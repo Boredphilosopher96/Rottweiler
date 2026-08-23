@@ -731,6 +731,7 @@ describe("OpenTUI engine runtime", () => {
         },
         session_id: "fork-parent",
         at_turn: "7",
+        operation_id: "first-operation",
       }),
     ).toEqual({ type: "accepted" })
     const firstFork = firstClient.commands.find((command) => command.type === "fork")
@@ -753,6 +754,7 @@ describe("OpenTUI engine runtime", () => {
         },
         session_id: "fork-parent",
         at_turn: "8",
+        operation_id: "different-operation",
       }),
     ).toBeNull()
     expect(secondClient.commands.some((command) => command.type === "fork")).toBeFalse()
@@ -766,6 +768,7 @@ describe("OpenTUI engine runtime", () => {
         },
         session_id: "fork-parent",
         at_turn: "7",
+        operation_id: "first-operation",
       }),
     ).toEqual({ type: "accepted" })
     const secondFork = secondClient.commands.find((command) => command.type === "fork")
@@ -826,6 +829,7 @@ describe("OpenTUI engine runtime", () => {
       },
       session_id: "fork-parent",
       at_turn: null,
+      operation_id: "fork-operation",
     })
     expect(outcome).toEqual({ type: "accepted" })
     expect(client.forkSignalAborted).toBeFalse()
@@ -872,6 +876,7 @@ describe("OpenTUI engine runtime", () => {
       },
       session_id: "fork-parent",
       at_turn: "3",
+      operation_id: "capacity-operation",
     })
     expect(await runtime.sendCommand(command("capacity-request"))).toMatchObject({
       type: "rejected",

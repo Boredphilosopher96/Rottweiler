@@ -9,6 +9,7 @@ use std::{
 
 use futures_util::StreamExt;
 use reqwest::header::{DATE, ETAG};
+use rw_types::config::ThinkingLevel;
 use serde::Deserialize;
 use serde_json::Number;
 use url::{Host, Url};
@@ -305,7 +306,7 @@ fn convert_models_dev(
     Ok(table)
 }
 
-fn reasoning_efforts(options: &[UpstreamReasoningOption]) -> Vec<crate::ThinkingLevel> {
+fn reasoning_efforts(options: &[UpstreamReasoningOption]) -> Vec<ThinkingLevel> {
     let mut efforts = Vec::new();
     for value in options
         .iter()
@@ -313,10 +314,10 @@ fn reasoning_efforts(options: &[UpstreamReasoningOption]) -> Vec<crate::Thinking
         .flat_map(|option| option.values.iter().flatten())
     {
         let effort = match value.as_str() {
-            "none" => Some(crate::ThinkingLevel::Off),
-            "low" => Some(crate::ThinkingLevel::Low),
-            "medium" => Some(crate::ThinkingLevel::Medium),
-            "high" => Some(crate::ThinkingLevel::High),
+            "none" => Some(ThinkingLevel::Off),
+            "low" => Some(ThinkingLevel::Low),
+            "medium" => Some(ThinkingLevel::Medium),
+            "high" => Some(ThinkingLevel::High),
             _ => None,
         };
         if let Some(effort) = effort
@@ -480,6 +481,7 @@ fn catalog_error(message: impl Into<String>) -> ProviderError {
 
 #[cfg(test)]
 mod tests {
+    use rw_types::config::ThinkingLevel;
     use serde_json::Number;
 
     use super::{convert_models_dev, decimal_rate_to_micros, parse_source_url};
@@ -547,11 +549,7 @@ mod tests {
         assert!(model.supports_thinking);
         assert_eq!(
             model.reasoning_efforts,
-            vec![
-                crate::ThinkingLevel::Off,
-                crate::ThinkingLevel::Low,
-                crate::ThinkingLevel::High,
-            ]
+            vec![ThinkingLevel::Off, ThinkingLevel::Low, ThinkingLevel::High,]
         );
         assert_eq!(model.input_per_million_micros_usd, 250_000);
         assert_eq!(model.output_per_million_micros_usd, 2_000_000);

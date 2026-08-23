@@ -11,6 +11,19 @@ use std::time::Duration;
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use futures_util::{Stream, StreamExt as _};
+use rw_plugin_protocol::{
+    CommandExecuteParams, DEFAULT_HANDLER_TIMEOUT_MS, EventPublishParams, FrameDecoder,
+    InitializeParams, MAX_FRAME_BYTES, MAX_HOOK_PAYLOAD_BYTES, MAX_NAME_BYTES,
+    MAX_PLUGIN_MODEL_TOKENS, MAX_PLUGIN_PRICE_MICROS_USD, MAX_RPC_MESSAGE_BYTES,
+    METHOD_COMMAND_EXECUTE, METHOD_EVENT_PUBLISH, METHOD_EXIT, METHOD_INITIALIZE,
+    METHOD_PROVIDER_CANCEL, METHOD_PROVIDER_COMPLETE, METHOD_PROVIDER_EVENT, METHOD_PROVIDER_HTTP,
+    METHOD_PROVIDER_HTTP_CANCEL, METHOD_PROVIDER_HTTP_EVENT, METHOD_PROVIDER_MODELS,
+    METHOD_SESSION_INJECT_MESSAGE, METHOD_SESSION_SET_STATUS, METHOD_SHUTDOWN, METHOD_TOOL_CALL,
+    METHOD_UI_NOTIFY, PluginCapabilities, PluginManifest, ProviderCacheBreakpoints,
+    ProviderCancelParams, ProviderCompleteParams, ProviderEventParams,
+    ProviderHttpCapabilityParams, ProviderModelsParams, ProviderModelsResponse, RpcFailure,
+    RpcFrame, RpcId, RpcNotification, RpcRequest, RpcSuccess, ToolCallParams, encode_frame,
+};
 use rw_providers::{
     BoxEventStream, CacheBreakpointSupport, Capabilities, DiscoveredModel,
     DiscoveredProviderCatalog, ModelPricing, Provider, ProviderError, ProviderErrorKind,
@@ -21,7 +34,7 @@ use rw_tools::{
     ToolError, ToolResult,
 };
 use rw_types::ToolCapability;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
 use thiserror::Error;
 #[cfg(test)]
@@ -30,23 +43,16 @@ use tokio::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
 
 use crate::plugin::{
-    ApprovalRequirement, ApprovalStore, CapabilityEnforcer, ExecutableIdentity, FrameDecoder,
-    MAX_FRAME_BYTES, MAX_HOOK_PAYLOAD_BYTES, MAX_NAME_BYTES, MAX_RPC_MESSAGE_BYTES,
-    METHOD_COMMAND_EXECUTE, METHOD_EVENT_PUBLISH, METHOD_EXIT, METHOD_INITIALIZE,
-    METHOD_PROVIDER_CANCEL, METHOD_PROVIDER_COMPLETE, METHOD_PROVIDER_EVENT, METHOD_PROVIDER_HTTP,
-    METHOD_PROVIDER_HTTP_CANCEL, METHOD_PROVIDER_HTTP_EVENT, METHOD_PROVIDER_MODELS,
-    METHOD_SESSION_INJECT_MESSAGE, METHOD_SESSION_SET_STATUS, METHOD_SHUTDOWN, METHOD_TOOL_CALL,
-    METHOD_UI_NOTIFY, PluginApprovalError, PluginCapabilities, PluginManifest, PluginProcessConfig,
-    PluginProcessError, PluginProviderEventStream, PluginRpcClient, PluginRpcError, RpcFailure,
-    RpcFrame, RpcId, RpcNotification, RpcRequest, RpcSuccess, SupervisedPluginProcess,
-    encode_frame,
+    ApprovalRequirement, ApprovalStore, CapabilityEnforcer, ExecutableIdentity,
+    PluginApprovalError, PluginProcessConfig, PluginProcessError, PluginProviderEventStream,
+    PluginRpcClient, PluginRpcError, SupervisedPluginProcess,
 };
 use crate::{CommandExecutionError, CommandHandler, CommandInvocation};
 
 const WRITER_QUEUE_CAPACITY: usize = 64;
 const PROVIDER_EVENT_QUEUE_CAPACITY: usize = 64;
 const MAX_ABANDONED_REQUESTS: usize = 256;
-const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_millis(DEFAULT_HANDLER_TIMEOUT_MS);
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub type PluginStdin = Pin<Box<dyn AsyncWrite + Send + Sync + Unpin + 'static>>;
@@ -74,7 +80,7 @@ impl PluginSandboxProfile {
     pub fn allows_workspace_reads(&self) -> bool {
         self.capabilities.tools.iter().any(|tool| {
             tool.caps
-                .contains(&crate::plugin::PluginToolEffect::ReadsFilesystem)
+                .contains(&rw_plugin_protocol::PluginToolEffect::ReadsFilesystem)
         })
     }
 
@@ -82,7 +88,7 @@ impl PluginSandboxProfile {
     pub fn allows_workspace_writes(&self) -> bool {
         self.capabilities.tools.iter().any(|tool| {
             tool.caps
-                .contains(&crate::plugin::PluginToolEffect::WritesFilesystem)
+                .contains(&rw_plugin_protocol::PluginToolEffect::WritesFilesystem)
         })
     }
 
@@ -91,7 +97,7 @@ impl PluginSandboxProfile {
         !self.capabilities.providers.is_empty()
             || self.capabilities.tools.iter().any(|tool| {
                 tool.caps
-                    .contains(&crate::plugin::PluginToolEffect::Network)
+                    .contains(&rw_plugin_protocol::PluginToolEffect::Network)
             })
     }
 
@@ -489,7 +495,7 @@ impl JsonRpcPluginClient {
         let (sender, receiver) = oneshot::channel();
         self.pending.lock().await.insert(id.clone(), sender);
         let frame = RpcFrame::Request(RpcRequest {
-            jsonrpc: crate::plugin::JSON_RPC_VERSION.to_owned(),
+            jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
             id: id.clone(),
             method: method.to_owned(),
             params: Some(self.redactor.redact(params)),
@@ -604,7 +610,7 @@ impl JsonRpcPluginClient {
 
     async fn send_notification(&self, method: &str, params: Value) -> Result<(), PluginRpcError> {
         let frame = RpcFrame::Notification(RpcNotification {
-            jsonrpc: crate::plugin::JSON_RPC_VERSION.to_owned(),
+            jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
             method: method.to_owned(),
             params: Some(self.redactor.redact(params)),
         });
@@ -658,7 +664,7 @@ impl JsonRpcPluginClient {
                 },
             );
         let frame = RpcFrame::Request(RpcRequest {
-            jsonrpc: crate::plugin::JSON_RPC_VERSION.to_owned(),
+            jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
             id: id.clone(),
             method: METHOD_PROVIDER_COMPLETE.to_owned(),
             params: Some(self.redactor.redact(params)),
@@ -742,7 +748,7 @@ impl Drop for JsonRpcProviderEventStream {
         abandoned.insert(id.clone());
         drop(abandoned);
         let cancel = RpcFrame::Notification(RpcNotification {
-            jsonrpc: crate::plugin::JSON_RPC_VERSION.to_owned(),
+            jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
             method: METHOD_PROVIDER_CANCEL.to_owned(),
             params: Some(json!({"request_id":id})),
         });
@@ -983,14 +989,14 @@ async fn process_incoming_frame(frame: RpcFrame, state: &ReaderState) -> bool {
             .await;
             let response_frame = match response {
                 Ok(result) => RpcFrame::Success(RpcSuccess {
-                    jsonrpc: crate::plugin::JSON_RPC_VERSION.to_owned(),
+                    jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
                     id: Some(request.id),
                     result,
                 }),
                 Err(error) => RpcFrame::Failure(RpcFailure {
-                    jsonrpc: crate::plugin::JSON_RPC_VERSION.to_owned(),
+                    jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
                     id: Some(request.id),
-                    error: crate::plugin::RpcErrorObject {
+                    error: rw_plugin_protocol::RpcErrorObject {
                         code: -32000,
                         message: error.message,
                         data: Some(json!({"code":error.code})),
@@ -1029,14 +1035,6 @@ async fn process_incoming_frame(frame: RpcFrame, state: &ReaderState) -> bool {
             !state.enforcer.violated()
         }
     }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ProviderHttpCapabilityParams {
-    alias: String,
-    credential_reference: String,
-    request: Value,
 }
 
 fn start_provider_http_request(request: RpcRequest, state: &ReaderState) -> bool {
@@ -1085,12 +1083,7 @@ fn start_provider_http_request(request: RpcRequest, state: &ReaderState) -> bool
 }
 
 fn cancel_provider_http_request(active: &ActiveProviderHttp, params: Value) -> bool {
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Cancel {
-        request_id: RpcId,
-    }
-    let Ok(cancel) = serde_json::from_value::<Cancel>(params) else {
+    let Ok(cancel) = serde_json::from_value::<ProviderCancelParams>(params) else {
         return false;
     };
     let Ok(active) = active.lock() else {
@@ -1150,14 +1143,14 @@ async fn stream_provider_http_response(
     }
     let frame = match result {
         Ok(()) => RpcFrame::Success(RpcSuccess {
-            jsonrpc: crate::plugin::JSON_RPC_VERSION.to_owned(),
+            jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
             id: Some(id),
             result: Value::Null,
         }),
         Err(error) => RpcFrame::Failure(RpcFailure {
-            jsonrpc: crate::plugin::JSON_RPC_VERSION.to_owned(),
+            jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
             id: Some(id),
-            error: crate::plugin::RpcErrorObject {
+            error: rw_plugin_protocol::RpcErrorObject {
                 code: -32020,
                 message: error.message,
                 data: Some(json!({"code":error.code})),
@@ -1232,7 +1225,7 @@ async fn send_provider_http_event(
 ) -> Result<(), PluginRpcError> {
     writer
         .send(RpcFrame::Notification(RpcNotification {
-            jsonrpc: crate::plugin::JSON_RPC_VERSION.to_owned(),
+            jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
             method: METHOD_PROVIDER_HTTP_EVENT.to_owned(),
             params: Some(redactor.redact(params)),
         }))
@@ -1240,19 +1233,12 @@ async fn send_provider_http_event(
         .map_err(|_| rpc_error("connection_closed", "plugin RPC connection closed"))
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ProviderEventNotification {
-    request_id: RpcId,
-    event: Value,
-}
-
 async fn handle_provider_event(
     streams: &PendingProviderStreams,
     abandoned: &Mutex<BTreeSet<RpcId>>,
     params: Value,
 ) -> bool {
-    let Ok(notification) = serde_json::from_value::<ProviderEventNotification>(params) else {
+    let Ok(notification) = serde_json::from_value::<ProviderEventParams>(params) else {
         return false;
     };
     let Ok(event) = serde_json::from_value::<ProviderEvent>(notification.event.clone()) else {
@@ -1347,13 +1333,10 @@ fn validate_push_params(method: &str, params: &Value) -> Result<(), PluginRpcErr
         let session_id = session_id
             .as_str()
             .ok_or_else(|| rpc_error("invalid_push", "plugin push session id is invalid"))?;
-        if session_id.is_empty()
-            || session_id.len() > MAX_NAME_BYTES
-            || session_id.chars().any(char::is_control)
-        {
+        if rw_types::SessionId::validate(session_id).is_err() {
             return Err(rpc_error(
                 "invalid_push",
-                "plugin push session id exceeds its bounds",
+                "plugin push session id is invalid",
             ));
         }
     }
@@ -1427,7 +1410,7 @@ fn approved_plugin_profile(
     }
     let reads_workspace = expected_manifest.capabilities.tools.iter().any(|tool| {
         tool.caps
-            .contains(&crate::plugin::PluginToolEffect::ReadsFilesystem)
+            .contains(&rw_plugin_protocol::PluginToolEffect::ReadsFilesystem)
     });
     if !reads_workspace
         && config
@@ -1442,7 +1425,7 @@ fn approved_plugin_profile(
     let requests_network = !expected_manifest.capabilities.providers.is_empty()
         || expected_manifest.capabilities.tools.iter().any(|tool| {
             tool.caps
-                .contains(&crate::plugin::PluginToolEffect::Network)
+                .contains(&rw_plugin_protocol::PluginToolEffect::Network)
         });
     if requests_network && config.allowed_domains().is_empty() {
         return Err(PluginHostError::Approval(
@@ -1537,15 +1520,14 @@ impl PluginHost {
             redactor,
             DEFAULT_REQUEST_TIMEOUT,
         );
-        let mut initialize = json!({
-            "host": "rottweiler",
-            "protocol": expected_manifest.protocol,
-            "min_protocol": crate::plugin::MIN_PROTOCOL_VERSION,
-            "max_frame_bytes": MAX_FRAME_BYTES,
-        });
-        if expected_manifest.protocol >= 2 {
-            initialize["capabilities"] = json!(["provider-models", "provider-http"]);
-        }
+        let initialize = serde_json::to_value(InitializeParams {
+            host: rw_plugin_protocol::PLUGIN_HOST_ID.to_owned(),
+            protocol: expected_manifest.protocol,
+            min_protocol: rw_plugin_protocol::MIN_PROTOCOL_VERSION,
+            max_frame_bytes: MAX_FRAME_BYTES,
+            capabilities: vec!["provider-models".to_owned(), "provider-http".to_owned()],
+        })
+        .map_err(|error| PluginHostError::Rpc(rpc_error("invalid_request", &error.to_string())))?;
         let result = client.request(METHOD_INITIALIZE, initialize).await;
         let initialized: PluginManifest = match result.and_then(|value| {
             serde_json::from_value(value)
@@ -1644,7 +1626,7 @@ pub(crate) async fn probe_plugin_manifest(
     let empty_manifest = PluginManifest {
         name: "manifest-probe".to_owned(),
         version: "0".to_owned(),
-        protocol: crate::plugin::PROTOCOL_VERSION,
+        protocol: rw_plugin_protocol::PROTOCOL_VERSION,
         capabilities: PluginCapabilities::default(),
     };
     let enforcer = Arc::new(CapabilityEnforcer::new(
@@ -1659,31 +1641,19 @@ pub(crate) async fn probe_plugin_manifest(
         redactor,
         DEFAULT_REQUEST_TIMEOUT,
     );
-    let mut value = client
+    let value = client
         .request(
             METHOD_INITIALIZE,
-            json!({
-                "host": "rottweiler",
-                "protocol": crate::plugin::MIN_PROTOCOL_VERSION,
-                "min_protocol": crate::plugin::MIN_PROTOCOL_VERSION,
-                "max_frame_bytes": MAX_FRAME_BYTES,
-            }),
+            serde_json::to_value(InitializeParams {
+                host: rw_plugin_protocol::PLUGIN_HOST_ID.to_owned(),
+                protocol: rw_plugin_protocol::PROTOCOL_VERSION,
+                min_protocol: rw_plugin_protocol::MIN_PROTOCOL_VERSION,
+                max_frame_bytes: MAX_FRAME_BYTES,
+                capabilities: vec!["provider-models".to_owned(), "provider-http".to_owned()],
+            })
+            .map_err(|error| rpc_error("invalid_request", &error.to_string()))?,
         )
         .await;
-    if value.is_err() && crate::plugin::MIN_PROTOCOL_VERSION < crate::plugin::PROTOCOL_VERSION {
-        value = client
-            .request(
-                METHOD_INITIALIZE,
-                json!({
-                    "host": "rottweiler",
-                    "protocol": crate::plugin::PROTOCOL_VERSION,
-                    "min_protocol": crate::plugin::MIN_PROTOCOL_VERSION,
-                    "max_frame_bytes": MAX_FRAME_BYTES,
-                    "capabilities": ["provider-models", "provider-http"],
-                }),
-            )
-            .await;
-    }
     let manifest: PluginManifest = match value.and_then(|value| {
         serde_json::from_value(value)
             .map_err(|_| rpc_error("invalid_manifest", "plugin returned an invalid manifest"))
@@ -1719,7 +1689,7 @@ fn canonical_roots(roots: &[PathBuf]) -> Result<Vec<PathBuf>, PluginHostError> {
 }
 
 pub struct RpcToolAdapter {
-    declaration: crate::plugin::PluginToolCapability,
+    declaration: rw_plugin_protocol::PluginToolCapability,
     client: Arc<dyn PluginRpcClient>,
     enforcer: Arc<CapabilityEnforcer>,
 }
@@ -1731,7 +1701,7 @@ impl RpcToolAdapter {
     ///
     /// Returns an approval error if any declaration field differs from the manifest snapshot.
     pub fn new(
-        declaration: crate::plugin::PluginToolCapability,
+        declaration: rw_plugin_protocol::PluginToolCapability,
         client: Arc<dyn PluginRpcClient>,
         enforcer: Arc<CapabilityEnforcer>,
     ) -> Result<Self, PluginHostError> {
@@ -1764,7 +1734,7 @@ impl Tool for RpcToolAdapter {
         if self
             .enforcer
             .process_tool_effects()
-            .contains(&crate::plugin::PluginToolEffect::WritesFilesystem)
+            .contains(&rw_plugin_protocol::PluginToolEffect::WritesFilesystem)
         {
             MutationScope::OpaqueWorkspace
         } else {
@@ -1780,7 +1750,11 @@ impl Tool for RpcToolAdapter {
             .client
             .request_cancellable(
                 METHOD_TOOL_CALL,
-                json!({"name":self.declaration.name,"input":input}),
+                serde_json::to_value(ToolCallParams {
+                    name: self.declaration.name.clone(),
+                    input,
+                })
+                .map_err(|error| ToolError::Output(error.to_string()))?,
                 &_context.cancellation,
             )
             .await
@@ -1791,12 +1765,12 @@ impl Tool for RpcToolAdapter {
     }
 }
 
-fn tool_effect(effect: crate::plugin::PluginToolEffect) -> ToolCapability {
+fn tool_effect(effect: rw_plugin_protocol::PluginToolEffect) -> ToolCapability {
     match effect {
-        crate::plugin::PluginToolEffect::ReadsFilesystem => ToolCapability::ReadFilesystem,
-        crate::plugin::PluginToolEffect::WritesFilesystem => ToolCapability::WriteFilesystem,
-        crate::plugin::PluginToolEffect::Network => ToolCapability::Network,
-        crate::plugin::PluginToolEffect::Execute => ToolCapability::Execute,
+        rw_plugin_protocol::PluginToolEffect::ReadsFilesystem => ToolCapability::ReadFilesystem,
+        rw_plugin_protocol::PluginToolEffect::WritesFilesystem => ToolCapability::WriteFilesystem,
+        rw_plugin_protocol::PluginToolEffect::Network => ToolCapability::Network,
+        rw_plugin_protocol::PluginToolEffect::Execute => ToolCapability::Execute,
     }
 }
 
@@ -1837,7 +1811,13 @@ where
         self.client
             .request(
                 METHOD_COMMAND_EXECUTE,
-                json!({"name":self.name,"arguments":invocation.arguments()}),
+                serde_json::to_value(CommandExecuteParams {
+                    name: self.name.clone(),
+                    arguments: invocation.arguments().to_owned(),
+                })
+                .map_err(|error| {
+                    CommandExecutionError::new("invalid_request", error.to_string())
+                })?,
             )
             .await
             .map_err(|error| CommandExecutionError::new(error.code, error.message))
@@ -1861,57 +1841,6 @@ struct RpcProviderCatalogCache {
     single_model_metadata: Option<ProviderModelMetadata>,
     metadata_by_model: BTreeMap<String, ProviderModelMetadata>,
 }
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RpcProviderModelsResponse {
-    models: Vec<RpcProviderModel>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RpcProviderModel {
-    id: String,
-    #[serde(default)]
-    display_name: Option<String>,
-    capabilities: RpcProviderModelCapabilities,
-    #[serde(default)]
-    max_context_tokens: Option<u64>,
-    #[serde(default)]
-    max_output_tokens: Option<u64>,
-    #[serde(default)]
-    pricing: Option<RpcProviderModelPricing>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RpcProviderModelCapabilities {
-    tool_calling: bool,
-    vision: bool,
-    thinking: bool,
-    cache_breakpoints: CacheBreakpointSupport,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RpcProviderModelPricing {
-    #[serde(rename = "input_per_million_micros_usd")]
-    input: u64,
-    #[serde(rename = "output_per_million_micros_usd")]
-    output: u64,
-    #[serde(default)]
-    #[serde(rename = "cache_read_per_million_micros_usd")]
-    cache_read: Option<u64>,
-    #[serde(default)]
-    #[serde(rename = "cache_write_per_million_micros_usd")]
-    cache_write: Option<u64>,
-    #[serde(default)]
-    #[serde(rename = "reasoning_per_million_micros_usd")]
-    reasoning: Option<u64>,
-}
-
-const MAX_PLUGIN_MODEL_TOKENS: u64 = 16 * 1024 * 1024;
-const MAX_PLUGIN_PRICE_MICROS_USD: u64 = 1_000_000_000_000;
 
 impl RpcProviderAdapter {
     #[must_use]
@@ -1953,13 +1882,13 @@ impl RpcProviderAdapter {
         reason = "catalog validation keeps the complete untrusted wire boundary visible"
     )]
     fn parse_catalog(&self, value: Value) -> Result<RpcProviderCatalogCache, ProviderError> {
-        let response: RpcProviderModelsResponse = serde_json::from_value(value).map_err(|_| {
+        let response: ProviderModelsResponse = serde_json::from_value(value).map_err(|_| {
             ProviderError::new(
                 ProviderErrorKind::Protocol,
                 "plugin returned an invalid provider model catalog",
             )
         })?;
-        if response.models.len() > crate::plugin::MAX_CAPABILITIES_PER_KIND {
+        if response.models.len() > rw_plugin_protocol::MAX_CAPABILITIES_PER_KIND {
             return Err(ProviderError::new(
                 ProviderErrorKind::Protocol,
                 "plugin provider model catalog exceeds the entry limit",
@@ -1998,7 +1927,11 @@ impl RpcProviderAdapter {
                 tool_calling: model.capabilities.tool_calling,
                 vision: model.capabilities.vision,
                 thinking: model.capabilities.thinking,
-                cache_breakpoints: model.capabilities.cache_breakpoints,
+                cache_breakpoints: match model.capabilities.cache_breakpoints {
+                    ProviderCacheBreakpoints::None => CacheBreakpointSupport::None,
+                    ProviderCacheBreakpoints::Explicit => CacheBreakpointSupport::Explicit,
+                    ProviderCacheBreakpoints::Automatic => CacheBreakpointSupport::Automatic,
+                },
                 max_context_tokens,
                 max_output_tokens,
                 wire_mode: WireMode::NormalizedReplay,
@@ -2013,16 +1946,20 @@ impl RpcProviderAdapter {
                 supports_tools: capabilities.tool_calling,
                 supports_thinking: capabilities.thinking,
                 reasoning_efforts: Vec::new(),
-                input_per_million_micros_usd: pricing.input.min(MAX_PLUGIN_PRICE_MICROS_USD),
-                output_per_million_micros_usd: pricing.output.min(MAX_PLUGIN_PRICE_MICROS_USD),
+                input_per_million_micros_usd: pricing
+                    .input_per_million_micros_usd
+                    .min(MAX_PLUGIN_PRICE_MICROS_USD),
+                output_per_million_micros_usd: pricing
+                    .output_per_million_micros_usd
+                    .min(MAX_PLUGIN_PRICE_MICROS_USD),
                 cache_read_per_million_micros_usd: pricing
-                    .cache_read
+                    .cache_read_per_million_micros_usd
                     .map(|price| price.min(MAX_PLUGIN_PRICE_MICROS_USD)),
                 cache_write_per_million_micros_usd: pricing
-                    .cache_write
+                    .cache_write_per_million_micros_usd
                     .map(|price| price.min(MAX_PLUGIN_PRICE_MICROS_USD)),
                 reasoning_per_million_micros_usd: pricing
-                    .reasoning
+                    .reasoning_per_million_micros_usd
                     .map(|price| price.min(MAX_PLUGIN_PRICE_MICROS_USD)),
             });
             let model_metadata = ProviderModelMetadata {
@@ -2138,7 +2075,12 @@ impl Provider for RpcProviderAdapter {
             .client
             .request(
                 METHOD_PROVIDER_MODELS,
-                json!({"alias_prefix":self.alias_prefix}),
+                serde_json::to_value(ProviderModelsParams {
+                    alias_prefix: self.alias_prefix.clone(),
+                })
+                .map_err(|error| {
+                    ProviderError::new(ProviderErrorKind::Protocol, error.to_string())
+                })?,
             )
             .await
             .map_err(|error| ProviderError::new(ProviderErrorKind::Protocol, error.to_string()))?;
@@ -2157,7 +2099,17 @@ impl Provider for RpcProviderAdapter {
         })?;
         let events = self
             .client
-            .provider_stream(json!({"alias":alias,"request":request}))
+            .provider_stream(
+                serde_json::to_value(ProviderCompleteParams {
+                    alias,
+                    request: serde_json::to_value(request).map_err(|error| {
+                        ProviderError::new(ProviderErrorKind::Protocol, error.to_string())
+                    })?,
+                })
+                .map_err(|error| {
+                    ProviderError::new(ProviderErrorKind::Protocol, error.to_string())
+                })?,
+            )
             .await
             .map_err(|error| provider_rpc_error(&error))?;
         Ok(Box::pin(events.map(|event| {
@@ -2211,7 +2163,11 @@ impl PluginEventRouter {
         self.client
             .notify(
                 METHOD_EVENT_PUBLISH,
-                json!({"event":event,"payload":payload}),
+                serde_json::to_value(EventPublishParams {
+                    event: event.to_owned(),
+                    payload,
+                })
+                .map_err(|error| rpc_error("invalid_request", &error.to_string()))?,
             )
             .await
     }
@@ -2323,22 +2279,24 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use futures_util::StreamExt;
-    use rw_providers::{CacheBreakpointSupport, ThinkingLevel, ToolChoice, WireMode};
+    use rw_providers::{CacheBreakpointSupport, ToolChoice, WireMode};
     use rw_tools::ToolRegistry;
+    use rw_types::config::ThinkingLevel;
     use tempfile::TempDir;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     use super::*;
-    use crate::plugin::{
-        ApprovalStoreError, CapabilityViolation, PluginCommandCapability, PluginHookDeclaration,
-        PluginProviderCapability, PluginPush, PluginToolCapability, PluginToolEffect,
+    use crate::plugin::{ApprovalStoreError, CapabilityViolation};
+    use rw_plugin_protocol::{
+        PluginCommandCapability, PluginHookDeclaration, PluginProviderCapability, PluginPush,
+        PluginToolCapability, PluginToolEffect,
     };
 
     fn manifest() -> PluginManifest {
         PluginManifest {
             name: "runtime-fixture".to_owned(),
             version: "1.0.0".to_owned(),
-            protocol: crate::plugin::MIN_PROTOCOL_VERSION,
+            protocol: rw_plugin_protocol::MIN_PROTOCOL_VERSION,
             capabilities: PluginCapabilities {
                 tools: vec![PluginToolCapability {
                     name: "fixture_tool".to_owned(),
@@ -2353,7 +2311,7 @@ mod tests {
                     allowed_tools: Vec::new(),
                 }],
                 hooks: vec![PluginHookDeclaration::Name(
-                    crate::plugin::PluginHook::PreTool,
+                    rw_plugin_protocol::PluginHook::PreTool,
                 )],
                 providers: vec![PluginProviderCapability {
                     alias_prefix: "fixture/".to_owned(),
@@ -2379,7 +2337,7 @@ mod tests {
 
     fn catalog_adapter(value: Value) -> RpcProviderAdapter {
         let mut approved = manifest();
-        approved.protocol = crate::plugin::PROTOCOL_VERSION;
+        approved.protocol = rw_plugin_protocol::PROTOCOL_VERSION;
         approved.capabilities.providers[0].capabilities = vec!["models".to_owned()];
         let process: Arc<dyn SupervisedPluginProcess> = Arc::new(FakeProcess::default());
         let enforcer = Arc::new(CapabilityEnforcer::new(&approved, process));
@@ -2806,7 +2764,7 @@ mod tests {
                         RpcFrame::Request(request) if request.method == METHOD_INITIALIZE => {
                             if let Some(method) = push.as_deref() {
                                 let push = RpcFrame::Request(RpcRequest {
-                                    jsonrpc: crate::plugin::JSON_RPC_VERSION.to_owned(),
+                                    jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
                                     id: RpcId::String("push-1".to_owned()),
                                     method: method.to_owned(),
                                     params: Some(json!({"message":"hello"})),
@@ -2819,7 +2777,7 @@ mod tests {
                                     .expect("push write");
                             }
                             let response = RpcFrame::Success(RpcSuccess {
-                                jsonrpc: crate::plugin::JSON_RPC_VERSION.to_owned(),
+                                jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
                                 id: Some(request.id),
                                 result: serde_json::to_value(&manifest).expect("manifest"),
                             });
@@ -2835,7 +2793,7 @@ mod tests {
                             if hang_method.as_deref() == Some(&request.method) => {}
                         RpcFrame::Request(request) if request.method == METHOD_TOOL_CALL => {
                             let response = RpcFrame::Success(RpcSuccess {
-                                jsonrpc: crate::plugin::JSON_RPC_VERSION.to_owned(),
+                                jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
                                 id: Some(request.id),
                                 result: serde_json::to_value(ToolResult::new(
                                     "fixture",
@@ -2853,7 +2811,7 @@ mod tests {
                         }
                         RpcFrame::Request(request) if request.method == METHOD_SHUTDOWN => {
                             let response = RpcFrame::Success(RpcSuccess {
-                                jsonrpc: crate::plugin::JSON_RPC_VERSION.to_owned(),
+                                jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
                                 id: Some(request.id),
                                 result: Value::Null,
                             });
@@ -3062,7 +3020,7 @@ mod tests {
         let manifest = PluginManifest {
             name: "workspace-root-code".to_owned(),
             version: "1.0.0".to_owned(),
-            protocol: crate::plugin::MIN_PROTOCOL_VERSION,
+            protocol: rw_plugin_protocol::MIN_PROTOCOL_VERSION,
             capabilities: PluginCapabilities::default(),
         };
         let store = MemoryApproval::default();
@@ -3201,7 +3159,7 @@ mod tests {
         let launcher = MemoryLauncher {
             manifest: manifest.clone(),
             process: process.clone(),
-            push: Some(crate::plugin::METHOD_SESSION_SET_STATUS.to_owned()),
+            push: Some(rw_plugin_protocol::METHOD_SESSION_SET_STATUS.to_owned()),
             hang_method: None,
         };
         let result = PluginHost::launch_approved(
@@ -3317,7 +3275,7 @@ mod tests {
                 .write_all(
                     &encode_frame(
                         &RpcFrame::Success(RpcSuccess {
-                            jsonrpc: crate::plugin::JSON_RPC_VERSION.to_owned(),
+                            jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
                             id: Some(request.id),
                             result: Value::Null,
                         }),
@@ -3337,7 +3295,7 @@ mod tests {
                 .write_all(
                     &encode_frame(
                         &RpcFrame::Request(RpcRequest {
-                            jsonrpc: crate::plugin::JSON_RPC_VERSION.to_owned(),
+                            jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
                             id: RpcId::String("push-canary".to_owned()),
                             method: METHOD_UI_NOTIFY.to_owned(),
                             params: Some(json!({
@@ -3373,7 +3331,7 @@ mod tests {
         );
         client
             .request(
-                crate::plugin::METHOD_HOOK_INVOKE,
+                rw_plugin_protocol::METHOD_HOOK_INVOKE,
                 json!({"payload":"PLUGIN_CANARY_SECRET"}),
             )
             .await
@@ -3487,7 +3445,10 @@ mod tests {
         let mut dispatcher = crate::HookDispatcher::new();
         dispatcher
             .register(
-                tool_host.manifest().capabilities.hooks[0].registration("typescript:pre-tool"),
+                crate::plugin_hook_registration(
+                    tool_host.manifest().capabilities.hooks[0],
+                    "typescript:pre-tool",
+                ),
                 hook,
             )
             .expect("register RPC hook");
@@ -3618,7 +3579,10 @@ mod tests {
             .with_allowed_domains(["example.com"])
             .expect("provider domains");
         let host = approved_fixture_host(&provider_config, &sdk, Arc::new(DenyPushHandler)).await;
-        assert_eq!(host.manifest().protocol, crate::plugin::PROTOCOL_VERSION);
+        assert_eq!(
+            host.manifest().protocol,
+            rw_plugin_protocol::PROTOCOL_VERSION
+        );
         let provider = RpcProviderAdapter::new(
             "typescript-fixture-v2",
             "fixture-v2/",
@@ -3801,7 +3765,7 @@ mod tests {
         let manifest = PluginManifest {
             name: "undeclared-push".to_owned(),
             version: "1.0.0".to_owned(),
-            protocol: crate::plugin::MIN_PROTOCOL_VERSION,
+            protocol: rw_plugin_protocol::MIN_PROTOCOL_VERSION,
             capabilities: PluginCapabilities::default(),
         };
         let store = MemoryApproval::default();

@@ -2,20 +2,8 @@ use std::{collections::BTreeMap, panic::AssertUnwindSafe, sync::Arc};
 
 use async_trait::async_trait;
 use futures_util::FutureExt;
+use rw_types::CommandSource;
 use thiserror::Error;
-
-/// User-visible metadata for a slash command.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum CommandSource {
-    #[default]
-    Builtin,
-    Project,
-    User,
-    Plugin,
-    Skill,
-    Workflow,
-    Mcp,
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommandDescriptor {

@@ -327,7 +327,7 @@ impl ServerHandler for RottweilerMcpServer {
                     ));
                 }
                 let input: SendMessage = parse(&request)?;
-                if input.session_id.len() > 256
+                if rw_types::SessionId::validate(&input.session_id).is_err()
                     || input.message.len() > MAX_WIRE_TEXT
                     || !self
                         .authority

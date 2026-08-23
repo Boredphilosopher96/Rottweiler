@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use rw_core::{Config, ProviderConfig, default_provider_api_key_credential_id};
+use rw_core::{AdapterKind, Config, ProviderConfig, default_provider_api_key_credential_id};
 use rw_store::{
     config::ConfigLoader,
     credentials::{
@@ -620,16 +620,17 @@ fn provider_plans(config: &Config) -> Vec<ProviderPlan> {
 fn provider_plan(name: &str, provider: &ProviderConfig, config: &Config) -> ProviderPlan {
     let endpoint = provider_endpoint(provider);
     let oauth = oauth_configured(provider);
-    let (auth, auth_scheme, refresh) = match provider.kind.as_str() {
-        "openai_codex" | "openai_subscription" => (
+    let adapter = AdapterKind::from_config_kind(&provider.kind);
+    let (auth, auth_scheme, refresh) = match adapter {
+        Some(AdapterKind::OpenAiSubscription) => (
             Some(reference_key(
-                format!("providers.{name}.openai_subscription"),
+                format!("providers.{name}.openai_codex"),
                 None,
             )),
             AuthScheme::OpaqueBundle,
             None,
         ),
-        "github_copilot" => (
+        Some(AdapterKind::GitHubCopilot) => (
             Some(reference_key(
                 format!("providers.{name}.github_copilot"),
                 None,
@@ -663,20 +664,14 @@ fn provider_plan(name: &str, provider: &ProviderConfig, config: &Config) -> Prov
                 default_provider_api_key_credential_id(name)
                     .unwrap_or_else(|_| format!("providers.{name}.api_key"))
             });
-            let environment =
-                provider
-                    .api_key_env
-                    .clone()
-                    .or_else(|| match provider.kind.as_str() {
-                        "anthropic" => Some("ANTHROPIC_API_KEY".to_owned()),
-                        "openai" | "openai_responses" | "openai_chat" => {
-                            Some("OPENAI_API_KEY".to_owned())
-                        }
-                        _ => None,
-                    });
+            let environment = provider.api_key_env.clone().or_else(|| {
+                adapter
+                    .and_then(AdapterKind::default_api_key_environment)
+                    .map(str::to_owned)
+            });
             (
                 Some(reference_key(identifier, environment)),
-                if provider.kind == "anthropic" {
+                if adapter == Some(AdapterKind::Anthropic) {
                     AuthScheme::AnthropicApiKey
                 } else {
                     AuthScheme::Bearer
@@ -728,10 +723,9 @@ fn oauth_configured(provider: &ProviderConfig) -> bool {
 fn provider_requires_api_key(provider: &ProviderConfig, endpoint: Option<&Url>) -> bool {
     provider.api_key_env.is_some()
         || provider.api_key_credential.is_some()
-        || matches!(
-            provider.kind.as_str(),
-            "anthropic" | "openai" | "openai_responses" | "openai_chat"
-        ) && endpoint.is_some_and(|value| !url_is_loopback(value))
+        || AdapterKind::from_config_kind(&provider.kind)
+            .is_some_and(AdapterKind::has_official_default)
+            && endpoint.is_some_and(|value| !url_is_loopback(value))
 }
 
 fn url_is_loopback(url: &Url) -> bool {
@@ -744,19 +738,9 @@ fn url_is_loopback(url: &Url) -> bool {
 }
 
 fn provider_endpoint(provider: &ProviderConfig) -> Option<Url> {
-    let value = provider
-        .base_url
-        .as_deref()
-        .or(match provider.kind.as_str() {
-            "anthropic" => Some("https://api.anthropic.com/v1/messages"),
-            "openai" | "openai_responses" => Some("https://api.openai.com/v1/responses"),
-            "openai_chat" => Some("https://api.openai.com/v1/chat/completions"),
-            "openai_codex" | "openai_subscription" => {
-                Some("https://chatgpt.com/backend-api/codex/responses")
-            }
-            "github_copilot" => Some("https://api.githubcopilot.com"),
-            _ => None,
-        })?;
+    let value = provider.base_url.as_deref().or_else(|| {
+        AdapterKind::from_config_kind(&provider.kind).and_then(AdapterKind::default_endpoint)
+    })?;
     Url::parse(value).ok()
 }
 
@@ -1237,7 +1221,7 @@ mod tests {
         let reference = reference_key("subscription".to_owned(), None);
         let plan = ProviderPlan {
             name: "openai".to_owned(),
-            kind: "openai_subscription".to_owned(),
+            kind: "openai_codex".to_owned(),
             endpoint: None,
             auth: Some(reference.clone()),
             auth_scheme: AuthScheme::OpaqueBundle,
@@ -1268,7 +1252,7 @@ mod tests {
         let reference = reference_key("subscription".to_owned(), None);
         let plan = ProviderPlan {
             name: "openai".to_owned(),
-            kind: "openai_subscription".to_owned(),
+            kind: "openai_codex".to_owned(),
             endpoint: None,
             auth: Some(reference.clone()),
             auth_scheme: AuthScheme::OpaqueBundle,

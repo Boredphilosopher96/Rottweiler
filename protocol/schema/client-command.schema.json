@@ -355,11 +355,7 @@
         },
         "operation_id": {
           "description": "Stable client-generated identity retained until the correlated fork completes.",
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
+          "type": "string"
         },
         "type": {
           "type": "string",
@@ -369,7 +365,8 @@
       "required": [
         "type",
         "meta",
-        "session_id"
+        "session_id",
+        "operation_id"
       ]
     },
     {
@@ -1052,7 +1049,7 @@
           "type": "string"
         },
         "action": {
-          "$ref": "#/$defs/PermissionAction"
+          "$ref": "#/$defs/PermissionDecision"
         },
         "type": {
           "type": "string",
@@ -1842,13 +1839,24 @@
         "value"
       ]
     },
-    "PermissionAction": {
-      "description": "Permission decision exposed on the interactive protocol without coupling\nclients to configuration-file types.",
-      "type": "string",
-      "enum": [
-        "ask",
-        "allow",
-        "deny"
+    "PermissionDecision": {
+      "description": "Default permission decision used when no rule matches.",
+      "oneOf": [
+        {
+          "description": "Ask the active driver for approval.",
+          "type": "string",
+          "const": "ask"
+        },
+        {
+          "description": "Allow the operation.",
+          "type": "string",
+          "const": "allow"
+        },
+        {
+          "description": "Deny the operation.",
+          "type": "string",
+          "const": "deny"
+        }
       ]
     },
     "TranscriptFormat": {

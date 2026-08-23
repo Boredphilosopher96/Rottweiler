@@ -804,6 +804,30 @@ pub enum MutationScope {
     OpaqueWorkspace,
 }
 
+/// Stable behavior categories consumed by engine and host policy adapters.
+///
+/// A tool implementation owns this classification. Callers must resolve it
+/// through [`ToolRegistry`] instead of inferring behavior from the tool name.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ToolBehavior {
+    #[default]
+    Standard,
+    FileMutation,
+    Shell,
+    WebFetch,
+    UserInteraction,
+    PlanSubmission,
+    BackgroundControl,
+}
+
+/// Tool-owned semantic projection of one registered invocation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolInvocationSemantics {
+    pub behavior: ToolBehavior,
+    pub mutation_scope: MutationScope,
+    pub workspace_paths: Vec<PathBuf>,
+}
+
 /// Whether a tool implementation captures workspace-root-specific state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspaceBinding {
@@ -836,6 +860,24 @@ pub struct ApprovalPreview {
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn descriptor(&self) -> ToolDescriptor;
+
+    /// Declares behavior that policy adapters cannot safely infer from a name.
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::Standard
+    }
+
+    /// Returns workspace paths explicitly carried by this invocation.
+    ///
+    /// Implementations should parse their typed input here exactly as they do
+    /// at execution. The empty default means the tool has no declared path,
+    /// not that an unknown input field named `path` is trusted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the invocation input cannot be parsed safely.
+    fn workspace_paths(&self, _input: &Value) -> Result<Vec<PathBuf>, ToolError> {
+        Ok(Vec::new())
+    }
 
     /// Root-bound is the fail-closed default. Only pure orchestration controls
     /// that never resolve workspace paths may opt into root independence.
@@ -876,13 +918,27 @@ pub trait Tool: Send + Sync {
     ///
     /// The default fails safe for tools declaring filesystem writes. Tools that can resolve a
     /// narrower path set should override this method.
-    fn mutation_scope(&self, _input: &Value) -> MutationScope {
+    fn mutation_scope(&self, input: &Value) -> MutationScope {
         if self
             .descriptor()
             .capabilities
             .contains(&ToolCapability::WriteFilesystem)
         {
-            MutationScope::OpaqueWorkspace
+            match self.workspace_paths(input) {
+                Ok(paths)
+                    if !paths.is_empty()
+                        && paths.iter().all(|path| {
+                            !path.as_os_str().is_empty()
+                                && !path.is_absolute()
+                                && path.components().all(|component| {
+                                    matches!(component, std::path::Component::Normal(_))
+                                })
+                        }) =>
+                {
+                    MutationScope::Paths(paths)
+                }
+                Ok(_) | Err(_) => MutationScope::OpaqueWorkspace,
+            }
         } else {
             MutationScope::None
         }
@@ -923,12 +979,14 @@ pub trait Tool: Send + Sync {
 struct RegisteredTool {
     tool: Arc<dyn Tool>,
     descriptor: ToolDescriptor,
+    behavior: ToolBehavior,
     subagent_lifecycle_mode: SubagentLifecycleMode,
 }
 
 struct GuardedTool {
     inner: Arc<dyn Tool>,
     descriptor: ToolDescriptor,
+    behavior: ToolBehavior,
     subagent_lifecycle_mode: SubagentLifecycleMode,
 }
 
@@ -940,6 +998,14 @@ impl Tool for GuardedTool {
 
     fn workspace_binding(&self) -> WorkspaceBinding {
         self.inner.workspace_binding()
+    }
+
+    fn behavior(&self) -> ToolBehavior {
+        self.behavior
+    }
+
+    fn workspace_paths(&self, input: &Value) -> Result<Vec<PathBuf>, ToolError> {
+        self.inner.workspace_paths(input)
     }
 
     fn subagent_lifecycle_mode(&self) -> SubagentLifecycleMode {
@@ -1025,6 +1091,7 @@ impl ToolRegistry {
     /// Returns [`ToolError::DuplicateTool`] when the name is already registered.
     pub fn register(&mut self, tool: Arc<dyn Tool>) -> Result<(), ToolError> {
         let descriptor = tool.descriptor();
+        let behavior = tool.behavior();
         let subagent_lifecycle_mode = tool.subagent_lifecycle_mode();
         let name = descriptor.name.clone();
         if name.is_empty()
@@ -1042,6 +1109,7 @@ impl ToolRegistry {
         let guarded: Arc<dyn Tool> = Arc::new(GuardedTool {
             inner: tool,
             descriptor: descriptor.clone(),
+            behavior,
             subagent_lifecycle_mode,
         });
         if guarded.observes_session_resources() {
@@ -1052,6 +1120,7 @@ impl ToolRegistry {
             RegisteredTool {
                 tool: guarded,
                 descriptor,
+                behavior,
                 subagent_lifecycle_mode,
             },
         );
@@ -1095,6 +1164,41 @@ impl ToolRegistry {
                 scope
             }
         })
+    }
+
+    /// Resolves tool-owned behavior, mutation, and path semantics together.
+    ///
+    /// Unknown tools return `Ok(None)` so callers can fail closed without
+    /// inventing defaults. Malformed registered input returns the tool's parse
+    /// error and must likewise be rejected before policy or hook dispatch.
+    ///
+    /// # Errors
+    ///
+    /// Returns the registered tool's input-classification error.
+    pub fn invocation_semantics(
+        &self,
+        name: &str,
+        input: &Value,
+    ) -> Result<Option<ToolInvocationSemantics>, ToolError> {
+        let Some(registered) = self.tools.get(name) else {
+            return Ok(None);
+        };
+        Ok(Some(ToolInvocationSemantics {
+            behavior: registered.behavior,
+            mutation_scope: registered.tool.mutation_scope(input),
+            workspace_paths: registered.tool.workspace_paths(input)?,
+        }))
+    }
+
+    /// Registered names in one tool-owned behavior category.
+    #[must_use]
+    pub fn names_with_behavior(&self, behavior: ToolBehavior) -> Vec<&str> {
+        self.tools
+            .iter()
+            .filter_map(|(name, registered)| {
+                (registered.behavior == behavior).then_some(name.as_str())
+            })
+            .collect()
     }
 
     #[must_use]
@@ -1379,6 +1483,72 @@ mod tests {
         assert_eq!(
             registry.mutation_scope("understated", &Value::Null),
             Some(MutationScope::OpaqueWorkspace)
+        );
+    }
+
+    #[test]
+    fn registry_is_the_fail_closed_invocation_semantics_boundary() {
+        struct FileMutation;
+
+        #[async_trait]
+        impl Tool for FileMutation {
+            fn descriptor(&self) -> ToolDescriptor {
+                ToolDescriptor {
+                    name: "file_mutation".to_owned(),
+                    description: String::new(),
+                    input_schema: Value::Null,
+                    capabilities: CapabilityManifest::new([ToolCapability::WriteFilesystem]),
+                }
+            }
+
+            fn behavior(&self) -> ToolBehavior {
+                ToolBehavior::FileMutation
+            }
+
+            fn workspace_paths(&self, input: &Value) -> Result<Vec<PathBuf>, ToolError> {
+                input
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .map(|path| vec![PathBuf::from(path)])
+                    .ok_or_else(|| ToolError::InvalidInput("path is required".to_owned()))
+            }
+
+            async fn execute(
+                &self,
+                _context: &ToolContext,
+                _input: Value,
+            ) -> Result<ToolResult, ToolError> {
+                Ok(ToolResult::new("", Value::Null))
+            }
+        }
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(FileMutation)).expect("register");
+        assert_eq!(
+            registry
+                .invocation_semantics("file_mutation", &serde_json::json!({"path": "src/lib.rs"}))
+                .expect("classified")
+                .expect("registered"),
+            ToolInvocationSemantics {
+                behavior: ToolBehavior::FileMutation,
+                mutation_scope: MutationScope::Paths(vec![PathBuf::from("src/lib.rs")]),
+                workspace_paths: vec![PathBuf::from("src/lib.rs")],
+            }
+        );
+        assert!(
+            registry
+                .invocation_semantics("missing", &Value::Null)
+                .expect("unknown is not an input error")
+                .is_none()
+        );
+        assert!(
+            registry
+                .invocation_semantics("file_mutation", &Value::Null)
+                .is_err()
+        );
+        assert_eq!(
+            registry.names_with_behavior(ToolBehavior::FileMutation),
+            vec!["file_mutation"]
         );
     }
 

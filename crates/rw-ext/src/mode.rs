@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use rw_tools::validate_mcp_virtual_tool;
-use rw_types::ModeId;
+use rw_types::{ModeId, SessionMode};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -11,15 +11,6 @@ use crate::ArtifactOrigin;
 const MAX_MODE_ID_BYTES: usize = 64;
 const MAX_PROMPT_BYTES: usize = 16 * 1024;
 const MAX_ALLOWED_TOOLS: usize = 128;
-
-/// Built-in interaction behavior used as the permission floor for a mode.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "kebab-case")]
-pub enum ModePermissionOverlay {
-    Discuss,
-    Plan,
-    Execute,
-}
 
 /// Provenance of a declarative mode definition.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -33,7 +24,7 @@ pub enum ModeSource {
 pub struct ModeDefinition {
     id: ModeId,
     description: String,
-    permission: ModePermissionOverlay,
+    permission: SessionMode,
     prompt: String,
     allowed_tools: Vec<String>,
     source: ModeSource,
@@ -51,7 +42,7 @@ impl ModeDefinition {
     }
 
     #[must_use]
-    pub const fn permission(&self) -> ModePermissionOverlay {
+    pub const fn permission(&self) -> SessionMode {
         self.permission
     }
 
@@ -81,11 +72,7 @@ impl ModeDefinition {
         for field in [
             self.id.0.as_bytes(),
             self.description.as_bytes(),
-            match self.permission {
-                ModePermissionOverlay::Discuss => b"discuss",
-                ModePermissionOverlay::Plan => b"plan",
-                ModePermissionOverlay::Execute => b"execute",
-            },
+            self.permission.as_str().as_bytes(),
             self.prompt.as_bytes(),
         ] {
             hasher.update(&u64::try_from(field.len()).unwrap_or(u64::MAX).to_le_bytes());
@@ -104,7 +91,7 @@ impl ModeDefinition {
 struct ModeDocument {
     id: String,
     description: String,
-    permission: ModePermissionOverlay,
+    permission: SessionMode,
     prompt: String,
     #[serde(default)]
     allowed_tools: Vec<String>,
@@ -340,7 +327,7 @@ mod tests {
         assert_eq!(registry.iter().len(), 3);
         assert_eq!(
             registry.get("plan").expect("plan").permission(),
-            ModePermissionOverlay::Plan
+            SessionMode::Plan
         );
         assert!(
             registry

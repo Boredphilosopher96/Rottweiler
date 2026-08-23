@@ -69,6 +69,9 @@ import sys
 import time
 
 repo = pathlib.Path(sys.argv[1])
+sys.path.insert(0, str(repo / "scripts"))
+from release_contract import load_contract
+
 root = pathlib.Path(sys.argv[2])
 output = pathlib.Path(sys.argv[3]) if sys.argv[3] else None
 built_binary = pathlib.Path(sys.argv[4])
@@ -232,7 +235,8 @@ if not smoke and turn_p99 >= protected_turn_limit_ms:
         f"zero-latency full-turn p99 {turn_p99:.3f}ms exceeds "
         f"{protected_turn_limit_ms}ms"
     )
-binary_limit = 40_000_000 if sys.platform == "darwin" else 28_000_000
+release_platform = load_contract().resolve_platform(platform.system(), platform.machine())
+binary_limit = release_platform.product_budgets.engine_less_than_bytes
 if binary_bytes >= binary_limit:
     raise SystemExit(
         f"release binary size {binary_bytes} exceeds {binary_limit // 1_000_000}MB"

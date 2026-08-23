@@ -3,7 +3,16 @@ import type {
   EngineEvent as GeneratedEngineEvent,
 } from "../../../protocol/types"
 
-export { PROTOCOL_VERSION } from "../../../protocol/types"
+export {
+  ENGINE_EVENT_DELIVERY,
+  MAX_ATTACHMENTS_PER_MESSAGE,
+  MAX_IMAGE_ATTACHMENT_BYTES,
+  MAX_MCP_SERVER_ID_BYTES,
+  MAX_TEXT_ATTACHMENT_BYTES,
+  MAX_TOTAL_ATTACHMENT_BYTES,
+  MCP_SERVER_ID_PATTERN,
+  PROTOCOL_VERSION,
+} from "../../../protocol/types"
 export type {
   Answer,
   Attachment,
@@ -20,6 +29,7 @@ export type {
   Cost,
   CostSnapshot,
   EngineError,
+  EngineEventDelivery,
   McpApprovalReview,
   McpServerDescriptor,
   McpServerState,
@@ -28,7 +38,7 @@ export type {
   PlanArtifact,
   PlanDecision,
   PlanStep,
-  PermissionAction,
+  PermissionDecision,
   PermissionApprovalDescriptor,
   PermissionApprovalScope,
   PermissionModeDescriptor,

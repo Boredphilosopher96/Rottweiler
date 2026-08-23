@@ -10,7 +10,10 @@ use reqwest::{Response, StatusCode, header::RETRY_AFTER};
 use thiserror::Error;
 use url::Url;
 
-use crate::{NetworkPolicy, ProviderError, ProviderErrorKind, ProxyAuthentication};
+use crate::{
+    NetworkPolicy, ProviderError, ProviderErrorKind, ProxyAuthentication,
+    types::MAX_PROVIDER_ERROR_BYTES,
+};
 
 static PROCESS_NETWORK_DENY_DEPTH: AtomicUsize = AtomicUsize::new(0);
 const MAX_GUARDED_REQUEST_BYTES: usize = 4 * 1024 * 1024;
@@ -18,6 +21,25 @@ const MAX_GUARDED_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_GUARDED_HEADERS: usize = 128;
 const MAX_GUARDED_HEADER_BYTES: usize = 64 * 1024;
 const MAX_GUARDED_HEADER_VALUE_BYTES: usize = 8 * 1024;
+
+pub(crate) async fn bounded_error_json(response: Response) -> Option<serde_json::Value> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_PROVIDER_ERROR_BYTES as u64)
+    {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.ok()?;
+        if bytes.len().saturating_add(chunk.len()) > MAX_PROVIDER_ERROR_BYTES {
+            return None;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).ok()
+}
 
 /// Methods supported by the guarded provider-neutral HTTP boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

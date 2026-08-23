@@ -390,7 +390,7 @@ describe("retained transcript layout", () => {
     const prose = renderer.captureSpans().lines
       .flatMap((line) => line.spans)
       .find((span) => span.text.includes("Main prose stays readable"))
-    expect(prose?.fg.toInts()).toEqual(RGBA.fromHex(nordTheme.foreground).toInts())
+    expect(prose?.fg.toInts()).toEqual(RGBA.fromHex(nordTheme.text).toInts())
   }, 20_000)
 
   test("follows a growing answer at the bottom but preserves deliberate scrollback", async () => {

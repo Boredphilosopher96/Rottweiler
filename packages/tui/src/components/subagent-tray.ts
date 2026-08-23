@@ -36,7 +36,7 @@ export class SubagentTrayRenderable extends BoxRenderable {
       border: true,
       borderStyle: "single",
       borderColor: theme.border,
-      backgroundColor: theme.panel,
+      backgroundColor: theme.backgroundPanel,
       paddingX: 1,
       visible: false,
     })
@@ -46,7 +46,7 @@ export class SubagentTrayRenderable extends BoxRenderable {
     this.onSizeChange = () => this.#render(this.#lastRenderNowMs)
     this.more = new TextRenderable(ctx, {
       content: "",
-      fg: theme.muted,
+      fg: theme.textMuted,
       height: 0,
       flexShrink: 0,
       visible: false,
@@ -54,7 +54,7 @@ export class SubagentTrayRenderable extends BoxRenderable {
     })
     this.footer = new TextRenderable(ctx, {
       content: "Ctrl+G inspect · click a row to open",
-      fg: theme.muted,
+      fg: theme.textMuted,
       height: 1,
       flexShrink: 0,
       wrapMode: "none",
@@ -192,7 +192,7 @@ function subagentColor(
   theme: RottweilerTheme,
   status: SubagentProjection["status"],
 ): string {
-  if (status === "failed") return theme.danger
+  if (status === "failed") return theme.error
   if (status === "completed") return theme.success
   if (status === "running") return theme.info
   return theme.warning

@@ -25,6 +25,7 @@ use rmcp::{
 use rw_tools::{
     ProtocolChildLauncher, ProtocolChildRequest, ProtocolProcessHandle, ProtocolSandboxPolicy,
 };
+use rw_types::McpServerId;
 use serde_json::Value;
 #[cfg(feature = "test-support")]
 use tokio::process::Command;
@@ -33,8 +34,8 @@ use tokio::{
     sync::Mutex,
 };
 
+use crate::McpTransportConfig;
 use crate::{McpError, McpServerConfig};
-use crate::{McpTransportConfig, ServerId};
 
 const MAX_PAGINATED_ENTRIES: usize = 256;
 const MAX_STDIO_FRAME_BYTES: usize = 4 * 1024 * 1024;
@@ -71,7 +72,7 @@ pub trait McpConnector: Send + Sync {
 pub trait McpAuthorizationProvider: Send + Sync {
     async fn token(
         &self,
-        server: &ServerId,
+        server: &McpServerId,
         resource: &str,
     ) -> Result<Option<crate::SecretToken>, McpError>;
 }
@@ -239,14 +240,14 @@ impl TestOnlyUnsandboxedStdioConnector {
 }
 
 struct RmcpClient {
-    server: ServerId,
+    server: McpServerId,
     service: Mutex<Option<RunningService<RoleClient, ()>>>,
     child: Mutex<Option<Box<dyn ProtocolProcessHandle>>>,
 }
 
 impl RmcpClient {
     fn new(
-        server: ServerId,
+        server: McpServerId,
         service: RunningService<RoleClient, ()>,
         child: Option<Box<dyn ProtocolProcessHandle>>,
     ) -> Self {
@@ -272,7 +273,7 @@ impl RmcpClient {
 #[doc(hidden)]
 #[must_use]
 pub fn boxed_running_http_client(
-    server: ServerId,
+    server: McpServerId,
     service: RunningService<RoleClient, ()>,
 ) -> Arc<dyn McpClient> {
     Arc::new(RmcpClient::new(server, service, None))
@@ -640,7 +641,7 @@ mod tests {
     #[cfg(unix)]
     fn stdio_config() -> McpServerConfig {
         McpServerConfig {
-            id: ServerId::new("fixture").expect("server id"),
+            id: McpServerId::new("fixture").expect("server id"),
             transport: McpTransportConfig::Stdio {
                 executable: "/bin/sh".into(),
                 args: vec![],

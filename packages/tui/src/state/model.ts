@@ -418,34 +418,14 @@ export interface ModeChoice {
   readonly current: boolean
 }
 
-export const BUILTIN_MODE_CHOICES: readonly ModeChoice[] = [
-  {
-    id: "execute",
-    description: "Execute work subject to the configured permission policy",
-    current: true,
-  },
-  {
-    id: "discuss",
-    description: "Explore and explain without changing the workspace",
-    current: false,
-  },
-  {
-    id: "plan",
-    description: "Develop a structured plan without changing the workspace",
-    current: false,
-  },
-]
-
 export interface ModelChoice {
-  readonly alias: string
-  readonly id?: string
-  readonly displayName?: string
-  readonly provider?: string
-  readonly providers: readonly string[]
-  readonly aliases?: readonly string[]
-  readonly current?: boolean
-  readonly available?: boolean
-  readonly status?: string | null
+  readonly id: string
+  readonly displayName: string
+  readonly provider: string
+  readonly aliases: readonly string[]
+  readonly current: boolean
+  readonly available: boolean
+  readonly status: string | null
   readonly vision: boolean
   readonly thinking: boolean
   readonly toolCalling: boolean
@@ -643,7 +623,7 @@ export function createInitialState(): RottweilerState {
     lastFork: null,
     commands: [],
     commandsTruncated: false,
-    modes: BUILTIN_MODE_CHOICES,
+    modes: [],
     modesTruncated: false,
     models: [],
     modelAliases: [],

@@ -198,7 +198,7 @@ mod tests {
                 .expect("package")
                 .contains("my-plugin")
         );
-        let manifest = rw_ext::PluginManifest::from_slice(
+        let manifest = rw_plugin_protocol::PluginManifest::from_slice(
             &fs::read(destination.join("manifest.json")).expect("manifest"),
         )
         .expect("trusted manifest parses");

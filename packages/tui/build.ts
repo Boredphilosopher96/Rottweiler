@@ -15,6 +15,8 @@ import { dirname, isAbsolute, join } from "node:path"
 
 import type { BunPlugin } from "bun"
 
+import { releasePlatformForNodeTarget } from "./generated/release-contract.ts"
+
 const MAX_EMBEDDED_TREE_SITTER_ASSET_BYTES = 8 * 1024 * 1024
 const COMPRESSED_TREE_SITTER_ASSET_HEADER_BYTES = 8
 
@@ -72,12 +74,15 @@ function nativePackage(): string {
 const selectedNativePackage = nativePackage()
 const selectedNativeEntry = Bun.resolveSync(selectedNativePackage, import.meta.dir)
 const selectedNativeDirectory = dirname(selectedNativeEntry)
+const selectedReleasePlatform = releasePlatformForNodeTarget(
+  process.platform,
+  process.arch,
+)
+if (selectedReleasePlatform === undefined && process.platform !== "win32") {
+  throw new Error(`Rottweiler does not publish ${process.platform}-${process.arch}`)
+}
 const selectedNativeLibrary =
-  process.platform === "win32"
-    ? "opentui.dll"
-    : process.platform === "darwin"
-      ? "libopentui.dylib"
-      : "libopentui.so"
+  selectedReleasePlatform?.nativeLibrary ?? "opentui.dll"
 const selectedNativePath = join(selectedNativeDirectory, selectedNativeLibrary)
 const treeSitterAssetDigest = createHash("sha256")
   .update(readFileSync(join(import.meta.dir, "bun.lock")))
@@ -123,12 +128,7 @@ function signDarwinArtifact(path: string, label: string): void {
 }
 
 function enforceTuiBundleSize(executable: string, nativeLibrary: string): void {
-  const limit =
-    process.platform === "darwin"
-      ? 100_000_000
-      : process.platform === "linux"
-        ? 150_000_000
-        : undefined
+  const limit = selectedReleasePlatform?.productBudgets.tuiBundleLessThanBytes
   if (limit === undefined) return
   const bundleBytes = statSync(executable).size + statSync(nativeLibrary).size
   if (bundleBytes >= limit) {

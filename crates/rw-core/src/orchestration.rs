@@ -9,7 +9,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use rw_ext::{AgentPermissionMode, AgentRegistry, LoadedAgent};
+use rw_ext::{AgentRegistry, LoadedAgent};
 use rw_tools::{
     CancellationToken, CapabilityManifest, DiffArtifactAuthority, McpToolPolicy,
     SessionDiffArtifactAuthority, SubagentEventSink, SubagentLifecycleEvent, SubagentLifecycleMode,
@@ -66,15 +66,6 @@ impl Default for SubagentLimits {
     }
 }
 
-/// Provider-blind request for one new child session.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SubagentPermissionMode {
-    Discuss,
-    Plan,
-    Execute,
-}
-
 /// Provider-blind request with an engine-resolved immutable launch policy.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub struct SubagentRequest {
@@ -83,7 +74,7 @@ pub struct SubagentRequest {
     pub model: String,
     pub tools: Vec<String>,
     pub system_prompt: Option<String>,
-    pub permission_mode: SubagentPermissionMode,
+    pub permission_mode: SessionMode,
     pub max_turns: Option<usize>,
     pub isolation: SubagentIsolation,
     #[serde(skip)]
@@ -105,11 +96,7 @@ impl SubagentRequest {
             model: agent.model.unwrap_or_else(|| inherited_model.into()),
             tools: agent.tools,
             system_prompt: Some(agent.system_prompt),
-            permission_mode: match agent.permission_mode {
-                AgentPermissionMode::Discuss => SubagentPermissionMode::Discuss,
-                AgentPermissionMode::Plan => SubagentPermissionMode::Plan,
-                AgentPermissionMode::Execute => SubagentPermissionMode::Execute,
-            },
+            permission_mode: agent.permission_mode,
             max_turns: Some(agent.max_turns),
             isolation: SubagentIsolation::default(),
             workspace_root,
@@ -130,7 +117,7 @@ pub struct SubagentHandle {
 pub struct SubagentRecoveryPolicy {
     pub model_alias: String,
     pub system_prompt: Option<String>,
-    pub permission_mode: SubagentPermissionMode,
+    pub permission_mode: SessionMode,
     pub max_turns: usize,
 }
 
@@ -1524,7 +1511,7 @@ fn validate_request(request: &SubagentRequest) -> Result<(), OrchestrationError>
 fn restricted_registry(
     tools: &Arc<ToolRegistry>,
     requested: &[String],
-    mode: SubagentPermissionMode,
+    mode: SessionMode,
 ) -> Result<Arc<ToolRegistry>, OrchestrationError> {
     if requested.iter().any(|name| name == "ask_user") {
         return Err(OrchestrationError::InvalidRequest(
@@ -1547,7 +1534,7 @@ fn restricted_registry(
             .map_err(|error| OrchestrationError::InvalidRequest(error.to_string()))?;
         mcp_grants.push(name.clone());
     }
-    if !mcp_grants.is_empty() && mode != SubagentPermissionMode::Execute {
+    if !mcp_grants.is_empty() && mode != SessionMode::Execute {
         return Err(OrchestrationError::InvalidRequest(
             "MCP tools require an execute-mode child because remote mutation capabilities are opaque"
                 .to_owned(),
@@ -1557,7 +1544,7 @@ fn restricted_registry(
         if name.starts_with("mcp:") {
             return false;
         }
-        mode == SubagentPermissionMode::Execute
+        mode == SessionMode::Execute
             || tools.descriptor(name).is_some_and(|descriptor| {
                 descriptor
                     .capabilities
@@ -1565,7 +1552,7 @@ fn restricted_registry(
                     .iter()
                     .all(|capability| matches!(capability, ToolCapability::ReadFilesystem))
             })
-            || (mode == SubagentPermissionMode::Plan && name.as_str() == "submit_plan")
+            || (mode == SessionMode::Plan && name.as_str() == "submit_plan")
     });
     let mut allowed = allowed.map(String::as_str).collect::<Vec<_>>();
     if !mcp_grants.is_empty() {
@@ -1892,7 +1879,7 @@ impl Tool for SpawnAgentTool {
                 }
                 self.agents
                     .load(&agent)
-                    .is_ok_and(|agent| agent.permission_mode != AgentPermissionMode::Execute)
+                    .is_ok_and(|agent| agent.permission_mode != SessionMode::Execute)
             }
         }
     }
@@ -2370,25 +2357,21 @@ fn apply_child_policy(
     config: &mut SessionActorConfig,
     model_alias: &str,
     system_prompt: Option<&str>,
-    permission_mode: SubagentPermissionMode,
+    permission_mode: SessionMode,
     max_turns: usize,
 ) {
     model_alias.clone_into(&mut config.model_alias);
     config.max_turns = config.max_turns.min(max_turns).max(1);
-    config.recovered.mode = match permission_mode {
-        SubagentPermissionMode::Discuss => SessionMode::Discuss,
-        SubagentPermissionMode::Plan => SessionMode::Plan,
-        SubagentPermissionMode::Execute => SessionMode::Execute,
-    };
-    config.recovered.plan_gate_active = permission_mode == SubagentPermissionMode::Plan;
+    config.recovered.mode = permission_mode;
+    config.recovered.plan_gate_active = permission_mode == SessionMode::Plan;
     let mode_prompt = match permission_mode {
-        SubagentPermissionMode::Discuss => {
+        SessionMode::Discuss => {
             "Child permission mode: discuss. Use only read-only tools and do not mutate the workspace."
         }
-        SubagentPermissionMode::Plan => {
+        SessionMode::Plan => {
             "Child permission mode: plan. Use only read-only tools and return a structured plan."
         }
-        SubagentPermissionMode::Execute => {
+        SessionMode::Execute => {
             "Child permission mode: execute. Use the exact tool grant selected by the parent and the parent session's effective permission policy."
         }
     };
@@ -2926,7 +2909,7 @@ mod tests {
             model: "fast".to_owned(),
             tools: Vec::new(),
             system_prompt: Some("fixture".to_owned()),
-            permission_mode: SubagentPermissionMode::Execute,
+            permission_mode: SessionMode::Execute,
             max_turns: Some(4),
             isolation: SubagentIsolation::Shared,
             workspace_root: std::env::current_dir().expect("cwd"),
@@ -3036,7 +3019,7 @@ mod tests {
                 &SubagentRecoveryPolicy {
                     model_alias: "fast".to_owned(),
                     system_prompt: None,
-                    permission_mode: SubagentPermissionMode::Execute,
+                    permission_mode: SessionMode::Execute,
                     max_turns: 4,
                 },
             )
@@ -3091,7 +3074,7 @@ mod tests {
             policy: SubagentRecoveryPolicy {
                 model_alias: "fast".to_owned(),
                 system_prompt: Some("fixture".to_owned()),
-                permission_mode: SubagentPermissionMode::Execute,
+                permission_mode: SessionMode::Execute,
                 max_turns: 4,
             },
             phase: SubagentRecoveryPhase::Active,
@@ -3193,20 +3176,12 @@ mod tests {
         let mut tools = ToolRegistry::new();
         tools.register(Arc::new(MutatingTool)).expect("register");
         let tools = Arc::new(tools);
-        let discuss = restricted_registry(
-            &tools,
-            &["write".to_owned()],
-            SubagentPermissionMode::Discuss,
-        )
-        .expect("discuss subset");
+        let discuss = restricted_registry(&tools, &["write".to_owned()], SessionMode::Discuss)
+            .expect("discuss subset");
         assert!(discuss.is_empty());
-        let error = restricted_registry(
-            &tools,
-            &["ask_user".to_owned()],
-            SubagentPermissionMode::Execute,
-        )
-        .err()
-        .expect("interactive child tool must fail");
+        let error = restricted_registry(&tools, &["ask_user".to_owned()], SessionMode::Execute)
+            .err()
+            .expect("interactive child tool must fail");
         assert!(error.to_string().contains("cannot include interactive"));
         let missing_root_bound = bind_child_tools(&ToolRegistry::new(), &tools)
             .err()
@@ -3228,7 +3203,7 @@ mod tests {
         let restricted = restricted_registry(
             &tools,
             &["mcp:github/get_issue".to_owned()],
-            SubagentPermissionMode::Execute,
+            SessionMode::Execute,
         )
         .expect("exact MCP policy");
         assert!(restricted.descriptor("tool_search").is_some());
@@ -3242,12 +3217,7 @@ mod tests {
 
         for invalid in ["mcp:github/*", "tool_search", "mcp_call"] {
             assert!(
-                restricted_registry(
-                    &tools,
-                    &[invalid.to_owned()],
-                    SubagentPermissionMode::Execute,
-                )
-                .is_err(),
+                restricted_registry(&tools, &[invalid.to_owned()], SessionMode::Execute,).is_err(),
                 "{invalid} must not widen child MCP authority"
             );
         }
@@ -3255,7 +3225,7 @@ mod tests {
             restricted_registry(
                 &tools,
                 &["mcp:github/get_issue".to_owned()],
-                SubagentPermissionMode::Discuss,
+                SessionMode::Discuss,
             )
             .is_err()
         );
@@ -3391,7 +3361,7 @@ mod tests {
         let mut launch = request("delay:1");
         launch.model = "subscription-fast".to_owned();
         launch.system_prompt = Some("exact recovered prompt".to_owned());
-        launch.permission_mode = SubagentPermissionMode::Plan;
+        launch.permission_mode = SessionMode::Plan;
         launch.max_turns = Some(3);
 
         let handle = orchestrator
@@ -3414,7 +3384,7 @@ mod tests {
             record.policy.system_prompt.as_deref(),
             Some("exact recovered prompt")
         );
-        assert_eq!(record.policy.permission_mode, SubagentPermissionMode::Plan);
+        assert_eq!(record.policy.permission_mode, SessionMode::Plan);
         assert_eq!(record.policy.max_turns, 3);
         assert_eq!(record.phase, SubagentRecoveryPhase::Active);
         orchestrator.wait(&handle).await.expect("result");

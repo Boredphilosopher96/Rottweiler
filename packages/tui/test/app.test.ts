@@ -79,12 +79,12 @@ function expectCoherentTheme(app: ReturnType<typeof createRottweilerApp>, theme:
   expect(app.backgroundColor.toInts()).toEqual(rgba(theme.background))
   expect(app.main.backgroundColor.toInts()).toEqual(rgba(theme.background))
   expect(app.transcript.backgroundColor.toInts()).toEqual(rgba(theme.background))
-  expect(app.contextPanel.backgroundColor.toInts()).toEqual(rgba(theme.panel))
-  expect(app.composer.backgroundColor.toInts()).toEqual(rgba(theme.panel))
-  expect(app.reviewPanel.backgroundColor.toInts()).toEqual(rgba(theme.panel))
-  expect(app.interactionPanel.backgroundColor.toInts()).toEqual(rgba(theme.panelRaised))
-  expect(app.picker.backgroundColor.toInts()).toEqual(rgba(theme.panelRaised))
-  expect(app.statusLine.bg.toInts()).toEqual(rgba(theme.panel))
+  expect(app.contextPanel.backgroundColor.toInts()).toEqual(rgba(theme.backgroundPanel))
+  expect(app.composer.backgroundColor.toInts()).toEqual(rgba(theme.backgroundPanel))
+  expect(app.reviewPanel.backgroundColor.toInts()).toEqual(rgba(theme.backgroundPanel))
+  expect(app.interactionPanel.backgroundColor.toInts()).toEqual(rgba(theme.backgroundElement))
+  expect(app.picker.backgroundColor.toInts()).toEqual(rgba(theme.backgroundElement))
+  expect(app.statusLine.bg.toInts()).toEqual(rgba(theme.backgroundPanel))
 }
 
 function completeTransportReconnect(app: ReturnType<typeof createRottweilerApp>): void {
@@ -151,7 +151,7 @@ describe("Rottweiler OpenTUI shell", () => {
 
     setup.mockInput.pressArrow("down", { ctrl: true })
     expect(app.transcript.selectedBlockId).toBe("tool:keyboard-block")
-    expect(block?.header.bg.toInts()).toEqual(rgba(kennelTheme.selection))
+    expect(block?.header.bg.toInts()).toEqual(rgba(kennelTheme.backgroundElement))
     expect(renderer.currentFocusedRenderable?.id).toBe("composer-editor")
 
     setup.mockInput.pressKey(" ", { ctrl: true })
@@ -1279,9 +1279,9 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.picker.select.getSelectedIndex()).toBe(0)
     await setup.renderOnce()
     const commandSpans = setup.captureSpans().lines.flatMap((line) => line.spans)
-    const selectedTitle = commandSpans.find((span) => span.text.includes("/help"))
-    const selectedCaption = commandSpans.find((span) => span.text.includes("List available commands"))
-    const nextCommand = commandSpans.find((span) => span.text.includes("/status"))
+    const selectedTitle = commandSpans.find((span) => span.text.includes("/models"))
+    const selectedCaption = commandSpans.find((span) => span.text.includes("Switch the active model"))
+    const nextCommand = commandSpans.find((span) => span.text.includes("/providers"))
     expect(selectedTitle).toBeDefined()
     expect(selectedCaption).toBeDefined()
     expect(nextCommand).toBeDefined()
@@ -1306,6 +1306,11 @@ describe("Rottweiler OpenTUI shell", () => {
     setup.mockInput.pressArrow("down")
     expect(app.picker.select.getSelectedIndex()).toBe(0)
 
+    const engineCommandIndex = app.picker.select.options.findIndex(
+      (option) => option.value === "command-0",
+    )
+    expect(engineCommandIndex).toBeGreaterThanOrEqual(0)
+    app.picker.select.setSelectedIndex(engineCommandIndex)
     setup.mockInput.pressEnter()
     await Bun.sleep(0)
     expect(app.picker.visible).toBeFalse()
@@ -1380,11 +1385,19 @@ describe("Rottweiler OpenTUI shell", () => {
   test("moves anchored slash selection to the closest match as the query changes", async () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer)
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        commands: [
+          { name: "help", description: "List available commands", usage: "/help" },
+          { name: "status", description: "Show session status", usage: "/status" },
+        ],
+      },
+    })
     renderer.root.add(app)
 
     await setup.mockInput.typeText("/")
-    expect(app.picker.select.getSelectedOption()?.value).toBe("help")
+    expect(app.picker.select.getSelectedOption()?.value).toBe("models")
     await setup.mockInput.typeText("sta")
     expect(app.picker.select.getSelectedOption()?.value).toBe("status")
     app.closePicker()
@@ -1418,6 +1431,7 @@ describe("Rottweiler OpenTUI shell", () => {
       initialState: {
         ...createInitialState(),
         connection: { phase: "connected", attempt: 0, error: null, gap: null },
+        commands: [{ name: "status", description: "Show session status", usage: "/status" }],
       },
       onCommand(command) {
         emitted.push(command)
@@ -1606,6 +1620,10 @@ describe("Rottweiler OpenTUI shell", () => {
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        commands: [{ name: "rewind", description: "Rewind the conversation", usage: "/rewind" }],
+      },
       onCommand(command) {
         emitted.push(command)
         return { type: "accepted" }
@@ -1919,7 +1937,7 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(commands.filter((command) => command.type === "send_message")).toEqual([])
   })
 
-  test("keeps slash defaults and the full action palette useful before engine projections", async () => {
+  test("keeps local slash actions and the full action palette useful before engine projections", async () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer)
@@ -1927,11 +1945,13 @@ describe("Rottweiler OpenTUI shell", () => {
 
     await setup.mockInput.typeText("/")
     const slash = app.picker.select.options.map((option) => option.value)
-    expect(slash).toContain("help")
     expect(slash).toContain("providers")
     expect(slash).toContain("agents")
-    expect(slash).toContain("permissions")
-    expect(slash.length).toBeGreaterThan(10)
+    expect(slash).toContain("theme")
+    expect(slash).toContain("settings")
+    expect(slash).toContain("exit")
+    expect(slash).not.toContain("help")
+    expect(slash).not.toContain("status")
 
     app.closePicker()
     app.openCommandPicker()
@@ -5096,7 +5116,7 @@ describe("Rottweiler OpenTUI shell", () => {
         ...createInitialState(),
         connection: { phase: "connected", attempt: 0, error: null, gap: null },
         commands: [{ name: "first", description: "First", usage: "" }],
-        models: [{ alias: "fast", providers: ["openai"], vision: false, thinking: false, toolCalling: true }],
+        models: [{ id: "openai/fast", displayName: "fast", provider: "openai", aliases: ["fast"], current: false, available: true, status: null, vision: false, thinking: false, toolCalling: true }],
       },
       onCommand(command) {
         emitted.push(command)
@@ -5390,11 +5410,12 @@ describe("Rottweiler OpenTUI shell", () => {
       meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: refresh!.meta.request_id, emitted_at: "2026-01-01T00:00:01Z" },
       models: [{
         id: "openai/gpt-5",
-        alias: "openai/gpt-5",
+        display_name: "GPT-5",
         provider: "openai",
-        providers: ["openai"],
+        aliases: ["fast"],
+        current: false,
         available: true,
-        capabilities: { vision: true, thinking: true, tool_calling: true },
+        capabilities: { vision: true, thinking: true, tool_calling: true, cache_behavior: "none", max_context_tokens: null, max_output_tokens: null },
       }],
       providers: [{
         name: "openai",
@@ -5479,7 +5500,7 @@ describe("Rottweiler OpenTUI shell", () => {
     await Bun.sleep(0)
 
     expect(app.picker.select.options.map((option) => option.value)).toContain("commands.error")
-    expect(app.picker.select.options.map((option) => option.value)).toContain("help")
+    expect(app.picker.select.options.map((option) => option.value)).toContain("providers")
     expect(app.picker.select.options[0]?.description).toContain(
       "driver lease rejected the command catalog",
     )
@@ -5662,7 +5683,7 @@ describe("Rottweiler OpenTUI shell", () => {
     const app = createRottweilerApp(renderer, {
       initialState: {
         ...createInitialState(),
-        models: [{ alias: "fast", providers: ["openai"], vision: true, thinking: true, toolCalling: true }],
+        models: [{ id: "openai/fast", displayName: "fast", provider: "openai", aliases: ["fast"], current: false, available: true, status: null, vision: true, thinking: true, toolCalling: true }],
       },
     })
     renderer.root.add(app)
@@ -5752,8 +5773,12 @@ describe("Rottweiler OpenTUI shell", () => {
       initialState: {
         ...createInitialState(),
         models: [
-          { alias: "fast", providers: ["openai", "copilot"], vision: true, thinking: true, toolCalling: true },
-          { alias: "steady", providers: ["copilot"], vision: false, thinking: true, toolCalling: true },
+          { id: "openai/fast", displayName: "fast", provider: "openai", aliases: ["fast"], current: false, available: true, status: null, vision: true, thinking: true, toolCalling: true },
+          { id: "copilot/steady", displayName: "steady", provider: "copilot", aliases: ["steady"], current: false, available: true, status: null, vision: false, thinking: true, toolCalling: true },
+        ],
+        providers: [
+          { name: "copilot", authKind: "device_flow", nextAction: "select_models", configured: true, authenticated: true, reachable: true, modelCount: 1, status: null },
+          { name: "openai", authKind: "api_key", nextAction: "select_models", configured: true, authenticated: true, reachable: true, modelCount: 1, status: null },
         ],
       },
       onCommand(command) {
@@ -5772,14 +5797,13 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.picker.title).toContain("Models · copilot")
     expect(app.picker.select.options.map((option) => option.value)).toEqual([
       "models.section.models",
-      "fast",
-      "steady",
+      "copilot/steady",
     ])
-    app.picker.select.setSelectedIndex(2)
+    app.picker.select.setSelectedIndex(1)
     app.picker.select.selectCurrent()
     expect(commands).toContainEqual(expect.objectContaining({
       type: "switch_model",
-      model: "steady",
+      model: "copilot/steady",
       provider: "copilot",
     }))
     app.handleEvent({
@@ -5801,8 +5825,8 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.picker.title).toContain("Models")
     expect(app.picker.select.options.map((option) => option.value)).toEqual([
       "models.section.models",
-      "fast",
-      "steady",
+      "openai/fast",
+      "copilot/steady",
     ])
   })
 
@@ -5816,40 +5840,48 @@ describe("Rottweiler OpenTUI shell", () => {
         models: [
           {
             id: "openai/gpt-5",
-            alias: "openai/gpt-5",
+            displayName: "GPT-5",
             provider: "openai",
-            providers: ["openai"],
+            aliases: ["fast"],
+            current: true,
             available: true,
+            status: null,
             vision: true,
             thinking: true,
             toolCalling: true,
           },
           {
             id: "anthropic/claude",
-            alias: "anthropic/claude",
+            displayName: "Claude",
             provider: "anthropic",
-            providers: ["anthropic"],
+            aliases: ["fast"],
+            current: false,
             available: true,
+            status: null,
             vision: false,
             thinking: true,
             toolCalling: true,
           },
           {
             id: "offline/one",
-            alias: "offline/one",
+            displayName: "Offline one",
             provider: "offline",
-            providers: ["offline"],
+            aliases: [],
+            current: false,
             available: false,
+            status: null,
             vision: false,
             thinking: false,
             toolCalling: true,
           },
           {
             id: "offline/two",
-            alias: "offline/two",
+            displayName: "Offline two",
             provider: "offline",
-            providers: ["offline"],
+            aliases: [],
+            current: false,
             available: false,
+            status: null,
             vision: false,
             thinking: false,
             toolCalling: true,
@@ -5931,11 +5963,12 @@ describe("Rottweiler OpenTUI shell", () => {
         ...createInitialState(),
         models: [{
           id: "openai/gpt-5",
-          alias: "openai/gpt-5",
           displayName: "GPT-5",
           provider: "openai",
-          providers: ["openai"],
+          aliases: ["fast"],
+          current: false,
           available: true,
+          status: null,
           vision: true,
           thinking: true,
           toolCalling: true,
@@ -6030,11 +6063,9 @@ describe("Rottweiler OpenTUI shell", () => {
           source: "project",
         }],
         models: [{
-          alias: "copilot/gpt-5",
           id: "copilot/gpt-5",
           displayName: "GPT-5",
           provider: "copilot",
-          providers: ["copilot"],
           aliases: ["fast"],
           current: true,
           available: true,
@@ -7095,8 +7126,13 @@ describe("Rottweiler OpenTUI shell", () => {
         ...createInitialState(),
         errors: priorErrors,
         models: [{
-          alias: "fast",
-          providers: ["openai"],
+          id: "openai/fast",
+          displayName: "fast",
+          provider: "openai",
+          aliases: ["fast"],
+          current: false,
+          available: true,
+          status: null,
           vision: true,
           thinking: true,
           toolCalling: true,
@@ -7126,7 +7162,7 @@ describe("Rottweiler OpenTUI shell", () => {
       },
     })
 
-    expect(commands).toContainEqual(expect.objectContaining({ type: "switch_model", model: "fast" }))
+    expect(commands).toContainEqual(expect.objectContaining({ type: "switch_model", model: "openai/fast" }))
     expect(app.state.errors).toHaveLength(64)
     expect(app.state.errors.at(-1)?.code).toBe("session_not_idle")
     expect(app.banner.visible).toBeTrue()
@@ -7151,8 +7187,13 @@ describe("Rottweiler OpenTUI shell", () => {
       initialState: {
         ...createInitialState(),
         models: [{
-          alias: "fast",
-          providers: ["openai"],
+          id: "openai/fast",
+          displayName: "fast",
+          provider: "openai",
+          aliases: ["fast"],
+          current: false,
+          available: true,
+          status: null,
           vision: false,
           thinking: true,
           toolCalling: true,
@@ -7961,7 +8002,7 @@ describe("Rottweiler OpenTUI shell", () => {
       for (const theme of themeCatalogFor(mode)) {
         const selected = pickerSelectionColors(theme)
         expect(colorContrast(selected.foreground, selected.background), theme.name).toBeGreaterThanOrEqual(4.5)
-        expect(colorContrast(selected.background, theme.panelRaised), theme.name).toBeGreaterThanOrEqual(1.4)
+        expect(colorContrast(selected.background, theme.backgroundElement), theme.name).toBeGreaterThanOrEqual(1.4)
       }
     }
     const transparentSelection = pickerSelectionColors({

@@ -20,6 +20,7 @@ use rw_core::{
 };
 use rw_runtime::{executable_config, session, session_history};
 use rw_tools::maybe_run_sandbox_helper;
+use rw_types::PermissionModeDescriptor as PermissionMode;
 use tracing_subscriber::EnvFilter;
 
 mod doctor;
@@ -69,7 +70,7 @@ struct Cli {
     #[arg(long, value_enum)]
     output_format: Option<OutputFormat>,
     /// Non-interactive permission policy. Omitted means the loaded config policy.
-    #[arg(long, value_enum)]
+    #[arg(long)]
     permission_mode: Option<PermissionMode>,
     /// Maximum provider iterations permitted in one user turn.
     #[arg(long)]
@@ -134,33 +135,6 @@ enum OutputFormat {
     Text,
     Json,
     StreamJson,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-pub(crate) enum PermissionMode {
-    Strict,
-    AutoSafe,
-    Yolo,
-}
-
-impl PermissionMode {
-    const fn as_cli_value(self) -> &'static str {
-        match self {
-            Self::Strict => "strict",
-            Self::AutoSafe => "auto-safe",
-            Self::Yolo => "yolo",
-        }
-    }
-}
-
-impl From<PermissionMode> for rw_runtime::PermissionMode {
-    fn from(value: PermissionMode) -> Self {
-        match value {
-            PermissionMode::Strict => Self::Strict,
-            PermissionMode::AutoSafe => Self::AutoSafe,
-            PermissionMode::Yolo => Self::Yolo,
-        }
-    }
 }
 
 impl From<OutputFormat> for rw_runtime::OutputFormat {
@@ -957,7 +931,7 @@ async fn main() -> Result<()> {
             session::run(session::RunOptions {
                 prompt: None,
                 output_format: output_format.into(),
-                permission_mode: permission_mode.map(Into::into),
+                permission_mode,
                 max_turns,
                 continue_latest: resume.is_none(),
                 resume,
@@ -1232,8 +1206,7 @@ async fn main() -> Result<()> {
                     "--permission-mode",
                     cli.permission_mode,
                     engine.permission_mode,
-                )?
-                .map(Into::into),
+                )?,
                 max_turns(cli.max_turns, engine.max_turns)?,
                 provider_mode,
                 false,
@@ -1401,7 +1374,7 @@ async fn main() -> Result<()> {
                 session::run(session::RunOptions {
                     prompt: cli.prompt,
                     output_format: cli.output_format.unwrap_or_default().into(),
-                    permission_mode: cli.permission_mode.map(Into::into),
+                    permission_mode: cli.permission_mode,
                     max_turns: cli.max_turns.unwrap_or(DEFAULT_MAX_TURNS),
                     resume: cli.resume,
                     continue_latest: cli.continue_latest,
@@ -2372,7 +2345,7 @@ async fn run_serve(
         let options = rw_runtime::RuntimeHostOptions::from_environment(
             workspace_roots,
             dangerously_trust,
-            permission_mode.map(Into::into),
+            permission_mode,
             max_turns,
             provider_mode,
             wait_for_execution_lease,
@@ -2982,7 +2955,7 @@ async fn spawn_detached_server(
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     if let Some(mode) = permission_mode {
-        command.arg("--permission-mode").arg(mode.as_cli_value());
+        command.arg("--permission-mode").arg(mode.as_str());
     }
     if let Some(model) = model {
         command.arg("--model").arg(model);
@@ -3107,11 +3080,7 @@ async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
         additional_workspaces: cli.add_dirs.clone(),
         dangerously_trust: cli.dangerously_trust,
         model: cli.model.clone(),
-        permission_mode: cli.permission_mode.map(|mode| match mode {
-            PermissionMode::Strict => remote::RemotePermissionMode::Strict,
-            PermissionMode::AutoSafe => remote::RemotePermissionMode::AutoSafe,
-            PermissionMode::Yolo => remote::RemotePermissionMode::Yolo,
-        }),
+        permission_mode: cli.permission_mode,
     };
     let tui_executable = locate_tui_executable()?;
     let fork_operation_directory = storage_root.join("control/pending-forks");

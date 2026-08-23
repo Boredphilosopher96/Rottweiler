@@ -11,11 +11,14 @@ import tarfile
 import tempfile
 import unittest
 
+from scripts.release_contract import load_contract
+
 
 REPO = Path(__file__).resolve().parents[2]
 RENDERER = REPO / "scripts" / "render-distribution.py"
 VERSION = "1.2.3"
 PLATFORMS = ("darwin-arm64", "linux-x86_64")
+RELEASE_CONTRACT = load_contract()
 
 
 def make_archive(root: Path, release_platform: str) -> Path:
@@ -31,10 +34,17 @@ def make_archive(root: Path, release_platform: str) -> Path:
         directory.type = tarfile.DIRTYPE
         directory.mode = 0o755
         bundle.addfile(directory)
-        info = tarfile.TarInfo(f"{release_root}/install.sh")
-        info.mode = 0o755
-        info.size = len(installer)
-        bundle.addfile(info, io.BytesIO(installer))
+        binary_directory = tarfile.TarInfo(f"{release_root}/bin")
+        binary_directory.type = tarfile.DIRTYPE
+        binary_directory.mode = 0o755
+        bundle.addfile(binary_directory)
+        platform_contract = RELEASE_CONTRACT.platform(release_platform)
+        for member in platform_contract.archive_members:
+            content = installer if member.id == "installer" else member.id.encode("ascii")
+            info = tarfile.TarInfo(f"{release_root}/{member.path}")
+            info.mode = member.mode
+            info.size = len(content)
+            bundle.addfile(info, io.BytesIO(content))
     return archive
 
 
@@ -129,11 +139,11 @@ class DistributionRenderTests(unittest.TestCase):
             self.assertIn("brew upgrade", formula_text)
             self.assertIn('cask "rottweiler" do', cask_text)
             self.assertIn('depends_on arch: :arm64', cask_text)
-            self.assertIn('binary "#{staged_path}/rottweiler-#{version}-darwin-arm64/bin/rw", target: "rw"', cask_text)
+            self.assertIn('binary "#{staged_path}/rottweiler-1.2.3-darwin-arm64/bin/rw", target: "rw"', cask_text)
             self.assertNotIn("ROTTWEILER_PACKAGE_MANAGER", cask_text)
             self.assertIn('system_command "/usr/bin/xattr"', cask_text)
             self.assertIn(
-                'args: ["-dr", "com.apple.quarantine", "#{staged_path}/rottweiler-#{version}-darwin-arm64"]',
+                'args: ["-dr", "com.apple.quarantine", "#{staged_path}/rottweiler-1.2.3-darwin-arm64"]',
                 cask_text,
             )
             self.assertIn("This pre-v1 CLI is not Apple-notarized", cask_text)
@@ -239,6 +249,20 @@ class DistributionRenderTests(unittest.TestCase):
 
             _, _, _, missing_os = self.render(root, [("linux-x86_64", good)])
             self.assertNotEqual(missing_os.returncode, 0)
+
+    def test_renders_canonical_linux_aarch64_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archives = [
+                ("darwin-arm64", make_archive(root, "darwin-arm64")),
+                ("linux-aarch64", make_archive(root, "linux-aarch64")),
+            ]
+            formula, _, bootstrap, rendered = self.render(root, archives)
+            self.assertEqual(rendered.returncode, 0, rendered.stderr.decode())
+            self.assertIn("rottweiler-1.2.3-linux-aarch64.tar.gz", formula.read_text())
+            bootstrap_text = bootstrap.read_text()
+            self.assertIn("Linux-aarch64)", bootstrap_text)
+            self.assertIn("rottweiler-1.2.3-linux-aarch64", bootstrap_text)
 
     def test_head_formula_builds_both_components_but_exposes_only_rw(self) -> None:
         formula = REPO / "packaging/homebrew/rottweiler-head.rb"

@@ -215,6 +215,33 @@ pub enum ThinkingLevel {
     High,
 }
 
+impl ThinkingLevel {
+    /// Stable configuration and protocol spelling for this level.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
+impl std::str::FromStr for ThinkingLevel {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "off" => Ok(Self::Off),
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            _ => Err(format!("unknown thinking level `{value}`")),
+        }
+    }
+}
+
 /// Presentation of a provider's primary credential on HTTP requests.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -323,12 +350,7 @@ impl ProviderConfig {
     /// Returns a sanitized explanation when a header, template, model mapping,
     /// or extra body field is unsafe or ambiguous.
     pub fn validate_gateway_options(&self) -> Result<(), String> {
-        const FIXED_TRANSPORT_KINDS: [&str; 4] = [
-            "openai_codex",
-            "openai_subscription",
-            "github_copilot",
-            "anthropic",
-        ];
+        const FIXED_TRANSPORT_KINDS: [&str; 3] = ["openai_codex", "github_copilot", "anthropic"];
         let has_gateway_override = self.path_template.is_some()
             || !self.headers.is_empty()
             || !self.header_credentials.is_empty()
@@ -436,10 +458,7 @@ impl ProviderConfig {
         if self.pricing.is_empty() {
             return Ok(());
         }
-        if matches!(
-            self.kind.as_str(),
-            "openai_codex" | "openai_subscription" | "github_copilot"
-        ) {
+        if matches!(self.kind.as_str(), "openai_codex" | "github_copilot") {
             return Err(format!(
                 "provider kind {:?} uses subscription or credit accounting and cannot declare API pricing",
                 self.kind
@@ -601,8 +620,9 @@ impl Default for WebSearchConfig {
 }
 
 /// Default permission decision used when no rule matches.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
 pub enum PermissionDecision {
     /// Ask the active driver for approval.
     #[default]
@@ -611,6 +631,31 @@ pub enum PermissionDecision {
     Allow,
     /// Deny the operation.
     Deny,
+}
+
+impl PermissionDecision {
+    /// Stable configuration and presentation spelling for this decision.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Allow => "allow",
+            Self::Deny => "deny",
+        }
+    }
+}
+
+impl std::str::FromStr for PermissionDecision {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "ask" => Ok(Self::Ask),
+            "allow" => Ok(Self::Allow),
+            "deny" => Ok(Self::Deny),
+            _ => Err(format!("unknown permission decision `{value}`")),
+        }
+    }
 }
 
 /// Permission settings.
@@ -700,6 +745,29 @@ pub enum UpdateChannel {
     Stable,
     /// Beta signed releases.
     Beta,
+}
+
+impl UpdateChannel {
+    /// Stable configuration and update-selector spelling for this channel.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Beta => "beta",
+        }
+    }
+}
+
+impl std::str::FromStr for UpdateChannel {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "stable" => Ok(Self::Stable),
+            "beta" => Ok(Self::Beta),
+            _ => Err(format!("unknown update channel `{value}`")),
+        }
+    }
 }
 
 /// Self-update configuration.
@@ -850,4 +918,31 @@ pub struct TelemetryConfigFile {
 pub struct UpdateConfigFile {
     /// Optional update-channel override.
     pub channel: Option<UpdateChannel>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PermissionDecision, ThinkingLevel, UpdateChannel};
+
+    #[test]
+    fn owned_configuration_enum_spellings_round_trip() {
+        for level in [
+            ThinkingLevel::Off,
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+        ] {
+            assert_eq!(level.as_str().parse(), Ok(level));
+        }
+        for decision in [
+            PermissionDecision::Ask,
+            PermissionDecision::Allow,
+            PermissionDecision::Deny,
+        ] {
+            assert_eq!(decision.as_str().parse(), Ok(decision));
+        }
+        for channel in [UpdateChannel::Stable, UpdateChannel::Beta] {
+            assert_eq!(channel.as_str().parse(), Ok(channel));
+        }
+    }
 }

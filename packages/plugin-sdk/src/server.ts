@@ -1,5 +1,6 @@
 import {
   PLUGIN_PROTOCOL_VERSION,
+  PLUGIN_HOST_ID,
   PROTOCOL_LIMITS,
   RPC_METHODS,
   type CommandExecuteParams,
@@ -21,7 +22,7 @@ import {
   type RpcId,
   type ToolCallParams,
   type ToolResponse,
-} from "./protocol"
+} from "./generated/protocol-2"
 import {
   BoundedJsonWriter,
   DEFAULT_MAX_RPC_LINE_BYTES,
@@ -234,8 +235,8 @@ function validateManifest(manifest: PluginManifest): void {
   requireKeys(manifest.capabilities, "capabilities", [
     "tools", "commands", "hooks", "providers", "event_subscriptions", "push",
   ])
-  if (manifest.protocol !== 1 && manifest.protocol !== PLUGIN_PROTOCOL_VERSION) {
-    throw new Error("plugin manifest protocol must be 1 or 2")
+  if (manifest.protocol !== PLUGIN_PROTOCOL_VERSION) {
+    throw new Error(`plugin manifest protocol must be ${PLUGIN_PROTOCOL_VERSION}`)
   }
   requireCanonicalName(manifest.name, "plugin", "plugin name")
   requireText(manifest.version, "plugin version", PROTOCOL_LIMITS.maxVersionBytes)
@@ -315,9 +316,6 @@ function validateManifest(manifest: PluginManifest): void {
     requireUnique(credentialReferences, "provider credential reference")
     for (const reference of credentialReferences) {
       requireCanonicalName(reference, "command", "provider credential reference")
-    }
-    if (manifest.protocol === 1 && (capabilities.length > 0 || credentialReferences.length > 0)) {
-      throw new Error("protocol 1 providers cannot declare protocol 2 capabilities or credentials")
     }
   }
   const validToolCapabilities = new Set(["reads-fs", "writes-fs", "network", "exec"])
@@ -630,12 +628,12 @@ export class PluginServer {
         (provider) => (provider["credential-references"]?.length ?? 0) > 0,
       ) === true
       if (
-        params.host !== "rottweiler"
+        params.host !== PLUGIN_HOST_ID
         || typeof params.protocol !== "number"
         || !Number.isSafeInteger(params.protocol)
         || typeof params.min_protocol !== "number"
         || !Number.isSafeInteger(params.min_protocol)
-        || params.min_protocol < 1
+        || params.min_protocol < PLUGIN_PROTOCOL_VERSION
         || params.min_protocol > selectedProtocol
         || params.protocol < selectedProtocol
         || params.protocol > PLUGIN_PROTOCOL_VERSION

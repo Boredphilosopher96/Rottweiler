@@ -758,6 +758,10 @@ impl Tool for BackgroundStatusTool {
         }
     }
 
+    fn behavior(&self) -> crate::ToolBehavior {
+        crate::ToolBehavior::BackgroundControl
+    }
+
     fn workspace_binding(&self) -> WorkspaceBinding {
         WorkspaceBinding::RootIndependent
     }
@@ -799,6 +803,10 @@ impl Tool for BackgroundOutputTool {
             input_schema: input_schema::<BackgroundOutputInput>(),
             capabilities: CapabilityManifest::default(),
         }
+    }
+
+    fn behavior(&self) -> crate::ToolBehavior {
+        crate::ToolBehavior::BackgroundControl
     }
 
     fn workspace_binding(&self) -> WorkspaceBinding {
@@ -852,6 +860,10 @@ impl Tool for BackgroundKillTool {
             input_schema: input_schema::<BackgroundKillInput>(),
             capabilities: CapabilityManifest::new([ToolCapability::Execute]),
         }
+    }
+
+    fn behavior(&self) -> crate::ToolBehavior {
+        crate::ToolBehavior::BackgroundControl
     }
 
     fn workspace_binding(&self) -> WorkspaceBinding {

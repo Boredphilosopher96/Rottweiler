@@ -183,7 +183,7 @@ export function modelAliasDescription(
 ): string {
   const candidates = alias.candidates.map((candidate) => boundedUiText(candidate, 64))
   const candidateModels = alias.candidates.map((candidate) =>
-    models.find((model) => (model.id ?? model.alias) === candidate),
+    models.find((model) => model.id === candidate),
   )
   const availability =
     candidateModels.length > 0 && candidateModels.every((model) => model !== undefined)

@@ -63,14 +63,6 @@ pub enum OutputFormat {
     StreamJson,
 }
 
-/// Runtime permission policy selected by a headless client.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PermissionMode {
-    Strict,
-    AutoSafe,
-    Yolo,
-}
-
 #[cfg(unix)]
 pub(crate) fn rustix_device_id<T: TryInto<u64>>(device: T) -> Option<u64> {
     device.try_into().ok()

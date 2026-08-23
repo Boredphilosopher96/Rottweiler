@@ -2307,6 +2307,10 @@ impl Tool for BashTool {
         }
     }
 
+    fn behavior(&self) -> crate::ToolBehavior {
+        crate::ToolBehavior::Shell
+    }
+
     fn invocation_capabilities(&self, input: &Value) -> Result<CapabilityManifest, ToolError> {
         let input: BashInput = parse_input(input.clone())?;
         Ok(if input.run_in_background {

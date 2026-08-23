@@ -6,7 +6,13 @@ import {
   type RenderContext,
 } from "@opentui/core"
 
-import type { Attachment } from "../protocol"
+import {
+  MAX_ATTACHMENTS_PER_MESSAGE,
+  MAX_IMAGE_ATTACHMENT_BYTES,
+  MAX_TEXT_ATTACHMENT_BYTES,
+  MAX_TOTAL_ATTACHMENT_BYTES,
+  type Attachment,
+} from "../protocol"
 import type { ClipboardImage, EditorAdapter, ImagePasteAdapter } from "../platform"
 import type { RottweilerTheme } from "../theme"
 import { ImageAttachmentRenderable } from "./image"
@@ -75,8 +81,8 @@ export class ComposerRenderable extends BoxRenderable {
       border: true,
       borderStyle: "rounded",
       borderColor: theme.border,
-      focusedBorderColor: theme.focus,
-      backgroundColor: theme.panel,
+      focusedBorderColor: theme.borderActive,
+      backgroundColor: theme.backgroundPanel,
       paddingX: 1,
     })
     this.#options = options
@@ -101,11 +107,11 @@ export class ComposerRenderable extends BoxRenderable {
       // Keep the binding-derived discovery copy within the measured 83-cell
       // budget; this editor has 76 usable cells at an 80-column terminal.
       placeholder: this.#placeholder,
-      backgroundColor: theme.panel,
-      textColor: theme.foreground,
-      focusedBackgroundColor: theme.panelRaised,
-      focusedTextColor: theme.foreground,
-      placeholderColor: theme.subtle,
+      backgroundColor: theme.backgroundPanel,
+      textColor: theme.text,
+      focusedBackgroundColor: theme.backgroundElement,
+      focusedTextColor: theme.text,
+      placeholderColor: theme.borderSubtle,
       wrapMode: "word",
       scrollMargin: 0,
       keyBindings: [
@@ -217,7 +223,7 @@ export class ComposerRenderable extends BoxRenderable {
     this.#shellMode = active
     this.title = active ? " Shell " : ""
     this.borderColor = active ? this.#theme.warning : this.#theme.border
-    this.focusedBorderColor = active ? this.#theme.warning : this.#theme.focus
+    this.focusedBorderColor = active ? this.#theme.warning : this.#theme.borderActive
     this.editor.placeholder = active
       ? "Shell command · Enter to run in foreground"
       : this.#placeholder
@@ -317,7 +323,7 @@ export class ComposerRenderable extends BoxRenderable {
       const identity = attachmentIdentity(attachment)
       if (identities.has(identity)) continue
       if (
-        merged.length < MAX_ATTACHMENTS &&
+        merged.length < MAX_ATTACHMENTS_PER_MESSAGE &&
         attachmentBudgetError(attachment, merged, this.editor.plainText) === null
       ) {
         identities.add(identity)
@@ -584,10 +590,6 @@ function attachmentIdentity(attachment: Attachment): string {
   return `text:${attachment.media_type}:${attachment.data.content}`
 }
 
-const MAX_ATTACHMENTS = 16
-const MAX_TEXT_ATTACHMENT_BYTES = 1024 * 1024
-const MAX_IMAGE_ATTACHMENT_BYTES = 5 * 1024 * 1024
-const MAX_TOTAL_ATTACHMENT_BYTES = 10 * 1024 * 1024
 // The host accepts a 16 MiB JSON command. Keep one MiB for the command envelope,
 // session identity, and future additive fields while measuring the exact UTF-8
 // JSON representation of all user-controlled composer payloads.
@@ -598,8 +600,8 @@ function attachmentBudgetError(
   current: readonly Attachment[],
   content = "",
 ): string | null {
-  if (current.length >= MAX_ATTACHMENTS) {
-    return `A message can include at most ${MAX_ATTACHMENTS} attachments.`
+  if (current.length >= MAX_ATTACHMENTS_PER_MESSAGE) {
+    return `A message can include at most ${MAX_ATTACHMENTS_PER_MESSAGE} attachments.`
   }
   const bytes = attachmentBytes(attachment)
   if (bytes === null) return "That attachment has invalid image data."

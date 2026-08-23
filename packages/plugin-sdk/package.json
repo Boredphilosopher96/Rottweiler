@@ -1,7 +1,7 @@
 {
   "name": "@rottweiler/plugin",
   "version": "0.1.4",
-  "description": "Official TypeScript SDK for Rottweiler protocol 1 and 2 plugins",
+  "description": "Official TypeScript SDK for Rottweiler protocol 2 plugins",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -23,15 +23,13 @@
       "types": "./dist/scaffold.d.ts",
       "default": "./dist/scaffold.js"
     },
-    "./protocol-1.json": "./fixtures/wire/protocol-1.json",
-    "./protocol-1.schema.json": "./fixtures/wire/protocol-1.schema.json",
     "./protocol-2.json": "./fixtures/wire/protocol-2.json",
     "./protocol-2.schema.json": "./fixtures/wire/protocol-2.schema.json"
   },
   "bin": {
     "rottweiler-plugin-scaffold": "./dist/bin/scaffold.js"
   },
-  "files": ["dist", "fixtures/wire/protocol-1.json", "fixtures/wire/protocol-1.schema.json", "fixtures/wire/protocol-2.json", "fixtures/wire/protocol-2.schema.json", "PROTOCOL.md", "README.md"],
+  "files": ["dist", "fixtures/wire/protocol-2.json", "fixtures/wire/protocol-2.schema.json", "PROTOCOL.md", "README.md"],
   "scripts": {
     "build": "bun run build.ts",
     "test": "bun test",

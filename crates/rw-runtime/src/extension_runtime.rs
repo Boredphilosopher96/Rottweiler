@@ -21,19 +21,21 @@ use rw_core::{
 };
 use rw_ext::{
     ApprovalRequirement, ApprovalStore, ApprovalStoreError, CapabilityEnforcer, HookHandler,
-    HookRegistration, METHOD_SESSION_INJECT_MESSAGE, METHOD_SESSION_SET_STATUS, METHOD_UI_NOTIFY,
-    PluginBoundaryRedactor, PluginEventRouter, PluginHost, PluginHttpStreamResponse,
-    PluginLauncher, PluginManifest, PluginProviderHttpHandler, PluginRpcClient, PluginRpcError,
-    PushHandler, RpcCommandAdapter, RpcHookHandler, RpcProviderAdapter, RpcToolAdapter,
-    plugin_launch_approval_requirement,
+    HookRegistration, PluginBoundaryRedactor, PluginEventRouter, PluginHost,
+    PluginHttpStreamResponse, PluginLauncher, PluginProviderHttpHandler, PluginRpcClient,
+    PluginRpcError, PushHandler, RpcCommandAdapter, RpcHookHandler, RpcProviderAdapter,
+    RpcToolAdapter, plugin_hook_registration, plugin_launch_approval_requirement,
 };
 use rw_ext::{
     CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation, CommandRegistry,
-    CommandRegistryError, CommandSource,
+    CommandRegistryError,
 };
 use rw_mcp::{
     FilesystemSpool, McpClient, McpConnectionApprovalPolicy, McpConnector, McpError, McpLimits,
-    McpManager, McpServerConfig, McpTransportConfig, OverflowSpool, ServerId, ServerState,
+    McpManager, McpServerConfig, McpTransportConfig, OverflowSpool, ServerState,
+};
+use rw_plugin_protocol::{
+    METHOD_SESSION_INJECT_MESSAGE, METHOD_SESSION_SET_STATUS, METHOD_UI_NOTIFY, PluginManifest,
 };
 use rw_store::config::ConfigLoader;
 use rw_store::credentials::{CredentialManager, CredentialReference};
@@ -41,7 +43,7 @@ use rw_tools::{
     CancellationToken, EgressPolicy, SandboxedProtocolLauncher, SupervisedEgressProxy, Tool,
     UpstreamProxy,
 };
-use rw_types::{Block, Role, Turn, TurnMeta};
+use rw_types::{Block, CommandSource, McpServerId, Role, Turn, TurnMeta};
 use serde::{Deserialize, Serialize};
 
 use crate::extension_config::DiscoveredMcpServer;
@@ -82,7 +84,7 @@ fn configured_stdio_environment(
 /// credential vault merely because a server exists in configuration.
 struct DeferredCredentialMcpConnector {
     inner: Arc<dyn McpConnector>,
-    bindings: BTreeMap<ServerId, Vec<crate::extension_config::CredentialBinding>>,
+    bindings: BTreeMap<McpServerId, Vec<crate::extension_config::CredentialBinding>>,
     resolve: McpCredentialResolver,
 }
 
@@ -110,8 +112,8 @@ impl McpConnector for DeferredCredentialMcpConnector {
 
 pub(crate) struct McpApprovalStore {
     path: PathBuf,
-    expected: RwLock<BTreeMap<ServerId, String>>,
-    configs: RwLock<BTreeMap<ServerId, DiscoveredMcpServer>>,
+    expected: RwLock<BTreeMap<McpServerId, String>>,
+    configs: RwLock<BTreeMap<McpServerId, DiscoveredMcpServer>>,
     approved: Mutex<BTreeMap<String, String>>,
 }
 
@@ -123,7 +125,7 @@ impl McpApprovalStore {
             .iter()
             .map(|config| {
                 Ok((
-                    ServerId::new(config.name.clone())
+                    McpServerId::new(config.name.clone())
                         .map_err(|error| miette!(error.to_string()))?,
                     config.approval_fingerprint()?,
                 ))
@@ -134,7 +136,7 @@ impl McpApprovalStore {
             .cloned()
             .map(|config| {
                 Ok((
-                    ServerId::new(config.name.clone())
+                    McpServerId::new(config.name.clone())
                         .map_err(|error| miette!(error.to_string()))?,
                     config,
                 ))
@@ -149,7 +151,7 @@ impl McpApprovalStore {
         })
     }
 
-    pub(crate) fn approval_summary(&self, server: &ServerId) -> Result<McpApprovalSummary> {
+    pub(crate) fn approval_summary(&self, server: &McpServerId) -> Result<McpApprovalSummary> {
         let configs = self
             .configs
             .read()
@@ -168,7 +170,7 @@ impl McpApprovalStore {
             .approved
             .lock()
             .map_err(|_| miette!("MCP approval lock was poisoned"))?
-            .get(&server.0)
+            .get(server.as_str())
             .cloned();
         let origin = match &config.origin {
             crate::extension_config::ExecutableConfigOrigin::User(path) => {
@@ -228,7 +230,7 @@ impl McpApprovalStore {
             }),
         };
         Ok(McpApprovalSummary {
-            server: server.0.clone(),
+            server: server.as_str().to_owned(),
             origin,
             transport,
             defer_tools: config.defer_tools,
@@ -241,7 +243,7 @@ impl McpApprovalStore {
         })
     }
 
-    pub(crate) fn approve_server(&self, server: &ServerId) -> Result<bool> {
+    pub(crate) fn approve_server(&self, server: &McpServerId) -> Result<bool> {
         let fingerprint = self
             .expected
             .read()
@@ -253,18 +255,19 @@ impl McpApprovalStore {
             .approved
             .lock()
             .map_err(|_| miette!("MCP approval lock was poisoned"))?;
-        if approved.get(&server.0) == Some(&fingerprint) {
+        if approved.get(server.as_str()) == Some(&fingerprint) {
             return Ok(false);
         }
         let mut updated = approved.clone();
-        updated.insert(server.0.clone(), fingerprint);
+        updated.insert(server.as_str().to_owned(), fingerprint);
         persist_approval_file(&self.path, &updated)?;
         *approved = updated;
         Ok(true)
     }
 
     pub(crate) fn register_user_server(&self, config: DiscoveredMcpServer) -> Result<()> {
-        let id = ServerId::new(config.name.clone()).map_err(|error| miette!(error.to_string()))?;
+        let id =
+            McpServerId::new(config.name.clone()).map_err(|error| miette!(error.to_string()))?;
         let fingerprint = config.approval_fingerprint()?;
         let mut configs = self
             .configs
@@ -282,7 +285,7 @@ impl McpApprovalStore {
         Ok(())
     }
 
-    pub(crate) fn unregister_user_server(&self, server: &ServerId) -> Result<()> {
+    pub(crate) fn unregister_user_server(&self, server: &McpServerId) -> Result<()> {
         let mut configs = self
             .configs
             .write()
@@ -295,7 +298,7 @@ impl McpApprovalStore {
             .approved
             .lock()
             .map_err(|_| miette!("MCP approval lock was poisoned"))?
-            .contains_key(&server.0)
+            .contains_key(server.as_str())
         {
             return Err(miette!("approved MCP server cannot be rolled back"));
         }
@@ -306,7 +309,7 @@ impl McpApprovalStore {
         Ok(())
     }
 
-    pub(crate) fn remove_user_server(&self, server: &ServerId) -> Result<()> {
+    pub(crate) fn remove_user_server(&self, server: &McpServerId) -> Result<()> {
         let mut configs = self
             .configs
             .write()
@@ -322,9 +325,9 @@ impl McpApprovalStore {
         if !configs.contains_key(server) || !expected.contains_key(server) {
             return Err(miette!("unknown MCP server {server}"));
         }
-        if approved.contains_key(&server.0) {
+        if approved.contains_key(server.as_str()) {
             let mut updated = approved.clone();
-            updated.remove(&server.0);
+            updated.remove(server.as_str());
             persist_approval_file(&self.path, &updated)?;
             *approved = updated;
         }
@@ -333,7 +336,7 @@ impl McpApprovalStore {
         Ok(())
     }
 
-    fn is_approved(&self, server: &ServerId) -> Result<bool> {
+    fn is_approved(&self, server: &McpServerId) -> Result<bool> {
         let expected = self
             .expected
             .read()
@@ -344,7 +347,7 @@ impl McpApprovalStore {
             .map_err(|_| miette!("MCP approval lock was poisoned"))?;
         Ok(expected
             .get(server)
-            .is_some_and(|fingerprint| approved.get(&server.0) == Some(fingerprint)))
+            .is_some_and(|fingerprint| approved.get(server.as_str()) == Some(fingerprint)))
     }
 }
 
@@ -376,7 +379,7 @@ impl McpConnectionApprovalPolicy for McpApprovalStore {
             .approved
             .lock()
             .map_err(|_| McpError::Policy("MCP approval ledger is unavailable".to_owned()))?;
-        if approved.get(&config.id.0) == Some(expected) {
+        if approved.get(config.id.as_str()) == Some(expected) {
             Ok(())
         } else {
             Err(McpError::Policy(
@@ -509,7 +512,7 @@ impl LiveMcpAdmin {
                 rw_mcp::ServerState::Stopping => McpServerState::Stopping,
             };
             servers.push(McpServerDescriptor {
-                name: status.id.0,
+                name: status.id.into_inner(),
                 enabled: status.enabled,
                 approved,
                 state,
@@ -526,7 +529,8 @@ impl LiveMcpAdmin {
         name: &str,
         endpoint: &str,
     ) -> std::result::Result<DiscoveredMcpServer, HostError> {
-        ServerId::new(name.to_owned()).map_err(|error| HostError::Protocol(error.to_string()))?;
+        McpServerId::new(name.to_owned())
+            .map_err(|error| HostError::Protocol(error.to_string()))?;
         let parsed = url::Url::parse(endpoint).map_err(|_| {
             HostError::Protocol("MCP endpoint must be an absolute HTTPS URL".to_owned())
         })?;
@@ -611,7 +615,7 @@ impl LiveMcpAdmin {
         name: &str,
         enabled: bool,
     ) -> std::result::Result<(), HostError> {
-        let id = ServerId::new(name.to_owned())
+        let id = McpServerId::new(name.to_owned())
             .map_err(|error| HostError::Protocol(error.to_string()))?;
         if enabled
             && !self
@@ -734,7 +738,7 @@ impl HostMcpService for LiveMcpAdmin {
 
     async fn remove(&self, name: &str) -> std::result::Result<Vec<McpServerDescriptor>, HostError> {
         let _guard = self.operation.lock().await;
-        let id = ServerId::new(name.to_owned())
+        let id = McpServerId::new(name.to_owned())
             .map_err(|error| HostError::Protocol(error.to_string()))?;
         let status = self
             .manager
@@ -771,7 +775,7 @@ impl HostMcpService for LiveMcpAdmin {
     }
 
     async fn review(&self, name: &str) -> std::result::Result<McpApprovalReview, HostError> {
-        let id = ServerId::new(name.to_owned())
+        let id = McpServerId::new(name.to_owned())
             .map_err(|error| HostError::Protocol(error.to_string()))?;
         let summary = self
             .approvals
@@ -820,7 +824,7 @@ impl HostMcpService for LiveMcpAdmin {
                 "MCP approval fingerprint is invalid".to_owned(),
             ));
         }
-        let id = ServerId::new(name.to_owned())
+        let id = McpServerId::new(name.to_owned())
             .map_err(|error| HostError::Protocol(error.to_string()))?;
         let summary = self
             .approvals
@@ -911,7 +915,7 @@ impl McpSessionRuntime {
             .iter()
             .map(|config| {
                 Ok((
-                    ServerId::new(config.name.clone())
+                    McpServerId::new(config.name.clone())
                         .map_err(|error| miette!(error.to_string()))?,
                     config.credentials.clone(),
                 ))
@@ -1475,11 +1479,10 @@ impl PluginSessionRuntime {
         }
         for declaration in &manifest.capabilities.hooks {
             self.hooks.push((
-                declaration.registration(format!(
-                    "plugin:{}:{}",
-                    config.name,
-                    declaration.name().as_str()
-                )),
+                plugin_hook_registration(
+                    *declaration,
+                    format!("plugin:{}:{}", config.name, declaration.name().as_str()),
+                ),
                 Arc::new(RpcHookHandler::new(client.clone(), enforcer.clone())),
             ));
         }
@@ -1542,11 +1545,10 @@ impl PluginSessionRuntime {
                 client.clone(),
                 enforcer.clone(),
             );
-            if manifest.protocol >= 2
-                && declaration
-                    .capabilities
-                    .iter()
-                    .any(|capability| capability == "models")
+            if declaration
+                .capabilities
+                .iter()
+                .any(|capability| capability == "models")
             {
                 adapter = adapter.with_model_catalog();
                 if let Err(error) = rw_providers::Provider::discover_models(&adapter).await {
@@ -1846,7 +1848,7 @@ pub(crate) async fn register_mcp_command(
 
 struct McpPromptCommand {
     manager: Arc<McpManager>,
-    server: ServerId,
+    server: McpServerId,
     prompt: String,
 }
 
@@ -1873,7 +1875,7 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for DynamicMcpP
                 "usage: /mcp.prompt <server> <prompt> [JSON object]",
             )
         })?;
-        let server = ServerId::new(server).map_err(|_| {
+        let server = McpServerId::new(server).map_err(|_| {
             CommandExecutionError::new(
                 "invalid_mcp_prompt_command",
                 "MCP prompt server name is invalid",
@@ -1902,7 +1904,7 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for McpPromptCo
 
 async fn execute_mcp_prompt(
     manager: &McpManager,
-    server: &ServerId,
+    server: &McpServerId,
     prompt: &str,
     raw_arguments: &str,
 ) -> std::result::Result<SessionCommandOutput, CommandExecutionError> {
@@ -2032,7 +2034,7 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for McpCommand 
                     .map_err(|error| {
                         CommandExecutionError::new("mcp_approval_failed", error.to_string())
                     })?;
-                let confirm_with = format!("/mcp approve {} {}", id.0, summary.new_fingerprint);
+                let confirm_with = format!("/mcp approve {id} {}", summary.new_fingerprint);
                 render_mcp_approval(&summary, &confirm_with)
             }
             ["approve", server, confirmation] => {
@@ -2099,8 +2101,8 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for McpCommand 
     }
 }
 
-fn server_id(value: &str) -> std::result::Result<ServerId, CommandExecutionError> {
-    ServerId::new(value).map_err(|_| invalid_mcp_command())
+fn server_id(value: &str) -> std::result::Result<McpServerId, CommandExecutionError> {
+    McpServerId::new(value).map_err(|_| invalid_mcp_command())
 }
 fn invalid_mcp_command() -> CommandExecutionError {
     CommandExecutionError::new(
@@ -2161,10 +2163,10 @@ fn escape_untrusted_json(value: &str) -> String {
         .replace('>', "\\u003e")
 }
 
-fn mcp_prompt_command_name(server: &ServerId, prompt: &str) -> String {
+fn mcp_prompt_command_name(server: &McpServerId, prompt: &str) -> String {
     format!(
         "mcp.{}.{}",
-        command_component(&server.0),
+        command_component(server.as_str()),
         command_component(prompt)
     )
 }
@@ -2505,44 +2507,54 @@ mod tests {
                 let mut output = plugin_output;
                 let mut line = String::new();
                 while input.read_line(&mut line).await.expect("fixture read") != 0 {
-                    let frame: rw_ext::RpcFrame =
+                    let frame: rw_plugin_protocol::RpcFrame =
                         serde_json::from_str(line.trim_end()).expect("host frame");
                     line.clear();
                     match frame {
-                        rw_ext::RpcFrame::Request(request)
-                            if request.method == rw_ext::METHOD_INITIALIZE =>
+                        rw_plugin_protocol::RpcFrame::Request(request)
+                            if request.method == rw_plugin_protocol::METHOD_INITIALIZE =>
                         {
-                            let response = rw_ext::RpcFrame::Success(rw_ext::RpcSuccess {
-                                jsonrpc: rw_ext::JSON_RPC_VERSION.to_owned(),
-                                id: Some(request.id),
-                                result: serde_json::to_value(&manifest).expect("manifest"),
-                            });
+                            let response = rw_plugin_protocol::RpcFrame::Success(
+                                rw_plugin_protocol::RpcSuccess {
+                                    jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
+                                    id: Some(request.id),
+                                    result: serde_json::to_value(&manifest).expect("manifest"),
+                                },
+                            );
                             output
                                 .write_all(
-                                    &rw_ext::encode_frame(&response, rw_ext::MAX_FRAME_BYTES)
-                                        .expect("response frame"),
+                                    &rw_plugin_protocol::encode_frame(
+                                        &response,
+                                        rw_plugin_protocol::MAX_FRAME_BYTES,
+                                    )
+                                    .expect("response frame"),
                                 )
                                 .await
                                 .expect("response write");
                         }
-                        rw_ext::RpcFrame::Request(request)
-                            if request.method == rw_ext::METHOD_SHUTDOWN =>
+                        rw_plugin_protocol::RpcFrame::Request(request)
+                            if request.method == rw_plugin_protocol::METHOD_SHUTDOWN =>
                         {
-                            let response = rw_ext::RpcFrame::Success(rw_ext::RpcSuccess {
-                                jsonrpc: rw_ext::JSON_RPC_VERSION.to_owned(),
-                                id: Some(request.id),
-                                result: Value::Null,
-                            });
+                            let response = rw_plugin_protocol::RpcFrame::Success(
+                                rw_plugin_protocol::RpcSuccess {
+                                    jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
+                                    id: Some(request.id),
+                                    result: Value::Null,
+                                },
+                            );
                             output
                                 .write_all(
-                                    &rw_ext::encode_frame(&response, rw_ext::MAX_FRAME_BYTES)
-                                        .expect("response frame"),
+                                    &rw_plugin_protocol::encode_frame(
+                                        &response,
+                                        rw_plugin_protocol::MAX_FRAME_BYTES,
+                                    )
+                                    .expect("response frame"),
                                 )
                                 .await
                                 .expect("response write");
                         }
-                        rw_ext::RpcFrame::Notification(notification)
-                            if notification.method == rw_ext::METHOD_EXIT =>
+                        rw_plugin_protocol::RpcFrame::Notification(notification)
+                            if notification.method == rw_plugin_protocol::METHOD_EXIT =>
                         {
                             break;
                         }
@@ -2569,8 +2581,8 @@ mod tests {
         let manifest = PluginManifest {
             name: name.to_owned(),
             version: "1.0.0".to_owned(),
-            protocol: rw_ext::MIN_PROTOCOL_VERSION,
-            capabilities: rw_ext::PluginCapabilities::default(),
+            protocol: rw_plugin_protocol::MIN_PROTOCOL_VERSION,
+            capabilities: rw_plugin_protocol::PluginCapabilities::default(),
         };
         let manifest_path = plugin_root.join("manifest.json");
         fs::write(
@@ -2872,7 +2884,7 @@ mod tests {
             0,
             "ordinary startup must not consult the credential backend",
         );
-        let server = ServerId::new("private.docs").expect("server");
+        let server = McpServerId::new("private.docs").expect("server");
         let statuses = runtime.manager.statuses().await;
         let status = &statuses[0];
         assert!(status.enabled, "persisted enablement must remain visible");
@@ -2933,7 +2945,7 @@ mod tests {
         ));
         manager
             .register(McpServerConfig {
-                id: ServerId::new("fixture").expect("id"),
+                id: McpServerId::new("fixture").expect("id"),
                 transport: rw_mcp::McpTransportConfig::Stdio {
                     executable: "/bin/false".into(),
                     args: vec![],
@@ -2983,7 +2995,7 @@ mod tests {
     impl OverflowSpool for MemorySpool {
         async fn write(
             &self,
-            _: &ServerId,
+            _: &McpServerId,
             _: &str,
             _: &[u8],
         ) -> std::result::Result<rw_mcp::OverflowReference, McpError> {
@@ -3115,7 +3127,7 @@ mod tests {
         assert!(
             manager
                 .call_tool(
-                    &ServerId("docs.remote".to_owned()),
+                    &McpServerId::new("docs.remote").expect("server id"),
                     "echo",
                     json!({"value": 1})
                 )
@@ -3415,7 +3427,7 @@ mod tests {
         )
         .await
         .expect("runtime");
-        let server = ServerId::new("fixture").expect("server");
+        let server = McpServerId::new("fixture").expect("server");
         let fingerprint = approvals
             .approval_summary(&server)
             .expect("summary")
@@ -3676,7 +3688,7 @@ mod tests {
         );
         runtime
             .manager
-            .set_enabled(&ServerId::new("fixture").expect("id"), false)
+            .set_enabled(&McpServerId::new("fixture").expect("id"), false)
             .await
             .expect("disable");
         assert!(
@@ -3690,8 +3702,9 @@ mod tests {
 
     #[test]
     fn mcp_prompt_command_encoding_is_collision_free_for_supported_ids() {
-        let upper = mcp_prompt_command_name(&ServerId::new("A").expect("id"), "review_name");
-        let escaped = mcp_prompt_command_name(&ServerId::new("_41").expect("id"), "review_5fname");
+        let upper = mcp_prompt_command_name(&McpServerId::new("A").expect("id"), "review_name");
+        let escaped =
+            mcp_prompt_command_name(&McpServerId::new("_41").expect("id"), "review_5fname");
         assert_ne!(upper, escaped);
         assert_eq!(upper, "mcp._41.review_5fname");
         assert_eq!(escaped, "mcp._5f41.review_5f5fname");
@@ -3757,7 +3770,7 @@ mod tests {
             tool_capabilities: rw_mcp::McpToolCapabilityOverrides::default(),
             capability_override_origin: None,
         };
-        let server = ServerId::new("fixture").expect("server");
+        let server = McpServerId::new("fixture").expect("server");
         let first = McpApprovalStore::open(user_root.path(), std::slice::from_ref(&config))
             .expect("first store");
         assert!(first.approve_server(&server).expect("approve"));

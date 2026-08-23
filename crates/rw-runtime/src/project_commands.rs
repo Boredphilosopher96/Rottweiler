@@ -4,9 +4,10 @@ use async_trait::async_trait;
 use rw_core::{InitDepth, SessionCommandAction, SessionCommandContext, SessionCommandOutput};
 use rw_ext::{
     CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation, CommandRegistry,
-    CommandRegistryError, CommandSource,
+    CommandRegistryError,
 };
 use rw_store::ProjectMemoryStore;
+use rw_types::CommandSource;
 
 /// Add project-owned commands to the same registry used by core and extensions.
 pub(crate) fn register_project_commands(

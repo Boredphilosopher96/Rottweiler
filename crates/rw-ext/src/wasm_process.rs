@@ -8,13 +8,14 @@ use std::{
 };
 
 use async_trait::async_trait;
+use rw_plugin_protocol::PluginManifest;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{
     HookDirective, HookDispatcher, HookError, HookHandler, HookInvocation, HookRegistrationError,
-    PluginManifest, WasmHookHostError, WasmHookLimits, encode_input,
+    WasmHookHostError, WasmHookLimits, encode_input,
 };
 
 pub const MAX_WASM_HOST_HEADER_BYTES: usize = 1024 * 1024;
@@ -105,7 +106,10 @@ impl WasmProcessHook {
         for declaration in &self.manifest.capabilities.hooks {
             let hook = declaration.name();
             let id = format!("wasm:{}:{}", self.manifest.name, hook.as_str());
-            dispatcher.register_shared(declaration.registration(id), Arc::clone(&shared))?;
+            dispatcher.register_shared(
+                crate::plugin_hook_registration(*declaration, id),
+                Arc::clone(&shared),
+            )?;
         }
         Ok(())
     }
@@ -145,7 +149,7 @@ impl HookHandler for WasmProcessHook {
         let request = WasmHostRequest::Invoke {
             manifest: self.manifest.clone(),
             limits: self.limits,
-            event: crate::PluginHook::from(invocation.event())
+            event: rw_plugin_protocol::PluginHook::from(invocation.event())
                 .as_str()
                 .to_owned(),
             input,
@@ -395,8 +399,8 @@ mod tests {
             manifest: PluginManifest {
                 name: "deadline-test".to_owned(),
                 version: "1.0.0".to_owned(),
-                protocol: crate::PROTOCOL_VERSION,
-                capabilities: crate::PluginCapabilities::default(),
+                protocol: rw_plugin_protocol::PROTOCOL_VERSION,
+                capabilities: rw_plugin_protocol::PluginCapabilities::default(),
             },
             limits: WasmHookLimits::default(),
         };

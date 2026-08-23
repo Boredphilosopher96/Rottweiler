@@ -67,6 +67,10 @@ function childResult(
 }
 
 describe("pure TUI state reducer", () => {
+  test("starts without inventing an engine mode catalog", () => {
+    expect(createInitialState().modes).toEqual([])
+  })
+
   test("bounds retained transcript and completed turn history", () => {
     let state = createInitialState()
     const total = MAX_RETAINED_TRANSCRIPT_ENTRIES + 8
@@ -321,38 +325,6 @@ describe("pure TUI state reducer", () => {
     expect(state.mode).toBe("audit")
   })
 
-  test("defaults missing providers from older model-list events", () => {
-    const state = reduce(createInitialState(), {
-      type: "models_listed",
-      meta: {
-        protocol_version: PROTOCOL_VERSION,
-        client_id: "client-old",
-        request_id: "request-old",
-        emitted_at: "2026-01-01T00:00:00Z",
-      },
-      models: [
-        {
-          alias: "fast",
-          capabilities: {
-            tool_calling: true,
-            vision: false,
-            thinking: false,
-            cache_behavior: "none",
-          },
-        },
-      ],
-    })
-    expect(state.models).toEqual([
-      {
-        alias: "fast",
-        providers: [],
-        vision: false,
-        thinking: false,
-        toolCalling: true,
-      },
-    ])
-  })
-
   test("projects the unique concrete current model before the first turn", () => {
     const state = reduce(createInitialState(), {
       type: "models_listed",
@@ -364,11 +336,9 @@ describe("pure TUI state reducer", () => {
       },
       models: [
         {
-          alias: "openai/gpt-5-mini",
           id: "openai/gpt-5-mini",
           display_name: "GPT-5 mini",
           provider: "openai",
-          providers: ["openai"],
           aliases: ["fast"],
           current: true,
           available: true,
@@ -377,6 +347,8 @@ describe("pure TUI state reducer", () => {
             vision: true,
             thinking: true,
             cache_behavior: "none",
+            max_context_tokens: null,
+            max_output_tokens: null,
           },
         },
       ],
@@ -502,11 +474,9 @@ describe("pure TUI state reducer", () => {
       },
       models: [
         {
-          alias: "openai/gpt-5-mini",
           id: "openai/gpt-5-mini",
           display_name: "GPT-5 mini",
           provider: "openai",
-          providers: ["openai"],
           aliases: ["fast"],
           current: true,
           available: true,
@@ -515,6 +485,8 @@ describe("pure TUI state reducer", () => {
             vision: true,
             thinking: true,
             cache_behavior: "none",
+            max_context_tokens: null,
+            max_output_tokens: null,
           },
         },
       ],
@@ -824,7 +796,7 @@ describe("pure TUI state reducer", () => {
 
   test("gap replay converges to the same projection as an uninterrupted stream", () => {
     const events: EngineEvent[] = [
-      { type: "mode_changed", meta: meta("1"), mode: "plan" },
+      { type: "mode_changed", meta: meta("1"), mode: "plan", definition_fingerprint: "fixture" },
       { type: "model_changed", meta: meta("2"), model: "fast" },
       { type: "user_shell_state_changed", meta: meta("3"), shell_id: "shell-1", active: true },
     ]
@@ -852,6 +824,7 @@ describe("pure TUI state reducer", () => {
       type: "mode_changed",
       meta: meta("18446744073709551614"),
       mode: "plan",
+      definition_fingerprint: "fixture",
     })
     state = reduce(state, {
       type: "model_changed",
@@ -867,6 +840,7 @@ describe("pure TUI state reducer", () => {
       type: "mode_changed",
       meta: meta("18446744073709551616"),
       mode: "invalid",
+      definition_fingerprint: "fixture",
     })
 
     expect(state.lastSequence).toBe("18446744073709551615")
@@ -1958,7 +1932,7 @@ describe("pure TUI state reducer", () => {
       snapshot: cost,
     })
     const durable: EngineEvent[] = [
-      { type: "mode_changed", meta: meta("1"), mode: "execute" },
+      { type: "mode_changed", meta: meta("1"), mode: "execute", definition_fingerprint: "fixture" },
       { type: "model_changed", meta: meta("2"), model: "fast" },
       { type: "turn_started", meta: meta("3"), turn_id: "4" },
       {

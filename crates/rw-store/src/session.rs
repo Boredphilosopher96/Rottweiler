@@ -285,18 +285,6 @@ impl SessionEventLog {
         }
     }
 
-    /// Backward-compatible name for appending one durably synchronized turn.
-    ///
-    /// # Errors
-    ///
-    /// Returns a serialization, sequence-overflow, or durable-write error.
-    pub fn append_turn<T: Serialize>(
-        &mut self,
-        events: impl IntoIterator<Item = T>,
-    ) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
-        self.append_batch(events)
-    }
-
     /// Loads every complete event after validating version and sequence.
     ///
     /// # Errors
@@ -3200,16 +3188,7 @@ fn lock_writer(_file: &File) -> Result<(), SessionStoreError> {
 }
 
 fn validate_session_id(value: &str) -> Result<(), SessionStoreError> {
-    if value.is_empty()
-        || value.len() > 128
-        || matches!(value, "." | "..")
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-    {
-        return Err(SessionStoreError::InvalidSessionId);
-    }
-    Ok(())
+    rw_types::SessionId::validate(value).map_err(|_| SessionStoreError::InvalidSessionId)
 }
 
 /// Session log/index failure without transcript contents in diagnostics.

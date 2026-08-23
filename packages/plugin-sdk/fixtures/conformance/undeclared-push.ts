@@ -8,7 +8,7 @@ for await (const line of console) {
   if (request.method === "initialize") {
     process.stdout.write(encoder.encode(`${JSON.stringify({
       jsonrpc: "2.0", id: request.id,
-      result: { name: "undeclared-push", version: "1.0.0", protocol: 1, capabilities: {} },
+      result: { name: "undeclared-push", version: "1.0.0", protocol: 2, capabilities: {} },
     })}\n`))
     process.stdout.write(encoder.encode(`${JSON.stringify({
       jsonrpc: "2.0", id: "violation-1", method: "session/set_status",

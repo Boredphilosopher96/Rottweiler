@@ -7,12 +7,15 @@ import subprocess
 import tempfile
 import unittest
 
+from scripts.release_contract import load_contract, render_installer
+
 
 REPO = Path(__file__).resolve().parents[2]
 TEMPLATE = REPO / "scripts" / "install-release.sh"
 VERSION = "1.2.3"
-SYSTEM = {"Darwin": "darwin", "Linux": "linux"}[platform.system()]
-PLATFORM = f"{SYSTEM}-{platform.machine()}"
+CONTRACT = load_contract()
+PLATFORM_CONTRACT = CONTRACT.resolve_platform(platform.system(), platform.machine())
+PLATFORM = PLATFORM_CONTRACT.id
 
 
 class ReleaseInstallTests(unittest.TestCase):
@@ -20,10 +23,7 @@ class ReleaseInstallTests(unittest.TestCase):
         release = root / f"rottweiler-{VERSION}-{PLATFORM}"
         binary_dir = release / "bin"
         binary_dir.mkdir(parents=True)
-        installer = TEMPLATE.read_text(encoding="utf-8")
-        installer = installer.replace("@ROTTWEILER_VERSION@", VERSION).replace(
-            "@ROTTWEILER_PLATFORM@", PLATFORM
-        )
+        installer = render_installer(CONTRACT, TEMPLATE, VERSION, PLATFORM)
         (release / "install.sh").write_text(installer, encoding="utf-8")
         rw = binary_dir / "rw"
         rw.write_text(
@@ -39,7 +39,7 @@ class ReleaseInstallTests(unittest.TestCase):
         tui.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         wasm_host = binary_dir / "rottweiler-wasm-host"
         wasm_host.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        native = binary_dir / ("libopentui.dylib" if SYSTEM == "darwin" else "libopentui.so")
+        native = binary_dir / PLATFORM_CONTRACT.native_library
         native.write_bytes(b"native fixture\n")
         (release / "install.sh").chmod(0o755)
         rw.chmod(0o755)

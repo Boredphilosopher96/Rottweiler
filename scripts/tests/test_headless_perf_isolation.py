@@ -241,8 +241,10 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
         self.assertIn("Linux Bun compiled output bytes:", build)
         self.assertIn(native_strip, build)
         self.assertIn("process.platform === \"darwin\"", build)
-        self.assertIn("? 100_000_000", build)
-        self.assertIn("? 150_000_000", build)
+        self.assertIn("releasePlatformForNodeTarget", build)
+        self.assertIn("productBudgets.tuiBundleLessThanBytes", build)
+        self.assertNotIn("100_000_000", build)
+        self.assertNotIn("150_000_000", build)
         self.assertIn(bundle_gate, build)
         self.assertNotIn("executablePath:", build)
         self.assertNotIn("stripLinuxArtifact", build)
@@ -274,6 +276,10 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
         self.assertIn('f"{output.stem}.evidence{output.suffix}"', gate)
         self.assertIn("source_metadata = os.fstat(source.fileno())", gate)
         self.assertIn("source_metadata.st_nlink != 1", gate)
+        self.assertIn("from release_contract import load_contract", gate)
+        self.assertIn("product_budgets.engine_less_than_bytes", gate)
+        self.assertNotIn("40_000_000", gate)
+        self.assertNotIn("28_000_000", gate)
         self.assertLess(
             gate.index("evidence_temporary.replace(evidence)"),
             gate.index("if smoke and start_p50 >= 80"),

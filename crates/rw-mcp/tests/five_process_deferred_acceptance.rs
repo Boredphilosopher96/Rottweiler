@@ -12,9 +12,10 @@ use async_trait::async_trait;
 use rw_mcp::{
     CompactJsonEncoder, FilesystemSpool, McpConnectionApprovalPolicy, McpError, McpLimits,
     McpManager, McpServerConfig, McpStdioSandboxPolicy, McpTransportConfig,
-    SandboxedStdioConnector, ServerId, ServerState,
+    SandboxedStdioConnector, ServerState,
 };
 use rw_tools::SandboxedProtocolLauncher;
+use rw_types::McpServerId;
 use serde_json::json;
 
 const PROFILES: [&str; 5] = ["repository", "issues", "notes", "database", "isolated"];
@@ -101,7 +102,7 @@ fn fixture_config(
         Vec::new()
     };
     McpServerConfig {
-        id: ServerId::new(profile).expect("id"),
+        id: McpServerId::new(profile).expect("id"),
         transport: McpTransportConfig::Stdio {
             executable: executable.to_path_buf(),
             args: Vec::new(),
@@ -282,7 +283,7 @@ async fn five_distinct_production_sandboxed_servers_remain_deferred_and_bounded(
         PROFILES.len() * 3
     );
 
-    let target = ServerId::new("repository").expect("target id");
+    let target = McpServerId::new("repository").expect("target id");
     let selected = manager.tool_search("echo_repository", Some(&target)).await;
     assert_eq!(selected.len(), 1);
     let called = manager

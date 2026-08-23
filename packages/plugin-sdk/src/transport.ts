@@ -1,4 +1,4 @@
-import { PROTOCOL_LIMITS, type JsonValue } from "./protocol"
+import { PROTOCOL_LIMITS, type JsonValue } from "./generated/protocol-2"
 
 export const DEFAULT_MAX_RPC_LINE_BYTES = PROTOCOL_LIMITS.maxLineBytes
 

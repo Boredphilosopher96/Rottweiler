@@ -2103,11 +2103,8 @@
           "$ref": "#/$defs/ModeId"
         },
         "definition_fingerprint": {
-          "description": "BLAKE3 hash of canonical mode semantics. Legacy built-in events may\nomit it; custom modes require it when resuming mutation-capable sessions.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "description": "BLAKE3 hash of the canonical mode semantics.",
+          "type": "string"
         },
         "type": {
           "type": "string",
@@ -2117,7 +2114,8 @@
       "required": [
         "type",
         "meta",
-        "mode"
+        "mode",
+        "definition_fingerprint"
       ]
     },
     {
@@ -3693,10 +3691,6 @@
       "description": "One concrete provider/model discovered from a live authenticated catalog.",
       "type": "object",
       "properties": {
-        "alias": {
-          "description": "Backward-compatible selection key. This is the concrete `provider/model`\nid, not a role alias.",
-          "$ref": "#/$defs/ModelAlias"
-        },
         "id": {
           "description": "Concrete provider-qualified model id.",
           "type": "string"
@@ -3707,14 +3701,6 @@
         "provider": {
           "description": "Sanitized logical provider name. Adapter kind, endpoint, and auth\nmaterial remain behind the provider boundary.",
           "type": "string"
-        },
-        "providers": {
-          "description": "One-item compatibility projection for older clients.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": []
         },
         "aliases": {
           "description": "Configured role aliases which currently include this concrete model.",
@@ -3741,7 +3727,6 @@
         }
       },
       "required": [
-        "alias",
         "id",
         "display_name",
         "provider",
@@ -4110,7 +4095,7 @@
       "type": "object",
       "properties": {
         "default": {
-          "$ref": "#/$defs/PermissionAction"
+          "$ref": "#/$defs/PermissionDecision"
         },
         "runtime_mode": {
           "anyOf": [
@@ -4162,17 +4147,28 @@
         "truncated"
       ]
     },
-    "PermissionAction": {
-      "description": "Permission decision exposed on the interactive protocol without coupling\nclients to configuration-file types.",
-      "type": "string",
-      "enum": [
-        "ask",
-        "allow",
-        "deny"
+    "PermissionDecision": {
+      "description": "Default permission decision used when no rule matches.",
+      "oneOf": [
+        {
+          "description": "Ask the active driver for approval.",
+          "type": "string",
+          "const": "ask"
+        },
+        {
+          "description": "Allow the operation.",
+          "type": "string",
+          "const": "allow"
+        },
+        {
+          "description": "Deny the operation.",
+          "type": "string",
+          "const": "deny"
+        }
       ]
     },
     "PermissionModeDescriptor": {
-      "description": "Active session permission mode exposed without coupling clients to the\nengine's runtime policy type.",
+      "description": "Active session permission mode shared by configuration, engine, and clients.",
       "type": "string",
       "enum": [
         "strict",
@@ -4192,7 +4188,7 @@
           "type": "string"
         },
         "action": {
-          "$ref": "#/$defs/PermissionAction"
+          "$ref": "#/$defs/PermissionDecision"
         }
       },
       "required": [

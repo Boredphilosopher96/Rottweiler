@@ -406,10 +406,8 @@ impl<B: ProcessBackend> Supervisor<B> {
         validate_private_path(&config.socket)?;
         validate_private_path(&config.token_file)?;
         validate_private_path(&config.last_seen_file)?;
-        if config.session_id.is_empty() {
-            return Err(SupervisorError::InvalidConfig(
-                "session id must not be empty",
-            ));
+        if rw_core::SessionId::validate(&config.session_id).is_err() {
+            return Err(SupervisorError::InvalidConfig("session id is invalid"));
         }
         if config.max_turns == 0 {
             return Err(SupervisorError::InvalidConfig(
@@ -778,7 +776,7 @@ fn engine_spec(config: &SupervisorConfig) -> ChildSpec {
     if let Some(mode) = config.permission_mode {
         args.extend([
             OsString::from("--permission-mode"),
-            OsString::from(mode.as_cli_value()),
+            OsString::from(mode.as_str()),
         ]);
     }
     if let Some(model) = &config.model {

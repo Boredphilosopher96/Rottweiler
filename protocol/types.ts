@@ -4,6 +4,13 @@ export type JsonValue = null | boolean | number | string | JsonValue[] | { [key:
 
 export const PROTOCOL_VERSION = 1 as const;
 
+export const MAX_ATTACHMENTS_PER_MESSAGE = 16 as const;
+export const MAX_TEXT_ATTACHMENT_BYTES = 1048576 as const;
+export const MAX_IMAGE_ATTACHMENT_BYTES = 5242880 as const;
+export const MAX_TOTAL_ATTACHMENT_BYTES = 10485760 as const;
+export const MAX_MCP_SERVER_ID_BYTES = 96 as const;
+export const MCP_SERVER_ID_PATTERN = "^[A-Za-z0-9._-]{1,96}$" as const;
+
 export type ToolCallId = string;
 
 export type SessionId = string;
@@ -94,11 +101,6 @@ export type ModelCapabilities = { tool_calling: boolean, vision: boolean, thinki
 
 export type ModelDescriptor = {
 /**
- * Backward-compatible selection key. This is the concrete `provider/model`
- * id, not a role alias.
- */
-alias: ModelAlias,
-/**
  * Concrete provider-qualified model id.
  */
 id: string, display_name: string,
@@ -107,10 +109,6 @@ id: string, display_name: string,
  * material remain behind the provider boundary.
  */
 provider: string,
-/**
- * One-item compatibility projection for older clients.
- */
-providers: Array<string>,
 /**
  * Configured role aliases which currently include this concrete model.
  */
@@ -232,7 +230,7 @@ export type PromptTool = { name: string, description: string, input_schema: Json
 
 export type PromptDump = { turn_id: TurnId | null, model_alias: ModelAlias, turns: Array<Turn>, tools: Array<PromptTool>, stable_prefix_hash: string, cache_breakpoints: Array<CacheBreakpoint>, estimated_tokens: string, };
 
-export type PermissionAction = "ask" | "allow" | "deny";
+export type PermissionDecision = "ask" | "allow" | "deny";
 
 export type PermissionModeDescriptor = "strict" | "auto-safe" | "yolo";
 
@@ -242,11 +240,11 @@ export type PermissionRuleDescriptor = {
 /**
  * Opaque stable id accepted by remove operations. Clients never rebuild it.
  */
-id: string, pattern: string, action: PermissionAction, };
+id: string, pattern: string, action: PermissionDecision, };
 
 export type PermissionApprovalDescriptor = { id: string, scope: PermissionApprovalScope, tool_name: string, summary: string, };
 
-export type PermissionStateDescriptor = { default: PermissionAction, runtime_mode?: PermissionModeDescriptor,
+export type PermissionStateDescriptor = { default: PermissionDecision, runtime_mode?: PermissionModeDescriptor,
 /**
  * Effective immutable rules assembled from trusted user configuration.
  */
@@ -275,7 +273,7 @@ provider?: string | null, } | { "type": "compact", meta: CommandMeta, session_id
 /**
  * Stable client-generated identity retained until the correlated fork completes.
  */
-operation_id?: string | null, } | { "type": "rewind", meta: CommandMeta, session_id: SessionId, target: RewindTarget, } | { "type": "take_driver", meta: CommandMeta, session_id: SessionId, } | { "type": "user_shell_started", meta: CommandMeta, session_id: SessionId, command: string, } | { "type": "user_shell_ended", meta: CommandMeta, session_id: SessionId, shell_id: ShellId, status: number, captured_output?: string | null, } | { "type": "pin_context", meta: CommandMeta, session_id: SessionId, item_id: ContextItemId, } | { "type": "evict_context", meta: CommandMeta, session_id: SessionId, item_id: ContextItemId, } | { "type": "get_context", meta: CommandMeta, session_id: SessionId, } | { "type": "get_cost", meta: CommandMeta, session_id: SessionId, } | { "type": "get_session_review", meta: CommandMeta, session_id: SessionId, } | { "type": "review_file", meta: CommandMeta, session_id: SessionId, path: string, decision: ReviewFileDecision, current_hash: string, } | { "type": "dump_prompt", meta: CommandMeta, session_id: SessionId, turn_id?: TurnId | null, } | { "type": "list_sessions", meta: CommandMeta, } | { "type": "search_sessions", meta: CommandMeta, query: string, limit: number, } | { "type": "list_commands", meta: CommandMeta, session_id: SessionId, } | { "type": "list_modes", meta: CommandMeta, session_id: SessionId, } | { "type": "list_models", meta: CommandMeta, session_id?: SessionId, refresh: boolean, } | { "type": "list_settings", meta: CommandMeta, session_id: SessionId, } | { "type": "set_setting", meta: CommandMeta, session_id: SessionId, key: string, value: string, } | { "type": "list_mcp_servers", meta: CommandMeta, session_id: SessionId, } | { "type": "list_runtime_services", meta: CommandMeta, session_id: SessionId, } | { "type": "add_mcp_http_server", meta: CommandMeta, session_id: SessionId, name: string, endpoint: string, } | { "type": "add_mcp_stdio_server", meta: CommandMeta, session_id: SessionId, name: string, executable: string, args: Array<string>, environment: Array<McpEnvironmentEntry>, } | { "type": "remove_mcp_server", meta: CommandMeta, session_id: SessionId, name: string, } | { "type": "review_mcp_server", meta: CommandMeta, session_id: SessionId, name: string, } | { "type": "approve_mcp_server", meta: CommandMeta, session_id: SessionId, name: string, fingerprint: string, } | { "type": "set_mcp_server_enabled", meta: CommandMeta, session_id: SessionId, name: string, enabled: boolean, } | { "type": "list_permissions", meta: CommandMeta, session_id: SessionId, } | { "type": "add_session_permission_rule", meta: CommandMeta, session_id: SessionId, pattern: string, action: PermissionAction, } | { "type": "remove_session_permission_rule", meta: CommandMeta, session_id: SessionId, rule_id: string, } | { "type": "remove_queued_message", meta: CommandMeta, session_id: SessionId, position: string, } | { "type": "clear_queued_messages", meta: CommandMeta, session_id: SessionId, } | { "type": "rename_session", meta: CommandMeta, session_id: SessionId, title: string, } | { "type": "export_session", meta: CommandMeta, session_id: SessionId, format: TranscriptFormat, output_path: string, force: boolean, } | { "type": "revoke_permission_approval", meta: CommandMeta, session_id: SessionId, approval_id: string, scope: PermissionApprovalScope, } | { "type": "begin_provider_auth", meta: CommandMeta, session_id: SessionId, provider: string, } | { "type": "configure_builtin_provider", meta: CommandMeta, session_id: SessionId, provider: string, } | { "type": "complete_provider_auth", meta: CommandMeta, session_id: SessionId, provider: string, attempt_id: ProviderAuthAttemptId, } | { "type": "cancel_provider_auth", meta: CommandMeta, session_id: SessionId, provider: string, attempt_id: ProviderAuthAttemptId, } | { "type": "search_workspace_files", meta: CommandMeta, session_id: SessionId, query: string, limit: number, } | { "type": "preview_workspace_file", meta: CommandMeta, session_id: SessionId, path: string, max_bytes: number, } | { "type": "get_workspace_status", meta: CommandMeta, session_id: SessionId, } | { "type": "get_workspace_diff", meta: CommandMeta, session_id: SessionId, path: string, max_bytes: number, } | { "type": "list_subagents", meta: CommandMeta, session_id: SessionId, } | { "type": "replay_subagent", meta: CommandMeta, session_id: SessionId, subagent_id: SubagentId, after_sequence?: SequenceId | null, } | { "type": "continue_subagent", meta: CommandMeta, session_id: SessionId, subagent_id: SubagentId, content: string, } | { "type": "interrupt_subagent", meta: CommandMeta, session_id: SessionId, subagent_id: SubagentId, } | { "type": "close_subagent", meta: CommandMeta, session_id: SessionId, subagent_id: SubagentId, } | { "type": "shutdown_host", meta: CommandMeta, };
+operation_id: string, } | { "type": "rewind", meta: CommandMeta, session_id: SessionId, target: RewindTarget, } | { "type": "take_driver", meta: CommandMeta, session_id: SessionId, } | { "type": "user_shell_started", meta: CommandMeta, session_id: SessionId, command: string, } | { "type": "user_shell_ended", meta: CommandMeta, session_id: SessionId, shell_id: ShellId, status: number, captured_output?: string | null, } | { "type": "pin_context", meta: CommandMeta, session_id: SessionId, item_id: ContextItemId, } | { "type": "evict_context", meta: CommandMeta, session_id: SessionId, item_id: ContextItemId, } | { "type": "get_context", meta: CommandMeta, session_id: SessionId, } | { "type": "get_cost", meta: CommandMeta, session_id: SessionId, } | { "type": "get_session_review", meta: CommandMeta, session_id: SessionId, } | { "type": "review_file", meta: CommandMeta, session_id: SessionId, path: string, decision: ReviewFileDecision, current_hash: string, } | { "type": "dump_prompt", meta: CommandMeta, session_id: SessionId, turn_id?: TurnId | null, } | { "type": "list_sessions", meta: CommandMeta, } | { "type": "search_sessions", meta: CommandMeta, query: string, limit: number, } | { "type": "list_commands", meta: CommandMeta, session_id: SessionId, } | { "type": "list_modes", meta: CommandMeta, session_id: SessionId, } | { "type": "list_models", meta: CommandMeta, session_id?: SessionId, refresh: boolean, } | { "type": "list_settings", meta: CommandMeta, session_id: SessionId, } | { "type": "set_setting", meta: CommandMeta, session_id: SessionId, key: string, value: string, } | { "type": "list_mcp_servers", meta: CommandMeta, session_id: SessionId, } | { "type": "list_runtime_services", meta: CommandMeta, session_id: SessionId, } | { "type": "add_mcp_http_server", meta: CommandMeta, session_id: SessionId, name: string, endpoint: string, } | { "type": "add_mcp_stdio_server", meta: CommandMeta, session_id: SessionId, name: string, executable: string, args: Array<string>, environment: Array<McpEnvironmentEntry>, } | { "type": "remove_mcp_server", meta: CommandMeta, session_id: SessionId, name: string, } | { "type": "review_mcp_server", meta: CommandMeta, session_id: SessionId, name: string, } | { "type": "approve_mcp_server", meta: CommandMeta, session_id: SessionId, name: string, fingerprint: string, } | { "type": "set_mcp_server_enabled", meta: CommandMeta, session_id: SessionId, name: string, enabled: boolean, } | { "type": "list_permissions", meta: CommandMeta, session_id: SessionId, } | { "type": "add_session_permission_rule", meta: CommandMeta, session_id: SessionId, pattern: string, action: PermissionDecision, } | { "type": "remove_session_permission_rule", meta: CommandMeta, session_id: SessionId, rule_id: string, } | { "type": "remove_queued_message", meta: CommandMeta, session_id: SessionId, position: string, } | { "type": "clear_queued_messages", meta: CommandMeta, session_id: SessionId, } | { "type": "rename_session", meta: CommandMeta, session_id: SessionId, title: string, } | { "type": "export_session", meta: CommandMeta, session_id: SessionId, format: TranscriptFormat, output_path: string, force: boolean, } | { "type": "revoke_permission_approval", meta: CommandMeta, session_id: SessionId, approval_id: string, scope: PermissionApprovalScope, } | { "type": "begin_provider_auth", meta: CommandMeta, session_id: SessionId, provider: string, } | { "type": "configure_builtin_provider", meta: CommandMeta, session_id: SessionId, provider: string, } | { "type": "complete_provider_auth", meta: CommandMeta, session_id: SessionId, provider: string, attempt_id: ProviderAuthAttemptId, } | { "type": "cancel_provider_auth", meta: CommandMeta, session_id: SessionId, provider: string, attempt_id: ProviderAuthAttemptId, } | { "type": "search_workspace_files", meta: CommandMeta, session_id: SessionId, query: string, limit: number, } | { "type": "preview_workspace_file", meta: CommandMeta, session_id: SessionId, path: string, max_bytes: number, } | { "type": "get_workspace_status", meta: CommandMeta, session_id: SessionId, } | { "type": "get_workspace_diff", meta: CommandMeta, session_id: SessionId, path: string, max_bytes: number, } | { "type": "list_subagents", meta: CommandMeta, session_id: SessionId, } | { "type": "replay_subagent", meta: CommandMeta, session_id: SessionId, subagent_id: SubagentId, after_sequence?: SequenceId | null, } | { "type": "continue_subagent", meta: CommandMeta, session_id: SessionId, subagent_id: SubagentId, content: string, } | { "type": "interrupt_subagent", meta: CommandMeta, session_id: SessionId, subagent_id: SubagentId, } | { "type": "close_subagent", meta: CommandMeta, session_id: SessionId, subagent_id: SubagentId, } | { "type": "shutdown_host", meta: CommandMeta, };
 
 export type TranscriptFormat = "markdown" | "html" | "json";
 
@@ -337,10 +335,9 @@ truncated: boolean, } | { "type": "sessions_search_ready", meta: CommandAckMeta,
  */
 context_window_known: boolean, context_window_reason?: string, stable_prefix_hash: string, cache_hit_basis_points: number, estimated_input_tokens: string, provider_input_tokens: string, correction_millionths: string, } | { "type": "budget_status_changed", meta: EventMeta, turn_id: TurnId, level: BudgetLevel, scope: BudgetScope, unit: BudgetUnit, current: string, limit: string, } | { "type": "compaction_started", meta: EventMeta, reason: CompactionReason, } | { "type": "compaction_attempt_started", session_id: SessionId, summary_turn_id: TurnId, attempt: number, } | { "type": "compaction_text_delta", session_id: SessionId, summary_turn_id: TurnId, attempt: number, text: string, } | { "type": "compaction_thinking_delta", session_id: SessionId, summary_turn_id: TurnId, attempt: number, text: string, } | { "type": "compaction_attempt_finished", meta: EventMeta, summary_turn_id: TurnId, usage: Usage, cost: Cost, } | { "type": "compaction_finished", meta: EventMeta, summary_turn_id: TurnId, reclaimed_tokens: string, usage?: Usage | null, cost?: Cost | null, } | { "type": "compaction_failed", meta: EventMeta, summary_turn_id: TurnId, } | { "type": "subagent_spawned", meta: EventMeta, subagent_id: SubagentId, child_session_id: SessionId, task: string, } | { "type": "subagent_finished", meta: EventMeta, subagent_id: SubagentId, result: SubagentResult, } | { "type": "subagent_progress", parent_session_id: SessionId, subagent_id: SubagentId, child_session_id: SessionId, child_sequence?: SequenceId | null, event: JsonValue, } | { "type": "tool_output_pruned", meta: EventMeta, tool_call_id: ToolCallId, reclaimed_tokens: string, } | { "type": "mode_changed", meta: EventMeta, mode: ModeId,
 /**
- * BLAKE3 hash of canonical mode semantics. Legacy built-in events may
- * omit it; custom modes require it when resuming mutation-capable sessions.
+ * BLAKE3 hash of the canonical mode semantics.
  */
-definition_fingerprint?: string, } | { "type": "permission_mode_changed", meta: EventMeta,
+definition_fingerprint: string, } | { "type": "permission_mode_changed", meta: EventMeta,
 /**
  * Session-local override. `None` restores the configured policy.
  */
@@ -355,3 +352,90 @@ provider?: string | null,
  * concrete provider/model routes.
  */
 thinking?: ThinkingLevel, } | { "type": "model_context_cleared", meta: EventMeta, strategy: ModelContextTransfer, } | { "type": "context_item_pinned", meta: EventMeta, item_id: ContextItemId, effective_after_agent_turn: string, } | { "type": "context_item_evicted", meta: EventMeta, item_id: ContextItemId, effective_after_agent_turn: string, } | { "type": "user_shell_state_changed", meta: EventMeta, shell_id: ShellId, command?: string | null, active: boolean, status?: number | null, captured_output?: string | null, } | { "type": "hook_failed", meta: EventMeta, event: string, hook_id: string, fail_closed: boolean, message: string, } | { "type": "command_finished", meta: EventMeta, name: string, message: string, unrestorable_paths: Array<UnrestorablePath>, } | { "type": "guard_triggered", meta: EventMeta, turn_id: TurnId, guard: string, message: string, } | { "type": "error", meta: EventMeta, error: EngineError, };
+
+export type EngineEventDelivery = "connection" | "durable" | "transient";
+
+export const ENGINE_EVENT_DELIVERY = {
+  budget_status_changed: "durable",
+  citation_delta: "durable",
+  command_acknowledged: "connection",
+  command_descriptors_listed: "connection",
+  command_finished: "durable",
+  compaction_attempt_finished: "durable",
+  compaction_attempt_started: "transient",
+  compaction_failed: "durable",
+  compaction_finished: "durable",
+  compaction_started: "durable",
+  compaction_text_delta: "transient",
+  compaction_thinking_delta: "transient",
+  context_item_evicted: "durable",
+  context_item_pinned: "durable",
+  context_snapshot_ready: "connection",
+  context_usage_updated: "durable",
+  conversation_rewound: "durable",
+  conversation_turn_committed: "durable",
+  cost_snapshot_ready: "connection",
+  driver_changed: "durable",
+  error: "durable",
+  guard_triggered: "durable",
+  hook_failed: "durable",
+  host_shutdown: "connection",
+  mcp_server_approval_reviewed: "connection",
+  mcp_servers_listed: "connection",
+  message_queued: "durable",
+  mode_changed: "durable",
+  model_changed: "durable",
+  model_context_cleared: "durable",
+  models_listed: "connection",
+  modes_listed: "connection",
+  permission_mode_changed: "durable",
+  permissions_listed: "connection",
+  plan_reviewed: "durable",
+  plan_submitted: "durable",
+  plugin_message_injected: "durable",
+  plugin_status_changed: "durable",
+  prompt_dump_ready: "connection",
+  provider_activation_finished: "connection",
+  provider_auth_finished: "connection",
+  provider_auth_started: "connection",
+  provider_configured: "connection",
+  question_answered: "durable",
+  question_asked: "durable",
+  queued_message_removed: "durable",
+  queued_messages_cleared: "durable",
+  runtime_services_listed: "connection",
+  session_created: "durable",
+  session_exported: "connection",
+  session_forked: "connection",
+  session_replay_completed: "connection",
+  session_review_ready: "connection",
+  session_review_updated: "connection",
+  session_title_updated: "durable",
+  sessions_listed: "connection",
+  sessions_search_ready: "connection",
+  settings_listed: "connection",
+  subagent_finished: "durable",
+  subagent_progress: "transient",
+  subagent_replay_batch: "connection",
+  subagent_replay_completed: "connection",
+  subagent_spawned: "durable",
+  subagents_listed: "connection",
+  text_delta: "durable",
+  thinking_delta: "durable",
+  tool_approval_needed: "durable",
+  tool_call_finished: "durable",
+  tool_call_started: "durable",
+  tool_diff_ready: "durable",
+  tool_output_delta: "durable",
+  tool_output_pruned: "durable",
+  turn_finished: "durable",
+  turn_started: "durable",
+  ui_notification: "durable",
+  user_message_accepted: "durable",
+  user_shell_state_changed: "durable",
+  workspace_diff_ready: "connection",
+  workspace_file_preview_ready: "connection",
+  workspace_files_found: "connection",
+  workspace_roots_changed: "durable",
+  workspace_status_ready: "connection",
+} as const satisfies Record<EngineEvent["type"], EngineEventDelivery>;

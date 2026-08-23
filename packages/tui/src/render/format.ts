@@ -75,9 +75,9 @@ export function formatStatusModel(
 ): string {
   if (model.includes("/")) return model
   const concrete = choices.find((choice) =>
-    choice.id === model || choice.alias === model || choice.aliases?.includes(model) === true,
+    choice.id === model || choice.aliases.includes(model),
   )
-  if (concrete?.id !== undefined) return concrete.id
+  if (concrete !== undefined) return concrete.id
   return provider === null ? model : `${provider}/${model}`
 }
 
@@ -87,10 +87,7 @@ export function formatStatusSessionCost(
   provider: string | null,
   fallbackTokens: string | null,
 ): string {
-  if (
-    provider === "openai_codex" ||
-    provider === "openai_subscription"
-  ) {
+  if (provider === "openai_codex") {
     if (
       snapshot === null ||
       (decimal(snapshot.session_subscription_quota_entries) === 0 &&

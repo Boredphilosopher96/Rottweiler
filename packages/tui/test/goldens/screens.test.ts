@@ -135,8 +135,8 @@ function fixtureState(): RottweilerState {
       { name: "rewind", description: "Restore a prior checkpoint", usage: "/rewind" },
     ],
     models: [
-      { alias: "fast", providers: ["openai_codex"], vision: true, thinking: true, toolCalling: true },
-      { alias: "deep", providers: ["github_copilot"], vision: false, thinking: true, toolCalling: true },
+      { id: "openai_codex/fast", displayName: "fast", provider: "openai_codex", aliases: ["fast"], current: false, available: true, status: null, vision: true, thinking: true, toolCalling: true },
+      { id: "github_copilot/deep", displayName: "deep", provider: "github_copilot", aliases: ["deep"], current: false, available: true, status: null, vision: false, thinking: true, toolCalling: true },
     ],
     sessions: [
       {
@@ -198,7 +198,7 @@ function replayFixtureState(): RottweilerState {
     emitted_at: `2026-01-01T00:00:0${sequence}Z`,
   })
   const events: EngineEvent[] = [
-    { type: "mode_changed", meta: eventMeta("1"), mode: "execute" },
+    { type: "mode_changed", meta: eventMeta("1"), mode: "execute", definition_fingerprint: "fixture" },
     { type: "model_changed", meta: eventMeta("2"), model: "fast" },
     {
       type: "conversation_turn_committed",

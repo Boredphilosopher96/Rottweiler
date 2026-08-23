@@ -11,6 +11,9 @@ use std::{io::Write, time::Duration};
 
 #[cfg(feature = "wasm-runtime")]
 use async_trait::async_trait;
+use rw_plugin_protocol::ManifestError;
+#[cfg(feature = "wasm-runtime")]
+use rw_plugin_protocol::PluginManifest;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -20,11 +23,9 @@ use wasmtime::{
     component::{Component, Linker},
 };
 
-use crate::ManifestError;
 #[cfg(feature = "wasm-runtime")]
 use crate::{
     HookDirective, HookDispatcher, HookError, HookHandler, HookInvocation, HookRegistrationError,
-    PluginManifest,
 };
 
 /// Stable component export used by every WASM hook extension.
@@ -173,7 +174,10 @@ impl WasmHookHost {
         for declaration in &self.manifest.capabilities.hooks {
             let hook = declaration.name();
             let id = format!("wasm:{}:{}", self.manifest.name, hook.as_str());
-            dispatcher.register_shared(declaration.registration(id), Arc::clone(&shared))?;
+            dispatcher.register_shared(
+                crate::plugin_hook_registration(*declaration, id),
+                Arc::clone(&shared),
+            )?;
         }
         Ok(())
     }
@@ -243,7 +247,7 @@ impl HookHandler for WasmHookHost {
         if invocation.cancellation().is_cancelled() {
             return Err(HookError::new("cancelled", "WASM hook was cancelled"));
         }
-        let event = crate::PluginHook::from(invocation.event())
+        let event = rw_plugin_protocol::PluginHook::from(invocation.event())
             .as_str()
             .to_owned();
         let input = encode_input(invocation.payload(), self.limits.max_input_bytes)
@@ -362,12 +366,12 @@ mod tests {
         PluginManifest {
             name: "wasm-test".to_owned(),
             version: "1.0.0".to_owned(),
-            protocol: crate::PROTOCOL_VERSION,
-            capabilities: crate::PluginCapabilities {
-                hooks: vec![crate::PluginHookDeclaration::Name(
-                    crate::PluginHook::PreTool,
+            protocol: rw_plugin_protocol::PROTOCOL_VERSION,
+            capabilities: rw_plugin_protocol::PluginCapabilities {
+                hooks: vec![rw_plugin_protocol::PluginHookDeclaration::Name(
+                    rw_plugin_protocol::PluginHook::PreTool,
                 )],
-                ..crate::PluginCapabilities::default()
+                ..rw_plugin_protocol::PluginCapabilities::default()
             },
         }
     }

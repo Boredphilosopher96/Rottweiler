@@ -102,7 +102,7 @@ pub enum SessionCommandAction {
         mode: ModeId,
     },
     SetPermissionMode {
-        mode: Option<crate::HeadlessPermissionMode>,
+        mode: Option<rw_types::PermissionModeDescriptor>,
     },
     AddPermissionRule {
         rule: PermissionRule,
@@ -249,21 +249,15 @@ impl WorkspaceRootController for NoopWorkspaceRootController {
 struct StatusCommand;
 
 fn permission_decision_label(decision: PermissionDecision) -> &'static str {
-    match decision {
-        PermissionDecision::Allow => "allow",
-        PermissionDecision::Ask => "ask",
-        PermissionDecision::Deny => "deny",
-    }
+    decision.as_str()
 }
 
 pub(super) fn render_permission_snapshot(
     snapshot: &crate::permission::PermissionSnapshot,
 ) -> String {
-    let mode = snapshot.runtime_mode.map_or("standard", |mode| match mode {
-        crate::HeadlessPermissionMode::Strict => "strict",
-        crate::HeadlessPermissionMode::AutoSafe => "auto-safe",
-        crate::HeadlessPermissionMode::Yolo => "yolo",
-    });
+    let mode = snapshot
+        .runtime_mode
+        .map_or("standard", rw_types::PermissionModeDescriptor::as_str);
     let mut lines = vec![
         format!("Permission mode: {mode}"),
         format!(
@@ -638,12 +632,10 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for Permissions
             });
         }
         if let Some(value) = arguments.strip_prefix("mode ").map(str::trim) {
-            let mode = match value {
-                "default" | "standard" => None,
-                "strict" => Some(crate::HeadlessPermissionMode::Strict),
-                "auto-safe" => Some(crate::HeadlessPermissionMode::AutoSafe),
-                "yolo" => Some(crate::HeadlessPermissionMode::Yolo),
-                _ => return Err(invalid_permissions_command()),
+            let mode = if matches!(value, "default" | "standard") {
+                None
+            } else {
+                Some(value.parse().map_err(|_| invalid_permissions_command())?)
             };
             return Ok(SessionCommandOutput {
                 message: String::new(),

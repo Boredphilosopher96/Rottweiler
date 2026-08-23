@@ -17,6 +17,7 @@ blake3.workspace = true
 ed25519-dalek.workspace = true
 futures-util = "0.3.31"
 rw-providers.workspace = true
+rw-plugin-protocol.workspace = true
 rw-tools.workspace = true
 rw-types.workspace = true
 serde.workspace = true

@@ -10,7 +10,7 @@ Cross-check: every feature in 01-FEATURES.md maps to exactly one milestone below
 
 Workspace with all crates stubbed; **codegen spike first (ADR-013): schemars/typeshare over the real `Block`/`ToolOutput`/event enums, round-tripped Rust↔TS — if the toolchain chokes, the IR shapes change here, not later**; `protocol/` generated + drift-checked; `packages/tui` scaffolded (OpenTUI hello-world consuming generated types) **including a go/no-go check of OpenTUI's headless/test surface — if it can't render to an inspectable in-memory buffer, building that harness becomes an M4 line item, budgeted now**; config loading with precedence + `rw config check`; `tracing` wired; CI (fmt/clippy/test/deny/audit + dep-direction check + bun typecheck).
 
-**AC:** `cargo test` green on macOS + Linux CI; generated Rust and TS types compile from the same source and a contract test round-trips fixture events through both; the OpenTUI test-surface decision is written into 07-VERIFICATION; `rw config check` prints effective config with per-key provenance; event schema tolerates unknown fields.
+**AC:** `cargo test` green on macOS + Linux CI; Rust protocol types and their generated schema and TypeScript projections pass a shared round-trip contract fixture; the OpenTUI test-surface decision is written into 07-VERIFICATION; `rw config check` prints effective config with per-key provenance; event schema tolerates unknown fields.
 
 ## M1 — Provider layer + record/replay (the testing spine)
 
@@ -68,9 +68,9 @@ Agent definitions; spawn_agent with parallelism/depth limits; nested progress in
 
 ## M8 — MCP + plugin host
 
-rmcp client (stdio + HTTP), deferred tool loading + `tool_search`, `/mcp` runtime controls, size-capped TOON-encoded responses; plugin host: protocol-1/2 negotiation, capability approval, hook catalog, event subscriptions, protocol-2 provider catalog/metadata and host-mediated authenticated HTTP; `rw plugin scaffold/dev`; TypeScript SDK; Rottweiler-as-MCP-server.
+rmcp client (stdio + HTTP), deferred tool loading + `tool_search`, `/mcp` runtime controls, size-capped TOON-encoded responses; plugin host: protocol-2 negotiation, capability approval, hook catalog, event subscriptions, provider catalog/metadata and host-mediated authenticated HTTP; `rw plugin scaffold/dev`; TypeScript SDK; Rottweiler-as-MCP-server.
 
-**AC:** connect 5 real MCP servers simultaneously — context increase < 2k tokens until a tool is used (deferred-loading proof); scaffolded TS plugin implementing `pre_tool` deny + a custom tool passes the conformance suite; capability-violation test (plugin exceeds manifest) → killed; another agent drives Rottweiler over its MCP server interface. **Protocol 2 is stable and protocol 1 remains frozen and supported; the checked-in schemas, wire fixtures, Rust host, and TypeScript SDK cover both generations.**
+**AC:** connect 5 real MCP servers simultaneously — context increase < 2k tokens until a tool is used (deferred-loading proof); scaffolded TS plugin implementing `pre_tool` deny + a custom tool passes the conformance suite; capability-violation test (plugin exceeds manifest) → killed; another agent drives Rottweiler over its MCP server interface. **Protocol 2 is stable and is the only supported generation; the checked-in schema, wire fixture, Rust host, and TypeScript SDK cover the same contract.**
 
 ## M9 — Fork, review, replay, export
 
@@ -82,7 +82,7 @@ rmcp client (stdio + HTTP), deferred tool loading + `tool_search`, `/mcp` runtim
 
 Background process manager; vim keybindings; `rw stats` (incl. cost attribution: main/compaction/subagents); **`rw import` (Claude Code / opencode / pi: commands, MCP config, CLAUDE.md→AGENTS.md, memory)**; **`rw doctor`**; **self-update (`rw upgrade`, stable/beta channels)**; docs site for the plugin protocol; binary size + startup final tuning; cross-platform pass (macOS/Linux/WSL); fuzzing (config parser, TOON, plugin RPC) in CI.
 
-**AC:** the full eval gate from 07 (terminal-bench subset + two consecutive self-hosting weeks without a P0, per 07 §5); all performance budgets green on both platforms; Rust engine binary < 28MB and TUI bundle < 100MB on macOS / < 150MB on Linux; zero clippy warnings, zero `cargo audit` criticals; `rw import` on a real Claude Code config dir yields working commands + MCP servers + hooks (fixture); self-update rejects the seeded bad-signature fixture and refuses unsigned downgrades; `rw doctor` correctly diagnoses the four seeded failure states (bad key, unreachable provider, no sandbox support, dumb terminal); each release platform produces one complete engine+TUI+renderer archive, the Homebrew and bootstrap metadata deterministically bind those exact bytes, only `rw` is public, and an installed-bundle PTY test proves one launch and one default close leave no owned child.
+**AC:** the full eval gate from 07 (terminal-bench subset + two consecutive self-hosting weeks without a P0, per 07 §5); all performance and release-product budgets pass on both platforms, with release sizes owned by `contracts/release-contract.json`; zero clippy warnings, zero `cargo audit` criticals; `rw import` on a real Claude Code config dir yields working commands + MCP servers + hooks (fixture); self-update rejects the seeded bad-signature fixture and refuses unsigned downgrades; `rw doctor` correctly diagnoses the four seeded failure states (bad key, unreachable provider, no sandbox support, dumb terminal); each release platform produces one complete engine+TUI+renderer archive, the Homebrew and bootstrap metadata deterministically bind those exact bytes, only `rw` is public, and an installed-bundle PTY test proves one launch and one default close leave no owned child.
 
 ---
 

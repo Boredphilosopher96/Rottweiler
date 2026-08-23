@@ -61,7 +61,7 @@ impl PrivateSubagentMetadataStore {
         }
         #[cfg(not(unix))]
         {
-            validate_component(&parent.0)?;
+            validate_session_id(parent)?;
             let directory = self.root.join(&parent.0);
             match fs::symlink_metadata(&directory) {
                 Ok(metadata) if metadata.file_type().is_dir() => {}
@@ -114,7 +114,7 @@ impl PrivateSubagentMetadataStore {
                     ));
                 }
                 validate_component(&envelope.record.handle.subagent_id.0)?;
-                validate_component(&envelope.record.handle.session_id.0)?;
+                validate_session_id(&envelope.record.handle.session_id)?;
                 let expected = format!("{}.json", envelope.record.handle.subagent_id.0);
                 if path.file_name().and_then(|value| value.to_str()) != Some(expected.as_str()) {
                     return Err(session_error(
@@ -129,7 +129,7 @@ impl PrivateSubagentMetadataStore {
 
     #[cfg(not(unix))]
     fn parent_dir(&self, parent: &SessionId) -> Result<PathBuf, OrchestrationError> {
-        validate_component(&parent.0)?;
+        validate_session_id(parent)?;
         let path = self.root.join(&parent.0);
         create_private_dir(&path)?;
         Ok(path)
@@ -147,7 +147,7 @@ impl SubagentMetadataStore for PrivateSubagentMetadataStore {
         #[cfg(not(unix))]
         {
             validate_component(&record.handle.subagent_id.0)?;
-            validate_component(&record.handle.session_id.0)?;
+            validate_session_id(&record.handle.session_id)?;
             let directory = self.parent_dir(&record.parent_session_id)?;
             let destination = directory.join(format!("{}.json", record.handle.subagent_id.0));
             let temporary = directory.join(format!(
@@ -202,7 +202,7 @@ impl SubagentMetadataStore for PrivateSubagentMetadataStore {
         }
         #[cfg(not(unix))]
         {
-            validate_component(&parent_session_id.0)?;
+            validate_session_id(parent_session_id)?;
             validate_component(&subagent_id.0)?;
             let directory = self.root.join(&parent_session_id.0);
             let path = directory.join(format!("{}.json", subagent_id.0));
@@ -342,7 +342,7 @@ fn open_parent(
     create: bool,
 ) -> Result<Option<std::os::fd::OwnedFd>, OrchestrationError> {
     use rustix::fs::{Mode, OFlags};
-    validate_component(&parent.0)?;
+    validate_session_id(parent)?;
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     match rustix::fs::openat(root, parent.0.as_str(), flags, Mode::empty()) {
         Ok(directory) => {
@@ -472,7 +472,7 @@ fn load_parent_unix(
             ));
         }
         validate_component(&envelope.record.handle.subagent_id.0)?;
-        validate_component(&envelope.record.handle.session_id.0)?;
+        validate_session_id(&envelope.record.handle.session_id)?;
         if name != format!("{}.json", envelope.record.handle.subagent_id.0) {
             return Err(session_error(
                 "subagent metadata filename does not match its identity",
@@ -487,7 +487,7 @@ fn load_parent_unix(
 fn save_unix(root: &OwnedFd, record: SubagentRecoveryRecord) -> Result<(), OrchestrationError> {
     use rustix::fs::{AtFlags, Mode, OFlags};
     validate_component(&record.handle.subagent_id.0)?;
-    validate_component(&record.handle.session_id.0)?;
+    validate_session_id(&record.handle.session_id)?;
     let directory = open_parent(root, &record.parent_session_id, true)?
         .ok_or_else(|| session_error("subagent metadata parent disappeared"))?;
     let destination = format!("{}.json", record.handle.subagent_id.0);
@@ -587,11 +587,11 @@ mod tests {
     use std::sync::Arc;
 
     use rw_core::{
-        SubagentHandle, SubagentMetadataStore as _, SubagentPermissionMode, SubagentRecoveryPhase,
-        SubagentRecoveryPolicy, SubagentRecoveryRecord,
+        SubagentHandle, SubagentMetadataStore as _, SubagentRecoveryPhase, SubagentRecoveryPolicy,
+        SubagentRecoveryRecord,
     };
     use rw_tools::CapabilityManifest;
-    use rw_types::{SubagentId, SubagentIsolation};
+    use rw_types::{SessionMode, SubagentId, SubagentIsolation};
     use tempfile::TempDir;
 
     use super::PrivateSubagentMetadataStore;
@@ -614,7 +614,7 @@ mod tests {
             policy: SubagentRecoveryPolicy {
                 model_alias: "fast".to_owned(),
                 system_prompt: None,
-                permission_mode: SubagentPermissionMode::Execute,
+                permission_mode: SessionMode::Execute,
                 max_turns: 4,
             },
             phase: SubagentRecoveryPhase::Active,
@@ -808,6 +808,11 @@ fn validate_component(value: &str) -> Result<(), OrchestrationError> {
         return Err(session_error("unsafe subagent metadata identity"));
     }
     Ok(())
+}
+
+fn validate_session_id(value: &SessionId) -> Result<(), OrchestrationError> {
+    SessionId::validate(&value.0)
+        .map_err(|_| session_error("unsafe subagent metadata session identity"))
 }
 
 #[allow(clippy::needless_pass_by_value)]

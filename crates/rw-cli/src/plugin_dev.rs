@@ -9,12 +9,21 @@ use std::{
 };
 
 use miette::{IntoDiagnostic as _, Result, miette};
+#[cfg(all(test, unix))]
+use rw_ext::plugin_hook_registration;
 use rw_ext::{
-    LaunchedPluginProcess, PluginCapabilities, PluginLauncher, PluginManifest, PluginProcessConfig,
-    PluginSandboxMode, PluginSandboxProfile, PluginToolCapability, PluginToolEffect,
-    SupervisedPluginProcess,
+    LaunchedPluginProcess, PluginLauncher, PluginProcessConfig, PluginSandboxMode,
+    PluginSandboxProfile, SupervisedPluginProcess,
 };
-use serde_json::{Value, json};
+use rw_plugin_protocol::{
+    DEFAULT_HANDLER_TIMEOUT_MS, FrameDecoder, FrameError, InitializeParams, JSON_RPC_VERSION,
+    MAX_FRAME_BYTES, METHOD_COMMAND_EXECUTE, METHOD_EVENT_PUBLISH, METHOD_EXIT, METHOD_HOOK_INVOKE,
+    METHOD_INITIALIZE, METHOD_PROVIDER_COMPLETE, METHOD_SESSION_INJECT_MESSAGE,
+    METHOD_SESSION_SET_STATUS, METHOD_SHUTDOWN, METHOD_TOOL_CALL, METHOD_UI_NOTIFY,
+    MIN_PROTOCOL_VERSION, PLUGIN_HOST_ID, PluginCapabilities, PluginManifest, PluginToolCapability,
+    PluginToolEffect, RpcFrame, RpcId, RpcNotification, RpcRequest, RpcSuccess, encode_frame,
+};
+use serde_json::json;
 use tokio::{
     io::{AsyncBufReadExt as _, AsyncWriteExt as _},
     sync::watch,
@@ -23,11 +32,10 @@ use tokio::{
 
 use rw_runtime::plugin::SandboxedPluginLauncher;
 
-const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SOURCE_FILES: usize = 4_096;
 const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SOURCE_DEPTH: usize = 64;
-const RPC_DEADLINE: Duration = Duration::from_secs(5);
+const RPC_DEADLINE: Duration = Duration::from_millis(DEFAULT_HANDLER_TIMEOUT_MS);
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(2);
 
 type Trace = Arc<dyn Fn(&'static str) + Send + Sync>;
@@ -165,20 +173,33 @@ struct RunningPlugin {
 
 async fn initialize(mut child: LaunchedPluginProcess, trace: Trace) -> Result<RunningPlugin> {
     let handshake = async {
-        let initialize = json!({
-            "jsonrpc":"2.0", "id":"rottweiler-dev-init", "method":"initialize",
-            "params":{"host":"rottweiler","protocol":1,"min_protocol":1,"max_frame_bytes":MAX_FRAME_BYTES}
+        let initialize = RpcFrame::Request(RpcRequest {
+            jsonrpc: JSON_RPC_VERSION.to_owned(),
+            id: RpcId::String("rottweiler-dev-init".to_owned()),
+            method: METHOD_INITIALIZE.to_owned(),
+            params: Some(
+                serde_json::to_value(InitializeParams {
+                    host: PLUGIN_HOST_ID.to_owned(),
+                    protocol: MIN_PROTOCOL_VERSION,
+                    min_protocol: MIN_PROTOCOL_VERSION,
+                    max_frame_bytes: MAX_FRAME_BYTES,
+                    capabilities: Vec::new(),
+                })
+                .into_diagnostic()?,
+            ),
         });
         write_frame(&mut child.stdin, &initialize).await?;
-        let frame = tokio::time::timeout(RPC_DEADLINE, read_frame(&mut child.stdout))
+        let response = tokio::time::timeout(RPC_DEADLINE, read_frame(&mut child.stdout))
             .await
             .map_err(|_| miette!("plugin dev initialize timed out"))??;
-        let response: Value = serde_json::from_slice(&frame)
-            .map_err(|_| miette!("plugin dev initialize response was invalid JSON"))?;
-        let manifest_value = response
-            .get("result")
-            .cloned()
-            .ok_or_else(|| miette!("plugin dev initialize was rejected"))?;
+        let manifest_value = match response {
+            RpcFrame::Success(RpcSuccess {
+                id: Some(RpcId::String(id)),
+                result,
+                ..
+            }) if id == "rottweiler-dev-init" => result,
+            _ => return Err(miette!("plugin dev initialize was rejected")),
+        };
         let manifest: PluginManifest = serde_json::from_value(manifest_value)
             .map_err(|_| miette!("plugin dev initialize returned an invalid manifest"))?;
         manifest.validate().map_err(|error| {
@@ -197,10 +218,11 @@ async fn initialize(mut child: LaunchedPluginProcess, trace: Trace) -> Result<Ru
     let trace_task = tokio::spawn(async move {
         loop {
             let frame = read_frame(&mut stdout).await?;
-            let label = serde_json::from_slice::<Value>(&frame)
-                .ok()
-                .and_then(|value| value.get("method").and_then(Value::as_str).map(safe_method))
-                .unwrap_or("response");
+            let label = match &frame {
+                RpcFrame::Request(request) => safe_method(&request.method),
+                RpcFrame::Notification(notification) => safe_method(&notification.method),
+                RpcFrame::Success(_) | RpcFrame::Failure(_) => "response",
+            };
             trace(label);
         }
     });
@@ -213,16 +235,16 @@ async fn initialize(mut child: LaunchedPluginProcess, trace: Trace) -> Result<Ru
 
 fn safe_method(method: &str) -> &'static str {
     match method {
-        "tool/call" => "plugin-rpc request tool/call",
-        "command/execute" => "plugin-rpc request command/execute",
-        "hook/invoke" => "plugin-rpc request hook/invoke",
-        "provider/complete" => "plugin-rpc request provider/complete",
-        "event/publish" => "plugin-rpc notification event/publish",
-        "session/inject_message" => "plugin-rpc request session/inject_message",
-        "session/set_status" => "plugin-rpc request session/set_status",
-        "ui/notify" => "plugin-rpc request ui/notify",
-        "shutdown" => "plugin-rpc request shutdown",
-        "exit" => "plugin-rpc notification exit",
+        METHOD_TOOL_CALL => "plugin-rpc request tool/call",
+        METHOD_COMMAND_EXECUTE => "plugin-rpc request command/execute",
+        METHOD_HOOK_INVOKE => "plugin-rpc request hook/invoke",
+        METHOD_PROVIDER_COMPLETE => "plugin-rpc request provider/complete",
+        METHOD_EVENT_PUBLISH => "plugin-rpc notification event/publish",
+        METHOD_SESSION_INJECT_MESSAGE => "plugin-rpc request session/inject_message",
+        METHOD_SESSION_SET_STATUS => "plugin-rpc request session/set_status",
+        METHOD_UI_NOTIFY => "plugin-rpc request ui/notify",
+        METHOD_SHUTDOWN => "plugin-rpc request shutdown",
+        METHOD_EXIT => "plugin-rpc notification exit",
         _ => "plugin-rpc unknown-method",
     }
 }
@@ -231,12 +253,21 @@ async fn shutdown(running: &mut RunningPlugin, trace: Trace) -> Result<()> {
     trace("plugin-dev lifecycle shutdown");
     let _ = write_frame(
         &mut running.stdin,
-        &json!({"jsonrpc":"2.0","id":"rottweiler-dev-shutdown","method":"shutdown"}),
+        &RpcFrame::Request(RpcRequest {
+            jsonrpc: JSON_RPC_VERSION.to_owned(),
+            id: RpcId::String("rottweiler-dev-shutdown".to_owned()),
+            method: METHOD_SHUTDOWN.to_owned(),
+            params: None,
+        }),
     )
     .await;
     let _ = write_frame(
         &mut running.stdin,
-        &json!({"jsonrpc":"2.0","method":"exit"}),
+        &RpcFrame::Notification(RpcNotification {
+            jsonrpc: JSON_RPC_VERSION.to_owned(),
+            method: METHOD_EXIT.to_owned(),
+            params: None,
+        }),
     )
     .await;
     if !matches!(
@@ -262,18 +293,15 @@ async fn terminate_and_reap(process: &dyn SupervisedPluginProcess) {
     let _ = tokio::time::timeout(SHUTDOWN_DEADLINE, process.reap()).await;
 }
 
-async fn write_frame(writer: &mut rw_ext::PluginStdin, value: &Value) -> Result<()> {
-    let mut bytes = serde_json::to_vec(value).into_diagnostic()?;
-    if bytes.len() > MAX_FRAME_BYTES {
-        return Err(miette!("plugin dev host frame exceeded the protocol limit"));
-    }
-    bytes.push(b'\n');
+async fn write_frame(writer: &mut rw_ext::PluginStdin, frame: &RpcFrame) -> Result<()> {
+    let bytes = encode_frame(frame, MAX_FRAME_BYTES)
+        .map_err(|error| miette!("plugin dev host frame is invalid: {error}"))?;
     writer.write_all(&bytes).await.into_diagnostic()?;
     writer.flush().await.into_diagnostic()
 }
 
-async fn read_frame(reader: &mut rw_ext::PluginStdout) -> Result<Vec<u8>> {
-    let mut frame = Vec::new();
+async fn read_frame(reader: &mut rw_ext::PluginStdout) -> Result<RpcFrame> {
+    let mut decoder = FrameDecoder::default();
     loop {
         let available = reader.fill_buf().await.into_diagnostic()?;
         if available.is_empty() {
@@ -283,18 +311,21 @@ async fn read_frame(reader: &mut rw_ext::PluginStdout) -> Result<Vec<u8>> {
             .iter()
             .position(|byte| *byte == b'\n')
             .map_or(available.len(), |index| index + 1);
-        if frame.len().saturating_add(take) > MAX_FRAME_BYTES + 1 {
-            return Err(miette!("plugin dev frame exceeded the protocol limit"));
-        }
-        frame.extend_from_slice(&available[..take]);
+        let frames = decoder
+            .push(&available[..take])
+            .map_err(plugin_frame_error)?;
         reader.consume(take);
-        if frame.last() == Some(&b'\n') {
-            frame.pop();
-            if frame.is_empty() {
-                return Err(miette!("plugin dev returned an empty frame"));
-            }
+        if let Some(frame) = frames.into_iter().next() {
             return Ok(frame);
         }
+    }
+}
+
+fn plugin_frame_error(error: FrameError) -> miette::Report {
+    match error {
+        FrameError::TooLarge { .. } => miette!("plugin dev frame exceeded the protocol limit"),
+        FrameError::Empty => miette!("plugin dev returned an empty frame"),
+        other => miette!("plugin dev returned an invalid frame: {other}"),
     }
 }
 
@@ -715,7 +746,8 @@ mod tests {
             .expect("run typecheck");
         assert!(
             typecheck.status.success(),
-            "generated typecheck failed: {}",
+            "generated typecheck failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&typecheck.stdout),
             String::from_utf8_lossy(&typecheck.stderr)
         );
         let bun = find_executable("bun").expect("Bun");
@@ -774,7 +806,7 @@ mod tests {
         let mut dispatcher = HookDispatcher::new();
         dispatcher
             .register(
-                manifest.capabilities.hooks[0].registration("scaffold:pre-tool"),
+                plugin_hook_registration(manifest.capabilities.hooks[0], "scaffold:pre-tool"),
                 hook,
             )
             .expect("hook registration");
@@ -819,7 +851,7 @@ printf '%s' "$$" > "$1"
 while IFS= read -r frame; do
   case "$frame" in
     *'"method":"initialize"'*)
-      printf '%s\n' '{"jsonrpc":"2.0","id":"rottweiler-dev-init","result":{"name":"oversized","version":"1","protocol":1,"capabilities":{}}}'
+      printf '%s\n' '{"jsonrpc":"2.0","id":"rottweiler-dev-init","result":{"name":"oversized","version":"1","protocol":2,"capabilities":{}}}'
       head -c 4194305 /dev/zero | tr '\000' x
       printf '\n'
       ;;
@@ -881,7 +913,7 @@ printf '%s\n' "$$" >> "$1"
 while IFS= read -r frame; do
   case "$frame" in
     *'"method":"initialize"'*)
-      printf '%s\n' '{"jsonrpc":"2.0","id":"rottweiler-dev-init","result":{"name":"fixture","version":"CANARY_SECRET","protocol":1,"capabilities":{}}}'
+      printf '%s\n' '{"jsonrpc":"2.0","id":"rottweiler-dev-init","result":{"name":"fixture","version":"CANARY_SECRET","protocol":2,"capabilities":{}}}'
       printf '%s\n' '{"jsonrpc":"2.0","id":"push","method":"ui/notify","params":{"message":"CANARY_SECRET"}}'
       ;;
     *'"method":"shutdown"'*) exit 0 ;;

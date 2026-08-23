@@ -70,11 +70,11 @@ prove whole-record precedence — explicit user config, then provider-discovered
 metadata, then models.dev — while subscription and credit-accounted providers
 reject dollar-pricing overrides and retain their non-dollar accounting.
 
-The plugin SDK and Rust host conformance surface covers protocols 1 and 2.
-Protocol 1 retains its frozen language-neutral wire fixture and streamed
-provider lifecycle; protocol 2 negotiates model-catalog capability, validates
-and bounds catalog entries, and matches the shared `protocol-2.json` fixture and
-schema. Cross-host `provider-v2.ts` and `provider-auth-v2.ts` fixtures exercise
+The plugin SDK and Rust host conformance surface covers protocol 2 only.
+The `rw-plugin-protocol` codegen check owns and verifies the
+TypeScript, `protocol-2.json`, and schema projections; the protocol also
+negotiates model-catalog capability and validates bounded catalog entries.
+Cross-host `provider-v2.ts` and `provider-auth-v2.ts` fixtures exercise
 catalog metadata plus host-mediated authentication, including declared
 credential references, response redaction across chunk boundaries,
 cancellation, and terminal refusal of an undeclared reference before HTTP.
@@ -155,7 +155,7 @@ security-sensitive and intentionally ignored.
 |---|---|---|
 | Unit | IR conversions per adapter, TOON round-trip (proptest), permission rule matching, config precedence, redactor, budgeter math | `cargo test`, `proptest` |
 | Integration | full turns under replay: tool loops, interrupts, compaction, failover, resume-after-kill | replay harness in `tests/` |
-| Protocol contract | fixture ClientCommands/EngineEvents round-tripped through the generated Rust *and* TS types; SSE reconnect/resync scenarios against a mock engine | `protocol/` fixtures, run by both `cargo test` and `bun test` |
+| Protocol contract | fixture ClientCommands/EngineEvents round-tripped through the Rust owner and generated TypeScript/schema projections; SSE reconnect/resync scenarios against a mock engine | `protocol/` fixtures, run by both `cargo test` and `bun test` |
 | TUI | golden screens rendered through OpenTUI's in-memory native test renderer, input latency harness, component tests | `bun test` in `packages/tui` + `vhs` for visual review artifacts |
 | E2E | print-mode runs on real repos under replay; production-composition acceptance fixtures | `tests/e2e/` |
 | Security | the acceptance list in 05-SECURITY (sandbox EPERM assertions, canary-string leak fuzzing, injection corpus) | dedicated `security-tests` job |
@@ -200,7 +200,7 @@ Property tests worth calling out:
 | Turn overhead (engine time excluding provider latency) | protected p99: < 60ms; PR smoke median < 20ms | replay timing |
 | Compaction pause (UI blocked) | 0ms (fully async) | assertion: UI events processed during compaction |
 | Memory, 8-hour stress session (engine + TUI combined) | < 600 MiB RSS | soak test, nightly |
-| Release size | engine binary < 40MB on macOS / < 28MB on Linux; TUI bundle < 100MB on macOS / < 150MB on Linux | CI check; macOS accepts the measured opt-level 3 size trade |
+| Release size | Platform product budgets from `contracts/release-contract.json` | `scripts/release_contract.py validate-build`; generated Rust and TypeScript projections |
 
 The required manually dispatched protected-performance, nightly, and release
 headless gates enforce the platform ceilings above at p99 over 500 fresh
@@ -336,7 +336,7 @@ one-time fixture or a single development run.
 
 ## 6. CI pipeline summary
 
-Per-PR: fmt · clippy `-D warnings` · unit+integration (replay, network-denied) · protocol codegen check (schema → generated types are committed and in sync) · `bun test` + typecheck in `packages/tui` · TUI goldens · security tests · perf smoke (startup + latency) · `cargo deny`/`audit` · dependency-direction and guarded-network-boundary checks · docs build.
+Per-PR: fmt · clippy `-D warnings` · unit+integration (replay, network-denied) · client and plugin protocol codegen checks (`rw-types` and `rw-plugin-protocol` → committed projections) · semantic ownership, toolchain ownership, dependency-direction, and guarded-network-boundary checks · `bun test` + typecheck in `packages/tui` · TUI goldens · security tests · perf smoke (startup + latency) · `cargo deny`/`audit` · docs build.
 Weekly/manual risk evidence: `cargo llvm-cov` records workspace line coverage
 without imposing an unreviewed percentage, while bounded `cargo-mutants`
 campaigns must catch mutations in permission, trust, signed-update, and plugin
@@ -374,6 +374,13 @@ Channel-signing fixtures additionally require stable/beta documents to share one
 timestamps, and gzip headers under `SOURCE_DATE_EPOCH`. Its checkout-independent
 fixture must produce byte-identical archives before a release artifact can be
 signed or attested.
+
+`contracts/release-contract.json` is the release-shape owner. It defines the
+supported platform mapping, required archive members, member modes and caps, and
+product size budgets. `scripts/release_contract.py` validates that contract and
+generates the Rust projection used by the updater. CI runs the generator in
+check mode and tests both package and updater consumers against the contract, so
+those consumers cannot accept different archive shapes.
 
 The distribution renderer accepts single-link regular release archives only,
 requires both the macOS and Linux publication families, and deterministically

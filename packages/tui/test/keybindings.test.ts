@@ -17,7 +17,7 @@ import {
 import { createInitialState } from "../src/state"
 
 describe("configurable TUI keybindings", () => {
-  test("keeps the standard map backward-compatible and supports explicit unbinding", () => {
+  test("keeps the canonical standard map stable and supports explicit unbinding", () => {
     const standard = compileKeybindings()
     expect(standard.preset).toBe("standard")
     expect(standard.bindings("global").get("ctrl+p")).toBe("open_command_picker")

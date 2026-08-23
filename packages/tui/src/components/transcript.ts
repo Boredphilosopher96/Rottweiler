@@ -106,7 +106,7 @@ export class ReasoningBlockRenderable extends BoxRenderable {
     this.header = new TextRenderable(ctx, {
       id: `${options.blockId}:header`,
       content: "",
-      fg: theme.muted,
+      fg: theme.textMuted,
       bg: theme.background,
       width: "100%",
       height: 1,
@@ -154,7 +154,7 @@ export class ReasoningBlockRenderable extends BoxRenderable {
   setSelected(selected: boolean): void {
     if (selected === this.#selected) return
     this.#selected = selected
-    this.header.bg = selected ? this.#theme.selection : this.#theme.background
+    this.header.bg = selected ? this.#theme.backgroundElement : this.#theme.background
   }
 
   update(content: string, streaming = this.#streaming, width = this.#width): void {
@@ -307,7 +307,7 @@ export class ToolBlockRenderable extends BoxRenderable {
     this.header = new TextRenderable(ctx, {
       id: `${blockId}:header`,
       content: "",
-      fg: theme.foreground,
+      fg: theme.text,
       bg: theme.background,
       width: "100%",
       height: 1,
@@ -315,14 +315,14 @@ export class ToolBlockRenderable extends BoxRenderable {
     })
     this.body = new TextRenderable(ctx, {
       content: "",
-      fg: theme.muted,
+      fg: theme.textMuted,
       wrapMode: "word",
       visible: !this.#collapsed,
       selectable: true,
     })
     this.truncationMarker = new TextRenderable(ctx, {
       content: "",
-      fg: theme.muted,
+      fg: theme.textMuted,
       height: 0,
       flexShrink: 0,
       wrapMode: "none",
@@ -428,7 +428,7 @@ export class ToolBlockRenderable extends BoxRenderable {
       tool.status === "awaiting_approval"
         ? this.#theme.warning
         : tool.isError === true
-          ? this.#theme.danger
+          ? this.#theme.error
           : tool.status === "finished"
             ? this.#theme.success
             : this.#theme.info
@@ -495,7 +495,7 @@ export class ToolBlockRenderable extends BoxRenderable {
     })
     this.commandPrompt = new TextRenderable(this.ctx, {
       content: bashPrompt(command),
-      fg: this.#theme.muted,
+      fg: this.#theme.textMuted,
       width: 2,
       height: rows,
       wrapMode: "none",
@@ -503,7 +503,7 @@ export class ToolBlockRenderable extends BoxRenderable {
     this.command = this.#rendering === undefined
       ? new TextRenderable(this.ctx, {
           content,
-          fg: this.#theme.foreground,
+          fg: this.#theme.text,
           flexGrow: 1,
           height: rows,
           wrapMode: "none",
@@ -570,7 +570,7 @@ export class ToolBlockRenderable extends BoxRenderable {
     })
     container.add(new TextRenderable(this.ctx, {
       content: `${displayPath(proposal.path)} · +${stats.added} −${stats.removed}`,
-      fg: this.#theme.muted,
+      fg: this.#theme.textMuted,
       height: 1,
       flexShrink: 0,
       wrapMode: "none",
@@ -579,7 +579,7 @@ export class ToolBlockRenderable extends BoxRenderable {
     this.diff = this.#rendering === undefined
       ? new TextRenderable(this.ctx, {
           content: visibleDiff,
-          fg: this.#theme.foreground,
+          fg: this.#theme.text,
           height: rows,
           wrapMode: "none",
           selectable: true,
@@ -598,16 +598,16 @@ export class ToolBlockRenderable extends BoxRenderable {
           syncScroll: false,
           wrapMode: "none",
           showLineNumbers: true,
-          addedBg: this.#theme.added,
-          removedBg: this.#theme.removed,
-          contextBg: this.#theme.panel,
+          addedBg: this.#theme.diffAddedBg,
+          removedBg: this.#theme.diffRemovedBg,
+          contextBg: this.#theme.backgroundPanel,
         })
     this.diff.selectable = true
     container.add(this.diff)
     if (truncated !== null) {
       container.add(new TextRenderable(this.ctx, {
         content: `… ${truncated.hiddenLines} more lines · Ctrl+R to review`,
-        fg: this.#theme.muted,
+        fg: this.#theme.textMuted,
         height: 1,
         flexShrink: 0,
         wrapMode: "none",
@@ -629,7 +629,7 @@ export class ToolBlockRenderable extends BoxRenderable {
   setSelected(selected: boolean): void {
     if (selected === this.#selected) return
     this.#selected = selected
-    this.header.bg = selected ? this.#theme.selection : this.#theme.background
+    this.header.bg = selected ? this.#theme.backgroundElement : this.#theme.background
   }
 }
 
@@ -776,7 +776,7 @@ export class SubagentPanelRenderable extends BoxRenderable {
       border: true,
       borderStyle: "single",
       borderColor: theme.border,
-      backgroundColor: theme.panel,
+      backgroundColor: theme.backgroundPanel,
       paddingX: 1,
       marginTop: 1,
       visible: false,
@@ -785,7 +785,7 @@ export class SubagentPanelRenderable extends BoxRenderable {
     this.#onOpenSubagent = onOpenSubagent
     this.header = new TextRenderable(ctx, {
       content: "",
-      fg: theme.accentStrong,
+      fg: theme.primary,
       height: 1,
       flexShrink: 0,
     })
@@ -821,7 +821,7 @@ export class SubagentPanelRenderable extends BoxRenderable {
       if (row === undefined) {
         row = new TextRenderable(this.ctx, {
           content: "",
-          fg: this.#theme.muted,
+          fg: this.#theme.textMuted,
           height: 1,
           flexShrink: 0,
         })
@@ -836,7 +836,7 @@ export class SubagentPanelRenderable extends BoxRenderable {
       row.onMouseDown = () => this.#onOpenSubagent?.(subagent.subagentId)
       row.fg =
         subagent.status === "failed"
-          ? this.#theme.danger
+          ? this.#theme.error
           : subagent.status === "completed"
             ? this.#theme.success
             : subagent.status === "cancelled" ||
@@ -972,13 +972,13 @@ class TurnCardRenderable extends BoxRenderable {
               : shell.status === 0
                 ? theme.success
               : shell.status === null
-                ? theme.muted
-                : theme.danger,
+                ? theme.textMuted
+                : theme.error,
           }),
       backgroundColor: shell !== undefined
-        ? theme.panel
+        ? theme.backgroundPanel
         : viewModel.entry.turn.role === "user"
-          ? theme.panelRaised
+          ? theme.backgroundElement
           : theme.background,
       paddingX: 1,
       paddingY: toolOnly ? 0 : 1,
@@ -1132,7 +1132,7 @@ class TurnCardRenderable extends BoxRenderable {
       })
       commandRow.add(new TextRenderable(this.ctx, {
         content: bashPrompt(shell.command),
-        fg: this.#theme.muted,
+        fg: this.#theme.textMuted,
         width: 2,
         height: rows,
         wrapMode: "none",
@@ -1140,7 +1140,7 @@ class TurnCardRenderable extends BoxRenderable {
       const renderedCommand = this.#treeSitterClient === undefined
         ? new TextRenderable(this.ctx, {
             content,
-            fg: this.#theme.foreground,
+            fg: this.#theme.text,
             flexGrow: 1,
             height: rows,
             wrapMode: "none",
@@ -1169,7 +1169,7 @@ class TurnCardRenderable extends BoxRenderable {
         content: output === ""
           ? shell.active ? "Running in the foreground terminal…" : "Completed with no output."
           : `Output${shell.outputTruncated ? " · truncated" : ""}\n${output}`,
-        fg: output === "" ? this.#theme.muted : this.#theme.foreground,
+        fg: output === "" ? this.#theme.textMuted : this.#theme.text,
         wrapMode: "word",
         flexShrink: 0,
         marginTop: 1,
@@ -1197,13 +1197,13 @@ class TurnCardRenderable extends BoxRenderable {
         : shell.status === 0
           ? this.#theme.success
         : shell.status === null
-          ? this.#theme.muted
-          : this.#theme.danger
+          ? this.#theme.textMuted
+          : this.#theme.error
     }
     this.backgroundColor = shell !== undefined
-      ? this.#theme.panel
+      ? this.#theme.backgroundPanel
       : entry.turn.role === "user"
-        ? this.#theme.panelRaised
+        ? this.#theme.backgroundElement
         : this.#theme.background
     this.paddingX = 1
     this.paddingY = toolOnly ? 0 : 1
@@ -1230,14 +1230,14 @@ class TurnCardRenderable extends BoxRenderable {
         : `${role}${viewModel.detail === null ? "" : ` · ${viewModel.detail}`}`
       : shellHeader(shell.active, shell.status)
     this.header.fg = shell === undefined
-      ? entry.turn.role === "assistant" ? this.#theme.accentStrong : this.#theme.info
+      ? entry.turn.role === "assistant" ? this.#theme.primary : this.#theme.info
       : shell.active
         ? this.#theme.info
         : shell.status === 0
           ? this.#theme.success
           : shell.status === null
-            ? this.#theme.muted
-            : this.#theme.danger
+            ? this.#theme.textMuted
+            : this.#theme.error
     this.header.height = toolOnly ? 0 : 1
     this.header.visible = shell !== undefined || (!toolOnly && markdown !== "")
   }
@@ -1450,7 +1450,7 @@ export class TranscriptRenderable extends BoxRenderable {
       scrollAcceleration: getScrollAcceleration(),
       viewportCulling: true,
       contentOptions: { flexDirection: "column", width: "100%" },
-      verticalScrollbarOptions: { showArrows: false, trackOptions: { backgroundColor: theme.panel } },
+      verticalScrollbarOptions: { showArrows: false, trackOptions: { backgroundColor: theme.backgroundPanel } },
     })
     this.scroller.onMouseUp = () => this.#onInteraction?.()
     this.emptyState = new BoxRenderable(ctx, {
@@ -1466,7 +1466,7 @@ export class TranscriptRenderable extends BoxRenderable {
     this.emptyStateTitle = new TextRenderable(ctx, {
       id: "transcript-empty-state-title",
       content: "Rottweiler",
-      fg: theme.accentStrong,
+      fg: theme.primary,
       height: 1,
       flexShrink: 0,
       selectable: true,
@@ -1474,7 +1474,7 @@ export class TranscriptRenderable extends BoxRenderable {
     this.emptyStateHint = new TextRenderable(ctx, {
       id: "transcript-empty-state-hint",
       content: "Ready for a task. Type / for commands or @ to add workspace files.",
-      fg: theme.muted,
+      fg: theme.textMuted,
       height: 2,
       flexShrink: 0,
       wrapMode: "word",
@@ -1496,7 +1496,7 @@ export class TranscriptRenderable extends BoxRenderable {
     })
     this.#tailHeader = new TextRenderable(ctx, {
       content: "Rottweiler · streaming",
-      fg: theme.accentStrong,
+      fg: theme.primary,
       height: 1,
       flexShrink: 0,
     })
@@ -1564,7 +1564,7 @@ export class TranscriptRenderable extends BoxRenderable {
     })
     this.#compactionHeader = new TextRenderable(ctx, {
       content: "Rottweiler · compacting context",
-      fg: theme.accentStrong,
+      fg: theme.primary,
       height: 1,
       flexShrink: 0,
     })

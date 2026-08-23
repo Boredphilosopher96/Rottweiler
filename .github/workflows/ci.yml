@@ -47,7 +47,12 @@ jobs:
           bun install --cwd packages/tui --frozen-lockfile
       - run: cargo test --locked --workspace --all-features
       - run: cargo run --locked --quiet -p xtask -- codegen --check
+      - run: cargo run --locked --quiet -p rw-plugin-protocol --bin rw-plugin-protocol-codegen -- --check
+      - run: python3 scripts/release_contract.py generate-rust --check
+      - run: python3 scripts/release_contract.py generate-typescript --check
       - run: python3 scripts/check-dependency-direction.py
+      - run: python3 scripts/check-ownership.py
+      - run: python3 scripts/check-toolchain-ownership.py
       - run: python3 scripts/check-network-boundaries.py
       - name: Capability-eval adapter contract
         run: |

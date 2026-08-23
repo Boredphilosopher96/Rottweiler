@@ -1,8 +1,9 @@
 use std::{collections::BTreeMap, path::Path};
 
+use rw_types::config::ThinkingLevel;
 use serde::{Deserialize, Serialize};
 
-use crate::{ProviderError, ProviderErrorKind, ThinkingLevel, TokenUsage};
+use crate::{ProviderError, ProviderErrorKind, TokenUsage};
 
 /// Per-million-token prices in micro-US-dollars. Keeping rates integral avoids
 /// floating-point drift in session budgets and replay fixtures.

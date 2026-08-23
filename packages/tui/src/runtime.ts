@@ -263,11 +263,12 @@ export class TuiEngineRuntime {
       let dispatched = command
       const fork = command.type === "fork"
       if (fork) {
-        const operationId =
-          command.operation_id ??
-          (await this.#forkOperations?.prepare(command.session_id, command.at_turn ?? null)) ??
-          crypto.randomUUID()
-        dispatched = { ...command, operation_id: operationId }
+        await this.#forkOperations?.prepare(
+          command.session_id,
+          command.at_turn ?? null,
+          command.operation_id,
+        )
+        dispatched = command
         this.#forkRequests.set(command.meta.request_id, command.session_id)
       }
       const outcome = await this.#client.postCommand(
@@ -990,12 +991,17 @@ class ForkOperationHandoff {
     this.#files = files
   }
 
-  async prepare(sessionId: string, atTurn: string | null): Promise<string> {
+  async prepare(sessionId: string, atTurn: string | null, operationId: string): Promise<string> {
     const path = this.#path(sessionId)
     const existing = (await this.#files.readText(path, FORK_OPERATION_FILE_LIMIT))?.trim()
     if (existing !== undefined && existing !== null && existing.length > 0) {
       const operation = parseForkOperation(existing)
       if (operation.session_id !== sessionId || operation.at_turn !== atTurn) {
+        throw new EngineRuntimeError(
+          "another fork operation is pending for this session; retry its original boundary",
+        )
+      }
+      if (operation.operation_id !== operationId) {
         throw new EngineRuntimeError(
           "another fork operation is pending for this session; retry its original boundary",
         )
@@ -1006,7 +1012,7 @@ class ForkOperationHandoff {
       version: 1,
       session_id: sessionId,
       at_turn: atTurn,
-      operation_id: crypto.randomUUID(),
+      operation_id: operationId,
     }
     await this.#files.writePrivateTextAtomic(path, `${JSON.stringify(operation)}\n`)
     return operation.operation_id

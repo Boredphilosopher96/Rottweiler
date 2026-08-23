@@ -13,13 +13,13 @@ use std::{
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use rw_core::{ModelAccounting, ModelDriver, ModelPricingSource, ProviderFactory};
-use rw_ext::MAX_PROVIDER_ALIAS_PREFIX_BYTES;
+use rw_plugin_protocol::MAX_PROVIDER_ALIAS_PREFIX_BYTES;
 use rw_providers::{
     BoxEventStream, CacheBreakpointSupport, CacheHint, Capabilities, DiscoveredModel,
     DiscoveredProviderCatalog, FinishReason, ModelPricing, NetworkPolicy, PricingTable, Provider,
     ProviderError, ProviderErrorKind, ProviderEvent, ProviderModelMetadata, ProviderRequest,
-    ProxyEnvironment, Recorder, ReplayProvider, RetryPolicy, ThinkingLevel, ToolChoice,
-    ToolDefinition, UsageAccounting, WireMode,
+    ProxyEnvironment, Recorder, ReplayProvider, RetryPolicy, ToolChoice, ToolDefinition,
+    UsageAccounting, WireMode,
 };
 use rw_store::credentials::{
     CREDENTIAL_VAULT_ID, CredentialEnvironment, CredentialError, CredentialManager,
@@ -27,7 +27,7 @@ use rw_store::credentials::{
 };
 use rw_types::{
     Block, Cost, ImageRef, Role, ToolCallId, ToolOutput, ToolOutputPart, Turn, TurnMeta,
-    config::{ProviderAuthScheme, ProviderConfig, ProviderModelPricingConfig},
+    config::{ProviderAuthScheme, ProviderConfig, ProviderModelPricingConfig, ThinkingLevel},
 };
 use serde_json::json;
 use tempfile::tempdir;
@@ -841,7 +841,7 @@ fn subscription_config(model: &str) -> rw_types::config::Config {
 fn subscription_credential_store() -> TestCredentialStore {
     let credential_store = TestCredentialStore::default();
     credential_store.insert(
-        "providers.fixture.openai_subscription",
+        "providers.fixture.openai_codex",
         r#"{"version":1,"access_token":"subscription-access-canary","refresh_token":"subscription-refresh-canary","account_id":"acct-fixture"}"#,
     );
     credential_store

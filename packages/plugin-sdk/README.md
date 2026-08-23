@@ -1,7 +1,7 @@
 # `@rottweiler/plugin`
 
 Official zero-runtime-dependency TypeScript SDK for Rottweiler's stable
-newline-delimited JSON-RPC 2.0 plugin protocol 2, with unchanged protocol-1 compatibility.
+newline-delimited JSON-RPC 2.0 plugin protocol 2.
 
 Use `definePlugin` to declare the complete capability manifest and handlers,
 then call `runPlugin(plugin)` from the executable entry point. The SDK rejects
@@ -26,7 +26,7 @@ the plugin receives the reference and response bytes, never the credential value
 Pushes are JSON-RPC requests and must be listed exactly in `capabilities.push`
 before `context.push` will emit them. Every handler receives an `AbortSignal`;
 the SDK cancels it on shutdown, request cancellation, and—except for provider
-streams—after the bounded handler timeout (5 seconds by default).
+streams—after the bounded generated default handler timeout.
 
 `scaffoldTypeScriptPlugin(path, options)` is the deterministic API used by
 `rw plugin scaffold --lang ts`. The package also exposes the

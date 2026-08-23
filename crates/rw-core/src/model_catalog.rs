@@ -20,18 +20,12 @@ pub struct ModelCatalogError(pub String);
 pub trait ModelCatalogSource: Send + Sync + 'static {
     async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError>;
 
-    /// Discovers one exact provider without requiring callers to compose or
-    /// authenticate unrelated providers. Sources with a provider-aware
-    /// boundary should override this method; the default preserves backwards
-    /// compatibility for simple and test sources.
+    /// Discovers one exact provider without composing or authenticating
+    /// unrelated providers.
     async fn discover_provider(
         &self,
         provider: &str,
-    ) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
-        let mut snapshot = self.discover().await?;
-        retain_provider(&mut snapshot, provider);
-        Ok(snapshot)
-    }
+    ) -> Result<ModelCatalogSnapshot, ModelCatalogError>;
 }
 
 struct CachedSnapshot {
@@ -135,9 +129,11 @@ impl CachedModelCatalog {
         let mut cached = self.snapshot.lock().await;
         let now = self.clock.now();
         let mut update = self.source.discover_provider(provider).await?;
-        retain_provider(&mut update, provider);
+        retain_model_catalog_provider(&mut update, provider);
         let mut snapshot = match cached.as_ref() {
-            Some(existing) => merge_provider(existing.snapshot.clone(), update, provider),
+            Some(existing) => {
+                merge_model_catalog_provider(existing.snapshot.clone(), update, provider)
+            }
             None => update,
         };
         snapshot.cached = false;
@@ -153,7 +149,8 @@ fn candidate_provider(candidate: &str) -> Option<&str> {
     candidate.split_once('/').map(|(provider, _)| provider)
 }
 
-fn retain_provider(snapshot: &mut ModelCatalogSnapshot, provider: &str) {
+/// Retains only one provider and its exact model and alias relations.
+pub fn retain_model_catalog_provider(snapshot: &mut ModelCatalogSnapshot, provider: &str) {
     snapshot.providers.retain(|row| row.name == provider);
     snapshot.models.retain(|model| model.provider == provider);
     snapshot.aliases.retain_mut(|alias| {
@@ -164,11 +161,15 @@ fn retain_provider(snapshot: &mut ModelCatalogSnapshot, provider: &str) {
     });
 }
 
-fn merge_provider(
+/// Replaces one provider projection in a catalog without disturbing other
+/// providers.
+#[must_use]
+pub fn merge_model_catalog_provider(
     mut base: ModelCatalogSnapshot,
     mut update: ModelCatalogSnapshot,
     provider: &str,
 ) -> ModelCatalogSnapshot {
+    retain_model_catalog_provider(&mut update, provider);
     base.providers.retain(|row| row.name != provider);
     base.providers.append(&mut update.providers);
     base.providers
@@ -197,6 +198,7 @@ fn merge_provider(
     base.aliases
         .sort_by(|left, right| left.alias.0.cmp(&right.alias.0));
     base.truncated |= update.truncated;
+    base.cached = false;
     base
 }
 
@@ -235,6 +237,13 @@ mod tests {
                 cached: false,
                 truncated: false,
             })
+        }
+
+        async fn discover_provider(
+            &self,
+            _provider: &str,
+        ) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
+            self.discover().await
         }
     }
 

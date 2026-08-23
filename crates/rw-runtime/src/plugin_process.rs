@@ -10,8 +10,9 @@ use std::{
 use async_trait::async_trait;
 use rw_ext::{
     CapabilityViolation, LaunchedPluginProcess, PluginLauncher, PluginProcessConfig,
-    PluginProcessError, PluginSandboxProfile, PluginToolEffect, SupervisedPluginProcess,
+    PluginProcessError, PluginSandboxProfile, SupervisedPluginProcess,
 };
+use rw_plugin_protocol::PluginToolEffect;
 use rw_tools::{
     EgressPolicy, NetworkPolicy, SandboxPolicy, SandboxSupport, SupervisedEgressProxy,
     probe_sandbox, shell_launch_plan,
@@ -369,9 +370,11 @@ mod tests {
 
     use super::*;
     use rw_ext::{
-        ApprovalStore, ApprovalStoreError, DenyPushHandler, LaunchedPluginProcess,
-        METHOD_TOOL_CALL, PluginCapabilities, PluginHost, PluginLauncher, PluginManifest,
-        PluginToolCapability, SupervisedPluginProcess, approve_plugin_launch,
+        ApprovalStore, ApprovalStoreError, DenyPushHandler, LaunchedPluginProcess, PluginHost,
+        PluginLauncher, SupervisedPluginProcess, approve_plugin_launch,
+    };
+    use rw_plugin_protocol::{
+        METHOD_TOOL_CALL, PluginCapabilities, PluginManifest, PluginToolCapability,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -586,7 +589,7 @@ mod tests {
             (
                 "pre-tool-deny-custom-tool.ts",
                 json!({
-                    "name":"conformance-policy-tool", "version":"1.0.0", "protocol":1,
+                    "name":"conformance-policy-tool", "version":"1.0.0", "protocol":2,
                     "capabilities": {
                         "tools":[{"name":"fixture_echo","description":"Echo bounded fixture input","schema":{"type":"object","required":["text"],"properties":{"text":{"type":"string"}}},"caps":[]}],
                         "hooks":[{"name":"pre_tool","failure_policy":"fail-closed"}]
@@ -596,14 +599,14 @@ mod tests {
             (
                 "event-subscriber.ts",
                 json!({
-                    "name":"conformance-event-subscriber", "version":"1.0.0", "protocol":1,
+                    "name":"conformance-event-subscriber", "version":"1.0.0", "protocol":2,
                     "capabilities":{"event_subscriptions":["TurnFinished"],"push":["session/set_status"]}
                 }),
             ),
             (
                 "provider.ts",
                 json!({
-                    "name":"conformance-provider", "version":"1.0.0", "protocol":1,
+                    "name":"conformance-provider", "version":"1.0.0", "protocol":2,
                     "capabilities":{"providers":[{"alias-prefix":"fixture/"}]}
                 }),
             ),
@@ -645,7 +648,7 @@ mod tests {
         };
         let config = compiled_fixture_config(&bun, &sdk, &package, "network-without-capability.ts");
         let manifest: PluginManifest = serde_json::from_value(json!({
-            "name":"network-without-capability", "version":"1.0.0", "protocol":1,
+            "name":"network-without-capability", "version":"1.0.0", "protocol":2,
             "capabilities":{}
         }))
         .expect("adversarial manifest");
@@ -708,7 +711,7 @@ mod tests {
         let config =
             compiled_fixture_config(&bun, &sdk, &package, "read-sibling-without-capability.ts");
         let manifest: PluginManifest = serde_json::from_value(json!({
-            "name":"read-sibling-without-capability", "version":"1.0.0", "protocol":1,
+            "name":"read-sibling-without-capability", "version":"1.0.0", "protocol":2,
             "capabilities":{"tools":[{
                 "name":"read_sibling_probe",
                 "description":"Verify sibling workspace reads are denied",

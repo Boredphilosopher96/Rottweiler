@@ -371,6 +371,10 @@ impl Tool for DiagnosticsTool {
         )
     }
 
+    fn workspace_paths(&self, input: &Value) -> Result<Vec<PathBuf>, ToolError> {
+        Ok(vec![parse_input::<DiagnosticsInput>(input.clone())?.path])
+    }
+
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {
         context.cancellation.check()?;
         let input: DiagnosticsInput = parse_input(input)?;
@@ -410,6 +414,10 @@ impl Tool for DefinitionTool {
         )
     }
 
+    fn workspace_paths(&self, input: &Value) -> Result<Vec<PathBuf>, ToolError> {
+        Ok(vec![parse_input::<PositionInput>(input.clone())?.path])
+    }
+
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {
         context.cancellation.check()?;
         let input: PositionInput = parse_input(input)?;
@@ -432,6 +440,10 @@ impl Tool for ReferencesTool {
         )
     }
 
+    fn workspace_paths(&self, input: &Value) -> Result<Vec<PathBuf>, ToolError> {
+        Ok(vec![parse_input::<PositionInput>(input.clone())?.path])
+    }
+
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {
         context.cancellation.check()?;
         let input: PositionInput = parse_input(input)?;
@@ -452,6 +464,10 @@ impl Tool for RenameTool {
             "rename",
             "Ask LSP for a bounded, workspace-confined rename edit plan. The tool does not apply edits; the ordinary checkpointed edit path must apply them.",
         )
+    }
+
+    fn workspace_paths(&self, input: &Value) -> Result<Vec<PathBuf>, ToolError> {
+        Ok(vec![parse_input::<RenameInput>(input.clone())?.path])
     }
 
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {

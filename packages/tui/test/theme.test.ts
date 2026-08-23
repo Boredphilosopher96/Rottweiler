@@ -68,15 +68,10 @@ describe("themes", () => {
     expect(themeCatalog).toHaveLength(34)
   })
 
-  test("resolves variants, role references, fallbacks, and compact compatibility aliases", () => {
+  test("resolves variants, role references, and optional role defaults", () => {
     const dark = resolveThemeJson(DEFAULT_THEMES.opencode!, "dark", "opencode")
     const light = resolveThemeJson(DEFAULT_THEMES.opencode!, "light", "opencode")
     expect(dark.background).not.toBe(light.background)
-    expect(dark.panel).toBe(dark.backgroundPanel)
-    expect(dark.panelRaised).toBe(dark.backgroundElement)
-    expect(dark.foreground).toBe(dark.text)
-    expect(dark.added).toBe(dark.diffAddedBg)
-    expect(dark.removed).toBe(dark.diffRemovedBg)
     expect(dark.backgroundMenu).toBe(dark.backgroundElement)
     expect(dark.selectedListItemText).toBe(dark.background)
   })

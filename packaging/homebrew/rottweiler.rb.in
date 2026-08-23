@@ -23,7 +23,7 @@ class Rottweiler < Formula
     assert_equal "rw #{version}\n", shell_output("#{bin}/rw --version")
     assert_predicate libexec/"rottweiler-tui", :executable?
     assert_predicate libexec/"rottweiler-wasm-host", :executable?
-    native = OS.mac? ? "libopentui.dylib" : "libopentui.so"
+    native = OS.mac? ? "@MACOS_NATIVE_LIBRARY@" : "@LINUX_NATIVE_LIBRARY@"
     assert_predicate libexec/native, :file?
     refute_path_exists bin/"rottweiler-tui"
     guidance = shell_output("#{bin}/rw upgrade 2>&1", 1)

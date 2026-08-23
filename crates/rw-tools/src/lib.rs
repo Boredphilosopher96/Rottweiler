@@ -6,7 +6,6 @@
 
 mod background;
 mod bash;
-mod builtins;
 mod files;
 mod intelligence;
 mod interaction;
@@ -36,7 +35,6 @@ pub use bash::{
     IdentityCommandFixtureRedactor, RecordingCommandExecutor, ReplayCommandExecutor,
     TokioCommandExecutor, classify_safe_command,
 };
-pub use builtins::{BuiltinDependencies, BuiltinHandles, register_builtins};
 pub use files::{
     EditInput, EditOperation, EditTool, MultiEditInput, MultiEditTool, ReadInput, ReadTool,
     WriteInput, WriteTool,
@@ -56,9 +54,9 @@ pub use protocol::{
 pub use registry::{
     ApprovalPreview, CancellationToken, CapabilityManifest, McpToolPolicy, MutationScope,
     NoopOutputSink, SubagentEventSink, SubagentLifecycleEvent, SubagentLifecycleMode,
-    SubagentProgressEvent, Tool, ToolContext, ToolDescriptor, ToolError, ToolLimits,
-    ToolOutputChunk, ToolOutputSink, ToolRegistry, ToolResult, WorkspaceBinding,
-    validate_mcp_virtual_tool,
+    SubagentProgressEvent, Tool, ToolBehavior, ToolContext, ToolDescriptor, ToolError,
+    ToolInvocationSemantics, ToolLimits, ToolOutputChunk, ToolOutputSink, ToolRegistry, ToolResult,
+    WorkspaceBinding, validate_mcp_virtual_tool,
 };
 pub use rw_intel::{
     CodeIntelligence, Diagnostic, DiagnosticSeverity, IntelligenceBackend, IntelligenceResult,

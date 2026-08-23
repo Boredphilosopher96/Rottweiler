@@ -9,7 +9,7 @@ use std::{
 
 use async_trait::async_trait;
 use futures_util::StreamExt as _;
-use rw_ext::validate_provider_alias_prefix;
+use rw_plugin_protocol::validate_provider_alias_prefix;
 use rw_providers::{
     AnthropicConfig, AnthropicProvider, AnthropicThinkingStrategy, AuthMaterial, AuthProvider,
     BoxEventStream, CacheBreakpointSupport, Capabilities, FixtureRedactor,
@@ -22,8 +22,7 @@ use rw_providers::{
     OpenAiWireMode, PricingTable, Provider, ProviderError, ProviderErrorKind,
     ProviderModelMetadata, ProviderRequest, ProviderRouter, ProxyAuthentication, ProxyEnvironment,
     ProxySettings, ProxySource, RefreshTokenSink, RefreshingOAuth, RetryPolicy, RouterError,
-    Secret as ProviderSecret, StaticAuth, ThinkingLevel, ToolChoice, UsageAccounting,
-    WireFrameSink, WireMode,
+    Secret as ProviderSecret, StaticAuth, ToolChoice, UsageAccounting, WireFrameSink, WireMode,
 };
 use rw_store::credentials::{
     CredentialEnvironment, CredentialError, CredentialManager, CredentialReference,
@@ -33,6 +32,7 @@ use rw_tools::{
     CancellationToken, ToolError, WebSearchRequest, WebSearchResponse, WebSearchResult,
     WebSearchSource, WebSearcher,
 };
+use rw_types::config::ThinkingLevel;
 use rw_types::{
     Cost, ModelAlias, ModelAliasDescriptor, ModelCacheBehavior, ModelCapabilities,
     ModelCatalogSnapshot, ModelDescriptor, ProviderAuthKind, ProviderDescriptor,
@@ -48,7 +48,7 @@ use url::{Host, Url};
 use crate::admin::provider_api_key_credential_reference;
 use crate::copilot_credentials::{GitHubCopilotCredential, github_copilot_credential_id};
 use crate::subscription_credentials::{
-    OpenAiSubscriptionCredentialBundle, openai_subscription_credential_id,
+    OpenAiSubscriptionCredentialBundle, openai_codex_credential_id,
 };
 use crate::{ModelCatalogError, ModelCatalogSource};
 
@@ -64,6 +64,128 @@ const MAX_CATALOG_ALIAS_CANDIDATES: usize = 32;
 const MAX_CATALOG_WIRE_BYTES: usize = 512 * 1024;
 const MAX_CATALOG_ID_BYTES: usize = 512;
 const MAX_CATALOG_TEXT_BYTES: usize = 512;
+
+/// Runtime adapter selected by a provider configuration kind.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdapterKind {
+    Anthropic,
+    OpenAiResponses,
+    OpenAiChat,
+    OpenAiSubscription,
+    GitHubCopilot,
+    OpenAiCompatibleResponses,
+    OpenAiCompatibleChat,
+}
+
+/// Canonical identity of a provider exposed by built-in onboarding.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum BuiltinProviderId {
+    Anthropic,
+    OpenAi,
+    OpenAiCodex,
+    GitHubCopilot,
+}
+
+/// Fixed metadata for one provider exposed by built-in onboarding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BuiltinProviderProfile {
+    id: BuiltinProviderId,
+    canonical_id: &'static str,
+    adapter_kind: AdapterKind,
+    setup_exposed: bool,
+    onboarding_auth_kind: ProviderAuthKind,
+}
+
+/// Complete built-in onboarding registry in stable display order.
+pub const BUILTIN_PROVIDER_PROFILES: [BuiltinProviderProfile; 4] = [
+    BuiltinProviderProfile {
+        id: BuiltinProviderId::Anthropic,
+        canonical_id: "anthropic",
+        adapter_kind: AdapterKind::Anthropic,
+        setup_exposed: true,
+        onboarding_auth_kind: ProviderAuthKind::ApiKey,
+    },
+    BuiltinProviderProfile {
+        id: BuiltinProviderId::OpenAi,
+        canonical_id: "openai",
+        adapter_kind: AdapterKind::OpenAiResponses,
+        setup_exposed: true,
+        onboarding_auth_kind: ProviderAuthKind::ApiKey,
+    },
+    BuiltinProviderProfile {
+        id: BuiltinProviderId::OpenAiCodex,
+        canonical_id: "openai_codex",
+        adapter_kind: AdapterKind::OpenAiSubscription,
+        setup_exposed: true,
+        onboarding_auth_kind: ProviderAuthKind::Oauth,
+    },
+    BuiltinProviderProfile {
+        id: BuiltinProviderId::GitHubCopilot,
+        canonical_id: "github_copilot",
+        adapter_kind: AdapterKind::GitHubCopilot,
+        setup_exposed: true,
+        onboarding_auth_kind: ProviderAuthKind::DeviceFlow,
+    },
+];
+
+impl BuiltinProviderId {
+    /// Parses a canonical built-in provider id. Adapter aliases do not count as
+    /// built-in onboarding identities.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        BUILTIN_PROVIDER_PROFILES
+            .iter()
+            .find(|profile| profile.canonical_id == value)
+            .map(|profile| profile.id)
+    }
+
+    /// Returns the fixed profile for this identity.
+    #[must_use]
+    pub const fn profile(self) -> BuiltinProviderProfile {
+        BUILTIN_PROVIDER_PROFILES[self as usize]
+    }
+
+    /// Resolves only a canonical provider configured with its fixed built-in
+    /// adapter kind.
+    #[must_use]
+    pub fn from_config(provider: &str, kind: &str) -> Option<Self> {
+        Self::parse(provider).filter(|id| id.profile().config_kind() == kind)
+    }
+}
+
+impl BuiltinProviderProfile {
+    #[must_use]
+    pub const fn id(self) -> BuiltinProviderId {
+        self.id
+    }
+
+    #[must_use]
+    pub const fn canonical_id(self) -> &'static str {
+        self.canonical_id
+    }
+
+    /// Built-in profiles currently use their canonical id as the fixed config
+    /// kind, so the string has one owner.
+    #[must_use]
+    pub const fn config_kind(self) -> &'static str {
+        self.canonical_id
+    }
+
+    #[must_use]
+    pub const fn adapter_kind(self) -> AdapterKind {
+        self.adapter_kind
+    }
+
+    #[must_use]
+    pub const fn setup_exposed(self) -> bool {
+        self.setup_exposed
+    }
+
+    #[must_use]
+    pub const fn onboarding_auth_kind(self) -> ProviderAuthKind {
+        self.onboarding_auth_kind
+    }
+}
 
 /// Production live-catalog source using the same secure provider composition
 /// boundary as inference.
@@ -1196,6 +1318,27 @@ impl ProviderRuntime {
     }
 }
 
+async fn discover_runtime_provider(
+    provider_name: String,
+    provider: Arc<dyn Provider>,
+    discovery_timeout: std::time::Duration,
+) -> (
+    String,
+    String,
+    bool,
+    Result<rw_providers::DiscoveredProviderCatalog, String>,
+) {
+    let candidate = discovery_candidate(&provider_name);
+    let discovery = tokio::time::timeout(discovery_timeout, provider.discover_models())
+        .await
+        .map_err(|_| "model discovery timed out".to_owned())
+        .and_then(|result| result.map_err(|error| provider_discovery_status(&error).to_owned()))
+        .and_then(|catalog| {
+            catalog.ok_or_else(|| "provider does not expose live model discovery".to_owned())
+        });
+    (provider_name, candidate, true, discovery)
+}
+
 #[async_trait]
 impl ModelCatalogSource for ProviderRuntime {
     async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
@@ -1210,22 +1353,7 @@ impl ModelCatalogSource for ProviderRuntime {
         let pending = providers
             .into_iter()
             .map(|(provider_name, provider)| {
-                let candidate = discovery_candidate(&provider_name);
-                async move {
-                    let discovery =
-                        tokio::time::timeout(discovery_timeout, provider.discover_models())
-                            .await
-                            .map_err(|_| "model discovery timed out".to_owned())
-                            .and_then(|result| {
-                                result.map_err(|error| provider_discovery_status(&error).to_owned())
-                            })
-                            .and_then(|catalog| {
-                                catalog.ok_or_else(|| {
-                                    "provider does not expose live model discovery".to_owned()
-                                })
-                            });
-                    (provider_name, candidate, true, discovery)
-                }
+                discover_runtime_provider(provider_name, provider, discovery_timeout)
             })
             .collect::<Vec<_>>();
         let discoveries = futures_util::stream::iter(pending)
@@ -1236,6 +1364,30 @@ impl ModelCatalogSource for ProviderRuntime {
             &self.config,
             &self.pricing_table,
             discoveries,
+        ))
+    }
+
+    async fn discover_provider(
+        &self,
+        provider: &str,
+    ) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
+        let discovery_provider = self
+            .discovery_providers
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(provider)
+            .cloned()
+            .ok_or_else(|| ModelCatalogError(format!("provider {provider:?} is unavailable")))?;
+        let discovery = discover_runtime_provider(
+            provider.to_owned(),
+            discovery_provider,
+            self.model_discovery_timeout,
+        )
+        .await;
+        Ok(project_model_catalog(
+            &self.config,
+            &self.pricing_table,
+            vec![discovery],
         ))
     }
 }
@@ -1913,7 +2065,7 @@ where
             .models
             .thinking
             .iter()
-            .map(|(alias, level)| (alias.clone(), convert_thinking(*level)))
+            .map(|(alias, level)| (alias.clone(), *level))
             .collect();
         let alias_candidates = config.models.aliases.clone();
         let mut discovery_providers: BTreeMap<String, Arc<dyn Provider>> = connections
@@ -2366,7 +2518,7 @@ where
                 "openai_codex uses only its built-in ChatGPT subscription OAuth credential bundle",
             ));
         }
-        let reference = CredentialReference::new(openai_subscription_credential_id(provider_name));
+        let reference = CredentialReference::new(openai_codex_credential_id(provider_name));
         let resolved = self
             .resolve_credential(&reference)
             .map_err(|error| ProviderFactoryError::new(provider_name, error.to_string()))?;
@@ -2864,35 +3016,31 @@ fn qualify_bound_message_start(mut stream: BoxEventStream, candidate: String) ->
     })
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AdapterKind {
-    Anthropic,
-    OpenAiResponses,
-    OpenAiChat,
-    OpenAiSubscription,
-    GitHubCopilot,
-    OpenAiCompatibleResponses,
-    OpenAiCompatibleChat,
-}
-
 impl AdapterKind {
-    fn parse(provider: &str, value: &str) -> Result<Self, ProviderFactoryError> {
+    /// Parses the complete configuration grammar.
+    #[must_use]
+    pub fn from_config_kind(value: &str) -> Option<Self> {
+        if let Some(profile) = BUILTIN_PROVIDER_PROFILES
+            .iter()
+            .find(|profile| profile.config_kind() == value)
+        {
+            return Some(profile.adapter_kind());
+        }
         match value {
-            "anthropic" => Ok(Self::Anthropic),
-            "openai" | "openai_responses" => Ok(Self::OpenAiResponses),
-            "openai_chat" => Ok(Self::OpenAiChat),
-            "openai_codex" | "openai_subscription" => Ok(Self::OpenAiSubscription),
-            "github_copilot" => Ok(Self::GitHubCopilot),
-            "openai_compatible_responses" => Ok(Self::OpenAiCompatibleResponses),
-            "openai_compatible" | "openai_compatible_chat" => Ok(Self::OpenAiCompatibleChat),
-            _ => Err(ProviderFactoryError::new(
-                provider,
-                "unsupported adapter kind; expected anthropic, github_copilot, openai, openai_chat, openai_codex, openai_compatible, or openai_compatible_responses",
-            )),
+            "openai_chat" => Some(Self::OpenAiChat),
+            "openai_compatible_responses" => Some(Self::OpenAiCompatibleResponses),
+            "openai_compatible" => Some(Self::OpenAiCompatibleChat),
+            _ => None,
         }
     }
 
-    const fn has_official_default(self) -> bool {
+    fn parse(provider: &str, value: &str) -> Result<Self, ProviderFactoryError> {
+        Self::from_config_kind(value)
+            .ok_or_else(|| ProviderFactoryError::new(provider, "unsupported provider adapter kind"))
+    }
+
+    #[must_use]
+    pub const fn has_official_default(self) -> bool {
         matches!(
             self,
             Self::Anthropic | Self::OpenAiResponses | Self::OpenAiChat
@@ -2909,7 +3057,8 @@ impl AdapterKind {
         }
     }
 
-    const fn default_api_key_environment(self) -> Option<&'static str> {
+    #[must_use]
+    pub const fn default_api_key_environment(self) -> Option<&'static str> {
         match self {
             Self::Anthropic => Some("ANTHROPIC_API_KEY"),
             Self::OpenAiResponses | Self::OpenAiChat => Some("OPENAI_API_KEY"),
@@ -2917,6 +3066,28 @@ impl AdapterKind {
             | Self::GitHubCopilot
             | Self::OpenAiCompatibleResponses
             | Self::OpenAiCompatibleChat => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn default_endpoint(self) -> Option<&'static str> {
+        match self {
+            Self::Anthropic => Some(ANTHROPIC_MESSAGES_ENDPOINT),
+            Self::OpenAiResponses => Some(OPENAI_RESPONSES_ENDPOINT),
+            Self::OpenAiChat => Some(OPENAI_CHAT_ENDPOINT),
+            Self::OpenAiSubscription => Some(OPENAI_SUBSCRIPTION_RESPONSES_ENDPOINT),
+            Self::GitHubCopilot => Some(GITHUB_COPILOT_ENDPOINT),
+            Self::OpenAiCompatibleResponses | Self::OpenAiCompatibleChat => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn auth_kind(self, oauth_configured: bool) -> ProviderAuthKind {
+        match self {
+            Self::OpenAiSubscription => ProviderAuthKind::Oauth,
+            Self::GitHubCopilot => ProviderAuthKind::DeviceFlow,
+            _ if oauth_configured => ProviderAuthKind::Oauth,
+            _ => ProviderAuthKind::ApiKey,
         }
     }
 }
@@ -2995,14 +3166,7 @@ fn resolve_endpoint(
     config: &ProviderConfig,
     kind: AdapterKind,
 ) -> Result<Url, ProviderFactoryError> {
-    let value = config.base_url.as_deref().or(match kind {
-        AdapterKind::Anthropic => Some(ANTHROPIC_MESSAGES_ENDPOINT),
-        AdapterKind::OpenAiResponses => Some(OPENAI_RESPONSES_ENDPOINT),
-        AdapterKind::OpenAiChat => Some(OPENAI_CHAT_ENDPOINT),
-        AdapterKind::OpenAiSubscription => Some(OPENAI_SUBSCRIPTION_RESPONSES_ENDPOINT),
-        AdapterKind::GitHubCopilot => Some(GITHUB_COPILOT_ENDPOINT),
-        AdapterKind::OpenAiCompatibleResponses | AdapterKind::OpenAiCompatibleChat => None,
-    });
+    let value = config.base_url.as_deref().or(kind.default_endpoint());
     let value = value.ok_or_else(|| {
         ProviderFactoryError::new(
             provider,
@@ -3229,11 +3393,16 @@ fn project_model_catalog(
         };
         providers.push(provider);
     }
-    for name in ["anthropic", "openai", "openai_codex", "github_copilot"] {
+    for profile in BUILTIN_PROVIDER_PROFILES
+        .iter()
+        .copied()
+        .filter(|profile| profile.setup_exposed())
+    {
+        let name = profile.canonical_id();
         if !providers.iter().any(|provider| provider.name == name) {
             providers.push(ProviderDescriptor {
                 name: name.to_owned(),
-                auth_kind: known_provider_auth_kind(name),
+                auth_kind: profile.onboarding_auth_kind(),
                 next_action: ProviderNextAction::Configure,
                 configured: false,
                 authenticated: false,
@@ -3288,7 +3457,6 @@ fn project_available_provider(
         models.insert(
             id.clone(),
             ModelDescriptor {
-                alias: ModelAlias(id.clone()),
                 id: id.clone(),
                 display_name: bounded_catalog_text(
                     discovered
@@ -3297,7 +3465,6 @@ fn project_available_provider(
                         .unwrap_or(discovered.id),
                 ),
                 provider: provider_name.to_owned(),
-                providers: vec![provider_name.to_owned()],
                 aliases: reverse_aliases.get(&id).cloned().unwrap_or_default(),
                 current: current_candidate == Some(&id),
                 available: true,
@@ -3400,18 +3567,12 @@ fn provider_auth_kind(config: &Config, provider: &str) -> ProviderAuthKind {
     let Some(entry) = config.providers.get(provider) else {
         return ProviderAuthKind::None;
     };
+    let oauth_configured = entry.oauth_token_env.is_some()
+        || entry.oauth_authorization_endpoint.is_some()
+        || entry.oauth_access_token_credential.is_some()
+        || entry.oauth_refresh_token_credential.is_some();
     match AdapterKind::parse(provider, &entry.kind) {
-        Ok(AdapterKind::OpenAiSubscription) => ProviderAuthKind::Oauth,
-        Ok(AdapterKind::GitHubCopilot) => ProviderAuthKind::DeviceFlow,
-        Ok(_)
-            if entry.oauth_token_env.is_some()
-                || entry.oauth_authorization_endpoint.is_some()
-                || entry.oauth_access_token_credential.is_some()
-                || entry.oauth_refresh_token_credential.is_some() =>
-        {
-            ProviderAuthKind::Oauth
-        }
-        Ok(_) => ProviderAuthKind::ApiKey,
+        Ok(kind) => kind.auth_kind(oauth_configured),
         Err(_) => ProviderAuthKind::None,
     }
 }
@@ -3427,15 +3588,6 @@ fn provider_next_action(auth_kind: ProviderAuthKind, authenticated: bool) -> Pro
             ProviderAuthKind::ApiKey => ProviderNextAction::ApiKeyCli,
             ProviderAuthKind::None => ProviderNextAction::None,
         }
-    }
-}
-
-fn known_provider_auth_kind(provider: &str) -> ProviderAuthKind {
-    match provider {
-        "openai_codex" => ProviderAuthKind::Oauth,
-        "github_copilot" => ProviderAuthKind::DeviceFlow,
-        "anthropic" | "openai" => ProviderAuthKind::ApiKey,
-        _ => ProviderAuthKind::None,
     }
 }
 
@@ -3866,12 +4018,92 @@ fn construct_adapter(
     result.map_err(|error| ProviderFactoryError::new(candidate, error.to_string()))
 }
 
-const fn convert_thinking(level: rw_types::config::ThinkingLevel) -> ThinkingLevel {
-    match level {
-        rw_types::config::ThinkingLevel::Off => ThinkingLevel::Off,
-        rw_types::config::ThinkingLevel::Low => ThinkingLevel::Low,
-        rw_types::config::ThinkingLevel::Medium => ThinkingLevel::Medium,
-        rw_types::config::ThinkingLevel::High => ThinkingLevel::High,
+#[cfg(test)]
+mod provider_profile_tests {
+    use super::*;
+
+    #[test]
+    fn built_in_profiles_own_canonical_setup_metadata() {
+        let expected = [
+            (
+                BuiltinProviderId::Anthropic,
+                "anthropic",
+                AdapterKind::Anthropic,
+                ProviderAuthKind::ApiKey,
+            ),
+            (
+                BuiltinProviderId::OpenAi,
+                "openai",
+                AdapterKind::OpenAiResponses,
+                ProviderAuthKind::ApiKey,
+            ),
+            (
+                BuiltinProviderId::OpenAiCodex,
+                "openai_codex",
+                AdapterKind::OpenAiSubscription,
+                ProviderAuthKind::Oauth,
+            ),
+            (
+                BuiltinProviderId::GitHubCopilot,
+                "github_copilot",
+                AdapterKind::GitHubCopilot,
+                ProviderAuthKind::DeviceFlow,
+            ),
+        ];
+
+        for (id, canonical_id, adapter_kind, auth_kind) in expected {
+            let profile = id.profile();
+            assert_eq!(BuiltinProviderId::parse(canonical_id), Some(id));
+            assert_eq!(
+                BuiltinProviderId::from_config(canonical_id, profile.config_kind()),
+                Some(id)
+            );
+            assert_eq!(profile.id(), id);
+            assert_eq!(profile.canonical_id(), canonical_id);
+            assert_eq!(profile.config_kind(), canonical_id);
+            assert_eq!(profile.adapter_kind(), adapter_kind);
+            assert_eq!(profile.onboarding_auth_kind(), auth_kind);
+            assert!(profile.setup_exposed());
+        }
+    }
+
+    #[test]
+    fn custom_adapter_kinds_do_not_become_built_in_provider_ids() {
+        for (kind, adapter) in [
+            ("openai_chat", AdapterKind::OpenAiChat),
+            (
+                "openai_compatible_responses",
+                AdapterKind::OpenAiCompatibleResponses,
+            ),
+            ("openai_compatible", AdapterKind::OpenAiCompatibleChat),
+        ] {
+            assert_eq!(AdapterKind::from_config_kind(kind), Some(adapter));
+            assert_eq!(BuiltinProviderId::parse(kind), None);
+        }
+        assert_eq!(BuiltinProviderId::parse("custom"), None);
+        assert_eq!(
+            BuiltinProviderId::from_config("openai", "openai_chat"),
+            None
+        );
+    }
+
+    #[test]
+    fn custom_provider_auth_remains_config_driven() {
+        let mut config = Config::default();
+        config.providers.insert(
+            "company_gateway".to_owned(),
+            ProviderConfig {
+                kind: "openai_compatible".to_owned(),
+                oauth_token_env: Some("COMPANY_GATEWAY_TOKEN".to_owned()),
+                ..ProviderConfig::default()
+            },
+        );
+
+        assert_eq!(
+            provider_auth_kind(&config, "company_gateway"),
+            ProviderAuthKind::Oauth
+        );
+        assert_eq!(BuiltinProviderId::parse("company_gateway"), None);
     }
 }
 

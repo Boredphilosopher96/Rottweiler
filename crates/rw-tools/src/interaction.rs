@@ -45,6 +45,10 @@ impl Tool for SubmitPlanTool {
         }
     }
 
+    fn behavior(&self) -> crate::ToolBehavior {
+        crate::ToolBehavior::PlanSubmission
+    }
+
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {
         context.cancellation.check()?;
         let artifact: PlanArtifact = parse_input(input)?;
@@ -102,6 +106,10 @@ impl Tool for AskUserTool {
             input_schema: input_schema::<AskUserInput>(),
             capabilities: CapabilityManifest::default(),
         }
+    }
+
+    fn behavior(&self) -> crate::ToolBehavior {
+        crate::ToolBehavior::UserInteraction
     }
 
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {

@@ -26,8 +26,8 @@ use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 
 use crate::{
-    AgentLoopError, CachedModelCatalog, EventClock, ProviderApiKey, SessionHandle,
-    SystemEventClock, store_provider_api_key,
+    AgentLoopError, BuiltinProviderId, BuiltinProviderProfile, CachedModelCatalog, EventClock,
+    ProviderApiKey, SessionHandle, SystemEventClock, store_provider_api_key,
 };
 
 const HOST_EVENT_CAPACITY: usize = 256;
@@ -412,7 +412,10 @@ pub trait HostQueryService: Send + Sync + 'static {
             "provider authentication is unavailable on this host".to_owned(),
         ))
     }
-    async fn configure_builtin_provider(&self, _provider: &str) -> Result<(), HostError> {
+    async fn configure_builtin_provider(
+        &self,
+        _profile: BuiltinProviderProfile,
+    ) -> Result<(), HostError> {
         Err(HostError::Query(
             "built-in provider setup is unavailable on this host".to_owned(),
         ))
@@ -1347,7 +1350,7 @@ impl EngineHost {
             Err(_) => return rejected("command_serialization", "command could not serialize"),
         };
         let key = (bound.client_id.clone(), meta.request_id.clone());
-        let session_id_hint = command_session_id(&command);
+        let session_id_hint = command.session_id().cloned();
         let mut pending_command = Some(command);
         let mut owns_execution = false;
 
@@ -1542,16 +1545,9 @@ impl EngineHost {
         meta: CommandMeta,
         session_id: SessionId,
         at_turn: Option<TurnId>,
-        operation_id: Option<String>,
+        operation_id: String,
         _request_payload_hash: String,
     ) -> CachedDispatch {
-        let operation_id = operation_id.unwrap_or_else(|| {
-            let mut legacy = b"rw-legacy-fork-operation\0".to_vec();
-            legacy.extend_from_slice(meta.client_id.0.as_bytes());
-            legacy.push(0);
-            legacy.extend_from_slice(meta.request_id.0.as_bytes());
-            blake3::hash(&legacy).to_hex().to_string()
-        });
         if operation_id.is_empty()
             || operation_id.len() > 128
             || !operation_id
@@ -2401,11 +2397,18 @@ impl EngineHost {
             } => {
                 validate_provider_auth_name(&provider)?;
                 let session = self.ready_session(&session_id).await?;
-                let auth_kind = builtin_provider_auth_kind(&provider)?;
+                let profile = BuiltinProviderId::parse(&provider)
+                    .map(BuiltinProviderId::profile)
+                    .filter(|profile| profile.setup_exposed())
+                    .ok_or_else(|| {
+                        HostError::Protocol(
+                            "provider is not in the fixed built-in setup registry".to_owned(),
+                        )
+                    })?;
+                let auth_kind = profile.onboarding_auth_kind();
                 let queries = Arc::clone(&self.queries);
                 let provider_mutation = Arc::clone(&self.provider_mutation);
                 let actor = meta.client_id.clone();
-                let provider_for_task = provider.clone();
                 tokio::spawn(async move {
                     let _provider_mutation = provider_mutation.lock_owned().await;
                     let _lifecycle_guard = Arc::clone(&session.lifecycle).lock_owned().await;
@@ -2415,7 +2418,7 @@ impl EngineHost {
                             "only the current driver may configure built-in providers".to_owned(),
                         ));
                     }
-                    queries.configure_builtin_provider(&provider_for_task).await
+                    queries.configure_builtin_provider(profile).await
                 })
                 .await
                 .map_err(|_| HostError::Query("provider configuration task failed".to_owned()))??;
@@ -2845,7 +2848,9 @@ impl EngineHost {
                 ))
             }
             command => {
-                let session_id = command_session_id(&command)
+                let session_id = command
+                    .session_id()
+                    .cloned()
                     .ok_or_else(|| HostError::Protocol("command has no session id".to_owned()))?;
                 let session = self.ready_session(&session_id).await?;
                 let driver = match &command {
@@ -3750,71 +3755,6 @@ async fn ensure_session_driver(
     }
 }
 
-fn command_session_id(command: &ClientCommand) -> Option<SessionId> {
-    match command {
-        ClientCommand::ResumeSession { session_id, .. }
-        | ClientCommand::AttachSession { session_id, .. }
-        | ClientCommand::SendMessage { session_id, .. }
-        | ClientCommand::Interrupt { session_id, .. }
-        | ClientCommand::ApproveTool { session_id, .. }
-        | ClientCommand::ApprovePlan { session_id, .. }
-        | ClientCommand::AnswerQuestion { session_id, .. }
-        | ClientCommand::SwitchMode { session_id, .. }
-        | ClientCommand::SwitchModel { session_id, .. }
-        | ClientCommand::Compact { session_id, .. }
-        | ClientCommand::Fork { session_id, .. }
-        | ClientCommand::Rewind { session_id, .. }
-        | ClientCommand::TakeDriver { session_id, .. }
-        | ClientCommand::UserShellStarted { session_id, .. }
-        | ClientCommand::UserShellEnded { session_id, .. }
-        | ClientCommand::PinContext { session_id, .. }
-        | ClientCommand::EvictContext { session_id, .. }
-        | ClientCommand::GetContext { session_id, .. }
-        | ClientCommand::GetCost { session_id, .. }
-        | ClientCommand::DumpPrompt { session_id, .. }
-        | ClientCommand::GetSessionReview { session_id, .. }
-        | ClientCommand::ReviewFile { session_id, .. }
-        | ClientCommand::SearchWorkspaceFiles { session_id, .. }
-        | ClientCommand::PreviewWorkspaceFile { session_id, .. }
-        | ClientCommand::GetWorkspaceStatus { session_id, .. }
-        | ClientCommand::GetWorkspaceDiff { session_id, .. }
-        | ClientCommand::ListCommands { session_id, .. }
-        | ClientCommand::ListModes { session_id, .. }
-        | ClientCommand::ListSettings { session_id, .. }
-        | ClientCommand::SetSetting { session_id, .. }
-        | ClientCommand::ListMcpServers { session_id, .. }
-        | ClientCommand::ListRuntimeServices { session_id, .. }
-        | ClientCommand::AddMcpHttpServer { session_id, .. }
-        | ClientCommand::AddMcpStdioServer { session_id, .. }
-        | ClientCommand::RemoveMcpServer { session_id, .. }
-        | ClientCommand::ReviewMcpServer { session_id, .. }
-        | ClientCommand::ApproveMcpServer { session_id, .. }
-        | ClientCommand::SetMcpServerEnabled { session_id, .. }
-        | ClientCommand::ListPermissions { session_id, .. }
-        | ClientCommand::AddSessionPermissionRule { session_id, .. }
-        | ClientCommand::RemoveSessionPermissionRule { session_id, .. }
-        | ClientCommand::RemoveQueuedMessage { session_id, .. }
-        | ClientCommand::ClearQueuedMessages { session_id, .. }
-        | ClientCommand::RenameSession { session_id, .. }
-        | ClientCommand::ExportSession { session_id, .. }
-        | ClientCommand::RevokePermissionApproval { session_id, .. }
-        | ClientCommand::BeginProviderAuth { session_id, .. }
-        | ClientCommand::ConfigureBuiltinProvider { session_id, .. }
-        | ClientCommand::CompleteProviderAuth { session_id, .. }
-        | ClientCommand::CancelProviderAuth { session_id, .. }
-        | ClientCommand::ListSubagents { session_id, .. }
-        | ClientCommand::ReplaySubagent { session_id, .. }
-        | ClientCommand::ContinueSubagent { session_id, .. }
-        | ClientCommand::InterruptSubagent { session_id, .. }
-        | ClientCommand::CloseSubagent { session_id, .. } => Some(session_id.clone()),
-        ClientCommand::CreateSession { .. }
-        | ClientCommand::ListSessions { .. }
-        | ClientCommand::SearchSessions { .. }
-        | ClientCommand::ListModels { .. }
-        | ClientCommand::ShutdownHost { .. } => None,
-    }
-}
-
 fn validate_provider_auth_name(provider: &str) -> Result<(), HostError> {
     if provider.is_empty()
         || provider.len() > 128
@@ -3827,17 +3767,6 @@ fn validate_provider_auth_name(provider: &str) -> Result<(), HostError> {
         ));
     }
     Ok(())
-}
-
-fn builtin_provider_auth_kind(provider: &str) -> Result<rw_types::ProviderAuthKind, HostError> {
-    match provider {
-        "openai_codex" => Ok(rw_types::ProviderAuthKind::Oauth),
-        "github_copilot" => Ok(rw_types::ProviderAuthKind::DeviceFlow),
-        "openai" | "anthropic" => Ok(rw_types::ProviderAuthKind::ApiKey),
-        _ => Err(HostError::Protocol(
-            "provider is not in the fixed built-in setup allowlist".to_owned(),
-        )),
-    }
 }
 
 fn provider_auth_attempt_id(
@@ -4048,15 +3977,7 @@ fn wire_command_catalog(
             name: descriptor.name().to_owned(),
             description: descriptor.description().to_owned(),
             usage: descriptor.argument_hint().unwrap_or_default().to_owned(),
-            source: match descriptor.source() {
-                rw_ext::CommandSource::Builtin => rw_types::CommandSource::Builtin,
-                rw_ext::CommandSource::Project => rw_types::CommandSource::Project,
-                rw_ext::CommandSource::User => rw_types::CommandSource::User,
-                rw_ext::CommandSource::Plugin => rw_types::CommandSource::Plugin,
-                rw_ext::CommandSource::Skill => rw_types::CommandSource::Skill,
-                rw_ext::CommandSource::Workflow => rw_types::CommandSource::Workflow,
-                rw_ext::CommandSource::Mcp => rw_types::CommandSource::Mcp,
-            },
+            source: descriptor.source(),
         };
         let Ok(encoded) = serde_json::to_vec(&command) else {
             truncated = true;
@@ -4132,9 +4053,12 @@ mod tests {
         CommandDescriptor as ExtensionCommandDescriptor, CommandExecutionError, CommandHandler,
         CommandInvocation,
     };
-    use rw_providers::{BoxEventStream, ProviderRequest, ThinkingLevel};
+    use rw_providers::{BoxEventStream, ProviderRequest};
     use rw_tools::ToolRegistry;
-    use rw_types::{AttachmentData, CommandMeta, PROTOCOL_VERSION, config::PermissionDecision};
+    use rw_types::{
+        AttachmentData, CommandMeta, PROTOCOL_VERSION,
+        config::{PermissionDecision, ThinkingLevel},
+    };
     use tempfile::TempDir;
     use tokio::sync::Notify;
 
@@ -5709,7 +5633,7 @@ mod tests {
                     meta: meta("spoofed", "fork-now"),
                     session_id: parent.clone(),
                     at_turn: None,
-                    operation_id: Some("fork-now-operation".to_owned()),
+                    operation_id: "fork-now-operation".to_owned(),
                 },
             )
             .await,
@@ -5748,7 +5672,7 @@ mod tests {
                     meta: meta("spoofed", "fork-invalid-turn"),
                     session_id: parent,
                     at_turn: Some(TurnId("1".to_owned())),
-                    operation_id: Some("fork-invalid-operation".to_owned()),
+                    operation_id: "fork-invalid-operation".to_owned(),
                 },
             )
             .await;
@@ -5794,7 +5718,7 @@ mod tests {
                         meta: meta("spoofed", "first-fork"),
                         session_id: parent,
                         at_turn: None,
-                        operation_id: Some("first-fork-operation".to_owned()),
+                        operation_id: "first-fork-operation".to_owned(),
                     },
                 )
                 .await
@@ -5835,7 +5759,7 @@ mod tests {
                     meta: meta("spoofed", "second-fork"),
                     session_id: parent,
                     at_turn: None,
-                    operation_id: Some("second-fork-operation".to_owned()),
+                    operation_id: "second-fork-operation".to_owned(),
                 },
             )
             .await,
@@ -6172,27 +6096,15 @@ mod tests {
     #[test]
     fn wire_command_catalog_preserves_each_runtime_source() {
         let sources = [
-            (
-                rw_ext::CommandSource::Builtin,
-                rw_types::CommandSource::Builtin,
-            ),
-            (
-                rw_ext::CommandSource::Project,
-                rw_types::CommandSource::Project,
-            ),
-            (rw_ext::CommandSource::User, rw_types::CommandSource::User),
-            (
-                rw_ext::CommandSource::Plugin,
-                rw_types::CommandSource::Plugin,
-            ),
-            (rw_ext::CommandSource::Skill, rw_types::CommandSource::Skill),
-            (
-                rw_ext::CommandSource::Workflow,
-                rw_types::CommandSource::Workflow,
-            ),
-            (rw_ext::CommandSource::Mcp, rw_types::CommandSource::Mcp),
+            rw_types::CommandSource::Builtin,
+            rw_types::CommandSource::Project,
+            rw_types::CommandSource::User,
+            rw_types::CommandSource::Plugin,
+            rw_types::CommandSource::Skill,
+            rw_types::CommandSource::Workflow,
+            rw_types::CommandSource::Mcp,
         ];
-        let descriptors = sources.iter().enumerate().map(|(index, (source, _))| {
+        let descriptors = sources.iter().enumerate().map(|(index, source)| {
             ExtensionCommandDescriptor::new(format!("source-{index}"), "source test")
                 .with_source(*source)
         });
@@ -6201,7 +6113,7 @@ mod tests {
 
         assert!(!truncated);
         assert_eq!(commands.len(), sources.len());
-        for (command, (_, expected)) in commands.iter().zip(sources) {
+        for (command, expected) in commands.iter().zip(sources) {
             assert_eq!(command.source, expected);
         }
     }

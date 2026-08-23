@@ -8,10 +8,10 @@ use std::{
 };
 
 use miette::{IntoDiagnostic, Result, miette};
-use rw_ext::PluginManifest;
-use rw_mcp::{McpServerConfig, McpTransportConfig, ServerId};
+use rw_mcp::{McpServerConfig, McpTransportConfig};
+use rw_plugin_protocol::PluginManifest;
 use rw_tools::CapabilityManifest;
-use rw_types::ToolCapability;
+use rw_types::{McpServerId, ToolCapability};
 use serde::Deserialize;
 use serde::Serialize;
 use url::Url;
@@ -301,7 +301,7 @@ impl DiscoveredMcpServer {
             },
         };
         Ok(McpServerConfig {
-            id: ServerId::new(self.name.clone()).map_err(|error| miette!(error.to_string()))?,
+            id: McpServerId::new(self.name.clone()).map_err(|error| miette!(error.to_string()))?,
             transport,
             enabled: self.enabled,
             defer_tools: self.defer_tools,
@@ -309,7 +309,7 @@ impl DiscoveredMcpServer {
         })
     }
 
-    pub(crate) fn oauth_binding(&self) -> Option<(ServerId, rw_core::McpOAuthBinding)> {
+    pub(crate) fn oauth_binding(&self) -> Option<(McpServerId, rw_core::McpOAuthBinding)> {
         let DiscoveredMcpTransport::Http {
             oauth_credential: Some(reference),
             oauth_resource: Some(resource),
@@ -334,7 +334,7 @@ impl DiscoveredMcpServer {
             _ => return None,
         };
         Some((
-            ServerId(self.name.clone()),
+            McpServerId::new(self.name.clone()).ok()?,
             rw_core::McpOAuthBinding {
                 token_reference: rw_store::credentials::CredentialReference::new(reference),
                 resource: resource.clone(),
@@ -671,7 +671,8 @@ fn parse_mcp_server(
     name: String,
     mut entry: McpEntry,
 ) -> Result<DiscoveredMcpServer> {
-    let id = ServerId::new(name.clone()).map_err(|error| miette!("{}: {error}", path.display()))?;
+    let id =
+        McpServerId::new(name.clone()).map_err(|error| miette!("{}: {error}", path.display()))?;
     validate_env_names(&entry.inherit_env, false)?;
     validate_literal_environment(&entry.environment)?;
     let credentials = parse_credential_bindings(std::mem::take(&mut entry.credentials))?;
@@ -801,7 +802,7 @@ fn parse_credential_bindings(
 }
 
 fn parse_stdio_transport(
-    id: &ServerId,
+    id: &McpServerId,
     base: &Path,
     argv: Vec<String>,
     entry: McpEntry,
@@ -843,7 +844,7 @@ fn resolve_mcp_roots(base: &Path, roots: &[PathBuf], field: &str) -> Result<Vec<
 }
 
 fn parse_http_transport(
-    id: &ServerId,
+    id: &McpServerId,
     endpoint: String,
     entry: McpEntry,
     credentials: &[CredentialBinding],
@@ -1749,7 +1750,7 @@ oauth_client_id = 'public-native-client'
             .expect("runtime");
         assert!(!runtime.enabled);
         assert!(runtime.defer_tools);
-        assert_eq!(runtime.id, ServerId::new("docs").expect("id"));
+        assert_eq!(runtime.id, McpServerId::new("docs").expect("id"));
         assert_eq!(
             runtime.transport,
             McpTransportConfig::Stdio {
@@ -1914,7 +1915,7 @@ oauth_client_id = 'public-native-client'
         fs::create_dir_all(&package).expect("package");
         fs::write(
             package.join("manifest.json"),
-            r#"{"name":"example","version":"1.0.0","protocol":1,"capabilities":{}}"#,
+            r#"{"name":"example","version":"1.0.0","protocol":2,"capabilities":{}}"#,
         )
         .expect("manifest");
         fs::write(

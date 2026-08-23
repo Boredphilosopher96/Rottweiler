@@ -12,8 +12,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[cfg(test)]
+use crate::registry::MutationScope;
 use crate::registry::{
-    ApprovalPreview, CandidateLocation, CapabilityManifest, MutationScope, Tool, ToolContext,
+    ApprovalPreview, CandidateLocation, CapabilityManifest, Tool, ToolBehavior, ToolContext,
     ToolDescriptor, ToolError, ToolLimits, ToolResult, input_schema, parse_input,
 };
 use crate::symbols::WorkspaceSymbolIndex;
@@ -53,6 +55,10 @@ impl Tool for ReadTool {
             "Read a UTF-8 workspace file with optional line bounds.",
             [ToolCapability::ReadFilesystem],
         )
+    }
+
+    fn workspace_paths(&self, input: &Value) -> Result<Vec<PathBuf>, ToolError> {
+        Ok(vec![parse_input::<ReadInput>(input.clone())?.path])
     }
 
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {
@@ -135,8 +141,12 @@ impl Tool for WriteTool {
         )
     }
 
-    fn mutation_scope(&self, input: &Value) -> MutationScope {
-        mutation_path(input)
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::FileMutation
+    }
+
+    fn workspace_paths(&self, input: &Value) -> Result<Vec<PathBuf>, ToolError> {
+        Ok(vec![parse_input::<WriteInput>(input.clone())?.path])
     }
 
     async fn approval_preview(
@@ -243,8 +253,12 @@ impl Tool for EditTool {
         )
     }
 
-    fn mutation_scope(&self, input: &Value) -> MutationScope {
-        mutation_path(input)
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::FileMutation
+    }
+
+    fn workspace_paths(&self, input: &Value) -> Result<Vec<PathBuf>, ToolError> {
+        Ok(vec![parse_input::<EditInput>(input.clone())?.path])
     }
 
     async fn approval_preview(
@@ -326,8 +340,12 @@ impl Tool for MultiEditTool {
         )
     }
 
-    fn mutation_scope(&self, input: &Value) -> MutationScope {
-        mutation_path(input)
+    fn behavior(&self) -> ToolBehavior {
+        ToolBehavior::FileMutation
+    }
+
+    fn workspace_paths(&self, input: &Value) -> Result<Vec<PathBuf>, ToolError> {
+        Ok(vec![parse_input::<MultiEditInput>(input.clone())?.path])
     }
 
     async fn approval_preview(
@@ -409,26 +427,6 @@ fn descriptor<T: JsonSchema>(
         description: description.to_owned(),
         input_schema: input_schema::<T>(),
         capabilities: CapabilityManifest::new(capabilities),
-    }
-}
-
-fn mutation_path(input: &Value) -> MutationScope {
-    let Some(path) = input
-        .get("path")
-        .and_then(Value::as_str)
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-    else {
-        return MutationScope::OpaqueWorkspace;
-    };
-    if path.is_absolute()
-        || !path
-            .components()
-            .all(|component| matches!(component, std::path::Component::Normal(_)))
-    {
-        MutationScope::OpaqueWorkspace
-    } else {
-        MutationScope::Paths(vec![path])
     }
 }
 

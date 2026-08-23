@@ -11,7 +11,7 @@ use url::{Host, Url};
 use super::{
     GitHubCopilotCatalog, GitHubCopilotEndpoint, GitHubCopilotModel, parse_github_copilot_models,
 };
-use crate::types::RawSseFrame;
+use crate::types::{MAX_PROVIDER_MODEL_CATALOG_BYTES, RawSseFrame};
 use crate::{
     AnthropicConfig, AnthropicProvider, AnthropicThinkingStrategy, AuthMaterial, BoxEventStream,
     CacheBreakpointSupport, Capabilities, DiscoveredModel, DiscoveredProviderCatalog,
@@ -27,7 +27,6 @@ pub const GITHUB_COPILOT_BASE_URL: &str = "https://api.githubcopilot.com";
 /// GitHub Copilot API revision sent by Rottweiler.
 pub const GITHUB_COPILOT_API_VERSION: &str = "2026-06-01";
 
-const MAX_CATALOG_BYTES: u64 = 4 * 1024 * 1024;
 const OPENAI_REASONING_PREFIX: &str = "openai.responses.reasoning.v1:";
 const OPENAI_CHAT_REASONING_PREFIX: &str = "openai.chat.reasoning.v1:";
 const COPILOT_RESPONSES_REASONING_PREFIX: &str = "github-copilot.responses.reasoning.v1:";
@@ -157,12 +156,12 @@ impl GitHubCopilotRuntime {
         }
         if response
             .content_length()
-            .is_some_and(|size| size > MAX_CATALOG_BYTES)
+            .is_some_and(|size| size > MAX_PROVIDER_MODEL_CATALOG_BYTES as u64)
         {
             return Err(catalog_too_large());
         }
         let bytes = response.bytes().await.map_err(transport_error)?;
-        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_CATALOG_BYTES {
+        if bytes.len() > MAX_PROVIDER_MODEL_CATALOG_BYTES {
             return Err(catalog_too_large());
         }
         parse_github_copilot_models(&bytes)

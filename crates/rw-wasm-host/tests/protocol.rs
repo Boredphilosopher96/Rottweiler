@@ -2,9 +2,9 @@
 
 use std::path::Path;
 
-use rw_ext::{
+use rw_ext::{WasmHookLimits, WasmHostRequest, WasmHostResponse, invoke_helper};
+use rw_plugin_protocol::{
     PROTOCOL_VERSION, PluginCapabilities, PluginHook, PluginHookDeclaration, PluginManifest,
-    WasmHookLimits, WasmHostRequest, WasmHostResponse, invoke_helper,
 };
 
 fn manifest() -> PluginManifest {

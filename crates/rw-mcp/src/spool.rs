@@ -7,8 +7,9 @@ use std::{
 };
 
 use async_trait::async_trait;
+use rw_types::McpServerId;
 
-use crate::{McpError, OverflowReference, ServerId};
+use crate::{McpError, OverflowReference};
 
 const DIRECTORY: &str = "mcp-overflow-v1";
 const MAX_SPOOL_BYTES: usize = 64 * 1024 * 1024;
@@ -19,7 +20,7 @@ const MAX_RECORDS: usize = 512;
 pub trait OverflowSpool: Send + Sync {
     async fn write(
         &self,
-        server: &ServerId,
+        server: &McpServerId,
         operation: &str,
         bytes: &[u8],
     ) -> Result<OverflowReference, McpError>;
@@ -141,7 +142,7 @@ impl FilesystemSpool {
 impl OverflowSpool for FilesystemSpool {
     async fn write(
         &self,
-        server: &ServerId,
+        server: &McpServerId,
         _operation: &str,
         bytes: &[u8],
     ) -> Result<OverflowReference, McpError> {
@@ -158,7 +159,7 @@ impl OverflowSpool for FilesystemSpool {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        let id = format!("mcp-{}-{sequence}-{random}", server.0);
+        let id = format!("mcp-{server}-{sequence}-{random}");
         {
             let mut records = self
                 .records
@@ -415,7 +416,11 @@ mod tests {
             0o700
         );
         let reference = spool
-            .write(&ServerId::new("safe").expect("id"), "ignored", b"payload")
+            .write(
+                &McpServerId::new("safe").expect("id"),
+                "ignored",
+                b"payload",
+            )
             .await
             .expect("write");
         assert!(!reference.id.contains('/'));
@@ -458,7 +463,11 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).expect("mode");
         assert!(
             spool
-                .write(&ServerId::new("safe").expect("id"), "ignored", b"payload")
+                .write(
+                    &McpServerId::new("safe").expect("id"),
+                    "ignored",
+                    b"payload"
+                )
                 .await
                 .is_err()
         );
@@ -472,7 +481,11 @@ mod tests {
                 .await
                 .expect("spool");
             spool
-                .write(&ServerId::new("safe").expect("id"), "ignored", b"payload")
+                .write(
+                    &McpServerId::new("safe").expect("id"),
+                    "ignored",
+                    b"payload",
+                )
                 .await
                 .expect("write")
         };

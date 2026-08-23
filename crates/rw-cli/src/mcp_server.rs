@@ -13,15 +13,15 @@ use async_trait::async_trait;
 use miette::{Result, miette};
 use rw_core::{
     BoundClient, ClientCommand, ClientId, CommandMeta, CommandOutcome, EngineEvent, EngineHost,
-    EngineHostConfig, HeadlessPermissionMode, PROTOCOL_VERSION, PermissionApprover, PermissionGate,
-    PermissionOutcome, PermissionRequest, RequestId,
+    EngineHostConfig, PROTOCOL_VERSION, PermissionApprover, PermissionGate, PermissionOutcome,
+    PermissionRequest, RequestId,
 };
 use rw_mcp::{
     BridgeError, EngineMcpBridge, EngineTool, McpServerAuthority, RottweilerMcpServerFactory,
     SessionSummary, serve_stdio,
 };
 use rw_tools::{GlobTool, GrepTool, LsTool, ReadTool, Tool, ToolContext, ToolLimits, ToolRegistry};
-use rw_types::ApprovalDecision;
+use rw_types::{ApprovalDecision, PermissionModeDescriptor};
 use serde_json::{Value, json};
 
 use rw_runtime::{RuntimeHostOptions, RuntimeSessionFactory, session::HostedProviderMode};
@@ -35,7 +35,7 @@ pub(crate) struct StdioServerOptions {
     pub(crate) storage_root: PathBuf,
     pub(crate) credentials_path: PathBuf,
     pub(crate) config: rw_core::Config,
-    pub(crate) permission_mode: Option<rw_runtime::PermissionMode>,
+    pub(crate) permission_mode: Option<PermissionModeDescriptor>,
     pub(crate) max_turns: usize,
     pub(crate) provider_mode: HostedProviderMode,
     pub(crate) dangerously_trust: bool,
@@ -284,7 +284,7 @@ pub(crate) async fn run_stdio(options: StdioServerOptions) -> Result<()> {
         .collect::<Vec<_>>();
     let tool_context = ToolContext::from_workspace_roots(&options.workspace_roots)
         .map_err(|_| miette!("MCP workspace authority could not initialize"))?;
-    let permissions = PermissionGate::for_headless_mode(HeadlessPermissionMode::AutoSafe)
+    let permissions = PermissionGate::for_headless_mode(PermissionModeDescriptor::AutoSafe)
         .with_workspace_roots(&options.workspace_roots);
     let bridge = Arc::new(CliMcpBridge {
         host,

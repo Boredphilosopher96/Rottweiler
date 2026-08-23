@@ -826,7 +826,8 @@ export const contractFixture = {
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
-      "mode": "plan"
+      "mode": "plan",
+      "definition_fingerprint": "fixture"
     },
     {
       "type": "model_changed",

@@ -68,7 +68,7 @@ export function renderTypeScriptScaffold(options: ScaffoldOptions = {}): readonl
         {
           name,
           version: "0.1.0",
-          protocol: 1,
+          protocol: 2,
           capabilities: {
             tools: [{
               name: "hello",

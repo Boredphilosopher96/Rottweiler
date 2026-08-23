@@ -132,7 +132,11 @@ def main() -> int:
     scaffold = text("packages/plugin-sdk/src/scaffold.ts")
     require(scaffold.count('path: "manifest.json"') == 1, "scaffold manifest source is not singular")
     require("parsePluginManifest(manifestDocument)" in scaffold, "scaffold does not import inert manifest data")
-    require_contains("crates/rw-cli/src/plugin_dev.rs", '"host":"rottweiler"')
+    require_contains(
+        "crates/rw-cli/src/plugin_dev.rs",
+        "InitializeParams {",
+        "host: PLUGIN_HOST_ID.to_owned()",
+    )
     require_contains(
         "docs/design/typescript-source-plugin-host.md",
         "one sandboxed host process for each active TypeScript plugin",

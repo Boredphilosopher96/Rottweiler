@@ -4,7 +4,7 @@ export const plugin = definePlugin({
   manifest: {
     name: "conformance-event-subscriber",
     version: "1.0.0",
-    protocol: 1,
+    protocol: 2,
     capabilities: {
       event_subscriptions: ["TurnFinished"],
       push: ["session/set_status"],

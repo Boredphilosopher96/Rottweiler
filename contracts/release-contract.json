@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "archive": {
+    "root_format": "rottweiler-{version}-{platform}",
+    "expanded_max_bytes": 314572800,
+    "members": [
+      {
+        "id": "installer",
+        "path": "install.sh",
+        "mode": "0755",
+        "max_bytes": 131072
+      },
+      {
+        "id": "engine",
+        "path": "bin/rw",
+        "mode": "0755",
+        "max_bytes": 52428800
+      },
+      {
+        "id": "tui",
+        "path": "bin/rottweiler-tui",
+        "mode": "0755",
+        "max_bytes": 104857600
+      },
+      {
+        "id": "wasm_host",
+        "path": "bin/rottweiler-wasm-host",
+        "mode": "0755",
+        "max_bytes": 104857600
+      },
+      {
+        "id": "opentui_native",
+        "path": "bin/{native_library}",
+        "mode": "0644",
+        "max_bytes": 104857600
+      }
+    ]
+  },
+  "platforms": [
+    {
+      "id": "darwin-arm64",
+      "system": "Darwin",
+      "machine": "arm64",
+      "rust_os": "macos",
+      "rust_arch": "aarch64",
+      "native_library": "libopentui.dylib",
+      "product_budgets": {
+        "engine_less_than_bytes": 40000000,
+        "wasm_host_less_than_bytes": 30000000,
+        "tui_bundle_less_than_bytes": 100000000
+      },
+      "distribution": {
+        "operating_system": "macos",
+        "label": "macOS",
+        "homebrew_condition": "Hardware::CPU.arm?"
+      }
+    },
+    {
+      "id": "darwin-x86_64",
+      "system": "Darwin",
+      "machine": "x86_64",
+      "rust_os": "macos",
+      "rust_arch": "x86_64",
+      "native_library": "libopentui.dylib",
+      "product_budgets": {
+        "engine_less_than_bytes": 40000000,
+        "wasm_host_less_than_bytes": 30000000,
+        "tui_bundle_less_than_bytes": 100000000
+      },
+      "distribution": {
+        "operating_system": "macos",
+        "label": "macOS",
+        "homebrew_condition": "Hardware::CPU.intel?"
+      }
+    },
+    {
+      "id": "linux-aarch64",
+      "system": "Linux",
+      "machine": "aarch64",
+      "rust_os": "linux",
+      "rust_arch": "aarch64",
+      "native_library": "libopentui.so",
+      "product_budgets": {
+        "engine_less_than_bytes": 28000000,
+        "wasm_host_less_than_bytes": 30000000,
+        "tui_bundle_less_than_bytes": 150000000
+      },
+      "distribution": {
+        "operating_system": "linux",
+        "label": "Linux",
+        "homebrew_condition": "Hardware::CPU.arm?"
+      }
+    },
+    {
+      "id": "linux-x86_64",
+      "system": "Linux",
+      "machine": "x86_64",
+      "rust_os": "linux",
+      "rust_arch": "x86_64",
+      "native_library": "libopentui.so",
+      "product_budgets": {
+        "engine_less_than_bytes": 28000000,
+        "wasm_host_less_than_bytes": 30000000,
+        "tui_bundle_less_than_bytes": 150000000
+      },
+      "distribution": {
+        "operating_system": "linux",
+        "label": "Linux",
+        "homebrew_condition": "Hardware::CPU.intel? && Hardware::CPU.is_64_bit?"
+      }
+    }
+  ]
+}

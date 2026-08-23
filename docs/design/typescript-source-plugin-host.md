@@ -264,8 +264,7 @@ Each checkpoint ends in a directly verifiable state:
   scratch, credentials, or network authority.
 - One plugin crash retains fail-closed behavior and leaves other plugins and the
   engine alive.
-- Direct executable protocol 1 and 2 plugins keep their approval fingerprints and
-  behavior.
+- Direct executable protocol 2 plugins keep their approval fingerprints and behavior.
 - Live attach invokes real tools and hooks, keeps the last good generation after a
   broken edit, blocks capability expansion, drains old work, restores production,
   and reaps on disconnect.

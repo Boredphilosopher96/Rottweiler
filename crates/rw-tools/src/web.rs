@@ -447,6 +447,10 @@ impl Tool for WebFetchTool {
         }
     }
 
+    fn behavior(&self) -> crate::ToolBehavior {
+        crate::ToolBehavior::WebFetch
+    }
+
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {
         context.cancellation.check()?;
         let input: WebFetchInput = parse_input(input)?;

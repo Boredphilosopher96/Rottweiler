@@ -9,14 +9,14 @@ cask "rottweiler" do
 
   depends_on arch: :arm64
 
-  binary "#{staged_path}/rottweiler-#{version}-darwin-arm64/bin/rw", target: "rw"
+  binary "#{staged_path}/@DARWIN_ARM64_BINARY_ROOT@/bin/rw", target: "rw"
 
   # Pre-v1 archives are checksum-verified but not yet Apple-notarized. Remove
   # quarantine before the first launch so Gatekeeper does not cache a rejected
   # assessment for the extracted inode.
   postflight do
     system_command "/usr/bin/xattr",
-                   args: ["-dr", "com.apple.quarantine", "#{staged_path}/rottweiler-#{version}-darwin-arm64"]
+                   args: ["-dr", "com.apple.quarantine", "#{staged_path}/@DARWIN_ARM64_QUARANTINE_ROOT@"]
   end
 
   caveats <<~EOS

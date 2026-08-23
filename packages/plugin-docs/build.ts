@@ -3,8 +3,8 @@ import { join, resolve } from "node:path"
 
 const root = resolve(import.meta.dir, "../..")
 const source = join(root, "packages/plugin-sdk/PROTOCOL.md")
-const schema = join(root, "packages/plugin-sdk/fixtures/wire/protocol-1.schema.json")
-const fixture = join(root, "packages/plugin-sdk/fixtures/wire/protocol-1.json")
+const schema = join(root, "packages/plugin-sdk/fixtures/wire/protocol-2.schema.json")
+const fixture = join(root, "packages/plugin-sdk/fixtures/wire/protocol-2.json")
 const output = join(import.meta.dir, "dist")
 
 const escapeHtml = (value: string): string =>
@@ -154,14 +154,14 @@ export const buildSite = async (): Promise<void> => {
   JSON.parse(fixtureText)
   const rendered = renderMarkdown(markdown)
   const html = `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Frozen Rottweiler plugin protocol 1 reference"><title>Rottweiler plugin protocol 1</title><style>${styles}</style></head>
-<body><div class="shell"><aside><div class="brand"><span class="mark">RW</span><span>Plugin protocol</span></div><input id="search" class="search" type="search" placeholder="Filter reference…" aria-label="Filter protocol reference"><div class="eyebrow">On this page</div><nav>${rendered.navigation}</nav><div class="links"><a href="protocol-1.schema.json">JSON schema ↗</a><a href="protocol-1.json">Wire fixture ↗</a></div></aside><main><header class="hero"><span class="pill">● Frozen · protocol 1</span><h1>Build extensions without hidden doors.</h1><p class="lede">The language-neutral contract for tools, commands, hooks, providers, events, and safe host interaction. Every built-in crosses the same extension boundaries.</p><div class="facts"><div class="fact"><b>JSON-RPC 2.0</b><span>newline-framed stdio transport</span></div><div class="fact"><b>4 MiB</b><span>hard maximum wire value</span></div><div class="fact"><b>5 seconds</b><span>default bounded request deadline</span></div></div></header><article>${rendered.body}</article></main></div><script>${script}</script></body></html>`
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Rottweiler plugin protocol 2 reference"><title>Rottweiler plugin protocol 2</title><style>${styles}</style></head>
+<body><div class="shell"><aside><div class="brand"><span class="mark">RW</span><span>Plugin protocol</span></div><input id="search" class="search" type="search" placeholder="Filter reference…" aria-label="Filter protocol reference"><div class="eyebrow">On this page</div><nav>${rendered.navigation}</nav><div class="links"><a href="protocol-2.schema.json">JSON schema ↗</a><a href="protocol-2.json">Wire fixture ↗</a></div></aside><main><header class="hero"><span class="pill">● Stable · protocol 2</span><h1>Build extensions without hidden doors.</h1><p class="lede">The language-neutral contract for tools, commands, hooks, providers, events, and safe host interaction. Every built-in crosses the same extension boundaries.</p><div class="facts"><div class="fact"><b>JSON-RPC 2.0</b><span>newline-framed stdio transport</span></div><div class="fact"><b>4 MiB</b><span>hard maximum wire value</span></div><div class="fact"><b>5 seconds</b><span>default bounded request deadline</span></div></div></header><article>${rendered.body}</article></main></div><script>${script}</script></body></html>`
   await rm(output, { recursive: true, force: true })
   await mkdir(output, { recursive: true })
   await Promise.all([
     writeFile(join(output, "index.html"), html),
-    writeFile(join(output, "protocol-1.schema.json"), schemaText),
-    writeFile(join(output, "protocol-1.json"), fixtureText),
+    writeFile(join(output, "protocol-2.schema.json"), schemaText),
+    writeFile(join(output, "protocol-2.json"), fixtureText),
   ])
 }
 

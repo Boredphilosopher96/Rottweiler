@@ -4,36 +4,46 @@
 //! algebraic enums use internally tagged, named-field variants so Rust, JSON
 //! Schema, and TypeScript all retain the same discriminated-union shape.
 
+pub mod attachment_contract;
 pub mod config;
 mod error;
 mod ir;
+pub mod mcp;
+mod permission_mode;
 mod protocol;
+pub mod release_contract {
+    include!("generated/release_contract.rs");
+}
 pub mod update_contract;
 
 pub use error::Error;
 
+pub use config::PermissionDecision;
 pub use ir::{Block, ImageRef, Role, ToolCallId, ToolOutput, ToolOutputPart, Turn, TurnMeta};
+pub use mcp::{MAX_MCP_SERVER_ID_BYTES, MCP_SERVER_ID_PATTERN, McpServerId, McpServerIdError};
+pub use permission_mode::PermissionModeDescriptor;
 pub use protocol::{
     AccountingAttribution, Answer, ApprovalBinding, ApprovalDecision, Attachment, AttachmentData,
     BudgetLevel, BudgetScope, BudgetUnit, CacheBreakpoint, ClientCommand, ClientId, ClientRole,
     CommandAckMeta, CommandDescriptor, CommandMeta, CommandOutcome, CommandSource,
     CompactionReason, ContextItemId, ContextItemKind, ContextItemSnapshot, ContextItemState,
     ContextSnapshot, Cost, CostSnapshot, DiffArtifact, DiffArtifactRef, EngineError,
-    EngineErrorCategory, EngineEvent, EventMeta, McpApprovalReview, McpEnvironmentEntry,
-    McpServerDescriptor, McpServerState, ModeDescriptor, ModeId, ModelAlias, ModelAliasDescriptor,
-    ModelCacheBehavior, ModelCapabilities, ModelCatalogSnapshot, ModelContextTransfer,
-    ModelDescriptor, ModelSwitchQuestion, PermissionAction, PermissionApprovalDescriptor,
-    PermissionApprovalScope, PermissionModeDescriptor, PermissionRuleDescriptor,
+    EngineErrorCategory, EngineEvent, EngineEventDelivery, EventMeta, MAX_SESSION_ID_BYTES,
+    McpApprovalReview, McpEnvironmentEntry, McpServerDescriptor, McpServerState, ModeDescriptor,
+    ModeId, ModelAlias, ModelAliasDescriptor, ModelCacheBehavior, ModelCapabilities,
+    ModelCatalogSnapshot, ModelContextTransfer, ModelDescriptor, ModelSwitchQuestion,
+    PermissionApprovalDescriptor, PermissionApprovalScope, PermissionRuleDescriptor,
     PermissionStateDescriptor, PlanArtifact, PlanDecision, PlanStep, PromptDump, PromptTool,
     ProviderAuthAttemptId, ProviderAuthChallenge, ProviderAuthKind, ProviderDescriptor,
     ProviderNextAction, Question, QuestionId, QuestionOption, QuestionResponseKind, RequestId,
     ReviewFileDecision, ReviewFileStatus, RewindTarget, RuntimeServiceDescriptor,
-    RuntimeServiceKind, SequenceId, SessionDescriptor, SessionId, SessionMode, SessionReview,
-    SessionReviewFile, ShellId, StoredAttachment, SubagentActivity, SubagentDescriptor, SubagentId,
-    SubagentIsolation, SubagentReplayItem, SubagentResult, SubagentStatus, ToolCapability,
-    ToolOutputStream, TouchedFile, TouchedFileStatus, TranscriptFormat, TurnAccounting, TurnId,
-    TurnStatus, UnifiedDiff, UnrestorablePath, Usage, UserSettingDescriptor, WorkspaceDiff,
-    WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus,
+    RuntimeServiceKind, SequenceId, SessionDescriptor, SessionId, SessionIdError, SessionMode,
+    SessionReview, SessionReviewFile, ShellId, StoredAttachment, SubagentActivity,
+    SubagentDescriptor, SubagentId, SubagentIsolation, SubagentReplayItem, SubagentResult,
+    SubagentStatus, TRANSIENT_ENGINE_EVENT_TYPES, ToolCapability, ToolOutputStream, TouchedFile,
+    TouchedFileStatus, TranscriptFormat, TurnAccounting, TurnId, TurnStatus, UnifiedDiff,
+    UnrestorablePath, Usage, UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch,
+    WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus,
 };
 
 /// Version of the protocol emitted by these types.

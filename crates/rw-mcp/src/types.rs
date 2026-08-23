@@ -1,37 +1,10 @@
 use std::{collections::BTreeMap, fmt, path::PathBuf, time::Duration};
 
 use rw_tools::CapabilityManifest;
-use rw_types::ToolCapability;
+use rw_types::{McpServerId, ToolCapability};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
-
-/// Stable identifier for one configured MCP server.
-#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(transparent)]
-pub struct ServerId(pub String);
-
-impl ServerId {
-    /// Validates a server identifier before it is used as a namespace.
-    pub fn new(value: impl Into<String>) -> Result<Self, McpError> {
-        let value = value.into();
-        if value.is_empty()
-            || value.len() > 96
-            || !value
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-        {
-            return Err(McpError::InvalidServerId(value));
-        }
-        Ok(Self(value))
-    }
-}
-
-impl fmt::Display for ServerId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
 
 /// A bearer token whose debug representation never exposes its bytes.
 #[derive(Clone, Eq, PartialEq)]
@@ -111,7 +84,7 @@ pub struct McpStdioSandboxPolicy {
 /// One server registration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct McpServerConfig {
-    pub id: ServerId,
+    pub id: McpServerId,
     pub transport: McpTransportConfig,
     pub enabled: bool,
     /// `true` keeps schemas out of the provider prompt until `tool_search`.
@@ -153,7 +126,7 @@ pub enum ServerState {
 /// Public status without transport credentials or process environment.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ServerStatus {
-    pub id: ServerId,
+    pub id: McpServerId,
     pub enabled: bool,
     pub state: ServerState,
     pub tool_count: usize,
@@ -164,7 +137,7 @@ pub struct ServerStatus {
 /// The only MCP tool metadata included before an explicit search.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DeferredTool {
-    pub server: ServerId,
+    pub server: McpServerId,
     pub name: String,
     pub description: String,
 }
@@ -172,7 +145,7 @@ pub struct DeferredTool {
 /// A full tool definition returned on demand.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct McpToolDefinition {
-    pub server: ServerId,
+    pub server: McpServerId,
     pub name: String,
     pub description: String,
     pub input_schema: Value,
@@ -190,7 +163,7 @@ impl McpToolDefinition {
 /// A resource or prompt listing, namespaced by server.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct McpCatalogEntry {
-    pub server: ServerId,
+    pub server: McpServerId,
     pub name: String,
     pub description: String,
     pub uri: Option<String>,
@@ -232,18 +205,16 @@ impl Default for McpLimits {
 
 #[derive(Debug, Error)]
 pub enum McpError {
-    #[error("invalid MCP server id: {0}")]
-    InvalidServerId(String),
     #[error("invalid MCP executable or argument: {0}")]
     InvalidCommand(String),
     #[error("MCP server is already registered: {0}")]
-    DuplicateServer(ServerId),
+    DuplicateServer(McpServerId),
     #[error("unknown MCP server: {0}")]
-    UnknownServer(ServerId),
+    UnknownServer(McpServerId),
     #[error("MCP server is disabled: {0}")]
-    Disabled(ServerId),
+    Disabled(McpServerId),
     #[error("MCP server is not connected: {0}")]
-    NotConnected(ServerId),
+    NotConnected(McpServerId),
     #[error("MCP transport policy rejected endpoint: {0}")]
     Policy(String),
     #[error("MCP protocol error: {0}")]
@@ -253,9 +224,12 @@ pub enum McpError {
     #[error("MCP overflow spool failed: {0}")]
     Spool(String),
     #[error("MCP shutdown timed out for server: {0}")]
-    ShutdownTimeout(ServerId),
+    ShutdownTimeout(McpServerId),
     #[error("MCP login required for server {server} and resource {resource}")]
-    PendingLogin { server: ServerId, resource: String },
+    PendingLogin {
+        server: McpServerId,
+        resource: String,
+    },
 }
 
 #[cfg(test)]

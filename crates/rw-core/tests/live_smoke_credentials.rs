@@ -14,13 +14,13 @@ use futures_util::StreamExt;
 use rw_core::{ProviderFactory, ProviderRuntime};
 use rw_providers::{
     FinishReason, FixtureRedactor, NetworkPolicy, PricingTable, Provider, ProviderError,
-    ProviderEvent, ProviderRequest, ProxyEnvironment, Recorder, ReplayProvider, ThinkingLevel,
-    ToolChoice, ToolDefinition, default_models_path, deny_outbound_network_for_process,
+    ProviderEvent, ProviderRequest, ProxyEnvironment, Recorder, ReplayProvider, ToolChoice,
+    ToolDefinition, default_models_path, deny_outbound_network_for_process,
 };
 use rw_store::{config::ConfigLoader, credentials::CredentialManager};
 use rw_types::{
     Block, Role, Turn, TurnMeta,
-    config::{Config, ThinkingLevel as ConfigThinkingLevel},
+    config::{Config, ThinkingLevel, ThinkingLevel as ConfigThinkingLevel},
 };
 use serde_json::json;
 

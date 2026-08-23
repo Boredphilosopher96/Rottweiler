@@ -9,8 +9,9 @@ use std::{
 use async_trait::async_trait;
 use rw_mcp::{
     CompactJsonEncoder, FilesystemSpool, McpError, McpLimits, McpManager, McpServerConfig,
-    McpTransportConfig, ServerId, StdioLaunchPolicy, TestOnlyUnsandboxedStdioConnector,
+    McpTransportConfig, StdioLaunchPolicy, TestOnlyUnsandboxedStdioConnector,
 };
+use rw_types::McpServerId;
 
 struct ApprovedFixture(PathBuf);
 
@@ -46,7 +47,7 @@ async fn three_real_stdio_processes_reach_prompt_ready_under_release_budget() {
         let pid_file = directory.path().join(format!("pid-{index}"));
         manager
             .register(McpServerConfig {
-                id: ServerId::new(format!("real-{index}")).expect("id"),
+                id: McpServerId::new(format!("real-{index}")).expect("id"),
                 transport: McpTransportConfig::Stdio {
                     executable: executable.clone(),
                     args: Vec::new(),

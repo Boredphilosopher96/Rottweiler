@@ -472,16 +472,8 @@ fn descendants(root: &str, facts: &[SessionFacts]) -> Result<BTreeSet<String>> {
 }
 
 fn validate_session_id(value: &str) -> Result<()> {
-    if value.is_empty()
-        || value.len() > 128
-        || matches!(value, "." | "..")
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-    {
-        return Err(miette!("stats session id is empty, too long, or unsafe"));
-    }
-    Ok(())
+    rw_core::SessionId::validate(value)
+        .map_err(|_| miette!("stats session id is empty, too long, or unsafe"))
 }
 
 fn empty_attribution(attribution: AccountingAttribution) -> AttributionTotals {

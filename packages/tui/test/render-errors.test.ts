@@ -31,7 +31,7 @@ describe("presentError", () => {
       category: "provider",
       code: "permission_denied",
       message: "credential was rejected",
-    }).severity).toBe("danger")
+    }).severity).toBe("error")
     expect(presentError({
       category: "protocol",
       code: "activation_pending",
@@ -47,7 +47,7 @@ describe("presentError", () => {
     })
     expect(result).toEqual({
       text: "Something went wrong · socket refused",
-      severity: "danger",
+      severity: "error",
     })
     expect(result.text).not.toContain("client.ts")
     expect(result.text).not.toContain("\u0007")
@@ -61,7 +61,7 @@ describe("presentError", () => {
       requestId: "request-42",
     })
     expect(result.text).toBe(`Something went wrong · ${"x".repeat(159)}… · request request-42`)
-    expect(result.severity).toBe("danger")
+    expect(result.severity).toBe("error")
   })
 
   test("sanitizes fragments without replacing TUI-authored framing", () => {

@@ -12,7 +12,7 @@ for await (const line of console) {
       encoder.encode(`${JSON.stringify({
         jsonrpc: "2.0",
         id: request.id,
-        result: { name: "capability-violator", version: "1.0.0", protocol: 1, capabilities: {} },
+        result: { name: "capability-violator", version: "1.0.0", protocol: 2, capabilities: {} },
       })}\n`),
     )
   } else if (request.method === "tool/call") {

@@ -26,8 +26,9 @@ use thiserror::Error;
 use url::Url;
 
 use crate::copilot_credentials::{GitHubCopilotCredential, github_copilot_credential_id};
+use crate::provider_factory::AdapterKind;
 use crate::subscription_credentials::{
-    OpenAiSubscriptionCredentialBundle, openai_subscription_credential_id,
+    OpenAiSubscriptionCredentialBundle, openai_codex_credential_id,
 };
 
 static PROVIDER_CREDENTIAL_STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -71,11 +72,11 @@ pub struct ProviderApiKey(StoredSecret<String>);
 ///
 /// Returns a sanitized error when the selected built-in bundle is malformed.
 pub fn validate_stored_provider_credential(kind: &str, value: &str) -> Result<(), AdminError> {
-    match kind {
-        "openai_codex" | "openai_subscription" => {
+    match AdapterKind::from_config_kind(kind) {
+        Some(AdapterKind::OpenAiSubscription) => {
             OpenAiSubscriptionCredentialBundle::parse(value).map(|_| ())
         }
-        "github_copilot" => GitHubCopilotCredential::parse(value).map(|_| ()),
+        Some(AdapterKind::GitHubCopilot) => GitHubCopilotCredential::parse(value).map(|_| ()),
         _ => Ok(()),
     }
 }
@@ -168,15 +169,10 @@ pub fn store_provider_api_key(
     let credentials_path = loader.credentials_path();
     let effective = loader.load().map_err(AdminError::from_display)?;
     let provider = configured_provider(&effective, provider_name)?;
-    if !matches!(
-        provider.kind.as_str(),
-        "anthropic"
-            | "openai"
-            | "openai_responses"
-            | "openai_chat"
-            | "openai_compatible"
-            | "openai_compatible_chat"
-            | "openai_compatible_responses"
+    let adapter = AdapterKind::from_config_kind(&provider.kind);
+    if matches!(
+        adapter,
+        None | Some(AdapterKind::OpenAiSubscription | AdapterKind::GitHubCopilot)
     ) {
         return Err(AdminError::new(
             "the configured provider does not use API-key authentication",
@@ -578,7 +574,7 @@ impl OAuthLogin {
             let encoded = bundle.encode()?;
             PreparedOAuthPayload::OpenAiSubscription {
                 credential: StoredSecret::new(encoded),
-                reference: CredentialReference::new(openai_subscription_credential_id(
+                reference: CredentialReference::new(openai_codex_credential_id(
                     &self.provider_name,
                 )),
             }
@@ -837,7 +833,7 @@ pub async fn begin_provider_login(provider_name: &str) -> Result<ProviderLogin, 
         .load()
         .map_err(AdminError::from_display)?;
     let provider = configured_provider(&effective, provider_name)?;
-    if provider.kind == "github_copilot" {
+    if AdapterKind::from_config_kind(&provider.kind) == Some(AdapterKind::GitHubCopilot) {
         begin_github_copilot_login(provider_name)
             .await
             .map(Box::new)
@@ -872,10 +868,8 @@ pub async fn begin_oauth_login(provider_name: &str) -> Result<OAuthLogin, AdminE
                 "provider {provider_name:?} is not configured at user scope; add [providers.{provider_name}] to the user config"
             ))
         })?;
-    let openai_subscription = matches!(
-        provider.kind.as_str(),
-        "openai_codex" | "openai_subscription"
-    );
+    let openai_subscription =
+        AdapterKind::from_config_kind(&provider.kind) == Some(AdapterKind::OpenAiSubscription);
     let token_endpoint = if openai_subscription {
         Url::parse(OPENAI_SUBSCRIPTION_TOKEN_ENDPOINT).map_err(AdminError::from_display)?
     } else {

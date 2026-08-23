@@ -12,6 +12,7 @@ use std::{
 };
 
 use rw_tools::validate_mcp_virtual_tool;
+use rw_types::SessionMode;
 use thiserror::Error;
 
 use crate::{CommandDescriptor, DiscoveredWorkflow, ModeDefinition};
@@ -334,7 +335,6 @@ pub struct DiscoveredCommand {
     model: Option<String>,
     allowed_tools: Vec<String>,
     argument_hint: Option<String>,
-    used_legacy_args_alias: bool,
     origin: ArtifactOrigin,
     body: LazyMarkdownBody,
 }
@@ -363,12 +363,6 @@ impl DiscoveredCommand {
     #[must_use]
     pub fn argument_hint(&self) -> Option<&str> {
         self.argument_hint.as_deref()
-    }
-
-    /// `args` is accepted as a migration alias for `argument-hint`.
-    #[must_use]
-    pub const fn used_legacy_args_alias(&self) -> bool {
-        self.used_legacy_args_alias
     }
 
     #[must_use]
@@ -457,28 +451,6 @@ pub struct DiscoveredSkill {
     body: LazyMarkdownBody,
 }
 
-/// Permission posture selected by a declarative agent definition.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AgentPermissionMode {
-    Discuss,
-    Plan,
-    Execute,
-}
-
-impl AgentPermissionMode {
-    fn parse(path: &Path, value: &str) -> Result<Self, ExtensionDiscoveryError> {
-        match value {
-            "discuss" => Ok(Self::Discuss),
-            "plan" => Ok(Self::Plan),
-            "execute" => Ok(Self::Execute),
-            _ => Err(ExtensionDiscoveryError::InvalidAgent {
-                path: path.to_owned(),
-                message: "`permission-mode` must be discuss, plan, or execute".to_owned(),
-            }),
-        }
-    }
-}
-
 /// A lazily loaded declarative subagent definition.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DiscoveredAgent {
@@ -486,7 +458,7 @@ pub struct DiscoveredAgent {
     description: String,
     model: String,
     tools: Vec<String>,
-    permission_mode: AgentPermissionMode,
+    permission_mode: SessionMode,
     max_turns: usize,
     origin: ArtifactOrigin,
     body: LazyMarkdownBody,
@@ -514,7 +486,7 @@ impl DiscoveredAgent {
     }
 
     #[must_use]
-    pub const fn permission_mode(&self) -> AgentPermissionMode {
+    pub const fn permission_mode(&self) -> SessionMode {
         self.permission_mode
     }
 
@@ -1205,17 +1177,13 @@ fn discover_command(
     let description = required_scalar(path, &document.fields, "description")?;
     let model = optional_scalar(path, &document.fields, "model")?;
     let allowed_tools = optional_list(&document.fields, "allowed-tools");
-    let canonical_hint = optional_scalar(path, &document.fields, "argument-hint")?;
-    let legacy_hint = optional_scalar(path, &document.fields, "args")?;
-    let used_legacy_args_alias = canonical_hint.is_none() && legacy_hint.is_some();
-    let argument_hint = canonical_hint.or(legacy_hint);
+    let argument_hint = optional_scalar(path, &document.fields, "argument-hint")?;
     Ok(DiscoveredCommand {
         name,
         description,
         model,
         allowed_tools,
         argument_hint,
-        used_legacy_args_alias,
         origin: ArtifactOrigin {
             scope,
             location,
@@ -1324,10 +1292,12 @@ fn discover_agent(
                     .to_owned(),
         });
     }
-    let permission_mode = AgentPermissionMode::parse(
-        path,
-        &required_scalar(path, &document.fields, "permission-mode")?,
-    )?;
+    let permission_mode = required_scalar(path, &document.fields, "permission-mode")?
+        .parse()
+        .map_err(|_| ExtensionDiscoveryError::InvalidAgent {
+            path: path.to_owned(),
+            message: "`permission-mode` must be discuss, plan, or execute".to_owned(),
+        })?;
     let max_turns = optional_scalar(path, &document.fields, "max-turns")?
         .map_or(Ok(32_usize), |value| value.parse::<usize>())
         .map_err(|_| ExtensionDiscoveryError::InvalidAgent {
@@ -2513,7 +2483,6 @@ mod tests {
         assert_eq!(command.model(), Some("fast"));
         assert_eq!(command.allowed_tools(), ["Read", "Bash(git status)"]);
         assert_eq!(command.argument_hint(), Some("[path] [focus]"));
-        assert!(!command.used_legacy_args_alias());
 
         let template = command.load_template().expect("parse lazy template");
         assert!(template.requires_shell());
@@ -2532,42 +2501,6 @@ mod tests {
                 .contains(&TemplatePart::ShellInterpolation {
                     command: "git status".to_owned()
                 })
-        );
-    }
-
-    #[test]
-    fn legacy_args_alias_is_accepted_but_canonical_key_wins() {
-        let fixture = TempDir::new().expect("fixture");
-        let project = fixture.path().join("project");
-        let home = fixture.path().join("home");
-        write(
-            &home.join(".agents/commands/old.md"),
-            "---\ndescription: old\nargs: FILE\n---\n$ARGUMENTS",
-        );
-        write(
-            &home.join(".agents/commands/both.md"),
-            "---\ndescription: both\nargs: OLD\nargument-hint: NEW\n---\n$ARGUMENTS",
-        );
-        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
-        assert_eq!(
-            catalog.command("old").expect("old").argument_hint(),
-            Some("FILE")
-        );
-        assert!(
-            catalog
-                .command("old")
-                .expect("old")
-                .used_legacy_args_alias()
-        );
-        assert_eq!(
-            catalog.command("both").expect("both").argument_hint(),
-            Some("NEW")
-        );
-        assert!(
-            !catalog
-                .command("both")
-                .expect("both")
-                .used_legacy_args_alias()
         );
     }
 

@@ -40,11 +40,10 @@ built-in ids `discuss`, `plan`, and `execute` are reserved: a discovered file
 using one of those ids fails registry composition instead of changing the named
 built-in's permission contract. Custom ids can select any of the three permission
 floors.
-When a custom mode becomes active, its canonical semantic fingerprint (id,
+When any mode becomes active, its canonical semantic fingerprint (id,
 description, permission floor, prompt, and sorted tool allowlist) is persisted
 without its source path. Resume and rewind compare that fingerprint against the
 trusted registry and fail closed if the definition was removed or changed.
-Legacy fingerprint-free events are accepted only for the three built-in ids.
 
 Interactive clients discover modes through the bounded, connection-scoped
 `ListModes`/`ModesListed` protocol catalog. `/mode` with no argument lists the
@@ -117,8 +116,7 @@ can declare the approval-fingerprinted `models` capability and answer
 `provider/models` with a bounded catalog containing model capabilities,
 cache-breakpoint behavior, context/output limits, and optional pricing. The
 `RpcProviderAdapter` exposes that discovery and metadata through the normal live
-catalog, model binding, and accounting paths. Protocol-1 providers are unchanged
-and retain conservative fixed capabilities and unpriced API accounting.
+catalog, model binding, and accounting paths.
 
 Protocol-2 providers can also declare bounded, approval-fingerprinted
 `credential-references`. For `provider/http`, the plugin sends the declared
@@ -139,7 +137,7 @@ require a larger protocol design.
 
 ### SDKs
 
-Official plugin SDKs: **TypeScript first** (npm `@rottweiler/plugin`), Rust second (a crate wrapping the protocol). The exact tag workflow publishes the version-matched TypeScript package through npm trusted publishing, then proves an unmodified clean scaffold can install it from the public registry. Pull-request CI consumes the packed package artifact rather than rewriting the dependency to workspace source. The protocol document plus checked-in schemas and canonical fixtures are the source of truth; SDKs are conveniences.
+Official plugin SDKs: **TypeScript first** (npm `@rottweiler/plugin`), Rust second. The dependency-leaf `rw-plugin-protocol` crate owns the public wire version, methods, limits, envelopes, manifest grammar, and DTOs. Its checked-in TypeScript, schema, and protocol-2 fixture projections are generated and CI-checked. The exact tag workflow publishes the version-matched TypeScript package through npm trusted publishing, then proves an unmodified clean scaffold can install it from the public registry. Pull-request CI consumes the packed package artifact rather than rewriting the dependency to workspace source.
 
 ### Executable configuration and approval
 
@@ -194,7 +192,7 @@ allowed_domains = []
 
 ADR-027 and `docs/design/typescript-source-plugin-host.md` define the accepted replacement for the per-plugin compiled Bun executable: one release-owned private host, one sandboxed process per plugin, two-pass sealed source preparation, and a later actor-owned live-session development attachment. This is an accepted staged design, not a shipped runtime claim. Until its extracted-release acceptance passes, standalone compilation remains the production recipe and `plugin dev` does not attach to a live session.
 
-Protocol 2 is stable; protocol 1 remains frozen and supported unchanged. The Rust host and TypeScript SDK consume canonical fixtures for both generations. Provider plugins emit request-correlated `provider/event` notifications incrementally and receive `provider/cancel` when the consumer drops; their streams are bounded and cancellation-cleaned without a whole-call five-second deadline. Protocol-2 catalog and host-HTTP requests are separately bounded and negotiated. Wire details and limits live in `packages/plugin-sdk/PROTOCOL.md` and its checked-in JSON schemas/fixtures.
+Protocol 2 is the only supported generation. The Rust host and TypeScript SDK consume the same generated contract projections. Provider plugins emit request-correlated `provider/event` notifications incrementally and receive `provider/cancel` when the consumer drops; their streams are bounded and cancellation-cleaned without a whole-call five-second deadline. Catalog and host-HTTP requests are separately bounded and negotiated. `packages/plugin-sdk/PROTOCOL.md` explains the wire contract; its current schema and fixture are projections of `rw-plugin-protocol`, not additional owners.
 
 The protocol documentation site is generated deterministically by
 `packages/plugin-docs` from the stable Markdown, schemas, and canonical wire
@@ -214,7 +212,7 @@ world hook-extension {
 }
 ```
 
-The return value is a bounded JSON directive: `continue`, `replace` with a typed JSON payload, `block` with a user-facing message, or `error`. The component declares protocol-1 hooks through the same `PluginManifest` used by Tier 2 and is registered on the same `HookDispatcher`; ordering, deadlines, cancellation, and fail-open/fail-closed behavior therefore do not fork.
+The return value is a bounded JSON directive: `continue`, `replace` with a typed JSON payload, `block` with a user-facing message, or `error`. The component declares hooks through the same `PluginManifest` used by Tier 2 and is registered on the same `HookDispatcher`; ordering, deadlines, cancellation, and fail-open/fail-closed behavior therefore do not fork.
 
 The public `rw` binary does not link Wasmtime. It communicates with the private helper over a one-shot typed, length-prefixed stdio exchange containing the exact signature-verified component bytes; malformed or oversized frames fail closed. There are no host imports and no WASI. Every call uses a fresh store with bounded component and serialized-input bytes, per-memory size, memory/table/instance counts, and fuel. The entire helper exchange, including validation, stdin writes, stdout reads, and process exit, has a fixed deadline; a timed-out or malformed helper is explicitly killed and reaped. Fuel periodically yields from the async Wasmtime call so dispatcher cancellation stops guest execution rather than merely abandoning a blocking worker. Enabled components are also bounded by count and aggregate installed bytes. The owned-string result is checked immediately after canonical lifting; its unavoidable pre-check allocation remains bounded by the store's linear-memory ceiling. This first production slice intentionally rejects tool, command, provider, event-subscription, and push capabilities: those remain RPC plugins until component interfaces can preserve their streaming and permission contracts.
 
@@ -228,8 +226,8 @@ Registry catalogs are bounded refreshable caches, and every entry is validated b
 
 - `rw plugin scaffold --lang ts` generates a working plugin skeleton with tests.
 - `rw plugin dev <path>` runs a plugin with hot-restart and RPC tracing for debugging.
-- Protocol is versioned (`protocol: 2`); the engine supports N and N-1, so
-  protocol-1 plugins remain compatible.
+- Protocol 2 is the sole accepted generation; upgrades migrate every caller and
+  remove the previous contract in the same change.
 
 ## What extensions can never do
 

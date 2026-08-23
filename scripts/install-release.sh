@@ -3,6 +3,13 @@ set -eu
 
 version='@ROTTWEILER_VERSION@'
 packaged_platform='@ROTTWEILER_PLATFORM@'
+packaged_root='@ROTTWEILER_RELEASE_ROOT@'
+archive_files='@ROTTWEILER_ARCHIVE_FILES@'
+archive_directories='@ROTTWEILER_ARCHIVE_DIRECTORIES@'
+executable_files='@ROTTWEILER_EXECUTABLE_FILES@'
+readonly_files='@ROTTWEILER_READONLY_FILES@'
+archive_entry_count='@ROTTWEILER_ARCHIVE_ENTRY_COUNT@'
+engine_path='@ROTTWEILER_ENGINE_PATH@'
 
 fail() {
   printf 'rottweiler install: %s\n' "$*" >&2
@@ -44,20 +51,18 @@ esac
 [ "$prefix" != / ] || fail 'refusing to use the filesystem root as the prefix'
 
 root=$(CDPATH= cd -P -- "$(dirname -- "$0")" && pwd)
-[ "$(basename -- "$root")" = "rottweiler-$version-$packaged_platform" ] ||
+[ "$(basename -- "$root")" = "$packaged_root" ] ||
   fail 'archive directory name does not match the packaged release'
 
-native=libopentui.so
-[ "$(uname -s)" = Darwin ] && native=libopentui.dylib
-for required in install.sh bin/rw bin/rottweiler-tui bin/rottweiler-wasm-host "bin/$native"; do
+for required in $archive_files; do
   [ -f "$root/$required" ] && [ ! -L "$root/$required" ] ||
     fail "archive is missing regular file $required"
 done
-[ -x "$root/bin/rw" ] || fail 'bin/rw is not executable'
-[ -x "$root/bin/rottweiler-tui" ] || fail 'bin/rottweiler-tui is not executable'
-[ -x "$root/bin/rottweiler-wasm-host" ] || fail 'bin/rottweiler-wasm-host is not executable'
+for executable in $executable_files; do
+  [ -x "$root/$executable" ] || fail "$executable is not executable"
+done
 entry_count=$(find "$root" -mindepth 1 -print | wc -l | tr -d ' ')
-[ "$entry_count" = 6 ] || fail 'archive contains unexpected entries'
+[ "$entry_count" = "$archive_entry_count" ] || fail 'archive contains unexpected entries'
 [ -z "$(find "$root" ! -type f ! -type d -print -quit)" ] ||
   fail 'archive contains a link or special filesystem object'
 [ -z "$(find "$root" -type f -links +1 -print -quit)" ] ||
@@ -144,13 +149,13 @@ version_dir="$prefix/versions/$version"
 if [ -e "$version_dir" ] || [ -L "$version_dir" ]; then
   [ -d "$version_dir" ] && [ ! -L "$version_dir" ] ||
     fail 'existing version generation is unsafe'
-  [ "$(find "$version_dir" -mindepth 1 -print | wc -l | tr -d ' ')" = 6 ] ||
+  [ "$(find "$version_dir" -mindepth 1 -print | wc -l | tr -d ' ')" = "$archive_entry_count" ] ||
     fail 'existing version generation contains unexpected entries'
   [ -z "$(find "$version_dir" ! -type f ! -type d -print -quit)" ] ||
     fail 'existing version generation contains a link or special filesystem object'
   [ -z "$(find "$version_dir" -type f -links +1 -print -quit)" ] ||
     fail 'existing version generation contains a hard-linked file'
-  for relative in install.sh bin/rw bin/rottweiler-tui bin/rottweiler-wasm-host "bin/$native"; do
+  for relative in $archive_files; do
     [ -f "$version_dir/$relative" ] && [ ! -L "$version_dir/$relative" ] ||
       fail 'existing version generation is incomplete'
     cmp -s "$root/$relative" "$version_dir/$relative" ||
@@ -159,37 +164,30 @@ if [ -e "$version_dir" ] || [ -L "$version_dir" ]; then
 else
   staging=$(mktemp -d "$prefix/.staging-$version.XXXXXX") ||
     fail 'could not create same-filesystem staging directory'
-  mkdir "$staging/bin"
-  chmod 755 "$staging/bin"
-  cp "$root/bin/rw" "$staging/bin/rw"
-  cp "$root/bin/rottweiler-tui" "$staging/bin/rottweiler-tui"
-  cp "$root/bin/rottweiler-wasm-host" "$staging/bin/rottweiler-wasm-host"
-  cp "$root/bin/$native" "$staging/bin/$native"
-  cp "$root/install.sh" "$staging/install.sh"
-  chmod 755 "$staging/bin/rw" "$staging/bin/rottweiler-tui" "$staging/bin/rottweiler-wasm-host"
-  chmod 755 "$staging/install.sh"
-  chmod 644 "$staging/bin/$native"
-  version_output=$("$staging/bin/rw" --version) || fail 'staged rw failed its version check'
+  for directory in $archive_directories; do
+    mkdir "$staging/$directory"
+    chmod 755 "$staging/$directory"
+  done
+  for relative in $archive_files; do
+    cp "$root/$relative" "$staging/$relative"
+  done
+  for executable in $executable_files; do
+    chmod 755 "$staging/$executable"
+  done
+  for readonly in $readonly_files; do
+    chmod 644 "$staging/$readonly"
+  done
+  version_output=$("$staging/$engine_path" --version) || fail 'staged rw failed its version check'
   [ "$version_output" = "rw $version" ] || fail 'staged rw reported the wrong version'
-  "$staging/bin/rw" __install-sync \
-    "$staging/install.sh" \
-    "$staging/bin/rw" \
-    "$staging/bin/rottweiler-tui" \
-    "$staging/bin/rottweiler-wasm-host" \
-    "$staging/bin/$native" \
-    "$staging/bin" \
+  "$staging/$engine_path" __install-sync \
+@ROTTWEILER_STAGING_SYNC_ARGUMENTS@
     "$staging" || fail 'staged generation could not be flushed durably'
   mv "$staging" "$version_dir"
   staging=
 fi
 
-"$version_dir/bin/rw" __install-sync \
-  "$version_dir/install.sh" \
-  "$version_dir/bin/rw" \
-  "$version_dir/bin/rottweiler-tui" \
-  "$version_dir/bin/rottweiler-wasm-host" \
-  "$version_dir/bin/$native" \
-  "$version_dir/bin" \
+"$version_dir/$engine_path" __install-sync \
+@ROTTWEILER_VERSION_SYNC_ARGUMENTS@
   "$version_dir" \
   "$prefix/versions" \
   "$prefix" || fail 'installed generation could not be flushed durably'
@@ -208,10 +206,10 @@ if [ -e "$prefix/bin/rw" ] && [ ! -L "$prefix/bin/rw" ]; then
   fail 'bin/rw is not a managed symlink'
 fi
 temporary_bin="$prefix/bin/.rw.$$"
-ln -s '../current/bin/rw' "$temporary_bin"
+ln -s "../current/$engine_path" "$temporary_bin"
 mv -f "$temporary_bin" "$prefix/bin/rw"
 temporary_bin=
-"$version_dir/bin/rw" __install-sync "$prefix/bin" "$prefix" ||
+"$version_dir/$engine_path" __install-sync "$prefix/bin" "$prefix" ||
   fail 'managed launcher could not be flushed durably'
 
 cleanup

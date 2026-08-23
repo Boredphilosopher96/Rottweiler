@@ -15,30 +15,13 @@ use hyper::{
     header::{AUTHORIZATION, CONNECTION, CONTENT_TYPE, HOST, HeaderValue},
 };
 use hyper_util::rt::TokioIo;
-use rw_core::{ClientCommand, CommandMeta, CommandOutcome, PROTOCOL_VERSION, RequestId};
+use rw_core::{ClientCommand, CommandMeta, CommandOutcome, PROTOCOL_VERSION, RequestId, SessionId};
+use rw_types::PermissionModeDescriptor;
 use tokio::net::UnixStream;
 
-use crate::server::ClientCredentials;
+use crate::server::{CLIENT_HEADER, ClientCredentials};
 
-const CLIENT_HEADER: &str = "x-rottweiler-client";
 const CONTROL_BODY_LIMIT: usize = 64 * 1024;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RemotePermissionMode {
-    Strict,
-    AutoSafe,
-    Yolo,
-}
-
-impl RemotePermissionMode {
-    const fn as_cli_value(self) -> &'static str {
-        match self {
-            Self::Strict => "strict",
-            Self::AutoSafe => "auto-safe",
-            Self::Yolo => "yolo",
-        }
-    }
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SshCommand {
@@ -58,7 +41,7 @@ pub struct RemoteConfig {
     pub additional_workspaces: Vec<PathBuf>,
     pub dangerously_trust: bool,
     pub model: Option<String>,
-    pub permission_mode: Option<RemotePermissionMode>,
+    pub permission_mode: Option<PermissionModeDescriptor>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -103,13 +86,7 @@ impl RemoteConfig {
         if !is_safe_absolute_path(&self.remote_rw_executable) {
             return Err(RemoteError::RemoteExecutable);
         }
-        if self.session_id.is_empty()
-            || self.session_id.len() > 128
-            || !self
-                .session_id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-        {
+        if SessionId::validate(&self.session_id).is_err() {
             return Err(RemoteError::Session);
         }
         if !is_safe_absolute_path(&self.remote_workspace) {
@@ -158,10 +135,7 @@ impl RemoteConfig {
             remote_argv.push("--wait-for-execution-lease".to_owned());
         }
         if let Some(mode) = self.permission_mode {
-            remote_argv.extend([
-                "--permission-mode".to_owned(),
-                mode.as_cli_value().to_owned(),
-            ]);
+            remote_argv.extend(["--permission-mode".to_owned(), mode.as_str().to_owned()]);
         }
         remote_argv.extend([
             "--socket".to_owned(),
@@ -668,7 +642,7 @@ mod tests {
             additional_workspaces: Vec::new(),
             dangerously_trust: false,
             model: None,
-            permission_mode: Some(RemotePermissionMode::Strict),
+            permission_mode: Some(PermissionModeDescriptor::Strict),
         }
     }
 
@@ -731,12 +705,15 @@ mod tests {
 
     #[test]
     fn remote_forwards_explicit_permission_modes_and_rejects_ssh_option_injection() {
-        for mode in [RemotePermissionMode::AutoSafe, RemotePermissionMode::Yolo] {
+        for mode in [
+            PermissionModeDescriptor::AutoSafe,
+            PermissionModeDescriptor::Yolo,
+        ] {
             let mut candidate = config();
             candidate.permission_mode = Some(mode);
             let command = candidate.engine_start_command().expect("permission mode");
             let rendered = command.args.last().expect("remote argv").to_string_lossy();
-            assert!(rendered.contains(&format!("'{}'", mode.as_cli_value())));
+            assert!(rendered.contains(&format!("'{}'", mode.as_str())));
         }
         let mut inherited = config();
         inherited.permission_mode = None;
@@ -779,6 +756,15 @@ mod tests {
                     .to_string_lossy()
                     .contains("'/work/project with spaces/it'\"'\"'s-safe'"))
         );
+    }
+
+    #[test]
+    fn remote_rejects_dot_component_session_ids() {
+        for session_id in [".", ".."] {
+            let mut candidate = config();
+            candidate.session_id = session_id.to_owned();
+            assert_eq!(candidate.validate(), Err(RemoteError::Session));
+        }
     }
 
     struct RecordingConsumer(Mutex<Vec<PathBuf>>);

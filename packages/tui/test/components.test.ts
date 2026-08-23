@@ -259,12 +259,12 @@ describe("M4 retained components", () => {
 
     app.transcript.selectNextBlock()
     expect(app.transcript.selectedBlockId).toBe("reasoning:1:1:assistant")
-    expect(reasoning?.header.bg.toInts()).toEqual(rgba(kennelTheme.selection))
+    expect(reasoning?.header.bg.toInts()).toEqual(rgba(kennelTheme.backgroundElement))
 
     app.transcript.selectNextBlock()
     expect(app.transcript.selectedBlockId).toBe("tool:block-tool-first")
     expect(reasoning?.header.bg.toInts()).toEqual(rgba(kennelTheme.background))
-    expect(tools[0]?.header.bg.toInts()).toEqual(rgba(kennelTheme.selection))
+    expect(tools[0]?.header.bg.toInts()).toEqual(rgba(kennelTheme.backgroundElement))
 
     app.transcript.selectNextBlock()
     app.transcript.selectNextBlock()
@@ -377,7 +377,7 @@ describe("M4 retained components", () => {
     expect(recreatedCard).toBe(previousCard)
     expect(recreatedTool).toBe(previousTool)
     expect(app.transcript.selectedBlockId).toBe("tool:block-tool-first")
-    expect(recreatedTool?.header.bg.toInts()).toEqual(rgba(kennelTheme.selection))
+    expect(recreatedTool?.header.bg.toInts()).toEqual(rgba(kennelTheme.backgroundElement))
     expect(recreatedTool?.body.visible).toBeTrue()
   })
 
@@ -432,7 +432,7 @@ describe("M4 retained components", () => {
     expect(updatedCard.markdown.content).toContain("Stable markdown body.")
     expect(updatedTool).toBe(tool)
     expect(updatedTool.header.plainText).toContain("✓")
-    expect(updatedTool.header.bg.toInts()).toEqual(rgba(kennelTheme.selection))
+    expect(updatedTool.header.bg.toInts()).toEqual(rgba(kennelTheme.backgroundElement))
 
     setup.resize(64, 24)
     await setup.renderOnce()
@@ -445,7 +445,7 @@ describe("M4 retained components", () => {
     expect(resizedCard.markdown.content).toContain("Stable markdown body.")
     expect(resizedTool).toBe(tool)
     expect(app.transcript.selectedBlockId).toBe("tool:block-tool-first")
-    expect(resizedTool.header.bg.toInts()).toEqual(rgba(kennelTheme.selection))
+    expect(resizedTool.header.bg.toInts()).toEqual(rgba(kennelTheme.backgroundElement))
   })
 
   test("clears block selection when the selected block disappears", async () => {

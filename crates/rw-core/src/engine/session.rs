@@ -183,16 +183,9 @@ impl SessionActor {
     ///
     /// Rejects zero guardrails, empty aliases, or an unusable workspace root.
     pub fn spawn(config: SessionActorConfig) -> Result<SessionHandle, AgentLoopError> {
-        if config.session_id.0.is_empty()
-            || config.session_id.0.len() > 128
-            || !config
-                .session_id
-                .0
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-        {
+        if SessionId::validate(&config.session_id.0).is_err() {
             return Err(AgentLoopError::InvalidConfiguration(
-                "session id must be 1-128 ASCII letters, digits, '-', '_', or '.'".to_owned(),
+                "session id must satisfy the canonical session identifier grammar".to_owned(),
             ));
         }
         if config.model_alias.trim().is_empty() {
@@ -316,7 +309,7 @@ impl SessionSubscription {
                     {
                         continue;
                     }
-                    if let Some(meta) = event_meta(&routed.event)
+                    if let Some(meta) = routed.event.meta()
                         && self
                             .last_sequence
                             .is_some_and(|last| meta.sequence_id <= last)
@@ -339,7 +332,7 @@ impl SessionSubscription {
     }
 
     fn observe(&mut self, event: &EngineEvent) {
-        if let Some(meta) = event_meta(event) {
+        if let Some(meta) = event.meta() {
             self.last_sequence = Some(meta.sequence_id);
         }
     }
@@ -352,7 +345,7 @@ pub(super) fn validate_gap(
 ) -> Result<(), AgentLoopError> {
     let mut expected = last_seen.map_or(0, |sequence| sequence.0.saturating_add(1));
     for event in gap {
-        let meta = event_meta(event).ok_or_else(|| {
+        let meta = event.meta().ok_or_else(|| {
             AgentLoopError::Persistence(
                 "durable gap contained a connection-scoped acknowledgement".to_owned(),
             )

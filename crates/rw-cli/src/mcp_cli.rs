@@ -4,8 +4,8 @@ use std::{fs, io::Write as _};
 
 use miette::{IntoDiagnostic as _, Result, miette};
 use rw_core::{McpOAuthLoginConfig, begin_mcp_oauth_login};
-use rw_mcp::ServerId;
 use rw_store::credentials::CredentialReference;
+use rw_types::McpServerId;
 use url::Url;
 
 use rw_runtime::executable_config::{DiscoveredMcpServer, DiscoveredMcpTransport};
@@ -82,7 +82,8 @@ fn login_configuration(
         ));
     };
     Ok(McpOAuthLoginConfig {
-        server: ServerId::new(server.name.clone()).map_err(|error| miette!(error.to_string()))?,
+        server: McpServerId::new(server.name.clone())
+            .map_err(|error| miette!(error.to_string()))?,
         authorization_endpoint: Url::parse(authorization_endpoint).into_diagnostic()?,
         token_endpoint: Url::parse(token_endpoint).into_diagnostic()?,
         client_id: client_id.clone(),

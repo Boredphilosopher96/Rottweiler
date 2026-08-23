@@ -54,6 +54,10 @@ impl Tool for GrepTool {
         )
     }
 
+    fn workspace_paths(&self, input: &Value) -> Result<Vec<PathBuf>, ToolError> {
+        Ok(vec![parse_input::<GrepInput>(input.clone())?.path])
+    }
+
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {
         context.cancellation.check()?;
         let input: GrepInput = parse_input(input)?;
@@ -174,6 +178,10 @@ impl Tool for GlobTool {
         descriptor::<GlobInput>("glob", "List non-ignored workspace paths matching a glob.")
     }
 
+    fn workspace_paths(&self, input: &Value) -> Result<Vec<PathBuf>, ToolError> {
+        Ok(vec![parse_input::<GlobInput>(input.clone())?.path])
+    }
+
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {
         context.cancellation.check()?;
         let input: GlobInput = parse_input(input)?;
@@ -259,6 +267,10 @@ struct LsEntry {
 impl Tool for LsTool {
     fn descriptor(&self) -> ToolDescriptor {
         descriptor::<LsInput>("ls", "List workspace directory entries and basic metadata.")
+    }
+
+    fn workspace_paths(&self, input: &Value) -> Result<Vec<PathBuf>, ToolError> {
+        Ok(vec![parse_input::<LsInput>(input.clone())?.path])
     }
 
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {

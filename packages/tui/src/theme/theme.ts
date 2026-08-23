@@ -75,22 +75,11 @@ export interface ThemeJson {
   }>
 }
 
-/** Rich OpenCode-compatible roles plus the compact aliases used by existing components. */
+/** Canonical resolved theme roles consumed directly by every TUI component. */
 export type RottweilerTheme = ResolvedThemeRoles & Readonly<{
   name: string
   mode: ThemeMode
   thinkingOpacity: number
-  panel: string
-  panelRaised: string
-  foreground: string
-  muted: string
-  subtle: string
-  accentStrong: string
-  danger: string
-  focus: string
-  selection: string
-  added: string
-  removed: string
 }>
 
 const asTheme = (value: unknown): ThemeJson => value as ThemeJson
@@ -172,17 +161,6 @@ export function resolveThemeJson(source: ThemeJson, mode: ThemeMode, name: strin
     name,
     mode,
     thinkingOpacity: opacity,
-    panel: roles.backgroundPanel,
-    panelRaised: roles.backgroundElement,
-    foreground: roles.text,
-    muted: roles.textMuted,
-    subtle: roles.borderSubtle,
-    accentStrong: roles.primary,
-    danger: roles.error,
-    focus: roles.borderActive,
-    selection: roles.backgroundElement,
-    added: roles.diffAddedBg,
-    removed: roles.diffRemovedBg,
   }
 }
 
@@ -405,7 +383,7 @@ export function createSyntaxStyle(theme: RottweilerTheme): SyntaxStyle {
   return SyntaxStyle.fromStyles({
     // Markdown prose inherits this default capture. Keep body copy on the
     // theme's primary foreground; syntax-specific captures still color code.
-    default: { fg: theme.foreground },
+    default: { fg: theme.text },
     prompt: { fg: theme.accent },
     "markup.heading": { fg: theme.markdownHeading, bold: true },
     "markup.heading.1": { fg: theme.markdownHeading, bold: true, underline: true },

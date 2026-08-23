@@ -21,7 +21,7 @@ use rmcp::{
 use rw_context::encode_toon;
 use rw_mcp::{
     McpAuthorizationProvider, McpConnectionApprovalPolicy, McpConnector, McpError, McpManager,
-    McpServerConfig, McpTransportConfig, OverflowReference, OverflowSpool, SecretToken, ServerId,
+    McpServerConfig, McpTransportConfig, OverflowReference, OverflowSpool, SecretToken,
     StructuredResponseEncoder, boxed_running_http_client,
 };
 use rw_providers::{
@@ -37,7 +37,7 @@ use rw_tools::{
     ToolContext, ToolDescriptor, ToolError, ToolRegistry, ToolResult, UpstreamProxy,
     WorkspaceBinding,
 };
-use rw_types::ToolCapability;
+use rw_types::{McpServerId, ToolCapability};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -59,7 +59,7 @@ const MCP_HTTP_MAX_EVENT_ID_BYTES: usize = 512;
 /// Trusted configuration for one public-client MCP OAuth authorization-code login.
 #[derive(Clone, Debug)]
 pub struct McpOAuthLoginConfig {
-    pub server: ServerId,
+    pub server: McpServerId,
     pub authorization_endpoint: Url,
     pub token_endpoint: Url,
     pub client_id: String,
@@ -73,7 +73,7 @@ pub struct McpOAuthLoginConfig {
 
 /// In-progress browser login. Token, state, and PKCE verifier never cross this facade.
 pub struct McpOAuthLogin {
-    server: ServerId,
+    server: McpServerId,
     session: OAuthLoginSession,
     authorization_url: String,
     redirect_uri: String,
@@ -150,7 +150,7 @@ impl McpOAuthLogin {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct McpOAuthLoginResult {
-    pub server: ServerId,
+    pub server: McpServerId,
     pub warnings: Vec<String>,
 }
 
@@ -913,8 +913,8 @@ impl fmt::Debug for McpOAuthRefreshBinding {
 /// or serialization and are returned only to the authenticated transport edge.
 pub struct VaultMcpTokenProvider<E, K> {
     credentials: Arc<CredentialManager<E, K>>,
-    bindings: BTreeMap<ServerId, McpOAuthBinding>,
-    refreshers: tokio::sync::Mutex<BTreeMap<ServerId, Arc<RefreshingOAuth>>>,
+    bindings: BTreeMap<McpServerId, McpOAuthBinding>,
+    refreshers: tokio::sync::Mutex<BTreeMap<McpServerId, Arc<RefreshingOAuth>>>,
 }
 
 impl<E, K> fmt::Debug for VaultMcpTokenProvider<E, K> {
@@ -930,7 +930,7 @@ impl<E, K> VaultMcpTokenProvider<E, K> {
     #[must_use]
     pub fn new(
         credentials: Arc<CredentialManager<E, K>>,
-        bindings: BTreeMap<ServerId, McpOAuthBinding>,
+        bindings: BTreeMap<McpServerId, McpOAuthBinding>,
     ) -> Self {
         Self {
             credentials,
@@ -977,7 +977,7 @@ where
         if stored.version != 2 {
             return Err(ProviderError::new(
                 ProviderErrorKind::Authentication,
-                "legacy MCP OAuth credential cannot rotate",
+                "unsupported MCP OAuth credential version",
             ));
         }
         stored.refresh_token = Some(refresh_token.expose_secret().to_owned());
@@ -1009,7 +1009,7 @@ where
 {
     fn load_credential(
         &self,
-        server: &ServerId,
+        server: &McpServerId,
         resource: &str,
         binding: &McpOAuthBinding,
     ) -> Result<StoredMcpOAuthCredential, McpError> {
@@ -1037,7 +1037,7 @@ where
 
     async fn refresher(
         &self,
-        server: &ServerId,
+        server: &McpServerId,
         binding: &McpOAuthBinding,
         refresh: &McpOAuthRefreshBinding,
         refresh_token: &str,
@@ -1077,7 +1077,7 @@ where
 {
     async fn token(
         &self,
-        server: &ServerId,
+        server: &McpServerId,
         resource: &str,
     ) -> Result<Option<SecretToken>, McpError> {
         let binding = self
@@ -1261,7 +1261,7 @@ impl Tool for ToolSearchTool {
         }
         let server = input
             .server
-            .map(ServerId::new)
+            .map(McpServerId::new)
             .transpose()
             .map_err(mcp_tool_error)?;
         let matches = self
@@ -1272,7 +1272,7 @@ impl Tool for ToolSearchTool {
             .filter(|definition| {
                 invocation
                     .mcp_tool_policy()
-                    .allows(&definition.server.0, &definition.name)
+                    .allows(definition.server.as_str(), &definition.name)
             })
             .collect::<Vec<_>>();
         let total_matches = matches.len();
@@ -1318,7 +1318,7 @@ impl Tool for McpCallTool {
     fn invocation_capabilities(&self, input: &Value) -> Result<CapabilityManifest, ToolError> {
         let input: McpCallInput = parse(input.clone())?;
         validate_wire_name(&input.name, "MCP tool")?;
-        let server = ServerId::new(input.server).map_err(mcp_tool_error)?;
+        let server = McpServerId::new(input.server).map_err(mcp_tool_error)?;
         Ok(self.manager.tool_capabilities(&server, &input.name))
     }
 
@@ -1329,8 +1329,11 @@ impl Tool for McpCallTool {
     ) -> Result<ToolResult, ToolError> {
         let input: McpCallInput = parse(input)?;
         validate_wire_name(&input.name, "MCP tool")?;
-        let server = ServerId::new(input.server).map_err(mcp_tool_error)?;
-        if !invocation.mcp_tool_policy().allows(&server.0, &input.name) {
+        let server = McpServerId::new(input.server).map_err(mcp_tool_error)?;
+        if !invocation
+            .mcp_tool_policy()
+            .allows(server.as_str(), &input.name)
+        {
             return Err(ToolError::InvalidInput(
                 "MCP tool is not allowed for the active agent".to_owned(),
             ));
@@ -1369,7 +1372,7 @@ impl Tool for McpResourceTool {
                 "MCP resource URI exceeds 4096 bytes".to_owned(),
             ));
         }
-        let server = ServerId::new(input.server).map_err(mcp_tool_error)?;
+        let server = McpServerId::new(input.server).map_err(mcp_tool_error)?;
         let response = self
             .manager
             .read_resource(&server, &input.uri)
@@ -1400,7 +1403,7 @@ impl Tool for McpPromptTool {
     async fn execute(&self, _context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {
         let input: McpPromptInput = parse(input)?;
         validate_wire_name(&input.name, "MCP prompt")?;
-        let server = ServerId::new(input.server).map_err(mcp_tool_error)?;
+        let server = McpServerId::new(input.server).map_err(mcp_tool_error)?;
         let response = self
             .manager
             .get_prompt(&server, &input.name, input.arguments)
@@ -1474,7 +1477,7 @@ fn restrictive_descriptor(name: &str, description: &str, input_schema: Value) ->
 }
 
 fn capped_result(
-    server: &ServerId,
+    server: &McpServerId,
     operation: &str,
     response: rw_mcp::CappedResponse,
 ) -> ToolResult {
@@ -1663,7 +1666,7 @@ mod tests {
             config: &McpServerConfig,
         ) -> Result<Arc<dyn rw_mcp::McpClient>, McpError> {
             Ok(Arc::new(PolicyClient {
-                server: config.id.0.clone(),
+                server: config.id.as_str().to_owned(),
                 calls: Arc::clone(&self.calls),
             }))
         }
@@ -1676,7 +1679,7 @@ mod tests {
     impl OverflowSpool for PolicySpool {
         async fn write(
             &self,
-            _server: &ServerId,
+            _server: &McpServerId,
             _operation: &str,
             _bytes: &[u8],
         ) -> Result<OverflowReference, McpError> {
@@ -1746,7 +1749,7 @@ mod tests {
     impl McpAuthorizationProvider for CanaryAuthorization {
         async fn token(
             &self,
-            _server: &ServerId,
+            _server: &McpServerId,
             _resource: &str,
         ) -> Result<Option<SecretToken>, McpError> {
             Ok(Some(SecretToken::new(HTTP_BEARER_CANARY)))
@@ -1755,7 +1758,7 @@ mod tests {
 
     fn oauth_login_config(token_endpoint: Url) -> McpOAuthLoginConfig {
         McpOAuthLoginConfig {
-            server: ServerId("oauth-fixture".to_owned()),
+            server: McpServerId::new("oauth-fixture").expect("server id"),
             authorization_endpoint: Url::parse("https://auth.example/authorize")
                 .expect("authorization URL"),
             token_endpoint,
@@ -1827,7 +1830,7 @@ mod tests {
                 &StoredSecret::new(serde_json::to_string(&stored).expect("stored JSON")),
             )
             .expect("seed credential");
-        let server = ServerId("oauth-refresh-fixture".to_owned());
+        let server = McpServerId::new("oauth-refresh-fixture").expect("server id");
         let provider = VaultMcpTokenProvider::new(
             manager.clone(),
             BTreeMap::from([(
@@ -1947,7 +1950,7 @@ mod tests {
             };
             manager
                 .register(McpServerConfig {
-                    id: ServerId::new(server).expect("server id"),
+                    id: McpServerId::new(server).expect("server id"),
                     transport: McpTransportConfig::Stdio {
                         executable: "fixture".into(),
                         args: Vec::new(),
@@ -2277,7 +2280,7 @@ mod tests {
             Arc::new(AllowConnection),
         );
         let config = McpServerConfig {
-            id: ServerId("http-canary".to_owned()),
+            id: McpServerId::new("http-canary").expect("server id"),
             transport: McpTransportConfig::StreamableHttp {
                 endpoint: endpoint.to_string(),
                 oauth: true,

@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 
+use rw_types::config::ThinkingLevel;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::{ModelPricing, ProviderError, ProviderErrorKind, ThinkingLevel};
+use crate::{ModelPricing, ProviderError, ProviderErrorKind};
 
 /// GitHub Copilot inference dialect selected from the live model catalog.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -436,9 +437,10 @@ fn invalid_price() -> ProviderError {
 
 #[cfg(test)]
 mod tests {
+    use rw_types::config::ThinkingLevel;
     use serde_json::json;
 
-    use crate::{ProviderErrorKind, ThinkingLevel};
+    use crate::ProviderErrorKind;
 
     use super::{
         GitHubCopilotEndpoint, github_copilot_ai_credits, github_copilot_micros_usd_per_million,

@@ -10,16 +10,16 @@ from pathlib import Path
 import re
 import tempfile
 
+from release_contract import PlatformContract, load_contract, verify_archive
+
 
 REPO = Path(__file__).resolve().parents[1]
 FORMULA_TEMPLATE = REPO / "packaging/homebrew/rottweiler.rb.in"
 CASK_TEMPLATE = REPO / "packaging/homebrew/rottweiler.cask.rb.in"
 BOOTSTRAP_TEMPLATE = REPO / "packaging/bootstrap/install.sh.in"
-SUPPORTED = {
-    "darwin-arm64": ("Darwin-arm64", "macos", "Hardware::CPU.arm?"),
-    "darwin-x86_64": ("Darwin-x86_64", "macos", "Hardware::CPU.intel?"),
-    "linux-arm64": ("Linux-aarch64", "linux", "Hardware::CPU.arm?"),
-    "linux-x86_64": ("Linux-x86_64", "linux", "Hardware::CPU.intel? && Hardware::CPU.is_64_bit?"),
+RELEASE_CONTRACT = load_contract()
+SUPPORTED: dict[str, PlatformContract] = {
+    platform.id: platform for platform in RELEASE_CONTRACT.platforms
 }
 VERSION_PATTERN = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?")
 REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
@@ -55,8 +55,12 @@ def load_archives(values: list[str], version: str) -> dict[str, Path]:
         expected = f"rottweiler-{version}-{platform}.tar.gz"
         if path.name != expected:
             raise ValueError(f"release archive must be named {expected}: {path}")
-        archives[platform] = path.resolve(strict=True)
-    operating_systems = {SUPPORTED[platform][1] for platform in archives}
+        resolved = path.resolve(strict=True)
+        verify_archive(RELEASE_CONTRACT, resolved, version, platform)
+        archives[platform] = resolved
+    operating_systems = {
+        SUPPORTED[platform].distribution.operating_system for platform in archives
+    }
     if operating_systems != {"macos", "linux"}:
         raise ValueError("distribution rendering requires at least one macOS and one Linux archive")
     return archives
@@ -83,24 +87,30 @@ def release_url(repository: str, version: str, path: Path) -> str:
 def render_formula(repository: str, version: str, archives: dict[str, Path]) -> str:
     by_os: dict[str, list[str]] = {"macos": [], "linux": []}
     for platform in sorted(archives):
-        _, operating_system, condition = SUPPORTED[platform]
+        metadata = SUPPORTED[platform].distribution
+        operating_system = metadata.operating_system
         _, digest = artifact_metadata(archives[platform])
         by_os[operating_system].append(
             "    {keyword} {condition}\n"
             "      url \"{url}\"\n"
             "      sha256 \"{digest}\"".format(
                 keyword="if" if not by_os[operating_system] else "elsif",
-                condition=condition,
+                condition=metadata.homebrew_condition,
                 url=release_url(repository, version, archives[platform]),
                 digest=digest,
             )
         )
 
     blocks: list[str] = []
-    for operating_system, label in (("macos", "macOS"), ("linux", "Linux")):
+    for operating_system in ("macos", "linux"):
         choices = by_os[operating_system]
         if not choices:
             continue
+        label = next(
+            platform.distribution.label
+            for platform in RELEASE_CONTRACT.platforms
+            if platform.distribution.operating_system == operating_system
+        )
         blocks.append(
             f"  on_{operating_system} do\n"
             + "\n".join(choices)
@@ -108,12 +118,22 @@ def render_formula(repository: str, version: str, archives: dict[str, Path]) -> 
             "    end\n  end"
         )
 
+    native_libraries: dict[str, str] = {}
+    for platform_id in archives:
+        platform = SUPPORTED[platform_id]
+        operating_system = platform.distribution.operating_system
+        previous = native_libraries.setdefault(operating_system, platform.native_library)
+        if previous != platform.native_library:
+            raise ValueError(f"release platforms disagree on the {operating_system} native library")
+
     return render_template(
         FORMULA_TEMPLATE,
         {
             "@REPOSITORY@": repository,
             "@VERSION@": version,
             "@PLATFORM_BLOCKS@": "\n\n".join(blocks),
+            "@MACOS_NATIVE_LIBRARY@": native_libraries["macos"],
+            "@LINUX_NATIVE_LIBRARY@": native_libraries["linux"],
         },
     )
 
@@ -130,6 +150,12 @@ def render_cask(repository: str, version: str, archives: dict[str, Path]) -> str
             "@HOMEPAGE_REPOSITORY@": repository,
             "@VERSION@": version,
             "@DARWIN_ARM64_SHA256@": digest,
+            "@DARWIN_ARM64_BINARY_ROOT@": RELEASE_CONTRACT.archive_root(
+                version, "darwin-arm64"
+            ),
+            "@DARWIN_ARM64_QUARANTINE_ROOT@": RELEASE_CONTRACT.archive_root(
+                version, "darwin-arm64"
+            ),
         },
     )
 
@@ -137,9 +163,9 @@ def render_cask(repository: str, version: str, archives: dict[str, Path]) -> str
 def render_bootstrap(repository: str, version: str, archives: dict[str, Path]) -> str:
     cases: list[str] = []
     for platform in sorted(archives):
-        uname, _, _ = SUPPORTED[platform]
+        uname = SUPPORTED[platform].uname_key
         length, digest = artifact_metadata(archives[platform])
-        root = f"rottweiler-{version}-{platform}"
+        root = RELEASE_CONTRACT.archive_root(version, platform)
         cases.append(
             f"  {uname})\n"
             f"    archive_url='{release_url(repository, version, archives[platform])}'\n"

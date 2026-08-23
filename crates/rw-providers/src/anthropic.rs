@@ -3,22 +3,25 @@ use std::{collections::BTreeMap, sync::Arc};
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
-use rw_types::{Block, ImageRef, Role, ToolOutput, ToolOutputPart, Turn};
+use rw_types::{Block, ImageRef, Role, ToolOutput, ToolOutputPart, Turn, config::ThinkingLevel};
 use serde_json::{Value, json};
 use url::Url;
 
-use crate::types::RawSseFrame;
+use crate::types::{
+    MAX_PROVIDER_MODEL_CATALOG_BYTES, MAX_PROVIDER_TOOL_ARGUMENT_BYTES, RawSseFrame,
+};
 use crate::{
     AuthProvider, BoxEventStream, CacheBreakpointSupport, Capabilities, DiscoveredModel,
     DiscoveredProviderCatalog, FinishReason, NetworkPolicy, Provider, ProviderError,
-    ProviderErrorKind, ProviderEvent, ProviderRequest, ProxyAuthentication, ThinkingLevel,
-    TokenUsage, ToolChoice, WireFrameSink, WireMode,
-    http::{build_client_with_proxy_auth, require_network, response_error, transport_error},
+    ProviderErrorKind, ProviderEvent, ProviderRequest, ProxyAuthentication, TokenUsage, ToolChoice,
+    WireFrameSink, WireMode,
+    http::{
+        bounded_error_json, build_client_with_proxy_auth, require_network, response_error,
+        transport_error,
+    },
     sse::{SseDecoder, SseEvent},
 };
 
-const MAX_TOOL_ARGUMENT_BYTES: usize = 1_048_576;
-const MAX_MODEL_CATALOG_BYTES: usize = 4 * 1024 * 1024;
 const MAX_MODEL_CATALOG_PAGES: usize = 32;
 
 /// How a configured Anthropic endpoint represents the thinking dial.
@@ -174,7 +177,7 @@ impl AnthropicProvider {
             if let Some(error) = response_error(&response) {
                 return Err(error);
             }
-            let remaining = MAX_MODEL_CATALOG_BYTES.saturating_sub(total_bytes);
+            let remaining = MAX_PROVIDER_MODEL_CATALOG_BYTES.saturating_sub(total_bytes);
             let bytes = bounded_anthropic_catalog_bytes(response, remaining).await?;
             total_bytes = total_bytes.saturating_add(bytes.len());
             let page = parse_anthropic_models_page(&bytes)?;
@@ -704,7 +707,7 @@ impl AnthropicState {
                             )
                         })?;
                         if tool.arguments.len().saturating_add(fragment.len())
-                            > MAX_TOOL_ARGUMENT_BYTES
+                            > MAX_PROVIDER_TOOL_ARGUMENT_BYTES
                         {
                             return Err(ProviderError::new(
                                 ProviderErrorKind::Protocol,
@@ -807,26 +810,6 @@ fn is_prompt_too_long(message: &str) -> bool {
         && maximum.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-async fn bounded_error_json(response: reqwest::Response) -> Option<Value> {
-    const MAX_ERROR_BYTES: usize = 64 * 1024;
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_ERROR_BYTES as u64)
-    {
-        return None;
-    }
-    let mut bytes = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.ok()?;
-        if bytes.len().saturating_add(chunk.len()) > MAX_ERROR_BYTES {
-            return None;
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    serde_json::from_slice(&bytes).ok()
-}
-
 fn u64_at(value: &Value, path: &[&str]) -> u64 {
     path.iter()
         .fold(value, |current, key| &current[*key])
@@ -884,12 +867,11 @@ pub(crate) fn replay_sse_frames(
 
 #[cfg(test)]
 mod tests {
-    use rw_types::{Block, Role, Turn, TurnMeta};
+    use rw_types::{Block, Role, Turn, TurnMeta, config::ThinkingLevel};
     use serde_json::json;
 
     use crate::{
-        CacheHint, ProviderErrorKind, ProviderRequest, ThinkingLevel, ToolChoice, ToolDefinition,
-        sse::SseEvent,
+        CacheHint, ProviderErrorKind, ProviderRequest, ToolChoice, ToolDefinition, sse::SseEvent,
     };
 
     use super::{AnthropicState, AnthropicThinkingStrategy, anthropic_stream_error, build_request};

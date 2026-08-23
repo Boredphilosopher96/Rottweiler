@@ -1,4 +1,5 @@
 import {
+  MAX_ATTACHMENTS_PER_MESSAGE,
   type Attachment,
   type EngineEvent,
 } from "./protocol"
@@ -91,7 +92,7 @@ export function mergeComposerDraft(
   const identities = new Set(attachments.map((attachment) => JSON.stringify(attachment)))
   for (const attachment of rejectedAttachments) {
     const identity = JSON.stringify(attachment)
-    if (identities.has(identity) || attachments.length >= 16) continue
+    if (identities.has(identity) || attachments.length >= MAX_ATTACHMENTS_PER_MESSAGE) continue
     identities.add(identity)
     attachments.push(attachment)
   }

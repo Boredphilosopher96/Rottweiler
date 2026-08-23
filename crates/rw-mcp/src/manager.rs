@@ -5,9 +5,10 @@ use tokio::{sync::RwLock, task::JoinSet};
 
 use crate::{
     CappedResponse, DeferredTool, McpCatalogEntry, McpClient, McpConnector, McpError, McpLimits,
-    McpServerConfig, McpToolDefinition, OverflowSpool, ServerId, ServerState, ServerStatus,
+    McpServerConfig, McpToolDefinition, OverflowSpool, ServerState, ServerStatus,
 };
 use rw_tools::CapabilityManifest;
+use rw_types::McpServerId;
 
 const MAX_CATALOG_ENTRIES: usize = 256;
 const MAX_CATALOG_ENTRY_BYTES: usize = 64 * 1024;
@@ -62,8 +63,8 @@ pub struct McpManager {
     spool: Arc<dyn OverflowSpool>,
     encoder: Arc<dyn StructuredResponseEncoder>,
     limits: McpLimits,
-    servers: RwLock<BTreeMap<ServerId, ServerEntry>>,
-    tool_capabilities: std::sync::RwLock<BTreeMap<ServerId, crate::McpToolCapabilityOverrides>>,
+    servers: RwLock<BTreeMap<McpServerId, ServerEntry>>,
+    tool_capabilities: std::sync::RwLock<BTreeMap<McpServerId, crate::McpToolCapabilityOverrides>>,
 }
 
 impl McpManager {
@@ -134,7 +135,7 @@ impl McpManager {
     /// Removes a server that has not been enabled. This is deliberately
     /// narrower than a general unregister operation: callers use it to roll
     /// back a live registration when durable configuration persistence fails.
-    pub async fn unregister_disabled(&self, server: &ServerId) -> Result<(), McpError> {
+    pub async fn unregister_disabled(&self, server: &McpServerId) -> Result<(), McpError> {
         let mut servers = self.servers.write().await;
         let entry = servers
             .get(server)
@@ -159,7 +160,7 @@ impl McpManager {
     /// invocation before the permission gate runs. Unknown or poisoned state
     /// remains network + execute.
     #[must_use]
-    pub fn tool_capabilities(&self, server: &ServerId, tool: &str) -> CapabilityManifest {
+    pub fn tool_capabilities(&self, server: &McpServerId, tool: &str) -> CapabilityManifest {
         self.tool_capabilities
             .read()
             .ok()
@@ -169,7 +170,7 @@ impl McpManager {
 
     /// Connects all enabled servers concurrently and returns failures without hiding successes.
     #[allow(clippy::too_many_lines)]
-    pub async fn connect_all(&self) -> Vec<(ServerId, Result<(), McpError>)> {
+    pub async fn connect_all(&self) -> Vec<(McpServerId, Result<(), McpError>)> {
         let configs = self
             .servers
             .read()
@@ -195,7 +196,7 @@ impl McpManager {
         while let Some(joined) = jobs.join_next().await {
             let Ok((id, generation, connected)) = joined else {
                 results.push((
-                    ServerId("internal-task".to_owned()),
+                    McpServerId::from_static("internal-task"),
                     Err(McpError::Protocol("MCP connection task failed".to_owned())),
                 ));
                 continue;
@@ -273,8 +274,8 @@ impl McpManager {
                                 let _ = client.close(self.limits.shutdown_timeout).await;
                                 results.push((
                                     id,
-                                    Err(McpError::Disabled(ServerId(
-                                        "stale-connection".to_owned(),
+                                    Err(McpError::Disabled(McpServerId::from_static(
+                                        "stale-connection",
                                     ))),
                                 ));
                             }
@@ -319,7 +320,7 @@ impl McpManager {
     /// Re-lists tools. Changed schemas stay pending until `approve_changes` is true.
     pub async fn refresh_tools(
         &self,
-        server: &ServerId,
+        server: &McpServerId,
         approve_changes: bool,
     ) -> Result<bool, McpError> {
         let client = self.client(server).await?;
@@ -347,7 +348,7 @@ impl McpManager {
         Ok(true)
     }
 
-    pub async fn approve_pending_tools(&self, server: &ServerId) -> Result<bool, McpError> {
+    pub async fn approve_pending_tools(&self, server: &McpServerId) -> Result<bool, McpError> {
         let mut servers = self.servers.write().await;
         let entry = servers
             .get_mut(server)
@@ -432,7 +433,7 @@ impl McpManager {
     pub async fn tool_search(
         &self,
         query: &str,
-        server_filter: Option<&ServerId>,
+        server_filter: Option<&McpServerId>,
     ) -> Vec<McpToolDefinition> {
         let query = query.to_ascii_lowercase();
         let servers = self.servers.read().await;
@@ -510,7 +511,7 @@ impl McpManager {
 
     pub async fn call_tool(
         &self,
-        server: &ServerId,
+        server: &McpServerId,
         name: &str,
         arguments: Value,
     ) -> Result<CappedResponse, McpError> {
@@ -537,7 +538,7 @@ impl McpManager {
 
     pub async fn read_resource(
         &self,
-        server: &ServerId,
+        server: &McpServerId,
         uri: &str,
     ) -> Result<CappedResponse, McpError> {
         let client = self.client(server).await?;
@@ -549,7 +550,7 @@ impl McpManager {
 
     pub async fn get_prompt(
         &self,
-        server: &ServerId,
+        server: &McpServerId,
         name: &str,
         arguments: Value,
     ) -> Result<CappedResponse, McpError> {
@@ -564,7 +565,7 @@ impl McpManager {
     }
 
     #[allow(clippy::too_many_lines)]
-    pub async fn set_enabled(&self, server: &ServerId, enabled: bool) -> Result<(), McpError> {
+    pub async fn set_enabled(&self, server: &McpServerId, enabled: bool) -> Result<(), McpError> {
         if enabled {
             let (config, generation) = {
                 let mut servers = self.servers.write().await;
@@ -613,7 +614,7 @@ impl McpManager {
     /// Returns `false` without changing `Ready`, `ApprovalRequired`, `Disabled`,
     /// or in-flight state, so repeated durable approval cannot replace a live
     /// client or undo an explicit disable.
-    pub async fn reconnect_if_failed(&self, server: &ServerId) -> Result<bool, McpError> {
+    pub async fn reconnect_if_failed(&self, server: &McpServerId) -> Result<bool, McpError> {
         let prepared = {
             let mut servers = self.servers.write().await;
             let entry = servers
@@ -633,7 +634,7 @@ impl McpManager {
 
     async fn connect_generation(
         &self,
-        server: &ServerId,
+        server: &McpServerId,
         config: McpServerConfig,
         generation: u64,
     ) -> Result<(), McpError> {
@@ -712,7 +713,7 @@ impl McpManager {
         Ok(())
     }
 
-    pub async fn shutdown(&self) -> Vec<(ServerId, Result<(), McpError>)> {
+    pub async fn shutdown(&self) -> Vec<(McpServerId, Result<(), McpError>)> {
         let clients = {
             let mut servers = self.servers.write().await;
             servers
@@ -738,7 +739,7 @@ impl McpManager {
         while let Some(joined) = jobs.join_next().await {
             let Ok((id, result)) = joined else {
                 results.push((
-                    ServerId("internal-shutdown-task".to_owned()),
+                    McpServerId::from_static("internal-shutdown-task"),
                     Err(McpError::Protocol("MCP shutdown task failed".to_owned())),
                 ));
                 continue;
@@ -757,7 +758,7 @@ impl McpManager {
         results
     }
 
-    async fn client(&self, server: &ServerId) -> Result<Arc<dyn McpClient>, McpError> {
+    async fn client(&self, server: &McpServerId) -> Result<Arc<dyn McpClient>, McpError> {
         let servers = self.servers.read().await;
         let entry = servers
             .get(server)
@@ -774,7 +775,7 @@ impl McpManager {
             .ok_or_else(|| McpError::NotConnected(server.clone()))
     }
 
-    async fn fail_generation(&self, server: &ServerId, generation: u64, error: &McpError) {
+    async fn fail_generation(&self, server: &McpServerId, generation: u64, error: &McpError) {
         if let Some(entry) = self.servers.write().await.get_mut(server)
             && entry.config.enabled
             && entry.generation == generation
@@ -787,7 +788,7 @@ impl McpManager {
 
     async fn cap(
         &self,
-        server: &ServerId,
+        server: &McpServerId,
         operation: &str,
         value: &Value,
     ) -> Result<CappedResponse, McpError> {
@@ -827,10 +828,9 @@ fn status_message(error: &McpError) -> String {
         McpError::Protocol(_) => "MCP protocol operation failed".to_owned(),
         McpError::Encoding(_) => "MCP response encoding failed".to_owned(),
         McpError::Spool(_) => "MCP overflow storage failed".to_owned(),
-        McpError::InvalidServerId(_)
-        | McpError::InvalidCommand(_)
-        | McpError::DuplicateServer(_)
-        | McpError::UnknownServer(_) => "MCP configuration is invalid".to_owned(),
+        McpError::InvalidCommand(_) | McpError::DuplicateServer(_) | McpError::UnknownServer(_) => {
+            "MCP configuration is invalid".to_owned()
+        }
     }
 }
 
@@ -856,7 +856,7 @@ fn one_line(value: &str) -> String {
 }
 
 fn definition(
-    server: &ServerId,
+    server: &McpServerId,
     tool: &Value,
     overrides: &crate::McpToolCapabilityOverrides,
 ) -> Option<McpToolDefinition> {
@@ -967,7 +967,7 @@ mod tests {
     }
 
     struct MockConnector {
-        clients: Mutex<BTreeMap<ServerId, Arc<MockClient>>>,
+        clients: Mutex<BTreeMap<McpServerId, Arc<MockClient>>>,
     }
 
     struct BlockingConnector {
@@ -1005,13 +1005,13 @@ mod tests {
     impl OverflowSpool for MemorySpool {
         async fn write(
             &self,
-            server: &ServerId,
+            server: &McpServerId,
             _operation: &str,
             bytes: &[u8],
         ) -> Result<OverflowReference, McpError> {
             self.values.lock().await.push(bytes.to_vec());
             Ok(OverflowReference {
-                id: format!("opaque-{}", server.0),
+                id: format!("opaque-{server}"),
                 bytes: bytes.len(),
             })
         }
@@ -1033,7 +1033,7 @@ mod tests {
     async fn five_servers_stay_deferred_and_support_full_catalog_and_calls() {
         let mut clients = BTreeMap::new();
         for index in 0..5 {
-            let id = ServerId::new(format!("server-{index}")).expect("id");
+            let id = McpServerId::new(format!("server-{index}")).expect("id");
             clients.insert(
                 id,
                 Arc::new(MockClient {
@@ -1060,7 +1060,7 @@ mod tests {
         for index in 0..5 {
             manager
                 .register(McpServerConfig {
-                    id: ServerId::new(format!("server-{index}")).expect("id"),
+                    id: McpServerId::new(format!("server-{index}")).expect("id"),
                     transport: McpTransportConfig::Stdio {
                         executable: "fixture".into(),
                         args: Vec::new(),
@@ -1092,7 +1092,7 @@ mod tests {
         assert_eq!(definitions[0].capabilities.capabilities().len(), 2);
         assert_eq!(manager.resources().await.len(), 5);
         assert_eq!(manager.prompts().await.len(), 5);
-        let server = ServerId::new("server-0").expect("id");
+        let server = McpServerId::new("server-0").expect("id");
         assert!(
             !manager
                 .call_tool(&server, "lookup", json!({"small":true}))
@@ -1126,7 +1126,7 @@ mod tests {
 
     #[tokio::test]
     async fn changed_schema_stays_inactive_until_approval() {
-        let id = ServerId::new("mutable").expect("id");
+        let id = McpServerId::new("mutable").expect("id");
         let schema_version = Arc::new(Mutex::new(1));
         let client = Arc::new(MockClient {
             schema_version: Arc::clone(&schema_version),
@@ -1195,7 +1195,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_close_does_not_make_an_explicitly_disabled_server_reconnectable() {
-        let id = ServerId::new("close-failure").expect("id");
+        let id = McpServerId::new("close-failure").expect("id");
         let client = Arc::new(MockClient {
             schema_version: Arc::new(Mutex::new(1)),
             closed: AtomicBool::new(false),
@@ -1239,7 +1239,7 @@ mod tests {
 
     #[tokio::test]
     async fn disable_during_connect_cannot_resurrect_stale_generation() {
-        let id = ServerId::new("racing").expect("id");
+        let id = McpServerId::new("racing").expect("id");
         let connector = Arc::new(BlockingConnector {
             client: Arc::new(MockClient {
                 schema_version: Arc::new(Mutex::new(1)),

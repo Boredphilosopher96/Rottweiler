@@ -7,7 +7,6 @@ import {
   EngineTransportError,
   SseLimitError,
   durableSequenceId,
-  normalizeWireEngineEvent,
   type BackoffScheduler,
 } from "../src/transport"
 import {
@@ -97,33 +96,6 @@ describe("authenticated UDS engine transport", () => {
   afterEach(async () => {
     await engine?.stop()
     engine = undefined
-  })
-
-  test("normalizes provider metadata omitted by older model-list events", () => {
-    const event = normalizeWireEngineEvent({
-      type: "models_listed",
-      meta: {
-        protocol_version: PROTOCOL_VERSION,
-        client_id: "client-old",
-        request_id: "request-old",
-        emitted_at: "2026-01-01T00:00:00Z",
-      },
-      models: [
-        {
-          alias: "fast",
-          capabilities: {
-            tool_calling: true,
-            vision: false,
-            thinking: false,
-            cache_behavior: "none",
-          },
-        },
-      ],
-    })
-    expect(event).toMatchObject({
-      type: "models_listed",
-      models: [{ alias: "fast", providers: [] }],
-    })
   })
 
   test("mints a client credential and never permits command client-id spoofing", async () => {
@@ -219,6 +191,7 @@ describe("authenticated UDS engine transport", () => {
       type: "mode_changed",
       meta: durableMeta("1"),
       mode: "plan",
+      definition_fingerprint: "fixture",
     } satisfies EngineEvent
     const second = {
       type: "model_changed",
@@ -371,9 +344,9 @@ describe("authenticated UDS engine transport", () => {
 
   test("aborts a gapped attempt and immediately resumes from the last verified cursor", async () => {
     const events = {
-      one: { type: "mode_changed", meta: durableMeta("1"), mode: "plan" },
+      one: { type: "mode_changed", meta: durableMeta("1"), mode: "plan", definition_fingerprint: "fixture" },
       two: { type: "model_changed", meta: durableMeta("2"), model: "slow" },
-      three: { type: "mode_changed", meta: durableMeta("3"), mode: "default" },
+      three: { type: "mode_changed", meta: durableMeta("3"), mode: "default", definition_fingerprint: "fixture" },
       four: { type: "model_changed", meta: durableMeta("4"), model: "fast" },
     } satisfies Record<string, EngineEvent>
     const harness = createPlannedFetch([
@@ -446,6 +419,7 @@ describe("authenticated UDS engine transport", () => {
       type: "mode_changed",
       meta: durableMeta("1"),
       mode: "plan",
+      definition_fingerprint: "fixture",
     } satisfies EngineEvent
     const two = {
       type: "model_changed",
@@ -456,6 +430,7 @@ describe("authenticated UDS engine transport", () => {
       type: "mode_changed",
       meta: durableMeta("3"),
       mode: "default",
+      definition_fingerprint: "fixture",
     } satisfies EngineEvent
     const four = {
       type: "model_changed",
@@ -587,6 +562,7 @@ describe("authenticated UDS engine transport", () => {
       type: "mode_changed",
       meta: durableMeta("1"),
       mode: "plan",
+      definition_fingerprint: "fixture",
     } satisfies EngineEvent
     engine = new AuthenticatedMockEngine([{ chunks: [encodeSseJson(event)], holdOpen: true }])
     await engine.start()

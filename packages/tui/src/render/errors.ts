@@ -1,4 +1,4 @@
-export type ErrorSeverity = "info" | "warning" | "danger"
+export type ErrorSeverity = "info" | "warning" | "error"
 
 export interface PresentErrorInput {
   readonly category?: string
@@ -15,49 +15,49 @@ export interface PresentedError {
 type KnownError = Omit<PresentedError, "text"> & { readonly text: string }
 
 const KNOWN_ERRORS: Record<string, KnownError> = {
-  "internal:agent_loop": danger("The engine could not complete this response"),
-  "internal:substituted": danger("The engine could not complete this response"),
+  "internal:agent_loop": error("The engine could not complete this response"),
+  "internal:substituted": error("The engine could not complete this response"),
   "protocol:attachment_unavailable": warning("Attachments are unavailable right now · try again"),
-  "protocol:attachment_queue_unsupported": danger("Attachments can only be sent when the session is idle"),
-  "protocol:command_attachments_unsupported": danger("Slash commands do not accept attachments"),
+  "protocol:attachment_queue_unsupported": error("Attachments can only be sent when the session is idle"),
+  "protocol:command_attachments_unsupported": error("Slash commands do not accept attachments"),
   "protocol:command_catalog_truncated": warning("The command catalog is too large to display safely"),
-  "protocol:command_not_available": danger("This action is not available in this engine version"),
-  "protocol:command_serialization": danger("Rottweiler could not prepare that request"),
-  "protocol:diff_unavailable": danger("No retained session diff is available"),
-  "protocol:driver_lease_held": danger("Another client controls this session"),
-  "protocol:driver_required": danger("Take control of this session before trying again"),
+  "protocol:command_not_available": error("This action is not available in this engine version"),
+  "protocol:command_serialization": error("Rottweiler could not prepare that request"),
+  "protocol:diff_unavailable": error("No retained session diff is available"),
+  "protocol:driver_lease_held": error("Another client controls this session"),
+  "protocol:driver_required": error("Take control of this session before trying again"),
   "protocol:fork_attach_failed": warning("The session was forked, but Rottweiler could not open the child session"),
-  "protocol:historical_replay_read_only": danger("Historical replay is read-only"),
-  "protocol:invalid_attachment": danger("One or more attachments could not be used"),
-  "protocol:invalid_command": danger("The engine could not understand that request"),
-  "protocol:invalid_command_arguments": danger("Those command arguments are not valid"),
+  "protocol:historical_replay_read_only": error("Historical replay is read-only"),
+  "protocol:invalid_attachment": error("One or more attachments could not be used"),
+  "protocol:invalid_command": error("The engine could not understand that request"),
+  "protocol:invalid_command_arguments": error("Those command arguments are not valid"),
   "protocol:interrupt_unavailable": warning("The engine connection is unavailable · retry shortly"),
-  "protocol:mcp_endpoint_invalid": danger("MCP endpoints must be safe HTTPS URLs"),
-  "protocol:mcp_name_invalid": danger("The MCP server name is not valid"),
-  "protocol:mcp_unconfigured": danger("No MCP servers are configured"),
+  "protocol:mcp_endpoint_invalid": error("MCP endpoints must be safe HTTPS URLs"),
+  "protocol:mcp_name_invalid": error("The MCP server name is not valid"),
+  "protocol:mcp_unconfigured": error("No MCP servers are configured"),
   "protocol:model_switch_pending": warning("Finish the pending model switch before choosing another model"),
-  "protocol:model_unavailable": danger("The selected model is unavailable"),
-  "protocol:models_unavailable": danger("No configured model routes are available"),
+  "protocol:model_unavailable": error("The selected model is unavailable"),
+  "protocol:models_unavailable": error("No configured model routes are available"),
   "protocol:permission_projection_failed": warning("Could not load permission rules"),
   "protocol:permissions_projection_failed": warning("Could not load permission rules"),
   "protocol:provider_activation_failed": warning("Provider activation failed · try again"),
   "protocol:provider_activation_pending": info("Credential stored securely · activation is pending"),
-  "protocol:provider_auth_failed": danger("Sign-in could not be completed · try again"),
-  "protocol:provider_auth_unavailable": danger("This provider has no safe sign-in action"),
-  "protocol:provider_credential_failed": danger("The credential could not be saved · verify it and try again"),
+  "protocol:provider_auth_failed": error("Sign-in could not be completed · try again"),
+  "protocol:provider_auth_unavailable": error("This provider has no safe sign-in action"),
+  "protocol:provider_credential_failed": error("The credential could not be saved · verify it and try again"),
   "protocol:provider_credential_warning": warning("The provider reported a credential warning"),
-  "protocol:providers_unavailable": danger("No configured provider routes are available"),
-  "protocol:question_attachments_unsupported": danger("Questions can only be answered with text"),
-  "protocol:request_id_conflict": danger("This request identifier was already used for another action"),
-  "protocol:request_state_invalid": danger("The engine could not process that request"),
+  "protocol:providers_unavailable": error("No configured provider routes are available"),
+  "protocol:question_attachments_unsupported": error("Questions can only be answered with text"),
+  "protocol:request_id_conflict": error("This request identifier was already used for another action"),
+  "protocol:request_state_invalid": error("The engine could not process that request"),
   "protocol:review_command_failed": warning("The review decision could not be delivered · try again"),
   "protocol:review_command_unavailable": warning("The engine did not acknowledge the review decision"),
-  "protocol:review_unavailable_during_shell": danger("Exit the foreground shell before opening session review"),
-  "protocol:selection_copy_failed": danger("Couldn't copy the selected text to the clipboard"),
-  "protocol:session_mismatch": danger("This request belongs to a different session"),
+  "protocol:review_unavailable_during_shell": error("Exit the foreground shell before opening session review"),
+  "protocol:selection_copy_failed": error("Couldn't copy the selected text to the clipboard"),
+  "protocol:session_mismatch": error("This request belongs to a different session"),
   "protocol:session_requires_recovery": warning("Restoring this session · input will be available shortly"),
   "internal:session_requires_recovery": warning("Restoring this session · input will be available shortly"),
-  "protocol:subagent_attachments_unsupported": danger("Child follow-ups can only include text"),
+  "protocol:subagent_attachments_unsupported": error("Child follow-ups can only include text"),
   "protocol:subagent_close_failed": warning("Couldn't close the child agent · try again"),
   "protocol:subagent_close_unavailable": warning("The engine connection is unavailable · retry shortly"),
   "protocol:subagent_continue_failed": warning("Couldn't continue the child agent · try again"),
@@ -66,14 +66,14 @@ const KNOWN_ERRORS: Record<string, KnownError> = {
   "protocol:subagent_interrupt_unavailable": warning("The engine connection is unavailable · retry shortly"),
   "protocol:subagent_replay_failed": warning("Couldn't load the child transcript · try again"),
   "protocol:subagent_replay_unavailable": warning("The engine connection is unavailable · retry shortly"),
-  "protocol:subagent_still_running": danger("This child is still working. Inspect its progress or interrupt it before sending a follow-up."),
+  "protocol:subagent_still_running": error("This child is still working. Inspect its progress or interrupt it before sending a follow-up."),
   "protocol:subagents_failed": warning("Couldn't load child agents · try again"),
   "protocol:subagents_unavailable": warning("The engine connection is unavailable · retry shortly"),
-  "protocol:subagents_unavailable_in_replay": danger("Child-agent controls are unavailable in historical replay"),
+  "protocol:subagents_unavailable_in_replay": error("Child-agent controls are unavailable in historical replay"),
   "protocol:theme_persistence_failed": warning("The theme could not be saved · try again"),
   "protocol:tool_approval_failed": warning("Couldn't deliver the approval decision · try again"),
   "protocol:tool_approval_unavailable": warning("The engine did not acknowledge the approval decision"),
-  "protocol:unsupported_protocol_version": danger("Rottweiler and engine versions are incompatible"),
+  "protocol:unsupported_protocol_version": error("Rottweiler and engine versions are incompatible"),
   "protocol:user_shell_active": warning("Finish the foreground shell before starting an agent turn"),
 }
 
@@ -85,8 +85,8 @@ function warning(text: string): KnownError {
   return { text, severity: "warning" }
 }
 
-function danger(text: string): KnownError {
-  return { text, severity: "danger" }
+function error(text: string): KnownError {
+  return { text, severity: "error" }
 }
 
 /** Converts engine and transport failures into stable, safe UI copy. */
@@ -155,8 +155,8 @@ function inferredSeverity(category: string, code: string, message: string): Erro
     return "warning"
   }
   if (category === "internal" || /permission|validation|invalid|denied|forbidden|auth|credential|unsupported/.test(detail)) {
-    return "danger"
+    return "error"
   }
-  return "danger"
+  return "error"
 }
 import { truncateToCells } from "./text"

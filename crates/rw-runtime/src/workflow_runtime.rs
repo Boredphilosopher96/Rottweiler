@@ -13,7 +13,7 @@ use rw_ext::{
 };
 use rw_ext::{
     CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation, CommandRegistry,
-    CommandRegistryError, CommandSource,
+    CommandRegistryError,
 };
 use rw_tools::CancellationToken;
 use rw_tools::{
@@ -21,7 +21,7 @@ use rw_tools::{
     SubagentProgressEvent, Tool, ToolContext, ToolDescriptor, ToolError, ToolRegistry, ToolResult,
     WorkspaceBinding,
 };
-use rw_types::{SessionId, SubagentResult, ToolCapability};
+use rw_types::{CommandSource, SessionId, SubagentResult, ToolCapability};
 use serde_json::{Value, json};
 
 const MAX_FRAMED_WORKFLOW_TASK_BYTES: usize = 64 * 1024;
@@ -1204,7 +1204,7 @@ needs = ["impl", "tests"]
                     max_turns: 4,
                     identical_tool_failure_limit: 5,
                     max_output_tokens: 1024,
-                    thinking: rw_providers::ThinkingLevel::Off,
+                    thinking: rw_types::config::ThinkingLevel::Off,
                     event_capacity: 64,
                 })
             }));
@@ -1309,7 +1309,7 @@ needs = ["impl", "tests"]
                 max_turns: 4,
                 identical_tool_failure_limit: 5,
                 max_output_tokens: 1024,
-                thinking: rw_providers::ThinkingLevel::Off,
+                thinking: rw_types::config::ThinkingLevel::Off,
                 event_capacity: 64,
             })
         }));

@@ -16,14 +16,14 @@ export class ImageAttachmentRenderable extends BoxRenderable {
       border: true,
       borderStyle: "single",
       borderColor: theme.border,
-      backgroundColor: theme.panel,
+      backgroundColor: theme.backgroundPanel,
       paddingX: 1,
     })
     this.preview = new TextRenderable(ctx, {
       content: graphicsCapable
         ? `▧▨▩ ${attachment.name}\n▨▩▧ cell preview · ${attachment.media_type}`
         : `🖼 ${attachment.name} · ${attachment.media_type} · preview unavailable`,
-      fg: graphicsCapable ? theme.info : theme.muted,
+      fg: graphicsCapable ? theme.info : theme.textMuted,
       wrapMode: "word",
     })
     this.add(this.preview)

@@ -28,14 +28,14 @@ export class OutputViewerRenderable extends BoxRenderable {
       border: true,
       borderStyle: "rounded",
       borderColor: theme.info,
-      backgroundColor: theme.panel,
+      backgroundColor: theme.backgroundPanel,
       paddingX: 1,
       visible: false,
       zIndex: 9,
     })
     this.header = new TextRenderable(ctx, {
       content: "",
-      fg: theme.foreground,
+      fg: theme.text,
       height: 1,
       flexShrink: 0,
       wrapMode: "none",
@@ -53,13 +53,13 @@ export class OutputViewerRenderable extends BoxRenderable {
       contentOptions: { flexDirection: "column", width: "100%" },
       verticalScrollbarOptions: {
         showArrows: false,
-        trackOptions: { backgroundColor: theme.panel },
+        trackOptions: { backgroundColor: theme.backgroundPanel },
       },
     })
     this.body = new TextRenderable(ctx, {
       id: "tool-output-content",
       content: "",
-      fg: theme.foreground,
+      fg: theme.text,
       width: "100%",
       flexShrink: 0,
       wrapMode: "word",
@@ -67,7 +67,7 @@ export class OutputViewerRenderable extends BoxRenderable {
     })
     this.hint = new TextRenderable(ctx, {
       content: "Esc to close",
-      fg: theme.muted,
+      fg: theme.textMuted,
       height: 1,
       flexShrink: 0,
     })

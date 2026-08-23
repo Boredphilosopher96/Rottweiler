@@ -36,6 +36,7 @@ function modeEvent(sequence: number): EngineEvent {
       emitted_at: "2026-07-10T00:00:00Z",
     },
     mode: sequence % 2 === 0 ? "plan" : "execute",
+    definition_fingerprint: "fixture",
   }
 }
 

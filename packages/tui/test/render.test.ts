@@ -18,14 +18,13 @@ describe("bounded retained rendering", () => {
     })).toBe("ctx 3.9k · limit unknown")
 
     const models = [{
-      alias: "openai_codex/gpt-5.4-mini",
       id: "openai_codex/gpt-5.4-mini",
       displayName: "GPT-5.4 mini",
       provider: "openai_codex",
-      providers: ["openai_codex"],
       aliases: ["fast"],
       current: true,
       available: true,
+      status: null,
       vision: true,
       thinking: true,
       toolCalling: true,

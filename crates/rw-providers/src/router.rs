@@ -435,6 +435,7 @@ mod tests {
 
     use async_trait::async_trait;
     use futures_util::StreamExt;
+    use rw_types::config::ThinkingLevel;
     use tokio::time::Instant;
 
     use crate::{
@@ -529,7 +530,7 @@ mod tests {
             tool_choice: crate::ToolChoice::Auto,
             max_output_tokens: 100,
             temperature: None,
-            thinking: crate::ThinkingLevel::Off,
+            thinking: ThinkingLevel::Off,
             cache_hint: None,
         }
     }

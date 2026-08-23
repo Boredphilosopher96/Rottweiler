@@ -92,8 +92,8 @@ describe("pure UI presentation policy", () => {
     expect(modelAliasDescription(
       { alias: "fast", candidates: ["openai/gpt-5", "copilot/gpt-5"], current: false },
       [
-        { alias: "gpt-5", id: "openai/gpt-5", providers: ["openai"], vision: true, thinking: true, toolCalling: true, available: false },
-        { alias: "gpt-5", id: "copilot/gpt-5", providers: ["copilot"], vision: true, thinking: true, toolCalling: true, available: false },
+        { id: "openai/gpt-5", displayName: "gpt-5", provider: "openai", aliases: ["fast"], current: false, status: null, vision: true, thinking: true, toolCalling: true, available: false },
+        { id: "copilot/gpt-5", displayName: "gpt-5", provider: "copilot", aliases: ["fast"], current: false, status: null, vision: true, thinking: true, toolCalling: true, available: false },
       ],
     )).toContain("no available route")
     expect(permissionPatternLabel("bash(*)")).toBe("bash · any arguments")

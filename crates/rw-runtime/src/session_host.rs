@@ -38,22 +38,20 @@ use rw_core::{
     ModelCatalogSnapshot, ModelCatalogSource, PermissionDecision, PreparedForkOperation,
     ProviderAuthAttempt, ProviderAuthChallenge, ProviderAuthCompletion, ProviderLogin,
     ProviderLoginCancellation, ProviderModelCatalogSource, SessionDescriptor, SessionFactory,
-    SessionId, ThinkingLevel, TranscriptFormat, UserSettingDescriptor, WorkspaceDiff,
-    WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceStatus, begin_provider_login,
-    builtin_command_registry, project_session_events,
+    SessionId, TranscriptFormat, UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch,
+    WorkspaceFilePreview, WorkspaceStatus, begin_provider_login, builtin_command_registry,
+    merge_model_catalog_provider, project_session_events, retain_model_catalog_provider,
 };
 use rw_store::catalog_cache::{load_model_catalog_cache, store_model_catalog_cache};
 use rw_store::config::ConfigLoader;
 use rw_store::session::{SessionEventLog, SessionIndex, SessionStoreError, UtcTimestamp};
+use rw_types::{PermissionModeDescriptor as PermissionMode, config::ThinkingLevel};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    PermissionMode,
-    session_runtime::{
-        HostedProviderMode, HostedSessionComposition, compose_hosted_actor,
-        fork_hosted_session_storage, load_session_metadata_any, load_session_workspace_roots,
-        new_session_id, remove_forked_session_storage,
-    },
+use crate::session_runtime::{
+    HostedProviderMode, HostedSessionComposition, compose_hosted_actor,
+    fork_hosted_session_storage, load_session_metadata_any, load_session_workspace_roots,
+    new_session_id, remove_forked_session_storage,
 };
 
 const MAX_SEARCH_RESULTS: usize = 1_000;
@@ -98,43 +96,6 @@ const MAX_COMPLETED_FORK_OPERATIONS: usize = 4_096;
 const MAX_PENDING_FORK_OPERATIONS: usize = 32;
 const MAX_FORK_TEMP_FILES: usize = 16;
 const MAX_FORK_JOURNAL_BYTES: usize = 256 * 1024;
-const TUI_THEME_CHOICES: [&str; 34] = [
-    "system",
-    "aura",
-    "ayu",
-    "carbonfox",
-    "catppuccin",
-    "catppuccin-frappe",
-    "catppuccin-macchiato",
-    "cobalt2",
-    "cursor",
-    "dracula",
-    "everforest",
-    "flexoki",
-    "github",
-    "gruvbox",
-    "kanagawa",
-    "lucent-orng",
-    "material",
-    "matrix",
-    "mercury",
-    "monokai",
-    "nightowl",
-    "nord",
-    "one-dark",
-    "opencode",
-    "orng",
-    "osaka-jade",
-    "palenight",
-    "rosepine",
-    "solarized",
-    "synthwave84",
-    "tokyonight",
-    "vercel",
-    "vesper",
-    "zenburn",
-];
-
 fn unix_millis() -> u64 {
     u64::try_from(
         SystemTime::now()
@@ -282,6 +243,87 @@ struct PersistingModelCatalogSource {
     cache_path: PathBuf,
 }
 
+enum EditableSettingKey {
+    KeybindingPreset,
+    ProjectDefaultModel,
+    Theme,
+    ModelThinking(String),
+    AutomaticCompaction,
+    DefaultPermission,
+    SessionCostCap,
+    DailyCostCap,
+    BudgetWarning,
+    McpServerEnabled(String),
+    McpAddHttp(String),
+}
+
+impl EditableSettingKey {
+    const KEYBINDING_PRESET: &'static str = "ui.keybindings.preset";
+    const PROJECT_DEFAULT_MODEL: &'static str = "project.models.default";
+    const THEME: &'static str = "ui.theme";
+    const MODEL_THINKING_PREFIX: &'static str = "models.thinking.";
+    const AUTOMATIC_COMPACTION: &'static str = "compaction.auto";
+    const DEFAULT_PERMISSION: &'static str = "permissions.default";
+    const SESSION_COST_CAP: &'static str = "budget.session_cost_cap_micros_usd";
+    const DAILY_COST_CAP: &'static str = "budget.daily_cost_cap_micros_usd";
+    const BUDGET_WARNING: &'static str = "budget.warn_at_percent";
+    const MCP_SERVER_PREFIX: &'static str = "mcp.servers.";
+    const MCP_SERVER_ENABLED_SUFFIX: &'static str = ".enabled";
+    const MCP_ADD_HTTP_PREFIX: &'static str = "mcp.add_http.";
+
+    fn parse(key: &str) -> Option<Self> {
+        let fixed = match key {
+            Self::KEYBINDING_PRESET => Some(Self::KeybindingPreset),
+            Self::PROJECT_DEFAULT_MODEL => Some(Self::ProjectDefaultModel),
+            Self::THEME => Some(Self::Theme),
+            Self::AUTOMATIC_COMPACTION => Some(Self::AutomaticCompaction),
+            Self::DEFAULT_PERMISSION => Some(Self::DefaultPermission),
+            Self::SESSION_COST_CAP => Some(Self::SessionCostCap),
+            Self::DAILY_COST_CAP => Some(Self::DailyCostCap),
+            Self::BUDGET_WARNING => Some(Self::BudgetWarning),
+            _ => None,
+        };
+        if let Some(fixed) = fixed {
+            return Some(fixed);
+        }
+        if let Some(alias) = key.strip_prefix(Self::MODEL_THINKING_PREFIX) {
+            return (!alias.is_empty()).then(|| Self::ModelThinking(alias.to_owned()));
+        }
+        if let Some(server) = key
+            .strip_prefix(Self::MCP_SERVER_PREFIX)
+            .and_then(|suffix| suffix.strip_suffix(Self::MCP_SERVER_ENABLED_SUFFIX))
+            .filter(|server| {
+                !server.contains('.') && rw_types::McpServerId::validate(server).is_ok()
+            })
+        {
+            return Some(Self::McpServerEnabled(server.to_owned()));
+        }
+        key.strip_prefix(Self::MCP_ADD_HTTP_PREFIX)
+            .filter(|server| rw_types::McpServerId::validate(server).is_ok())
+            .map(|server| Self::McpAddHttp(server.to_owned()))
+    }
+
+    fn render(&self) -> String {
+        match self {
+            Self::KeybindingPreset => Self::KEYBINDING_PRESET.to_owned(),
+            Self::ProjectDefaultModel => Self::PROJECT_DEFAULT_MODEL.to_owned(),
+            Self::Theme => Self::THEME.to_owned(),
+            Self::ModelThinking(alias) => format!("{}{alias}", Self::MODEL_THINKING_PREFIX),
+            Self::AutomaticCompaction => Self::AUTOMATIC_COMPACTION.to_owned(),
+            Self::DefaultPermission => Self::DEFAULT_PERMISSION.to_owned(),
+            Self::SessionCostCap => Self::SESSION_COST_CAP.to_owned(),
+            Self::DailyCostCap => Self::DAILY_COST_CAP.to_owned(),
+            Self::BudgetWarning => Self::BUDGET_WARNING.to_owned(),
+            Self::McpServerEnabled(server) => format!(
+                "{}{server}{}",
+                Self::MCP_SERVER_PREFIX,
+                Self::MCP_SERVER_ENABLED_SUFFIX
+            ),
+            Self::McpAddHttp(server) => format!("{}{server}", Self::MCP_ADD_HTTP_PREFIX),
+        }
+    }
+}
+
 #[async_trait]
 impl ModelCatalogSource for PersistingModelCatalogSource {
     async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
@@ -293,6 +335,28 @@ impl ModelCatalogSource for PersistingModelCatalogSource {
         let _ =
             tokio::task::spawn_blocking(move || store_model_catalog_cache(&cache_path, &cached))
                 .await;
+        Ok(snapshot)
+    }
+
+    async fn discover_provider(
+        &self,
+        provider: &str,
+    ) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
+        let snapshot = self.inner.discover_provider(provider).await?;
+        let cache_path = self.cache_path.clone();
+        let provider = provider.to_owned();
+        let cached = snapshot.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let durable = if let Some(base) = load_model_catalog_cache(&cache_path).ok().flatten() {
+                merge_model_catalog_provider(base, cached, &provider)
+            } else {
+                let mut scoped = cached;
+                retain_model_catalog_provider(&mut scoped, &provider);
+                scoped
+            };
+            store_model_catalog_cache(&cache_path, &durable)
+        })
+        .await;
         Ok(snapshot)
     }
 }
@@ -419,7 +483,10 @@ impl RuntimeSessionFactory {
         } else {
             &loaded.config.models.default
         };
-        let thinking_key = format!("models.thinking.{alias}");
+        let theme_key = EditableSettingKey::Theme.render();
+        let thinking_key = EditableSettingKey::ModelThinking(alias.to_owned()).render();
+        let compaction_key = EditableSettingKey::AutomaticCompaction.render();
+        let permission_key = EditableSettingKey::DefaultPermission.render();
         let provenance = |key: &str| {
             loaded
                 .provenance(key)
@@ -427,7 +494,7 @@ impl RuntimeSessionFactory {
         };
         let mut settings = vec![
             UserSettingDescriptor {
-                key: "ui.keybindings.preset".to_owned(),
+                key: EditableSettingKey::KeybindingPreset.render(),
                 label: "Keybinding preset".to_owned(),
                 value: keybinding_preset.to_owned(),
                 choices: ["standard", "vim"].map(str::to_owned).to_vec(),
@@ -435,7 +502,7 @@ impl RuntimeSessionFactory {
                 applies_immediately: false,
             },
             UserSettingDescriptor {
-                key: "project.models.default".to_owned(),
+                key: EditableSettingKey::ProjectDefaultModel.render(),
                 label: "Project default model".to_owned(),
                 value: project_model.unwrap_or("not set").to_owned(),
                 choices: project_model.into_iter().map(str::to_owned).collect(),
@@ -443,44 +510,56 @@ impl RuntimeSessionFactory {
                 applies_immediately: false,
             },
             UserSettingDescriptor {
-                key: "ui.theme".to_owned(),
+                key: theme_key.clone(),
                 label: "Theme".to_owned(),
                 value: loaded.config.ui.theme.clone(),
-                choices: TUI_THEME_CHOICES.map(str::to_owned).to_vec(),
-                provenance: provenance("ui.theme"),
+                choices: Vec::new(),
+                provenance: provenance(&theme_key),
                 applies_immediately: false,
             },
             UserSettingDescriptor {
                 key: thinking_key.clone(),
                 label: format!("Thinking · {alias}"),
-                value: thinking_level_name(
-                    loaded
-                        .config
-                        .models
-                        .thinking
-                        .get(alias)
-                        .copied()
-                        .unwrap_or_default(),
-                )
-                .to_owned(),
-                choices: ["off", "low", "medium", "high"].map(str::to_owned).to_vec(),
+                value: loaded
+                    .config
+                    .models
+                    .thinking
+                    .get(alias)
+                    .copied()
+                    .unwrap_or_default()
+                    .as_str()
+                    .to_owned(),
+                choices: [
+                    ThinkingLevel::Off,
+                    ThinkingLevel::Low,
+                    ThinkingLevel::Medium,
+                    ThinkingLevel::High,
+                ]
+                .map(|level| level.as_str().to_owned())
+                .to_vec(),
                 provenance: provenance(&thinking_key),
                 applies_immediately: false,
             },
             UserSettingDescriptor {
-                key: "compaction.auto".to_owned(),
+                key: compaction_key.clone(),
                 label: "Automatic compaction".to_owned(),
                 value: loaded.config.compaction.auto.to_string(),
                 choices: vec!["true".to_owned(), "false".to_owned()],
-                provenance: provenance("compaction.auto"),
+                provenance: provenance(&compaction_key),
                 applies_immediately: false,
             },
             UserSettingDescriptor {
-                key: "permissions.default".to_owned(),
+                key: permission_key.clone(),
                 label: "Default permission".to_owned(),
-                value: permission_decision_name(loaded.config.permissions.default).to_owned(),
-                choices: ["ask", "allow", "deny"].map(str::to_owned).to_vec(),
-                provenance: provenance("permissions.default"),
+                value: loaded.config.permissions.default.as_str().to_owned(),
+                choices: [
+                    PermissionDecision::Ask,
+                    PermissionDecision::Allow,
+                    PermissionDecision::Deny,
+                ]
+                .map(|decision| decision.as_str().to_owned())
+                .to_vec(),
+                provenance: provenance(&permission_key),
                 applies_immediately: false,
             },
         ];
@@ -489,7 +568,7 @@ impl RuntimeSessionFactory {
             mcp_servers
                 .iter()
                 .map(|(server, enabled)| UserSettingDescriptor {
-                    key: format!("mcp.servers.{server}.enabled"),
+                    key: EditableSettingKey::McpServerEnabled(server.clone()).render(),
                     label: format!("MCP · {server}"),
                     value: enabled.to_string(),
                     choices: ["true", "false"].map(str::to_owned).to_vec(),
@@ -1992,35 +2071,46 @@ impl HostQueryService for RuntimeSessionFactory {
         let workspace = self.workspace_for_session(session)?;
         let config_loader = self.settings_loader_for(&workspace);
         let project_loader = config_loader.clone();
-        let key = key.to_owned();
+        let setting_key = EditableSettingKey::parse(key).ok_or_else(|| {
+            HostError::Persistence(
+                rw_store::config::ConfigError::InvalidUserSetting {
+                    key: key.to_owned(),
+                    reason: "key or value is outside the safe TUI settings allowlist".to_owned(),
+                }
+                .to_string(),
+            )
+        })?;
+        let rendered_key = setting_key.render();
         let value = value.to_owned();
-        let project_model_write = key == "project.models.default";
+        let project_model_write = matches!(&setting_key, EditableSettingKey::ProjectDefaultModel);
         let persisted_project_model = project_model_write.then(|| value.clone());
-        let effective = tokio::task::spawn_blocking(move || {
-            if key == "project.models.default" {
+        let effective = tokio::task::spawn_blocking(move || match setting_key {
+            EditableSettingKey::ProjectDefaultModel => {
                 config_loader.persist_tui_project_model(&value)
-            } else if key == "ui.keybindings.preset" {
+            }
+            EditableSettingKey::KeybindingPreset => {
                 config_loader.persist_tui_keybinding_preset(&value)?;
                 config_loader.load()
-            } else if let Some(server) = mcp_setting_server(&key) {
+            }
+            EditableSettingKey::McpServerEnabled(server) => {
                 let enabled = match value.as_str() {
                     "true" => true,
                     "false" => false,
                     _ => {
                         return Err(rw_store::config::ConfigError::InvalidUserSetting {
-                            key,
+                            key: rendered_key,
                             reason: "MCP enablement must be true or false".to_owned(),
                         });
                     }
                 };
-                config_loader.persist_tui_mcp_enabled(server, enabled)?;
+                config_loader.persist_tui_mcp_enabled(&server, enabled)?;
                 config_loader.load()
-            } else if let Some(server) = key.strip_prefix("mcp.add_http.") {
-                config_loader.persist_tui_mcp_http_server(server, &value)?;
-                config_loader.load()
-            } else {
-                config_loader.persist_tui_setting(&key, &value)
             }
+            EditableSettingKey::McpAddHttp(server) => {
+                config_loader.persist_tui_mcp_http_server(&server, &value)?;
+                config_loader.load()
+            }
+            _ => config_loader.persist_tui_setting(&rendered_key, &value),
         })
         .await
         .map_err(|_| HostError::Persistence("user setting worker failed".to_owned()))?
@@ -2142,15 +2232,17 @@ impl HostQueryService for RuntimeSessionFactory {
         }
     }
 
-    async fn configure_builtin_provider(&self, provider: &str) -> Result<(), HostError> {
+    async fn configure_builtin_provider(
+        &self,
+        profile: rw_core::BuiltinProviderProfile,
+    ) -> Result<(), HostError> {
         let config_loader = self.settings_loader();
-        let provider = provider.to_owned();
-        tokio::task::spawn_blocking(move || config_loader.configure_builtin_provider(&provider))
-            .await
-            .map_err(|_| {
-                HostError::Persistence("built-in provider setup worker failed".to_owned())
-            })?
-            .map_err(|error| HostError::Persistence(error.to_string()))?;
+        tokio::task::spawn_blocking(move || {
+            config_loader.configure_provider_profile(profile.canonical_id(), profile.config_kind())
+        })
+        .await
+        .map_err(|_| HostError::Persistence("built-in provider setup worker failed".to_owned()))?
+        .map_err(|error| HostError::Persistence(error.to_string()))?;
         Ok(())
     }
 
@@ -2308,29 +2400,6 @@ fn overlay_catalog_current(
     }
 }
 
-const fn thinking_level_name(level: ThinkingLevel) -> &'static str {
-    match level {
-        ThinkingLevel::Off => "off",
-        ThinkingLevel::Low => "low",
-        ThinkingLevel::Medium => "medium",
-        ThinkingLevel::High => "high",
-    }
-}
-
-fn mcp_setting_server(key: &str) -> Option<&str> {
-    let mut segments = key.split('.');
-    match (
-        segments.next(),
-        segments.next(),
-        segments.next(),
-        segments.next(),
-        segments.next(),
-    ) {
-        (Some("mcp"), Some("servers"), Some(server), Some("enabled"), None) => Some(server),
-        _ => None,
-    }
-}
-
 /// Rounds down to whole cents for display; TUI-authored values are exact multiples of 10,000 micros and round-trip exactly.
 fn format_cost_cap(micros: Option<u64>) -> String {
     let Some(micros) = micros else {
@@ -2343,6 +2412,9 @@ fn format_cost_cap(micros: Option<u64>) -> String {
 fn budget_setting_descriptors(
     loaded: &rw_store::config::LoadedConfig,
 ) -> [UserSettingDescriptor; 3] {
+    let session_cost_key = EditableSettingKey::SessionCostCap.render();
+    let daily_cost_key = EditableSettingKey::DailyCostCap.render();
+    let warning_key = EditableSettingKey::BudgetWarning.render();
     let provenance = |key: &str| {
         loaded
             .provenance(key)
@@ -2350,38 +2422,30 @@ fn budget_setting_descriptors(
     };
     [
         UserSettingDescriptor {
-            key: "budget.session_cost_cap_micros_usd".to_owned(),
+            key: session_cost_key.clone(),
             label: "Session cost cap".to_owned(),
             value: format_cost_cap(loaded.config.budget.session_cost_cap_micros_usd),
             choices: Vec::new(),
-            provenance: provenance("budget.session_cost_cap_micros_usd"),
+            provenance: provenance(&session_cost_key),
             applies_immediately: false,
         },
         UserSettingDescriptor {
-            key: "budget.daily_cost_cap_micros_usd".to_owned(),
+            key: daily_cost_key.clone(),
             label: "Daily cost cap".to_owned(),
             value: format_cost_cap(loaded.config.budget.daily_cost_cap_micros_usd),
             choices: Vec::new(),
-            provenance: provenance("budget.daily_cost_cap_micros_usd"),
+            provenance: provenance(&daily_cost_key),
             applies_immediately: false,
         },
         UserSettingDescriptor {
-            key: "budget.warn_at_percent".to_owned(),
+            key: warning_key.clone(),
             label: "Budget warning".to_owned(),
             value: format!("{}%", loaded.config.budget.warn_at_percent),
             choices: Vec::new(),
-            provenance: provenance("budget.warn_at_percent"),
+            provenance: provenance(&warning_key),
             applies_immediately: false,
         },
     ]
-}
-
-const fn permission_decision_name(decision: PermissionDecision) -> &'static str {
-    match decision {
-        PermissionDecision::Ask => "ask",
-        PermissionDecision::Allow => "allow",
-        PermissionDecision::Deny => "deny",
-    }
 }
 
 fn workspace_name(workspace: &Path) -> String {
@@ -3608,6 +3672,77 @@ mod tests {
     use super::*;
 
     #[test]
+    fn editable_setting_keys_round_trip_through_one_grammar() {
+        for key in [
+            "ui.keybindings.preset",
+            "project.models.default",
+            "ui.theme",
+            "models.thinking.fast",
+            "compaction.auto",
+            "permissions.default",
+            "budget.session_cost_cap_micros_usd",
+            "budget.daily_cost_cap_micros_usd",
+            "budget.warn_at_percent",
+            "mcp.servers.docs.enabled",
+            "mcp.add_http.docs",
+        ] {
+            let parsed = EditableSettingKey::parse(key)
+                .unwrap_or_else(|| panic!("setting key should parse: {key}"));
+            assert_eq!(parsed.render(), key);
+        }
+
+        for key in [
+            "models.default",
+            "models.thinking.",
+            "mcp.add_http.",
+            "mcp.add_http.has/slash",
+            "mcp.servers..enabled",
+            "mcp.servers.docs.enabled.extra",
+            "mcp.servers.docs.with.dot.enabled",
+        ] {
+            assert!(EditableSettingKey::parse(key).is_none(), "parsed {key}");
+        }
+    }
+
+    #[test]
+    fn setting_descriptors_render_keys_from_the_editable_contract() {
+        let root = tempdir().expect("root");
+        let user = root.path().join("user/config.toml");
+        let project = root.path().join("repo/.rottweiler/config.toml");
+        fs::create_dir_all(user.parent().expect("user parent")).expect("user dir");
+        fs::create_dir_all(project.parent().expect("project parent")).expect("project dir");
+        fs::write(
+            &user,
+            "[models]\ndefault = \"fast\"\n[models.aliases]\nfast = [\"openai/gpt-5-mini\"]\n",
+        )
+        .expect("user config");
+        let loaded = ConfigLoader::new(user, project)
+            .load()
+            .expect("loaded config");
+        let session = SessionDescriptor {
+            session_id: SessionId("settings-contract".to_owned()),
+            title: "Settings contract".to_owned(),
+            workspace_name: "repo".to_owned(),
+            model: ModelAlias("fast".to_owned()),
+            driver_client_id: None,
+            shell_active: false,
+        };
+        let settings = RuntimeSessionFactory::setting_descriptors(
+            &loaded,
+            &session,
+            Some("openai/gpt-5-mini"),
+            "vim",
+            &[("docs".to_owned(), true)],
+        );
+
+        for descriptor in settings {
+            let parsed = EditableSettingKey::parse(&descriptor.key)
+                .unwrap_or_else(|| panic!("descriptor key should parse: {}", descriptor.key));
+            assert_eq!(parsed.render(), descriptor.key);
+        }
+    }
+
+    #[test]
     fn catalog_current_keeps_selected_alias_and_marks_actual_fallback_route() {
         let capabilities = ModelCapabilities {
             tool_calling: true,
@@ -3618,14 +3753,12 @@ mod tests {
             max_output_tokens: None,
         };
         let model = |id: &str| ModelDescriptor {
-            alias: ModelAlias(id.to_owned()),
             id: id.to_owned(),
             display_name: id.to_owned(),
             provider: id
                 .split_once('/')
                 .map_or("", |(provider, _)| provider)
                 .to_owned(),
-            providers: Vec::new(),
             aliases: vec![ModelAlias("fast".to_owned())],
             current: false,
             available: true,
@@ -4835,7 +4968,7 @@ mod tests {
                     },
                     session_id: parent_id.clone(),
                     at_turn: Some(fork_turn.clone()),
-                    operation_id: Some(restarted_client_key.operation_id.clone()),
+                    operation_id: restarted_client_key.operation_id.clone(),
                 },
             )
             .await,
@@ -4910,7 +5043,7 @@ mod tests {
                             caused_by: None,
                         },
                         mode: rw_core::ModeId("execute".to_owned()),
-                        definition_fingerprint: None,
+                        definition_fingerprint: "fixture".to_owned(),
                     }
                 })
                 .collect::<Vec<_>>();
@@ -4992,7 +5125,7 @@ mod tests {
                     },
                     session_id: completion.parent_session_id.clone(),
                     at_turn: Some(completion.at_turn.clone()),
-                    operation_id: Some(second_restart_key.operation_id.clone()),
+                    operation_id: second_restart_key.operation_id.clone(),
                 },
             )
             .await,
@@ -5150,7 +5283,7 @@ mod tests {
                     },
                     session_id: parent,
                     at_turn: None,
-                    operation_id: Some("capacity-fork-operation".to_owned()),
+                    operation_id: "capacity-fork-operation".to_owned(),
                 },
             )
             .await;
@@ -5316,6 +5449,35 @@ mod tests {
                 .iter()
                 .all(|setting| !setting.key.contains("openai/gpt-5-mini"))
         );
+    }
+
+    #[test]
+    fn theme_setting_leaves_choices_to_the_tui_theme_catalog() {
+        let root = tempdir().expect("root");
+        let user = root.path().join("user/config.toml");
+        let project = root.path().join("repo/.rottweiler/config.toml");
+        fs::create_dir_all(user.parent().expect("user parent")).expect("user dir");
+        fs::create_dir_all(project.parent().expect("project parent")).expect("project dir");
+        let loaded = ConfigLoader::new(user, project)
+            .load()
+            .expect("loaded config");
+        let session = SessionDescriptor {
+            session_id: SessionId("theme-settings".to_owned()),
+            title: "Theme settings".to_owned(),
+            workspace_name: "repo".to_owned(),
+            model: ModelAlias("fast".to_owned()),
+            driver_client_id: None,
+            shell_active: false,
+        };
+
+        let settings =
+            RuntimeSessionFactory::setting_descriptors(&loaded, &session, None, "standard", &[]);
+        let theme = settings
+            .iter()
+            .find(|setting| setting.key == "ui.theme")
+            .expect("theme setting");
+
+        assert!(theme.choices.is_empty());
     }
 
     #[test]

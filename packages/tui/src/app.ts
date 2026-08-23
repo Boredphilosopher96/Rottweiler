@@ -61,8 +61,10 @@ import {
   type EngineEvent,
   type PlanDecision,
   type ModeId,
-  type PermissionAction,
+  type PermissionDecision,
   type PermissionApprovalScope,
+  type PermissionModeDescriptor,
+  MCP_SERVER_ID_PATTERN,
 } from "./protocol"
 import {
   ProjectionRequestBroker,
@@ -77,7 +79,7 @@ import { presentError, sanitizeErrorFragment } from "./render"
 import { setWorkspaceRoots } from "./render/tool-presentation"
 import {
   commandSourceLabel,
-  isLocalSlashCommand,
+  isTuiHandledSlashCommand,
   isU64,
   mergeSlashCommandChoices,
   parseSessionAction,
@@ -179,7 +181,7 @@ export interface RottweilerAppOptions {
   readonly onExit?: () => void
   /** Historical presentation is observer-only; the composer and mutating interactions are hidden. */
   readonly replaySessionId?: string
-  /** TUI-local bindings. Standard is backward-compatible; Vim enables modal editing/navigation. */
+  /** TUI-local bindings. Standard is the canonical map; Vim enables modal editing/navigation. */
   readonly keybindings?: KeybindingConfiguration
   /** Injectable frame scheduler used to coalesce presentation-only stream deltas. */
   readonly presentationFrame?: PresentationFrameScheduler
@@ -248,7 +250,7 @@ type ModelPickerChoice =
 type PermissionPickerAction =
   | { readonly kind: "refresh" }
   | { readonly kind: "mode"; readonly mode: PermissionMode }
-  | { readonly kind: "add"; readonly action: PermissionAction }
+  | { readonly kind: "add"; readonly action: PermissionDecision }
   | { readonly kind: "remove"; readonly ruleId: string }
   | { readonly kind: "revoke"; readonly approvalId: string; readonly scope: PermissionApprovalScope }
   | { readonly kind: "info" }
@@ -285,7 +287,7 @@ type PaletteSection =
   | "Help & system"
   | "Commands"
 
-type PermissionMode = "strict" | "auto-safe" | "yolo" | "default"
+type PermissionMode = PermissionModeDescriptor | "default"
 
 interface PermissionModeChoice {
   readonly mode: PermissionMode
@@ -1372,8 +1374,8 @@ export class RottweilerApp extends BoxRenderable {
           const model = availableModels[0]!
           this.#projectionRequests.command({
             type: "switch_model",
-            model: model.id ?? model.alias,
-            provider: model.provider ?? null,
+            model: model.id,
+            provider: model.provider,
           })
           this.closePicker()
         }
@@ -1627,7 +1629,7 @@ export class RottweilerApp extends BoxRenderable {
     this.banner.update(presented)
     if (this.#composerNotice !== null && this.composer.visible) {
       this.banner.visible = true
-      this.banner.fg = this.#theme.muted
+      this.banner.fg = this.#theme.textMuted
       this.banner.content = this.#composerNotice
     }
     if (viewingSubagent) this.#updateSubagentBanner(presented)
@@ -1890,7 +1892,7 @@ export class RottweilerApp extends BoxRenderable {
       "Add remote MCP server",
       "server name",
       (name) => {
-        if (!/^[A-Za-z0-9._-]{1,96}$/.test(name)) {
+        if (!new RegExp(MCP_SERVER_ID_PATTERN).test(name)) {
           this.#projectClientError(
             "mcp_name_invalid",
             "MCP server name is invalid"
@@ -1945,7 +1947,7 @@ export class RottweilerApp extends BoxRenderable {
       "Server name, e.g. docs",
       "docs",
       (name) => {
-        if (!/^[A-Za-z0-9._-]{1,96}$/.test(name)) {
+        if (!new RegExp(MCP_SERVER_ID_PATTERN).test(name)) {
           this.#projectClientError("mcp_name_invalid", "MCP server name is invalid")
           return
         }
@@ -2036,7 +2038,7 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #openPermissionPatternPrompt(
-    action: PermissionAction
+    action: PermissionDecision
   ): void {
     this.#pickerController.kind = "permissionInput"
     this.picker.openTextPrompt(
@@ -3008,11 +3010,9 @@ export class RottweilerApp extends BoxRenderable {
         const models = this.#state.models.filter(
           (model) =>
             this.#modelProviderFilter === null ||
-            (model.provider === undefined
-              ? model.providers.includes(this.#modelProviderFilter)
-              : model.provider === this.#modelProviderFilter),
+            model.provider === this.#modelProviderFilter,
         )
-        const concreteModelIds = new Set(models.map((model) => model.id ?? model.alias))
+        const concreteModelIds = new Set(models.map((model) => model.id))
         const aliases = this.#modelProviderFilter === null
           ? this.#state.modelAliases.filter(
               (alias) =>
@@ -3049,10 +3049,10 @@ export class RottweilerApp extends BoxRenderable {
                 sectionHeader: true,
               }]),
           ...models.map((model) => ({
-            id: model.id ?? model.alias,
-            label: `${model.current === true ? "● " : ""}${model.displayName ?? model.alias}`,
+            id: model.id,
+            label: `${model.current ? "● " : ""}${model.displayName}`,
             description: [
-              model.provider ?? model.providers[0] ?? "unconfigured",
+              model.provider,
               modelAvailabilityLabel(model),
               model.toolCalling ? "tools" : "",
               model.vision ? "vision" : "",
@@ -3114,15 +3114,15 @@ export class RottweilerApp extends BoxRenderable {
               if (model.available === false) {
                 this.#projectClientError(
                   "model_unavailable",
-                  model.status ?? `${model.displayName ?? model.alias} is unavailable`,
+                  model.status ?? `${model.displayName} is unavailable`,
                   true,
                 )
                 return
               }
               this.#projectionRequests.command({
                 type: "switch_model",
-                model: model.id ?? model.alias,
-                provider: model.provider ?? this.#modelProviderFilter,
+                model: model.id,
+                provider: model.provider,
               })
             }
             this.closePicker()
@@ -3130,18 +3130,7 @@ export class RottweilerApp extends BoxRenderable {
         )
         break
       case "providers": {
-        const providerChoices = this.#state.providers.length > 0
-          ? this.#state.providers
-          : [...new Set(this.#state.models.flatMap((model) => model.providers))].map((name) => ({
-              name,
-              authKind: "none" as const,
-              nextAction: "select_models" as const,
-              configured: true,
-              authenticated: true,
-              reachable: true,
-              modelCount: this.#state.models.filter((model) => model.providers.includes(name)).length,
-              status: null,
-            }))
+        const providerChoices = this.#state.providers
         const providerItems: PickerItem<RottweilerState["providers"][number] | null>[] =
           providerChoices
             .slice()
@@ -3794,7 +3783,7 @@ export class RottweilerApp extends BoxRenderable {
           return {
             id: `theme:${theme.name}`,
             label: `${theme.name === this.#theme.name ? "● " : ""}${theme.name}`,
-            description: `${theme.background} · ${theme.foreground} · ${theme.accent}`,
+            description: `${theme.background} · ${theme.text} · ${theme.accent}`,
             value: theme,
           }
         })
@@ -4204,7 +4193,7 @@ export class RottweilerApp extends BoxRenderable {
       { id: "app.exit", title: "Exit Rottweiler", section: "Help & system", description: "Close the TUI and its supervised engine", run: open(() => this.#options.onExit?.()) },
     ]
     for (const command of this.#state.commands) {
-      if (isLocalSlashCommand(command.name)) continue
+      if (isTuiHandledSlashCommand(command.name)) continue
       const requiresArgument = /<[^>]+>/.test(command.usage)
       actions.push({
         id: `slash.${command.name}`,
@@ -4595,7 +4584,7 @@ export class RottweilerApp extends BoxRenderable {
       ...(childrenHint === null ? [] : [`${childrenHint} children`]),
       ...(paletteHint === null ? [] : [`${paletteHint} palette`]),
     ]
-    this.banner.content = t`${fg(this.#theme.accentStrong)("◉ child agent")} · ${descriptor.task} · ${detail}${context === null ? "" : ` · ${context}`} · ${hints.join(" · ")}`
+    this.banner.content = t`${fg(this.#theme.primary)("◉ child agent")} · ${descriptor.task} · ${detail}${context === null ? "" : ` · ${context}`} · ${hints.join(" · ")}`
   }
 
   async #interruptSubagent(subagentId: string): Promise<void> {
@@ -5215,6 +5204,7 @@ export class RottweilerApp extends BoxRenderable {
       meta,
       session_id: this.#sessionId,
       at_turn: atTurn,
+      operation_id: crypto.randomUUID(),
     })
     if (outcome === null || outcome?.type === "rejected") {
       this.#projectionRequests.discardFork(meta.request_id)

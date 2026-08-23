@@ -40,8 +40,8 @@ const PROVIDER_API_KEY_BODY_LIMIT: usize = 16 * 1024;
 const PROVIDER_API_KEY_LIMIT: usize = 8 * 1024;
 const MAX_PROVIDER_API_KEY_ATTEMPTS: usize = 256;
 const HOST_EVENT_FORWARD_CAPACITY: usize = 256;
-const CLIENT_HEADER: &str = "x-rottweiler-client";
-const CAPABILITY_HEADER: &str = "x-rottweiler-capability";
+pub(crate) const CLIENT_HEADER: &str = "x-rottweiler-client";
+pub(crate) const CAPABILITY_HEADER: &str = "x-rottweiler-capability";
 
 type HttpBody = UnsyncBoxBody<Bytes, Infallible>;
 
@@ -843,8 +843,7 @@ async fn handle_request(
                                 provider,
                                 api_key,
                             } = secret_request;
-                            if session_id.is_empty()
-                                || session_id.len() > 512
+                            if SessionId::validate(&session_id).is_err()
                                 || provider.len() > 128
                                 || !provider.bytes().all(|byte| {
                                     byte.is_ascii_alphanumeric()
@@ -938,8 +937,7 @@ async fn handle_request(
                         Ok(ActivateProviderRequest {
                             session_id,
                             provider,
-                        }) if !session_id.is_empty()
-                            && session_id.len() <= 512
+                        }) if SessionId::validate(&session_id).is_ok()
                             && !provider.is_empty()
                             && provider.len() <= 128
                             && provider.bytes().all(|byte| {
@@ -996,9 +994,16 @@ async fn handle_request(
             let mut last_seen = None;
             for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
                 match key.as_ref() {
-                    "session_id" if !value.is_empty() => {
-                        session_id = Some(SessionId(value.into_owned()));
-                    }
+                    "session_id" if !value.is_empty() => match SessionId::parse(value.into_owned())
+                    {
+                        Ok(value) => session_id = Some(value),
+                        Err(_) => {
+                            return Ok(error_response(
+                                StatusCode::BAD_REQUEST,
+                                "session_id is invalid",
+                            ));
+                        }
+                    },
                     "last_seen_sequence" if !value.is_empty() => match value.parse::<u64>() {
                         Ok(sequence) => last_seen = Some(SequenceId(sequence)),
                         Err(_) => {

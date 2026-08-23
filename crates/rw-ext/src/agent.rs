@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use rw_tools::{ToolRegistry, validate_mcp_virtual_tool};
+use rw_types::SessionMode;
 use thiserror::Error;
 
-use crate::{AgentPermissionMode, DiscoveredAgent, ExtensionCatalog, ExtensionDiscoveryError};
+use crate::{DiscoveredAgent, ExtensionCatalog, ExtensionDiscoveryError};
 
 const EXPLORE_PROMPT: &str = "Explore the requested area carefully. Prefer read-only tools, cite concrete paths and evidence, and return a concise finding summary.";
 const PLAN_PROMPT: &str = "Produce an implementation plan grounded in repository evidence. Do not mutate files. Identify dependencies, risks, and verification steps.";
@@ -26,7 +27,7 @@ pub struct AgentDefinition {
     /// model instead of depending on a synthetic alias.
     model: Option<String>,
     tools: Vec<String>,
-    permission_mode: AgentPermissionMode,
+    permission_mode: SessionMode,
     max_turns: usize,
     prompt: AgentPromptSource,
 }
@@ -37,7 +38,7 @@ impl AgentDefinition {
         name: impl Into<String>,
         description: impl Into<String>,
         tools: Vec<String>,
-        permission_mode: AgentPermissionMode,
+        permission_mode: SessionMode,
         max_turns: usize,
         system_prompt: &'static str,
     ) -> Self {
@@ -86,7 +87,7 @@ impl AgentDefinition {
     }
 
     #[must_use]
-    pub const fn permission_mode(&self) -> AgentPermissionMode {
+    pub const fn permission_mode(&self) -> SessionMode {
         self.permission_mode
     }
 
@@ -126,7 +127,7 @@ pub struct LoadedAgent {
     /// Declarative agents retain their explicit alias in `Some`.
     pub model: Option<String>,
     pub tools: Vec<String>,
-    pub permission_mode: AgentPermissionMode,
+    pub permission_mode: SessionMode,
     pub max_turns: usize,
     pub system_prompt: String,
 }
@@ -288,7 +289,7 @@ fn builtin_agents() -> [AgentDefinition; 3] {
                 "glob".to_owned(),
                 "ls".to_owned(),
             ],
-            AgentPermissionMode::Discuss,
+            SessionMode::Discuss,
             16,
             EXPLORE_PROMPT,
         ),
@@ -301,7 +302,7 @@ fn builtin_agents() -> [AgentDefinition; 3] {
                 "glob".to_owned(),
                 "ls".to_owned(),
             ],
-            AgentPermissionMode::Plan,
+            SessionMode::Plan,
             24,
             PLAN_PROMPT,
         ),
@@ -332,7 +333,7 @@ fn builtin_agents() -> [AgentDefinition; 3] {
             .into_iter()
             .map(str::to_owned)
             .collect(),
-            AgentPermissionMode::Execute,
+            SessionMode::Execute,
             32,
             GENERAL_PROMPT,
         ),
@@ -386,7 +387,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::compose_agent_registry;
-    use crate::{AgentPermissionMode, ExtensionCatalog, ExtensionDiscoveryConfig};
+    use crate::{ExtensionCatalog, ExtensionDiscoveryConfig};
+    use rw_types::SessionMode;
 
     #[test]
     fn builtins_and_declarative_agents_share_registry_and_declarative_can_shadow() {
@@ -408,7 +410,7 @@ mod tests {
         assert_eq!(registry.definitions().len(), 3);
         let loaded = registry.load("explore").expect("explore");
         assert_eq!(loaded.description, "local explorer");
-        assert_eq!(loaded.permission_mode, AgentPermissionMode::Discuss);
+        assert_eq!(loaded.permission_mode, SessionMode::Discuss);
         assert_eq!(loaded.system_prompt, "Local prompt.");
     }
 

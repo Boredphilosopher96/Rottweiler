@@ -1,4 +1,9 @@
-import type { EngineEvent, ToolOutput } from "../protocol"
+import {
+  ENGINE_EVENT_DELIVERY,
+  type EngineEvent,
+  type EngineEventDelivery,
+  type ToolOutput,
+} from "../protocol"
 import { durableSequenceId, isRecord, type WireEngineEvent } from "../transport"
 import type { RottweilerAction } from "./actions"
 import {
@@ -135,98 +140,9 @@ function retainRecentTurns(
   }
   return next
 }
-type EventScope = "connection" | "durable" | "transient"
-
-// Rust owns the generated event union. This local map owns only the TUI's delivery semantics,
-// and `Record` makes every generated variant an explicit compile-time decision.
-const EVENT_SCOPE = {
-  command_acknowledged: "connection",
-  context_snapshot_ready: "connection",
-  cost_snapshot_ready: "connection",
-  session_review_ready: "connection",
-  session_review_updated: "connection",
-  prompt_dump_ready: "connection",
-  session_replay_completed: "connection",
-  session_forked: "connection",
-  session_exported: "connection",
-  sessions_listed: "connection",
-  subagents_listed: "connection",
-  subagent_replay_batch: "connection",
-  subagent_replay_completed: "connection",
-  sessions_search_ready: "connection",
-  command_descriptors_listed: "connection",
-  modes_listed: "connection",
-  models_listed: "connection",
-  settings_listed: "connection",
-  mcp_servers_listed: "connection",
-  runtime_services_listed: "connection",
-  mcp_server_approval_reviewed: "connection",
-  permissions_listed: "connection",
-  provider_auth_started: "connection",
-  provider_configured: "connection",
-  provider_auth_finished: "connection",
-  provider_activation_finished: "connection",
-  workspace_files_found: "connection",
-  workspace_file_preview_ready: "connection",
-  workspace_status_ready: "connection",
-  workspace_diff_ready: "connection",
-  host_shutdown: "connection",
-  session_created: "durable",
-  workspace_roots_changed: "durable",
-  driver_changed: "durable",
-  message_queued: "durable",
-  queued_message_removed: "durable",
-  queued_messages_cleared: "durable",
-  user_message_accepted: "durable",
-  session_title_updated: "durable",
-  plugin_message_injected: "durable",
-  plugin_status_changed: "durable",
-  ui_notification: "durable",
-  conversation_turn_committed: "durable",
-  conversation_rewound: "durable",
-  turn_started: "durable",
-  text_delta: "durable",
-  thinking_delta: "durable",
-  citation_delta: "durable",
-  tool_call_started: "durable",
-  tool_approval_needed: "durable",
-  tool_diff_ready: "durable",
-  tool_output_delta: "durable",
-  tool_call_finished: "durable",
-  question_asked: "durable",
-  question_answered: "durable",
-  turn_finished: "durable",
-  context_usage_updated: "durable",
-  budget_status_changed: "durable",
-  compaction_started: "durable",
-  compaction_attempt_started: "transient",
-  compaction_text_delta: "transient",
-  compaction_thinking_delta: "transient",
-  compaction_attempt_finished: "durable",
-  compaction_finished: "durable",
-  compaction_failed: "durable",
-  subagent_spawned: "durable",
-  subagent_finished: "durable",
-  subagent_progress: "transient",
-  tool_output_pruned: "durable",
-  mode_changed: "durable",
-  permission_mode_changed: "durable",
-  plan_submitted: "durable",
-  plan_reviewed: "durable",
-  model_changed: "durable",
-  model_context_cleared: "durable",
-  context_item_pinned: "durable",
-  context_item_evicted: "durable",
-  user_shell_state_changed: "durable",
-  hook_failed: "durable",
-  command_finished: "durable",
-  guard_triggered: "durable",
-  error: "durable",
-} as const satisfies Record<EngineEvent["type"], EventScope>
-
-function knownEventScope(type: string): EventScope | null {
-  return Object.hasOwn(EVENT_SCOPE, type)
-    ? EVENT_SCOPE[type as EngineEvent["type"]]
+function knownEventDelivery(type: string): EngineEventDelivery | null {
+  return Object.hasOwn(ENGINE_EVENT_DELIVERY, type)
+    ? ENGINE_EVENT_DELIVERY[type as EngineEvent["type"]]
     : null
 }
 
@@ -291,7 +207,7 @@ export function reduceWireEvent(
   state: RottweilerState,
   event: WireEngineEvent,
 ): RottweilerState {
-  const scope = knownEventScope(event.type)
+  const scope = knownEventDelivery(event.type)
   // Transient progress updates retained projections without consuming the durable replay cursor.
   if (scope === "transient") {
     return applyKnownEvent(state, event as EngineEvent, null)
@@ -519,20 +435,17 @@ function applyKnownEvent(
         ...(state.model !== null || currentModel === undefined
           ? {}
           : {
-              model: currentModel.id ?? currentModel.alias,
-              provider: currentModel.provider ?? currentModel.providers?.[0] ?? null,
+              model: currentModel.id,
+              provider: currentModel.provider,
             }),
         models: event.models.map((model) => ({
-          alias: model.alias,
-          ...(model.id === undefined ? {} : { id: model.id }),
-          ...(model.display_name === undefined ? {} : { displayName: model.display_name }),
-          ...(model.provider === undefined ? {} : { provider: model.provider }),
-          // Older compatible hosts did not emit provider metadata.
-          providers: model.providers ?? [],
-          ...(model.aliases === undefined ? {} : { aliases: model.aliases }),
-          ...(model.current === undefined ? {} : { current: model.current }),
-          ...(model.available === undefined ? {} : { available: model.available }),
-          ...(model.status === undefined ? {} : { status: model.status }),
+          id: model.id,
+          displayName: model.display_name,
+          provider: model.provider,
+          aliases: model.aliases,
+          current: model.current,
+          available: model.available,
+          status: model.status ?? null,
           vision: model.capabilities.vision,
           thinking: model.capabilities.thinking,
           toolCalling: model.capabilities.tool_calling,

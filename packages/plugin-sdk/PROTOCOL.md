@@ -1,30 +1,26 @@
 # Rottweiler plugin protocol 2
 
-Status: **stable**. Protocol 1 remains frozen and supported unchanged. The protocol-2 schema and
-fixture beside this file are the current language-neutral source of truth; Rust and TypeScript
-tests consume both protocol generations.
+Status: **stable**. The dependency-leaf `rw-plugin-protocol` crate owns the contract and generates
+the TypeScript, schema, and fixture projections beside this file. Protocol 2 is the only supported
+generation.
 
-## Version negotiation and compatibility
+## Version negotiation
 
-The host sends `initialize` with `protocol` (the selected/highest mutually supported version),
-`min_protocol` (its lowest supported version), and an optional bounded string `capabilities` list.
-The selected version in the plugin's approved manifest must fall in that inclusive range.
+The host sends `initialize` with `protocol`, `min_protocol`, and an optional bounded string
+`capabilities` list. Both version fields are 2, and the plugin's approved manifest must select 2.
 Protocol 2 requires `provider-models` for declared model discovery and `provider-http` for any
 declared credential reference. Unknown host capability strings are ignored, so later additive
 facilities remain negotiable without protocol 3.
 
-The engine accepts protocol 2 and N-1 (protocol 1). Protocol-1 manifests and wire behavior remain
-unchanged and receive the conservative provider defaults documented below. A protocol version is
-deprecated for at least one stable release before removal; removal may occur only when it is older
-than N-1 and must be announced in release notes. Additive optional methods and capability strings
-may be introduced within protocol 2. Breaking wire-shape, framing, or existing-method semantic
-changes require protocol 3.
+The engine accepts protocol 2 only. Additive optional methods and capability strings may be
+introduced within protocol 2. Breaking wire-shape, framing, or existing-method semantic changes
+require a new protocol generation and a direct migration; the host does not carry legacy adapters.
 
-Transport is newline-terminated JSON-RPC 2.0 over stdin/stdout. Each JSON value is at most
-4 MiB excluding the newline. Empty or unterminated lines, invalid UTF-8/JSON, unknown response
-IDs, and malformed envelopes are fatal protocol violations. Requests use bounded integer or
-string IDs. Error messages are sanitized strings of at most 16 KiB; arbitrary handler exceptions
-must never cross the boundary.
+Transport is newline-terminated JSON-RPC 2.0 over stdin/stdout. Empty or unterminated lines,
+invalid UTF-8/JSON, unknown response IDs, and malformed envelopes are fatal protocol violations.
+Requests use bounded integer or string IDs. Error messages are sanitized; arbitrary handler
+exceptions must never cross the boundary. The generated `PROTOCOL_LIMITS` object and current
+schema project the authoritative bounds.
 
 Production loads the expected manifest from trusted configuration before any process is started.
 The user approves the exact canonical manifest, origin, argv/cwd/environment/domain configuration,
@@ -36,14 +32,11 @@ safely execute unapproved code.
 Manifest capability arrays contain tools, commands, hooks, provider alias prefixes, event
 subscriptions, and plugin-to-host push methods. Tool effects are exactly `reads-fs`, `writes-fs`,
 `network`, and `exec`; the host permission engine and process sandbox enforce the immutable
-approved declaration. Hooks declare `fail-open` or `fail-closed` and default to a 5-second
-deadline. Events are notifications. Pushes are requests and require an explicit declaration.
+approved declaration. Hooks declare `fail-open` or `fail-closed` and use the generated default
+handler timeout. Events are notifications. Pushes are requests and require an explicit declaration.
 
-Canonical methods are `initialize`, `tool/call`, `command/execute`, `hook/invoke`,
-`provider/complete`, `provider/models`, `provider/event`, `provider/cancel`, `event/publish`,
-`provider/http`, `provider/http_event`, `provider/http_cancel`, `session/inject_message`,
-`session/set_status`, `ui/notify`, `shutdown`, and `exit`. Exact examples
-live in `fixtures/wire/protocol-1.json` and `fixtures/wire/protocol-2.json`.
+The generated `RPC_METHODS` object is the canonical method catalog. Exact examples live in
+`fixtures/wire/protocol-2.json`.
 
 `tool/call` returns `{ "content": string, "data": JSON, "truncated"?: boolean }`.
 Protocol-2 provider declarations opt into catalog RPC with
@@ -57,9 +50,7 @@ Each model contains a bounded provider-local `id`, optional `display_name`, requ
 optional integral micro-US-dollar per-million-token `pricing`. Catalog data flows only from the
 plugin to the host. It never exposes host credentials or bypasses the approved alias prefix.
 
-Protocol-1 providers do not receive `provider/models` and retain `tool_calling: true`, all other
-feature flags false, no cache breakpoints, no token limits, and unpriced API accounting.
-Protocol-2 provider declarations may also list bounded `credential-references`. The list is part
+Provider declarations may also list bounded `credential-references`. The list is part
 of the approved manifest fingerprint, and the host refuses an alias/reference pair absent from
 that exact provider declaration. `context.providerHttp.request` sends only the reference plus a
 credential-free HTTP request. The host resolves and registers the secret, attaches it to the
@@ -81,7 +72,7 @@ the handler's signal and closes the async iterator. Provider streams have bounde
 write deadlines but deliberately have no five-second whole-call deadline. Other handlers retain
 the default five-second deadline.
 
-Host requests are bounded by a 5-second default deadline and a 64-request in-flight/writer limit.
+Host requests use the generated default deadline and a separately enforced bounded in-flight/writer limit.
 Cancellation removes correlation state atomically; late responses to cancelled/timed-out IDs are
 ignored up to the bounded abandoned-ID limit. Fatal errors close admission, kill the complete
 process tree, and perform a bounded reap. Secret redaction is mandatory before any host value is
@@ -89,9 +80,8 @@ serialized to a plugin. Plugin environment inheritance is cleared and restored o
 small safe allowlist. Approved network plugins receive only canonical public `allowed_domains`;
 private, local, link-local, and loopback destinations remain denied by the policy proxy.
 
-Limits: manifest 256 KiB; 256 entries per capability kind; names 128 bytes; version 64 bytes;
-descriptions 16 KiB; schemas 64 KiB and depth 32; hook replacements/injected messages 256 KiB.
-Catalogs contain at most 256 models. Model ids/display names are at most 128 bytes. Declared token
-limits are clamped to 1..16,777,216 and prices to 0..1,000,000,000,000 micro-USD per million
-tokens by the Rust boundary; the SDK rejects values outside those ranges. A malformed catalog
-fails discovery for that provider only and does not terminate startup or the session.
+All frame, manifest, capability, name, schema, payload, catalog, token, and pricing bounds come
+from `rw-plugin-protocol` and its generated `PROTOCOL_LIMITS` and schema projections. The Rust
+boundary clamps bounded catalog values, and the SDK rejects values outside the same generated
+ranges. A malformed catalog fails discovery for that provider only and does not terminate startup
+or the session.

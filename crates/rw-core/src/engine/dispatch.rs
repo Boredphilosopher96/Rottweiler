@@ -1,136 +1,6 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
-fn client_command_meta(command: &ClientCommand) -> &CommandMeta {
-    match command {
-        ClientCommand::CreateSession { meta, .. }
-        | ClientCommand::ResumeSession { meta, .. }
-        | ClientCommand::AttachSession { meta, .. }
-        | ClientCommand::SendMessage { meta, .. }
-        | ClientCommand::Interrupt { meta, .. }
-        | ClientCommand::ApproveTool { meta, .. }
-        | ClientCommand::ApprovePlan { meta, .. }
-        | ClientCommand::AnswerQuestion { meta, .. }
-        | ClientCommand::SwitchMode { meta, .. }
-        | ClientCommand::SwitchModel { meta, .. }
-        | ClientCommand::Compact { meta, .. }
-        | ClientCommand::Fork { meta, .. }
-        | ClientCommand::Rewind { meta, .. }
-        | ClientCommand::TakeDriver { meta, .. }
-        | ClientCommand::UserShellStarted { meta, .. }
-        | ClientCommand::UserShellEnded { meta, .. }
-        | ClientCommand::PinContext { meta, .. }
-        | ClientCommand::EvictContext { meta, .. }
-        | ClientCommand::GetContext { meta, .. }
-        | ClientCommand::GetCost { meta, .. }
-        | ClientCommand::DumpPrompt { meta, .. }
-        | ClientCommand::GetSessionReview { meta, .. }
-        | ClientCommand::ReviewFile { meta, .. }
-        | ClientCommand::ListSessions { meta, .. }
-        | ClientCommand::SearchSessions { meta, .. }
-        | ClientCommand::ListCommands { meta, .. }
-        | ClientCommand::ListModes { meta, .. }
-        | ClientCommand::ListModels { meta, .. }
-        | ClientCommand::ListSettings { meta, .. }
-        | ClientCommand::SetSetting { meta, .. }
-        | ClientCommand::ListMcpServers { meta, .. }
-        | ClientCommand::ListRuntimeServices { meta, .. }
-        | ClientCommand::AddMcpHttpServer { meta, .. }
-        | ClientCommand::AddMcpStdioServer { meta, .. }
-        | ClientCommand::RemoveMcpServer { meta, .. }
-        | ClientCommand::ReviewMcpServer { meta, .. }
-        | ClientCommand::ApproveMcpServer { meta, .. }
-        | ClientCommand::SetMcpServerEnabled { meta, .. }
-        | ClientCommand::ListPermissions { meta, .. }
-        | ClientCommand::AddSessionPermissionRule { meta, .. }
-        | ClientCommand::RemoveSessionPermissionRule { meta, .. }
-        | ClientCommand::RemoveQueuedMessage { meta, .. }
-        | ClientCommand::ClearQueuedMessages { meta, .. }
-        | ClientCommand::RenameSession { meta, .. }
-        | ClientCommand::ExportSession { meta, .. }
-        | ClientCommand::RevokePermissionApproval { meta, .. }
-        | ClientCommand::BeginProviderAuth { meta, .. }
-        | ClientCommand::ConfigureBuiltinProvider { meta, .. }
-        | ClientCommand::CompleteProviderAuth { meta, .. }
-        | ClientCommand::CancelProviderAuth { meta, .. }
-        | ClientCommand::SearchWorkspaceFiles { meta, .. }
-        | ClientCommand::PreviewWorkspaceFile { meta, .. }
-        | ClientCommand::GetWorkspaceStatus { meta, .. }
-        | ClientCommand::GetWorkspaceDiff { meta, .. }
-        | ClientCommand::ListSubagents { meta, .. }
-        | ClientCommand::ReplaySubagent { meta, .. }
-        | ClientCommand::ContinueSubagent { meta, .. }
-        | ClientCommand::InterruptSubagent { meta, .. }
-        | ClientCommand::CloseSubagent { meta, .. }
-        | ClientCommand::ShutdownHost { meta, .. } => meta,
-    }
-}
-
-fn client_command_session(command: &ClientCommand) -> Option<&SessionId> {
-    match command {
-        ClientCommand::CreateSession { .. }
-        | ClientCommand::ListSessions { .. }
-        | ClientCommand::SearchSessions { .. }
-        | ClientCommand::ListModels { .. }
-        | ClientCommand::ShutdownHost { .. } => None,
-        ClientCommand::ResumeSession { session_id, .. }
-        | ClientCommand::AttachSession { session_id, .. }
-        | ClientCommand::SendMessage { session_id, .. }
-        | ClientCommand::Interrupt { session_id, .. }
-        | ClientCommand::ApproveTool { session_id, .. }
-        | ClientCommand::ApprovePlan { session_id, .. }
-        | ClientCommand::AnswerQuestion { session_id, .. }
-        | ClientCommand::SwitchMode { session_id, .. }
-        | ClientCommand::SwitchModel { session_id, .. }
-        | ClientCommand::Compact { session_id, .. }
-        | ClientCommand::Fork { session_id, .. }
-        | ClientCommand::Rewind { session_id, .. }
-        | ClientCommand::TakeDriver { session_id, .. }
-        | ClientCommand::UserShellStarted { session_id, .. }
-        | ClientCommand::UserShellEnded { session_id, .. }
-        | ClientCommand::PinContext { session_id, .. }
-        | ClientCommand::EvictContext { session_id, .. }
-        | ClientCommand::GetContext { session_id, .. }
-        | ClientCommand::GetCost { session_id, .. }
-        | ClientCommand::DumpPrompt { session_id, .. }
-        | ClientCommand::GetSessionReview { session_id, .. }
-        | ClientCommand::ReviewFile { session_id, .. }
-        | ClientCommand::SearchWorkspaceFiles { session_id, .. }
-        | ClientCommand::PreviewWorkspaceFile { session_id, .. }
-        | ClientCommand::GetWorkspaceStatus { session_id, .. }
-        | ClientCommand::GetWorkspaceDiff { session_id, .. }
-        | ClientCommand::ListCommands { session_id, .. }
-        | ClientCommand::ListModes { session_id, .. }
-        | ClientCommand::ListSettings { session_id, .. }
-        | ClientCommand::SetSetting { session_id, .. }
-        | ClientCommand::ListMcpServers { session_id, .. }
-        | ClientCommand::ListRuntimeServices { session_id, .. }
-        | ClientCommand::AddMcpHttpServer { session_id, .. }
-        | ClientCommand::AddMcpStdioServer { session_id, .. }
-        | ClientCommand::RemoveMcpServer { session_id, .. }
-        | ClientCommand::ReviewMcpServer { session_id, .. }
-        | ClientCommand::ApproveMcpServer { session_id, .. }
-        | ClientCommand::SetMcpServerEnabled { session_id, .. }
-        | ClientCommand::ListPermissions { session_id, .. }
-        | ClientCommand::AddSessionPermissionRule { session_id, .. }
-        | ClientCommand::RemoveSessionPermissionRule { session_id, .. }
-        | ClientCommand::RemoveQueuedMessage { session_id, .. }
-        | ClientCommand::ClearQueuedMessages { session_id, .. }
-        | ClientCommand::RenameSession { session_id, .. }
-        | ClientCommand::ExportSession { session_id, .. }
-        | ClientCommand::RevokePermissionApproval { session_id, .. }
-        | ClientCommand::BeginProviderAuth { session_id, .. }
-        | ClientCommand::ConfigureBuiltinProvider { session_id, .. }
-        | ClientCommand::CompleteProviderAuth { session_id, .. }
-        | ClientCommand::CancelProviderAuth { session_id, .. }
-        | ClientCommand::ListSubagents { session_id, .. }
-        | ClientCommand::ReplaySubagent { session_id, .. }
-        | ClientCommand::ContinueSubagent { session_id, .. }
-        | ClientCommand::InterruptSubagent { session_id, .. }
-        | ClientCommand::CloseSubagent { session_id, .. } => Some(session_id),
-    }
-}
-
 fn protocol_rejection(code: &str, message: impl Into<String>) -> CommandOutcome {
     CommandOutcome::Rejected {
         error: EngineError {
@@ -150,8 +20,10 @@ pub(super) fn prepare_user_message(
     model_alias: &str,
     model: &dyn ModelDriver,
 ) -> Result<PreparedUserMessage, String> {
-    if attachments.len() > MAX_ATTACHMENTS {
-        return Err(format!("at most {MAX_ATTACHMENTS} attachments are allowed"));
+    if attachments.len() > MAX_ATTACHMENTS_PER_MESSAGE {
+        return Err(format!(
+            "at most {MAX_ATTACHMENTS_PER_MESSAGE} attachments are allowed"
+        ));
     }
     let mut total_bytes = 0_usize;
     let mut stored_attachments = Vec::with_capacity(attachments.len());
@@ -416,30 +288,10 @@ fn requires_driver(command: &ClientCommand) -> bool {
     )
 }
 
-const fn permission_action(decision: PermissionDecision) -> PermissionAction {
-    match decision {
-        PermissionDecision::Ask => PermissionAction::Ask,
-        PermissionDecision::Allow => PermissionAction::Allow,
-        PermissionDecision::Deny => PermissionAction::Deny,
-    }
-}
-
-const fn permission_decision(action: PermissionAction) -> PermissionDecision {
-    match action {
-        PermissionAction::Ask => PermissionDecision::Ask,
-        PermissionAction::Allow => PermissionDecision::Allow,
-        PermissionAction::Deny => PermissionDecision::Deny,
-    }
-}
-
 const fn permission_mode_descriptor(
-    mode: crate::HeadlessPermissionMode,
+    mode: rw_types::PermissionModeDescriptor,
 ) -> PermissionModeDescriptor {
-    match mode {
-        crate::HeadlessPermissionMode::Strict => PermissionModeDescriptor::Strict,
-        crate::HeadlessPermissionMode::AutoSafe => PermissionModeDescriptor::AutoSafe,
-        crate::HeadlessPermissionMode::Yolo => PermissionModeDescriptor::Yolo,
-    }
+    mode
 }
 
 fn permission_rule_id(scope: &str, rule: &PermissionRule) -> String {
@@ -459,7 +311,7 @@ fn bounded_permission_rule(scope: &str, rule: &PermissionRule) -> Option<Permiss
     .then(|| PermissionRuleDescriptor {
         id: permission_rule_id(scope, rule),
         pattern: rule.pattern.clone(),
-        action: permission_action(rule.action),
+        action: rule.action,
     })
 }
 
@@ -513,7 +365,7 @@ pub(super) fn permission_state(permissions: &PermissionGate) -> PermissionStateD
         }
     }
     PermissionStateDescriptor {
-        default: permission_action(snapshot.default),
+        default: snapshot.default,
         runtime_mode: snapshot.runtime_mode.map(permission_mode_descriptor),
         effective_rules,
         // Project configuration cannot grant permission authority. Remembered
@@ -542,7 +394,7 @@ fn apply_permission_command(
             }
             permissions.add_session_rule(PermissionRule {
                 pattern: pattern.clone(),
-                action: permission_decision(*action),
+                action: *action,
             })?;
         }
         ClientCommand::RemoveSessionPermissionRule { rule_id, .. } => {
@@ -896,8 +748,8 @@ pub(super) async fn handle_actor_command(
             respond,
             mut completion,
         } => {
-            let meta = client_command_meta(&command).clone();
-            let session = client_command_session(&command).cloned();
+            let meta = command.meta().clone();
+            let session = command.session_id().cloned();
             let rejection = if meta.protocol_version != PROTOCOL_VERSION {
                 Some(protocol_rejection(
                     "unsupported_protocol_version",
@@ -1986,6 +1838,19 @@ pub(super) async fn handle_actor_command(
                     revisions,
                     ..
                 } => {
+                    let execute_definition = if decision == PlanDecision::Approve {
+                        let Some(definition) = config.modes.get("execute") else {
+                            if let Some(complete) = completion.take() {
+                                let _ = complete.send(Err(AgentLoopError::InvalidConfiguration(
+                                    "execute mode is not registered".to_owned(),
+                                )));
+                            }
+                            return;
+                        };
+                        Some(definition)
+                    } else {
+                        None
+                    };
                     let artifact = state.pending_plan.clone().unwrap_or_else(|| PlanArtifact {
                         title: String::new(),
                         summary_md: String::new(),
@@ -2007,17 +1872,14 @@ pub(super) async fn handle_actor_command(
                             turn,
                         });
                     }
-                    if decision == PlanDecision::Approve {
+                    if let Some(definition) = execute_definition {
                         durable.push(PendingEvent::ContextItemPinned {
                             item_id: item_id.clone(),
                             effective_after_agent_turn: state.completed_turns,
                         });
                         durable.push(PendingEvent::ModeChanged {
                             mode: ModeId("execute".to_owned()),
-                            definition_fingerprint: config
-                                .modes
-                                .get("execute")
-                                .map(ModeDefinition::semantic_fingerprint),
+                            definition_fingerprint: definition.semantic_fingerprint(),
                         });
                     }
                     let result = emit_batch(state, events, &config.event_sink, durable).await;
@@ -2026,7 +1888,7 @@ pub(super) async fn handle_actor_command(
                         if let Some(turn) = context_turn {
                             state.conversation.push(turn);
                         }
-                        if decision == PlanDecision::Approve {
+                        if let Some(definition) = execute_definition {
                             state.approved_plan = Some(artifact);
                             state.plan_gate_active = false;
                             state.context_surgery.push(ContextSurgeryAction {
@@ -2034,10 +1896,7 @@ pub(super) async fn handle_actor_command(
                                 pinned: true,
                                 effective_after_agent_turn: state.completed_turns,
                             });
-                            state.mode = config
-                                .modes
-                                .get("execute")
-                                .map_or(SessionMode::Execute, mode_permission_base);
+                            state.mode = mode_permission_base(definition);
                             state.mode_id = ModeId("execute".to_owned());
                         }
                     }

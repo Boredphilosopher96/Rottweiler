@@ -15,9 +15,9 @@ use rw_providers::{
     OpenAiCompatibleProvider, OpenAiWireMode, PricingTable, Provider, ProviderError,
     ProviderErrorKind, ProviderEvent, ProviderRequest, ProviderRouter, ProxyAuthentication,
     ProxyEnvironment, ProxySettings, Recorder, ReplayProvider, RetryPolicy, Secret, StaticAuth,
-    ThinkingLevel, TokenUsage, ToolChoice, ToolDefinition,
+    TokenUsage, ToolChoice, ToolDefinition,
 };
-use rw_types::{Block, Role, Turn, TurnMeta};
+use rw_types::{Block, Role, Turn, TurnMeta, config::ThinkingLevel};
 use serde_json::json;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},

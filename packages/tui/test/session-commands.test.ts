@@ -2,20 +2,23 @@ import { describe, expect, test } from "bun:test"
 
 import {
   commandSourceLabel,
-  isLocalSlashCommand,
+  isTuiHandledSlashCommand,
   isU64,
-  LOCAL_SLASH_COMMANDS,
+  TUI_SLASH_COMMANDS,
   mergeSlashCommandChoices,
   parseSessionAction,
 } from "../src/session-commands"
 
 describe("session command policy", () => {
-  test("keeps the local catalog unique and merges live descriptors in stable order", () => {
-    const names = LOCAL_SLASH_COMMANDS.map((command) => command.name)
+  test("keeps the TUI catalog unique and merges engine descriptors in stable order", () => {
+    const names = TUI_SLASH_COMMANDS.map((command) => command.name)
     expect(new Set(names).size).toBe(names.length)
-    expect(LOCAL_SLASH_COMMANDS.find((command) => command.name === "mode")?.usage).toBe("/mode [id]")
-    expect(isLocalSlashCommand("models")).toBeTrue()
-    expect(isLocalSlashCommand("deploy")).toBeFalse()
+    expect(TUI_SLASH_COMMANDS.find((command) => command.name === "models")?.usage).toBe("/models")
+    expect(TUI_SLASH_COMMANDS.find((command) => command.name === "mode")).toBeUndefined()
+    expect(isTuiHandledSlashCommand("models")).toBeTrue()
+    expect(isTuiHandledSlashCommand("review")).toBeTrue()
+    expect(isTuiHandledSlashCommand("status")).toBeFalse()
+    expect(isTuiHandledSlashCommand("deploy")).toBeFalse()
 
     const merged = mergeSlashCommandChoices([
       { name: "models", description: "Live model catalog", usage: "/models", source: "builtin" },

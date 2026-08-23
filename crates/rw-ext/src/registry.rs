@@ -15,12 +15,12 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 
-use crate::{MAX_NAME_BYTES, PluginManifest};
+use rw_plugin_protocol::{MAX_NAME_BYTES, PluginManifest};
 
 const REGISTRY_SCHEMA: u32 = 1;
-const MAX_CATALOG_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_REGISTRY_CATALOG_BYTES: usize = 2 * 1024 * 1024;
 const MAX_RELEASES: usize = 10_000;
-const MAX_COMPONENT_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_REGISTRY_COMPONENT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_ENABLED_EXTENSIONS: usize = 32;
 const MAX_ENABLED_COMPONENT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RELEASE_RECORD_BYTES: usize = 384 * 1024;
@@ -79,7 +79,7 @@ impl RegistryRelease {
         {
             return Err(RegistryError::InvalidUrl);
         }
-        if self.component.size == 0 || self.component.size > MAX_COMPONENT_BYTES as u64 {
+        if self.component.size == 0 || self.component.size > MAX_REGISTRY_COMPONENT_BYTES as u64 {
             return Err(RegistryError::InvalidArtifactSize);
         }
         if !is_lowercase_digest(&self.component.blake3) {
@@ -136,7 +136,7 @@ impl RegistryRelease {
     /// Returns an error when the signed size or digest does not match.
     pub fn verify_component(&self, bytes: &[u8]) -> Result<(), RegistryError> {
         if usize::try_from(self.component.size).ok() != Some(bytes.len())
-            || bytes.len() > MAX_COMPONENT_BYTES
+            || bytes.len() > MAX_REGISTRY_COMPONENT_BYTES
         {
             return Err(RegistryError::ArtifactSizeMismatch);
         }
@@ -161,7 +161,7 @@ impl ExtensionRegistryCatalog {
     /// # Errors
     /// Returns an error for oversized, malformed, duplicate, or unknown-schema catalogs.
     pub fn from_slice(bytes: &[u8]) -> Result<Self, RegistryError> {
-        if bytes.len() > MAX_CATALOG_BYTES {
+        if bytes.len() > MAX_REGISTRY_CATALOG_BYTES {
             return Err(RegistryError::CatalogTooLarge);
         }
         let catalog: Self =
@@ -642,8 +642,13 @@ fn read_installed_release(
     if manifest != record.release.manifest {
         return Err(RegistryError::ExistingReleaseChanged);
     }
-    let component =
-        read_installed_file(root, name, version, "component.wasm", MAX_COMPONENT_BYTES)?;
+    let component = read_installed_file(
+        root,
+        name,
+        version,
+        "component.wasm",
+        MAX_REGISTRY_COMPONENT_BYTES,
+    )?;
     record.release.verify_component(&component)?;
     let canonical = fs::canonicalize(&version_root).map_err(RegistryError::Io)?;
     if canonical != version_root {
@@ -1089,7 +1094,9 @@ mod tests {
     use ed25519_dalek::{Signer as _, SigningKey};
 
     use super::*;
-    use crate::{PROTOCOL_VERSION, PluginCapabilities, PluginHook, PluginHookDeclaration};
+    use rw_plugin_protocol::{
+        PROTOCOL_VERSION, PluginCapabilities, PluginHook, PluginHookDeclaration,
+    };
 
     fn valid_component() -> Vec<u8> {
         let output = r#"{"directive":"continue"}"#;

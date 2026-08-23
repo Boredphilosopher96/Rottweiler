@@ -920,8 +920,8 @@ Hub, and common authinfo files in addition to the existing credential stores.
 The regression checks the shared expansion, and the existing macOS profile test
 checks that every expanded path becomes an `RW_SECRET_n` deny parameter. This
 round does not replace broad macOS reads with a read allowlist. That larger
-compatibility change remains part of the repository-wide ownership and boundary
-review requested after this round.
+sandbox behavior redesign remains separate from the repository-wide ownership
+and boundary review requested after this round.
 
 ## Checked and found sound
 

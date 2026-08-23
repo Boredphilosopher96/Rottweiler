@@ -1570,16 +1570,7 @@ fn normalize_relative(path: &Path) -> Result<String, CheckpointError> {
 }
 
 fn validate_session_id(value: &str) -> Result<(), CheckpointError> {
-    if value.is_empty()
-        || value.len() > 128
-        || matches!(value, "." | "..")
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-    {
-        return Err(CheckpointError::InvalidSessionId);
-    }
-    Ok(())
+    SessionId::validate(value).map_err(|_| CheckpointError::InvalidSessionId)
 }
 
 fn validate_operation_id(value: &str) -> Result<(), CheckpointError> {

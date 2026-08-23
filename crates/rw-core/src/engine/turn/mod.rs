@@ -1471,7 +1471,7 @@ pub(super) async fn emit_batch(
         let expected = first_expected
             .checked_add(offset)
             .ok_or_else(|| AgentLoopError::Persistence("event sequence overflow".to_owned()))?;
-        let meta = event_meta(event).ok_or_else(|| {
+        let meta = event.meta().ok_or_else(|| {
             AgentLoopError::Persistence(
                 "event sink returned a connection-scoped acknowledgement".to_owned(),
             )
@@ -1501,7 +1501,7 @@ pub(super) async fn emit_batch(
     }
     state.sequence = persisted
         .last()
-        .and_then(event_meta)
+        .and_then(EngineEvent::meta)
         .map(|meta| meta.sequence_id.0);
     for event in persisted {
         let _ = events.send(RoutedEvent {
@@ -1599,6 +1599,7 @@ enum PreparedToolCall {
         arguments: Value,
         read_only: bool,
         mutation_scope: MutationScope,
+        semantics: Box<rw_tools::ToolInvocationSemantics>,
         authorization: AuthorizedToolBinding,
         deferred_mutating_pre_hook: bool,
     },
@@ -2587,6 +2588,7 @@ struct ResolvedToolSecurity {
     tool: Arc<dyn rw_tools::Tool>,
     capabilities: Vec<rw_types::ToolCapability>,
     mutation_scope: MutationScope,
+    semantics: rw_tools::ToolInvocationSemantics,
     read_only: bool,
 }
 
@@ -2596,10 +2598,8 @@ fn resolve_tool_security(
     arguments: &Value,
 ) -> Option<ResolvedToolSecurity> {
     let tool = config.tools.resolve(name)?;
-    let mutation_scope = config
-        .tools
-        .mutation_scope(name, arguments)
-        .unwrap_or(MutationScope::OpaqueWorkspace);
+    let semantics = config.tools.invocation_semantics(name, arguments).ok()??;
+    let mutation_scope = semantics.mutation_scope.clone();
     let mut capabilities = tool
         .invocation_capabilities(arguments)
         .ok()?
@@ -2615,6 +2615,7 @@ fn resolve_tool_security(
         tool,
         capabilities,
         mutation_scope,
+        semantics,
         read_only,
     })
 }
@@ -2649,12 +2650,13 @@ fn widen_security_for_hooks(
     (security, deferred_mutating_pre_hook)
 }
 
-fn background_control_call(name: &str, arguments: &Value) -> bool {
-    matches!(
-        name,
-        "background_status" | "background_output" | "background_kill"
-    ) || (name == "bash"
-        && arguments.get("run_in_background").and_then(Value::as_bool) == Some(true))
+fn background_control_call(
+    semantics: &rw_tools::ToolInvocationSemantics,
+    arguments: &Value,
+) -> bool {
+    semantics.behavior == rw_tools::ToolBehavior::BackgroundControl
+        || (semantics.behavior == rw_tools::ToolBehavior::Shell
+            && arguments.get("run_in_background").and_then(Value::as_bool) == Some(true))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2663,6 +2665,7 @@ async fn authorize_tool_call(
     call: &PendingToolCall,
     arguments: &Value,
     capabilities: Vec<rw_types::ToolCapability>,
+    semantics: &rw_tools::ToolInvocationSemantics,
     tool: &Arc<dyn rw_tools::Tool>,
     context: &ToolContext,
     config: &SessionActorConfig,
@@ -2681,7 +2684,7 @@ async fn authorize_tool_call(
     request.approval_diff = current_approval_diff(tool, context, &request).await?;
     let authorization = AuthorizedToolBinding {
         approval_diff: request.approval_diff.as_ref().map(diff_binding),
-        execution_identity: PermissionGate::execution_identity(&request),
+        execution_identity: PermissionGate::registered_execution_identity(&request, semantics),
         capabilities: request.capabilities.clone(),
     };
     let displayed = redacted_permission_request(request.clone(), config.secret_redactor.as_ref());
@@ -2720,8 +2723,9 @@ async fn authorize_tool_call(
     };
     let permission = config
         .permissions
-        .authorize_in_mode(
+        .authorize_registered_in_mode(
             request,
+            semantics,
             &redacting_approver,
             permission_hook_override(permission_hook.status(), permission_hook.payload()),
             mode,
@@ -2789,7 +2793,7 @@ async fn prepare_tool_call(
     };
     let (initial_security, _) =
         widen_security_for_hooks(initial_security, &config.hooks, &call.name);
-    let background_control = background_control_call(&call.name, &arguments);
+    let background_control = background_control_call(&initial_security.semantics, &arguments);
     if background_control && !matches!(initial_security.mutation_scope, MutationScope::None) {
         return PreparedToolCall::Complete(failed_execution(
             call,
@@ -2810,6 +2814,7 @@ async fn prepare_tool_call(
         &call,
         &arguments,
         initial_security.capabilities.clone(),
+        &initial_security.semantics,
         &initial_security.tool,
         context,
         config,
@@ -2891,7 +2896,7 @@ async fn prepare_tool_call(
     };
     let (security, deferred_mutating_pre_hook) =
         widen_security_for_hooks(security, &config.hooks, &call.name);
-    let background_control = background_control_call(&call.name, &arguments);
+    let background_control = background_control_call(&security.semantics, &arguments);
     if background_control && !matches!(security.mutation_scope, MutationScope::None) {
         return PreparedToolCall::Complete(failed_execution(
             call,
@@ -2913,6 +2918,7 @@ async fn prepare_tool_call(
             &call,
             &arguments,
             security.capabilities.clone(),
+            &security.semantics,
             &security.tool,
             context,
             config,
@@ -2933,6 +2939,7 @@ async fn prepare_tool_call(
         arguments,
         read_only: security.read_only,
         mutation_scope: security.mutation_scope,
+        semantics: Box::new(security.semantics),
         authorization,
         deferred_mutating_pre_hook,
     }
@@ -3148,32 +3155,41 @@ async fn execute_prepared_tool(
     cancellation: CancellationToken,
     runtime: ToolExecutionRuntime,
 ) -> (ToolExecution, bool) {
-    let (call, tool, arguments, mutation_scope, authorization, deferred_mutating_pre_hook) =
-        match prepared {
-            PreparedToolCall::Execute {
-                call,
-                tool,
-                arguments,
-                mutation_scope,
-                authorization,
-                deferred_mutating_pre_hook,
-                ..
-            } => (
-                call,
-                tool,
-                arguments,
-                mutation_scope,
-                authorization,
-                deferred_mutating_pre_hook,
-            ),
-            PreparedToolCall::Complete(execution) => return (execution, false),
-        };
+    let (
+        call,
+        tool,
+        arguments,
+        mutation_scope,
+        semantics,
+        authorization,
+        deferred_mutating_pre_hook,
+    ) = match prepared {
+        PreparedToolCall::Execute {
+            call,
+            tool,
+            arguments,
+            mutation_scope,
+            semantics,
+            authorization,
+            deferred_mutating_pre_hook,
+            ..
+        } => (
+            call,
+            tool,
+            arguments,
+            mutation_scope,
+            semantics,
+            authorization,
+            deferred_mutating_pre_hook,
+        ),
+        PreparedToolCall::Complete(execution) => return (execution, false),
+    };
     if !matches!(mutation_scope, MutationScope::None)
         && runtime
             .tools
             .session_activity(&runtime.session_id)
             .is_some()
-        && !background_control_call(&call.name, &arguments)
+        && !background_control_call(&semantics, &arguments)
     {
         return (
             failed_execution(
@@ -3264,7 +3280,8 @@ async fn execute_prepared_tool(
         Ok(())
     };
     let revalidation = diff_revalidation.and_then(|()| {
-        (PermissionGate::execution_identity(&execution_request) == authorization.execution_identity)
+        (PermissionGate::registered_execution_identity(&execution_request, &semantics)
+            == authorization.execution_identity)
             .then_some(())
             .ok_or_else(|| {
                 ToolError::Command(
@@ -3493,7 +3510,13 @@ async fn execute_tool_calls(
                 .await
             };
             redact_tool_output(&mut execution.output, config.secret_redactor.as_ref());
-            emit_plan_submission(&execution, mode, signals, config.secret_redactor.as_ref());
+            emit_plan_submission(
+                &execution,
+                mode,
+                signals,
+                config.secret_redactor.as_ref(),
+                &config.tools,
+            );
             send_event(
                 signals,
                 PendingEvent::ToolCallFinished {
@@ -3568,7 +3591,13 @@ async fn execute_tool_calls(
             continue;
         };
         redact_tool_output(&mut execution.output, config.secret_redactor.as_ref());
-        emit_plan_submission(&execution, mode, signals, config.secret_redactor.as_ref());
+        emit_plan_submission(
+            &execution,
+            mode,
+            signals,
+            config.secret_redactor.as_ref(),
+            &config.tools,
+        );
         send_event(
             signals,
             PendingEvent::ToolCallFinished {
@@ -3593,16 +3622,16 @@ fn emit_plan_submission(
     mode: SessionMode,
     signals: &mpsc::UnboundedSender<TurnSignal>,
     redactor: &dyn SecretRedactor,
+    tools: &ToolRegistry,
 ) {
-    if mode != SessionMode::Plan || execution.is_error || execution.call.name != "submit_plan" {
+    if mode != SessionMode::Plan || execution.is_error {
         return;
     }
-    if let Some(arguments) = execution
-        .call
-        .arguments
-        .clone()
-        .map(|arguments| redacted_json(arguments, redactor))
-        && let Ok(artifact) = serde_json::from_value::<PlanArtifact>(arguments)
+    if let Some(arguments) = execution.call.arguments.as_ref()
+        && let Ok(Some(semantics)) = tools.invocation_semantics(&execution.call.name, arguments)
+        && semantics.behavior == rw_tools::ToolBehavior::PlanSubmission
+        && let Ok(artifact) =
+            serde_json::from_value::<PlanArtifact>(redacted_json(arguments.clone(), redactor))
     {
         send_event(signals, PendingEvent::PlanSubmitted { artifact });
     }

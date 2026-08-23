@@ -2,40 +2,33 @@ import type { RottweilerState } from "./state"
 
 export type CommandChoice = RottweilerState["commands"][number]
 
-export const LOCAL_SLASH_COMMANDS: readonly CommandChoice[] = [
-  { name: "help", description: "List available commands", usage: "/help" },
-  { name: "status", description: "Show actor running and queue state", usage: "/status" },
-  { name: "mode", description: "Show or switch the interaction mode", usage: "/mode [id]" },
+export const TUI_SLASH_COMMANDS: readonly CommandChoice[] = [
   { name: "models", description: "Switch the active model", usage: "/models" },
   { name: "providers", description: "Choose a configured provider and model", usage: "/providers" },
   { name: "agents", description: "Inspect and manage child agents", usage: "/agents" },
   { name: "theme", description: "Preview and change the interface theme", usage: "/theme" },
   { name: "settings", description: "Change safe user settings", usage: "/settings" },
-  { name: "permissions", description: "Show or edit session permission rules", usage: "/permissions [list|mode|approvals|add|remove|clear-session|revoke-session|revoke-project]" },
-  { name: "plan", description: "Show the pending or approved plan", usage: "/plan" },
-  { name: "rewind", description: "Restore a completed turn checkpoint", usage: "/rewind <turn>" },
-  { name: "fork", description: "Fork this session at a completed turn", usage: "/fork [turn]" },
-  { name: "review", description: "Review the cumulative session diff", usage: "/review" },
-  { name: "interrupt", description: "Interrupt the active turn", usage: "/interrupt" },
-  { name: "context", description: "Inspect, pin, or evict context items", usage: "/context [pin|evict <item-id>]" },
-  { name: "cost", description: "Show usage, cost, and budget accounting", usage: "/cost" },
-  { name: "compact", description: "Compact conversation context", usage: "/compact [instructions]" },
-  { name: "trust", description: "Inspect or change folder trust", usage: "/trust [status|grant|revoke]" },
-  { name: "add-dir", description: "Append a live workspace root", usage: "/add-dir <path>" },
   { name: "exit", description: "Close Rottweiler", usage: "/exit" },
 ]
 
-const LOCAL_SLASH_COMMAND_NAMES = new Set(LOCAL_SLASH_COMMANDS.map((command) => command.name))
+const TUI_HANDLED_SLASH_COMMAND_NAMES = new Set([
+  ...TUI_SLASH_COMMANDS.map((command) => command.name),
+  "fork",
+  "mcp",
+  "permissions",
+  "review",
+  "rewind",
+])
 
-export function isLocalSlashCommand(name: string): boolean {
-  return LOCAL_SLASH_COMMAND_NAMES.has(name)
+export function isTuiHandledSlashCommand(name: string): boolean {
+  return TUI_HANDLED_SLASH_COMMAND_NAMES.has(name)
 }
 
-/** Live descriptors replace local copy while preserving stable local-first ordering. */
+/** Engine descriptors augment the small set of commands owned by the TUI. */
 export function mergeSlashCommandChoices(
   liveCommands: readonly CommandChoice[],
 ): readonly CommandChoice[] {
-  const choices = new Map(LOCAL_SLASH_COMMANDS.map((command) => [command.name, command]))
+  const choices = new Map(TUI_SLASH_COMMANDS.map((command) => [command.name, command]))
   for (const command of liveCommands) choices.set(command.name, command)
   return [...choices.values()]
 }

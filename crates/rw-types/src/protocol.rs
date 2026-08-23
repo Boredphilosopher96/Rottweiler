@@ -2,9 +2,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;
+use thiserror::Error;
 use ts_rs::TS;
 
-use crate::{ToolCallId, ToolOutput};
+use crate::{PermissionModeDescriptor, ToolCallId, ToolOutput, config::PermissionDecision};
 
 mod decimal_u64 {
     use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
@@ -55,7 +56,50 @@ macro_rules! string_id {
     };
 }
 
-string_id!(SessionId, "Stable identifier of an engine session.");
+/// Maximum encoded length of a session identifier.
+pub const MAX_SESSION_ID_BYTES: usize = 128;
+
+/// Stable identifier of an engine session.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, JsonSchema, PartialEq, Serialize, TS)]
+pub struct SessionId(pub String);
+
+/// A session identifier failed the canonical path-component grammar.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[error("session id is empty, too long, a dot component, or contains an unsafe character")]
+pub struct SessionIdError;
+
+impl SessionId {
+    /// Validates the canonical session identifier grammar without allocating.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionIdError`] unless `value` is a non-dot ASCII path
+    /// component using at most [`MAX_SESSION_ID_BYTES`] bytes.
+    pub fn validate(value: &str) -> Result<(), SessionIdError> {
+        if value.is_empty()
+            || value.len() > MAX_SESSION_ID_BYTES
+            || matches!(value, "." | "..")
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return Err(SessionIdError);
+        }
+        Ok(())
+    }
+
+    /// Parses an untrusted string into a validated session identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionIdError`] when the value does not satisfy the canonical
+    /// session identifier grammar.
+    pub fn parse(value: impl Into<String>) -> Result<Self, SessionIdError> {
+        let value = value.into();
+        Self::validate(&value)?;
+        Ok(Self(value))
+    }
+}
 string_id!(ClientId, "Stable identifier of a connected client.");
 string_id!(
     RequestId,
@@ -314,28 +358,6 @@ pub enum RuntimeServiceKind {
     Formatter,
 }
 
-/// Permission decision exposed on the interactive protocol without coupling
-/// clients to configuration-file types.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
-#[serde(rename_all = "snake_case")]
-#[ts(rename_all = "snake_case")]
-pub enum PermissionAction {
-    Ask,
-    Allow,
-    Deny,
-}
-
-/// Active session permission mode exposed without coupling clients to the
-/// engine's runtime policy type.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
-#[serde(rename_all = "kebab-case")]
-#[ts(rename_all = "kebab-case")]
-pub enum PermissionModeDescriptor {
-    Strict,
-    AutoSafe,
-    Yolo,
-}
-
 /// Scope of a remembered exact approval.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -351,7 +373,7 @@ pub struct PermissionRuleDescriptor {
     /// Opaque stable id accepted by remove operations. Clients never rebuild it.
     pub id: String,
     pub pattern: String,
-    pub action: PermissionAction,
+    pub action: PermissionDecision,
 }
 
 /// Opaque remembered approval metadata. Invocation arguments and fingerprints
@@ -367,7 +389,7 @@ pub struct PermissionApprovalDescriptor {
 /// Bounded permission inventory for one live session.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 pub struct PermissionStateDescriptor {
-    pub default: PermissionAction,
+    pub default: PermissionDecision,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub runtime_mode: Option<PermissionModeDescriptor>,
@@ -412,18 +434,12 @@ pub struct ModelCapabilities {
 /// One concrete provider/model discovered from a live authenticated catalog.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 pub struct ModelDescriptor {
-    /// Backward-compatible selection key. This is the concrete `provider/model`
-    /// id, not a role alias.
-    pub alias: ModelAlias,
     /// Concrete provider-qualified model id.
     pub id: String,
     pub display_name: String,
     /// Sanitized logical provider name. Adapter kind, endpoint, and auth
     /// material remain behind the provider boundary.
     pub provider: String,
-    /// One-item compatibility projection for older clients.
-    #[serde(default)]
-    pub providers: Vec<String>,
     /// Configured role aliases which currently include this concrete model.
     #[serde(default)]
     pub aliases: Vec<ModelAlias>,
@@ -597,6 +613,31 @@ pub enum SessionMode {
     Plan,
     #[default]
     Execute,
+}
+
+impl SessionMode {
+    /// Stable declarative and protocol spelling for this interaction policy.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Discuss => "discuss",
+            Self::Plan => "plan",
+            Self::Execute => "execute",
+        }
+    }
+}
+
+impl std::str::FromStr for SessionMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "discuss" => Ok(Self::Discuss),
+            "plan" => Ok(Self::Plan),
+            "execute" => Ok(Self::Execute),
+            _ => Err(format!("unknown session mode `{value}`")),
+        }
+    }
 }
 
 /// One verifiable step in a model-submitted plan artifact.
@@ -1028,8 +1069,7 @@ pub enum ClientCommand {
         session_id: SessionId,
         at_turn: Option<TurnId>,
         /// Stable client-generated identity retained until the correlated fork completes.
-        #[serde(default)]
-        operation_id: Option<String>,
+        operation_id: String,
     },
     Rewind {
         meta: CommandMeta,
@@ -1172,7 +1212,7 @@ pub enum ClientCommand {
         meta: CommandMeta,
         session_id: SessionId,
         pattern: String,
-        action: PermissionAction,
+        action: PermissionDecision,
     },
     RemoveSessionPermissionRule {
         meta: CommandMeta,
@@ -1348,6 +1388,73 @@ impl ClientCommand {
             | Self::InterruptSubagent { meta, .. }
             | Self::CloseSubagent { meta, .. }
             | Self::ShutdownHost { meta, .. } => meta,
+        }
+    }
+
+    /// Returns the target session for session-scoped commands.
+    #[must_use]
+    pub fn session_id(&self) -> Option<&SessionId> {
+        match self {
+            Self::CreateSession { .. }
+            | Self::ListSessions { .. }
+            | Self::SearchSessions { .. }
+            | Self::ListModels { .. }
+            | Self::ShutdownHost { .. } => None,
+            Self::ResumeSession { session_id, .. }
+            | Self::AttachSession { session_id, .. }
+            | Self::SendMessage { session_id, .. }
+            | Self::Interrupt { session_id, .. }
+            | Self::ApproveTool { session_id, .. }
+            | Self::ApprovePlan { session_id, .. }
+            | Self::AnswerQuestion { session_id, .. }
+            | Self::SwitchMode { session_id, .. }
+            | Self::SwitchModel { session_id, .. }
+            | Self::Compact { session_id, .. }
+            | Self::Fork { session_id, .. }
+            | Self::Rewind { session_id, .. }
+            | Self::TakeDriver { session_id, .. }
+            | Self::UserShellStarted { session_id, .. }
+            | Self::UserShellEnded { session_id, .. }
+            | Self::PinContext { session_id, .. }
+            | Self::EvictContext { session_id, .. }
+            | Self::GetContext { session_id, .. }
+            | Self::GetCost { session_id, .. }
+            | Self::DumpPrompt { session_id, .. }
+            | Self::GetSessionReview { session_id, .. }
+            | Self::ReviewFile { session_id, .. }
+            | Self::SearchWorkspaceFiles { session_id, .. }
+            | Self::PreviewWorkspaceFile { session_id, .. }
+            | Self::GetWorkspaceStatus { session_id, .. }
+            | Self::GetWorkspaceDiff { session_id, .. }
+            | Self::ListCommands { session_id, .. }
+            | Self::ListModes { session_id, .. }
+            | Self::ListSettings { session_id, .. }
+            | Self::SetSetting { session_id, .. }
+            | Self::ListMcpServers { session_id, .. }
+            | Self::ListRuntimeServices { session_id, .. }
+            | Self::AddMcpHttpServer { session_id, .. }
+            | Self::AddMcpStdioServer { session_id, .. }
+            | Self::RemoveMcpServer { session_id, .. }
+            | Self::ReviewMcpServer { session_id, .. }
+            | Self::ApproveMcpServer { session_id, .. }
+            | Self::SetMcpServerEnabled { session_id, .. }
+            | Self::ListPermissions { session_id, .. }
+            | Self::AddSessionPermissionRule { session_id, .. }
+            | Self::RemoveSessionPermissionRule { session_id, .. }
+            | Self::RemoveQueuedMessage { session_id, .. }
+            | Self::ClearQueuedMessages { session_id, .. }
+            | Self::RenameSession { session_id, .. }
+            | Self::ExportSession { session_id, .. }
+            | Self::RevokePermissionApproval { session_id, .. }
+            | Self::BeginProviderAuth { session_id, .. }
+            | Self::ConfigureBuiltinProvider { session_id, .. }
+            | Self::CompleteProviderAuth { session_id, .. }
+            | Self::CancelProviderAuth { session_id, .. }
+            | Self::ListSubagents { session_id, .. }
+            | Self::ReplaySubagent { session_id, .. }
+            | Self::ContinueSubagent { session_id, .. }
+            | Self::InterruptSubagent { session_id, .. }
+            | Self::CloseSubagent { session_id, .. } => Some(session_id),
         }
     }
 
@@ -1705,6 +1812,25 @@ pub enum CommandOutcome {
     Accepted,
     Rejected { error: EngineError },
 }
+
+/// Delivery lifetime owned by an engine event variant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EngineEventDelivery {
+    /// Stored in the ordered session log and replayed after reconnect.
+    Durable,
+    /// Returned only to the requesting connection.
+    Connection,
+    /// Broadcast as live progress without advancing the durable cursor.
+    Transient,
+}
+
+/// Non-durable event tags that still belong to a live session stream.
+pub const TRANSIENT_ENGINE_EVENT_TYPES: &[&str] = &[
+    "subagent_progress",
+    "compaction_attempt_started",
+    "compaction_text_delta",
+    "compaction_thinking_delta",
+];
 
 /// Events streamed to clients and persisted in the session event log.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
@@ -2221,11 +2347,8 @@ pub enum EngineEvent {
     ModeChanged {
         meta: EventMeta,
         mode: ModeId,
-        /// BLAKE3 hash of canonical mode semantics. Legacy built-in events may
-        /// omit it; custom modes require it when resuming mutation-capable sessions.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        definition_fingerprint: Option<String>,
+        /// BLAKE3 hash of the canonical mode semantics.
+        definition_fingerprint: String,
     },
     PermissionModeChanged {
         meta: EventMeta,
@@ -2311,8 +2434,20 @@ pub enum EngineEvent {
 }
 
 impl EngineEvent {
-    /// Returns durable session metadata, or `None` for the connection-scoped
-    /// command acknowledgement that is never written to a session log.
+    /// Returns the authoritative delivery lifetime for this event variant.
+    #[must_use]
+    pub fn delivery(&self) -> EngineEventDelivery {
+        match self {
+            Self::SubagentProgress { .. }
+            | Self::CompactionAttemptStarted { .. }
+            | Self::CompactionTextDelta { .. }
+            | Self::CompactionThinkingDelta { .. } => EngineEventDelivery::Transient,
+            _ if self.meta().is_some() => EngineEventDelivery::Durable,
+            _ => EngineEventDelivery::Connection,
+        }
+    }
+
+    /// Returns durable session metadata. Non-durable events return `None`.
     #[must_use]
     pub fn meta(&self) -> Option<&EventMeta> {
         match self {
@@ -2401,8 +2536,8 @@ impl EngineEvent {
         }
     }
 
-    /// Mutable durable session metadata for storage adapters and protocol
-    /// validators. Connection-scoped acknowledgements return `None`.
+    /// Mutable durable session metadata for storage adapters and validators.
+    /// Non-durable events return `None`.
     #[must_use]
     pub fn meta_mut(&mut self) -> Option<&mut EventMeta> {
         match self {
@@ -2495,8 +2630,9 @@ impl EngineEvent {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClientCommand, ClientId, CommandAckMeta, CommandMeta, EngineEvent, McpEnvironmentEntry,
-        RequestId, SequenceId, SessionId, SubagentId, TranscriptFormat,
+        ClientCommand, ClientId, CommandAckMeta, CommandMeta, EngineEvent, EngineEventDelivery,
+        EventMeta, McpEnvironmentEntry, ModeId, RequestId, SequenceId, SessionId, SubagentId,
+        TranscriptFormat,
     };
 
     #[test]
@@ -2510,6 +2646,38 @@ mod tests {
         };
         command.meta_mut().client_id = ClientId("bound-connection".to_owned());
         assert_eq!(command.meta().client_id.0, "bound-connection");
+    }
+
+    #[test]
+    fn session_id_parser_owns_the_path_component_grammar() {
+        for value in ["session", "session-1", "session_1", "session.1"] {
+            assert_eq!(SessionId::parse(value), Ok(SessionId(value.to_owned())));
+        }
+        for value in ["", ".", "..", "../escape", "has/slash", "has space"] {
+            assert!(SessionId::parse(value).is_err(), "accepted {value:?}");
+        }
+        assert!(SessionId::parse("a".repeat(super::MAX_SESSION_ID_BYTES)).is_ok());
+        assert!(SessionId::parse("a".repeat(super::MAX_SESSION_ID_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn command_session_accessor_distinguishes_host_and_session_commands() {
+        let meta = CommandMeta {
+            protocol_version: 1,
+            client_id: ClientId("client".to_owned()),
+            request_id: RequestId("request".to_owned()),
+        };
+        let session = SessionId("session".to_owned());
+        let scoped = ClientCommand::AttachSession {
+            meta: meta.clone(),
+            session_id: session.clone(),
+            last_seen_sequence: None,
+            role: super::ClientRole::Driver,
+        };
+        let host = ClientCommand::ListSessions { meta };
+
+        assert_eq!(scoped.session_id(), Some(&session));
+        assert_eq!(host.session_id(), None);
     }
 
     #[test]
@@ -2638,5 +2806,41 @@ mod tests {
         assert_eq!(wire["events_before_page"], "8");
         assert_eq!(wire["truncated"], true);
         Ok(())
+    }
+
+    #[test]
+    fn event_delivery_is_owned_by_the_protocol_variant() {
+        let connection = EngineEvent::SessionExported {
+            meta: CommandAckMeta {
+                protocol_version: 1,
+                client_id: ClientId("driver".to_owned()),
+                request_id: RequestId("export".to_owned()),
+                emitted_at: "2026-01-01T00:00:00Z".to_owned(),
+            },
+            session_id: SessionId("session".to_owned()),
+            output_path: "/tmp/export.md".to_owned(),
+        };
+        let transient = EngineEvent::SubagentProgress {
+            parent_session_id: SessionId("session".to_owned()),
+            subagent_id: SubagentId("child".to_owned()),
+            child_session_id: SessionId("child-session".to_owned()),
+            child_sequence: None,
+            event: serde_json::json!({"type": "progress"}),
+        };
+        let durable = EngineEvent::ModeChanged {
+            meta: EventMeta {
+                protocol_version: 1,
+                session_id: SessionId("session".to_owned()),
+                sequence_id: SequenceId(1),
+                emitted_at: "2026-01-01T00:00:00Z".to_owned(),
+                caused_by: None,
+            },
+            mode: ModeId("execute".to_owned()),
+            definition_fingerprint: "fixture".to_owned(),
+        };
+
+        assert_eq!(connection.delivery(), EngineEventDelivery::Connection);
+        assert_eq!(transient.delivery(), EngineEventDelivery::Transient);
+        assert_eq!(durable.delivery(), EngineEventDelivery::Durable);
     }
 }

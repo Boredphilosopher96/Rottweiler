@@ -4,8 +4,9 @@ use rw_providers::{
     AnthropicConfig, AnthropicProvider, AuthMaterial, CacheBreakpointSupport, NetworkPolicy,
     OpenAiChatRequestProfile, OpenAiCompatibleConfig, OpenAiCompatibleProvider, OpenAiWireMode,
     Provider, ProviderErrorKind, ProviderRequest, ProxyEnvironment, ProxySettings, StaticAuth,
-    ThinkingLevel, ToolChoice, deny_outbound_network_for_process, refresh_models_dev,
+    ToolChoice, deny_outbound_network_for_process, refresh_models_dev,
 };
+use rw_types::config::ThinkingLevel;
 use tokio::{net::TcpListener, time::timeout};
 use url::Url;
 

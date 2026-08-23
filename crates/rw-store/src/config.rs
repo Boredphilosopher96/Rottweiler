@@ -9,10 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
 
-use rw_types::config::{
-    Config, ConfigFile, EngineConfigFile, PermissionDecision, ProviderAuthScheme, ProviderConfig,
-    ThinkingLevel, UpdateChannel,
-};
+use rw_types::McpServerId;
+use rw_types::config::{Config, ConfigFile, EngineConfigFile, ProviderAuthScheme, ProviderConfig};
 use thiserror::Error;
 use url::{Host, Url};
 
@@ -24,7 +22,6 @@ const ENV_SUBAGENT_CONCURRENCY: &str = "RW_ENGINE_SUBAGENT_MAX_CONCURRENCY";
 const ENV_MODEL_DEFAULT: &str = "RW_MODEL_DEFAULT";
 const ENV_COMPACTION_AUTO: &str = "RW_COMPACTION_AUTO";
 const ENV_COMPACTION_RESERVED: &str = "RW_COMPACTION_RESERVED";
-const ENV_COMPACTION_RESERVED_TOKENS: &str = "RW_COMPACTION_RESERVED_TOKENS";
 const ENV_COMPACTION_MODEL_ALIAS: &str = "RW_COMPACTION_MODEL_ALIAS";
 const ENV_BUDGET_SESSION_COST_CAP: &str = "RW_BUDGET_SESSION_COST_CAP_MICROS_USD";
 const ENV_BUDGET_DAILY_COST_CAP: &str = "RW_BUDGET_DAILY_COST_CAP_MICROS_USD";
@@ -160,10 +157,7 @@ impl LoadedConfig {
             lines.push(self.render_leaf("models.thinking", "{}"));
         } else {
             for (alias, level) in &self.config.models.thinking {
-                lines.push(self.render_leaf(
-                    &format!("models.thinking.{alias}"),
-                    thinking_level_name(*level),
-                ));
+                lines.push(self.render_leaf(&format!("models.thinking.{alias}"), level.as_str()));
             }
         }
 
@@ -428,7 +422,7 @@ impl LoadedConfig {
         ));
         lines.push(self.render_leaf(
             "permissions.default",
-            permission_name(self.config.permissions.default),
+            self.config.permissions.default.as_str(),
         ));
         lines.push(self.render_leaf(
             "sandbox.safe_list",
@@ -468,10 +462,7 @@ impl LoadedConfig {
             "telemetry.enabled",
             &self.config.telemetry.enabled.to_string(),
         ));
-        lines.push(self.render_leaf(
-            "updates.channel",
-            update_channel_name(self.config.updates.channel),
-        ));
+        lines.push(self.render_leaf("updates.channel", self.config.updates.channel.as_str()));
         lines.push(self.render_leaf("ui.theme", &quoted(&self.config.ui.theme)));
         lines.join("\n") + "\n"
     }
@@ -796,27 +787,20 @@ impl ConfigLoader {
         self.load()
     }
 
-    /// Adds one built-in provider profile using only its fixed adapter kind.
+    /// Adds one provider profile after the composition layer has resolved its
+    /// canonical name and fixed adapter kind.
     /// Existing profiles are never overwritten and no endpoint, client id, or
     /// credential value can enter through this path.
     ///
     /// # Errors
     ///
-    /// Returns an error for unknown providers, conflicting existing profiles,
-    /// unsafe paths, or failed atomic persistence.
-    pub fn configure_builtin_provider(&self, provider: &str) -> Result<LoadedConfig, ConfigError> {
-        let kind = match provider {
-            "openai_codex" => "openai_codex",
-            "github_copilot" => "github_copilot",
-            "openai" => "openai",
-            "anthropic" => "anthropic",
-            _ => {
-                return Err(ConfigError::InvalidUserSetting {
-                    key: format!("providers.{provider}"),
-                    reason: "provider is not in the fixed built-in setup allowlist".to_owned(),
-                });
-            }
-        };
+    /// Returns an error for conflicting existing profiles, unsafe paths, or
+    /// failed atomic persistence.
+    pub fn configure_provider_profile(
+        &self,
+        provider: &str,
+        kind: &str,
+    ) -> Result<LoadedConfig, ConfigError> {
         let effective = self.load()?;
         if let Some(existing) = effective.config.providers.get(provider) {
             return if existing.kind == kind {
@@ -840,9 +824,6 @@ impl ConfigLoader {
         let _settings_lock = acquire_tui_settings_lock(parent, &key)?;
         validate_tui_config_file(&self.user_path, &key)?;
         let mut document = read_tui_config_document(&self.user_path)?;
-        if provider == "openai" {
-            migrate_legacy_openai_subscription_document(&mut document);
-        }
         set_toml_leaf(&mut document, &key, kind)?;
         let encoded = format!(
             "# Rottweiler user settings; last updated via TUI\n{}",
@@ -979,7 +960,7 @@ impl ConfigLoader {
             .and_then(toml::Value::as_table)
             .into_iter()
             .flat_map(|servers| servers.iter())
-            .filter(|(name, value)| valid_mcp_server_name(name) && value.is_table())
+            .filter(|(name, value)| McpServerId::validate(name).is_ok() && value.is_table())
             .map(|(name, value)| {
                 (
                     name.clone(),
@@ -1001,7 +982,7 @@ impl ConfigLoader {
     ///
     /// Returns an error for an unknown server or unsafe, malformed, or unwritable configuration.
     pub fn persist_tui_mcp_enabled(&self, server: &str, enabled: bool) -> Result<(), ConfigError> {
-        if !valid_mcp_server_name(server) {
+        if McpServerId::validate(server).is_err() {
             return Err(ConfigError::InvalidUserSetting {
                 key: "mcp.servers".to_owned(),
                 reason: "MCP server name is invalid".to_owned(),
@@ -1061,7 +1042,7 @@ impl ConfigLoader {
         endpoint: &str,
     ) -> Result<(), ConfigError> {
         let key = format!("mcp.servers.{server}");
-        if !valid_mcp_server_name(server) || endpoint.len() > 2_048 {
+        if McpServerId::validate(server).is_err() || endpoint.len() > 2_048 {
             return Err(ConfigError::InvalidUserSetting {
                 key,
                 reason: "MCP server name or endpoint is invalid".to_owned(),
@@ -1153,7 +1134,9 @@ impl ConfigLoader {
         environment: &[(String, String)],
     ) -> Result<(), ConfigError> {
         let key = format!("mcp.servers.{server}");
-        if !valid_mcp_server_name(server) || !valid_mcp_executable_and_args(executable, args) {
+        if McpServerId::validate(server).is_err()
+            || !valid_mcp_executable_and_args(executable, args)
+        {
             return Err(ConfigError::InvalidUserSetting {
                 key,
                 reason: "MCP server name or argv is invalid".to_owned(),
@@ -1240,7 +1223,7 @@ impl ConfigLoader {
     /// Returns an error for an unknown server or unsafe, malformed, or
     /// unwritable user configuration.
     pub fn remove_tui_mcp_server(&self, server: &str) -> Result<(), ConfigError> {
-        if !valid_mcp_server_name(server) {
+        if McpServerId::validate(server).is_err() {
             return Err(ConfigError::InvalidUserSetting {
                 key: "mcp.servers".to_owned(),
                 reason: "MCP server name is invalid".to_owned(),
@@ -1344,129 +1327,9 @@ impl ConfigLoader {
         for cli_override in &self.cli_overrides {
             apply_override(&mut loaded, cli_override, &ConfigSource::Cli)?;
         }
-        migrate_legacy_openai_subscription(&mut loaded);
         validate(&loaded.config)?;
         Ok(loaded)
     }
-}
-
-fn migrate_legacy_openai_subscription_document(document: &mut toml::Value) {
-    let Some(root) = document.as_table_mut() else {
-        return;
-    };
-    let legacy = {
-        let Some(providers) = root
-            .get_mut("providers")
-            .and_then(toml::Value::as_table_mut)
-        else {
-            return;
-        };
-        let legacy_is_subscription = providers
-            .get("openai")
-            .and_then(toml::Value::as_table)
-            .and_then(|provider| provider.get("kind"))
-            .and_then(toml::Value::as_str)
-            .is_some_and(|kind| matches!(kind, "openai_codex" | "openai_subscription"));
-        if !legacy_is_subscription {
-            return;
-        }
-        let canonical_is_compatible = providers
-            .get("openai_codex")
-            .and_then(toml::Value::as_table)
-            .and_then(|provider| provider.get("kind"))
-            .and_then(toml::Value::as_str)
-            .is_none_or(|kind| matches!(kind, "openai_codex" | "openai_subscription"));
-        if !canonical_is_compatible {
-            return;
-        }
-        providers.remove("openai")
-    };
-    if let Some(legacy) = legacy
-        && let Some(providers) = root
-            .get_mut("providers")
-            .and_then(toml::Value::as_table_mut)
-    {
-        providers.entry("openai_codex".to_owned()).or_insert(legacy);
-    }
-    if let Some(aliases) = root
-        .get_mut("models")
-        .and_then(toml::Value::as_table_mut)
-        .and_then(|models| models.get_mut("aliases"))
-        .and_then(toml::Value::as_table_mut)
-    {
-        for candidates in aliases
-            .iter_mut()
-            .filter_map(|(_, value)| value.as_array_mut())
-        {
-            for candidate in candidates {
-                let Some(value) = candidate.as_str() else {
-                    continue;
-                };
-                if let Some(model) = value.strip_prefix("openai/") {
-                    *candidate = toml::Value::String(format!("openai_codex/{model}"));
-                }
-            }
-        }
-    }
-}
-
-fn migrate_legacy_openai_subscription(loaded: &mut LoadedConfig) {
-    let Some(legacy) = loaded.config.providers.get("openai").cloned() else {
-        return;
-    };
-    if !matches!(legacy.kind.as_str(), "openai_codex" | "openai_subscription") {
-        return;
-    }
-    if loaded
-        .config
-        .providers
-        .get("openai_codex")
-        .is_some_and(|provider| {
-            !matches!(
-                provider.kind.as_str(),
-                "openai_codex" | "openai_subscription"
-            )
-        })
-    {
-        loaded.warnings.push(ConfigWarning {
-            message: "legacy ChatGPT profile [providers.openai] could not migrate because [providers.openai_codex] is already used by a different adapter".to_owned(),
-        });
-        return;
-    }
-
-    loaded.config.providers.remove("openai");
-    loaded
-        .config
-        .providers
-        .entry("openai_codex".to_owned())
-        .or_insert(legacy);
-    let legacy_sources = loaded
-        .provenance
-        .iter()
-        .filter_map(|(key, source)| {
-            key.strip_prefix("providers.openai.").map(|field| {
-                (
-                    key.clone(),
-                    format!("providers.openai_codex.{field}"),
-                    source.clone(),
-                )
-            })
-        })
-        .collect::<Vec<_>>();
-    for (legacy_key, canonical_key, source) in legacy_sources {
-        loaded.provenance.remove(&legacy_key);
-        loaded.provenance.entry(canonical_key).or_insert(source);
-    }
-    for candidates in loaded.config.models.aliases.values_mut() {
-        for candidate in candidates {
-            if let Some(model) = candidate.strip_prefix("openai/") {
-                *candidate = format!("openai_codex/{model}");
-            }
-        }
-    }
-    loaded.warnings.push(ConfigWarning {
-        message: "migrated legacy ChatGPT profile [providers.openai] to [providers.openai_codex]; OpenAI API remains a separate provider".to_owned(),
-    });
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1887,9 +1750,6 @@ fn apply_environment(
         (ENV_SUBAGENT_CONCURRENCY, "engine.subagent_max_concurrency"),
         (ENV_MODEL_DEFAULT, "models.default"),
         (ENV_COMPACTION_AUTO, "compaction.auto"),
-        // Retain the pre-M3 spelling as a compatibility alias. The canonical
-        // environment variable is applied last so it wins when both are set.
-        (ENV_COMPACTION_RESERVED_TOKENS, "compaction.reserved"),
         (ENV_COMPACTION_RESERVED, "compaction.reserved"),
         (ENV_COMPACTION_MODEL_ALIAS, "compaction.model_alias"),
         (
@@ -1979,7 +1839,7 @@ fn apply_override(
         }
         "permissions.default" => {
             loaded.config.permissions.default =
-                parse_permission(value).ok_or_else(|| ConfigError::CliOverride {
+                value.parse().map_err(|_| ConfigError::CliOverride {
                     override_value: raw.to_owned(),
                     reason: "expected ask, allow, or deny".to_owned(),
                 })?;
@@ -1996,7 +1856,7 @@ fn apply_override(
         }
         "updates.channel" => {
             loaded.config.updates.channel =
-                parse_update_channel(value).ok_or_else(|| ConfigError::CliOverride {
+                value.parse().map_err(|_| ConfigError::CliOverride {
                     override_value: raw.to_owned(),
                     reason: "expected stable or beta".to_owned(),
                 })?;
@@ -2023,7 +1883,7 @@ fn apply_override(
                     reason: "model alias name must not be empty".to_owned(),
                 });
             }
-            let level = parse_thinking_level(value).ok_or_else(|| ConfigError::CliOverride {
+            let level = value.parse().map_err(|_| ConfigError::CliOverride {
                 override_value: raw.to_owned(),
                 reason: "expected off, low, medium, or high".to_owned(),
             })?;
@@ -2804,14 +2664,6 @@ fn valid_project_model_selection(model: &str) -> bool {
     )
 }
 
-fn valid_mcp_server_name(server: &str) -> bool {
-    !server.is_empty()
-        && server.len() <= 96
-        && server
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-}
-
 fn valid_mcp_executable_and_args(executable: &Path, args: &[String]) -> bool {
     let executable = executable.to_string_lossy();
     Path::new(executable.as_ref()).is_absolute()
@@ -2930,7 +2782,7 @@ fn configured_setting_value(config: &Config, key: &str) -> Option<String> {
     match key {
         "ui.theme" => Some(config.ui.theme.clone()),
         "compaction.auto" => Some(config.compaction.auto.to_string()),
-        "permissions.default" => Some(permission_name(config.permissions.default).to_owned()),
+        "permissions.default" => Some(config.permissions.default.as_str().to_owned()),
         "budget.session_cost_cap_micros_usd" => config
             .budget
             .session_cost_cap_micros_usd
@@ -2944,7 +2796,7 @@ fn configured_setting_value(config: &Config, key: &str) -> Option<String> {
             .models
             .thinking
             .get(key.trim_start_matches("models.thinking."))
-            .map(|level| thinking_level_name(*level).to_owned()),
+            .map(|level| level.as_str().to_owned()),
         _ if key.starts_with("providers.") => {
             let mut segments = key.split('.');
             match (
@@ -3390,57 +3242,6 @@ fn valid_environment_name(value: &str) -> bool {
         && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
 
-fn parse_permission(value: &str) -> Option<PermissionDecision> {
-    match value {
-        "ask" => Some(PermissionDecision::Ask),
-        "allow" => Some(PermissionDecision::Allow),
-        "deny" => Some(PermissionDecision::Deny),
-        _ => None,
-    }
-}
-
-fn permission_name(value: PermissionDecision) -> &'static str {
-    match value {
-        PermissionDecision::Ask => "ask",
-        PermissionDecision::Allow => "allow",
-        PermissionDecision::Deny => "deny",
-    }
-}
-
-fn parse_thinking_level(value: &str) -> Option<ThinkingLevel> {
-    match value {
-        "off" => Some(ThinkingLevel::Off),
-        "low" => Some(ThinkingLevel::Low),
-        "medium" => Some(ThinkingLevel::Medium),
-        "high" => Some(ThinkingLevel::High),
-        _ => None,
-    }
-}
-
-fn thinking_level_name(value: ThinkingLevel) -> &'static str {
-    match value {
-        ThinkingLevel::Off => "off",
-        ThinkingLevel::Low => "low",
-        ThinkingLevel::Medium => "medium",
-        ThinkingLevel::High => "high",
-    }
-}
-
-fn parse_update_channel(value: &str) -> Option<UpdateChannel> {
-    match value {
-        "stable" => Some(UpdateChannel::Stable),
-        "beta" => Some(UpdateChannel::Beta),
-        _ => None,
-    }
-}
-
-fn update_channel_name(value: UpdateChannel) -> &'static str {
-    match value {
-        UpdateChannel::Stable => "stable",
-        UpdateChannel::Beta => "beta",
-    }
-}
-
 fn split_list(value: &str) -> Vec<String> {
     value
         .split(',')
@@ -3760,7 +3561,7 @@ mod tests {
     }
 
     #[test]
-    fn tui_builtin_provider_setup_is_fixed_user_scoped_and_idempotent() {
+    fn resolved_provider_setup_is_fixed_user_scoped_and_idempotent() {
         let root = tempdir().expect("root");
         let user = root.path().join("user/config.toml");
         let project = root.path().join("repo/.rottweiler/config.toml");
@@ -3770,7 +3571,7 @@ mod tests {
 
         for provider in ["openai_codex", "github_copilot"] {
             let effective = loader
-                .configure_builtin_provider(provider)
+                .configure_provider_profile(provider, provider)
                 .expect("built-in setup");
             assert_eq!(effective.config.providers[provider].kind, provider);
             assert!(matches!(
@@ -3778,7 +3579,7 @@ mod tests {
                 Some(ConfigSource::UserTui(path)) if path == &user
             ));
             loader
-                .configure_builtin_provider(provider)
+                .configure_provider_profile(provider, provider)
                 .expect("idempotent setup");
         }
         assert_eq!(
@@ -3788,68 +3589,6 @@ mod tests {
         let persisted = fs::read_to_string(user).expect("user config");
         assert!(persisted.contains("[providers.openai_codex]"));
         assert!(persisted.contains("[providers.github_copilot]"));
-    }
-
-    #[test]
-    fn legacy_chatgpt_profile_migrates_before_openai_api_setup() {
-        let root = tempdir().expect("root");
-        let user = root.path().join("user/config.toml");
-        let project = root.path().join("repo/.rottweiler/config.toml");
-        fs::create_dir_all(user.parent().expect("user parent")).expect("user dir");
-        fs::create_dir_all(project.parent().expect("project parent")).expect("project dir");
-        fs::write(
-            &user,
-            r#"
-[models]
-default = "fast"
-
-[models.aliases]
-fast = ["openai/gpt-5.4-mini"]
-
-[providers.openai]
-kind = "openai_codex"
-"#,
-        )
-        .expect("legacy user config");
-        let loader = ConfigLoader::new(user.clone(), project);
-
-        let migrated = loader.load().expect("effective migration");
-        assert!(!migrated.config.providers.contains_key("openai"));
-        assert_eq!(
-            migrated.config.providers["openai_codex"].kind,
-            "openai_codex"
-        );
-        assert!(matches!(
-            migrated.provenance("providers.openai_codex.kind"),
-            Some(ConfigSource::UserFile(path)) if path == &user
-        ));
-        assert_eq!(
-            migrated.config.models.aliases["fast"],
-            vec!["openai_codex/gpt-5.4-mini"]
-        );
-
-        loader
-            .configure_builtin_provider("openai")
-            .expect("separate OpenAI API setup");
-        let reloaded = ConfigLoader::new(
-            user.clone(),
-            root.path().join("repo/.rottweiler/config.toml"),
-        )
-        .load()
-        .expect("restart load");
-        assert_eq!(reloaded.config.providers["openai"].kind, "openai");
-        assert_eq!(
-            reloaded.config.providers["openai_codex"].kind,
-            "openai_codex"
-        );
-        assert_eq!(
-            reloaded.config.models.aliases["fast"],
-            vec!["openai_codex/gpt-5.4-mini"]
-        );
-        let persisted = fs::read_to_string(user).expect("persisted user config");
-        assert!(persisted.contains("[providers.openai]"));
-        assert!(persisted.contains("[providers.openai_codex]"));
-        assert!(persisted.contains("openai_codex/gpt-5.4-mini"));
     }
 
     #[test]
@@ -5195,7 +4934,7 @@ headers = { Authorization = "project-secret-canary" }
             ),
             (
                 "subscription",
-                "[providers.g]\nkind='openai_subscription'\n[providers.g.pricing.m]\ncurrency='USD'\ninput_per_million=1\noutput_per_million=2\n",
+                "[providers.g]\nkind='openai_codex'\n[providers.g.pricing.m]\ncurrency='USD'\ninput_per_million=1\noutput_per_million=2\n",
                 "subscription or credit accounting",
             ),
             (
@@ -5286,7 +5025,7 @@ headers = { Authorization = "project-secret-canary" }
             ),
             (
                 "subscription-override",
-                "[providers.g]\nkind='openai_subscription'\nheaders={ 'X-Title'='Rottweiler' }\n",
+                "[providers.g]\nkind='openai_codex'\nheaders={ 'X-Title'='Rottweiler' }\n",
                 "fixed transport",
             ),
         ] {

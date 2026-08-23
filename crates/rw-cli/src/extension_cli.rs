@@ -10,10 +10,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use miette::{IntoDiagnostic as _, Result, miette};
 use rw_core::prepare_update_network;
 use rw_ext as extensions;
+use rw_ext::{MAX_REGISTRY_CATALOG_BYTES, MAX_REGISTRY_COMPONENT_BYTES};
 use url::Url;
-
-const MAX_CATALOG_BYTES: usize = 2 * 1024 * 1024;
-const MAX_COMPONENT_BYTES: usize = 8 * 1024 * 1024;
 
 pub(crate) async fn list_registry(source: &str) -> Result<()> {
     let catalog = fetch_catalog(source).await?;
@@ -61,7 +59,11 @@ pub(crate) async fn install_registry_release(
     }
     let component_url = Url::parse(&release.component.url).into_diagnostic()?;
     let component = network
-        .fetch(&component_url, MAX_COMPONENT_BYTES, Duration::from_mins(2))
+        .fetch(
+            &component_url,
+            MAX_REGISTRY_COMPONENT_BYTES,
+            Duration::from_mins(2),
+        )
         .await
         .map_err(|error| miette!(error.to_string()))?;
     let installed =
@@ -172,7 +174,7 @@ async fn fetch_catalog(source: &str) -> Result<extensions::ExtensionRegistryCata
         eprintln!("warning: {warning}");
     }
     let bytes = network
-        .fetch(&source, MAX_CATALOG_BYTES, Duration::from_secs(30))
+        .fetch(&source, MAX_REGISTRY_CATALOG_BYTES, Duration::from_secs(30))
         .await
         .map_err(|error| miette!(error.to_string()))?;
     extensions::ExtensionRegistryCatalog::from_slice(&bytes)

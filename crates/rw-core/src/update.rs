@@ -9,27 +9,21 @@ use std::collections::{BTreeMap, BTreeSet};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ed25519_dalek::{Signature, VerifyingKey};
 use semver::Version;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use url::Url;
 
-use rw_types::{config::UpdateChannel, update_contract::MAX_UPDATE_ARTIFACT_BYTES};
+use rw_types::{
+    config::UpdateChannel,
+    update_contract::{
+        MAX_UPDATE_ARTIFACT_BYTES, MAX_UPDATE_ENVELOPE_BYTES, MAX_UPDATE_KEYS,
+        MAX_UPDATE_PAYLOAD_BYTES, MAX_UPDATE_RELEASE_NOTES_BYTES, MAX_UPDATE_ROOT_CHAIN_ENTRIES,
+        MAX_UPDATE_SELECTOR_BYTES, MAX_UPDATE_SIGNATURES, MAX_UPDATE_TARGETS, ReleaseMetadata,
+        ReleaseTarget, RootMetadata, SignedEnvelope, UPDATE_RELEASE_ROLE, UPDATE_ROOT_ROLE,
+        UPDATE_SCHEMA_VERSION, signature_message,
+    },
+};
 
-const SIGNATURE_DOMAIN: &[u8] = b"rottweiler-update-metadata-v1\0";
-const MAX_ENVELOPE_BYTES: usize = 1024 * 1024;
-const MAX_PAYLOAD_BYTES: usize = 768 * 1024;
-const MAX_SIGNATURES: usize = 32;
-const MAX_KEYS: usize = 32;
-const MAX_TARGETS: usize = 32;
-const MAX_RELEASE_NOTES_BYTES: usize = 64 * 1024;
-const MAX_ROOT_CHAIN: usize = 16;
-
-/// Legacy compile-time public root key id used by single-key release builds.
-pub const EMBEDDED_ROOT_KEY_ID: Option<&str> = option_env!("ROTTWEILER_UPDATE_ROOT_KEY_ID");
-/// Legacy compile-time base64 Ed25519 public root key used by single-key builds.
-pub const EMBEDDED_ROOT_PUBLIC_KEY: Option<&str> =
-    option_env!("ROTTWEILER_UPDATE_ROOT_PUBLIC_KEY_B64");
 /// Compile-time JSON object of root-role key ids to base64 Ed25519 public keys.
 pub const EMBEDDED_ROOT_KEYS_JSON: Option<&str> = option_env!("ROTTWEILER_UPDATE_ROOT_KEYS_JSON");
 /// Compile-time root threshold paired with the embedded root-role keys.
@@ -119,7 +113,10 @@ impl TrustedRoot {
         let mut unique_material = BTreeSet::new();
         let mut decoded_keys = BTreeMap::new();
         for (id, bytes) in keys {
-            if id.is_empty() || id.len() > 128 || !unique_material.insert(bytes) {
+            if id.is_empty()
+                || id.len() > MAX_UPDATE_SELECTOR_BYTES
+                || !unique_material.insert(bytes)
+            {
                 return Err(UpdateVerificationError::InvalidRootRotation);
             }
             let key = VerifyingKey::from_bytes(&bytes)
@@ -131,7 +128,7 @@ impl TrustedRoot {
         let keys = decoded_keys;
         if version == 0
             || keys.is_empty()
-            || keys.len() > MAX_KEYS
+            || keys.len() > MAX_UPDATE_KEYS
             || threshold == 0
             || threshold > keys.len()
         {
@@ -178,14 +175,6 @@ impl TrustedRoot {
                     threshold,
                     decoded.into_iter().map(|(id, key)| (id, key.to_bytes())),
                 )
-            }
-            (None, None) => {
-                let id =
-                    EMBEDDED_ROOT_KEY_ID.ok_or(UpdateVerificationError::TrustRootUnavailable)?;
-                let encoded = EMBEDDED_ROOT_PUBLIC_KEY
-                    .ok_or(UpdateVerificationError::TrustRootUnavailable)?;
-                let bytes = decode_public_key(encoded)?;
-                Self::from_keys(version, 1, [(id.to_owned(), bytes)])
             }
             _ => Err(UpdateVerificationError::TrustRootUnavailable),
         }
@@ -311,55 +300,6 @@ impl VerifiedUpdate {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct SignedEnvelope {
-    payload: String,
-    signatures: Vec<MetadataSignature>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct MetadataSignature {
-    key_id: String,
-    signature: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct RootMetadata {
-    schema_version: u16,
-    role: String,
-    version: u64,
-    expires_unix: u64,
-    keys: BTreeMap<String, String>,
-    root_key_ids: Vec<String>,
-    root_threshold: usize,
-    release_key_ids: Vec<String>,
-    release_threshold: usize,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct ReleaseMetadata {
-    schema_version: u16,
-    role: String,
-    version: u64,
-    expires_unix: u64,
-    channel: UpdateChannel,
-    release_notes: String,
-    targets: BTreeMap<String, ReleaseTarget>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct ReleaseTarget {
-    version: String,
-    url: String,
-    length: u64,
-    sha256: String,
-}
-
 struct AcceptedRoot {
     version: u64,
     expires_unix: u64,
@@ -404,7 +344,7 @@ pub fn verify_update_metadata_chain(
     if policy.now_unix < policy.high_water.trusted_unix_time {
         return Err(UpdateVerificationError::ClockRollback);
     }
-    if root_envelopes.len() > MAX_ROOT_CHAIN {
+    if root_envelopes.len() > MAX_UPDATE_ROOT_CHAIN_ENTRIES {
         return Err(UpdateVerificationError::InvalidRootRotation);
     }
     let mut current = trusted.clone();
@@ -430,13 +370,16 @@ pub fn verify_update_metadata_chain(
     }
     let release_payload = verify_envelope(
         release_envelope,
-        "release",
+        UPDATE_RELEASE_ROLE,
         &current.release_keys,
         current.release_threshold,
     )?;
     let release: ReleaseMetadata = serde_json::from_slice(&release_payload)
         .map_err(|_| UpdateVerificationError::MalformedMetadata)?;
-    if release.schema_version != 1 || release.role != "release" || release.version == 0 {
+    if release.schema_version != UPDATE_SCHEMA_VERSION
+        || release.role != UPDATE_RELEASE_ROLE
+        || release.version == 0
+    {
         return Err(UpdateVerificationError::MalformedMetadata);
     }
     if release.expires_unix < policy.now_unix {
@@ -453,10 +396,10 @@ pub fn verify_update_metadata_chain(
     if release.channel != policy.channel {
         return Err(UpdateVerificationError::ChannelMismatch);
     }
-    if release.targets.is_empty() || release.targets.len() > MAX_TARGETS {
+    if release.targets.is_empty() || release.targets.len() > MAX_UPDATE_TARGETS {
         return Err(UpdateVerificationError::InvalidTarget);
     }
-    if release.release_notes.len() > MAX_RELEASE_NOTES_BYTES
+    if release.release_notes.len() > MAX_UPDATE_RELEASE_NOTES_BYTES
         || release
             .release_notes
             .chars()
@@ -505,7 +448,7 @@ pub fn restore_trusted_root_chain(
     trusted: &TrustedRoot,
     root_envelopes: &[&[u8]],
 ) -> Result<TrustedRoot, UpdateVerificationError> {
-    if root_envelopes.len() > MAX_ROOT_CHAIN {
+    if root_envelopes.len() > MAX_UPDATE_ROOT_CHAIN_ENTRIES {
         return Err(UpdateVerificationError::InvalidRootRotation);
     }
     let mut current = trusted.clone();
@@ -536,11 +479,16 @@ fn accept_root(
     now_unix: u64,
     enforce_expiry: bool,
 ) -> Result<AcceptedRoot, UpdateVerificationError> {
-    let payload = verify_envelope(envelope_bytes, "root", &trusted.keys, trusted.threshold)?;
+    let payload = verify_envelope(
+        envelope_bytes,
+        UPDATE_ROOT_ROLE,
+        &trusted.keys,
+        trusted.threshold,
+    )?;
     let root: RootMetadata =
         serde_json::from_slice(&payload).map_err(|_| UpdateVerificationError::MalformedMetadata)?;
-    if root.schema_version != 1
-        || root.role != "root"
+    if root.schema_version != UPDATE_SCHEMA_VERSION
+        || root.role != UPDATE_ROOT_ROLE
         || root.version < trusted.version
         || root.version > trusted.version.saturating_add(1)
         || (enforce_expiry && root.expires_unix < now_unix)
@@ -570,7 +518,12 @@ fn accept_root(
     {
         return Err(UpdateVerificationError::InvalidRootRotation);
     }
-    verify_envelope(envelope_bytes, "root", &root_keys, root.root_threshold)?;
+    verify_envelope(
+        envelope_bytes,
+        UPDATE_ROOT_ROLE,
+        &root_keys,
+        root.root_threshold,
+    )?;
     Ok(AcceptedRoot {
         version: root.version,
         expires_unix: root.expires_unix,
@@ -587,28 +540,24 @@ fn verify_envelope(
     keys: &BTreeMap<String, VerifyingKey>,
     threshold: usize,
 ) -> Result<Vec<u8>, UpdateVerificationError> {
-    if bytes.len() > MAX_ENVELOPE_BYTES {
+    if bytes.len() > MAX_UPDATE_ENVELOPE_BYTES {
         return Err(UpdateVerificationError::MetadataTooLarge);
     }
     let envelope: SignedEnvelope =
         serde_json::from_slice(bytes).map_err(|_| UpdateVerificationError::MalformedEnvelope)?;
     if envelope.signatures.is_empty()
-        || envelope.signatures.len() > MAX_SIGNATURES
-        || envelope.payload.len() > MAX_ENVELOPE_BYTES
+        || envelope.signatures.len() > MAX_UPDATE_SIGNATURES
+        || envelope.payload.len() > MAX_UPDATE_ENVELOPE_BYTES
     {
         return Err(UpdateVerificationError::MalformedEnvelope);
     }
     let payload = STANDARD
         .decode(envelope.payload.as_bytes())
         .map_err(|_| UpdateVerificationError::MalformedEnvelope)?;
-    if payload.len() > MAX_PAYLOAD_BYTES {
+    if payload.len() > MAX_UPDATE_PAYLOAD_BYTES {
         return Err(UpdateVerificationError::MetadataTooLarge);
     }
-    let mut message = Vec::with_capacity(SIGNATURE_DOMAIN.len() + role.len() + payload.len() + 1);
-    message.extend_from_slice(SIGNATURE_DOMAIN);
-    message.extend_from_slice(role.as_bytes());
-    message.push(0);
-    message.extend_from_slice(&payload);
+    let message = signature_message(role, &payload);
     let mut accepted = BTreeSet::new();
     for candidate in envelope.signatures {
         if accepted.contains(&candidate.key_id) {
@@ -636,13 +585,13 @@ fn verify_envelope(
 fn decode_key_map(
     encoded: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, VerifyingKey>, UpdateVerificationError> {
-    if encoded.is_empty() || encoded.len() > MAX_KEYS {
+    if encoded.is_empty() || encoded.len() > MAX_UPDATE_KEYS {
         return Err(UpdateVerificationError::InvalidRootRotation);
     }
     let decoded = encoded
         .iter()
         .map(|(id, value)| {
-            if id.is_empty() || id.len() > 128 {
+            if id.is_empty() || id.len() > MAX_UPDATE_SELECTOR_BYTES {
                 return Err(UpdateVerificationError::InvalidRootRotation);
             }
             let bytes = decode_public_key(value)?;
@@ -684,7 +633,7 @@ fn select_role_keys(
     ids: &[String],
     threshold: usize,
 ) -> Result<BTreeMap<String, VerifyingKey>, UpdateVerificationError> {
-    if ids.is_empty() || ids.len() > MAX_KEYS || threshold == 0 || threshold > ids.len() {
+    if ids.is_empty() || ids.len() > MAX_UPDATE_KEYS || threshold == 0 || threshold > ids.len() {
         return Err(UpdateVerificationError::InvalidRootRotation);
     }
     let unique = ids.iter().collect::<BTreeSet<_>>();
@@ -738,6 +687,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[allow(clippy::expect_used)]
 mod tests {
     use ed25519_dalek::{Signer as _, SigningKey};
+    use rw_types::update_contract::MetadataSignature;
+    use serde::Serialize;
 
     use super::*;
 
@@ -778,11 +729,7 @@ mod tests {
 
     fn envelope<T: Serialize>(role: &str, payload: &T, keys: &[(&str, &SigningKey)]) -> Vec<u8> {
         let payload = serde_json::to_vec(payload).expect("fixture payload");
-        let mut message = Vec::new();
-        message.extend_from_slice(SIGNATURE_DOMAIN);
-        message.extend_from_slice(role.as_bytes());
-        message.push(0);
-        message.extend_from_slice(&payload);
+        let message = signature_message(role, &payload);
         serde_json::to_vec(&SignedEnvelope {
             payload: STANDARD.encode(payload),
             signatures: keys
@@ -875,6 +822,35 @@ mod tests {
             Err(UpdateVerificationError::MalformedEnvelope
                 | UpdateVerificationError::SignatureThreshold)
         ));
+    }
+
+    #[test]
+    fn shared_signer_wire_dtos_are_accepted_by_the_verifier() {
+        let (trusted, root, release, artifact) = fixtures("1.1.0", UpdateChannel::Stable);
+        let root_envelope: SignedEnvelope =
+            serde_json::from_slice(&root).expect("shared root envelope");
+        let root_payload = STANDARD
+            .decode(root_envelope.payload.as_bytes())
+            .expect("shared root payload");
+        let root_metadata: RootMetadata =
+            serde_json::from_slice(&root_payload).expect("shared root metadata");
+        assert_eq!(root_metadata.schema_version, UPDATE_SCHEMA_VERSION);
+        assert_eq!(root_metadata.role, UPDATE_ROOT_ROLE);
+
+        let release_envelope: SignedEnvelope =
+            serde_json::from_slice(&release).expect("shared release envelope");
+        let release_payload = STANDARD
+            .decode(release_envelope.payload.as_bytes())
+            .expect("shared release payload");
+        let release_metadata: ReleaseMetadata =
+            serde_json::from_slice(&release_payload).expect("shared release metadata");
+        assert_eq!(release_metadata.schema_version, UPDATE_SCHEMA_VERSION);
+        assert_eq!(release_metadata.role, UPDATE_RELEASE_ROLE);
+
+        let verified =
+            verify_update_metadata(&trusted, &root, &release, &policy(UpdateChannel::Stable))
+                .expect("verify shared signed wire contract");
+        verified.verify_artifact(&artifact).expect("exact artifact");
     }
 
     #[test]

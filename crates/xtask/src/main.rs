@@ -6,29 +6,42 @@ use std::path::{Path, PathBuf};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ed25519_dalek::{Signature, Signer as _, SigningKey, VerifyingKey};
-use rw_types::config::{ThinkingLevel, UpdateChannel};
-use rw_types::update_contract::MAX_UPDATE_ARTIFACT_BYTES;
+use rw_types::attachment_contract::{
+    MAX_ATTACHMENTS_PER_MESSAGE, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TEXT_ATTACHMENT_BYTES,
+    MAX_TOTAL_ATTACHMENT_BYTES,
+};
+use rw_types::config::{PermissionDecision, ThinkingLevel, UpdateChannel};
+use rw_types::update_contract::{
+    MAX_UPDATE_ARTIFACT_BYTES, MAX_UPDATE_KEYS, MAX_UPDATE_PAYLOAD_BYTES,
+    MAX_UPDATE_RELEASE_NOTES_BYTES, MAX_UPDATE_ROOT_CHAIN_ENTRIES, MAX_UPDATE_SELECTOR_BYTES,
+    MAX_UPDATE_SIGNATURES, MAX_UPDATE_TARGETS, MetadataSignature,
+    ReleaseMetadata as ReleasePayload, ReleaseTarget, RootChainDocument, RootChainEntry,
+    RootMetadata as RootPayload, SignedEnvelope, UPDATE_RELEASE_ROLE, UPDATE_ROOT_ROLE,
+    UPDATE_SCHEMA_VERSION, signature_message,
+};
 use rw_types::{
     AccountingAttribution, Answer, ApprovalBinding, ApprovalDecision, Attachment, AttachmentData,
     Block, BudgetLevel, BudgetScope, BudgetUnit, CacheBreakpoint, ClientCommand, ClientId,
     ClientRole, CommandAckMeta, CommandDescriptor, CommandMeta, CommandOutcome, CommandSource,
     CompactionReason, ContextItemId, ContextItemKind, ContextItemSnapshot, ContextItemState,
     ContextSnapshot, Cost, CostSnapshot, DiffArtifact, EngineError, EngineErrorCategory,
-    EngineEvent, EventMeta, ImageRef, McpApprovalReview, McpEnvironmentEntry, McpServerDescriptor,
-    McpServerState, ModeDescriptor, ModeId, ModelAlias, ModelAliasDescriptor, ModelCacheBehavior,
-    ModelCapabilities, ModelCatalogSnapshot, ModelContextTransfer, ModelDescriptor,
-    ModelSwitchQuestion, PermissionAction, PermissionApprovalDescriptor, PermissionApprovalScope,
-    PermissionModeDescriptor, PermissionRuleDescriptor, PermissionStateDescriptor, PlanArtifact,
-    PlanDecision, PlanStep, PromptDump, PromptTool, ProviderAuthAttemptId, ProviderAuthChallenge,
-    ProviderAuthKind, ProviderDescriptor, ProviderNextAction, Question, QuestionId, QuestionOption,
+    EngineEvent, EventMeta, ImageRef, MAX_MCP_SERVER_ID_BYTES, MCP_SERVER_ID_PATTERN,
+    McpApprovalReview, McpEnvironmentEntry, McpServerDescriptor, McpServerState, ModeDescriptor,
+    ModeId, ModelAlias, ModelAliasDescriptor, ModelCacheBehavior, ModelCapabilities,
+    ModelCatalogSnapshot, ModelContextTransfer, ModelDescriptor, ModelSwitchQuestion,
+    PermissionApprovalDescriptor, PermissionApprovalScope, PermissionModeDescriptor,
+    PermissionRuleDescriptor, PermissionStateDescriptor, PlanArtifact, PlanDecision, PlanStep,
+    PromptDump, PromptTool, ProviderAuthAttemptId, ProviderAuthChallenge, ProviderAuthKind,
+    ProviderDescriptor, ProviderNextAction, Question, QuestionId, QuestionOption,
     QuestionResponseKind, RequestId, ReviewFileDecision, ReviewFileStatus, RewindTarget, Role,
     RuntimeServiceDescriptor, RuntimeServiceKind, SequenceId, SessionDescriptor, SessionId,
     SessionReview, SessionReviewFile, ShellId, StoredAttachment, SubagentActivity,
     SubagentDescriptor, SubagentId, SubagentIsolation, SubagentReplayItem, SubagentResult,
-    SubagentStatus, ToolCallId, ToolCapability, ToolOutput, ToolOutputPart, ToolOutputStream,
-    TouchedFile, TouchedFileStatus, TranscriptFormat, Turn, TurnAccounting, TurnId, TurnMeta,
-    TurnStatus, UnifiedDiff, UnrestorablePath, Usage, UserSettingDescriptor, WorkspaceDiff,
-    WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus,
+    SubagentStatus, TRANSIENT_ENGINE_EVENT_TYPES, ToolCallId, ToolCapability, ToolOutput,
+    ToolOutputPart, ToolOutputStream, TouchedFile, TouchedFileStatus, TranscriptFormat, Turn,
+    TurnAccounting, TurnId, TurnMeta, TurnStatus, UnifiedDiff, UnrestorablePath, Usage,
+    UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview,
+    WorkspaceRootDescriptor, WorkspaceStatus,
 };
 use schemars::{JsonSchema, schema_for};
 use semver::Version;
@@ -38,12 +51,6 @@ use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use ts_rs::{Config as TypeScriptConfig, TS};
 use url::Url;
-
-const UPDATE_SIGNATURE_DOMAIN: &[u8] = b"rottweiler-update-metadata-v1\0";
-const MAX_UPDATE_SPEC_BYTES: u64 = 768 * 1024;
-const MAX_UPDATE_KEYS: usize = 32;
-const MAX_UPDATE_TARGETS: usize = 32;
-const MAX_RELEASE_NOTES_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Error)]
 enum XtaskError {
@@ -67,6 +74,8 @@ enum XtaskError {
     Serialize(#[from] serde_json::Error),
     #[error("generated artifact is stale: {0}")]
     Stale(PathBuf),
+    #[error("generated protocol contract is invalid: {0}")]
+    GeneratedContract(String),
     #[error("invalid sign-update argument: {0}")]
     SignArgument(String),
     #[error("invalid update metadata spec {path}: {reason}")]
@@ -250,20 +259,6 @@ impl SignUpdateCommand {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct RootPayload {
-    schema_version: u16,
-    role: String,
-    version: u64,
-    expires_unix: u64,
-    keys: BTreeMap<String, String>,
-    root_key_ids: Vec<String>,
-    root_threshold: usize,
-    release_key_ids: Vec<String>,
-    release_threshold: usize,
-}
-
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReleasePayloadSpec {
@@ -281,54 +276,6 @@ struct ReleasePayloadSpec {
 struct ReleaseTargetSpec {
     version: String,
     url: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-struct ReleasePayload {
-    schema_version: u16,
-    role: String,
-    version: u64,
-    expires_unix: u64,
-    channel: UpdateChannel,
-    release_notes: String,
-    targets: BTreeMap<String, ReleaseTarget>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-struct ReleaseTarget {
-    version: String,
-    url: String,
-    length: u64,
-    sha256: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct SignedEnvelope {
-    payload: String,
-    signatures: Vec<MetadataSignature>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct RootChainDocument {
-    roots: Vec<RootChainEntry>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct RootChainEntry {
-    version: u64,
-    envelope: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct MetadataSignature {
-    key_id: String,
-    signature: String,
 }
 
 struct ArtifactIdentity {
@@ -411,8 +358,8 @@ fn sign_release(arguments: &ReleaseSignArgs) -> Result<(), XtaskError> {
             "every supplied artifact must be used by at least one channel target".to_owned(),
         ));
     }
-    let stable_bytes = signed_envelope_bytes("release", &stable, &release_keys)?;
-    let beta_bytes = signed_envelope_bytes("release", &beta, &release_keys)?;
+    let stable_bytes = signed_envelope_bytes(UPDATE_RELEASE_ROLE, &stable, &release_keys)?;
+    let beta_bytes = signed_envelope_bytes(UPDATE_RELEASE_ROLE, &beta, &release_keys)?;
     let root_bytes = STANDARD
         .decode(
             root_chain
@@ -522,7 +469,7 @@ fn rotate_root(arguments: &RootRotationArgs) -> Result<(), XtaskError> {
         &root_keys,
         &arguments.root_spec,
     )?;
-    let root_bytes = signed_envelope_bytes("root", &root, &root_keys)?;
+    let root_bytes = signed_envelope_bytes(UPDATE_ROOT_ROLE, &root, &root_keys)?;
     root_chain.push(RootChainEntry {
         version: root.version,
         envelope: STANDARD.encode(&root_bytes),
@@ -553,7 +500,7 @@ fn parse_key_argument(value: &str) -> Result<(String, PathBuf), XtaskError> {
 
 fn validate_key_id(id: &str) -> Result<(), XtaskError> {
     if id.is_empty()
-        || id.len() > 128
+        || id.len() > MAX_UPDATE_SELECTOR_BYTES
         || !id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
@@ -572,7 +519,7 @@ fn read_spec<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, XtaskError>
     })?;
     if !metadata.is_file()
         || metadata.file_type().is_symlink()
-        || metadata.len() > MAX_UPDATE_SPEC_BYTES
+        || metadata.len() > u64::try_from(MAX_UPDATE_PAYLOAD_BYTES).unwrap_or(u64::MAX)
     {
         return Err(XtaskError::UpdateSpec {
             path: path.to_owned(),
@@ -596,10 +543,12 @@ fn load_root_chain(
         return Ok((Vec::new(), None));
     };
     let document: RootChainDocument = read_spec(path)?;
-    if document.roots.is_empty() || document.roots.len() > 16 {
+    if document.roots.is_empty() || document.roots.len() > MAX_UPDATE_ROOT_CHAIN_ENTRIES {
         return Err(XtaskError::UpdateSpec {
             path: path.to_owned(),
-            reason: "existing root chain must contain between 1 and 16 envelopes".to_owned(),
+            reason: format!(
+                "existing root chain must contain between 1 and {MAX_UPDATE_ROOT_CHAIN_ENTRIES} envelopes"
+            ),
         });
     }
     let mut previous: Option<RootPayload> = None;
@@ -645,7 +594,7 @@ fn load_root_chain(
             verify_envelope_role(
                 &envelope,
                 &payload_bytes,
-                "root",
+                UPDATE_ROOT_ROLE,
                 &prior.keys,
                 &prior.root_key_ids,
                 prior.root_threshold,
@@ -660,7 +609,7 @@ fn load_root_chain(
         verify_envelope_role(
             &envelope,
             &payload_bytes,
-            "root",
+            UPDATE_ROOT_ROLE,
             &root.keys,
             &root.root_key_ids,
             root.root_threshold,
@@ -672,6 +621,12 @@ fn load_root_chain(
 }
 
 fn decode_envelope_payload(envelope: &SignedEnvelope, path: &Path) -> Result<Vec<u8>, XtaskError> {
+    if envelope.signatures.is_empty() || envelope.signatures.len() > MAX_UPDATE_SIGNATURES {
+        return Err(XtaskError::UpdateSpec {
+            path: path.to_owned(),
+            reason: "metadata signature count is invalid".to_owned(),
+        });
+    }
     let payload =
         STANDARD
             .decode(envelope.payload.as_bytes())
@@ -679,8 +634,7 @@ fn decode_envelope_payload(envelope: &SignedEnvelope, path: &Path) -> Result<Vec
                 path: path.to_owned(),
                 reason: "metadata payload is not base64".to_owned(),
             })?;
-    if payload.len() as u64 > MAX_UPDATE_SPEC_BYTES || STANDARD.encode(&payload) != envelope.payload
-    {
+    if payload.len() > MAX_UPDATE_PAYLOAD_BYTES || STANDARD.encode(&payload) != envelope.payload {
         return Err(XtaskError::UpdateSpec {
             path: path.to_owned(),
             reason: "metadata payload is oversized or not canonical base64".to_owned(),
@@ -700,10 +654,7 @@ fn verify_envelope_role(
 ) -> Result<(), XtaskError> {
     let keys = decode_public_keys(encoded_keys, path)?;
     let permitted = role_ids.iter().collect::<BTreeSet<_>>();
-    let mut message = UPDATE_SIGNATURE_DOMAIN.to_vec();
-    message.extend_from_slice(role.as_bytes());
-    message.push(0);
-    message.extend_from_slice(payload);
+    let message = signature_message(role, payload);
     let mut accepted = BTreeSet::new();
     for candidate in &envelope.signatures {
         if !permitted.contains(&candidate.key_id) || accepted.contains(&candidate.key_id) {
@@ -864,14 +815,14 @@ fn validate_root(
         root.root_threshold,
         &root.keys,
         path,
-        "root",
+        UPDATE_ROOT_ROLE,
     )?;
     let release_ids = validate_role_ids(
         &root.release_key_ids,
         root.release_threshold,
         &root.keys,
         path,
-        "release",
+        UPDATE_RELEASE_ROLE,
     )?;
     if !root_ids.is_disjoint(&release_ids) {
         return Err(invalid("root and release roles must use distinct key ids"));
@@ -907,8 +858,8 @@ fn validate_root(
 }
 
 fn validate_root_shape(root: &RootPayload, path: &Path) -> Result<(), XtaskError> {
-    if root.schema_version != 1
-        || root.role != "root"
+    if root.schema_version != UPDATE_SCHEMA_VERSION
+        || root.role != UPDATE_ROOT_ROLE
         || root.version == 0
         || root.expires_unix == 0
         || root.keys.is_empty()
@@ -924,14 +875,14 @@ fn validate_root_shape(root: &RootPayload, path: &Path) -> Result<(), XtaskError
         root.root_threshold,
         &root.keys,
         path,
-        "root",
+        UPDATE_ROOT_ROLE,
     )?;
     let release_ids = validate_role_ids(
         &root.release_key_ids,
         root.release_threshold,
         &root.keys,
         path,
-        "release",
+        UPDATE_RELEASE_ROLE,
     )?;
     if !root_ids.is_disjoint(&release_ids) {
         return Err(XtaskError::UpdateSpec {
@@ -1064,7 +1015,7 @@ fn validate_release_signers(
     path: &Path,
 ) -> Result<(), XtaskError> {
     validate_root_shape(root, path)?;
-    validate_signers_against_root(signers, &root.keys, path, "release")?;
+    validate_signers_against_root(signers, &root.keys, path, UPDATE_RELEASE_ROLE)?;
     let release_ids = root
         .release_key_ids
         .iter()
@@ -1094,7 +1045,7 @@ fn load_prior_release(
     verify_envelope_role(
         &envelope,
         &payload_bytes,
-        "release",
+        UPDATE_RELEASE_ROLE,
         &root.keys,
         &root.release_key_ids,
         root.release_threshold,
@@ -1115,14 +1066,14 @@ fn validate_release_payload(
     base_url: &Url,
     path: &Path,
 ) -> Result<(), XtaskError> {
-    if payload.schema_version != 1
-        || payload.role != "release"
+    if payload.schema_version != UPDATE_SCHEMA_VERSION
+        || payload.role != UPDATE_RELEASE_ROLE
         || payload.version == 0
         || payload.expires_unix == 0
         || payload.channel != expected_channel
         || payload.targets.is_empty()
         || payload.targets.len() > MAX_UPDATE_TARGETS
-        || payload.release_notes.len() > MAX_RELEASE_NOTES_BYTES
+        || payload.release_notes.len() > MAX_UPDATE_RELEASE_NOTES_BYTES
         || payload
             .release_notes
             .chars()
@@ -1331,14 +1282,14 @@ fn fill_release(
         path: path.to_owned(),
         reason: reason.to_owned(),
     };
-    if spec.schema_version != 1
-        || spec.role != "release"
+    if spec.schema_version != UPDATE_SCHEMA_VERSION
+        || spec.role != UPDATE_RELEASE_ROLE
         || spec.version == 0
         || spec.expires_unix == 0
         || spec.channel != expected_channel
         || spec.targets.is_empty()
         || spec.targets.len() > MAX_UPDATE_TARGETS
-        || spec.release_notes.len() > MAX_RELEASE_NOTES_BYTES
+        || spec.release_notes.len() > MAX_UPDATE_RELEASE_NOTES_BYTES
         || spec
             .release_notes
             .chars()
@@ -1449,12 +1400,7 @@ fn signed_envelope_bytes<T: Serialize>(
     signers: &BTreeMap<String, SigningKey>,
 ) -> Result<Vec<u8>, XtaskError> {
     let payload = serde_json::to_vec(payload)?;
-    let mut message =
-        Vec::with_capacity(UPDATE_SIGNATURE_DOMAIN.len() + role.len() + payload.len() + 1);
-    message.extend_from_slice(UPDATE_SIGNATURE_DOMAIN);
-    message.extend_from_slice(role.as_bytes());
-    message.push(0);
-    message.extend_from_slice(&payload);
+    let message = signature_message(role, &payload);
     let signatures = signers
         .iter()
         .map(|(key_id, key)| MetadataSignature {
@@ -1601,7 +1547,7 @@ impl Drop for OutputStaging {
 
 fn safe_selector(value: &str) -> bool {
     !value.is_empty()
-        && value.len() <= 128
+        && value.len() <= MAX_UPDATE_SELECTOR_BYTES
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
@@ -1625,7 +1571,7 @@ fn hex_digest(bytes: &[u8]) -> String {
 fn generated_artifacts() -> Result<Vec<(PathBuf, String)>, XtaskError> {
     let fixture = contract_fixture();
     Ok(vec![
-        (PathBuf::from("types.ts"), generate_typescript()),
+        (PathBuf::from("types.ts"), generate_typescript()?),
         (
             PathBuf::from("schema/block.schema.json"),
             generate_schema::<Block>()?,
@@ -1661,7 +1607,7 @@ fn generate_typescript_fixture(fixture: &ContractFixture) -> Result<String, serd
 }
 
 #[allow(clippy::too_many_lines)]
-fn generate_typescript() -> String {
+fn generate_typescript() -> Result<String, XtaskError> {
     let mut output =
         String::from("// @generated by `cargo xtask codegen`; do not edit by hand.\n\n");
     output.push_str(
@@ -1670,6 +1616,23 @@ fn generate_typescript() -> String {
     output.push_str("export const PROTOCOL_VERSION = ");
     output.push_str(&rw_types::PROTOCOL_VERSION.to_string());
     output.push_str(" as const;\n\n");
+    for (name, value) in [
+        ("MAX_ATTACHMENTS_PER_MESSAGE", MAX_ATTACHMENTS_PER_MESSAGE),
+        ("MAX_TEXT_ATTACHMENT_BYTES", MAX_TEXT_ATTACHMENT_BYTES),
+        ("MAX_IMAGE_ATTACHMENT_BYTES", MAX_IMAGE_ATTACHMENT_BYTES),
+        ("MAX_TOTAL_ATTACHMENT_BYTES", MAX_TOTAL_ATTACHMENT_BYTES),
+        ("MAX_MCP_SERVER_ID_BYTES", MAX_MCP_SERVER_ID_BYTES),
+    ] {
+        output.push_str("export const ");
+        output.push_str(name);
+        output.push_str(" = ");
+        output.push_str(&value.to_string());
+        output.push_str(" as const;\n");
+    }
+    output.push_str("export const MCP_SERVER_ID_PATTERN = ");
+    output.push_str(&serde_json::to_string(MCP_SERVER_ID_PATTERN)?);
+    output.push_str(" as const;\n");
+    output.push('\n');
     let typescript_config = TypeScriptConfig::default();
 
     macro_rules! declaration {
@@ -1768,7 +1731,7 @@ fn generate_typescript() -> String {
     declaration!(CostSnapshot);
     declaration!(PromptTool);
     declaration!(PromptDump);
-    declaration!(PermissionAction);
+    declaration!(PermissionDecision);
     declaration!(PermissionModeDescriptor);
     declaration!(PermissionApprovalScope);
     declaration!(PermissionRuleDescriptor);
@@ -1791,13 +1754,82 @@ fn generate_typescript() -> String {
     declaration!(EngineError);
     declaration!(CommandOutcome);
     declaration!(EngineEvent);
-    output
+    output.push_str(&generate_engine_event_delivery()?);
+    Ok(output
         .trim_end()
         .lines()
         .map(str::trim_end)
         .collect::<Vec<_>>()
         .join("\n")
-        + "\n"
+        + "\n")
+}
+
+fn generate_engine_event_delivery() -> Result<String, XtaskError> {
+    let schema = serde_json::to_value(schema_for!(EngineEvent))?;
+    let variants = schema
+        .get("oneOf")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            XtaskError::GeneratedContract("EngineEvent has no oneOf variants".to_owned())
+        })?;
+    let transient = TRANSIENT_ENGINE_EVENT_TYPES
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut deliveries = BTreeMap::<String, &'static str>::new();
+    for variant in variants {
+        let properties = variant
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| {
+                XtaskError::GeneratedContract("EngineEvent variant has no properties".to_owned())
+            })?;
+        let event_type = properties
+            .get("type")
+            .and_then(|property| property.get("const"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                XtaskError::GeneratedContract("EngineEvent variant has no type tag".to_owned())
+            })?;
+        let meta_type = properties
+            .get("meta")
+            .and_then(|property| property.get("$ref"))
+            .and_then(serde_json::Value::as_str);
+        let delivery = if transient.contains(event_type) {
+            if meta_type.is_some() {
+                return Err(XtaskError::GeneratedContract(format!(
+                    "transient event {event_type} unexpectedly has metadata"
+                )));
+            }
+            "transient"
+        } else if meta_type.is_some_and(|reference| reference.ends_with("/$defs/EventMeta")) {
+            "durable"
+        } else {
+            "connection"
+        };
+        if deliveries.insert(event_type.to_owned(), delivery).is_some() {
+            return Err(XtaskError::GeneratedContract(format!(
+                "duplicate EngineEvent type tag {event_type}"
+            )));
+        }
+    }
+    if transient
+        .iter()
+        .any(|event_type| !deliveries.contains_key(*event_type))
+    {
+        return Err(XtaskError::GeneratedContract(
+            "transient EngineEvent tag is missing from the schema".to_owned(),
+        ));
+    }
+    let mut output = String::from(
+        "export type EngineEventDelivery = \"connection\" | \"durable\" | \"transient\";\n\nexport const ENGINE_EVENT_DELIVERY = {\n",
+    );
+    for (event_type, delivery) in deliveries {
+        use std::fmt::Write as _;
+        let _ = writeln!(output, "  {event_type}: \"{delivery}\",");
+    }
+    output.push_str("} as const satisfies Record<EngineEvent[\"type\"], EngineEventDelivery>;\n");
+    Ok(output)
 }
 
 fn generate_schema<T: JsonSchema>() -> Result<String, serde_json::Error> {
@@ -2045,7 +2077,7 @@ fn contract_fixture() -> ContractFixture {
                 meta: command_meta.clone(),
                 session_id: SessionId("session-fixture".to_owned()),
                 at_turn: None,
-                operation_id: Some("fork-operation-fixture".to_owned()),
+                operation_id: "fork-operation-fixture".to_owned(),
             },
             ClientCommand::Rewind {
                 meta: command_meta.clone(),
@@ -2336,7 +2368,7 @@ fn contract_fixture() -> ContractFixture {
             EngineEvent::ModeChanged {
                 meta: event_meta(19),
                 mode: ModeId("plan".to_owned()),
-                definition_fingerprint: None,
+                definition_fingerprint: "fixture".to_owned(),
             },
             EngineEvent::ModelChanged {
                 meta: event_meta(20),
@@ -2585,7 +2617,7 @@ mod tests {
     }
 
     #[test]
-    fn signing_is_deterministic_and_covers_exact_canonical_payload_bytes() {
+    fn signer_emits_the_shared_wire_contract_and_covers_exact_payload_bytes() {
         let fixture = fixture();
         rotate_root(&fixture.rotation).expect("initial root signing");
         let chain = fixture.root.path().join("initial-root/root-chain.json");
@@ -2598,9 +2630,7 @@ mod tests {
         let payload = STANDARD
             .decode(envelope.payload.as_bytes())
             .expect("decode root payload");
-        let mut message = UPDATE_SIGNATURE_DOMAIN.to_vec();
-        message.extend_from_slice(b"root\0");
-        message.extend_from_slice(&payload);
+        let message = signature_message(UPDATE_ROOT_ROLE, &payload);
         let signature = STANDARD
             .decode(envelope.signatures[0].signature.as_bytes())
             .expect("decode signature");

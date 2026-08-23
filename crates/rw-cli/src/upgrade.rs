@@ -18,18 +18,22 @@ use rw_core::{
     UpdateVerificationPolicy, VerifiedUpdate, prepare_update_network, restore_trusted_root_chain,
     verify_update_metadata_chain,
 };
-use rw_types::update_contract::MAX_UPDATE_ARTIFACT_BYTES;
+use rw_types::{
+    release_contract::{
+        EXPANDED_ARCHIVE_MAX_BYTES, archive_root as release_archive_root, platform_for_rust_target,
+    },
+    update_contract::{
+        MAX_UPDATE_ARTIFACT_BYTES, MAX_UPDATE_ENVELOPE_BYTES, MAX_UPDATE_ROOT_CHAIN_ENTRIES,
+        MAX_UPDATE_SELECTOR_BYTES, RootChainDocument, RootChainEntry,
+    },
+};
 use serde::{Deserialize, Serialize};
 use tar::EntryType;
 use url::Url;
 
-const METADATA_LIMIT: usize = 1024 * 1024;
 const STATE_LIMIT: u64 = 2 * 1024 * 1024;
-const ROOT_CHAIN_LIMIT: usize = 16;
 const MOUNTS_LIMIT: u64 = 1024 * 1024;
 const OS_RELEASE_LIMIT: u64 = 4096;
-const ARCHIVE_ENTRY_LIMIT: usize = 7;
-const EXPANDED_LIMIT: u64 = 160 * 1024 * 1024;
 const STATE_MARKER: &str = ".update-state-initialized";
 
 #[derive(Clone, Copy, Debug)]
@@ -66,19 +70,6 @@ struct UpgradeState {
 struct PendingReleaseNotes {
     version: String,
     notes: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-struct RootChainEntry {
-    version: u64,
-    envelope: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RootChainDocument {
-    roots: Vec<RootChainEntry>,
 }
 
 #[derive(Debug)]
@@ -229,11 +220,11 @@ async fn run_signed_upgrade(
         .map_err(|_| miette!("compiled update metadata origin is invalid"))?;
     let timeout = Duration::from_millis(options.timeout_ms);
     let root_bytes = client
-        .fetch(&root_url, METADATA_LIMIT, timeout)
+        .fetch(&root_url, MAX_UPDATE_ENVELOPE_BYTES, timeout)
         .await
         .into_diagnostic()?;
     let release_bytes = client
-        .fetch(&release_url, METADATA_LIMIT, timeout)
+        .fetch(&release_url, MAX_UPDATE_ENVELOPE_BYTES, timeout)
         .await
         .into_diagnostic()?;
     let embedded = TrustedRoot::embedded().into_diagnostic()?;
@@ -440,7 +431,7 @@ fn homebrew_managed_executable(executable: &Path) -> bool {
 fn decode_root_chain(bytes: &[u8]) -> Result<Vec<RootChainEntry>> {
     let document: RootChainDocument = serde_json::from_slice(bytes)
         .map_err(|_| miette!("signed update root-chain document is malformed"))?;
-    if document.roots.len() > ROOT_CHAIN_LIMIT {
+    if document.roots.len() > MAX_UPDATE_ROOT_CHAIN_ENTRIES {
         return Err(miette!("signed update root chain has an invalid length"));
     }
     validate_root_entries(&document.roots)?;
@@ -452,14 +443,14 @@ fn decode_root_entries(entries: &[RootChainEntry]) -> Result<Vec<Vec<u8>>> {
     entries
         .iter()
         .map(|entry| {
-            if entry.envelope.len() > METADATA_LIMIT {
+            if entry.envelope.len() > MAX_UPDATE_ENVELOPE_BYTES {
                 return Err(miette!("signed update root envelope is oversized"));
             }
             let envelope = STANDARD
                 .decode(entry.envelope.as_bytes())
                 .map_err(|_| miette!("signed update root envelope is malformed"))?;
             total = total.saturating_add(envelope.len());
-            if envelope.is_empty() || total > METADATA_LIMIT {
+            if envelope.is_empty() || total > MAX_UPDATE_ENVELOPE_BYTES {
                 return Err(miette!("signed update root chain is oversized"));
             }
             Ok(envelope)
@@ -468,7 +459,7 @@ fn decode_root_entries(entries: &[RootChainEntry]) -> Result<Vec<Vec<u8>>> {
 }
 
 fn validate_root_entries(entries: &[RootChainEntry]) -> Result<()> {
-    if entries.len() > ROOT_CHAIN_LIMIT
+    if entries.len() > MAX_UPDATE_ROOT_CHAIN_ENTRIES
         || entries.iter().any(|entry| entry.version == 0)
         || entries
             .windows(2)
@@ -561,28 +552,20 @@ fn validate_embedded_update_base_url(value: &str) -> Result<Url> {
 }
 
 fn release_platform() -> &'static str {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "aarch64") => "darwin-arm64",
-        ("macos", "x86_64") => "darwin-x86_64",
-        ("linux", "aarch64") => "linux-aarch64",
-        ("linux", "x86_64") => "linux-x86_64",
-        _ => "unsupported",
-    }
+    platform_for_rust_target(std::env::consts::OS, std::env::consts::ARCH)
+        .map_or("unsupported", |platform| platform.id)
 }
 
 fn expected_generation_files() -> BTreeMap<&'static str, (u64, u32)> {
-    let native = if cfg!(target_os = "macos") {
-        "bin/libopentui.dylib"
-    } else {
-        "bin/libopentui.so"
-    };
-    BTreeMap::from([
-        ("install.sh", (128 * 1024, 0o755)),
-        ("bin/rw", (25 * 1024 * 1024, 0o755)),
-        ("bin/rottweiler-tui", (100 * 1024 * 1024, 0o755)),
-        ("bin/rottweiler-wasm-host", (100 * 1024 * 1024, 0o755)),
-        (native, (100 * 1024 * 1024, 0o644)),
-    ])
+    platform_for_rust_target(std::env::consts::OS, std::env::consts::ARCH)
+        .map(|platform| {
+            platform
+                .archive_members
+                .iter()
+                .map(|member| (member.path, (member.max_bytes, member.mode)))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 async fn stage_generation(
@@ -636,7 +619,7 @@ fn extract_exact_archive(
     platform: &str,
     artifact: &[u8],
 ) -> Result<()> {
-    let root = format!("rottweiler-{version}-{platform}");
+    let root = release_archive_root(version, platform);
     let files = expected_generation_files();
     let expected = [root.clone(), format!("{root}/bin")]
         .into_iter()
@@ -651,7 +634,7 @@ fn extract_exact_archive(
     let mut expanded = 0_u64;
     for entry in entries {
         let mut entry = entry.map_err(|_| miette!("signed update archive is malformed"))?;
-        if seen.len() >= ARCHIVE_ENTRY_LIMIT {
+        if seen.len() >= expected.len() {
             return Err(miette!("signed update archive has too many entries"));
         }
         let path = entry
@@ -705,7 +688,7 @@ fn extract_exact_archive(
             .size()
             .map_err(|_| miette!("signed update archive size is invalid"))?;
         expanded = expanded.saturating_add(size);
-        if size == 0 || size > limit || expanded > EXPANDED_LIMIT {
+        if size == 0 || size > limit || expanded > EXPANDED_ARCHIVE_MAX_BYTES {
             return Err(miette!("signed update archive expanded size is invalid"));
         }
         let destination = staging.join(relative);
@@ -933,11 +916,11 @@ fn validate_state(state: &UpgradeState) -> Result<()> {
     if state.schema_version != 1
         || !safe_selector(&state.active.version)
         || state.active.platform != release_platform()
-        || state.trusted_root_chain.len() > ROOT_CHAIN_LIMIT
+        || state.trusted_root_chain.len() > MAX_UPDATE_ROOT_CHAIN_ENTRIES
         || state
             .trusted_root_chain
             .iter()
-            .any(|entry| entry.envelope.len() > METADATA_LIMIT)
+            .any(|entry| entry.envelope.len() > MAX_UPDATE_ENVELOPE_BYTES)
         || (state.highest_root_version > 0
             && state.trusted_root_chain.last().map(|entry| entry.version)
                 != Some(state.highest_root_version))
@@ -1236,7 +1219,7 @@ fn validate_managed_directory(path: &Path, label: &str) -> Result<()> {
 
 fn safe_selector(value: &str) -> bool {
     !value.is_empty()
-        && value.len() <= 128
+        && value.len() <= MAX_UPDATE_SELECTOR_BYTES
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+' | b'_'))
@@ -1312,6 +1295,7 @@ fn sync_directory(path: &Path) -> Result<()> {
 mod tests {
     use ed25519_dalek::{Signer as _, SigningKey};
     use flate2::{Compression, write::GzEncoder};
+    use rw_types::update_contract::signature_message;
     use serde_json::json;
     use tar::{Builder, Header};
 
@@ -1323,10 +1307,7 @@ mod tests {
         keys: &[(&str, &SigningKey)],
     ) -> Vec<u8> {
         let payload = serde_json::to_vec(payload).expect("payload");
-        let mut message = b"rottweiler-update-metadata-v1\0".to_vec();
-        message.extend_from_slice(role.as_bytes());
-        message.push(0);
-        message.extend_from_slice(&payload);
+        let message = signature_message(role, &payload);
         serde_json::to_vec(&json!({
             "payload": STANDARD.encode(&payload),
             "signatures": keys.iter().map(|(id, key)| json!({
@@ -1371,7 +1352,7 @@ mod tests {
     }
 
     fn archive_fixture(link_rw: bool, unexpected: bool) -> Vec<u8> {
-        let root = format!("rottweiler-1.2.3-{}", release_platform());
+        let root = release_archive_root("1.2.3", release_platform());
         let encoder = GzEncoder::new(Vec::new(), Compression::default());
         let mut builder = Builder::new(encoder);
         for directory in [&root, &format!("{root}/bin")] {

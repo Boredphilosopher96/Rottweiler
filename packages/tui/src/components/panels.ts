@@ -79,7 +79,7 @@ export class ReviewPanelRenderable extends BoxRenderable {
       border: true,
       borderStyle: "rounded",
       borderColor: theme.info,
-      backgroundColor: theme.panel,
+      backgroundColor: theme.backgroundPanel,
       paddingX: 1,
       visible: false,
       zIndex: 9,
@@ -87,7 +87,7 @@ export class ReviewPanelRenderable extends BoxRenderable {
     this.#callbacks = callbacks
     this.summary = new TextRenderable(ctx, {
       content: "",
-      fg: theme.foreground,
+      fg: theme.text,
       height: 1,
       truncate: true,
     })
@@ -101,25 +101,25 @@ export class ReviewPanelRenderable extends BoxRenderable {
       view: "unified",
       wrapMode: "none",
       showLineNumbers: true,
-      addedBg: theme.added,
-      removedBg: theme.removed,
-      contextBg: theme.panel,
+      addedBg: theme.diffAddedBg,
+      removedBg: theme.diffRemovedBg,
+      contextBg: theme.backgroundPanel,
     })
     this.files = new SelectRenderable(ctx, {
       id: "session-review-files",
       width: "100%",
       height: 5,
       options: [],
-      backgroundColor: theme.panel,
-      textColor: theme.foreground,
-      selectedBackgroundColor: theme.selection,
-      selectedTextColor: theme.accentStrong,
-      descriptionColor: theme.muted,
+      backgroundColor: theme.backgroundPanel,
+      textColor: theme.text,
+      selectedBackgroundColor: theme.backgroundElement,
+      selectedTextColor: theme.primary,
+      descriptionColor: theme.textMuted,
       showScrollIndicator: true,
     })
     this.hint = new TextRenderable(ctx, {
       content: "A accept · R revert",
-      fg: theme.muted,
+      fg: theme.textMuted,
       height: 1,
     })
     this.files.on(SelectRenderableEvents.SELECTION_CHANGED, () => this.#showSelected())
@@ -369,7 +369,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
       border: true,
       borderStyle: "rounded",
       borderColor: theme.warning,
-      backgroundColor: theme.panelRaised,
+      backgroundColor: theme.backgroundElement,
       paddingX: 1,
       visible: false,
       zIndex: 10,
@@ -381,7 +381,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.#terminalHeight = ctx.height
     this.prompt = new TextRenderable(ctx, {
       content: "",
-      fg: theme.foreground,
+      fg: theme.text,
       wrapMode: "word",
       minHeight: 1,
       flexShrink: 0,
@@ -392,11 +392,11 @@ export class InteractionPanelRenderable extends BoxRenderable {
       minHeight: 0,
       flexShrink: 0,
       options: [],
-      backgroundColor: theme.panelRaised,
-      textColor: theme.foreground,
-      selectedBackgroundColor: theme.selection,
-      selectedTextColor: theme.accentStrong,
-      descriptionColor: theme.muted,
+      backgroundColor: theme.backgroundElement,
+      textColor: theme.text,
+      selectedBackgroundColor: theme.backgroundElement,
+      selectedTextColor: theme.primary,
+      descriptionColor: theme.textMuted,
       wrapSelection: true,
     })
     this.select.on(SelectRenderableEvents.ITEM_SELECTED, (index: number) =>
@@ -530,9 +530,9 @@ export class InteractionPanelRenderable extends BoxRenderable {
           view: "unified",
           wrapMode: "none",
           showLineNumbers: true,
-          addedBg: this.#theme.added,
-          removedBg: this.#theme.removed,
-          contextBg: this.#theme.panel,
+          addedBg: this.#theme.diffAddedBg,
+          removedBg: this.#theme.diffRemovedBg,
+          contextBg: this.#theme.backgroundPanel,
         })
         this.insertBefore(this.#diff, this.select)
       } else {
@@ -765,7 +765,7 @@ export class ContextPanelRenderable extends BoxRenderable {
       border: true,
       borderStyle: "rounded",
       borderColor: theme.border,
-      backgroundColor: theme.panel,
+      backgroundColor: theme.backgroundPanel,
       padding: 1,
       gap: 0,
       title: " Session ",
@@ -783,11 +783,11 @@ export class ContextPanelRenderable extends BoxRenderable {
       width: "100%",
       height: "45%",
       options: [],
-      backgroundColor: theme.panel,
-      textColor: theme.foreground,
-      selectedBackgroundColor: theme.selection,
-      selectedTextColor: theme.accentStrong,
-      descriptionColor: theme.muted,
+      backgroundColor: theme.backgroundPanel,
+      textColor: theme.text,
+      selectedBackgroundColor: theme.backgroundElement,
+      selectedTextColor: theme.primary,
+      descriptionColor: theme.textMuted,
       showScrollIndicator: true,
       showSelectionIndicator: false,
       showDescription: false,
@@ -805,11 +805,11 @@ export class ContextPanelRenderable extends BoxRenderable {
       height: 0,
       flexShrink: 0,
       options: [],
-      backgroundColor: theme.panel,
-      textColor: theme.foreground,
-      selectedBackgroundColor: theme.selection,
-      selectedTextColor: theme.accentStrong,
-      descriptionColor: theme.muted,
+      backgroundColor: theme.backgroundPanel,
+      textColor: theme.text,
+      selectedBackgroundColor: theme.backgroundElement,
+      selectedTextColor: theme.primary,
+      descriptionColor: theme.textMuted,
       showScrollIndicator: true,
       showDescription: false,
       showSelectionIndicator: false,
@@ -828,11 +828,11 @@ export class ContextPanelRenderable extends BoxRenderable {
       height: 0,
       flexShrink: 0,
       options: [],
-      backgroundColor: theme.panel,
-      textColor: theme.foreground,
-      selectedBackgroundColor: theme.selection,
-      selectedTextColor: theme.accentStrong,
-      descriptionColor: theme.muted,
+      backgroundColor: theme.backgroundPanel,
+      textColor: theme.text,
+      selectedBackgroundColor: theme.backgroundElement,
+      selectedTextColor: theme.primary,
+      descriptionColor: theme.textMuted,
       showScrollIndicator: true,
       showDescription: false,
       showSelectionIndicator: false,
@@ -849,11 +849,11 @@ export class ContextPanelRenderable extends BoxRenderable {
       width: "100%",
       flexGrow: 1,
       options: [],
-      backgroundColor: theme.panel,
-      textColor: theme.foreground,
-      selectedBackgroundColor: theme.selection,
-      selectedTextColor: theme.accentStrong,
-      descriptionColor: theme.muted,
+      backgroundColor: theme.backgroundPanel,
+      textColor: theme.text,
+      selectedBackgroundColor: theme.backgroundElement,
+      selectedTextColor: theme.primary,
+      descriptionColor: theme.textMuted,
       showScrollIndicator: true,
       showDescription: false,
       showSelectionIndicator: false,
@@ -1059,8 +1059,8 @@ export class StatusLineRenderable extends TextRenderable {
       width: "100%",
       height: 1,
       content: "",
-      fg: theme.muted,
-      bg: theme.panel,
+      fg: theme.textMuted,
+      bg: theme.backgroundPanel,
       truncate: true,
     })
     this.#modelPickerKeycap = options.modelPickerKeycap ?? null
@@ -1156,7 +1156,7 @@ export class StateBannerRenderable extends TextRenderable {
       height: 1,
       content: "",
       fg: theme.info,
-      bg: theme.panelRaised,
+      bg: theme.backgroundElement,
       visible: false,
       truncate: true,
     })
@@ -1177,7 +1177,7 @@ export class StateBannerRenderable extends TextRenderable {
       this.content = presentation.text
     } else if (latestBudget !== undefined && latestBudget.level === "hard_cap") {
       this.visible = true
-      this.fg = this.#theme.danger
+      this.fg = this.#theme.error
       this.content = `Budget limit reached · ${budgetScopeLabel(latestBudget.scope)} · ${formatBudgetAmount(latestBudget.current, latestBudget.unit)} of ${formatBudgetAmount(latestBudget.limit, latestBudget.unit)}`
     } else if (waitingApproval !== undefined) {
       this.visible = true

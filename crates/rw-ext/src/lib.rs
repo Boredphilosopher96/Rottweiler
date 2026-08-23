@@ -9,7 +9,6 @@ mod hook;
 mod mode;
 mod plugin;
 mod plugin_runtime;
-mod provider_prefix;
 mod registry;
 mod wasm;
 mod wasm_process;
@@ -22,14 +21,14 @@ pub use agent::{
 
 pub use command::{
     CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation, CommandRegistry,
-    CommandRegistryError, CommandSource,
+    CommandRegistryError,
 };
 pub use discovery::{
-    AgentPermissionMode, ArtifactKind, ArtifactLocation, ArtifactOrigin, ArtifactScope,
-    CLAUDE_FRONTMATTER_MIGRATION, CommandTemplate, DiscoveredAgent, DiscoveredCommand,
-    DiscoveredShellHook, DiscoveredSkill, ExtensionCatalog, ExtensionDiagnostic,
-    ExtensionDiscoveryConfig, ExtensionDiscoveryError, InertProjectArtifact, LoadedSkillResource,
-    SkillResource, TemplatePart, UninventoriedProjectRoot,
+    ArtifactKind, ArtifactLocation, ArtifactOrigin, ArtifactScope, CLAUDE_FRONTMATTER_MIGRATION,
+    CommandTemplate, DiscoveredAgent, DiscoveredCommand, DiscoveredShellHook, DiscoveredSkill,
+    ExtensionCatalog, ExtensionDiagnostic, ExtensionDiscoveryConfig, ExtensionDiscoveryError,
+    InertProjectArtifact, LoadedSkillResource, SkillResource, TemplatePart,
+    UninventoriedProjectRoot,
 };
 pub use hook::{
     HookDirective, HookDispatchResult, HookDispatchStatus, HookDispatcher, HookEffect, HookError,
@@ -37,14 +36,11 @@ pub use hook::{
     HookRegistrationError,
 };
 pub use mode::{
-    ModeDefinition, ModePermissionOverlay, ModeRegistry, ModeRegistryError, ModeSource,
-    compose_mode_registry, parse_mode_toml,
+    ModeDefinition, ModeRegistry, ModeRegistryError, ModeSource, compose_mode_registry,
+    parse_mode_toml,
 };
 pub use plugin::*;
 pub use plugin_runtime::*;
-pub use provider_prefix::{
-    MAX_PROVIDER_ALIAS_PREFIX_BYTES, ProviderAliasPrefixError, validate_provider_alias_prefix,
-};
 pub use registry::*;
 pub use wasm::*;
 pub use wasm_process::*;

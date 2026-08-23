@@ -21,13 +21,13 @@ export function pickerSelectionColors(theme: RottweilerTheme): {
   if (parseHex(background).a !== 255) {
     background = theme.mode === "light" ? "#555555" : "#BBBBBB"
   }
-  const panelContrast = colorContrast(background, theme.panelRaised)
+  const panelContrast = colorContrast(background, theme.backgroundElement)
   if (panelContrast < 1.4) {
     const target = theme.mode === "light" ? "#000000" : "#FFFFFF"
     for (const amount of [0.15, 0.25, 0.35, 0.45, 0.55]) {
       const candidate = mixHex(background, target, amount)
       background = candidate
-      if (colorContrast(candidate, theme.panelRaised) >= 1.4) break
+      if (colorContrast(candidate, theme.backgroundElement) >= 1.4) break
     }
   }
   const fallbacks = (theme.mode === "light"
@@ -249,8 +249,8 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
       border: true,
       borderStyle: "rounded",
       borderColor: theme.border,
-      focusedBorderColor: theme.focus,
-      backgroundColor: theme.panelRaised,
+      focusedBorderColor: theme.borderActive,
+      backgroundColor: theme.backgroundElement,
       padding: 1,
       gap: 1,
       visible: false,
@@ -262,21 +262,21 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
       id: "picker-query",
       width: "100%",
       placeholder: "type to filter…",
-      backgroundColor: theme.panel,
-      textColor: theme.foreground,
-      focusedBackgroundColor: theme.selection,
-      focusedTextColor: theme.foreground,
+      backgroundColor: theme.backgroundPanel,
+      textColor: theme.text,
+      focusedBackgroundColor: theme.backgroundElement,
+      focusedTextColor: theme.text,
     })
     this.select = new SelectRenderable(ctx, {
       id: "picker-results",
       width: "100%",
       flexGrow: 1,
       options: [],
-      backgroundColor: theme.panelRaised,
-      textColor: theme.foreground,
+      backgroundColor: theme.backgroundElement,
+      textColor: theme.text,
       selectedBackgroundColor: selected.background,
       selectedTextColor: selected.foreground,
-      descriptionColor: theme.muted,
+      descriptionColor: theme.textMuted,
       selectedDescriptionColor: selected.foreground,
       showScrollIndicator: true,
       wrapSelection: true,
@@ -287,7 +287,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
       width: "100%",
       flexGrow: 1,
       content: "",
-      fg: theme.muted,
+      fg: theme.textMuted,
       visible: false,
     })
     this.add(this.input)
@@ -624,9 +624,9 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
         }]
       : ranked.map((entry) => entry.item)
     const selected = pickerSelectionColors(this.#theme)
-    this.select.textColor = noMatches ? this.#theme.muted : this.#theme.foreground
-    this.select.selectedTextColor = noMatches ? this.#theme.muted : selected.foreground
-    this.select.selectedBackgroundColor = noMatches ? this.#theme.panelRaised : selected.background
+    this.select.textColor = noMatches ? this.#theme.textMuted : this.#theme.text
+    this.select.selectedTextColor = noMatches ? this.#theme.textMuted : selected.foreground
+    this.select.selectedBackgroundColor = noMatches ? this.#theme.backgroundElement : selected.background
     this.select.showSelectionIndicator = !noMatches
     this.select.options = this.#filtered.map((item) => ({
       // SelectRenderable has one color for all labels and a separate muted

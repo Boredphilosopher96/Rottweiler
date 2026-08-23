@@ -2,7 +2,7 @@ import {
   PROTOCOL_VERSION,
   type ClientCommand,
   type CommandOutcome,
-  type PermissionAction,
+  type PermissionDecision,
   type PermissionApprovalScope,
 } from "./protocol"
 import { isRecord, type WireEngineEvent } from "./transport"
@@ -55,7 +55,7 @@ export type ProjectionCommand =
   | { readonly type: "approve_mcp_server"; readonly name: string; readonly fingerprint: string }
   | { readonly type: "set_mcp_server_enabled"; readonly name: string; readonly enabled: boolean }
   | { readonly type: "list_permissions" }
-  | { readonly type: "add_session_permission_rule"; readonly pattern: string; readonly action: PermissionAction }
+  | { readonly type: "add_session_permission_rule"; readonly pattern: string; readonly action: PermissionDecision }
   | { readonly type: "remove_session_permission_rule"; readonly ruleId: string }
   | { readonly type: "revoke_permission_approval"; readonly approvalId: string; readonly scope: PermissionApprovalScope }
   | { readonly type: "remove_queued_message"; readonly position: string }

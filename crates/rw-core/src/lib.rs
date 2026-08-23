@@ -22,7 +22,7 @@ pub use rw_types::{
     AccountingAttribution, Attachment, AttachmentData, CommandDescriptor, CommandSource,
     ContextItemId, ContextSnapshot, CostSnapshot, McpApprovalReview, McpEnvironmentEntry,
     McpServerDescriptor, McpServerState, ModeId, ModelAlias, ModelAliasDescriptor,
-    ModelCacheBehavior, ModelCapabilities, ModelCatalogSnapshot, ModelDescriptor, PermissionAction,
+    ModelCacheBehavior, ModelCapabilities, ModelCatalogSnapshot, ModelDescriptor,
     PermissionApprovalDescriptor, PermissionApprovalScope, PermissionRuleDescriptor,
     PermissionStateDescriptor, PlanDecision, PromptDump, ProviderAuthChallenge, ProviderAuthKind,
     ProviderDescriptor, ProviderNextAction, ReviewFileDecision, ReviewFileStatus,
@@ -78,24 +78,27 @@ pub use mcp::{
     ProductionMcpHttpError, ToonMcpEncoder, VaultMcpTokenProvider, begin_mcp_oauth_login,
     encode_mcp_oauth_credential, register_mcp_tools,
 };
-pub use model_catalog::{CachedModelCatalog, ModelCatalogError, ModelCatalogSource};
+pub use model_catalog::{
+    CachedModelCatalog, ModelCatalogError, ModelCatalogSource, merge_model_catalog_provider,
+    retain_model_catalog_provider,
+};
 pub use orchestration::{
     ActorSubagentSessionFactory, DEFAULT_SUBAGENT_CONCURRENCY, DEFAULT_SUBAGENT_MAX_DEPTH,
     DEFAULT_SUBAGENT_MAX_DURATION, DEFAULT_SUBAGENT_MAX_TURNS, NoopSubagentMetadataStore,
     OrchestrationError, SpawnAgentTool, SubagentHandle, SubagentLaunch, SubagentLimits,
-    SubagentMetadataStore, SubagentObserver, SubagentOrchestrator, SubagentPermissionMode,
-    SubagentProgressObserver, SubagentRecoveryPhase, SubagentRecoveryPolicy,
-    SubagentRecoveryRecord, SubagentRequest, SubagentSession, SubagentSessionFactory,
-    SubagentTurnResult, WorktreeSubagentSessionFactory, diff_artifact_reference,
-    incomplete_subagent_lifecycles, interrupted_subagent_recovery_result,
+    SubagentMetadataStore, SubagentObserver, SubagentOrchestrator, SubagentProgressObserver,
+    SubagentRecoveryPhase, SubagentRecoveryPolicy, SubagentRecoveryRecord, SubagentRequest,
+    SubagentSession, SubagentSessionFactory, SubagentTurnResult, WorktreeSubagentSessionFactory,
+    diff_artifact_reference, incomplete_subagent_lifecycles, interrupted_subagent_recovery_result,
     subagent_result_tool_output,
 };
 pub use permission::{
-    ClearedSessionPermissions, HeadlessPermissionMode, PermissionApprovalSnapshot,
-    PermissionApprovalSummary, PermissionApprover, PermissionGate, PermissionGenerationUpdate,
-    PermissionOutcome, PermissionRequest,
+    ClearedSessionPermissions, PermissionApprovalSnapshot, PermissionApprovalSummary,
+    PermissionApprover, PermissionGate, PermissionGenerationUpdate, PermissionOutcome,
+    PermissionRequest,
 };
 pub use provider_factory::{
+    AdapterKind, BUILTIN_PROVIDER_PROFILES, BuiltinProviderId, BuiltinProviderProfile,
     ModelPricingSource, ProviderFactory, ProviderFactoryError, ProviderModelCatalogSource,
     ProviderNativeWebSearcher, ProviderRuntime, ResolvedModel, cost_from_model_metadata,
 };
@@ -111,10 +114,9 @@ pub use rw_types::{
     UnrestorablePath, Usage,
 };
 pub use update::{
-    EMBEDDED_ROOT_KEY_ID, EMBEDDED_ROOT_KEYS_JSON, EMBEDDED_ROOT_PUBLIC_KEY,
-    EMBEDDED_ROOT_THRESHOLD, EMBEDDED_ROOT_VERSION, TrustedRoot, UpdateHighWaterMark,
-    UpdateVerificationError, UpdateVerificationPolicy, VerifiedUpdate, restore_trusted_root_chain,
-    verify_update_metadata, verify_update_metadata_chain,
+    EMBEDDED_ROOT_KEYS_JSON, EMBEDDED_ROOT_THRESHOLD, EMBEDDED_ROOT_VERSION, TrustedRoot,
+    UpdateHighWaterMark, UpdateVerificationError, UpdateVerificationPolicy, VerifiedUpdate,
+    restore_trusted_root_chain, verify_update_metadata, verify_update_metadata_chain,
 };
 
 /// Identifies this workspace component in diagnostics.

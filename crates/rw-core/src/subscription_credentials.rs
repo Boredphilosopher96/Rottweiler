@@ -91,6 +91,6 @@ fn validate_account_id(value: &str) -> Result<(), AdminError> {
     Ok(())
 }
 
-pub(crate) fn openai_subscription_credential_id(provider: &str) -> String {
-    format!("providers.{provider}.openai_subscription")
+pub(crate) fn openai_codex_credential_id(provider: &str) -> String {
+    format!("providers.{provider}.openai_codex")
 }

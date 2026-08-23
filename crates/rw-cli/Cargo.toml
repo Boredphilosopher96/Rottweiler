@@ -31,6 +31,7 @@ rpassword.workspace = true
 rw-core.workspace = true
 rw-ext.workspace = true
 rw-mcp.workspace = true
+rw-plugin-protocol.workspace = true
 rw-providers.workspace = true
 rw-runtime.workspace = true
 rw-store.workspace = true

@@ -229,8 +229,9 @@ bun run build
 ```
 
 Read [Extensibility](docs/04-EXTENSIBILITY.md) before granting capabilities or
-shipping an extension. The generated TypeScript SDK, wire schemas, and session
-event envelope are maintained in `packages/plugin-sdk/` and `protocol/`.
+shipping an extension. `rw-plugin-protocol` owns and generates the current plugin
+wire projections in `packages/plugin-sdk/`; `rw-types` owns the generated session
+event envelope in `protocol/`.
 
 Invalid, unreadable, or unsafe declarative artifacts are skipped with diagnostics
 in tracing, `rw doctor`, and engine startup notifications; an artifact failure

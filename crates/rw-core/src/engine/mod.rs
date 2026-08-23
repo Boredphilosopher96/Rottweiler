@@ -24,11 +24,11 @@ use rw_ext::{
     CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation, CommandRegistry,
     HookDirective, HookDispatchResult, HookDispatchStatus, HookDispatcher, HookEffect, HookEvent,
     HookFailure, HookFailurePolicy, HookHandler, HookInvocation, HookRegistration, ModeDefinition,
-    ModePermissionOverlay, ModeRegistry, ModeSource,
+    ModeRegistry, ModeSource,
 };
 use rw_providers::{
     BoxEventStream, CacheBreakpointSupport, CacheHint, FinishReason, ProviderEvent,
-    ProviderRequest, ThinkingLevel, TokenUsage, ToolChoice, ToolDefinition,
+    ProviderRequest, TokenUsage, ToolChoice, ToolDefinition,
 };
 use rw_tools::{
     ApprovalPreview, AskUserInput, CancellationToken, MutationScope, QuestionAsker,
@@ -36,6 +36,11 @@ use rw_tools::{
     ToolContext, ToolDescriptor, ToolError, ToolOutputChunk, ToolOutputSink, ToolRegistry,
     ToolResult,
 };
+use rw_types::attachment_contract::{
+    MAX_ATTACHMENTS_PER_MESSAGE, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TEXT_ATTACHMENT_BYTES,
+    MAX_TOTAL_ATTACHMENT_BYTES,
+};
+use rw_types::config::ThinkingLevel;
 use rw_types::config::{BudgetConfig, CompactionConfig, PermissionDecision, PermissionRule};
 use rw_types::{
     AccountingAttribution, Answer, ApprovalBinding, ApprovalDecision, Attachment, AttachmentData,
@@ -43,12 +48,12 @@ use rw_types::{
     ClientRole, CommandAckMeta, CommandMeta, CommandOutcome, CompactionReason, ContextItemId,
     ContextItemKind, ContextItemSnapshot, ContextItemState, ContextSnapshot, Cost, CostSnapshot,
     EngineError, EngineErrorCategory, EngineEvent, EventMeta, ImageRef, ModeId, ModelAlias,
-    ModelContextTransfer, ModelSwitchQuestion, PROTOCOL_VERSION, PermissionAction,
-    PermissionApprovalDescriptor, PermissionApprovalScope, PermissionModeDescriptor,
-    PermissionRuleDescriptor, PermissionStateDescriptor, PlanArtifact, PlanDecision, PromptDump,
-    PromptTool, Question, QuestionId, QuestionOption, QuestionResponseKind, RequestId,
-    ReviewFileDecision, ReviewFileStatus, RewindTarget, Role, SequenceId, SessionId, SessionMode,
-    SessionReview, ShellId, StoredAttachment, SubagentId, ToolCallId, ToolOutput, ToolOutputPart,
+    ModelContextTransfer, ModelSwitchQuestion, PROTOCOL_VERSION, PermissionApprovalDescriptor,
+    PermissionApprovalScope, PermissionModeDescriptor, PermissionRuleDescriptor,
+    PermissionStateDescriptor, PlanArtifact, PlanDecision, PromptDump, PromptTool, Question,
+    QuestionId, QuestionOption, QuestionResponseKind, RequestId, ReviewFileDecision,
+    ReviewFileStatus, RewindTarget, Role, SequenceId, SessionId, SessionMode, SessionReview,
+    ShellId, StoredAttachment, SubagentId, ToolCallId, ToolOutput, ToolOutputPart,
     ToolOutputStream, Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus, UnifiedDiff,
     UnrestorablePath, Usage,
 };
@@ -119,24 +124,6 @@ const SESSION_TITLE_PROMPT_CHARS: usize = 1_024;
 const SESSION_TITLE_OUTPUT_CHARS: usize = 160;
 const SESSION_TITLE_MAX_CHARS: usize = 72;
 
-const fn provider_thinking_to_config(thinking: ThinkingLevel) -> rw_types::config::ThinkingLevel {
-    match thinking {
-        ThinkingLevel::Off => rw_types::config::ThinkingLevel::Off,
-        ThinkingLevel::Low => rw_types::config::ThinkingLevel::Low,
-        ThinkingLevel::Medium => rw_types::config::ThinkingLevel::Medium,
-        ThinkingLevel::High => rw_types::config::ThinkingLevel::High,
-    }
-}
-
-const fn config_thinking_to_provider(thinking: rw_types::config::ThinkingLevel) -> ThinkingLevel {
-    match thinking {
-        rw_types::config::ThinkingLevel::Off => ThinkingLevel::Off,
-        rw_types::config::ThinkingLevel::Low => ThinkingLevel::Low,
-        rw_types::config::ThinkingLevel::Medium => ThinkingLevel::Medium,
-        rw_types::config::ThinkingLevel::High => ThinkingLevel::High,
-    }
-}
-
 mod decimal_u64 {
     use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
 
@@ -172,10 +159,6 @@ const TEXT_DELTA_COALESCE_WINDOW: Duration = Duration::from_millis(2);
 const MAX_LIVE_TOOL_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_LIVE_TOOL_OUTPUT_CHUNKS: usize = 1024;
 const MAX_IN_FLIGHT_TOOL_OUTPUT_CHUNKS: usize = 32;
-const MAX_ATTACHMENTS: usize = 16;
-const MAX_TEXT_ATTACHMENT_BYTES: usize = 1024 * 1024;
-const MAX_IMAGE_ATTACHMENT_BYTES: usize = 5 * 1024 * 1024;
-const MAX_TOTAL_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const MAX_CAPTURED_SHELL_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_APPROVAL_DIFF_BYTES: usize = 256 * 1024;
 const MAX_COMMAND_TOOL_FRAME_BYTES: usize = 256 * 1024;
@@ -916,10 +899,10 @@ enum PendingEvent {
     },
     ModeChanged {
         mode: ModeId,
-        definition_fingerprint: Option<String>,
+        definition_fingerprint: String,
     },
     PermissionModeChanged {
-        mode: Option<crate::HeadlessPermissionMode>,
+        mode: Option<rw_types::PermissionModeDescriptor>,
     },
     PlanSubmitted {
         artifact: PlanArtifact,
@@ -978,11 +961,7 @@ fn wire_turn_id(turn: u64) -> TurnId {
 }
 
 fn session_mode_name(mode: SessionMode) -> &'static str {
-    match mode {
-        SessionMode::Discuss => "discuss",
-        SessionMode::Plan => "plan",
-        SessionMode::Execute => "execute",
-    }
+    mode.as_str()
 }
 
 fn parse_session_mode(mode: &str) -> Option<SessionMode> {
@@ -995,32 +974,18 @@ fn parse_session_mode(mode: &str) -> Option<SessionMode> {
 }
 
 fn mode_permission_base(mode: &ModeDefinition) -> SessionMode {
-    match mode.permission() {
-        ModePermissionOverlay::Discuss => SessionMode::Discuss,
-        ModePermissionOverlay::Plan => SessionMode::Plan,
-        ModePermissionOverlay::Execute => SessionMode::Execute,
-    }
+    mode.permission()
 }
 
-fn permission_mode_name(mode: crate::HeadlessPermissionMode) -> &'static str {
-    match mode {
-        crate::HeadlessPermissionMode::Strict => "strict",
-        crate::HeadlessPermissionMode::AutoSafe => "auto-safe",
-        crate::HeadlessPermissionMode::Yolo => "yolo",
-    }
+fn permission_mode_name(mode: rw_types::PermissionModeDescriptor) -> &'static str {
+    mode.as_str()
 }
 
 fn parse_permission_mode(
     mode: &str,
-) -> Result<crate::HeadlessPermissionMode, SessionProjectionError> {
-    match mode {
-        "strict" => Ok(crate::HeadlessPermissionMode::Strict),
-        "auto-safe" => Ok(crate::HeadlessPermissionMode::AutoSafe),
-        "yolo" => Ok(crate::HeadlessPermissionMode::Yolo),
-        _ => Err(SessionProjectionError::InvalidPermissionMode(
-            mode.to_owned(),
-        )),
-    }
+) -> Result<rw_types::PermissionModeDescriptor, SessionProjectionError> {
+    mode.parse()
+        .map_err(|_| SessionProjectionError::InvalidPermissionMode(mode.to_owned()))
 }
 
 fn model_context_transfer_value(strategy: ModelContextTransfer) -> &'static str {
@@ -1183,10 +1148,6 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
     (year, month, day)
 }
 
-fn event_meta(event: &EngineEvent) -> Option<&EventMeta> {
-    event.meta()
-}
-
 impl PendingEvent {
     #[allow(clippy::too_many_lines)]
     fn stamp(self, meta: EventMeta) -> EngineEvent {
@@ -1321,9 +1282,8 @@ impl PendingEvent {
                 turn_id: wire_turn_id(turn),
                 tool_call_id: ToolCallId(request.id),
                 name: request.tool_name.clone(),
-                rationale: if request.tool_name == "bash"
-                    && request.arguments.get("sandbox").and_then(Value::as_str)
-                        == Some("unsandboxed")
+                rationale: if request.arguments.get("sandbox").and_then(Value::as_str)
+                    == Some("unsandboxed")
                 {
                     "UNSANDBOXED EXECUTION: this command will bypass native filesystem and network isolation"
                         .to_owned()
@@ -1547,7 +1507,7 @@ impl PendingEvent {
                 meta,
                 model,
                 provider,
-                thinking: Some(provider_thinking_to_config(thinking)),
+                thinking: Some(thinking),
             },
             Self::ModelContextCleared { strategy } => {
                 EngineEvent::ModelContextCleared { meta, strategy }
@@ -1707,7 +1667,7 @@ pub struct SessionSnapshot {
     pub thinking: ThinkingLevel,
     pub mode: SessionMode,
     pub mode_id: ModeId,
-    pub permission_mode: Option<crate::HeadlessPermissionMode>,
+    pub permission_mode: Option<rw_types::PermissionModeDescriptor>,
     pub pending_plan: Option<PlanArtifact>,
     pub approved_plan: Option<PlanArtifact>,
     pub plan_gate_active: bool,
@@ -1741,7 +1701,7 @@ async fn apply_mode_change(
     }
     durable.push(PendingEvent::ModeChanged {
         mode: mode_id.clone(),
-        definition_fingerprint: Some(definition.semantic_fingerprint()),
+        definition_fingerprint: definition.semantic_fingerprint(),
     });
     emit_batch(state, events, sink, durable).await?;
     if let Some(item_id) = evicted {
@@ -1765,7 +1725,7 @@ async fn apply_permission_mode_change(
     state: &mut ActorState,
     events: &broadcast::Sender<RoutedEvent>,
     config: &SessionActorConfig,
-    mode: Option<crate::HeadlessPermissionMode>,
+    mode: Option<rw_types::PermissionModeDescriptor>,
 ) -> Result<(), AgentLoopError> {
     let previous = config.permissions.snapshot().runtime_mode;
     config
@@ -1867,7 +1827,7 @@ impl SessionEventSink for NoopSessionEventSink {
             .next_sequence
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let meta = event_meta(&event).ok_or_else(|| {
+        let meta = event.meta().ok_or_else(|| {
             AgentLoopError::Persistence(
                 "connection-scoped acknowledgement cannot enter a session log".to_owned(),
             )
@@ -1907,7 +1867,7 @@ impl SessionEventSink for NoopSessionEventSink {
             let sequence = next
                 .checked_add(offset)
                 .ok_or_else(|| AgentLoopError::Persistence("event sequence overflow".to_owned()))?;
-            let meta = event_meta(event).ok_or_else(|| {
+            let meta = event.meta().ok_or_else(|| {
                 AgentLoopError::Persistence(
                     "connection-scoped acknowledgement cannot enter a session log".to_owned(),
                 )
@@ -1937,7 +1897,7 @@ impl SessionEventSink for NoopSessionEventSink {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .filter(|event| event_meta(event).is_some_and(|meta| meta.sequence_id.0 >= first))
+            .filter(|event| event.meta().is_some_and(|meta| meta.sequence_id.0 >= first))
             .cloned()
             .collect())
     }
@@ -2274,7 +2234,7 @@ mod tests {
         assert_eq!(
             yolo.action,
             SessionCommandAction::SetPermissionMode {
-                mode: Some(crate::HeadlessPermissionMode::Yolo),
+                mode: Some(rw_types::PermissionModeDescriptor::Yolo),
             }
         );
 
@@ -2923,6 +2883,7 @@ mod tests {
 
     struct StubTool {
         descriptor: ToolDescriptor,
+        behavior: rw_tools::ToolBehavior,
         outcome: StubOutcome,
         calls: AtomicUsize,
         inputs: Mutex<Vec<Value>>,
@@ -2937,10 +2898,16 @@ mod tests {
                     input_schema: json!({"type": "object"}),
                     capabilities: CapabilityManifest::new(capabilities),
                 },
+                behavior: rw_tools::ToolBehavior::Standard,
                 outcome,
                 calls: AtomicUsize::new(0),
                 inputs: Mutex::new(Vec::new()),
             }
+        }
+
+        fn with_behavior(mut self, behavior: rw_tools::ToolBehavior) -> Self {
+            self.behavior = behavior;
+            self
         }
     }
 
@@ -2948,6 +2915,10 @@ mod tests {
     impl Tool for StubTool {
         fn descriptor(&self) -> ToolDescriptor {
             self.descriptor.clone()
+        }
+
+        fn behavior(&self) -> rw_tools::ToolBehavior {
+            self.behavior
         }
 
         async fn execute(
@@ -5240,7 +5211,7 @@ mod tests {
         assert!(matches!(
             mode_changed.kind,
             PendingEvent::PermissionModeChanged {
-                mode: Some(crate::HeadlessPermissionMode::Yolo)
+                mode: Some(rw_types::PermissionModeDescriptor::Yolo)
             }
         ));
         next_matching(&mut events, |kind| {
@@ -5253,7 +5224,7 @@ mod tests {
                 .await
                 .expect("yolo snapshot")
                 .permission_mode,
-            Some(crate::HeadlessPermissionMode::Yolo)
+            Some(rw_types::PermissionModeDescriptor::Yolo)
         );
         handle
             .send_message("/permissions approvals")
@@ -5332,7 +5303,7 @@ mod tests {
         assert!(matches!(
             mode_changed.kind,
             PendingEvent::PermissionModeChanged {
-                mode: Some(crate::HeadlessPermissionMode::Strict)
+                mode: Some(rw_types::PermissionModeDescriptor::Strict)
             }
         ));
         next_matching(&mut events, |kind| {
@@ -6942,11 +6913,14 @@ mod tests {
         ] {
             let root = TempDir::new().expect("tempdir");
             let model = Arc::new(ScriptedModel::new([stop_script("done", &[])]));
-            let tool = Arc::new(StubTool::new(
-                "bash",
-                vec![ToolCapability::Execute, ToolCapability::WriteFilesystem],
-                StubOutcome::Success(ToolResult::new("prelude output", Value::Null)),
-            ));
+            let tool = Arc::new(
+                StubTool::new(
+                    "bash",
+                    vec![ToolCapability::Execute, ToolCapability::WriteFilesystem],
+                    StubOutcome::Success(ToolResult::new("prelude output", Value::Null)),
+                )
+                .with_behavior(rw_tools::ToolBehavior::Shell),
+            );
             let mut tools = ToolRegistry::new();
             tools.register(tool.clone()).expect("register bash");
             let mut commands = builtin_command_registry().expect("commands");
@@ -7080,11 +7054,14 @@ mod tests {
             ),
             stop_script("denied", &[]),
         ]));
-        let tool = Arc::new(StubTool::new(
-            "bash",
-            vec![ToolCapability::Execute, ToolCapability::WriteFilesystem],
-            StubOutcome::Success(ToolResult::new("must not execute", Value::Null)),
-        ));
+        let tool = Arc::new(
+            StubTool::new(
+                "bash",
+                vec![ToolCapability::Execute, ToolCapability::WriteFilesystem],
+                StubOutcome::Success(ToolResult::new("must not execute", Value::Null)),
+            )
+            .with_behavior(rw_tools::ToolBehavior::Shell),
+        );
         let mut tools = ToolRegistry::new();
         tools.register(tool.clone()).expect("register bash fixture");
         let handle = SessionActor::spawn(config(
@@ -7153,11 +7130,14 @@ mod tests {
             ),
             stop_script("denied", &[]),
         ]));
-        let tool = Arc::new(StubTool::new(
-            "bash",
-            vec![ToolCapability::Execute, ToolCapability::WriteFilesystem],
-            StubOutcome::Success(ToolResult::new("must not execute", Value::Null)),
-        ));
+        let tool = Arc::new(
+            StubTool::new(
+                "bash",
+                vec![ToolCapability::Execute, ToolCapability::WriteFilesystem],
+                StubOutcome::Success(ToolResult::new("must not execute", Value::Null)),
+            )
+            .with_behavior(rw_tools::ToolBehavior::Shell),
+        );
         let mut tools = ToolRegistry::new();
         tools.register(tool.clone()).expect("register bash fixture");
         let handle = SessionActor::spawn(config(
@@ -7213,11 +7193,14 @@ mod tests {
             ),
             stop_script("done", &[]),
         ]));
-        let tool = Arc::new(StubTool::new(
-            "bash",
-            vec![ToolCapability::Execute],
-            StubOutcome::Success(ToolResult::new("tests passed", Value::Null)),
-        ));
+        let tool = Arc::new(
+            StubTool::new(
+                "bash",
+                vec![ToolCapability::Execute],
+                StubOutcome::Success(ToolResult::new("tests passed", Value::Null)),
+            )
+            .with_behavior(rw_tools::ToolBehavior::Shell),
+        );
         let mut tools = ToolRegistry::new();
         tools.register(tool.clone()).expect("register bash fixture");
         let mut actor_config = config(
@@ -7278,16 +7261,22 @@ mod tests {
                 ),
                 stop_script("denied", &[]),
             ]));
-            let fetch = Arc::new(StubTool::new(
-                "webfetch",
-                vec![ToolCapability::Network],
-                StubOutcome::Success(ToolResult::new(injection.clone(), Value::Null)),
-            ));
-            let bash = Arc::new(StubTool::new(
-                "bash",
-                vec![ToolCapability::Execute, ToolCapability::Network],
-                StubOutcome::Success(ToolResult::new("must not execute", Value::Null)),
-            ));
+            let fetch = Arc::new(
+                StubTool::new(
+                    "webfetch",
+                    vec![ToolCapability::Network],
+                    StubOutcome::Success(ToolResult::new(injection.clone(), Value::Null)),
+                )
+                .with_behavior(rw_tools::ToolBehavior::WebFetch),
+            );
+            let bash = Arc::new(
+                StubTool::new(
+                    "bash",
+                    vec![ToolCapability::Execute, ToolCapability::Network],
+                    StubOutcome::Success(ToolResult::new("must not execute", Value::Null)),
+                )
+                .with_behavior(rw_tools::ToolBehavior::Shell),
+            );
             let mut tools = ToolRegistry::new();
             tools
                 .register(fetch.clone())
@@ -7370,11 +7359,14 @@ mod tests {
             ),
             stop_script("done", &[]),
         ]));
-        let tool = Arc::new(StubTool::new(
-            "bash",
-            vec![ToolCapability::Execute],
-            StubOutcome::Success(ToolResult::new("should not execute", Value::Null)),
-        ));
+        let tool = Arc::new(
+            StubTool::new(
+                "bash",
+                vec![ToolCapability::Execute],
+                StubOutcome::Success(ToolResult::new("should not execute", Value::Null)),
+            )
+            .with_behavior(rw_tools::ToolBehavior::Shell),
+        );
         let mut tools = ToolRegistry::new();
         tools.register(tool.clone()).expect("register bash fixture");
         let handle = SessionActor::spawn(config(
@@ -7442,11 +7434,14 @@ mod tests {
             ),
             stop_script("done", &[]),
         ]));
-        let tool = Arc::new(StubTool::new(
-            "bash",
-            vec![ToolCapability::Execute],
-            StubOutcome::Success(ToolResult::new("executed once", Value::Null)),
-        ));
+        let tool = Arc::new(
+            StubTool::new(
+                "bash",
+                vec![ToolCapability::Execute],
+                StubOutcome::Success(ToolResult::new("executed once", Value::Null)),
+            )
+            .with_behavior(rw_tools::ToolBehavior::Shell),
+        );
         let mut tools = ToolRegistry::new();
         tools.register(tool.clone()).expect("register bash fixture");
         let handle = SessionActor::spawn(config(
@@ -9698,7 +9693,7 @@ mod tests {
             CommandOutcome::Accepted
         );
         let listed = next_permission_state(&mut observer_events).await;
-        assert_eq!(listed.default, PermissionAction::Ask);
+        assert_eq!(listed.default, PermissionDecision::Ask);
         assert_eq!(listed.runtime_mode, None);
         assert_eq!(listed.effective_rules.len(), 1);
         assert!(listed.project_rules.is_empty());
@@ -9728,7 +9723,7 @@ mod tests {
         assert!(matches!(
             mode_changed.kind,
             PendingEvent::PermissionModeChanged {
-                mode: Some(crate::HeadlessPermissionMode::AutoSafe)
+                mode: Some(rw_types::PermissionModeDescriptor::AutoSafe)
             }
         ));
         assert_eq!(
@@ -9758,7 +9753,7 @@ mod tests {
                     meta: protocol_meta("observer", "observer-add"),
                     session_id: session_id.clone(),
                     pattern: "write(**)".to_owned(),
-                    action: PermissionAction::Allow,
+                    action: PermissionDecision::Allow,
                 })
                 .await
                 .expect("observer mutation"),
@@ -9772,7 +9767,7 @@ mod tests {
                     meta: protocol_meta("driver", "driver-add"),
                     session_id: session_id.clone(),
                     pattern: "write(**)".to_owned(),
-                    action: PermissionAction::Allow,
+                    action: PermissionDecision::Allow,
                 })
                 .await
                 .expect("driver add"),
@@ -12779,7 +12774,8 @@ prompt = "Inspect without mutation."
                 mode: ModeId("audit".to_owned()),
                 definition_fingerprint: modes
                     .get("audit")
-                    .map(ModeDefinition::semantic_fingerprint),
+                    .expect("audit mode")
+                    .semantic_fingerprint(),
             },
             PendingEvent::TurnStarted { turn: 1 },
             PendingEvent::TurnFinished {
@@ -12790,7 +12786,10 @@ prompt = "Inspect without mutation."
             },
             PendingEvent::ModeChanged {
                 mode: ModeId("execute".to_owned()),
-                definition_fingerprint: None,
+                definition_fingerprint: modes
+                    .get("execute")
+                    .expect("execute mode")
+                    .semantic_fingerprint(),
             },
             PendingEvent::ConversationRewound {
                 to_turn: 1,
@@ -12832,7 +12831,8 @@ prompt = "Produce a plan."
                 mode: ModeId("design".to_owned()),
                 definition_fingerprint: modes
                     .get("design")
-                    .map(ModeDefinition::semantic_fingerprint),
+                    .expect("design mode")
+                    .semantic_fingerprint(),
             },
         )];
         let recovered =
@@ -12868,15 +12868,15 @@ prompt = "The file changed after the mode was selected."
             ))
         );
 
-        let legacy_custom = vec![wire_event(
+        let stale_custom = vec![wire_event(
             0,
             PendingEvent::ModeChanged {
                 mode: ModeId("design".to_owned()),
-                definition_fingerprint: None,
+                definition_fingerprint: "stale-fingerprint".to_owned(),
             },
         )];
         assert_eq!(
-            project_session_events_with_modes(&legacy_custom, &modes),
+            project_session_events_with_modes(&stale_custom, &modes),
             Err(SessionProjectionError::ModeDefinitionChanged(
                 "design".to_owned()
             ))
@@ -12995,7 +12995,7 @@ prompt = "The file changed after the mode was selected."
                 actor_config.permissions = Arc::new(if hook_allow {
                     PermissionGate::new(PermissionDecision::Ask)
                 } else {
-                    PermissionGate::for_headless_mode(crate::HeadlessPermissionMode::Yolo)
+                    PermissionGate::for_headless_mode(rw_types::PermissionModeDescriptor::Yolo)
                 });
                 let handle = SessionActor::spawn(actor_config).expect("actor");
                 let mut events = handle.subscribe();
@@ -13269,7 +13269,7 @@ prompt = "The file changed after the mode was selected."
         let kinds = vec![
             PendingEvent::ModeChanged {
                 mode: wire_mode(SessionMode::Plan),
-                definition_fingerprint: None,
+                definition_fingerprint: "fixture".to_owned(),
             },
             PendingEvent::PlanSubmitted {
                 artifact: artifact.clone(),
@@ -13289,7 +13289,7 @@ prompt = "The file changed after the mode was selected."
             },
             PendingEvent::ModeChanged {
                 mode: wire_mode(SessionMode::Execute),
-                definition_fingerprint: None,
+                definition_fingerprint: "fixture".to_owned(),
             },
         ];
         let events = kinds
@@ -13316,14 +13316,14 @@ prompt = "The file changed after the mode was selected."
             6,
             PendingEvent::ModeChanged {
                 mode: wire_mode(SessionMode::Plan),
-                definition_fingerprint: None,
+                definition_fingerprint: "fixture".to_owned(),
             },
         ));
         next_cycle.push(wire_event(
             7,
             PendingEvent::ModeChanged {
                 mode: wire_mode(SessionMode::Discuss),
-                definition_fingerprint: None,
+                definition_fingerprint: "fixture".to_owned(),
             },
         ));
         let resumed = project_session_events(&next_cycle).expect("resume second plan cycle");
@@ -13337,13 +13337,13 @@ prompt = "The file changed after the mode was selected."
         let durable = vec![wire_event(
             0,
             PendingEvent::PermissionModeChanged {
-                mode: Some(crate::HeadlessPermissionMode::Yolo),
+                mode: Some(rw_types::PermissionModeDescriptor::Yolo),
             },
         )];
         let recovered = project_session_events(&durable).expect("project permission mode");
         assert_eq!(
             recovered.permission_mode,
-            Some(crate::HeadlessPermissionMode::Yolo)
+            Some(rw_types::PermissionModeDescriptor::Yolo)
         );
 
         let root = TempDir::new().expect("workspace");
@@ -13358,7 +13358,7 @@ prompt = "The file changed after the mode was selected."
         let handle = SessionActor::spawn(actor_config).expect("resume actor");
         assert_eq!(
             handle.snapshot().await.expect("snapshot").permission_mode,
-            Some(crate::HeadlessPermissionMode::Yolo)
+            Some(rw_types::PermissionModeDescriptor::Yolo)
         );
     }
 

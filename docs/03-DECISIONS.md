@@ -19,7 +19,7 @@ Format: context → decision → rationale → revisit-when. The implementing ag
 **Consequences (accepted).**
 - Two build toolchains (cargo + bun) and a protocol contract test suite between them (see 07 §2).
 - Startup has three independently named budgets: engine ready < 50ms, the TUI process-start splash < 150ms total, and an accepted composer keystroke after transcript paint < 500ms. The splash is feedback, not evidence that the application is interactive.
-- Distribution artifact is larger because a Bun-compiled executable embeds the Bun runtime. The binary-size gate applies to the Rust engine only; the TUI bundle has platform-specific budgets (< 100MB on macOS, < 150MB on Linux) — a knowing trade for the renderer. Linux release builds fail closed unless the copied OpenTUI native library can be stripped with the trusted system `strip` binary.
+- Distribution artifact is larger because a Bun-compiled executable embeds the Bun runtime. `contracts/release-contract.json` owns the platform-specific engine and TUI bundle budgets. Linux release builds fail closed unless the copied OpenTUI native library can be stripped with the trusted system `strip` binary.
 - If the TUI process dies, the engine survives; `rw` reattaches (this must be a tested behavior, not an accident).
 
 **Revisit when.** OpenTUI publishes a stable C ABI / Rust binding for its Zig renderer — then evaluate moving the TUI in-process behind the same component API.
@@ -97,7 +97,7 @@ Format: context → decision → rationale → revisit-when. The implementing ag
 
 **Decision.** Copy opencode's compaction behavior exactly (reference: `opencode/packages/opencode/src/session/compaction.ts` and `overflow.ts`; the constants and flow below are the contract):
 1. **Prune** (continuous, free): walk backward; skip the newest 2 user turns; protect the newest `PRUNE_PROTECT = 40_000` tokens of completed tool outputs and a protected-tools list; stop at the last summary/pruned marker; erase older tool outputs only if reclaimable > `PRUNE_MINIMUM = 20_000`.
-2. **Overflow check**: fire when total tokens ≥ usable − reserved, `reserved = min(20_000, max_output_tokens)`, both user-configurable (`compaction.auto = false` disables, `compaction.reserved` overrides).
+2. **Overflow check**: fire when total tokens ≥ context window − reserved. The default reserve is `min(20_000, max_output_tokens, context_window / 2)`. `compaction.auto = false` disables automatic compaction, and `compaction.reserved` overrides the default. A zero window or an explicit reserve that exhausts the window makes the resolved policy invalid and disables automatic compaction.
 3. **Summarize as a message**: a dedicated `compaction` agent (own model alias, falls back to session model) produces the summary with opencode's template — Goal / Instructions / Discoveries / Accomplished / Relevant files & directories — phrased as a hand-off prompt for the next agent, user's language, no tools, media stripped. The summary is an assistant message flagged `summary: true`; context assembly restarts from it.
 4. **Provider-overflow replay**: when the request itself exceeded the provider limit, compact everything before the last real user message and replay that message after the summary.
 5. **Auto-continue**: after auto-compaction, inject the synthetic "Continue if you have next steps, or stop and ask for clarification" user message (hook-suppressible).
@@ -126,7 +126,7 @@ Format: context → decision → rationale → revisit-when. The implementing ag
 
 ## ADR-013: Protocol types are Rust-first, schema is generated
 
-**Decision.** The source of truth for ClientCommand/EngineEvent/IR is the Rust types in `rw-types` (annotated with `schemars`); the JSON Schema in `protocol/` and the TypeScript types in `packages/tui` are **generated** from them (schemars export + typeshare-style TS emission). Generated artifacts are committed; CI fails if they're out of sync.
+**Decision.** The source of truth for ClientCommand/EngineEvent/IR is the Rust types in `rw-types` (annotated with `schemars`); the JSON Schema and TypeScript contract in `protocol/` are **generated** from them (schemars export + typeshare-style TS emission). `packages/tui/src/protocol.ts` re-exports that generated TypeScript contract. Generated artifacts are committed; CI fails if they're out of sync.
 
 **Rationale.** Schema-first tooling for Rust is mediocre (weak enum/discriminated-union codegen); Rust-first with export gives the same cross-language guarantee minus the toolchain fight. The engine is the protocol's owner anyway.
 
@@ -178,7 +178,7 @@ Format: context → decision → rationale → revisit-when. The implementing ag
 
 **Constraints.** ChatGPT tokens may reach only the fixed ChatGPT Codex backend; Copilot tokens may reach only the exact GitHub auth and Copilot API origins. Redirects are disabled. Project config cannot override those origins or client identities. Subscription usage is never mislabeled as ordinary API-key cost. Any unsupported IR field fails before network or has an explicit, tested compatibility mapping. Upstream behavior is pinned and audited as a compatibility contract; Rottweiler still owns its grant, storage, redaction, and request boundaries.
 
-**Revisit when.** OpenAI or GitHub publishes a stable first-party raw provider API/SDK that preserves Rottweiler's headless provider boundary, or a compatibility canary fails; migrate deliberately and retain fixture compatibility where possible.
+**Revisit when.** OpenAI or GitHub publishes a stable first-party raw provider API/SDK that preserves Rottweiler's headless provider boundary, or a compatibility canary fails; migrate the implementation and fixtures together without retaining the superseded path.
 
 ---
 
@@ -253,7 +253,7 @@ The built-in no-prompt shell list is intentionally narrow and implemented as har
 
 **Status:** accepted 2026-07-13; supersedes ADR-003's WASM deferral for the hook subset only.
 
-**Decision.** Rottweiler ships Wasmtime's component-model runtime in a private `rottweiler-wasm-host` helper beside `rw` and exposes one versioned, length-bounded string/JSON hook ABI. This is still one installed application and one public `rw` entrypoint; the helper is never placed on the user's PATH. Keeping Wasmtime out of the normal `rw` dependency graph preserves no-extension startup latency and makes a guest-runtime failure process-isolated. WASM hooks register on the existing `HookDispatcher`, use the same protocol-1 capability manifest and hook names as RPC plugins, and receive a fresh short-lived store for each invocation. The helper clears its environment and provides no WASI and no filesystem, network, process, environment, clock, randomness, or credential imports. Component size, protocol frames, serialized input bytes, linear-memory/table/instance counts, aggregate enabled bytes, fuel, and the complete helper request lifetime are bounded. A helper that stalls during validation, request writes, response reads, or shutdown is killed and reaped before the request fails. Fuel-based async yielding makes dispatcher cancellation observable while guest code is running. The component ABI's owned-string return is checked immediately after canonical lifting; the tighter linear-memory ceiling bounds the unavoidable allocation before that check. Tools, commands, providers, events, and push methods remain on the crash-isolated RPC tier until their component interfaces can preserve the same security and cancellation contracts.
+**Decision.** Rottweiler ships Wasmtime's component-model runtime in a private `rottweiler-wasm-host` helper beside `rw` and exposes one versioned, length-bounded string/JSON hook ABI. This is still one installed application and one public `rw` entrypoint; the helper is never placed on the user's PATH. Keeping Wasmtime out of the normal `rw` dependency graph preserves no-extension startup latency and makes a guest-runtime failure process-isolated. WASM hooks register on the existing `HookDispatcher`, use the same current capability manifest and hook names as RPC plugins, and receive a fresh short-lived store for each invocation. The helper clears its environment and provides no WASI and no filesystem, network, process, environment, clock, randomness, or credential imports. Component size, protocol frames, serialized input bytes, linear-memory/table/instance counts, aggregate enabled bytes, fuel, and the complete helper request lifetime are bounded. A helper that stalls during validation, request writes, response reads, or shutdown is killed and reaped before the request fails. Fuel-based async yielding makes dispatcher cancellation observable while guest code is running. The component ABI's owned-string return is checked immediately after canonical lifting; the tighter linear-memory ceiling bounds the unavoidable allocation before that check. Tools, commands, providers, events, and push methods remain on the crash-isolated RPC tier until their component interfaces can preserve the same security and cancellation contracts.
 
 The extension registry is a distribution layer, not a trust root. Each release contains its exact manifest, semantic version, HTTPS artifact location, byte size, BLAKE3 digest, publisher public key, and an Ed25519 signature over all of that metadata. Installation requires the publisher key to be trusted independently of the fetched catalog, verifies the signature and artifact bytes, and atomically publishes the complete manifest/component/signed-release record beneath the extension store. The approved publisher key is pinned separately in `trusted-publishers.json`; it is not accepted from the adjacent installed release record. Activation re-verifies the persisted signature against that separate key pin, rechecks the manifest and artifact, and records the publisher-key, manifest, and component fingerprints before capability approval; installation alone never executes code. Thus a coordinated rewrite of an inactive release record, manifest, and component cannot nominate a replacement publisher. Descriptor-relative no-follow reads protect installed artifacts on Unix, with opened-handle type/size validation on other supported platforms. Invalid installed or enabled records remain visible in `rw extension status`; a corrupt extension is skipped without preventing engine startup, and the durable plugin-status/UI-notification event stream surfaces a bounded control-stripped recovery warning in attached clients. Catalog files are bounded caches; signed release metadata plus the user's separate publisher-key and capability approvals are authoritative. A session retains the exact successfully validated WASM hook generation across workspace-root recomposition, while registration conflicts fail the root change instead of silently disabling hooks.
 
@@ -401,3 +401,45 @@ release gates, migration checkpoints, and non-goals.
 **Revisit when.** The compiled-host feasibility spike cannot load a sealed external
 ESM module under both native sandboxes, or a shared-process design can prove equal
 kernel authority and crash containment. Either outcome requires a superseding ADR.
+
+---
+
+## ADR-028: Each contract and feature catalog has one owner
+
+**Status:** accepted 2026-08-22.
+
+**Decision.** Each piece of contract data and each feature catalog has one
+hand-maintained owner. A consumer imports that owner or reads a generated
+projection. Client preflight checks and transport guards may enforce the same
+contract at their boundaries, but they must consume the owned limits and types.
+They must not copy the values.
+
+Generated files are committed when a consumer needs them. Each generated file
+names its generator, and CI regenerates or checks the projection. Tests may own
+invalid samples and non-normative examples. A test fixture is not a second owner
+of production defaults or supported values. Docs link to the owner or use a
+generated reference when exact values matter.
+
+`architecture/ownership.toml` registers the high-risk boundaries that the
+repository can check mechanically. Its entries name the owner, the generator,
+the generated outputs, and specific definitions that would reintroduce an old
+shadow. The checker does not scan for repeated literals because the same number
+can have unrelated meanings.
+
+**Rationale.** Release packaging, update verification, client limits, and feature
+catalogs had acquired separate hand-maintained definitions. Some copies drifted
+while each local test remained green. Naming one owner makes dependency direction
+explicit and lets CI reject the known ways that a second owner can return.
+
+**Consequences.** A migration moves all callers to the owner and deletes the old
+definition in the same change. Runtime-specific adapters may supply dependencies
+or optional capabilities, but they do not maintain another copy of the common
+feature list. The manifest covers only registered boundaries. A passing ownership
+check does not prove that every unregistered behavior has one implementation.
+Exact Rust and Bun versions use their native root files as owners and a dedicated
+checker validates every workflow, package, provisioning script, and README
+projection.
+
+**Revisit when.** A registered projection cannot be generated or consumed at its
+boundary. Any exception must name the authoritative owner and add a test that
+detects divergence.

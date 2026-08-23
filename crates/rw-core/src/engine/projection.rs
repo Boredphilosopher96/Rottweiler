@@ -27,7 +27,7 @@ pub struct SessionRecoveredState {
     pub thinking: Option<ThinkingLevel>,
     pub mode: SessionMode,
     pub mode_id: Option<ModeId>,
-    pub permission_mode: Option<crate::HeadlessPermissionMode>,
+    pub permission_mode: Option<rw_types::PermissionModeDescriptor>,
     pub pending_plan: Option<PlanArtifact>,
     pub approved_plan: Option<PlanArtifact>,
     pub plan_gate_active: bool,
@@ -77,8 +77,8 @@ pub enum SessionProjectionError {
     UnsupportedVersion(u16),
     #[error("session event sequence is not contiguous at {found}; expected {expected}")]
     NonContiguousSequence { expected: u64, found: u64 },
-    #[error("event stream contains a connection-scoped command acknowledgement")]
-    ConnectionScopedEvent,
+    #[error("event stream contains a non-durable event")]
+    NonDurableEvent,
     #[error("event session changed from {expected} to {found}")]
     SessionChanged { expected: String, found: String },
     #[error("invalid decimal turn id `{0}`")]
@@ -123,46 +123,10 @@ pub(super) fn review_path_is_valid(value: &str) -> bool {
 pub(super) fn recovered_pending_event(
     event: &EngineEvent,
 ) -> Result<Option<PendingEvent>, SessionProjectionError> {
+    if event.delivery() != rw_types::EngineEventDelivery::Durable {
+        return Err(SessionProjectionError::NonDurableEvent);
+    }
     let pending = match event {
-        EngineEvent::CommandAcknowledged { .. }
-        | EngineEvent::SubagentProgress { .. }
-        | EngineEvent::CompactionAttemptStarted { .. }
-        | EngineEvent::CompactionTextDelta { .. }
-        | EngineEvent::CompactionThinkingDelta { .. } => {
-            return Err(SessionProjectionError::ConnectionScopedEvent);
-        }
-        EngineEvent::ContextSnapshotReady { .. }
-        | EngineEvent::CostSnapshotReady { .. }
-        | EngineEvent::PromptDumpReady { .. }
-        | EngineEvent::SessionReplayCompleted { .. }
-        | EngineEvent::SessionForked { .. }
-        | EngineEvent::SessionExported { .. }
-        | EngineEvent::SessionsListed { .. }
-        | EngineEvent::SubagentsListed { .. }
-        | EngineEvent::SubagentReplayBatch { .. }
-        | EngineEvent::SubagentReplayCompleted { .. }
-        | EngineEvent::SessionsSearchReady { .. }
-        | EngineEvent::SessionReviewReady { .. }
-        | EngineEvent::SessionReviewUpdated { .. }
-        | EngineEvent::CommandDescriptorsListed { .. }
-        | EngineEvent::ModesListed { .. }
-        | EngineEvent::ModelsListed { .. }
-        | EngineEvent::SettingsListed { .. }
-        | EngineEvent::McpServersListed { .. }
-        | EngineEvent::RuntimeServicesListed { .. }
-        | EngineEvent::McpServerApprovalReviewed { .. }
-        | EngineEvent::PermissionsListed { .. }
-        | EngineEvent::ProviderAuthStarted { .. }
-        | EngineEvent::ProviderConfigured { .. }
-        | EngineEvent::ProviderAuthFinished { .. }
-        | EngineEvent::ProviderActivationFinished { .. }
-        | EngineEvent::WorkspaceFilesFound { .. }
-        | EngineEvent::WorkspaceFilePreviewReady { .. }
-        | EngineEvent::WorkspaceStatusReady { .. }
-        | EngineEvent::WorkspaceDiffReady { .. }
-        | EngineEvent::HostShutdown { .. } => {
-            return Err(SessionProjectionError::ConnectionScopedEvent);
-        }
         EngineEvent::TurnStarted { turn_id, .. } => PendingEvent::TurnStarted {
             turn: parse_turn_id(turn_id)?,
         },
@@ -544,7 +508,7 @@ pub(super) fn recovered_pending_event(
         } => PendingEvent::ModelChanged {
             model: model.clone(),
             provider: provider.clone(),
-            thinking: config_thinking_to_provider(thinking.unwrap_or_default()),
+            thinking: thinking.unwrap_or_default(),
         },
         EngineEvent::ModelContextCleared { strategy, .. } => PendingEvent::ModelContextCleared {
             strategy: *strategy,
@@ -603,6 +567,7 @@ pub(super) fn recovered_pending_event(
         EngineEvent::SubagentSpawned { .. } | EngineEvent::SubagentFinished { .. } => {
             return Ok(None);
         }
+        _ => unreachable!("non-durable events were rejected before projection"),
     };
     Ok(Some(pending))
 }
@@ -640,14 +605,10 @@ pub fn project_session_events_with_modes(
         let definition = modes
             .get(&mode.0)
             .ok_or_else(|| SessionProjectionError::InvalidMode(mode.0.clone()))?;
-        match recorded_fingerprint {
-            Some(recorded) if recorded == &definition.semantic_fingerprint() => {}
-            None if matches!(mode.0.as_str(), "discuss" | "plan" | "execute") => {}
-            _ => {
-                return Err(SessionProjectionError::ModeDefinitionChanged(
-                    mode.0.clone(),
-                ));
-            }
+        if recorded_fingerprint != &definition.semantic_fingerprint() {
+            return Err(SessionProjectionError::ModeDefinitionChanged(
+                mode.0.clone(),
+            ));
         }
         Ok(mode_permission_base(definition))
     })
@@ -656,10 +617,7 @@ pub fn project_session_events_with_modes(
 #[allow(clippy::match_same_arms, clippy::too_many_lines)]
 fn project_session_events_resolving_mode(
     events: &[EngineEvent],
-    mut resolve_mode: impl FnMut(
-        &ModeId,
-        Option<&String>,
-    ) -> Result<SessionMode, SessionProjectionError>,
+    mut resolve_mode: impl FnMut(&ModeId, &String) -> Result<SessionMode, SessionProjectionError>,
 ) -> Result<SessionRecoveredState, SessionProjectionError> {
     let mut conversation = Vec::new();
     let mut title = None;
@@ -715,7 +673,9 @@ fn project_session_events_resolving_mode(
         Budgeter,
     )>::new();
     for event in events {
-        let meta = event_meta(event).ok_or(SessionProjectionError::ConnectionScopedEvent)?;
+        let meta = event
+            .meta()
+            .ok_or(SessionProjectionError::NonDurableEvent)?;
         if meta.protocol_version != SESSION_EVENT_VERSION {
             return Err(SessionProjectionError::UnsupportedVersion(
                 meta.protocol_version,
@@ -1117,7 +1077,7 @@ fn project_session_events_resolving_mode(
                 definition_fingerprint,
             } => {
                 mode_id = Some(changed.clone());
-                mode = resolve_mode(changed, definition_fingerprint.as_ref())?;
+                mode = resolve_mode(changed, definition_fingerprint)?;
                 if mode == SessionMode::Plan {
                     pending_plan = None;
                     approved_plan = None;

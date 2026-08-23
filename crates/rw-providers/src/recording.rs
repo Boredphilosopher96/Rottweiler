@@ -1651,14 +1651,14 @@ mod tests {
 
     use async_trait::async_trait;
     use futures_util::StreamExt;
+    use rw_types::config::ThinkingLevel;
     use tokio::sync::Notify;
 
     use crate::types::RawSseFrame;
     use crate::{
         BoxEventStream, CacheBreakpointSupport, Capabilities, FinishReason, NativeWebSearchRequest,
         Provider, ProviderError, ProviderErrorKind, ProviderEvent, ProviderModelMetadata,
-        ProviderRequest, ThinkingLevel, TokenUsage, ToolChoice, UsageAccounting, WireFrameSink,
-        WireMode,
+        ProviderRequest, TokenUsage, ToolChoice, UsageAccounting, WireFrameSink, WireMode,
     };
 
     use super::{

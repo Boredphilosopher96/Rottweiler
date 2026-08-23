@@ -2,12 +2,19 @@ use std::{fmt, pin::Pin};
 
 use async_trait::async_trait;
 use futures_core::Stream;
-use rw_types::Turn;
+use rw_types::{Turn, config::ThinkingLevel};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
 use crate::ModelPricing;
+
+/// Maximum encoded arguments accepted for one streamed provider tool call.
+pub(crate) const MAX_PROVIDER_TOOL_ARGUMENT_BYTES: usize = 1_048_576;
+/// Maximum response body accepted from a provider model-catalog endpoint.
+pub(crate) const MAX_PROVIDER_MODEL_CATALOG_BYTES: usize = 4 * 1024 * 1024;
+/// Maximum structured provider error body retained for classification.
+pub(crate) const MAX_PROVIDER_ERROR_BYTES: usize = 64 * 1024;
 
 /// Reserved marker translated only by adapters that explicitly advertise
 /// provider-native web search.
@@ -236,21 +243,6 @@ pub struct ToolDefinition {
     pub description: String,
     /// JSON Schema accepted by the tool.
     pub input_schema: Value,
-}
-
-/// User-facing reasoning effort.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ThinkingLevel {
-    /// Do not request hidden reasoning.
-    #[default]
-    Off,
-    /// Prefer the smallest supported reasoning budget.
-    Low,
-    /// Use a balanced reasoning budget.
-    Medium,
-    /// Prefer the provider's largest generally supported reasoning budget.
-    High,
 }
 
 /// Prompt-cache behavior offered by an adapter.

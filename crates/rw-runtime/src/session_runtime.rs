@@ -4,7 +4,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Component, Path, PathBuf},
     sync::{
-        Arc, Mutex, OnceLock, RwLock,
+        Arc, Mutex, OnceLock, RwLock, Weak,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -26,15 +26,14 @@ use rw_core::{
     SessionActorConfig, SessionCommandAction, SessionCommandContext, SessionCommandOutput,
     SessionEventSink, SessionReview, SpawnAgentTool, StartupNotification, SubagentLimits,
     SubagentMetadataStore, SubagentObserver, SubagentOrchestrator, SubagentReplay,
-    SubagentSessionFactory, SystemEventClock, ThinkingLevel as ConfigThinkingLevel,
-    ToolOutputStream, TurnStatus, UnrestorablePath, Usage, WorktreeSubagentSessionFactory,
-    base_agent_system_turn, builtin_command_registry, builtin_hook_dispatcher,
-    load_instruction_stack, load_nested_instruction_stack, project_session_events,
-    project_session_events_with_modes,
+    SubagentSessionFactory, SystemEventClock, ToolOutputStream, TurnStatus, UnrestorablePath,
+    Usage, WorktreeSubagentSessionFactory, base_agent_system_turn, builtin_command_registry,
+    builtin_hook_dispatcher, load_instruction_stack, load_nested_instruction_stack,
+    merge_model_catalog_provider, project_session_events, project_session_events_with_modes,
 };
 use rw_ext::{
     CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation, CommandRegistry,
-    CommandSource, DiscoveredCommand, DiscoveredShellHook, DiscoveredSkill, ExtensionCatalog,
+    DiscoveredCommand, DiscoveredShellHook, DiscoveredSkill, ExtensionCatalog,
     ExtensionDiscoveryConfig, HookDirective, HookDispatcher, HookEffect, HookError, HookEvent,
     HookFailurePolicy, HookHandler, HookInvocation, HookRegistration, TemplatePart, WasmHookLimits,
     WasmProcessHook, compose_agent_registry, compose_mode_registry,
@@ -44,7 +43,7 @@ use rw_providers::{
     BoxEventStream, CacheBreakpointSupport, CacheHint, Capabilities, FixtureRedactor,
     GuardedHttpFetchError, GuardedHttpFetchRequest, NativeWebSearchCapability, PricingTable,
     Provider, ProviderError, ProviderErrorKind, ProviderEvent, ProviderRequest, ProxyEnvironment,
-    ProxySettings, Recorder, ReplayProvider, ThinkingLevel, ToolChoice, ToolDefinition, WireMode,
+    ProxySettings, Recorder, ReplayProvider, ToolChoice, ToolDefinition, WireMode,
     default_models_path, deny_outbound_network_for_process, guarded_http_fetch,
 };
 use rw_store::{
@@ -73,7 +72,7 @@ use rw_tools::{
     ReadTool, RecordingCommandExecutor, ReferencesTool, RenameResult, RenameTool,
     ReplayCommandExecutor, SandboxPolicy, SandboxSupport, SandboxedLspSpawner,
     SubagentProgressEvent, SubmitPlanTool, SupervisedEgressProxy, SymbolsTool, TodoTool,
-    TokioCommandExecutor, Tool, ToolContext, ToolDescriptor, ToolError, ToolLimits,
+    TokioCommandExecutor, Tool, ToolBehavior, ToolContext, ToolDescriptor, ToolError, ToolLimits,
     ToolOutputChunk, ToolOutputSink, ToolRegistry, ToolResult, UpstreamProxy, WebFetchTool,
     WebFetcher, WebSearchRequest, WebSearchResponse, WebSearchTool, WebSearcher,
     WorkspaceSymbolIndex, WorkspaceUriMapper, WorktreeIsolation, WorktreeLeaseRecord,
@@ -84,12 +83,13 @@ use rw_types::{
     ToolOutputPart, Turn, TurnMeta,
     config::{ToolchainConfig, WebSearchConfig},
 };
+use rw_types::{CommandSource, PermissionModeDescriptor as PermissionMode, config::ThinkingLevel};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{OnceCell, mpsc, oneshot};
 use url::{Host, Url};
 
+use crate::OutputFormat;
 pub use crate::storage_root::initialize_private_storage_root;
-use crate::{OutputFormat, PermissionMode};
 
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8_192;
 const DEFAULT_EVENT_CAPACITY: usize = 1_024;
@@ -107,19 +107,13 @@ const MAX_WORKSPACE_ROOTS: usize = 32;
 const MAX_INITIAL_PROJECT_MEMORY_BYTES: usize = 128 * 1024;
 
 fn configured_session_thinking(config: &Config, model: &str) -> ThinkingLevel {
-    let configured = config
+    config
         .models
         .thinking
         .get(model)
         .or_else(|| config.models.thinking.get(&config.models.default))
         .copied()
-        .unwrap_or_default();
-    match configured {
-        ConfigThinkingLevel::Off => ThinkingLevel::Off,
-        ConfigThinkingLevel::Low => ThinkingLevel::Low,
-        ConfigThinkingLevel::Medium => ThinkingLevel::Medium,
-        ConfigThinkingLevel::High => ThinkingLevel::High,
-    }
+        .unwrap_or_default()
 }
 const INITIAL_MEMORY_FRAME_OPEN: &str = "<rottweiler_untrusted_project_memory_v1>";
 const INITIAL_MEMORY_FRAME_CLOSE: &str = "</rottweiler_untrusted_project_memory_v1>";
@@ -1679,9 +1673,10 @@ pub async fn run(options: RunOptions) -> Result<()> {
                     .as_str();
                 let cache_support = match kind {
                     "anthropic" => CacheBreakpointSupport::Explicit,
-                    "openai" | "openai_responses" | "openai_chat" | "openai_codex"
-                    | "openai_subscription" => CacheBreakpointSupport::Automatic,
-                    "github_copilot" | "openai_compatible" | "openai_compatible_chat"
+                    "openai" | "openai_chat" | "openai_codex" => {
+                        CacheBreakpointSupport::Automatic
+                    }
+                    "github_copilot" | "openai_compatible"
                     | "openai_compatible_responses" => CacheBreakpointSupport::None,
                     _ => {
                         return Err(miette!(
@@ -1877,15 +1872,17 @@ pub async fn run(options: RunOptions) -> Result<()> {
     let model = AliasAwareWebSearchModel::wrap(model, built_tools.websearch.as_ref());
     let instruction_workspace_roots = Arc::new(RwLock::new(workspace_roots.clone()));
     let active_nested_instruction_sources = Arc::new(RwLock::new(BTreeSet::new()));
+    let session_tools = Arc::new(OnceLock::new());
     let model: Arc<dyn ModelDriver> = Arc::new(NestedInstructionsModel {
         inner: model,
+        tools: Arc::clone(&session_tools),
         workspace_roots: Arc::clone(&instruction_workspace_roots),
         active_sources: Arc::clone(&active_nested_instruction_sources),
         memory_redactor: engine_redactor.clone(),
     });
     let project_approvals = project_approval_path(&storage_root, &workspace);
     let permissions = match options.permission_mode {
-        Some(mode) => PermissionGate::for_headless_mode(mode.into()),
+        Some(mode) => PermissionGate::for_headless_mode(mode),
         None => PermissionGate::from_config(loaded_config.config.permissions.clone()),
     }
     .with_workspace_roots(&workspace_roots)
@@ -1906,28 +1903,16 @@ pub async fn run(options: RunOptions) -> Result<()> {
     if let Some(index) = skill_index_turn(&extension_catalog)? {
         initial_context.push(index);
     }
-    let (mut runtime_hooks, mut wasm_startup_notifications, validated_wasm_hooks) =
+    let (_, mut wasm_startup_notifications, validated_wasm_hooks) =
         compose_runtime_hooks_with_extensions_validated(
             &loaded_config.config.toolchain,
             &toolchain_runtime,
+            Arc::clone(&built_tools.registry),
             &extension_catalog,
             Arc::clone(&built_tools.code_intelligence),
         )
         .await?;
     wasm_startup_notifications.extend(extension_startup_notifications(&extension_catalog));
-    if let Some(plugins) = &plugin_runtime {
-        for (registration, handler) in &plugins.hooks {
-            runtime_hooks
-                .register_shared(registration.clone(), Arc::clone(handler))
-                .map_err(|error| miette!("plugin hook could not register: {error}"))?;
-        }
-    }
-    register_nested_instruction_guard(
-        &mut runtime_hooks,
-        Arc::clone(&instruction_workspace_roots),
-        Arc::clone(&active_nested_instruction_sources),
-    )?;
-    let runtime_hooks = Arc::new(runtime_hooks);
     let workspace_root_controller = Arc::new(RuntimeWorkspaceRootController {
         checkpoint_root,
         storage_root: storage_root.clone(),
@@ -2114,6 +2099,31 @@ pub async fn run(options: RunOptions) -> Result<()> {
         .map_err(display_agent_error)?;
         registry
     };
+    session_tools
+        .set(Arc::downgrade(&runtime_tools))
+        .map_err(|_| miette!("session tool registry was bound more than once"))?;
+    let mut runtime_hooks = compose_runtime_hooks_with_extensions(
+        &loaded_config.config.toolchain,
+        &workspace_root_controller.toolchain_runtime,
+        Arc::clone(&runtime_tools),
+        &extension_catalog,
+        Arc::clone(&built_tools.code_intelligence),
+        &workspace_root_controller.validated_wasm_hooks,
+    )?;
+    if let Some(plugins) = &plugin_runtime {
+        for (registration, handler) in &plugins.hooks {
+            runtime_hooks
+                .register_shared(registration.clone(), Arc::clone(handler))
+                .map_err(|error| miette!("plugin hook could not register: {error}"))?;
+        }
+    }
+    register_nested_instruction_guard(
+        &mut runtime_hooks,
+        Arc::clone(&runtime_tools),
+        Arc::clone(&instruction_workspace_roots),
+        Arc::clone(&workspace_root_controller.active_nested_instruction_sources),
+    )?;
+    let runtime_hooks = Arc::new(runtime_hooks);
     let mut runtime_commands = compose_runtime_commands(
         &extension_catalog,
         &workspace_roots,
@@ -2678,15 +2688,17 @@ pub(crate) async fn compose_hosted_actor(
     let model = AliasAwareWebSearchModel::wrap(model, built_tools.websearch.as_ref());
     let instruction_workspace_roots = Arc::new(RwLock::new(workspace_roots.clone()));
     let active_nested_instruction_sources = Arc::new(RwLock::new(BTreeSet::new()));
+    let session_tools = Arc::new(OnceLock::new());
     let model: Arc<dyn ModelDriver> = Arc::new(NestedInstructionsModel {
         inner: model,
+        tools: Arc::clone(&session_tools),
         workspace_roots: Arc::clone(&instruction_workspace_roots),
         active_sources: Arc::clone(&active_nested_instruction_sources),
         memory_redactor: engine_redactor.clone(),
     });
     let project_approvals = project_approval_path(&options.storage_root, &workspace);
     let permissions = match options.permission_mode {
-        Some(mode) => PermissionGate::for_headless_mode(mode.into()),
+        Some(mode) => PermissionGate::for_headless_mode(mode),
         None => PermissionGate::from_config(options.config.permissions.clone()),
     }
     .with_workspace_roots(&workspace_roots)
@@ -2707,28 +2719,16 @@ pub(crate) async fn compose_hosted_actor(
     if let Some(index) = skill_index_turn(&extension_catalog)? {
         initial_context.push(index);
     }
-    let (mut runtime_hooks, mut wasm_startup_notifications, validated_wasm_hooks) =
+    let (_, mut wasm_startup_notifications, validated_wasm_hooks) =
         compose_runtime_hooks_with_extensions_validated(
             &options.config.toolchain,
             &toolchain_runtime,
+            Arc::clone(&built_tools.registry),
             &extension_catalog,
             Arc::clone(&built_tools.code_intelligence),
         )
         .await?;
     wasm_startup_notifications.extend(extension_startup_notifications(&extension_catalog));
-    if let Some(plugins) = &plugin_runtime {
-        for (registration, handler) in &plugins.hooks {
-            runtime_hooks
-                .register_shared(registration.clone(), Arc::clone(handler))
-                .map_err(|error| miette!("plugin hook could not register: {error}"))?;
-        }
-    }
-    register_nested_instruction_guard(
-        &mut runtime_hooks,
-        Arc::clone(&instruction_workspace_roots),
-        Arc::clone(&active_nested_instruction_sources),
-    )?;
-    let runtime_hooks = Arc::new(runtime_hooks);
     let workspace_root_controller = Arc::new(RuntimeWorkspaceRootController {
         checkpoint_root: checkpoint_root(&options.storage_root, &workspace, &session_id),
         storage_root: options.storage_root.clone(),
@@ -2911,6 +2911,31 @@ pub(crate) async fn compose_hosted_actor(
     )
     .await
     .map_err(display_agent_error)?;
+    session_tools
+        .set(Arc::downgrade(&runtime_tools))
+        .map_err(|_| miette!("session tool registry was bound more than once"))?;
+    let mut runtime_hooks = compose_runtime_hooks_with_extensions(
+        &options.config.toolchain,
+        &workspace_root_controller.toolchain_runtime,
+        Arc::clone(&runtime_tools),
+        &extension_catalog,
+        Arc::clone(&built_tools.code_intelligence),
+        &workspace_root_controller.validated_wasm_hooks,
+    )?;
+    if let Some(plugins) = &plugin_runtime {
+        for (registration, handler) in &plugins.hooks {
+            runtime_hooks
+                .register_shared(registration.clone(), Arc::clone(handler))
+                .map_err(|error| miette!("plugin hook could not register: {error}"))?;
+        }
+    }
+    register_nested_instruction_guard(
+        &mut runtime_hooks,
+        Arc::clone(&runtime_tools),
+        Arc::clone(&instruction_workspace_roots),
+        Arc::clone(&workspace_root_controller.active_nested_instruction_sources),
+    )?;
+    let runtime_hooks = Arc::new(runtime_hooks);
     let mut runtime_commands = compose_runtime_commands(
         &extension_catalog,
         &workspace_roots,
@@ -3008,16 +3033,6 @@ fn load_provider_script(path: &Path) -> Result<Vec<Vec<ProviderEvent>>> {
 #[allow(clippy::needless_pass_by_value)]
 fn display_agent_error(error: AgentLoopError) -> miette::Report {
     miette!(error.to_string())
-}
-
-impl From<PermissionMode> for rw_core::HeadlessPermissionMode {
-    fn from(value: PermissionMode) -> Self {
-        match value {
-            PermissionMode::Strict => Self::Strict,
-            PermissionMode::AutoSafe => Self::AutoSafe,
-            PermissionMode::Yolo => Self::Yolo,
-        }
-    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -3456,16 +3471,7 @@ fn latest_workspace_session(storage_root: &Path, workspace: &Path) -> Result<Opt
 }
 
 fn validate_session_id(value: &str) -> Result<()> {
-    if value.is_empty()
-        || value.len() > 128
-        || matches!(value, "." | "..")
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-    {
-        return Err(miette!("session id is empty, too long, or unsafe"));
-    }
-    Ok(())
+    SessionId::validate(value).map_err(|_| miette!("session id is empty, too long, or unsafe"))
 }
 
 pub(crate) fn checkpoint_root(storage_root: &Path, workspace: &Path, session_id: &str) -> PathBuf {
@@ -5305,6 +5311,7 @@ impl RuntimeWorkspaceRootController {
         let mut hooks = compose_runtime_hooks_with_extensions(
             &self.toolchain_config,
             &toolchain_runtime,
+            Arc::clone(&built.registry),
             &catalog,
             Arc::clone(&built.code_intelligence),
             &self.validated_wasm_hooks,
@@ -5312,6 +5319,7 @@ impl RuntimeWorkspaceRootController {
         .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
         register_nested_instruction_guard(
             &mut hooks,
+            Arc::clone(&built.registry),
             Arc::clone(&instruction_roots),
             Arc::clone(&active_sources),
         )
@@ -5581,6 +5589,7 @@ impl RuntimeWorkspaceRootController {
         let mut hooks = compose_runtime_hooks_with_extensions(
             &self.toolchain_config,
             &self.toolchain_runtime,
+            Arc::clone(&built.registry),
             &catalog,
             Arc::clone(&built.code_intelligence),
             &self.validated_wasm_hooks,
@@ -5592,6 +5601,7 @@ impl RuntimeWorkspaceRootController {
         })?;
         register_nested_instruction_guard(
             &mut hooks,
+            Arc::clone(&built.registry),
             Arc::clone(&self.instruction_workspace_roots),
             Arc::clone(&self.active_nested_instruction_sources),
         )
@@ -6703,7 +6713,7 @@ impl ModelCatalogSource for PersistingHostedCatalogSource {
             .ok()
             .flatten()
             .unwrap_or_else(|| self.initial.clone());
-        let durable = merge_catalog_provider(base, update.clone(), provider);
+        let durable = merge_model_catalog_provider(base, update.clone(), provider);
         persist_catalog_snapshot(self.cache_path.clone(), durable).await;
         Ok(update)
     }
@@ -6714,53 +6724,6 @@ async fn persist_catalog_snapshot(path: PathBuf, snapshot: ModelCatalogSnapshot)
     // provider operation must not be relabelled as failed if the private cache
     // cannot be refreshed.
     let _ = tokio::task::spawn_blocking(move || store_model_catalog_cache(&path, &snapshot)).await;
-}
-
-fn merge_catalog_provider(
-    mut base: ModelCatalogSnapshot,
-    mut update: ModelCatalogSnapshot,
-    provider: &str,
-) -> ModelCatalogSnapshot {
-    fn candidate_provider(candidate: &str) -> Option<&str> {
-        candidate.split_once('/').map(|(owner, _)| owner)
-    }
-    update.providers.retain(|row| row.name == provider);
-    update.models.retain(|model| model.provider == provider);
-    update.aliases.retain_mut(|alias| {
-        alias
-            .candidates
-            .retain(|candidate| candidate_provider(candidate) == Some(provider));
-        !alias.candidates.is_empty()
-    });
-
-    base.providers.retain(|row| row.name != provider);
-    base.providers.append(&mut update.providers);
-    base.providers
-        .sort_by(|left, right| left.name.cmp(&right.name));
-    base.models.retain(|model| model.provider != provider);
-    base.models.append(&mut update.models);
-    base.models.sort_by(|left, right| left.id.cmp(&right.id));
-    for alias in &mut base.aliases {
-        alias
-            .candidates
-            .retain(|candidate| candidate_provider(candidate) != Some(provider));
-        if let Some(position) = update
-            .aliases
-            .iter()
-            .position(|updated| updated.alias == alias.alias)
-        {
-            let updated = update.aliases.remove(position);
-            alias.candidates.extend(updated.candidates);
-            alias.current |= updated.current;
-        }
-    }
-    base.aliases.retain(|alias| !alias.candidates.is_empty());
-    base.aliases.append(&mut update.aliases);
-    base.aliases
-        .sort_by(|left, right| left.alias.0.cmp(&right.alias.0));
-    base.truncated |= update.truncated;
-    base.cached = false;
-    base
 }
 
 #[async_trait]
@@ -7890,6 +7853,7 @@ impl ModelDriver for PromptRecordingModel {
 /// interactions without mutating the actor's persisted initial prefix.
 struct NestedInstructionsModel {
     inner: Arc<dyn ModelDriver>,
+    tools: Arc<OnceLock<Weak<ToolRegistry>>>,
     workspace_roots: Arc<RwLock<Vec<PathBuf>>>,
     active_sources: Arc<RwLock<BTreeSet<PathBuf>>>,
     memory_redactor: FixtureRedactor,
@@ -7912,7 +7876,17 @@ impl NestedInstructionsModel {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let touched = completed_file_tool_paths(&request.turns, &roots);
+        let tools = self.tools.get().and_then(Weak::upgrade).ok_or_else(|| {
+            AgentLoopError::InvalidConfiguration(
+                "session tool registry is not available for model use".to_owned(),
+            )
+        })?;
+        let touched =
+            completed_file_tool_paths(&request.turns, &roots, &tools).map_err(|error| {
+                AgentLoopError::ToolContext(format!(
+                    "completed tool path semantics could not be resolved: {error}"
+                ))
+            })?;
         if touched.is_empty() {
             return Ok(());
         }
@@ -8057,6 +8031,7 @@ impl ModelDriver for NestedInstructionsModel {
 }
 
 struct NestedInstructionsPreToolGuard {
+    tools: Arc<ToolRegistry>,
     workspace_roots: Arc<RwLock<Vec<PathBuf>>>,
     active_sources: Arc<RwLock<BTreeSet<PathBuf>>>,
 }
@@ -8074,26 +8049,41 @@ impl HookHandler for NestedInstructionsPreToolGuard {
         let Some(tool_name) = payload.get("name").and_then(serde_json::Value::as_str) else {
             return Ok(HookDirective::Continue);
         };
-        if !matches!(tool_name, "write" | "edit" | "multi_edit") {
+        let arguments = payload
+            .get("arguments")
+            .ok_or_else(|| HookError::new("tool_semantics", "tool arguments are missing"))?;
+        let semantics = self
+            .tools
+            .invocation_semantics(tool_name, arguments)
+            .map_err(|error| HookError::new("tool_semantics", error.to_string()))?
+            .ok_or_else(|| HookError::new("tool_semantics", "tool is not registered"))?;
+        if semantics.behavior != ToolBehavior::FileMutation {
             return Ok(HookDirective::Continue);
         }
-        let Some(supplied) = payload
-            .get("arguments")
-            .and_then(|arguments| arguments.get("path"))
-            .and_then(serde_json::Value::as_str)
-        else {
-            return Ok(HookDirective::Continue);
-        };
         let roots = self
             .workspace_roots
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let Some(touched) = resolve_instruction_tool_path(&roots, supplied) else {
-            return Ok(HookDirective::Continue);
-        };
+        let touched = semantics
+            .workspace_paths
+            .iter()
+            .map(|path| resolve_instruction_tool_path(&roots, path))
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                HookError::new(
+                    "tool_semantics",
+                    "registered file mutation path is outside the workspace",
+                )
+            })?;
+        if touched.is_empty() {
+            return Err(HookError::new(
+                "tool_semantics",
+                "registered file mutation did not declare a workspace path",
+            ));
+        }
         let stack =
-            tokio::task::spawn_blocking(move || load_nested_instruction_stack(&roots, &[touched]))
+            tokio::task::spawn_blocking(move || load_nested_instruction_stack(&roots, &touched))
                 .await
                 .map_err(|_| {
                     HookError::new(
@@ -8132,17 +8122,24 @@ impl HookHandler for NestedInstructionsPreToolGuard {
 
 fn register_nested_instruction_guard(
     dispatcher: &mut HookDispatcher,
+    tools: Arc<ToolRegistry>,
     workspace_roots: Arc<RwLock<Vec<PathBuf>>>,
     active_sources: Arc<RwLock<BTreeSet<PathBuf>>>,
 ) -> Result<()> {
+    let applicable_tools = tools
+        .names_with_behavior(ToolBehavior::FileMutation)
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
     dispatcher
         .register(
             HookRegistration::new("builtin.nested_instructions", HookEvent::PreTool)
                 .with_priority(i32::MIN.saturating_add(1))
                 .with_failure_policy(HookFailurePolicy::FailClosed)
-                .with_applicable_tools(["write", "edit", "multi_edit"])
+                .with_applicable_tools(applicable_tools)
                 .with_timeout(std::time::Duration::from_secs(5)),
             NestedInstructionsPreToolGuard {
+                tools,
                 workspace_roots,
                 active_sources,
             },
@@ -8150,7 +8147,11 @@ fn register_nested_instruction_guard(
         .map_err(|error| miette!("nested instruction guard could not register: {error}"))
 }
 
-fn completed_file_tool_paths(turns: &[Turn], roots: &[PathBuf]) -> Vec<PathBuf> {
+fn completed_file_tool_paths(
+    turns: &[Turn],
+    roots: &[PathBuf],
+    tools: &ToolRegistry,
+) -> Result<Vec<PathBuf>, ToolError> {
     let completed = turns
         .iter()
         .flat_map(|turn| &turn.blocks)
@@ -8163,27 +8164,25 @@ fn completed_file_tool_paths(turns: &[Turn], roots: &[PathBuf]) -> Vec<PathBuf> 
         .iter()
         .flat_map(|turn| &turn.blocks)
         .filter_map(|block| match block {
-            Block::ToolCall { id, name, args } if completed.contains(&id.0) => {
-                schema_file_tool_path(name, args)
-                    .and_then(|path| resolve_instruction_tool_path(roots, path))
-            }
+            Block::ToolCall { id, name, args } if completed.contains(&id.0) => Some((name, args)),
             _ => None,
         })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
+        .try_fold(BTreeSet::new(), |mut paths, (name, args)| {
+            let semantics = tools.invocation_semantics(name, args)?.ok_or_else(|| {
+                ToolError::InvalidInput(format!("unknown historical tool: {name}"))
+            })?;
+            paths.extend(
+                semantics
+                    .workspace_paths
+                    .iter()
+                    .filter_map(|path| resolve_instruction_tool_path(roots, path)),
+            );
+            Ok(paths)
+        })
+        .map(|paths| paths.into_iter().collect())
 }
 
-fn schema_file_tool_path<'a>(name: &str, args: &'a serde_json::Value) -> Option<&'a str> {
-    match name {
-        "read" | "write" | "edit" | "multi_edit" | "grep" | "glob" | "ls" | "diagnostics"
-        | "definition" | "references" | "rename" => args.get("path")?.as_str(),
-        _ => None,
-    }
-}
-
-fn resolve_instruction_tool_path(roots: &[PathBuf], supplied: &str) -> Option<PathBuf> {
-    let supplied = Path::new(supplied);
+fn resolve_instruction_tool_path(roots: &[PathBuf], supplied: &Path) -> Option<PathBuf> {
     if supplied.is_absolute() {
         return roots
             .iter()
@@ -8637,7 +8636,7 @@ fn provider_native_search_available(config: &Config) -> bool {
             return false;
         };
         match provider.kind.as_str() {
-            "openai" | "openai_responses" => provider
+            "openai" => provider
                 .base_url
                 .as_deref()
                 .is_none_or(openai_native_endpoint),
@@ -8981,10 +8980,15 @@ struct ToolchainHook {
     linters: Vec<String>,
     rules: Vec<CompiledToolchainRule>,
     runtime: Arc<ToolchainRuntime>,
+    tools: Arc<ToolRegistry>,
 }
 
 impl ToolchainHook {
-    fn compile(config: &ToolchainConfig, runtime: Arc<ToolchainRuntime>) -> Result<Self> {
+    fn compile(
+        config: &ToolchainConfig,
+        runtime: Arc<ToolchainRuntime>,
+        tools: Arc<ToolRegistry>,
+    ) -> Result<Self> {
         let rules = config
             .rules
             .iter()
@@ -9008,6 +9012,7 @@ impl ToolchainHook {
             linters: config.linters.clone(),
             rules,
             runtime,
+            tools,
         })
     }
 
@@ -9070,6 +9075,31 @@ impl ToolchainHook {
     }
 }
 
+fn registered_file_mutation_path(
+    tools: &ToolRegistry,
+    name: &str,
+    arguments: &serde_json::Value,
+) -> std::result::Result<Option<PathBuf>, HookError> {
+    let semantics = tools
+        .invocation_semantics(name, arguments)
+        .map_err(|error| HookError::new("tool_semantics", error.to_string()))?
+        .ok_or_else(|| HookError::new("tool_semantics", "tool is not registered"))?;
+    if semantics.behavior != ToolBehavior::FileMutation {
+        return Ok(None);
+    }
+    match semantics.workspace_paths.as_slice() {
+        [path] => Ok(Some(path.clone())),
+        [] => Err(HookError::new(
+            "tool_semantics",
+            "registered file mutation did not declare a workspace path",
+        )),
+        _ => Err(HookError::new(
+            "tool_semantics",
+            "toolchain hooks require one registered workspace path",
+        )),
+    }
+}
+
 #[async_trait]
 impl HookHandler for ToolchainHook {
     async fn invoke(
@@ -9083,22 +9113,25 @@ impl HookHandler for ToolchainHook {
         let Some(tool_name) = payload.get("name").and_then(serde_json::Value::as_str) else {
             return Ok(HookDirective::Continue);
         };
-        if !matches!(tool_name, "write" | "edit" | "multi_edit") {
-            return Ok(HookDirective::Continue);
-        }
-        let Some(virtual_path) = payload
+        let arguments = payload
             .get("arguments")
-            .and_then(|arguments| arguments.get("path"))
-            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| HookError::new("tool_semantics", "tool arguments are missing"))?;
+        let Some(virtual_path) = registered_file_mutation_path(&self.tools, tool_name, arguments)?
         else {
             return Ok(HookDirective::Continue);
         };
         let boundary = self.runtime.current();
-        let Some((file, cwd)) = resolve_toolchain_file(&boundary.workspace_roots, virtual_path)
+        let Some((file, cwd)) = resolve_toolchain_file(&boundary.workspace_roots, &virtual_path)
         else {
             return Err(HookError::new(
                 "toolchain_path",
                 "post-tool path could not be resolved inside a workspace root",
+            ));
+        };
+        let Some(virtual_path) = virtual_path.to_str() else {
+            return Err(HookError::new(
+                "toolchain_path",
+                "registered tool path is not UTF-8",
             ));
         };
         let (formatter, linters) = self.commands_for(virtual_path);
@@ -9150,6 +9183,7 @@ impl HookHandler for ToolchainHook {
 struct LspDiagnosticsHook {
     intelligence: Arc<dyn CodeIntelligenceProvider>,
     runtime: Arc<ToolchainRuntime>,
+    tools: Arc<ToolRegistry>,
 }
 
 #[async_trait]
@@ -9165,18 +9199,15 @@ impl HookHandler for LspDiagnosticsHook {
         let Some(tool_name) = payload.get("name").and_then(serde_json::Value::as_str) else {
             return Ok(HookDirective::Continue);
         };
-        if !matches!(tool_name, "write" | "edit" | "multi_edit") {
-            return Ok(HookDirective::Continue);
-        }
-        let Some(virtual_path) = payload
+        let arguments = payload
             .get("arguments")
-            .and_then(|arguments| arguments.get("path"))
-            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| HookError::new("tool_semantics", "tool arguments are missing"))?;
+        let Some(virtual_path) = registered_file_mutation_path(&self.tools, tool_name, arguments)?
         else {
             return Ok(HookDirective::Continue);
         };
         let boundary = self.runtime.current();
-        let Some((file, _cwd)) = resolve_toolchain_file(&boundary.workspace_roots, virtual_path)
+        let Some((file, _cwd)) = resolve_toolchain_file(&boundary.workspace_roots, &virtual_path)
         else {
             return Ok(HookDirective::Continue);
         };
@@ -9191,7 +9222,7 @@ impl HookHandler for LspDiagnosticsHook {
             .map_err(|error| HookError::new("lsp_diagnostics_read", error.to_string()))?;
         let diagnostics = self
             .intelligence
-            .diagnostics(Path::new(virtual_path), &source)
+            .diagnostics(&virtual_path, &source)
             .await
             .items;
         if diagnostics.is_empty() {
@@ -9281,8 +9312,7 @@ impl HookCommandResult {
     }
 }
 
-fn resolve_toolchain_file(roots: &[PathBuf], virtual_path: &str) -> Option<(PathBuf, PathBuf)> {
-    let supplied = Path::new(virtual_path);
+fn resolve_toolchain_file(roots: &[PathBuf], supplied: &Path) -> Option<(PathBuf, PathBuf)> {
     if supplied.is_absolute()
         || supplied.components().any(|component| {
             matches!(
@@ -9760,13 +9790,6 @@ fn compose_runtime_commands(
         if registry.resolve(definition.name()).is_some() {
             continue;
         }
-        if matches!(&definition, CustomPromptDefinition::Command(command) if command.used_legacy_args_alias())
-        {
-            eprintln!(
-                "warning: custom command /{} uses Claude frontmatter `args`; migrate to `argument-hint` (description, model, and allowed-tools are unchanged)",
-                definition.name()
-            );
-        }
         let allowed_tools = normalized_allowed_tools(&definition, tools)?;
         let descriptor = match &definition {
             CustomPromptDefinition::Command(command) => {
@@ -9885,13 +9908,14 @@ impl DeclarativeShellHookHandler {
                         "hook command requested {file} without a tool path",
                     )
                 })?;
-            let (file, _) = resolve_toolchain_file(&boundary.workspace_roots, virtual_path)
-                .ok_or_else(|| {
-                    HookError::new(
-                        "declarative_hook_file",
-                        "hook file could not be resolved inside a workspace root",
-                    )
-                })?;
+            let (file, _) =
+                resolve_toolchain_file(&boundary.workspace_roots, Path::new(virtual_path))
+                    .ok_or_else(|| {
+                        HookError::new(
+                            "declarative_hook_file",
+                            "hook file could not be resolved inside a workspace root",
+                        )
+                    })?;
             command = command.replace("{file}", &shell_words::quote(&file.to_string_lossy()));
         }
         let read_only = self.hook.registration().effect() == HookEffect::ReadOnly;
@@ -10153,11 +10177,12 @@ fn skill_index_turn(catalog: &ExtensionCatalog) -> Result<Option<Turn>> {
 fn compose_runtime_hooks_with_extensions(
     config: &ToolchainConfig,
     runtime: &Arc<ToolchainRuntime>,
+    tools: Arc<ToolRegistry>,
     catalog: &ExtensionCatalog,
     intelligence: Arc<dyn CodeIntelligenceProvider>,
     validated_wasm_hooks: &[NamedWasmHook],
 ) -> Result<HookDispatcher> {
-    let mut hooks = compose_runtime_hooks(config, Arc::clone(runtime), Some(intelligence))?;
+    let mut hooks = compose_runtime_hooks(config, Arc::clone(runtime), tools, Some(intelligence))?;
     register_declarative_hooks(&mut hooks, catalog, runtime)?;
     register_retained_wasm_hooks(&mut hooks, validated_wasm_hooks)?;
     Ok(hooks)
@@ -10166,6 +10191,7 @@ fn compose_runtime_hooks_with_extensions(
 async fn compose_runtime_hooks_with_extensions_validated(
     config: &ToolchainConfig,
     runtime: &Arc<ToolchainRuntime>,
+    tools: Arc<ToolRegistry>,
     catalog: &ExtensionCatalog,
     intelligence: Arc<dyn CodeIntelligenceProvider>,
 ) -> Result<(
@@ -10173,7 +10199,7 @@ async fn compose_runtime_hooks_with_extensions_validated(
     Vec<StartupNotification>,
     Arc<[NamedWasmHook]>,
 )> {
-    let mut hooks = compose_runtime_hooks(config, Arc::clone(runtime), Some(intelligence))?;
+    let mut hooks = compose_runtime_hooks(config, Arc::clone(runtime), tools, Some(intelligence))?;
     register_declarative_hooks(&mut hooks, catalog, runtime)?;
     let (validated_wasm_hooks, notices) = register_validated_wasm_hooks(&mut hooks).await?;
     Ok((hooks, notices, validated_wasm_hooks.into()))
@@ -10333,6 +10359,7 @@ fn require_private_helper(path: PathBuf) -> Result<PathBuf> {
 fn compose_runtime_hooks(
     config: &ToolchainConfig,
     runtime: Arc<ToolchainRuntime>,
+    tools: Arc<ToolRegistry>,
     intelligence: Option<Arc<dyn CodeIntelligenceProvider>>,
 ) -> Result<HookDispatcher> {
     let mut hooks = builtin_hook_dispatcher().map_err(display_agent_error)?;
@@ -10343,31 +10370,42 @@ fn compose_runtime_hooks(
             .iter()
             .any(|rule| rule.formatter.is_some() || !rule.linters.is_empty());
     if has_commands {
+        let applicable_tools = tools
+            .names_with_behavior(ToolBehavior::FileMutation)
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
         hooks
             .register(
                 HookRegistration::new("builtin.toolchain", HookEvent::PostTool)
                     .with_priority(100)
                     .with_failure_policy(HookFailurePolicy::FailClosed)
                     .with_effect(HookEffect::WorkspaceMutating)
-                    .with_applicable_tools(["write", "edit", "multi_edit"])
+                    .with_applicable_tools(applicable_tools)
                     .with_required_capabilities([ToolCapability::Execute])
                     .with_timeout(std::time::Duration::from_mins(2)),
-                ToolchainHook::compile(config, Arc::clone(&runtime))?,
+                ToolchainHook::compile(config, Arc::clone(&runtime), Arc::clone(&tools))?,
             )
             .map_err(|error| miette!("toolchain hook could not register: {error}"))?;
     }
     if let Some(intelligence) = intelligence {
+        let applicable_tools = tools
+            .names_with_behavior(ToolBehavior::FileMutation)
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
         hooks
             .register(
                 HookRegistration::new("builtin.lsp_diagnostics", HookEvent::PostTool)
                     .with_priority(200)
                     .with_failure_policy(HookFailurePolicy::FailOpen)
-                    .with_applicable_tools(["write", "edit", "multi_edit"])
+                    .with_applicable_tools(applicable_tools)
                     .with_required_capabilities([ToolCapability::Execute])
                     .with_timeout(std::time::Duration::from_secs(15)),
                 LspDiagnosticsHook {
                     intelligence,
                     runtime,
+                    tools,
                 },
             )
             .map_err(|error| miette!("LSP diagnostics hook could not register: {error}"))?;
@@ -13046,7 +13084,7 @@ mod tests {
     use rw_core::{
         Cost, PermissionApprover, PermissionOutcome, PermissionRequest, ProviderConfig, TurnId,
     };
-    use rw_ext::PluginManifest;
+    use rw_plugin_protocol::PluginManifest;
     use rw_providers::FinishReason;
     use rw_tools::{
         CommandOutcome as ToolCommandOutcome, DiagnosticSeverity, Range, WebSearchResult,
@@ -13378,6 +13416,13 @@ mod tests {
                 cached: false,
                 truncated: self.0,
             })
+        }
+
+        async fn discover_provider(
+            &self,
+            _provider: &str,
+        ) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
+            self.discover().await
         }
     }
 
@@ -14015,7 +14060,7 @@ mod tests {
         );
 
         loader
-            .configure_builtin_provider("openai")
+            .configure_provider_profile("openai", "openai")
             .expect("fixed built-in profile must persist");
         credential_stored.store(true, Ordering::Release);
         model
@@ -14329,8 +14374,8 @@ mod tests {
             ),
         ]);
         config.models.thinking = BTreeMap::from([
-            ("fast".to_owned(), rw_core::ThinkingLevel::Low),
-            ("other".to_owned(), rw_core::ThinkingLevel::High),
+            ("fast".to_owned(), ThinkingLevel::Low),
+            ("other".to_owned(), ThinkingLevel::High),
         ]);
 
         let isolated = prepare_isolated_model_initialization_config(config, "fast")
@@ -14350,7 +14395,7 @@ mod tests {
         );
         assert_eq!(
             isolated.models.thinking,
-            BTreeMap::from([("fast".to_owned(), rw_core::ThinkingLevel::Low)])
+            BTreeMap::from([("fast".to_owned(), ThinkingLevel::Low)])
         );
     }
 
@@ -14378,7 +14423,7 @@ mod tests {
         config
             .models
             .thinking
-            .insert("fast".to_owned(), rw_core::ThinkingLevel::Low);
+            .insert("fast".to_owned(), ThinkingLevel::Low);
 
         let isolated =
             prepare_isolated_model_initialization_config(config, "github_copilot/gpt-4.1")
@@ -15389,7 +15434,7 @@ mod tests {
                 policy: rw_core::SubagentRecoveryPolicy {
                     model_alias: "fast".to_owned(),
                     system_prompt: None,
-                    permission_mode: rw_core::SubagentPermissionMode::Execute,
+                    permission_mode: rw_types::SessionMode::Execute,
                     max_turns: 4,
                 },
                 phase: rw_core::SubagentRecoveryPhase::Active,
@@ -15609,7 +15654,7 @@ mod tests {
             policy: rw_core::SubagentRecoveryPolicy {
                 model_alias: "fast".to_owned(),
                 system_prompt: None,
-                permission_mode: rw_core::SubagentPermissionMode::Execute,
+                permission_mode: rw_types::SessionMode::Execute,
                 max_turns: 4,
             },
             phase: rw_core::SubagentRecoveryPhase::Active,
@@ -15724,7 +15769,7 @@ mod tests {
             policy: rw_core::SubagentRecoveryPolicy {
                 model_alias: "fast".to_owned(),
                 system_prompt: None,
-                permission_mode: rw_core::SubagentPermissionMode::Execute,
+                permission_mode: rw_types::SessionMode::Execute,
                 max_turns: 4,
             },
             phase: rw_core::SubagentRecoveryPhase::Active,
@@ -15886,6 +15931,7 @@ mod tests {
 
     fn nested_instruction_fixture() -> (
         TempDir,
+        Arc<ToolRegistry>,
         NestedInstructionsModel,
         ProviderRequest,
         ToolCallId,
@@ -15903,6 +15949,7 @@ mod tests {
             .expect("root instructions")
             .expect("root layer")
             .as_system_turn();
+        let tools = semantic_file_tools();
         let wrapper = NestedInstructionsModel {
             inner: Arc::new(UnavailableHostedModel {
                 alias: "fixture".to_owned(),
@@ -15910,6 +15957,7 @@ mod tests {
                 compaction: rw_core::CompactionConfig::default(),
                 budget: rw_core::BudgetConfig::default(),
             }),
+            tools: bound_session_tools(&tools),
             workspace_roots: Arc::new(RwLock::new(vec![root.path().to_path_buf()])),
             active_sources: Arc::new(RwLock::new(BTreeSet::new())),
             memory_redactor: FixtureRedactor::default(),
@@ -15937,7 +15985,29 @@ mod tests {
                 tools_in_prefix: true,
             }),
         };
-        (root, wrapper, request, call_id)
+        (root, tools, wrapper, request, call_id)
+    }
+
+    fn semantic_file_tools() -> Arc<ToolRegistry> {
+        let mut tools = ToolRegistry::new();
+        for tool in [
+            Arc::new(ReadTool::new(ToolLimits::default())) as Arc<dyn Tool>,
+            Arc::new(WriteTool::new(ToolLimits::default())),
+            Arc::new(EditTool::new(ToolLimits::default())),
+            Arc::new(MultiEditTool::new(ToolLimits::default())),
+        ] {
+            tools.register(tool).expect("semantic file tool");
+        }
+        Arc::new(tools)
+    }
+
+    fn bound_session_tools(tools: &Arc<ToolRegistry>) -> Arc<OnceLock<Weak<ToolRegistry>>> {
+        let bound = Arc::new(OnceLock::new());
+        assert!(
+            bound.set(Arc::downgrade(tools)).is_ok(),
+            "bind session tools once"
+        );
+        bound
     }
 
     fn completed_tool_result(id: ToolCallId) -> Turn {
@@ -16073,10 +16143,12 @@ mod tests {
         let captured = Arc::new(Mutex::new(None));
         let redactor = FixtureRedactor::default();
         redactor.register_known_value(CANARY);
+        let tools = semantic_file_tools();
         let wrapper = NestedInstructionsModel {
             inner: Arc::new(CapturingModel {
                 request: Arc::clone(&captured),
             }),
+            tools: bound_session_tools(&tools),
             workspace_roots: Arc::new(RwLock::new(vec![root.path().to_path_buf()])),
             active_sources: Arc::new(RwLock::new(BTreeSet::new())),
             memory_redactor: redactor,
@@ -16114,7 +16186,7 @@ mod tests {
 
     #[test]
     fn nested_instructions_activate_after_completed_file_tool_in_same_session() {
-        let (root, wrapper, mut request, call_id) = nested_instruction_fixture();
+        let (root, tools, wrapper, mut request, call_id) = nested_instruction_fixture();
 
         wrapper
             .augment(&mut request)
@@ -16145,7 +16217,9 @@ mod tests {
 
         let attacker_turns = attacker_path_turns();
         assert!(
-            completed_file_tool_paths(&attacker_turns, &[root.path().to_path_buf()]).is_empty()
+            completed_file_tool_paths(&attacker_turns, &[root.path().to_path_buf()], &tools,)
+                .is_err(),
+            "unknown historical tools must not be guessed from arbitrary JSON"
         );
         assert!(
             resolve_instruction_tool_path(
@@ -16154,8 +16228,7 @@ mod tests {
                     .parent()
                     .expect("workspace parent")
                     .join("outside.rs")
-                    .to_str()
-                    .expect("UTF-8 fixture path")
+                    .as_path()
             )
             .is_none()
         );
@@ -16163,11 +16236,11 @@ mod tests {
 
     #[tokio::test]
     async fn nested_instruction_guard_blocks_first_mutation_then_allows_replay_retry() {
-        let (root, wrapper, mut request, call_id) = nested_instruction_fixture();
+        let (root, tools, wrapper, mut request, call_id) = nested_instruction_fixture();
         let roots = Arc::clone(&wrapper.workspace_roots);
         let active = Arc::clone(&wrapper.active_sources);
         let mut dispatcher = builtin_hook_dispatcher().expect("builtin hooks");
-        register_nested_instruction_guard(&mut dispatcher, roots, active)
+        register_nested_instruction_guard(&mut dispatcher, Arc::clone(&tools), roots, active)
             .expect("register nested guard");
         let registrations = dispatcher
             .registrations(HookEvent::PreTool)
@@ -16181,7 +16254,7 @@ mod tests {
         let mutation = serde_json::json!({
             "id": "nested-edit",
             "name": "edit",
-            "arguments": {"path": "src/deep/file.rs", "old_string": "fixture", "new_string": "changed"}
+            "arguments": {"path": "src/deep/file.rs", "old": "fixture", "new": "changed"}
         });
         let first = dispatcher
             .dispatch(HookEvent::PreTool, mutation.clone())
@@ -16198,8 +16271,8 @@ mod tests {
         *name = "edit".to_owned();
         *args = serde_json::json!({
             "path": "src/deep/file.rs",
-            "old_string": "fixture",
-            "new_string": "changed"
+            "old": "fixture",
+            "new": "changed"
         });
         request.turns.push(completed_tool_result(call_id));
         wrapper
@@ -16210,6 +16283,7 @@ mod tests {
 
         let replay = NestedInstructionsModel {
             inner: Arc::clone(&wrapper.inner),
+            tools: Arc::clone(&wrapper.tools),
             workspace_roots: Arc::clone(&wrapper.workspace_roots),
             active_sources: Arc::new(RwLock::new(BTreeSet::new())),
             memory_redactor: FixtureRedactor::default(),
@@ -16221,6 +16295,7 @@ mod tests {
         let mut replay_dispatcher = builtin_hook_dispatcher().expect("replay hooks");
         register_nested_instruction_guard(
             &mut replay_dispatcher,
+            tools,
             Arc::clone(&replay.workspace_roots),
             Arc::clone(&replay.active_sources),
         )
@@ -16251,8 +16326,13 @@ mod tests {
         let roots = Arc::new(RwLock::new(vec![primary.path().to_path_buf()]));
         let active = Arc::new(RwLock::new(BTreeSet::new()));
         let mut dispatcher = builtin_hook_dispatcher().expect("builtin hooks");
-        register_nested_instruction_guard(&mut dispatcher, Arc::clone(&roots), Arc::clone(&active))
-            .expect("nested guard");
+        register_nested_instruction_guard(
+            &mut dispatcher,
+            semantic_file_tools(),
+            Arc::clone(&roots),
+            Arc::clone(&active),
+        )
+        .expect("nested guard");
 
         assert!(
             dispatcher
@@ -16271,7 +16351,7 @@ mod tests {
         let blocked = dispatcher
             .dispatch(
                 HookEvent::PreTool,
-                serde_json::json!({"id":"parallel-edit","name":"edit","arguments":{"path":"@root/1/pkg/file.ts","old_string":"x","new_string":"y"}}),
+                serde_json::json!({"id":"parallel-edit","name":"edit","arguments":{"path":"@root/1/pkg/file.ts","old":"x","new":"y"}}),
             )
             .await;
         assert!(matches!(
@@ -16559,6 +16639,7 @@ mod tests {
         let dispatcher = compose_runtime_hooks_with_extensions(
             &ToolchainConfig::default(),
             &runtime,
+            semantic_file_tools(),
             &catalog,
             Arc::new(FixtureCodeIntelligence),
             &[],
@@ -16598,7 +16679,7 @@ mod tests {
             br#"{
                 "name":"retained-hook",
                 "version":"1.0.0",
-                "protocol":1,
+                "protocol":2,
                 "capabilities":{"hooks":["post_tool"]}
             }"#,
         )
@@ -16944,6 +17025,7 @@ mod tests {
                 rules: Vec::new(),
             },
             runtime,
+            semantic_file_tools(),
             None,
         )
         .expect("toolchain hooks");
@@ -16953,7 +17035,7 @@ mod tests {
                 serde_json::json!({
                     "id": "call",
                     "name": "multi_edit",
-                    "arguments": {"path": "src/lib.rs"},
+                    "arguments": {"path": "src/lib.rs", "edits": []},
                     "output": {"type": "text", "text": "multi edit complete"},
                     "is_error": false,
                 }),
@@ -17044,6 +17126,7 @@ mod tests {
                 rules: Vec::new(),
             },
             runtime,
+            semantic_file_tools(),
             None,
         )
         .expect("production toolchain hooks");
@@ -17053,7 +17136,7 @@ mod tests {
                 serde_json::json!({
                     "id": "real-toolchain-call",
                     "name": "edit",
-                    "arguments": {"path": "crate/src/lib.rs"},
+                    "arguments": {"path": "crate/src/lib.rs", "old": "value:&Vec<u8>", "new": "value: &[u8]"},
                     "output": {"type": "text", "text": "edit complete"},
                     "is_error": false,
                 }),
@@ -17121,15 +17204,20 @@ mod tests {
             &[root.path().to_path_buf()],
         ));
         let intelligence: Arc<dyn CodeIntelligenceProvider> = Arc::new(FixtureCodeIntelligence);
-        let hooks = compose_runtime_hooks(&ToolchainConfig::default(), runtime, Some(intelligence))
-            .expect("runtime hooks");
+        let hooks = compose_runtime_hooks(
+            &ToolchainConfig::default(),
+            runtime,
+            semantic_file_tools(),
+            Some(intelligence),
+        )
+        .expect("runtime hooks");
         let result = hooks
             .dispatch(
                 HookEvent::PostTool,
                 serde_json::json!({
                     "id": "call",
                     "name": "multi_edit",
-                    "arguments": {"path": "src/lib.rs"},
+                    "arguments": {"path": "src/lib.rs", "edits": []},
                     "output": {"type": "text", "text": "multi edit complete"},
                     "is_error": false,
                 }),
@@ -17548,7 +17636,7 @@ mod tests {
             .providers
             .entry("openai".to_owned())
             .or_default()
-            .kind = "openai_responses".to_owned();
+            .kind = "openai".to_owned();
         config
             .models
             .aliases
@@ -18403,7 +18491,7 @@ mod tests {
             .append(EngineEvent::ModeChanged {
                 meta: meta(7),
                 mode: rw_core::ModeId("removed-custom-mode".to_owned()),
-                definition_fingerprint: Some("stale-fingerprint".to_owned()),
+                definition_fingerprint: "stale-fingerprint".to_owned(),
             })
             .expect("custom mode event");
         drop(parent_log);
@@ -19807,7 +19895,7 @@ mod tests {
             SessionActor::spawn(resumed_parent).expect("resume parent actor");
         assert_eq!(
             resumed_parent_permissions.snapshot().runtime_mode,
-            Some(rw_core::HeadlessPermissionMode::Yolo),
+            Some(rw_types::PermissionModeDescriptor::Yolo),
             "the restarted parent must restore its durable YOLO mode"
         );
 
@@ -19828,7 +19916,7 @@ mod tests {
         assert_eq!(child.workspace_root, added);
         assert_eq!(
             child.permissions.snapshot().runtime_mode,
-            Some(rw_core::HeadlessPermissionMode::Yolo),
+            Some(rw_types::PermissionModeDescriptor::Yolo),
             "fresh child inherits the parent's effective permission mode"
         );
         let rejecting_approver = RejectingPermissionApprover(AtomicUsize::new(0));
@@ -20551,7 +20639,7 @@ mod tests {
             policy: rw_core::SubagentRecoveryPolicy {
                 model_alias: "fast".to_owned(),
                 system_prompt: Some("complete the recovered task".to_owned()),
-                permission_mode: rw_core::SubagentPermissionMode::Execute,
+                permission_mode: rw_types::SessionMode::Execute,
                 max_turns: 4,
             },
             phase: rw_core::SubagentRecoveryPhase::Pending,

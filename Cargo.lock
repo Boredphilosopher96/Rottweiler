@@ -2732,6 +2732,7 @@ dependencies = [
  "rw-core",
  "rw-ext",
  "rw-mcp",
+ "rw-plugin-protocol",
  "rw-providers",
  "rw-runtime",
  "rw-store",
@@ -2785,6 +2786,7 @@ dependencies = [
  "rw-context",
  "rw-ext",
  "rw-mcp",
+ "rw-plugin-protocol",
  "rw-providers",
  "rw-store",
  "rw-tools",
@@ -2814,6 +2816,7 @@ dependencies = [
  "ed25519-dalek",
  "futures-util",
  "rustix",
+ "rw-plugin-protocol",
  "rw-providers",
  "rw-tools",
  "rw-types",
@@ -2868,6 +2871,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rw-plugin-protocol"
+version = "0.1.4"
+dependencies = [
+ "blake3",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "rw-providers"
 version = "0.1.4"
 dependencies = [
@@ -2915,6 +2928,7 @@ dependencies = [
  "rw-core",
  "rw-ext",
  "rw-mcp",
+ "rw-plugin-protocol",
  "rw-providers",
  "rw-store",
  "rw-tools",
@@ -3011,6 +3025,7 @@ name = "rw-wasm-host"
 version = "0.1.4"
 dependencies = [
  "rw-ext",
+ "rw-plugin-protocol",
  "serde_json",
  "tokio",
  "wat",

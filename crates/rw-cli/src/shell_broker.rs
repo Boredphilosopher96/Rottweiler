@@ -28,15 +28,13 @@ use tokio::{
 };
 
 use crate::{
-    server::ClientCredentials,
+    server::{CAPABILITY_HEADER, CLIENT_HEADER, ClientCredentials},
     tty::{
         OutputRedactor, ShellCompletionGate, TokioTerminalSpawner, TtyError, UnixTerminalSignals,
         remote_tty_argv, run_after_durable_shell_start, run_argv_after_durable_shell_start,
     },
 };
 
-const CLIENT_HEADER: &str = "x-rottweiler-client";
-const CAPABILITY_HEADER: &str = "x-rottweiler-capability";
 const SHELL_BROKER_CAPABILITY: &str = "shell_broker";
 const MAX_CONTROL_BODY_BYTES: usize = 64 * 1024;
 const MAX_SSE_EVENT_BYTES: usize = 2 * 1024 * 1024;

@@ -3,10 +3,10 @@ use std::{path::PathBuf, sync::Arc};
 use futures_util::StreamExt;
 use rw_providers::{
     GitHubCopilotProvider, GitHubCopilotProviderConfig, GitHubCopilotRuntime, NetworkPolicy,
-    Provider, ProviderRequest, Recorder, ReplayProvider, Secret, ThinkingLevel, ToolChoice,
+    Provider, ProviderRequest, Recorder, ReplayProvider, Secret, ToolChoice,
     deny_outbound_network_for_process,
 };
-use rw_types::{Block, Role, Turn, TurnMeta};
+use rw_types::{Block, Role, Turn, TurnMeta, config::ThinkingLevel};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},

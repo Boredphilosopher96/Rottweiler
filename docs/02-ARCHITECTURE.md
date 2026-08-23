@@ -47,9 +47,16 @@ Headless engine + thin clients. The engine owns all agent logic and speaks an ev
 
 ```
 rottweiler/
+├── .bun-version               # exact Bun toolchain owner
+├── rust-toolchain.toml        # exact Rust toolchain owner
 ├── Cargo.toml                 # workspace
+├── architecture/
+│   └── ownership.toml         # checked owners, generators, and forbidden shadows
+├── contracts/
+│   └── release-contract.json  # release platforms, archive shape, and product budgets
 ├── crates/
 │   ├── rw-types/              # shared types: message IR, events, config schema, errors
+│   ├── rw-plugin-protocol/    # dependency-leaf plugin wire contract + current codegen
 │   ├── rw-store/              # session persistence, checkpoints, config loading
 │   ├── rw-providers/          # router, adapters, pricing, auth
 │   ├── rw-context/            # token budget, compaction, TOON, cache strategy
@@ -70,7 +77,22 @@ rottweiler/
 └── tests/                     # cross-crate integration + replay fixtures + protocol contract tests
 ```
 
-Dependency rule: arrows point downward only. No Rust crate depends on anything in `packages/`. `rw-types` depends on almost nothing. `rw-core` is independent of `rw-runtime` and all executable frontends. `rw-runtime` owns concrete storage/provider/tool/MCP/extension assembly and injects it into the core engine. `rw-cli` consumes that owned composition API; its direct lower-level dependencies are explicit, narrow administrative and transport commands, not a re-export facade. The metadata and source-layout rules are enforced in CI by `scripts/check-dependency-direction.py`.
+Dependency rule: arrows point downward only. No Rust crate depends on anything in `packages/`. `rw-types` and `rw-plugin-protocol` are dependency leaves. `rw-core` is independent of `rw-runtime` and all executable frontends. `rw-runtime` owns concrete storage/provider/tool/MCP/extension assembly and injects it into the core engine. `rw-cli` consumes that owned composition API; its direct lower-level dependencies are explicit, narrow administrative and transport commands, not a re-export facade. The metadata and source-layout rules are enforced in CI by `scripts/check-dependency-direction.py`.
+
+Each piece of contract data and each feature catalog has one hand-maintained
+owner. Other crates, clients, scripts, tests, and docs either consume that owner
+or use a generated projection. Boundary-specific validation remains local, but
+it imports the contract that it enforces instead of copying limits or defaults.
+`architecture/ownership.toml` records the ownership boundaries that CI can check
+mechanically. `scripts/check-ownership.py` rejects duplicate owner locations,
+unmarked generated projections, and named hand-maintained shadows. The manifest
+is a checked set of high-risk boundaries, not proof that an unregistered semantic
+rule has no second implementation.
+
+The exact Rust version lives in `rust-toolchain.toml`; the exact Bun version
+lives in the root `.bun-version`. Workflows, package metadata, WSL provisioning,
+and build docs project those values. `scripts/check-toolchain-ownership.py`
+rejects drift without storing a third copy in the ownership manifest.
 
 The stable boundary is semantic rather than binary-private: `rw-core` owns
 protocol state, actor behavior, permission enforcement, and provider-neutral
@@ -94,6 +116,13 @@ the identical signed archive and its installer exposes only `rw`. Consequently
 ordinary install, launch, and close are each one user action even though crash
 isolation remains process-based. Source builds may expose component paths to
 contributors, but are not an end-user distribution contract.
+
+`contracts/release-contract.json` owns the supported platform mapping, archive
+member paths and modes, extraction caps, and product size budgets.
+`scripts/release_contract.py` validates that file and generates
+`crates/rw-types/src/generated/release_contract.rs` for Rust consumers. Release
+shell and Python code query the JSON owner through that script. They do not keep
+parallel platform or archive tables.
 
 The signed updater follows the same boundary: `rw-core` owns exact-byte threshold verification, root rotation, rollback/freeze policy, and the opaque proxy-aware HTTP client; `rw-providers` remains the only production HTTP implementation; `rw-cli` owns the official versioned install layout, bounded archive extraction, fsync/journal recovery, and atomic generation selection. Runtime/project config cannot replace the compile-time trust root or metadata origin.
 
@@ -262,14 +291,14 @@ resolve(alias) → [candidate models] → adapter → provider
   `provider/http` authentication. Model capabilities, context/output limits,
   and optional pricing flow into the live catalog and accounting path. The
   plugin names an approval-fingerprinted credential reference; the host alone
-  resolves, registers, and applies the secret. Protocol-1 providers retain the
-  conservative fixed capabilities and unpriced accounting defined by protocol 1.
+  resolves, registers, and applies the secret. Protocol 2 is the only supported
+  plugin generation.
 
 ### Context engine (`rw-context`)
 
 - `ContextAssembler`: builds the prompt with a **frozen prefix** (system, tools, project docs) hashed each turn; a test asserts the hash is stable across turns of the same session unless config changed.
 - `Budgeter`: local token estimates per block, reconciled with provider-reported usage; drives meters and the compaction trigger.
-- `Pruner` + `Compactor`: **1:1 port of opencode's strategy — ADR-010 is the contract** (backward-walking prune with 40k-token protection window and 20k minimum reclaim; overflow = usable − min(20k, max output); summary generated by the `compaction` agent as an in-conversation assistant message using the Goal/Instructions/Discoveries/Accomplished/Relevant-files template; provider-overflow replay of the last user message; synthetic auto-continue nudge). The `pre_compact` hook contract: inject context strings or replace the summary prompt.
+- `Pruner` + `Compactor`: **ADR-010 is the contract** (backward-walking prune with a 40k-token protection window and 20k minimum reclaim; the default reserve is the smallest of 20k, the model output limit, and half of the context window; summary generated by the `compaction` agent as an in-conversation assistant message using the Goal/Instructions/Discoveries/Accomplished/Relevant-files template; provider-overflow replay of the last user message; synthetic auto-continue nudge). Invalid resolved window metadata disables automatic compaction instead of creating a zero threshold. The `pre_compact` hook contract can inject context strings or replace the summary prompt.
 - `toon` module: serializer from `Value` to TOON with property-based tests (round-trip through a decoder) and a token-savings benchmark.
 
 ### Storage (`rw-store`)
@@ -356,7 +385,7 @@ If a token refresh rotates the refresh token, the adapter persists the rotated
 value through an injected credential sink before returning the new access token;
 storage failure is fail-closed and sanitized.
 
-The `openai_codex` (alias `openai_subscription`) kind is intentionally separate
+The `openai_codex` kind is intentionally separate
 from standard OpenAI API-key adapters. Its built-in browser flow uses the public
 client id, PKCE/state, the exact `http://localhost:1455/auth/callback`, and the
 required organization/simplified-flow/originator authorization parameters. One
@@ -448,10 +477,14 @@ Built on OpenTUI (per ADR-001), which supplies the retained component tree and t
 - **SSE client** with reconnect + event-sequence resync (events carry monotonic ids; on reconnect the TUI replays the gap from the engine).
 - **Replay presentation boundary** is the engine's `session_replay_completed` marker. The TUI reduces historical events immediately but suppresses their live-only presentation effects until that marker arrives; stream termination only performs idempotent cleanup for an incomplete replay.
 - Components: markdown/syntax-highlighted blocks, collapsible tool calls, diff accept/reject view, fuzzy pickers, question prompts, nested subagent progress, status line.
-- Types for commands/events are **generated from `protocol/`**, never hand-written — drift between Rust and TS is a build failure, not a runtime bug.
-- Reducer delivery semantics are a local, compiler-exhaustive map over the generated
-  `EngineEvent` discriminator union. Unknown wire discriminators remain an additive
-  compatibility path, but a generated event cannot silently fall through as unknown.
+- `ClientCommand`, `EngineEvent`, and the shared IR are owned by the Rust types in
+  `crates/rw-types`. `cargo xtask codegen` generates `protocol/types.ts`, the JSON
+  schemas, and the cross-language fixtures from those types. The TUI imports the
+  generated TypeScript projection; CI rejects drift.
+- `EngineEvent::delivery()` owns durable, transient, and connection-scoped event
+  lifetime. Protocol codegen derives a complete TypeScript delivery map from the
+  Rust event schema, and the reducer consumes that projection. Unknown wire
+  discriminators remain an additive compatibility path.
 
 ## Cross-cutting behaviors
 

@@ -27,8 +27,8 @@ const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 const initializeParams = {
   host: "rottweiler",
-  protocol: 1,
-  min_protocol: 1,
+  protocol: 2,
+  min_protocol: 2,
   max_frame_bytes: PROTOCOL_LIMITS.maxLineBytes,
 } as const
 
@@ -47,7 +47,7 @@ function fixtureDefinition(secret = "handler-secret"): PluginDefinition {
     manifest: {
       name: "fixture",
       version: "1.0.0",
-      protocol: 1,
+      protocol: 2,
       capabilities: {
         tools: [{ name: "echo", description: "echo", schema: { type: "object" }, caps: [] }],
         commands: [{ name: "fixture", description: "fixture command" }],
@@ -137,46 +137,7 @@ describe("wire protocol", () => {
     })
   })
 
-  test("matches the language-neutral protocol 1 wire fixture", async () => {
-    const fixture = JSON.parse(
-      await readFile(join(import.meta.dir, "../fixtures/wire/protocol-1.json"), "utf8"),
-    ) as { methods: Readonly<Record<string, string>> }
-    const {
-      providerModels: _providerModels,
-      providerHttp: _providerHttp,
-      providerHttpEvent: _providerHttpEvent,
-      providerHttpCancel: _providerHttpCancel,
-      ...protocol1Methods
-    } = RPC_METHODS
-    expect(fixture.methods).toEqual(protocol1Methods)
-  })
-
-  test("shared fixture matches the frozen schema constants and manifest contract", async () => {
-    const fixture = JSON.parse(
-      await readFile(join(import.meta.dir, "../fixtures/wire/protocol-1.json"), "utf8"),
-    ) as { status: string; limits: Record<string, number>; initialize_response: { result: PluginDefinition["manifest"] } }
-    const schema = JSON.parse(
-      await readFile(join(import.meta.dir, "../fixtures/wire/protocol-1.schema.json"), "utf8"),
-    ) as { properties: { status: { const: string }; limits: { properties: Record<string, { const: number }> } }; $defs: Record<string, unknown> }
-    expect(fixture.status).toBe(schema.properties.status.const)
-    for (const [name, value] of Object.entries(fixture.limits)) {
-      const schemaLimit = schema.properties.limits.properties[name]?.const
-      if (schemaLimit === undefined) throw new Error(`schema is missing limit ${name}`)
-      expect(value).toBe(schemaLimit)
-    }
-    expect(schema.$defs).toMatchObject({
-      manifest: expect.any(Object), tool_result: expect.any(Object), hook_result: expect.any(Object),
-      provider_request: expect.any(Object), provider_event_params: expect.any(Object),
-      provider_cancel_params: expect.any(Object),
-      inject_message_params: expect.any(Object), set_status_params: expect.any(Object), notify_params: expect.any(Object),
-    })
-    expect(() => definePlugin({
-      manifest: fixture.initialize_response.result,
-      handlers: { events: { TurnFinished: () => undefined } },
-    })).not.toThrow()
-  })
-
-  test("protocol 2 fixture and schema publish the negotiated model catalog contract", async () => {
+  test("the protocol fixture and schema publish the negotiated model catalog contract", async () => {
     const fixture = JSON.parse(
       await readFile(join(import.meta.dir, "../fixtures/wire/protocol-2.json"), "utf8"),
     ) as {
@@ -221,7 +182,7 @@ describe("wire protocol", () => {
       event: "TurnFinished", payload: { session_id: "s" },
     })
     expect(messages).toHaveLength(11)
-    expect(messages[0]).toMatchObject({ id: 1, result: { protocol: 1 } })
+    expect(messages[0]).toMatchObject({ id: 1, result: { protocol: 2 } })
     expect(messages[1]).toEqual({
       jsonrpc: "2.0", id: "plugin-push-1", method: "ui/notify", params: { title: "fixture", message: "called" },
     })
@@ -331,7 +292,7 @@ describe("wire protocol", () => {
     let cleaned = false
     const definition = definePlugin({
       manifest: {
-        name: "cancel-provider", version: "1", protocol: 1,
+        name: "cancel-provider", version: "1", protocol: 2,
         capabilities: { providers: [{ "alias-prefix": "fixture/" }] },
       },
       handlers: { providers: {
@@ -476,7 +437,7 @@ describe("wire protocol", () => {
   test("gracefully shuts down when aborted while input is idle", async () => {
     let shutdowns = 0
     const definition = definePlugin({
-      manifest: { name: "shutdown", version: "1", protocol: 1, capabilities: {} },
+      manifest: { name: "shutdown", version: "1", protocol: 2, capabilities: {} },
       handlers: { shutdown: () => { shutdowns += 1 } },
     })
     const { server } = harness(definition)
@@ -492,7 +453,7 @@ describe("wire protocol", () => {
     let observedAbort = false
     const definition = definePlugin({
       manifest: {
-        name: "hung-handler", version: "1", protocol: 1,
+        name: "hung-handler", version: "1", protocol: 2,
         capabilities: {
           tools: [{ name: "hang", description: "hang", schema: {}, caps: [] }],
         },
@@ -525,7 +486,7 @@ describe("wire protocol", () => {
     let observedAbort = false
     const definition = definePlugin({
       manifest: {
-        name: "abort-handler", version: "1", protocol: 1,
+        name: "abort-handler", version: "1", protocol: 2,
         capabilities: { tools: [{ name: "hang", description: "hang", schema: {}, caps: [] }] },
       },
       handlers: { tools: { hang: (_params, { signal }) => new Promise<never>(() => {
@@ -547,7 +508,7 @@ describe("wire protocol", () => {
   test("refuses undeclared pushes locally without emitting a push frame", async () => {
     const definition = definePlugin({
       manifest: {
-        name: "no-push", version: "1", protocol: 1,
+        name: "no-push", version: "1", protocol: 2,
         capabilities: { tools: [{ name: "attempt", description: "attempt", schema: {}, caps: [] }] },
       },
       handlers: { tools: { attempt: async (_params, { push }) => {
@@ -594,13 +555,13 @@ describe("bounded transport and manifests", () => {
 
   test("rejects undeclared handlers and unbounded manifests before startup", () => {
     expect(() => definePlugin({
-      manifest: { name: "bad", version: "1", protocol: 1, capabilities: {} },
+      manifest: { name: "bad", version: "1", protocol: 2, capabilities: {} },
       handlers: { tools: { escaped: () => ({ content: "escaped", data: null }) } },
     })).toThrow("exceeds the manifest")
     expect(() => definePlugin({
       manifest: {
         name: "x".repeat(PROTOCOL_LIMITS.maxNameBytes + 1),
-        version: "1", protocol: 1, capabilities: {},
+        version: "1", protocol: 2, capabilities: {},
       },
       handlers: {},
     })).toThrow("plugin name")
@@ -608,19 +569,19 @@ describe("bounded transport and manifests", () => {
 
   test("matches Rust canonical manifest limits and names", () => {
     expect(() => definePlugin({
-      manifest: { name: "version", version: "x".repeat(65), protocol: 1, capabilities: {} },
+      manifest: { name: "version", version: "x".repeat(65), protocol: 2, capabilities: {} },
       handlers: {},
     })).toThrow("plugin version")
     expect(() => definePlugin({
       manifest: {
-        name: "event", version: "1", protocol: 1,
+        name: "event", version: "1", protocol: 2,
         capabilities: { event_subscriptions: ["turnFinished"] },
       },
       handlers: { events: { turnFinished: () => undefined } },
     })).toThrow("canonical event")
     expect(() => definePlugin({
       manifest: {
-        name: "provider", version: "1", protocol: 1,
+        name: "provider", version: "1", protocol: 2,
         capabilities: { providers: [{ "alias-prefix": "fixture" }] },
       },
       handlers: { providers: { fixture: async function* () { yield { type: "finished", reason: "stop" } } } },
@@ -629,7 +590,7 @@ describe("bounded transport and manifests", () => {
     const maximumPrefix = `${"a".repeat(PROTOCOL_LIMITS.maxNameBytes - 1)}/`
     expect(() => definePlugin({
       manifest: {
-        name: "provider", version: "1", protocol: 1,
+        name: "provider", version: "1", protocol: 2,
         capabilities: { providers: [{ "alias-prefix": maximumPrefix }] },
       },
       handlers: { providers: { [maximumPrefix]: async function* () { yield { type: "finished", reason: "stop" } } } },
@@ -637,7 +598,7 @@ describe("bounded transport and manifests", () => {
     const overlongPrefix = `${"a".repeat(PROTOCOL_LIMITS.maxNameBytes)}/`
     expect(() => definePlugin({
       manifest: {
-        name: "provider", version: "1", protocol: 1,
+        name: "provider", version: "1", protocol: 2,
         capabilities: { providers: [{ "alias-prefix": overlongPrefix }] },
       },
       handlers: { providers: { [overlongPrefix]: async function* () { yield { type: "finished", reason: "stop" } } } },
@@ -647,7 +608,7 @@ describe("bounded transport and manifests", () => {
     for (let depth = 0; depth < 33; depth += 1) schema = { nested: schema }
     expect(() => definePlugin({
       manifest: {
-        name: "schema", version: "1", protocol: 1,
+        name: "schema", version: "1", protocol: 2,
         capabilities: {
           tools: [{ name: "deep", description: "deep", schema: schema as never, caps: [] }],
         },
@@ -669,7 +630,7 @@ describe("scaffold", () => {
     const manifest = parsePluginManifest({
       name: "inert",
       version: "1.0.0",
-      protocol: 1,
+      protocol: 2,
       capabilities: {},
     })
     expect(manifest.name).toBe("inert")
@@ -677,7 +638,7 @@ describe("scaffold", () => {
     expect(() => parsePluginManifest({
       name: "inert",
       version: "1.0.0",
-      protocol: 1,
+      protocol: 2,
       capabilities: { unknown: [] },
     })).toThrow("unknown field")
   })
