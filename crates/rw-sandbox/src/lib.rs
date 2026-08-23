@@ -24,22 +24,45 @@ pub const HELPER_ARG: &str = "__rottweiler-sandbox-helper";
 // Keep this list shared by Seatbelt and Landlock so broad/default policies do
 // not drift in which credential stores they protect.
 const SENSITIVE_HOME_SUFFIXES: &[&str] = &[
-    ".ssh",
+    ".authinfo",
+    ".authinfo.gpg",
     ".aws",
     ".azure",
+    ".bash_history",
+    ".cargo/credentials.toml",
+    ".claude",
     ".codex",
-    ".docker",
-    ".gnupg",
-    ".kube",
-    ".rottweiler",
+    ".config/claude",
     ".config/gcloud",
     ".config/gh",
+    ".config/hub",
     ".config/opencode",
+    ".databrickscfg",
+    ".docker",
+    ".gem/credentials",
     ".git-credentials",
+    ".gitconfig",
+    ".gnupg",
+    ".kaggle",
+    ".kube",
+    ".m2/settings.xml",
     ".netrc",
     ".npmrc",
+    ".oci",
     ".pypirc",
+    ".rottweiler",
+    ".ssh",
+    ".terraform.d",
+    ".zsh_history",
+    "Library/Keychains",
 ];
+
+fn sensitive_home_roots(home: &Path) -> Vec<PathBuf> {
+    SENSITIVE_HOME_SUFFIXES
+        .iter()
+        .map(|suffix| home.join(suffix))
+        .collect()
+}
 
 /// Network authority granted to a sandboxed process.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -807,10 +830,7 @@ fn sensitive_read_roots() -> Vec<PathBuf> {
     else {
         return Vec::new();
     };
-    SENSITIVE_HOME_SUFFIXES
-        .iter()
-        .map(|suffix| home.join(suffix))
-        .collect()
+    sensitive_home_roots(&home)
 }
 
 /// Handles a Linux sandbox-helper invocation and replaces the current process
@@ -874,8 +894,8 @@ mod linux {
     };
 
     use super::{
-        NetworkPolicy, OsString, RootKind, SENSITIVE_HOME_SUFFIXES, SandboxError, SandboxPolicy,
-        audited_linux_tool, serde_json,
+        NetworkPolicy, OsString, RootKind, SandboxError, SandboxPolicy, audited_linux_tool,
+        sensitive_home_roots, serde_json,
     };
 
     /// Linux's default compatibility roots. These are deliberately explicit:
@@ -1205,8 +1225,7 @@ mod linux {
 
     fn sensitive_linux_roots(home: &Path) -> Vec<PathBuf> {
         let mut roots = BTreeSet::new();
-        for suffix in SENSITIVE_HOME_SUFFIXES {
-            let lexical = home.join(suffix);
+        for lexical in sensitive_home_roots(home) {
             roots.insert(lexical.clone());
             if let Ok(canonical) = lexical.canonicalize() {
                 roots.insert(canonical);
@@ -1684,6 +1703,22 @@ mod tests {
                 .evaluate("example.com", &[private]),
             EgressDecision::Allowed
         );
+    }
+
+    #[test]
+    fn sensitive_home_policy_includes_shell_history_and_agent_credentials() {
+        let roots = sensitive_home_roots(Path::new("/Users/fixture"));
+        for expected in [
+            "/Users/fixture/.claude",
+            "/Users/fixture/.zsh_history",
+            "/Users/fixture/Library/Keychains",
+            "/Users/fixture/.terraform.d",
+        ] {
+            assert!(
+                roots.iter().any(|root| root == Path::new(expected)),
+                "missing {expected}"
+            );
+        }
     }
 
     #[cfg(target_os = "macos")]

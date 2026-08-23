@@ -125,13 +125,12 @@ pub struct OverflowPolicy {
 }
 
 impl OverflowPolicy {
-    /// Validates explicit overrides before accepting user configuration.
+    /// Validates the context window and explicit user reserve.
     ///
     /// # Errors
     ///
     /// Rejects a zero context window or an explicit reserve that consumes the
-    /// entire window. Runtime metadata using the default reserve remains
-    /// observable through [`Self::calculate`] even when internally inconsistent.
+    /// entire window.
     pub const fn validate(self) -> Result<Self, OverflowPolicyError> {
         if self.context_window_tokens == 0 {
             return Err(OverflowPolicyError::ZeroContextWindow);
@@ -147,11 +146,14 @@ impl OverflowPolicy {
         Ok(self)
     }
 
-    /// Default reserve required by ADR-010: min(20k, model max output).
+    /// Default ADR-010 reserve, capped at half of the context window.
     #[must_use]
     pub fn reserved_tokens(self) -> u64 {
-        self.reserved_tokens_override
-            .unwrap_or_else(|| 20_000_u64.min(self.max_output_tokens))
+        self.reserved_tokens_override.unwrap_or_else(|| {
+            20_000_u64
+                .min(self.max_output_tokens)
+                .min(self.context_window_tokens / 2)
+        })
     }
 
     /// Calculates both physical overflow and whether auto-compaction should run.
@@ -258,7 +260,7 @@ mod tests {
     }
 
     #[test]
-    fn reserve_at_or_above_window_is_immediate_overflow() {
+    fn default_reserve_cannot_exhaust_the_context_window() {
         let policy = OverflowPolicy {
             context_window_tokens: 10_000,
             max_output_tokens: 20_000,
@@ -266,8 +268,9 @@ mod tests {
             automatic_compaction: true,
         };
         let decision = policy.calculate(0);
-        assert_eq!(decision.threshold_tokens, 0);
-        assert!(decision.should_compact);
+        assert_eq!(decision.reserved_tokens, 5_000);
+        assert_eq!(decision.threshold_tokens, 5_000);
+        assert!(!decision.should_compact);
     }
 
     #[test]

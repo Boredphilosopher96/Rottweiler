@@ -1938,38 +1938,44 @@ impl ToolOutputSink for OrderedOutputSink {
 
 struct DoomLoopGuard {
     threshold: usize,
-    last_failure: Option<String>,
-    identical_failures: usize,
+    recent_failures: VecDeque<Option<String>>,
+    window_capacity: usize,
 }
 
 impl DoomLoopGuard {
     fn new(threshold: usize) -> Self {
         Self {
             threshold,
-            last_failure: None,
-            identical_failures: 0,
+            recent_failures: VecDeque::new(),
+            window_capacity: threshold.saturating_mul(4),
         }
     }
 
     fn observe(&mut self, call: &PendingToolCall, result: &ToolExecution) -> bool {
-        if !result.is_error {
-            self.last_failure = None;
-            self.identical_failures = 0;
-            return false;
-        }
-        let signature = serde_json::to_string(&json!({
-            "name": call.name,
-            "arguments": call.arguments,
-            "output": result.output,
-        }))
-        .unwrap_or_else(|_| "unserializable-tool-failure".to_owned());
-        if self.last_failure.as_deref() == Some(&signature) {
-            self.identical_failures = self.identical_failures.saturating_add(1);
+        let signature = if result.is_error {
+            Some(
+                serde_json::to_string(&json!({
+                    "name": call.name,
+                    "arguments": call.arguments,
+                    "output": result.output,
+                }))
+                .unwrap_or_else(|_| "unserializable-tool-failure".to_owned()),
+            )
         } else {
-            self.last_failure = Some(signature);
-            self.identical_failures = 1;
+            None
+        };
+        self.recent_failures.push_back(signature.clone());
+        while self.recent_failures.len() > self.window_capacity {
+            self.recent_failures.pop_front();
         }
-        self.identical_failures >= self.threshold
+        signature.is_some_and(|signature| {
+            self.recent_failures
+                .iter()
+                .flatten()
+                .filter(|recent| *recent == &signature)
+                .count()
+                >= self.threshold
+        })
     }
 }
 
@@ -2272,6 +2278,24 @@ fn protocol_context_kind(kind: AssemblyContextItemKind, role: Option<&Role>) -> 
     }
 }
 
+fn resolved_overflow_policy(
+    metadata: ModelContextMetadata,
+    compaction: &CompactionConfig,
+) -> Result<Option<OverflowPolicy>, String> {
+    let Some(context_window_tokens) = metadata.max_context_tokens else {
+        return Ok(None);
+    };
+    OverflowPolicy {
+        context_window_tokens,
+        max_output_tokens: metadata.max_output_tokens.unwrap_or(0),
+        reserved_tokens_override: compaction.reserved_tokens,
+        automatic_compaction: compaction.auto,
+    }
+    .validate()
+    .map(Some)
+    .map_err(|error| error.to_string())
+}
+
 #[allow(clippy::too_many_lines)]
 pub(super) fn context_snapshot(
     assembled: &AssembledContext,
@@ -2281,16 +2305,21 @@ pub(super) fn context_snapshot(
     compaction: &CompactionConfig,
     turn_id: Option<TurnId>,
 ) -> ContextSnapshot {
-    let context_window_known = metadata.max_context_tokens.is_some_and(|window| window > 0);
-    let (usable_tokens, reserved_tokens) = metadata.max_context_tokens.map_or((0, 0), |window| {
-        let policy = OverflowPolicy {
-            context_window_tokens: window,
-            max_output_tokens: metadata.max_output_tokens.unwrap_or(0),
-            reserved_tokens_override: compaction.reserved_tokens,
-            automatic_compaction: compaction.auto,
-        };
+    let (policy, context_window_reason) = match resolved_overflow_policy(metadata, compaction) {
+        Ok(Some(policy)) => (Some(policy), None),
+        Ok(None) => (
+            None,
+            Some("provider did not report a context window".to_owned()),
+        ),
+        Err(error) => (None, Some(error)),
+    };
+    let context_window_known = policy.is_some();
+    let (usable_tokens, reserved_tokens) = policy.map_or((0, 0), |policy| {
         let reserved = policy.reserved_tokens();
-        (window.saturating_sub(reserved), reserved)
+        (
+            policy.context_window_tokens.saturating_sub(reserved),
+            reserved,
+        )
     });
     let mut items = assembled
         .items
@@ -2408,8 +2437,7 @@ pub(super) fn context_snapshot(
         usable_tokens,
         reserved_tokens,
         context_window_known,
-        context_window_reason: (!context_window_known)
-            .then(|| "provider did not report a context window".to_owned()),
+        context_window_reason,
         cache_breakpoints: assembled
             .cache_breakpoints
             .iter()
@@ -4539,14 +4567,8 @@ async fn run_turn(
         let metadata = config.model.context_metadata(&config.model_alias);
         let compaction = config.model.compaction_config();
         let mut input_estimate = budgeter.estimate(&assembled.turns, &assembled.tools);
-        if let Some(context_window_tokens) = metadata.max_context_tokens {
-            let overflow = OverflowPolicy {
-                context_window_tokens,
-                max_output_tokens: metadata.max_output_tokens.unwrap_or(0),
-                reserved_tokens_override: compaction.reserved_tokens,
-                automatic_compaction: compaction.auto,
-            }
-            .calculate(input_estimate.reconciled_tokens);
+        if let Ok(Some(policy)) = resolved_overflow_policy(metadata, &compaction) {
+            let overflow = policy.calculate(input_estimate.reconciled_tokens);
             if overflow.should_compact {
                 match compact_during_turn(
                     turn,
@@ -5160,7 +5182,8 @@ async fn run_turn(
                 PendingEvent::GuardTriggered {
                     turn,
                     guard: "identical_tool_failure".to_owned(),
-                    message: "identical failing tool invocation repeated too many times".to_owned(),
+                    message: "identical failing tool invocation repeated too many times in recent history"
+                        .to_owned(),
                 },
             );
             status = AgentTurnStatus::DoomLoop;

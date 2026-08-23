@@ -79,6 +79,30 @@ def main() -> int:
     )
     require_contains("crates/rw-cli/src/parent_death.rs", "NOTE_EXIT", "set_parent_process_death_signal")
     require_contains(
+        "crates/rw-context/src/budget.rs",
+        ".min(self.context_window_tokens / 2)",
+        "default_reserve_cannot_exhaust_the_context_window",
+    )
+    require_contains(
+        "crates/rw-core/src/engine/turn/mod.rs",
+        "resolved_overflow_policy",
+        ".validate()",
+        "recent_failures: VecDeque<Option<String>>",
+        "window_capacity: threshold.saturating_mul(4)",
+    )
+    require_contains(
+        "crates/rw-providers/src/anthropic.rs",
+        "mark_last_cacheable_message_block",
+        "last_stable_system",
+        'Some("text" | "image" | "tool_use" | "tool_result")',
+    )
+    require_contains(
+        "crates/rw-sandbox/src/lib.rs",
+        "const SENSITIVE_HOME_SUFFIXES",
+        "fn sensitive_home_roots",
+        "for lexical in sensitive_home_roots(home)",
+    )
+    require_contains(
         "benchmarks/release-optimization-2026-08-22.json",
         '"samples": 100',
         '"3"',

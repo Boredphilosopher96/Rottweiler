@@ -65,7 +65,8 @@ impl Default for UiConfig {
 pub struct CompactionConfig {
     /// Whether local overflow estimates trigger automatic compaction.
     pub auto: bool,
-    /// Explicit token reserve; absent uses `min(20_000, max_output_tokens)`.
+    /// Explicit token reserve. By default, the engine uses the smallest of
+    /// 20,000, the model output limit, and half of the context window.
     #[serde(rename = "reserved", alias = "reserved_tokens")]
     pub reserved_tokens: Option<u64>,
     /// Optional compaction model alias; absent or unresolved falls back to the

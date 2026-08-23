@@ -10740,6 +10740,154 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn alternating_failures_trigger_the_doom_loop_guard() {
+        let root = TempDir::new().expect("tempdir");
+        let scripts = (0..9)
+            .map(|index| {
+                let name = if index % 2 == 0 {
+                    "failing_a"
+                } else {
+                    "failing_b"
+                };
+                tool_script(
+                    &[(&format!("call-{index}"), name, json!({"same": true}))],
+                    &[],
+                )
+            })
+            .collect::<Vec<_>>();
+        let model = Arc::new(ScriptedModel::new(scripts));
+        let mut tools = ToolRegistry::new();
+        for (name, message) in [("failing_a", "failure a"), ("failing_b", "failure b")] {
+            tools
+                .register(Arc::new(StubTool::new(
+                    name,
+                    vec![],
+                    StubOutcome::Failure(message.to_owned()),
+                )))
+                .expect("register tool");
+        }
+        let handle = SessionActor::spawn(config(
+            root.path(),
+            model.clone(),
+            Arc::new(tools),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        ))
+        .expect("actor");
+        let mut events = handle.subscribe();
+        handle.send_message("run").await.expect("message");
+        let events = collect_turn(&mut events).await;
+        assert_eq!(model.request_count(), 9);
+        assert!(matches!(
+            events.last().map(|event| &event.kind),
+            Some(PendingEvent::TurnFinished {
+                status: AgentTurnStatus::DoomLoop,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn successful_calls_do_not_clear_repeated_failure_history() {
+        let root = TempDir::new().expect("tempdir");
+        let scripts = (0..9)
+            .map(|index| {
+                let name = if index % 2 == 0 { "failing" } else { "ok" };
+                tool_script(
+                    &[(&format!("call-{index}"), name, json!({"same": true}))],
+                    &[],
+                )
+            })
+            .collect::<Vec<_>>();
+        let model = Arc::new(ScriptedModel::new(scripts));
+        let mut tools = ToolRegistry::new();
+        tools
+            .register(Arc::new(StubTool::new(
+                "failing",
+                vec![],
+                StubOutcome::Failure("same failure".to_owned()),
+            )))
+            .expect("register failing tool");
+        tools
+            .register(Arc::new(StubTool::new(
+                "ok",
+                vec![],
+                StubOutcome::Success(ToolResult::new("ok", Value::Null)),
+            )))
+            .expect("register successful tool");
+        let handle = SessionActor::spawn(config(
+            root.path(),
+            model.clone(),
+            Arc::new(tools),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        ))
+        .expect("actor");
+        let mut events = handle.subscribe();
+        handle.send_message("run").await.expect("message");
+        let events = collect_turn(&mut events).await;
+        assert_eq!(model.request_count(), 9);
+        assert!(matches!(
+            events.last().map(|event| &event.kind),
+            Some(PendingEvent::TurnFinished {
+                status: AgentTurnStatus::DoomLoop,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn repeated_failures_decay_outside_the_doom_loop_window() {
+        let root = TempDir::new().expect("tempdir");
+        let scripts = (0..21)
+            .map(|index| {
+                let name = if index % 5 == 0 { "failing" } else { "ok" };
+                tool_script(
+                    &[(&format!("call-{index}"), name, json!({"same": true}))],
+                    &[],
+                )
+            })
+            .chain(std::iter::once(stop_script("done", &[])))
+            .collect::<Vec<_>>();
+        let model = Arc::new(ScriptedModel::new(scripts));
+        let mut tools = ToolRegistry::new();
+        tools
+            .register(Arc::new(StubTool::new(
+                "failing",
+                vec![],
+                StubOutcome::Failure("same failure".to_owned()),
+            )))
+            .expect("register failing tool");
+        tools
+            .register(Arc::new(StubTool::new(
+                "ok",
+                vec![],
+                StubOutcome::Success(ToolResult::new("ok", Value::Null)),
+            )))
+            .expect("register successful tool");
+        let mut actor_config = config(
+            root.path(),
+            model.clone(),
+            Arc::new(tools),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        actor_config.max_turns = 22;
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let mut events = handle.subscribe();
+        handle.send_message("run").await.expect("message");
+        let events = collect_turn(&mut events).await;
+        assert_eq!(model.request_count(), 22);
+        assert!(matches!(
+            events.last().map(|event| &event.kind),
+            Some(PendingEvent::TurnFinished {
+                status: AgentTurnStatus::Completed,
+                ..
+            })
+        ));
+    }
+
     fn text_turn(role: Role, text: impl Into<String>) -> Turn {
         Turn {
             role,
@@ -11032,6 +11180,34 @@ mod tests {
         let dump = handle.dump_prompt(None).await.expect("offline prompt dump");
         assert!(dump.turns.is_empty());
         assert_eq!(model.request_count(), 0);
+    }
+
+    #[test]
+    fn invalid_resolved_overflow_policy_disables_automatic_compaction() {
+        let assembled =
+            ContextAssembler::assemble(AssemblyInput::default()).expect("empty context assembles");
+        let snapshot = turn::context_snapshot(
+            &assembled,
+            &[],
+            &BTreeMap::new(),
+            ModelContextMetadata {
+                max_context_tokens: Some(10_000),
+                max_output_tokens: Some(2_000),
+                cache_breakpoints: None,
+            },
+            &CompactionConfig {
+                reserved_tokens: Some(10_000),
+                ..CompactionConfig::default()
+            },
+            None,
+        );
+        assert!(!snapshot.context_window_known);
+        assert_eq!(snapshot.usable_tokens, 0);
+        assert_eq!(snapshot.reserved_tokens, 0);
+        assert_eq!(
+            snapshot.context_window_reason.as_deref(),
+            Some("explicit reserve 10000 must be smaller than context window 10000")
+        );
     }
 
     #[tokio::test]

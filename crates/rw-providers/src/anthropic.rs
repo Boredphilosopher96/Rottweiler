@@ -402,15 +402,16 @@ fn build_request(
             })
         })
         .collect::<Vec<_>>();
-    let tools_marked = request
+    let tools_in_prefix = request
         .cache_hint
         .is_some_and(|hint| hint.tools_in_prefix && !tools.is_empty());
-    if tools_marked {
-        if let Some(tool) = tools.last_mut() {
-            tool["cache_control"] = json!({ "type": "ephemeral" });
-        }
-    } else if let Some(index) = last_stable_system {
+    if let Some(index) = last_stable_system {
         system[index]["cache_control"] = json!({ "type": "ephemeral" });
+    } else if tools_in_prefix && let Some(tool) = tools.last_mut() {
+        tool["cache_control"] = json!({ "type": "ephemeral" });
+    }
+    if request.cache_hint.is_some() {
+        mark_last_cacheable_message_block(&mut messages);
     }
     let mut body = json!({
         "model": request.model,
@@ -472,6 +473,24 @@ fn build_request(
         }
     }
     Ok(body)
+}
+
+fn mark_last_cacheable_message_block(messages: &mut [Value]) {
+    for message in messages.iter_mut().rev() {
+        let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let Some(block) = content.iter_mut().rev().find(|block| {
+            matches!(
+                block.get("type").and_then(Value::as_str),
+                Some("text" | "image" | "tool_use" | "tool_result")
+            )
+        }) else {
+            continue;
+        };
+        block["cache_control"] = json!({ "type": "ephemeral" });
+        return;
+    }
 }
 
 const fn thinking_name(level: ThinkingLevel) -> &'static str {
@@ -992,8 +1011,11 @@ mod tests {
     }
 
     #[test]
-    fn explicit_cache_hint_marks_last_stable_tool_else_last_system_block() {
+    fn explicit_cache_hint_marks_stable_system_and_conversation_prefix() {
         let mut request = tool_request(ToolChoice::Auto);
+        request.turns[0].blocks.push(Block::Text {
+            text: "current user message".to_owned(),
+        });
         request.turns.insert(
             0,
             Turn {
@@ -1011,11 +1033,16 @@ mod tests {
         let body = build_request(&request, None)
             .unwrap_or_else(|error| panic!("cache request failed: {error}"));
         assert_eq!(
-            body["tools"][0]["cache_control"],
+            body["system"][0]["cache_control"],
             json!({"type":"ephemeral"})
         );
-        assert!(body["system"][0].get("cache_control").is_none());
+        assert!(body["tools"][0].get("cache_control").is_none());
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"],
+            json!({"type":"ephemeral"})
+        );
 
+        request.turns.truncate(1);
         request.tools.clear();
         request.cache_hint = Some(CacheHint {
             stable_prefix_turns: 1,
@@ -1025,6 +1052,21 @@ mod tests {
             .unwrap_or_else(|error| panic!("system cache request failed: {error}"));
         assert_eq!(
             body["system"][0]["cache_control"],
+            json!({"type":"ephemeral"})
+        );
+    }
+
+    #[test]
+    fn explicit_cache_hint_marks_tool_when_no_stable_system_exists() {
+        let mut request = tool_request(ToolChoice::Auto);
+        request.cache_hint = Some(CacheHint {
+            stable_prefix_turns: 0,
+            tools_in_prefix: true,
+        });
+        let body = build_request(&request, None)
+            .unwrap_or_else(|error| panic!("cache request failed: {error}"));
+        assert_eq!(
+            body["tools"][0]["cache_control"],
             json!({"type":"ephemeral"})
         );
     }

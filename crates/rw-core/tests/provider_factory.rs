@@ -1701,15 +1701,31 @@ async fn mixed_automatic_to_explicit_fallback_preserves_anthropic_cache_control(
                 .unwrap_or_else(|error| panic!("Anthropic request body must parse: {error}"))
         })
         .collect::<Vec<_>>();
-    let stable_wire_prefix = bodies[0]["messages"][0].clone();
+    let mut stable_wire_prefix = bodies[0]["messages"][0].clone();
+    stable_wire_prefix["content"][0]
+        .as_object_mut()
+        .unwrap_or_else(|| panic!("stable message block must be an object"))
+        .remove("cache_control");
     let stable_wire_tools = bodies[0]["tools"].clone();
     for body in &bodies {
-        assert_eq!(body["messages"][0], stable_wire_prefix);
+        let mut first_message = body["messages"][0].clone();
+        first_message["content"][0]
+            .as_object_mut()
+            .unwrap_or_else(|| panic!("stable message block must be an object"))
+            .remove("cache_control");
+        assert_eq!(first_message, stable_wire_prefix);
         assert_eq!(body["tools"], stable_wire_tools);
         assert_eq!(
             body["tools"][0]["cache_control"],
             json!({"type": "ephemeral"})
         );
+        let final_content = body["messages"]
+            .as_array()
+            .and_then(|messages| messages.last())
+            .and_then(|message| message["content"].as_array())
+            .and_then(|content| content.last())
+            .unwrap_or_else(|| panic!("conversation cache boundary must exist"));
+        assert_eq!(final_content["cache_control"], json!({"type": "ephemeral"}));
     }
     assert!(
         bodies[19]["messages"]

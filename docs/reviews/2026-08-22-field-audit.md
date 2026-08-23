@@ -650,7 +650,7 @@ on their own terms rather than in service of a number.
 
 ---
 
-- [ ] **ENG-1 · P0 · [verified] · ~half a day** — on 157 catalog models the
+- [x] **ENG-1 · P0 · [verified] · ~half a day** — on 157 catalog models the
       compaction threshold collapses to zero, turning one user message into 32
       summarisation calls.
       `crates/rw-context/src/budget.rs` computes the ADR-010 reserve as
@@ -696,7 +696,7 @@ on their own terms rather than in service of a number.
       for the fix is that inconsistent metadata should fail toward *doing nothing*,
       never toward compacting forever; the current code fails the other way.
 
-- [ ] **ENG-2 · P1 · [code] · ~1 day** — Anthropic prompt caching covers the tool
+- [x] **ENG-2 · P1 · [code] · ~1 day** — Anthropic prompt caching covers the tool
       definitions and nothing else, so coverage decays toward zero as a session
       grows.
       Two decisions compound. `crates/rw-context/src/assembly.rs` restricts the
@@ -745,7 +745,7 @@ on their own terms rather than in service of a number.
       than either alternative in every case. A test currently asserts the current
       behaviour, so that test moves with the fix.
 
-- [ ] **ENG-3 · P1 · [code] · ~half a day** — the doom-loop guard only catches
+- [x] **ENG-3 · P1 · [code] · ~half a day** — the doom-loop guard only catches
       consecutive identical failures, which is not the loop agents get into.
       `crates/rw-core/src/engine/turn/mod.rs:1954` keeps a single slot
       (`last_failure: Option<String>`) and a counter that fires at
@@ -783,6 +783,19 @@ on their own terms rather than in service of a number.
       than a threshold tweak. Worth deciding explicitly whether the guard should
       interrupt or merely warn on the softer patterns — a false stuck-interruption
       mid-task is its own bad experience.
+
+## Resolution — round 3
+
+| Finding | Resolution |
+|---|---|
+| ENG-1 | The default reserve is now the smallest of 20,000 tokens, the model output limit, and half of the context window. A positive context window therefore always leaves input capacity. The engine now calls `OverflowPolicy::validate()` for resolved metadata and user overrides. An invalid policy makes the window unknown and disables automatic compaction instead of creating permanent overflow. Unit and engine tests cover both paths. |
+| ENG-2 | The Anthropic adapter now marks the last stable system block when one exists, which covers the preceding tools and the system prefix. It marks the tool boundary only when no stable system block exists. A second explicit breakpoint marks the latest cacheable conversation block, while thinking blocks remain unmarked. Adapter tests cover the system, tool-only, and conversation boundaries without making a provider call. |
+| ENG-3 | The guard now retains the last 20 tool observations at the default threshold and counts exact failure signatures within that window. Unrelated successes occupy the window but do not erase failure history. The guard still interrupts only after five byte-identical failures, which limits false positives. Fixtures cover consecutive failures, alternating failures, success-interleaved failures, and decay outside the window. |
+
+Round 3 is resolved. The compaction path now fails toward no automatic action,
+Anthropic receives both useful cache boundaries, and the doom-loop guard catches
+the two non-consecutive loop shapes without turning old failures into permanent
+session state.
 
 ## Read and found sound
 
@@ -830,3 +843,163 @@ the next round of defects, in rough order of user impact:
    partial-failure handling.
 4. Sandbox escape surfaces on both Seatbelt and Landlock.
 5. The TOON serializer, which the M3 AC credits with ≥30% token reduction.
+
+---
+
+# Round 4 — 2026-08-22, breadth pass
+
+Read-only sweep of the areas round 3 listed as unread: permissions beyond the
+safe-list, the Seatbelt/Landlock sandbox and egress proxy, store replay and
+rewind, subagent orchestration, the TOON serializer, MCP, credentials, trust,
+background processes, LSP, and hook dispatch.
+
+**Headline: one finding.** The security- and durability-critical code is in
+better shape than the surfaces around it. That is a real result, not a shortage
+of effort, so the "checked and found sound" section below is the substantive
+output of this round and is written to be specific enough to rely on.
+
+---
+
+- [x] **SEC-1 · P1 · [verified] · ~1 hour** — the macOS sandbox's sensitive-read
+      denylist misses credential paths that exist on a normal developer machine,
+      including this one.
+      On macOS, filesystem read is broad by design — `docs/05-SECURITY.md:69`
+      states "FS read broad, write restricted to workspace + `$TMPDIR` scratch" —
+      so the denylist in `crates/rw-sandbox/src/lib.rs:26` is not a supplement to
+      a read allowlist, it **is** the read control. Confirmed that the production
+      path takes it: `crates/rw-runtime/src/session_runtime.rs:10427` builds the
+      bash policy with `SandboxPolicy::new(&sandbox_roots, Deny)` and never calls
+      `with_read_roots`, so `read_roots` stays `None`, the generated
+      `(deny file-read* …)` rule is omitted entirely, and only
+      `SENSITIVE_HOME_SUFFIXES` restricts reads.
+      That list has 15 entries. Checked against this machine, these exist and are
+      **not** covered:
+
+      | path | present | note |
+      |---|---|---|
+      | `~/.claude` | yes | 63 KB `history.jsonl` at mode 0600 — Claude Code prompt history |
+      | `~/.zsh_history` | yes | 6,649 lines |
+      | `~/.bash_history` | yes | classic paste-a-secret vector |
+      | `~/Library/Keychains` | yes | macOS keychain files |
+      | `~/.gitconfig` | yes | credential helpers, url rewrites with tokens |
+      | `~/.terraform.d` | yes | `credentials.tfrc.json` lives here |
+
+      The omission that makes this a defect rather than a design argument: the
+      list *deliberately enumerates competing agents' credential directories* —
+      `.codex`, `.config/opencode`, `.config/gh`, `.config/gcloud` — and missed
+      `.claude`. The intent is unambiguous and the coverage is incomplete.
+      This sits squarely inside the stated threat model. `docs/05-SECURITY.md:5`
+      names "prompt-injected or simply wrong … exfiltration of secrets" as
+      threat one, and exfiltration does not require network egress: reading a
+      secret into tool output already discloses it to the model provider, which
+      is a third party.
+      **Fix:** extend the list with `.claude`, `.config/claude`, `Library/Keychains`,
+      `.zsh_history`, `.bash_history`, `.gitconfig`, `.cargo/credentials.toml`,
+      `.gem/credentials`, `.m2/settings.xml`, `.terraform.d`, `.databrickscfg`,
+      `.oci`, `.kaggle`, `.authinfo*`, and `.config/hub`.
+      **Assessment:** the one-hour fix is the entry list, and it is worth doing
+      today. The structural point is worth a separate decision, not a rushed one:
+      a denylist of secret locations is unbounded by nature, and every new tool a
+      developer installs adds an entry nobody will remember to add here. The
+      durable answer is to narrow ordinary `bash` reads to workspace roots plus a
+      small allowlist (toolchain caches, `/usr`, `/etc`, `$TMPDIR`) — which is
+      what `with_read_roots` already supports and what the MCP and plugin process
+      paths already do. That is a behaviour change with real breakage risk for
+      developer tooling, so it wants its own design pass; the entry list should
+      not wait for it.
+
+## Resolution — round 4
+
+SEC-1 is resolved at the existing shared policy owner. `rw-sandbox` now defines
+the expanded sensitive home paths once and expands them through
+`sensitive_home_roots()`. Both the Seatbelt and Landlock adapters consume that
+function. The policy now covers Claude state, shell histories, macOS keychains,
+Git configuration, Cargo, RubyGems, Maven, Terraform, Databricks, OCI, Kaggle,
+Hub, and common authinfo files in addition to the existing credential stores.
+
+The regression checks the shared expansion, and the existing macOS profile test
+checks that every expanded path becomes an `RW_SECRET_n` deny parameter. This
+round does not replace broad macOS reads with a read allowlist. That larger
+compatibility change remains part of the repository-wide ownership and boundary
+review requested after this round.
+
+## Checked and found sound
+
+Each item below was read looking for a specific failure mode and did not have
+one. Recorded at this level of detail so a later round can skip them.
+
+- **Permission engine** (`rw-core/src/permission.rs`) — `Deny` short-circuits
+  globally and cannot be overridden by a later `allow`; every canonical target
+  must pass independently or the decision falls back to the configured default;
+  `bash_unsandboxed(…)` is a separate rule namespace, so `bash(*)` can never
+  grant a sandbox bypass; and `canonical_shell_commands` refuses to match an
+  allow rule when the command contains backticks, `$`, globs, braces, or `~`,
+  so shell expansion cannot smuggle argv past a rule.
+- **Workspace path containment** (`rw-tools/src/registry.rs`) — `resolve_existing`
+  and `resolve_writable` canonicalize before checking roots, `root_index_for`
+  uses component-wise `starts_with` and picks the longest match (so `/work`
+  cannot satisfy `/workspace`), non-existent targets canonicalize the *parent*
+  and re-join the filename, and `secure_parent` traverses with pinned no-follow
+  directory handles, which closes the symlink-swap window I would otherwise have
+  flagged. Escape tests exist for `../`, `@root/N/../`, and symlinks.
+- **Egress proxy SSRF defence** (`rw-sandbox/src/lib.rs:388`) — more complete
+  than most implementations: IPv4-mapped IPv6, NAT64 `64:ff9b::`, 6to4 `2002::`,
+  ISATAP `::5efe`, carrier-grade NAT `100.64/10`, benchmarking `198.18/15`,
+  TEST-NET, `0.0.0.0/8`, and everything at or above `240/4`. DNS is genuinely
+  pinned — resolved once, connected to the pinned address, and the request URL
+  rewritten to the pinned IP — so rebinding does not apply.
+- **Seatbelt profile generation** — write roots are emitted as
+  `(subpath (param "RW_WRITE_n"))` rather than interpolated strings, so a path
+  containing SBPL syntax cannot alter the policy.
+- **Subagent orchestration** (`rw-core/src/orchestration.rs`) — depth is checked
+  before the permit is taken, concurrency is a real semaphore, `max_turns` is
+  clamped with `.min()` against the configured ceiling so a request cannot raise
+  it, and `session_depths` entries are removed when a subagent record is cleaned
+  up, so the map does not grow across a long session.
+- **Checkpoint rewind** (`rw-store/src/checkpoint.rs`) — a genuine write-ahead
+  transaction: the plan is staged durably, each step persists `next_step` before
+  continuing, and `recover_rewinds` resumes an interrupted apply on startup. A
+  crash mid-rewind cannot leave a half-restored workspace with no record.
+- **Background processes** (`rw-tools/src/background.rs`) — owned process groups
+  are killed and reaped on session shutdown behind a bounded deadline, with
+  `Drop` guards and a test that asserts descendants die too.
+- **MCP** (`rw-mcp/src/manager.rs:511`) — `call_tool` re-checks the approved
+  catalog at invocation, not only at listing time.
+- **Credentials** (`rw-store/src/credentials.rs`) — one lock spans read, merge,
+  temp-write and rename; the file is created `0o600`, the directory `0o700`, and
+  both modes are re-verified on read rather than assumed.
+- **TOON** (`rw-context/src/toon.rs`) — `encode` decodes its own output and
+  compares against the input before returning, refusing to emit anything that
+  does not round-trip.
+- **Instructions** (`rw-core/src/instructions.rs`) — bounded at 64 files /
+  512 KiB aggregate / 256 KiB per file, and `push_bounded_layer` pops the layer
+  that broke the limit rather than half-applying the stack.
+- **LSP** (`rw-intel/src/lsp.rs`) — 10 s request and 2 s drain timeouts, with a
+  fallback to cached diagnostics rather than a stalled edit.
+- **Hook dispatch** (`rw-ext/src/hook.rs`) — 5 s default timeout clamped to a
+  configured min/max, plus a 2 s cancellation grace.
+
+## Noted, not defects
+
+- **The Linux sandbox is not the macOS sandbox.** Landlock has no deny rule, so
+  `collect_directory_except` represents "everything except the secret paths" by
+  enumerating a directory's safe siblings at sandbox-construction time. Three
+  consequences worth knowing, all documented in the code: the carve-out is a
+  snapshot, so entries created after it are unreadable for that invocation;
+  symlinked entries are skipped deliberately, so a symlinked directory inside a
+  workspace is readable on macOS and not on Linux; and a home-directory workspace
+  pays a `read_dir` plus `canonicalize` per entry on every sandboxed command.
+- **Session event paging is O(n) per page.** `scan_event_page` reads from the
+  start of the log and skips to `after_sequence`, so paging a whole log is
+  quadratic. It is bounded (512 MiB scan, 1M events, 2,000 events per page) and
+  nowhere near reachable today — the largest real log in
+  `~/.rottweiler/sessions` is **1.3 MB / 1,882 events**, which fits in a single
+  page. Worth remembering rather than fixing.
+
+## Still unread after this round
+
+Roughly 60k lines remain, now mostly in the largest engine and store modules
+rather than in dedicated subsystems: `engine/mod.rs` (14.2k), `host.rs` (7.4k),
+`store/config.rs` (5.3k), `store/session.rs` (5.3k), `engine/dispatch.rs` (3.5k),
+`tools/worktree.rs` (3.1k), plus `admin.rs`, `update.rs`, `memory.rs`,
+`search.rs`, `intelligence.rs`, and `workflow_runtime.rs`.
