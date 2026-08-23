@@ -29,6 +29,11 @@ The catalog can expose bounded display metadata and sanitized auth or
 reachability state. Provider endpoints, credential references and values,
 proxy details, wire errors, and routing internals stay inside the Rust engine.
 
+Model capabilities come from the same catalog record that owns context limits
+and pricing. When a model declares image input, the composer exposes image
+paste and accepts image attachments. When it does not, those controls stay
+hidden and image attachments are rejected before a provider request is sent.
+
 ## Pricing
 
 User configuration can declare per-model USD API rates. Pricing precedence is

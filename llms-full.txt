@@ -330,6 +330,10 @@ against declared capabilities.
 Use the [TypeScript plugin SDK](../reference/plugin-sdk.md) to scaffold, validate,
 develop, and package a plugin.
 
+Run `rw plugin check <path> --allow-exec` before live development. It validates
+package identity and runs the plugin's declared typecheck and test scripts
+without attaching it to an engine.
+
 ---
 
 # Models and routing
@@ -367,6 +371,11 @@ rw models show coding
 The catalog can expose bounded display metadata and sanitized auth or
 reachability state. Provider endpoints, credential references and values,
 proxy details, wire errors, and routing internals stay inside the Rust engine.
+
+Model capabilities come from the same catalog record that owns context limits
+and pricing. When a model declares image input, the composer exposes image
+paste and accepts image attachments. When it does not, those controls stay
+hidden and image attachments are rejected before a provider request is sent.
 
 ## Pricing
 
@@ -443,6 +452,10 @@ rw doctor
 rw trust status
 ```
 
+`rw doctor` exits unsuccessfully when no provider is configured or the default
+model cannot resolve to a configured route. A fresh installation should not be
+reported as ready until both checks pass.
+
 ## Provider or credential problems
 
 Network checks are opt-in:
@@ -461,6 +474,29 @@ TOML to make a test pass.
 Check project trust first. Invalid or unreadable artifacts are skipped with a
 diagnostic; the rest of the application can still start. Re-run `rw trust
 status` after any executable extension file changes.
+
+For a TypeScript plugin, validate its identity and run its declared checks
+without attaching it to a session:
+
+```sh
+rw plugin check ./path/to/plugin --allow-exec
+```
+
+The execution flag is required because the command runs package scripts.
+
+## Another process is using this workspace
+
+Only one engine writes a workspace at a time. A second process reports that it
+is waiting, permits `Ctrl+C`, and gives up after a bounded interval instead of
+appearing to hang. To start another conversation in the attached engine, press
+`Ctrl+N` or enter `/new`.
+
+## The runtime path is too long
+
+Rottweiler normally keeps runtime files below its storage root. When that path
+cannot fit the platform's Unix-socket limit, it automatically uses a private,
+hashed directory below the system temporary directory. Session data remains in
+the configured storage root; only short-lived runtime files move.
 
 ## The application starts incompletely
 
@@ -667,6 +703,7 @@ rw trust status
 rw trust grant
 rw trust revoke
 rw plugin scaffold --lang ts --name <name> <path>
+rw plugin check <path> --allow-exec
 rw plugin dev <path> --session <id|current> --allow-dev-exec
 rw plugin status
 rw plugin approve <plugin>
@@ -700,6 +737,10 @@ rw upgrade [--channel stable|beta]
 
 Aliases are not part of the CLI contract. The command tree has one spelling for
 each operation.
+
+`plugin check` validates manifest/package identity, then runs the plugin's
+declared `typecheck` and `test` scripts. It executes local code only after the
+explicit `--allow-exec` grant and does not attach the plugin to a live session.
 
 ---
 
@@ -806,6 +847,42 @@ api_key_credential = "providers.anthropic.api_key"
 ```
 
 Store the referenced value with `rw auth set-key anthropic`.
+
+## Budget guardrails
+
+Choose limits that match the route's accounting unit. API-key routes report
+micro-US-dollars, consumer subscription routes report tokens, and Copilot
+routes can report AI credits.
+
+```toml
+[budget]
+session_cost_cap_micros_usd = 5000000
+daily_cost_cap_micros_usd = 20000000
+session_token_cap = 250000
+daily_token_cap = 1000000
+token_rate_alarm_per_minute = 100000
+warn_at_percent = 80
+```
+
+Rottweiler stops before another provider call after a hard cap. If a configured
+cap cannot be measured because a provider omits its accounting unit, the cap
+fails closed.
+
+## Automatic verification
+
+Configure one test command to run after every otherwise-successful agent turn:
+
+```toml
+[toolchain]
+formatter = "cargo fmt -- {file}"
+linters = ["cargo clippy --offline --workspace --all-targets -- -D warnings"]
+test = "cargo test --workspace"
+```
+
+Formatter and linter commands run after matching file edits. The test command
+runs once at the turn boundary. A failing test marks the turn failed and adds a
+bounded diagnostic to durable conversation context so the next turn can act on
+it.
 
 ---
 
@@ -933,10 +1010,13 @@ itself grant approval; the host binds approval to the manifest fingerprint.
 ```sh
 rw plugin scaffold --lang ts --name example.tools ./example-plugin
 cd example-plugin
-bun run typecheck
-bun test
+rw plugin check . --allow-exec
 bun run build
 ```
+
+`plugin check` verifies that `manifest.json` and `package.json` name the same
+plugin, then runs the package's required `typecheck` and `test` scripts. It does
+not attach the plugin to a live session.
 
 The source target is exactly `source`. An executable target is exactly an
 argument vector plus an optional working directory.
@@ -1078,6 +1158,18 @@ Source owners: crates/rw-cli/src/main.rs, crates/rw-store/src/session.rs
 
 Rottweiler persists session events so the UI process is not the owner of your
 work.
+
+## Start a clean conversation
+
+Press `Ctrl+N`, choose **New session** from the command or session picker, or
+enter:
+
+```text
+/new
+```
+
+The engine creates the session and returns its identity before the TUI switches.
+The previous conversation remains durable and available from **Switch session**.
 
 ## Find the session
 

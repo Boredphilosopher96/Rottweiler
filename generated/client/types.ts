@@ -138,7 +138,7 @@ export type McpApprovalReview = { server: string, transport: string, endpoint: s
 
 export type McpEnvironmentEntry = { key: string, value: string, };
 
-export type RuntimeServiceKind = "lsp" | "linter" | "formatter";
+export type RuntimeServiceKind = "lsp" | "linter" | "formatter" | "test";
 
 export type RuntimeServiceDescriptor = { kind: RuntimeServiceKind, name: string, };
 
@@ -224,7 +224,7 @@ export type AccountingAttribution = "main" | "compaction" | "subagent" | "title"
 
 export type TurnAccounting = { turn_id: TurnId, attribution: AccountingAttribution, usage: Usage, cost: Cost, };
 
-export type CostSnapshot = { utc_day: string, turns: Array<TurnAccounting>, session_usage: Usage, session_cost_micros_usd: string, session_ai_credit_micros: string, daily_cost_micros_usd: string, daily_ai_credit_micros: string, trailing_minute_cost_micros_usd: string, trailing_minute_ai_credit_micros: string, cache_hit_basis_points: number, session_cost_cap_micros_usd: string | null, daily_cost_cap_micros_usd: string | null, session_ai_credit_cap_micros: string | null, daily_ai_credit_cap_micros: string | null, spend_rate_alarm_micros_usd_per_minute: string | null, ai_credit_rate_alarm_micros_per_minute: string | null, hard_cap_reached: boolean, session_monetary_accounting_complete: boolean, daily_monetary_accounting_complete: boolean, session_subscription_quota_entries: string, session_cost_unavailable_entries: string, session_non_usd_monetary_entries: string, daily_subscription_quota_entries: string, daily_cost_unavailable_entries: string, daily_non_usd_monetary_entries: string, };
+export type CostSnapshot = { utc_day: string, turns: Array<TurnAccounting>, session_usage: Usage, session_cost_micros_usd: string, session_ai_credit_micros: string, daily_cost_micros_usd: string, daily_ai_credit_micros: string, trailing_minute_cost_micros_usd: string, trailing_minute_ai_credit_micros: string, session_subscription_tokens: string, daily_subscription_tokens: string, trailing_minute_subscription_tokens: string, cache_hit_basis_points: number, session_cost_cap_micros_usd: string | null, daily_cost_cap_micros_usd: string | null, session_ai_credit_cap_micros: string | null, daily_ai_credit_cap_micros: string | null, session_token_cap: string | null, daily_token_cap: string | null, spend_rate_alarm_micros_usd_per_minute: string | null, ai_credit_rate_alarm_micros_per_minute: string | null, token_rate_alarm_per_minute: string | null, hard_cap_reached: boolean, session_monetary_accounting_complete: boolean, daily_monetary_accounting_complete: boolean, session_subscription_quota_entries: string, session_cost_unavailable_entries: string, session_non_usd_monetary_entries: string, daily_subscription_quota_entries: string, daily_cost_unavailable_entries: string, daily_non_usd_monetary_entries: string, };
 
 export type PromptTool = { name: string, description: string, input_schema: JsonValue, };
 
@@ -287,7 +287,7 @@ export type ThinkingLevel = "off" | "low" | "medium" | "high";
 
 export type CompactionReason = "automatic" | "manual" | "provider_overflow";
 
-export type BudgetUnit = "micros_usd" | "ai_credit_micros";
+export type BudgetUnit = "micros_usd" | "ai_credit_micros" | "tokens";
 
 export type BudgetLevel = "warning" | "spend_rate_alarm" | "hard_cap";
 

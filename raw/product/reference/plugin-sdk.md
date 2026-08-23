@@ -41,10 +41,13 @@ itself grant approval; the host binds approval to the manifest fingerprint.
 ```sh
 rw plugin scaffold --lang ts --name example.tools ./example-plugin
 cd example-plugin
-bun run typecheck
-bun test
+rw plugin check . --allow-exec
 bun run build
 ```
+
+`plugin check` verifies that `manifest.json` and `package.json` name the same
+plugin, then runs the package's required `typecheck` and `test` scripts. It does
+not attach the plugin to a live session.
 
 The source target is exactly `source`. An executable target is exactly an
 argument vector plus an optional working directory.

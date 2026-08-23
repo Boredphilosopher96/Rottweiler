@@ -67,3 +67,39 @@ api_key_credential = "providers.anthropic.api_key"
 ```
 
 Store the referenced value with `rw auth set-key anthropic`.
+
+## Budget guardrails
+
+Choose limits that match the route's accounting unit. API-key routes report
+micro-US-dollars, consumer subscription routes report tokens, and Copilot
+routes can report AI credits.
+
+```toml
+[budget]
+session_cost_cap_micros_usd = 5000000
+daily_cost_cap_micros_usd = 20000000
+session_token_cap = 250000
+daily_token_cap = 1000000
+token_rate_alarm_per_minute = 100000
+warn_at_percent = 80
+```
+
+Rottweiler stops before another provider call after a hard cap. If a configured
+cap cannot be measured because a provider omits its accounting unit, the cap
+fails closed.
+
+## Automatic verification
+
+Configure one test command to run after every otherwise-successful agent turn:
+
+```toml
+[toolchain]
+formatter = "cargo fmt -- {file}"
+linters = ["cargo clippy --offline --workspace --all-targets -- -D warnings"]
+test = "cargo test --workspace"
+```
+
+Formatter and linter commands run after matching file edits. The test command
+runs once at the turn boundary. A failing test marks the turn failed and adds a
+bounded diagnostic to durable conversation context so the next turn can act on
+it.
