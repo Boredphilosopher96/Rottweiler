@@ -35,7 +35,7 @@ updates:
     open-pull-requests-limit: 1
 
   - package-ecosystem: npm
-    directory: /packages/plugin-docs
+    directory: /packages/docs-site
     patterns: ["*"]
     multi-ecosystem-group: application-dependencies
     open-pull-requests-limit: 1

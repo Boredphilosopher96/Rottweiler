@@ -338,7 +338,7 @@ class CiHardeningContractTests(unittest.TestCase):
     def test_javascript_dependencies_do_not_use_version_specific_patches(
         self,
     ) -> None:
-        for package_name in ("tui", "plugin-sdk", "plugin-docs"):
+        for package_name in ("tui", "plugin-sdk", "docs-site"):
             package_root = ROOT / "packages" / package_name
             manifest = (package_root / "package.json").read_text(encoding="utf-8")
             self.assertNotIn("patchedDependencies", manifest)

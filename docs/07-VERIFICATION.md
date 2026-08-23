@@ -1,6 +1,10 @@
 # 07 — Verification Strategy
 
-How we know the harness works, stays fast, and doesn't regress. Everything here runs in CI; "the budgets are tests, not aspirations."
+How we know the harness works, stays fast, and does not regress. Evidence is
+tiered: per-change CI, scheduled checks, manually dispatched performance and
+release preflight, paid live canaries, and protected release gates. A gate only
+counts when the named run completed for the exact source or archive; queued,
+unconfigured, and intentionally unrun tiers are not green evidence.
 
 ## 1. Deterministic replay (the foundation)
 

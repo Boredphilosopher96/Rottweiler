@@ -1,0 +1,18 @@
+---
+import { stableTargets } from "../generated/product.mjs"
+---
+
+<table>
+  <thead>
+    <tr><th>Target</th><th>Operating system</th><th>Signed archive</th></tr>
+  </thead>
+  <tbody>
+    {stableTargets.map((target) => (
+      <tr>
+        <td><code>{target.id}</code></td>
+        <td>{target.operatingSystem} ({target.machine})</td>
+        <td><a href={target.archiveUrl}>Download</a></td>
+      </tr>
+    ))}
+  </tbody>
+</table>

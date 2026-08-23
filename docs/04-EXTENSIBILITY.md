@@ -204,11 +204,11 @@ The separate executable target pins its executable, explicit interpreter entrypo
 
 Protocol 2 is the only supported generation. The Rust host and TypeScript SDK consume the same generated contract projections. Provider plugins emit request-correlated `provider/event` notifications incrementally and receive `provider/cancel` when the consumer drops; their streams are bounded and cancellation-cleaned without a whole-call five-second deadline. Catalog and host-HTTP requests are separately bounded and negotiated. `packages/plugin-sdk/PROTOCOL.md` explains the wire contract; its current schema and fixture are projections of `rw-plugin-protocol`, not additional owners.
 
-The protocol documentation site is generated deterministically by
-`packages/plugin-docs` from the stable Markdown, schemas, and canonical wire
-fixtures. It adds searchable navigation and direct schema/fixture downloads
-without introducing a second protocol source; CI rebuilds and tests the static
-site alongside the TypeScript SDK.
+The public documentation site in `packages/docs-site` copies the protocol
+crate's generated schema and fixture byte-for-byte and links to the SDK's
+protocol Markdown. It adds searchable navigation, raw Markdown, and direct
+artifact downloads without recreating protocol values. CI checks both the
+protocol projections and the site.
 
 ## Tier 3 — WASM hook components
 

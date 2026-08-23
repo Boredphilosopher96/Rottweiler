@@ -1,0 +1,39 @@
+---
+title: Platforms and releases
+description: Signed release targets, complete bundle membership, update channels, and the boundary between supported release and build shapes.
+sidebar:
+  order: 7
+---
+
+import StableTargets from '../../../../components/StableTargets.astro'
+
+## Supported release targets
+
+<StableTargets />
+
+The release contract understands additional build shapes, but only targets in
+the signed update specification are advertised as released platforms.
+
+## Bundle membership
+
+A complete release contains:
+
+- `rw`, the public application and Rust supervisor;
+- `rottweiler-tui`, the compiled OpenTUI client;
+- the OpenTUI native renderer library;
+- `rottweiler-wasm-host`;
+- `rottweiler-plugin-host`;
+- the archive installer.
+
+The archive contract owns names, modes, per-member size ceilings, and platform
+native-library names.
+
+## Updates
+
+`rw upgrade` consumes signed root and channel metadata from the no-redirect
+update origin. Stable and beta are explicit channels. Immutable archives remain
+available under `/updates/`; the documentation deployment does not own or
+modify that subtree.
+
+Browse the [GitHub releases](https://github.com/Boredphilosopher96/Rottweiler/releases)
+for archive checksums and attestations.

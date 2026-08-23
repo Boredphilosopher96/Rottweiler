@@ -1,9 +1,9 @@
 # 01 — Product Feature Reference
 
-The product feature reference, grouped by area. It describes the intended
-product contract, not a blanket claim that every listed capability has shipped.
-For implementation status, use source and tests; [the roadmap](06-ROADMAP.md)
-records milestones and explicitly calls out known gaps.
+This is an intent document grouped by product area, not a current user manual or
+an issue tracker. The public site documents the implemented product as one
+surface. Source, executable tests, and exact release evidence own shipped
+status.
 
 ## 1. Interaction model
 
@@ -56,7 +56,7 @@ records milestones and explicitly calls out known gaps.
 
 ## 5. Tools (built-in)
 
-`read`, `write`, `edit` (string replace: exact match first, whitespace-normalized fallback; ambiguous matches fail with candidate locations listed — never guess), `multi-edit`, `grep` (ripgrep engine), `glob`, `ls`, `bash` (sandboxed, see 05-SECURITY), `webfetch` (URL → markdown; size-capped, injection-dampened, no routine permission prompt, SSRF-guarded, honors the proxy config), `websearch` (web search: provider-native search where the model supports it, else a configured search API; results through the same egress policy), `todo` (task list the model maintains), `ask_user`, `spawn_agent` (§6). All tools:
+`read`, `write`, `edit` (string replace: exact match first, whitespace-normalized match second; ambiguous matches fail with candidate locations listed), `multi-edit`, `grep` (ripgrep engine), `glob`, `ls`, `bash` (sandboxed, see 05-SECURITY), `webfetch` (URL → markdown; size-capped, injection-dampened, SSRF-guarded, honors proxy policy), `todo`, `ask_user`, and `spawn_agent` (§6). A first-party `websearch` tool remains product intent and is not a current shipped claim. All shipped tools:
 - Emit structured results (TOON-encodable).
 - Declare a capability manifest (reads-fs / writes-fs / network / exec) consumed by the permission engine.
 - Are registered through the public tool registry (dogfooding rule).
@@ -108,9 +108,9 @@ records milestones and explicitly calls out known gaps.
 ## 10. CLI / headless / SDK
 
 - **Print mode**: `rw -p "prompt"` → runs headless, prints result; `--output-format json|stream-json` for scripting; exit codes reflect success.
-- **CI-safe policies**: non-interactive permission policy (`--permission-mode`), max-turns, max-budget flags.
+- **CI-safe policies**: non-interactive permission policy (`--permission-mode`) and max-turns. A separate max-budget flag remains product intent.
 - **Stdin piping**: `git diff | rw -p "review this"`.
-- **SDK surface**: `rw-core` published as a library crate — the TUI is proof the SDK is sufficient (dogfooding rule).
+- **SDK surface**: `rw-core` is the internal headless-engine library boundary. It is not currently published as a crates.io SDK.
 - **Scriptable server**: `rw serve` exposes the engine over an HTTP+SSE API (what the TUI itself uses in client/server mode).
 - **Remote engine**: `rw --remote <host>` runs the engine where the code lives and the TUI locally — over an SSH-forwarded socket by default. The client/server split exists precisely so any UI can attach to any engine; the protocol must never assume localhost (auth token on every connection, no machine-local paths leaked in events, reconnect/resync built in).
 
@@ -119,8 +119,8 @@ records milestones and explicitly calls out known gaps.
 - **OpenTUI** (TypeScript/Bun, opencode's stack) as the frontend, talking to the Rust engine over the client protocol (ADR-001): OpenTUI's Zig renderer gives damage-tracked partial redraws, 60fps streaming, no full-screen redraw per token. Shipped as a Bun-compiled self-contained executable spawned by `rw` — users never install Node/Bun.
 - Markdown rendering with syntax highlighting; unified diff view with accept/reject for edits; collapsible tool-call blocks.
 - Composer-anchored `/` command and `@` file autocomplete plus compact OpenCode-style fuzzy pickers (commands, gitignore-aware files, models, configured providers, sessions). The palette uses one concise action row with a muted hint instead of duplicating multi-line descriptions. Provider/model pickers receive only bounded display names and capabilities—never endpoints, auth references, or credentials. Selecting a provider and model binds that session to the exact provider route; ordinary `/models` selection keeps the configured automatic fallback chain. Provider-authenticated live discovery is the only availability source; files are cache/enrichment only. The default wide-terminal sidebar shows todos and changed files plus only currently active LSP, linter, formatter, and MCP services. Activating a changed file opens its bounded current-worktree diff; mutation diffs also remain inline in the transcript. File diffs and visible Bash commands use embedded Tree-sitter parsers. Themes; configurable keybindings including vim mode; image preview where terminal supports (kitty/iTerm2 protocols).
-- Status line: mode, model alias, context %, session cost, cache-hit %, git branch. Extensible via config script.
-- **Desktop notifications**: notify when a long turn finishes or the agent blocks on an approval/question while the terminal is unfocused (macOS/Linux native, configurable).
+- Status line: mode, model alias, context, usage or subscription accounting, cache behavior, and git state. Scripted status-line extension remains product intent.
+- **Desktop notifications (planned)**: notify when a long turn finishes or the agent blocks on an approval/question while the terminal is unfocused.
 - Scrollback that never drops content; copy-friendly (no decorative borders inside code blocks).
 
 ## 12. Safety & security
@@ -131,7 +131,7 @@ See 05-SECURITY.md. Headlines: **project extension inventory trust** (untrusted 
 
 - Structured tracing (`tracing` crate) with `--debug` spool to file.
 - **Prompt transparency**: `rw prompt dump [--turn N]` prints the exact assembled request (system prompt, tools, context order, cache breakpoints) that was/would be sent — the debugging tool for token economy and plugin authors.
-- Optional OpenTelemetry export (opt-in) for teams.
+- Optional OpenTelemetry export remains planned; it is not a current shipped claim.
 - `/cost` and `rw stats`: per-session and historical spend, tokens, cache savings, tool-use counts, cost attribution (main turns vs compaction vs subagents). `rw stats [--session ID] [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--json]` is an offline, read-only report over inclusive UTC days. It keeps known USD API cost, AI credits, subscription quota, unavailable pricing, and non-USD entries distinct—subscription access is never presented as a `$0` API call. Historical child-session rows are counted once and attributed to subagents through durable spawn relationships.
 
 ## 14. Guardrails

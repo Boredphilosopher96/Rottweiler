@@ -22,7 +22,7 @@ class ToolchainOwnershipTests(unittest.TestCase):
         (root / "scripts").mkdir()
         (root / "crates/rw-cli/tests").mkdir(parents=True)
         (root / "crates/rw-sandbox/tests").mkdir(parents=True)
-        for package in ("plugin-docs", "plugin-sdk", "tui"):
+        for package in ("docs-site", "plugin-sdk", "tui"):
             directory = root / "packages" / package
             directory.mkdir(parents=True)
             (directory / "package.json").write_text(

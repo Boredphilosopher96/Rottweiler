@@ -88,7 +88,7 @@ Format: context → decision → rationale → revisit-when. The implementing ag
 
 ## ADR-009: TOON for structured tool output, not for conversation text
 
-**Decision.** TOON encoding applies to structured/tabular tool results and MCP payloads. Prose (model text, file contents) is never TOON-encoded. Every TOON payload is preceded by a one-line format note the first time it appears in a session. **The format is pinned**: we implement the open TOON specification (the `toon-format` project); the spec text and its reference test vectors are **vendored into `docs/spec/toon/`** as the first task of M3, and the vendored snapshot — not the moving upstream — is what the serializer, round-trip proptests, and benchmarks target. If upstream is unusable for any reason, the fallback is an in-repo grammar defined in that same directory before any encoder code is written; either way, no TOON code exists before its grammar document does.
+**Decision.** TOON encoding applies to structured/tabular tool results and MCP payloads. Prose (model text, file contents) is never TOON-encoded. Every TOON payload is preceded by a one-line format note the first time it appears in a session. **The format is pinned**: we implement the open TOON specification (the `toon-format` project); the spec text and its reference test vectors are vendored into `crates/rw-context/spec/toon/`, and that snapshot — not moving upstream content — owns serializer, round-trip property-test, and benchmark behavior.
 **Rationale.** TOON's savings are real on uniform arrays (benchmarks ~40–60% vs JSON) but it *hurts* readability/accuracy on deeply-nested or free-text data. Scope it to where it wins; measure (07-VERIFICATION has a token-savings benchmark gate).
 
 ---

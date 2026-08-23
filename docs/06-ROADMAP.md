@@ -1,8 +1,15 @@
 # 06 — Roadmap
 
-Rules: milestones are sequential; a milestone is done only when its acceptance criteria (AC) pass in CI *and* the global gates pass (`fmt`, `clippy -D warnings`, `cargo test`, performance budgets from 07). Each milestone produces a usable artifact — no milestone ends in scaffolding-only.
+**Status: historical implementation sequence.** This file preserves the staged
+plan used to build the repository. It is not current product documentation, an
+issue tracker, or proof that a capability ships. Use the public documentation
+site for users and exact source/tests/release evidence for current status.
 
-Cross-check: every feature in 01-FEATURES.md maps to exactly one milestone below; if you implement something unlisted, update both docs first.
+The original rule was that milestones were sequential and accepted only when
+their criteria and global gates passed. The sections below preserve that plan.
+
+Do not add new work to this archive. Current architectural decisions belong in
+focused design records or ADRs, and current public behavior belongs in the site.
 
 ---
 

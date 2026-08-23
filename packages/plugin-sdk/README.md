@@ -1,7 +1,7 @@
 # `@rottweiler/plugin`
 
-Official zero-runtime-dependency TypeScript SDK for Rottweiler's stable
-newline-delimited JSON-RPC 2.0 plugin protocol 2.
+Official zero-runtime-dependency TypeScript SDK for Rottweiler's
+newline-delimited JSON-RPC plugin API.
 
 Use `definePlugin` to declare the complete capability manifest and handlers,
 then call `runPlugin(plugin)` from the executable entry point. The SDK rejects

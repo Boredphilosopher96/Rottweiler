@@ -414,7 +414,7 @@ const FIXTURE_TEMPLATE: &str = r#"{
 const SCHEMA_TEMPLATE: &str = r##"{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://rottweiler.dev/schema/plugin/protocol-2.json",
-  "title": "Rottweiler plugin protocol 2 conformance fixture",
+  "title": "Rottweiler Plugin API conformance fixture",
   "type": "object",
   "required": ["protocol", "status", "framing", "limits", "methods", "initialize_request", "initialize_response", "provider_models_request", "provider_models_response", "provider_http_request", "provider_http_head", "provider_http_body", "provider_http_finished"],
   "properties": {

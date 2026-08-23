@@ -1,0 +1,11 @@
+node_modules/
+.astro/
+dist/
+public/generated/
+public/raw/
+public/llms.txt
+public/llms-full.txt
+public/docs-index.json
+public/rottweiler-logo.png
+public/rottweiler-hero.png
+src/generated/

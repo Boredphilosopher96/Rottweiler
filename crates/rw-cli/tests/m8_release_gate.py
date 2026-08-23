@@ -446,7 +446,6 @@ def one_sample(
     env = isolated_env(home, scratch)
     command = [
         str(rw),
-        "--line",
         "--permission-mode",
         "strict",
         "--in-memory-replay-script",

@@ -339,6 +339,6 @@
     "provider_http_body",
     "provider_http_finished"
   ],
-  "title": "Rottweiler plugin protocol 2 conformance fixture",
+  "title": "Rottweiler Plugin API conformance fixture",
   "type": "object"
 }

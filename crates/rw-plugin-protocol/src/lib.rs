@@ -495,15 +495,6 @@ impl PluginManifest {
         })?;
         Ok(blake3::hash(&bytes).to_hex().to_string())
     }
-
-    /// Alias for [`Self::fingerprint`] that makes the normalization contract explicit.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the manifest is invalid or cannot be serialized.
-    pub fn canonical_fingerprint(&self) -> Result<String, ManifestError> {
-        self.fingerprint()
-    }
 }
 
 impl PluginCapabilities {

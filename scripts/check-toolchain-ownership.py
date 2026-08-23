@@ -62,7 +62,7 @@ def validate_repository(root: Path) -> list[str]:
         failures.append("scripts/provision-wsl-ci.sh must project the root Bun version exactly once")
 
     package_paths = (
-        "packages/plugin-docs/package.json",
+        "packages/docs-site/package.json",
         "packages/plugin-sdk/package.json",
         "packages/tui/package.json",
     )

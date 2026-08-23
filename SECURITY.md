@@ -1,8 +1,8 @@
 # Security policy
 
-Rottweiler is pre-v1 security-sensitive software. The current source branch and
-Homebrew HEAD formula are intended for development and evaluation; no stable
-release is supported until the protected release gates pass.
+Rottweiler is security-sensitive software. The latest signed release is the
+supported product; its authenticated target set is owned by the stable update
+metadata.
 
 ## Reporting a vulnerability
 

@@ -1,0 +1,55 @@
+---
+title: Rottweiler coding agent
+description: Fast local coding-agent infrastructure with a Rust engine, durable sessions, explicit trust, and a responsive terminal interface.
+template: splash
+editUrl: false
+---
+
+import ProductHero from '../../components/ProductHero.astro'
+import { Card, CardGrid } from '@astrojs/starlight/components'
+
+<ProductHero />
+
+<div class="feature-ledger">
+  <div><strong>One engine, every workflow</strong><span>The TUI, one-shot prompts, remote clients, and MCP use the same durable session engine.</span></div>
+  <div><strong>Safe where it matters</strong><span>Project trust, explicit permissions, sandboxing, and credential isolation are engine boundaries—not UI promises.</span></div>
+  <div><strong>Built to be extended</strong><span>Commands, skills, modes, MCP, hooks, WASM, and RPC plugins meet documented contracts.</span></div>
+</div>
+
+## Productive in a terminal. Reliable in automation.
+
+Rottweiler combines a compiled OpenTUI frontend with a headless Rust engine.
+Interactive work feels immediate, while scripts get structured output, bounded
+turns, explicit permission modes, and deterministic replay. Sessions survive
+process exits and remain searchable, resumable, forkable, rewindable, and
+exportable.
+
+<CardGrid>
+  <Card title="Start in five minutes" icon="rocket">
+    Install the complete bundle, validate it, configure one provider, and run
+    your first task. [Follow the quick start](/Rottweiler/docs/installation/).
+  </Card>
+  <Card title="Automate a real task" icon="setting">
+    Use JSON or streaming JSON, set a turn budget, and select an explicit
+    permission policy. [Build a headless workflow](/Rottweiler/docs/tutorials/automate-a-task/).
+  </Card>
+  <Card title="Give an agent the docs" icon="open-book">
+    Point an agent at [`llms.txt`](/Rottweiler/llms.txt), the complete
+    [`llms-full.txt`](/Rottweiler/llms-full.txt), or the structured
+    [`docs-index.json`](/Rottweiler/docs-index.json).
+  </Card>
+</CardGrid>
+
+## One product, one source of truth
+
+The documentation, copyable examples, raw Markdown, search index, and API
+artifacts are built together. Release targets and schemas are projected from
+their machine-owned sources instead of being redefined in prose.
+
+## Open contracts, not hidden doors
+
+Rottweiler publishes JSON Schemas and TypeScript projections for its Client
+API, durable session log, and Plugin API. Built-in execution still
+goes through the same registries and permission boundaries exposed to
+extensions. Download the [machine-readable artifacts](/Rottweiler/docs/reference/plugin-api/)
+or browse the [architecture](/Rottweiler/docs/concepts/architecture/).

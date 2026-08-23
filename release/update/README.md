@@ -1,8 +1,9 @@
 # Signed update repository inputs
 
 `rw upgrade` fails closed unless release binaries contain a compile-time update
-origin and bootstrap root public key. Before the first tag release, maintainers
-must perform an offline key ceremony and commit only these public inputs:
+origin and bootstrap root public key. Signed releases are published from the
+committed public root chain and channel specs. Future root rotations remain an
+offline ceremony; only these public inputs belong in the repository:
 
 - `root-chain.json` — exact signed root envelopes, beginning at version 1.
 - `stable.spec.json` and `beta.spec.json` — release metadata specs whose target

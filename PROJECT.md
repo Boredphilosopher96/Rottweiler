@@ -2,7 +2,9 @@
 
 **A coding agent harness with a Rust engine and an OpenTUI frontend.** The target blend: **opencode's TUI and compaction strategy**, **pi's extensibility**, **Claude Code's CLI orchestration ability** — provider-blind by design.
 
-This file is the entry point for any agent or human working on this project. Read it fully, then read the docs it links to **before writing any code**.
+This file is the entry point for contributors. Product users should start with
+the [public documentation site](https://boredphilosopher96.github.io/Rottweiler/).
+Read this file fully, then read the maintainer documents relevant to the change.
 
 ## Mission
 
@@ -24,17 +26,19 @@ Build the best-performing coding agent harness: instant startup, 60fps TUI, aggr
 
 | Doc | Contents |
 |---|---|
-| [docs/01-FEATURES.md](docs/01-FEATURES.md) | Complete feature spec — the "what" |
-| [docs/02-ARCHITECTURE.md](docs/02-ARCHITECTURE.md) | Crate layout, engine design, data flow — the "how" |
+| [packages/docs-site](packages/docs-site) | Current public product docs, tutorials, references, and agent projections |
+| [docs/01-FEATURES.md](docs/01-FEATURES.md) | Product intent; source and tests own shipped status |
+| [docs/02-ARCHITECTURE.md](docs/02-ARCHITECTURE.md) | Current boundaries plus intended architecture |
 | [docs/03-DECISIONS.md](docs/03-DECISIONS.md) | ADRs: every contested choice, with rationale and revisit conditions |
 | [docs/04-EXTENSIBILITY.md](docs/04-EXTENSIBILITY.md) | Extension tiers, plugin protocol, hook catalog |
 | [docs/05-SECURITY.md](docs/05-SECURITY.md) | Sandbox design, permission model, threat model |
-| [docs/06-ROADMAP.md](docs/06-ROADMAP.md) | Phased milestones with acceptance criteria |
-| [docs/07-VERIFICATION.md](docs/07-VERIFICATION.md) | How we prove it works: tests, replay, benchmarks, evals |
+| [docs/06-ROADMAP.md](docs/06-ROADMAP.md) | Historical implementation sequence, not the current issue tracker |
+| [docs/07-VERIFICATION.md](docs/07-VERIFICATION.md) | Current test, replay, benchmark, eval, and release evidence tiers |
 
 ## Rules for the implementing agent
 
-1. **Follow the roadmap order** in `docs/06-ROADMAP.md`. Do not start a milestone before the previous one's acceptance criteria pass.
+1. **Follow semantic ownership.** Put each fact and feature in one owner. Generate
+   or mechanically check projections; never create a second handwritten source.
 2. **Every milestone ends green**: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test` all pass — and from M0 on, `bun test` + typecheck in `packages/tui` and the cross-language protocol contract tests — plus the milestone's specific acceptance tests.
 3. **Respect the ADRs** in `docs/03-DECISIONS.md`. If an ADR turns out to be wrong, write a superseding ADR explaining why before deviating — never silently diverge.
 4. **Engine stays headless.** No terminal/UI types in any Rust crate. All UI lives in `packages/tui` (TypeScript/OpenTUI). If the engine needs something shown, it emits an event; if the TUI needs something done, it sends a command. Never a third channel.

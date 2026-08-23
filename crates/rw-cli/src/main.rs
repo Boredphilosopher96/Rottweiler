@@ -63,7 +63,7 @@ pub(crate) fn rustix_mode_bits<T: Into<u32>>(mode: T) -> u32 {
 #[command(name = "rw", version, about = "Rottweiler coding-agent harness")]
 #[allow(clippy::struct_excessive_bools)]
 struct Cli {
-    /// Run one prompt without starting the interactive line-mode client.
+    /// Run one prompt without starting the interactive application.
     #[arg(short = 'p', long, value_name = "PROMPT")]
     prompt: Option<String>,
     /// Rendering contract for print mode.
@@ -84,9 +84,6 @@ struct Cli {
     /// Keep the engine alive after the interactive client exits.
     #[arg(long)]
     detach: bool,
-    /// Use the pre-M4 readline client instead of `OpenTUI`.
-    #[arg(long)]
-    line: bool,
     /// Add another canonical workspace root for tools and sandbox writes.
     #[arg(long = "add-dir", value_name = "PATH")]
     add_dirs: Vec<PathBuf>,
@@ -485,11 +482,6 @@ enum SessionsCommand {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
-    /// Alias for `list`, optimized for quickly finding a resume target.
-    Recent {
-        #[arg(long, default_value_t = 20)]
-        limit: usize,
-    },
     Search {
         #[arg(value_name = "QUERY")]
         query: String,
@@ -713,9 +705,6 @@ fn validate_cli_option_scope(cli: &Cli) -> Result<()> {
     if cli.detach && !supports_detach {
         invalid.push("--detach");
     }
-    if cli.line {
-        invalid.push("--line");
-    }
     if !cli.add_dirs.is_empty() && !supports_workspace_roots {
         invalid.push("--add-dir");
     }
@@ -775,14 +764,13 @@ fn command_supports_output(command: &Command) -> bool {
 }
 
 fn validate_default_command_options(cli: &Cli) -> Result<()> {
-    let headless_or_line = cli.prompt.is_some()
-        || cli.line
+    let headless = cli.prompt.is_some()
         || cli.replay_dir.is_some()
         || cli.record_replay_script.is_some()
         || cli.perf_markers;
-    if cli.output_format.is_some() && !headless_or_line {
+    if cli.output_format.is_some() && !headless {
         return Err(miette!(
-            "--output-format requires --prompt, --line, or a replay/performance run"
+            "--output-format requires --prompt or a replay/performance run"
         ));
     }
     if cli.replay_provider.is_some()
@@ -866,7 +854,7 @@ async fn main() -> Result<()> {
     validate_cli_option_scope(&cli)?;
     upgrade::show_pending_release_notes();
     if let Some(host) = cli.remote.as_deref() {
-        if cli.command.is_some() || cli.prompt.is_some() || cli.line {
+        if cli.command.is_some() || cli.prompt.is_some() {
             return Err(miette!("--remote is available only for the OpenTUI client"));
         }
         run_remote_tui(host, &cli).await?;
@@ -1274,7 +1262,7 @@ async fn main() -> Result<()> {
         }
         Some(Command::Sessions {
             output,
-            command: SessionsCommand::List { limit } | SessionsCommand::Recent { limit },
+            command: SessionsCommand::List { limit },
         }) => {
             let sessions = session_history::list_sessions(&configuration_root_path()?, limit)?;
             render_session_search(
@@ -1369,12 +1357,11 @@ async fn main() -> Result<()> {
             .await?;
         }
         None => {
-            let headless_or_line = cli.prompt.is_some()
-                || cli.line
+            let headless = cli.prompt.is_some()
                 || cli.replay_dir.is_some()
                 || cli.record_replay_script.is_some()
                 || cli.perf_markers;
-            if headless_or_line {
+            if headless {
                 session::run(session::RunOptions {
                     prompt: cli.prompt,
                     output_format: cli.output_format.unwrap_or_default().into(),
