@@ -249,7 +249,7 @@ function validateManifest(manifest: PluginManifest): void {
     ["command", (manifest.capabilities.commands ?? []).map((entry) => entry.name)],
     [
       "hook",
-      (manifest.capabilities.hooks ?? []).map((entry) => (typeof entry === "string" ? entry : entry.name)),
+      (manifest.capabilities.hooks ?? []).map((entry) => entry.name),
     ],
     [
       "provider",
@@ -326,14 +326,14 @@ function validateManifest(manifest: PluginManifest): void {
   }
   for (const event of manifest.capabilities.event_subscriptions ?? []) requireCanonicalName(event, "event", "event subscription")
   for (const hook of manifest.capabilities.hooks ?? []) {
-    const hookName = typeof hook === "string" ? hook : hook.name
+    const hookName = hook.name
     const validHooks = new Set([
       "session_start", "session_end", "user_prompt_submit", "pre_tool", "post_tool",
       "pre_compact", "turn_end", "permission_check",
     ])
     if (!validHooks.has(hookName)) throw new Error(`unknown hook capability ${hookName}`)
-    if (typeof hook !== "string") requireKeys(hook, `hook ${hookName}`, ["name", "failure_policy"])
-    if (typeof hook !== "string" && hook.failure_policy !== "fail-open" && hook.failure_policy !== "fail-closed") {
+    requireKeys(hook, `hook ${hookName}`, ["name", "failure_policy"])
+    if (hook.failure_policy !== "fail-open" && hook.failure_policy !== "fail-closed") {
       throw new Error(`hook ${hook.name} has an invalid failure policy`)
     }
   }
@@ -347,7 +347,7 @@ function validateDefinition(definition: PluginDefinition): void {
     ["command", (manifest.capabilities.commands ?? []).map((entry) => entry.name), Object.keys(handlers.commands ?? {})],
     [
       "hook",
-      (manifest.capabilities.hooks ?? []).map((entry) => (typeof entry === "string" ? entry : entry.name)),
+      (manifest.capabilities.hooks ?? []).map((entry) => entry.name),
       Object.keys(handlers.hooks ?? {}),
     ],
     [

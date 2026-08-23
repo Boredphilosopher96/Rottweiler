@@ -1095,7 +1095,8 @@ mod tests {
 
     use super::*;
     use rw_plugin_protocol::{
-        PROTOCOL_VERSION, PluginCapabilities, PluginHook, PluginHookDeclaration,
+        PROTOCOL_VERSION, PluginCapabilities, PluginHook, PluginHookCapability,
+        PluginHookFailurePolicy,
     };
 
     fn valid_component() -> Vec<u8> {
@@ -1146,7 +1147,10 @@ mod tests {
                 version: "1.2.3".to_owned(),
                 protocol: PROTOCOL_VERSION,
                 capabilities: PluginCapabilities {
-                    hooks: vec![PluginHookDeclaration::Name(PluginHook::PostTool)],
+                    hooks: vec![PluginHookCapability {
+                        name: PluginHook::PostTool,
+                        failure_policy: PluginHookFailurePolicy::FailOpen,
+                    }],
                     ..PluginCapabilities::default()
                 },
             },

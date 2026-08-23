@@ -285,12 +285,12 @@ pub struct PluginCapabilities {
     #[serde(default)]
     pub commands: Vec<PluginCommandCapability>,
     #[serde(default)]
-    pub hooks: Vec<PluginHookDeclaration>,
+    pub hooks: Vec<PluginHookCapability>,
     #[serde(default)]
     pub providers: Vec<PluginProviderCapability>,
     #[serde(default)]
     pub event_subscriptions: Vec<String>,
-    #[serde(default, alias = "push_methods")]
+    #[serde(default)]
     pub push: Vec<PluginPush>,
 }
 
@@ -363,35 +363,10 @@ pub enum PluginHookFailurePolicy {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(untagged)]
-pub enum PluginHookDeclaration {
-    Name(PluginHook),
-    Detailed(PluginHookCapability),
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginHookCapability {
     pub name: PluginHook,
     pub failure_policy: PluginHookFailurePolicy,
-}
-
-impl PluginHookDeclaration {
-    #[must_use]
-    pub const fn name(self) -> PluginHook {
-        match self {
-            Self::Name(name) => name,
-            Self::Detailed(declaration) => declaration.name,
-        }
-    }
-
-    #[must_use]
-    pub const fn failure_policy(self) -> PluginHookFailurePolicy {
-        match self {
-            Self::Name(_) => PluginHookFailurePolicy::FailOpen,
-            Self::Detailed(declaration) => declaration.failure_policy,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -599,7 +574,7 @@ impl PluginCapabilities {
                 NameKind::Tool,
             )?;
         }
-        validate_unique("hook", self.hooks.iter().map(|hook| hook.name().as_str()))?;
+        validate_unique("hook", self.hooks.iter().map(|hook| hook.name.as_str()))?;
 
         let mut prefixes = BTreeSet::new();
         for provider in &self.providers {

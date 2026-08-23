@@ -94,7 +94,7 @@ export type PluginPushMethod =
 export interface PluginCapabilities {
   readonly tools?: readonly ToolDeclaration[]
   readonly commands?: readonly CommandDeclaration[]
-  readonly hooks?: readonly (HookName | HookDeclaration)[]
+  readonly hooks?: readonly HookDeclaration[]
   readonly providers?: readonly ProviderDeclaration[]
   readonly event_subscriptions?: readonly string[]
   readonly push?: readonly PluginPushMethod[]

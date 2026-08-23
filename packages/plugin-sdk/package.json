@@ -29,7 +29,7 @@
   "bin": {
     "rottweiler-plugin-scaffold": "./dist/bin/scaffold.js"
   },
-  "files": ["dist", "fixtures/wire/protocol-2.json", "fixtures/wire/protocol-2.schema.json", "PROTOCOL.md", "README.md"],
+  "files": ["dist", "fixtures/scaffold", "fixtures/wire/protocol-2.json", "fixtures/wire/protocol-2.schema.json", "PROTOCOL.md", "README.md"],
   "scripts": {
     "build": "bun run build.ts",
     "test": "bun test",

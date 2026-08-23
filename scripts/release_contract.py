@@ -24,7 +24,14 @@ VERSION_PATTERN = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:[.-][0-9
 PLATFORM_PATTERN = re.compile(r"[a-z0-9]+-[a-z0-9_]+")
 SAFE_PATH_PATTERN = re.compile(r"[A-Za-z0-9_.{}/-]+")
 SAFE_LIBRARY_PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
-EXPECTED_MEMBER_IDS = {"installer", "engine", "tui", "wasm_host", "opentui_native"}
+EXPECTED_MEMBER_IDS = {
+    "installer",
+    "engine",
+    "tui",
+    "wasm_host",
+    "plugin_host",
+    "opentui_native",
+}
 
 
 @dataclass(frozen=True)
@@ -39,6 +46,7 @@ class ArchiveMember:
 class ProductBudgets:
     engine_less_than_bytes: int
     wasm_host_less_than_bytes: int
+    plugin_host_less_than_bytes: int
     tui_bundle_less_than_bytes: int
 
 
@@ -164,6 +172,7 @@ def _parse_budgets(value: object, path: str) -> ProductBudgets:
     fields = {
         "engine_less_than_bytes",
         "wasm_host_less_than_bytes",
+        "plugin_host_less_than_bytes",
         "tui_bundle_less_than_bytes",
     }
     _expect_keys(document, path, fields)
@@ -173,6 +182,9 @@ def _parse_budgets(value: object, path: str) -> ProductBudgets:
         ),
         wasm_host_less_than_bytes=_positive_integer(
             document["wasm_host_less_than_bytes"], f"{path}.wasm_host_less_than_bytes"
+        ),
+        plugin_host_less_than_bytes=_positive_integer(
+            document["plugin_host_less_than_bytes"], f"{path}.plugin_host_less_than_bytes"
         ),
         tui_bundle_less_than_bytes=_positive_integer(
             document["tui_bundle_less_than_bytes"], f"{path}.tui_bundle_less_than_bytes"
@@ -316,6 +328,11 @@ def load_contract(path: Path = DEFAULT_CONTRACT_PATH) -> ReleaseContract:
                 f"platforms.{platform.id}.product_budgets.wasm_host_less_than_bytes",
                 "WASM host product budget exceeds its member extraction limit",
             )
+        if budgets.plugin_host_less_than_bytes > member_by_id["plugin_host"].max_bytes:
+            _fail(
+                f"platforms.{platform.id}.product_budgets.plugin_host_less_than_bytes",
+                "plugin host product budget exceeds its member extraction limit",
+            )
         tui_extraction_bytes = (
             member_by_id["tui"].max_bytes + member_by_id["opentui_native"].max_bytes
         )
@@ -328,6 +345,7 @@ def load_contract(path: Path = DEFAULT_CONTRACT_PATH) -> ReleaseContract:
             member_by_id["installer"].max_bytes
             + budgets.engine_less_than_bytes
             + budgets.wasm_host_less_than_bytes
+            + budgets.plugin_host_less_than_bytes
             + budgets.tui_bundle_less_than_bytes
         )
         if maximum_allowed_product_bytes > expanded_max_bytes:
@@ -356,6 +374,7 @@ def validate_build(
     platform_id: str,
     engine: Path,
     wasm_host: Path,
+    plugin_host: Path,
     tui: Path,
     opentui_native: Path,
 ) -> None:
@@ -363,6 +382,7 @@ def validate_build(
     paths = {
         "engine": engine,
         "wasm_host": wasm_host,
+        "plugin_host": plugin_host,
         "tui": tui,
         "opentui_native": opentui_native,
     }
@@ -390,6 +410,7 @@ def validate_build(
     checks = (
         ("engine", sizes["engine"], budgets.engine_less_than_bytes),
         ("WASM helper", sizes["wasm_host"], budgets.wasm_host_less_than_bytes),
+        ("TypeScript plugin host", sizes["plugin_host"], budgets.plugin_host_less_than_bytes),
         (
             "TUI bundle",
             sizes["tui"] + sizes["opentui_native"],
@@ -485,6 +506,7 @@ def render_rust(contract: ReleaseContract) -> str:
         "pub struct ReleaseProductBudgets {",
         "    pub engine_less_than_bytes: u64,",
         "    pub wasm_host_less_than_bytes: u64,",
+        "    pub plugin_host_less_than_bytes: u64,",
         "    pub tui_bundle_less_than_bytes: u64,",
         "}",
         "",
@@ -544,6 +566,8 @@ def render_rust(contract: ReleaseContract) -> str:
                 f"{_rust_integer(budgets.engine_less_than_bytes)},",
                 "            wasm_host_less_than_bytes: "
                 f"{_rust_integer(budgets.wasm_host_less_than_bytes)},",
+                "            plugin_host_less_than_bytes: "
+                f"{_rust_integer(budgets.plugin_host_less_than_bytes)},",
                 "            tui_bundle_less_than_bytes: "
                 f"{_rust_integer(budgets.tui_bundle_less_than_bytes)},",
                 "        },",
@@ -582,6 +606,7 @@ def render_typescript(contract: ReleaseContract) -> str:
         "export interface ReleaseProductBudgets {",
         "  readonly engineLessThanBytes: number",
         "  readonly wasmHostLessThanBytes: number",
+        "  readonly pluginHostLessThanBytes: number",
         "  readonly tuiBundleLessThanBytes: number",
         "}",
         "",
@@ -614,6 +639,7 @@ def render_typescript(contract: ReleaseContract) -> str:
                 "    productBudgets: {",
                 f"      engineLessThanBytes: {budgets.engine_less_than_bytes},",
                 f"      wasmHostLessThanBytes: {budgets.wasm_host_less_than_bytes},",
+                f"      pluginHostLessThanBytes: {budgets.plugin_host_less_than_bytes},",
                 f"      tuiBundleLessThanBytes: {budgets.tui_bundle_less_than_bytes},",
                 "    },",
                 "  },",
@@ -715,6 +741,7 @@ def stage_release(
     platform_id: str,
     engine: Path,
     wasm_host: Path,
+    plugin_host: Path,
     tui: Path,
     opentui_native: Path,
 ) -> None:
@@ -724,10 +751,11 @@ def stage_release(
         raise ValueError(f"release stage must be named {expected_root}: {output}")
     if output.exists() or output.is_symlink():
         raise ValueError(f"release stage already exists: {output}")
-    validate_build(contract, platform_id, engine, wasm_host, tui, opentui_native)
+    validate_build(contract, platform_id, engine, wasm_host, plugin_host, tui, opentui_native)
     sources = {
         "engine": engine,
         "wasm_host": wasm_host,
+        "plugin_host": plugin_host,
         "tui": tui,
         "opentui_native": opentui_native,
     }
@@ -777,6 +805,7 @@ def parse_args() -> argparse.Namespace:
     validate.add_argument("--platform", required=True)
     validate.add_argument("--engine", required=True, type=Path)
     validate.add_argument("--wasm-host", required=True, type=Path)
+    validate.add_argument("--plugin-host", required=True, type=Path)
     validate.add_argument("--tui", required=True, type=Path)
     validate.add_argument("--opentui-native", required=True, type=Path)
 
@@ -793,6 +822,7 @@ def parse_args() -> argparse.Namespace:
     stage.add_argument("--platform", required=True)
     stage.add_argument("--engine", required=True, type=Path)
     stage.add_argument("--wasm-host", required=True, type=Path)
+    stage.add_argument("--plugin-host", required=True, type=Path)
     stage.add_argument("--tui", required=True, type=Path)
     stage.add_argument("--opentui-native", required=True, type=Path)
 
@@ -827,6 +857,7 @@ def run(args: argparse.Namespace) -> None:
             args.platform,
             args.engine,
             args.wasm_host,
+            args.plugin_host,
             args.tui,
             args.opentui_native,
         )
@@ -845,6 +876,7 @@ def run(args: argparse.Namespace) -> None:
             args.platform,
             args.engine,
             args.wasm_host,
+            args.plugin_host,
             args.tui,
             args.opentui_native,
         )

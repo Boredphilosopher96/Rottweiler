@@ -110,9 +110,10 @@ pub trait WebSearcher: Send + Sync {
     ) -> Result<WebSearchResponse, ToolError>;
 }
 
-/// Generic JSON search API implemented strictly on top of [`WebFetcher`], so
+/// Configured JSON search API implemented strictly on top of [`WebFetcher`], so
 /// redirect, DNS, SSRF, approval, proxy, and egress rules are identical to
-/// `webfetch`.
+/// `webfetch`. Responses use exactly
+/// `{"results":[{"title":"...","url":"...","snippet":"..."}]}`.
 #[derive(Clone)]
 pub struct ConfiguredSearchApi {
     fetcher: Arc<dyn WebFetcher>,
@@ -168,39 +169,16 @@ impl ConfiguredSearchApi {
 }
 
 #[derive(Deserialize)]
-struct GenericSearchEnvelope {
-    #[serde(default, alias = "items", alias = "webPages")]
-    results: GenericResults,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(untagged)]
-enum GenericResults {
-    List(Vec<GenericSearchHit>),
-    Object {
-        #[serde(default, alias = "items")]
-        value: Vec<GenericSearchHit>,
-    },
-    #[default]
-    Empty,
-}
-
-impl GenericResults {
-    fn into_vec(self) -> Vec<GenericSearchHit> {
-        match self {
-            Self::List(results) | Self::Object { value: results } => results,
-            Self::Empty => Vec::new(),
-        }
-    }
+#[serde(deny_unknown_fields)]
+struct ConfiguredSearchEnvelope {
+    results: Vec<ConfiguredSearchHit>,
 }
 
 #[derive(Deserialize)]
-struct GenericSearchHit {
-    #[serde(default, alias = "name")]
+#[serde(deny_unknown_fields)]
+struct ConfiguredSearchHit {
     title: String,
-    #[serde(alias = "link")]
     url: String,
-    #[serde(default, alias = "description")]
     snippet: String,
 }
 
@@ -236,14 +214,15 @@ impl WebSearcher for ConfiguredSearchApi {
                 response.status
             )));
         }
-        let envelope: GenericSearchEnvelope =
+        let envelope: ConfiguredSearchEnvelope =
             serde_json::from_slice(&response.body).map_err(|_| {
-                ToolError::Network("configured search API returned invalid JSON".to_owned())
+                ToolError::Network(
+                    "configured search API returned an invalid response contract".to_owned(),
+                )
             })?;
         let allowed_domains = request.allowed_domains;
         let results = envelope
             .results
-            .into_vec()
             .into_iter()
             .filter_map(|hit| {
                 let url = Url::parse(&hit.url).ok()?;
@@ -731,6 +710,23 @@ mod tests {
         );
         assert!(!result.content.contains("example.com"));
         assert!(!result.content.contains("file:///"));
+    }
+
+    #[test]
+    fn configured_search_response_has_one_strict_shape() {
+        assert!(
+            serde_json::from_value::<ConfiguredSearchEnvelope>(
+                json!({"results":[{"title":"Title","url":"https://example.com","snippet":"Text"}]})
+            )
+            .is_ok()
+        );
+        for alternate in [
+            json!({"items": []}),
+            json!({"webPages": {"value": []}}),
+            json!({"results":[{"name":"Title","link":"https://example.com","description":"Text"}]}),
+        ] {
+            assert!(serde_json::from_value::<ConfiguredSearchEnvelope>(alternate).is_err());
+        }
     }
 
     #[test]

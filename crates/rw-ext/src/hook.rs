@@ -317,6 +317,7 @@ pub enum HookRegistrationError {
     Duplicate { event: HookEvent, id: String },
 }
 
+#[derive(Clone)]
 struct RegisteredHook {
     registration: HookRegistration,
     handler: Arc<dyn HookHandler>,
@@ -355,7 +356,7 @@ async fn invoke_registered_hook(
 /// Hooks execute serially by `(priority, id)`. This makes the observable
 /// pipeline independent of extension discovery order and asynchronous runtime
 /// scheduling.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct HookDispatcher {
     hooks: BTreeMap<HookEvent, Vec<RegisteredHook>>,
 }

@@ -15,10 +15,13 @@ fi
 scripts/cargo-release.sh build --locked --release -p rw-cli
 scripts/cargo-release.sh build --locked --release -p rw-wasm-host
 (cd packages/tui && bun run build)
+(cd packages/plugin-sdk && bun install --frozen-lockfile && bun run typecheck && bun test && bun run build)
+(cd packages/plugin-host && bun install --frozen-lockfile && bun run typecheck && bun test && bun run build)
 
 release_dir=$(scripts/cargo-release.sh artifact-dir)
 engine="$release_dir/rw"
 wasm_host="$release_dir/rottweiler-wasm-host"
+plugin_host="$repo/packages/plugin-host/dist/rottweiler-plugin-host"
 tui="$repo/packages/tui/dist/rottweiler-tui"
 platform=$(python3 scripts/release_contract.py resolve-platform --system "$(uname -s)" --machine "$(uname -m)")
 opentui_native_name=$(python3 scripts/release_contract.py platform-field --platform "$platform" --field native-library)
@@ -27,6 +30,7 @@ python3 scripts/release_contract.py validate-build \
   --platform "$platform" \
   --engine "$engine" \
   --wasm-host "$wasm_host" \
+  --plugin-host "$plugin_host" \
   --tui "$tui" \
   --opentui-native "$opentui_native"
 
@@ -46,6 +50,7 @@ python3 scripts/release_contract.py stage-release \
   --platform "$platform" \
   --engine "$engine" \
   --wasm-host "$wasm_host" \
+  --plugin-host "$plugin_host" \
   --tui "$tui" \
   --opentui-native "$opentui_native"
 python3 scripts/package-release.py "$stage" "$archive"
@@ -58,7 +63,14 @@ verify=$(mktemp -d "${TMPDIR:-/tmp}/rottweiler-release.XXXXXX")
 trap 'rm -rf "$verify"' EXIT HUP INT TERM
 tar -xzf "$archive" -C "$verify"
 engine_path=$(python3 scripts/release_contract.py member-path --platform "$platform" --member engine)
+plugin_host_path=$(python3 scripts/release_contract.py member-path --platform "$platform" --member plugin_host)
 "$verify/$release_root/$engine_path" --version >/dev/null
+"$verify/$release_root/$plugin_host_path" version | python3 -c '
+import json, sys
+identity = json.load(sys.stdin)
+if set(identity) != {"abi", "format"} or not isinstance(identity["abi"], int) or identity["abi"] < 1 or not isinstance(identity["format"], str) or not identity["format"]:
+    raise SystemExit("extracted plugin host reported an unexpected semantic identity")
+'
 rm -rf "$verify"
 trap - EXIT HUP INT TERM
 printf '%s\n' "$archive"

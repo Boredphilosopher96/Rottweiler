@@ -371,11 +371,11 @@ to become publication inputs rather than authorization evidence.
 
 ## ADR-027: TypeScript source plugins use a sealed, per-plugin process host
 
-**Status:** accepted design 2026-08-22; implementation is staged and must not be
-reported as shipped until the extracted-release acceptance passes.
+**Status:** implemented 2026-08-22. Registry publication of the SDK remains an
+exact-tag release operation.
 
-**Decision.** Rottweiler will ship one private, authenticated TypeScript host and
-spawn one sandboxed host process per active TypeScript plugin. Production resolves
+**Decision.** Rottweiler ships one private, authenticated TypeScript host and
+spawns one sandboxed host process per active TypeScript plugin. Production resolves
 an inert manifest plus an exact source and locked-dependency graph into a sealed,
 content-addressed bundle, then runs that bundle through the existing approval,
 `PluginLauncher`, `PluginHost`, capability, and adapter path. `manifest.json` is
@@ -391,8 +391,8 @@ plugin without moving JavaScript into the Rust engine or combining unrelated
 plugins into one failure and authority domain. Sealing from a two-pass private
 snapshot makes source approval describe the bytes that execute. Resolving the new
 artifact into the current process contract minimizes the production migration;
-reserving actor-owned generations keeps the later Pi-like development loop from
-requiring unsafe mutable registries.
+actor-owned generations provide the Pi-like development loop without unsafe
+mutable registries.
 
 **Specification.** `docs/design/typescript-source-plugin-host.md` defines the
 preparation protocol, identity and sandbox rules, failure states, live attachment,

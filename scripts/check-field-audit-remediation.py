@@ -130,12 +130,60 @@ def main() -> int:
     cargo = text("Cargo.toml")
     require(f'version = "{package["version"]}"' in cargo, "SDK and product versions differ")
     scaffold = text("packages/plugin-sdk/src/scaffold.ts")
-    require(scaffold.count('path: "manifest.json"') == 1, "scaffold manifest source is not singular")
-    require("parsePluginManifest(manifestDocument)" in scaffold, "scaffold does not import inert manifest data")
+    scaffold_files = text("packages/plugin-sdk/fixtures/scaffold/files.txt")
+    scaffold_source = text("packages/plugin-sdk/fixtures/scaffold/src/index.ts")
+    require(
+        scaffold_files.count("manifest.json\tmanifest.json") == 1,
+        "scaffold manifest source is not singular",
+    )
+    require("files.txt" in scaffold, "SDK renderer does not consume the canonical scaffold mapping")
+    require(
+        "parsePluginManifest(manifestDocument)" in scaffold_source,
+        "scaffold does not import inert manifest data",
+    )
+    require_contains(
+        "crates/rw-runtime/src/source_plugin.rs",
+        "SourcePluginResolver",
+        "let discovered = self.graph",
+        "let rebuilt = self.bundle",
+        "if rebuilt != discovered",
+        "publish_bundle",
+        "parse_bun_lock",
+    )
+    require_contains(
+        "packages/plugin-host/src/index.ts",
+        "SOURCE_HOST_ABI",
+        "SOURCE_BUNDLE_FORMAT",
+        "dynamic-import",
+        "rejectSymlinkComponents",
+        "await runPlugin(loaded.plugin)",
+    )
+    require_contains(
+        "crates/rw-core/src/engine/session_extension.rs",
+        "SessionExtensionSnapshot",
+        "SessionExtensionController",
+    )
+    require_contains(
+        "crates/rw-runtime/src/extension_runtime.rs",
+        "RuntimeSessionExtensionController",
+        "candidate.shutdown().await",
+        "state.active.replace(candidate)",
+    )
     require_contains(
         "crates/rw-cli/src/plugin_dev.rs",
-        "InitializeParams {",
-        "host: PLUGIN_HOST_ID.to_owned()",
+        'CAPABILITY_HEADER, "plugin_development"',
+        "AttachDevelopmentPlugin",
+        "DetachDevelopmentPlugin",
+        "retaining last good generation",
+    )
+    require_contains(
+        "contracts/release-contract.json",
+        '"id": "plugin_host"',
+        '"path": "bin/rottweiler-plugin-host"',
+    )
+    require(
+        "--compile" not in text("packages/plugin-sdk/fixtures/scaffold/package.json"),
+        "the TypeScript scaffold still embeds a Bun runtime",
     )
     require_contains(
         "docs/design/typescript-source-plugin-host.md",

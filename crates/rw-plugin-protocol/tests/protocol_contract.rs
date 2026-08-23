@@ -60,6 +60,19 @@ fn independent_negative_samples_fail_at_the_owner_boundary() {
         })
     ));
 
+    let shorthand_hook = json!({
+        "name": "plugin",
+        "version": "1.0.0",
+        "protocol": 2,
+        "capabilities": { "hooks": ["pre_tool"] }
+    });
+    assert!(
+        PluginManifest::from_slice(
+            &serde_json::to_vec(&shorthand_hook).expect("shorthand hook JSON")
+        )
+        .is_err()
+    );
+
     let mut decoder = FrameDecoder::default();
     assert!(
         decoder

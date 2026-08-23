@@ -1092,6 +1092,15 @@ pub enum ClientCommand {
         status: i32,
         captured_output: Option<String>,
     },
+    AttachDevelopmentPlugin {
+        meta: CommandMeta,
+        session_id: SessionId,
+        source: String,
+    },
+    DetachDevelopmentPlugin {
+        meta: CommandMeta,
+        session_id: SessionId,
+    },
     PinContext {
         meta: CommandMeta,
         session_id: SessionId,
@@ -1344,6 +1353,8 @@ impl ClientCommand {
             | Self::TakeDriver { meta, .. }
             | Self::UserShellStarted { meta, .. }
             | Self::UserShellEnded { meta, .. }
+            | Self::AttachDevelopmentPlugin { meta, .. }
+            | Self::DetachDevelopmentPlugin { meta, .. }
             | Self::PinContext { meta, .. }
             | Self::EvictContext { meta, .. }
             | Self::GetContext { meta, .. }
@@ -1415,6 +1426,8 @@ impl ClientCommand {
             | Self::TakeDriver { session_id, .. }
             | Self::UserShellStarted { session_id, .. }
             | Self::UserShellEnded { session_id, .. }
+            | Self::AttachDevelopmentPlugin { session_id, .. }
+            | Self::DetachDevelopmentPlugin { session_id, .. }
             | Self::PinContext { session_id, .. }
             | Self::EvictContext { session_id, .. }
             | Self::GetContext { session_id, .. }
@@ -1479,6 +1492,8 @@ impl ClientCommand {
             | Self::TakeDriver { meta, .. }
             | Self::UserShellStarted { meta, .. }
             | Self::UserShellEnded { meta, .. }
+            | Self::AttachDevelopmentPlugin { meta, .. }
+            | Self::DetachDevelopmentPlugin { meta, .. }
             | Self::PinContext { meta, .. }
             | Self::EvictContext { meta, .. }
             | Self::GetContext { meta, .. }

@@ -285,6 +285,8 @@ fn requires_driver(command: &ClientCommand) -> bool {
             | ClientCommand::DumpPrompt { .. }
             | ClientCommand::ListPermissions { .. }
             | ClientCommand::RenameSession { .. }
+            | ClientCommand::AttachDevelopmentPlugin { .. }
+            | ClientCommand::DetachDevelopmentPlugin { .. }
     )
 }
 
@@ -844,6 +846,35 @@ pub(super) async fn handle_actor_command(
                     let outcome = protocol_rejection(
                         "user_shell_active",
                         "an agent turn cannot start while the foreground user shell is active",
+                    );
+                    send_ack(state, events, &meta, session, outcome.clone());
+                    let _ = respond.send(outcome);
+                    return;
+                }
+                ClientCommand::AttachDevelopmentPlugin { source, .. }
+                    if state.running.is_some()
+                        || state.active_shell.is_some()
+                        || state.driver_client_id.is_none()
+                        || source.is_empty()
+                        || source.len() > 4096
+                        || source.chars().any(char::is_control) =>
+                {
+                    let outcome = protocol_rejection(
+                        "development_attach_requires_idle_session",
+                        "development plugin attachment requires an idle session and one bounded source path",
+                    );
+                    send_ack(state, events, &meta, session, outcome.clone());
+                    let _ = respond.send(outcome);
+                    return;
+                }
+                ClientCommand::DetachDevelopmentPlugin { .. }
+                    if state.running.is_some()
+                        || state.active_shell.is_some()
+                        || state.driver_client_id.is_none() =>
+                {
+                    let outcome = protocol_rejection(
+                        "development_detach_requires_idle_session",
+                        "development plugin detachment requires an idle session",
                     );
                     send_ack(state, events, &meta, session, outcome.clone());
                     let _ = respond.send(outcome);
@@ -1768,6 +1799,66 @@ pub(super) async fn handle_actor_command(
                 }
                 return;
             }
+            if matches!(
+                command,
+                ClientCommand::AttachDevelopmentPlugin { .. }
+                    | ClientCommand::DetachDevelopmentPlugin { .. }
+            ) {
+                let current = SessionExtensionSnapshot {
+                    revision: config.workspace_generation,
+                    workspace_roots: Arc::from(
+                        std::iter::once(config.workspace_root.clone())
+                            .chain(config.additional_workspace_roots.iter().cloned())
+                            .collect::<Vec<_>>(),
+                    ),
+                    tools: Arc::clone(&config.tools),
+                    hooks: Arc::clone(&config.hooks),
+                    commands: Arc::clone(&config.commands),
+                };
+                let prepared = match &command {
+                    ClientCommand::AttachDevelopmentPlugin { source, .. } => {
+                        config
+                            .extension_development
+                            .attach(Path::new(source), current)
+                            .await
+                    }
+                    ClientCommand::DetachDevelopmentPlugin { .. } => {
+                        config.extension_development.detach().await
+                    }
+                    _ => unreachable!("development command guard narrows the command"),
+                };
+                match prepared {
+                    Ok(snapshot) => {
+                        let next_config = Arc::new(config.with_extension_snapshot(&snapshot));
+                        *command_descriptors
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::from(
+                            next_config
+                                .commands
+                                .descriptors()
+                                .cloned()
+                                .collect::<Vec<_>>(),
+                        );
+                        *config = next_config;
+                        let accepted = CommandOutcome::Accepted;
+                        send_ack(state, events, &meta, session, accepted.clone());
+                        let _ = respond.send(accepted);
+                        if let Some(complete) = completion.take() {
+                            let _ = complete.send(Ok(ProtocolCompletion::Unit));
+                        }
+                    }
+                    Err(error) => {
+                        let outcome =
+                            protocol_rejection("development_plugin_rejected", error.to_string());
+                        send_ack(state, events, &meta, session, outcome.clone());
+                        let _ = respond.send(outcome);
+                        if let Some(complete) = completion.take() {
+                            let _ = complete.send(Err(error));
+                        }
+                    }
+                }
+                return;
+            }
             let accepted = CommandOutcome::Accepted;
             send_ack(state, events, &meta, session, accepted.clone());
             let _ = respond.send(accepted);
@@ -1810,6 +1901,10 @@ pub(super) async fn handle_actor_command(
                     if let Some(complete) = completion.take() {
                         let _ = complete.send(result.map(|()| ProtocolCompletion::Unit));
                     }
+                }
+                ClientCommand::AttachDevelopmentPlugin { .. }
+                | ClientCommand::DetachDevelopmentPlugin { .. } => {
+                    unreachable!("development plugin commands return through their typed branch")
                 }
                 ClientCommand::AttachSession { role, .. } => {
                     state
@@ -2881,9 +2976,20 @@ pub(super) async fn handle_actor_command(
                                 config
                                     .workspace_roots
                                     .finalize_generation(generation.generation);
-                                let next_config = Arc::new(
-                                    config.with_workspace_generation(&generation, &state.mode_id),
-                                );
+                                let base_config =
+                                    config.with_workspace_generation(&generation, &state.mode_id);
+                                let (rebased, development_detached) = config
+                                    .extension_development
+                                    .rebase(SessionExtensionSnapshot {
+                                        revision: base_config.workspace_generation,
+                                        workspace_roots: Arc::from(generation.roots.clone()),
+                                        tools: Arc::clone(&base_config.tools),
+                                        hooks: Arc::clone(&base_config.hooks),
+                                        commands: Arc::clone(&base_config.commands),
+                                    })
+                                    .await;
+                                let next_config =
+                                    Arc::new(base_config.with_extension_snapshot(&rebased));
                                 *command_descriptors
                                     .write()
                                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::from(
@@ -2903,6 +3009,11 @@ pub(super) async fn handle_actor_command(
                                     "added workspace root @root/{}",
                                     generation.roots.len() - 1
                                 );
+                                if development_detached {
+                                    output.message.push_str(
+                                        "; detached the development plugin after a registry collision",
+                                    );
+                                }
                             }
                             SessionCommandAction::Trust { operation } => {
                                 match config.folder_trust.execute(operation).await {

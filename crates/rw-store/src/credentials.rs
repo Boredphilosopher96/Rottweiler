@@ -1203,21 +1203,18 @@ fn credential_file_lock_path(path: &Path) -> PathBuf {
 
 fn remove_stale_credential_temporary_files(path: &Path) {
     let parent = credential_file_parent(path);
-    let mut legacy_name = path
+    let mut current_prefix = path
         .file_name()
         .map_or_else(|| "credentials".into(), std::ffi::OsString::from);
-    legacy_name.push(".tmp");
-    let mut unique_prefix = legacy_name.clone();
-    unique_prefix.push(".");
+    current_prefix.push(".tmp.");
     let Ok(entries) = fs::read_dir(parent) else {
         return;
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
-        if name != legacy_name
-            && !name
-                .as_encoded_bytes()
-                .starts_with(unique_prefix.as_encoded_bytes())
+        if !name
+            .as_encoded_bytes()
+            .starts_with(current_prefix.as_encoded_bytes())
         {
             continue;
         }
@@ -1869,12 +1866,8 @@ mod tests {
     fn stale_credential_temporary_files_do_not_block_a_later_write() {
         let root = tempdir().expect("temporary directory should be created");
         let path = root.path().join("credentials.toml");
-        let legacy_stale = root.path().join("credentials.toml.tmp");
-        let unique_stale = root.path().join("credentials.toml.tmp.1234.9");
-        fs::write(&legacy_stale, b"stale-secret-data")
-            .expect("legacy stale temporary file should be written");
-        fs::write(&unique_stale, b"stale-secret-data")
-            .expect("unique stale temporary file should be written");
+        let stale = root.path().join("credentials.toml.tmp.1234.9");
+        fs::write(&stale, b"stale-secret-data").expect("stale temporary file should be written");
 
         CredentialManager::system(path.clone())
             .store(
@@ -1883,8 +1876,7 @@ mod tests {
             )
             .expect("stale temporary files must not block credential storage");
 
-        assert!(!legacy_stale.exists());
-        assert!(!unique_stale.exists());
+        assert!(!stale.exists());
         let document = read_document(&path).expect("credential document should decode");
         assert_eq!(
             document.credentials.get("provider-token"),

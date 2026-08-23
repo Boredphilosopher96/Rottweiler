@@ -3,6 +3,7 @@
 export interface ReleaseProductBudgets {
   readonly engineLessThanBytes: number
   readonly wasmHostLessThanBytes: number
+  readonly pluginHostLessThanBytes: number
   readonly tuiBundleLessThanBytes: number
 }
 
@@ -23,6 +24,7 @@ export const RELEASE_PLATFORMS = [
     productBudgets: {
       engineLessThanBytes: 40000000,
       wasmHostLessThanBytes: 30000000,
+      pluginHostLessThanBytes: 75000000,
       tuiBundleLessThanBytes: 100000000,
     },
   },
@@ -34,6 +36,7 @@ export const RELEASE_PLATFORMS = [
     productBudgets: {
       engineLessThanBytes: 40000000,
       wasmHostLessThanBytes: 30000000,
+      pluginHostLessThanBytes: 75000000,
       tuiBundleLessThanBytes: 100000000,
     },
   },
@@ -45,6 +48,7 @@ export const RELEASE_PLATFORMS = [
     productBudgets: {
       engineLessThanBytes: 28000000,
       wasmHostLessThanBytes: 30000000,
+      pluginHostLessThanBytes: 75000000,
       tuiBundleLessThanBytes: 150000000,
     },
   },
@@ -56,6 +60,7 @@ export const RELEASE_PLATFORMS = [
     productBudgets: {
       engineLessThanBytes: 28000000,
       wasmHostLessThanBytes: 30000000,
+      pluginHostLessThanBytes: 75000000,
       tuiBundleLessThanBytes: 150000000,
     },
   },

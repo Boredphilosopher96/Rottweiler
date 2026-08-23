@@ -4,7 +4,8 @@ use std::path::Path;
 
 use rw_ext::{WasmHookLimits, WasmHostRequest, WasmHostResponse, invoke_helper};
 use rw_plugin_protocol::{
-    PROTOCOL_VERSION, PluginCapabilities, PluginHook, PluginHookDeclaration, PluginManifest,
+    PROTOCOL_VERSION, PluginCapabilities, PluginHook, PluginHookCapability,
+    PluginHookFailurePolicy, PluginManifest,
 };
 
 fn manifest() -> PluginManifest {
@@ -13,7 +14,10 @@ fn manifest() -> PluginManifest {
         version: "1.0.0".to_owned(),
         protocol: PROTOCOL_VERSION,
         capabilities: PluginCapabilities {
-            hooks: vec![PluginHookDeclaration::Name(PluginHook::PreTool)],
+            hooks: vec![PluginHookCapability {
+                name: PluginHook::PreTool,
+                failure_policy: PluginHookFailurePolicy::FailOpen,
+            }],
             ..PluginCapabilities::default()
         },
     }

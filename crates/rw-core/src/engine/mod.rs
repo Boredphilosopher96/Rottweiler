@@ -71,6 +71,7 @@ mod commands;
 mod dispatch;
 mod projection;
 mod session;
+mod session_extension;
 mod turn;
 
 pub use commands::{
@@ -105,6 +106,9 @@ use session::{
 pub use session::{
     PluginSessionCapability, SessionActor, SessionActorConfig, SessionHandle, SessionSubscription,
     StartupNotification,
+};
+pub use session_extension::{
+    NoopSessionExtensionController, SessionExtensionController, SessionExtensionSnapshot,
 };
 #[cfg(test)]
 use turn::{
@@ -2118,6 +2122,13 @@ mod tests {
     use super::*;
 
     type ProviderScript = Vec<Result<ProviderEvent, ProviderError>>;
+
+    fn has_command(handle: &SessionHandle, name: &str) -> bool {
+        handle
+            .command_descriptors()
+            .iter()
+            .any(|descriptor| descriptor.name() == name)
+    }
 
     #[test]
     fn adjacent_reasoning_deltas_coalesce_and_keep_the_final_signature() {
@@ -4226,6 +4237,95 @@ mod tests {
         fail_commit: bool,
     }
 
+    #[derive(Default)]
+    struct FixedSessionExtensionController {
+        base: Mutex<Option<SessionExtensionSnapshot>>,
+        reject: AtomicBool,
+        attaches: AtomicUsize,
+        detaches: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl SessionExtensionController for FixedSessionExtensionController {
+        async fn attach(
+            &self,
+            _source: &Path,
+            current: SessionExtensionSnapshot,
+        ) -> Result<SessionExtensionSnapshot, AgentLoopError> {
+            self.attaches.fetch_add(1, Ordering::SeqCst);
+            if self.reject.load(Ordering::SeqCst) {
+                return Err(AgentLoopError::InvalidConfiguration(
+                    "seeded development reload rejection".to_owned(),
+                ));
+            }
+            let base = {
+                let mut stored = self.base.lock().expect("extension base");
+                stored.get_or_insert(current).clone()
+            };
+            let mut commands = base.commands.as_ref().clone();
+            commands
+                .register(
+                    CommandDescriptor::new(
+                        "development-marker",
+                        "command from the active development plugin generation",
+                    ),
+                    EchoCommand,
+                )
+                .expect("development marker command");
+            Ok(SessionExtensionSnapshot {
+                revision: base.revision.saturating_add(1),
+                workspace_roots: base.workspace_roots,
+                tools: base.tools,
+                hooks: base.hooks,
+                commands: Arc::new(commands),
+            })
+        }
+
+        async fn detach(&self) -> Result<SessionExtensionSnapshot, AgentLoopError> {
+            self.detaches.fetch_add(1, Ordering::SeqCst);
+            self.base
+                .lock()
+                .expect("extension base")
+                .take()
+                .ok_or_else(|| {
+                    AgentLoopError::InvalidConfiguration(
+                        "no development generation is active".to_owned(),
+                    )
+                })
+        }
+
+        async fn rebase(
+            &self,
+            current: SessionExtensionSnapshot,
+        ) -> (SessionExtensionSnapshot, bool) {
+            let mut stored = self.base.lock().expect("extension base");
+            if stored.is_none() {
+                return (current, false);
+            }
+            *stored = Some(current.clone());
+            let mut commands = current.commands.as_ref().clone();
+            commands
+                .register(
+                    CommandDescriptor::new(
+                        "development-marker",
+                        "command from the active development plugin generation",
+                    ),
+                    EchoCommand,
+                )
+                .expect("development marker command");
+            (
+                SessionExtensionSnapshot {
+                    revision: current.revision.saturating_add(1),
+                    workspace_roots: current.workspace_roots,
+                    tools: current.tools,
+                    hooks: current.hooks,
+                    commands: Arc::new(commands),
+                },
+                false,
+            )
+        }
+    }
+
     #[async_trait]
     impl WorkspaceRootController for FixedWorkspaceRootController {
         async fn append_root(
@@ -4459,6 +4559,7 @@ mod tests {
             checkpoints: Arc::new(NoopMutationCheckpointCoordinator),
             folder_trust: Arc::new(NoopFolderTrustController),
             workspace_roots: Arc::new(NoopWorkspaceRootController),
+            extension_development: Arc::new(NoopSessionExtensionController),
             recovered: SessionRecoveredState::default(),
             max_turns: 10,
             identical_tool_failure_limit: 5,
@@ -5151,6 +5252,103 @@ mod tests {
                 .iter()
                 .any(|descriptor| descriptor.name() == "generation-marker")
         );
+    }
+
+    #[tokio::test]
+    async fn live_plugin_reload_swaps_only_successful_generations_and_detach_restores_base() {
+        let root = TempDir::new().expect("tempdir");
+        let primary = std::fs::canonicalize(root.path()).expect("canonical primary");
+        let added_dir = TempDir::new().expect("added tempdir");
+        let added = std::fs::canonicalize(added_dir.path()).expect("canonical added");
+        let tools = Arc::new(ToolRegistry::new());
+        let permissions = Arc::new(PermissionGate::new(PermissionDecision::Allow));
+        let workspace_controller = Arc::new(FixedWorkspaceRootController {
+            roots: vec![primary.clone(), added.clone()],
+            tools: Arc::clone(&tools),
+            permissions: Arc::clone(&permissions),
+            committed: AtomicU64::new(0),
+            aborted: AtomicU64::new(0),
+            fail_commit: false,
+        });
+        let extension_controller = Arc::new(FixedSessionExtensionController::default());
+        let mut actor_config = config(
+            &primary,
+            Arc::new(ScriptedModel::default()),
+            tools,
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        actor_config.permissions = permissions;
+        actor_config.workspace_roots = workspace_controller;
+        actor_config.extension_development = extension_controller.clone();
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let session_id = handle.session_id().clone();
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::AttachSession {
+                    meta: protocol_meta("driver", "attach-driver"),
+                    session_id: session_id.clone(),
+                    last_seen_sequence: None,
+                    role: ClientRole::Driver,
+                })
+                .await
+                .expect("driver attach"),
+            CommandOutcome::Accepted
+        );
+        let attach = |request: &str| ClientCommand::AttachDevelopmentPlugin {
+            meta: protocol_meta("plugin-dev", request),
+            session_id: session_id.clone(),
+            source: primary.to_string_lossy().into_owned(),
+        };
+
+        assert_eq!(
+            handle.dispatch(attach("dev-attach")).await.expect("attach"),
+            CommandOutcome::Accepted
+        );
+        assert!(has_command(&handle, "development-marker"));
+
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::SendMessage {
+                    meta: protocol_meta("driver", "add-root-with-development-plugin"),
+                    session_id: session_id.clone(),
+                    content: format!("/add-dir {}", added.display()),
+                    attachments: Vec::new(),
+                })
+                .await
+                .expect("add workspace root while development plugin is attached"),
+            CommandOutcome::Accepted
+        );
+        assert!(has_command(&handle, "generation-marker"));
+        assert!(has_command(&handle, "development-marker"));
+
+        extension_controller.reject.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            handle
+                .dispatch(attach("dev-reload-rejected"))
+                .await
+                .expect("typed reload rejection"),
+            CommandOutcome::Rejected { .. }
+        ));
+        assert!(
+            has_command(&handle, "development-marker"),
+            "a rejected candidate must retain the last good generation"
+        );
+
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::DetachDevelopmentPlugin {
+                    meta: protocol_meta("plugin-dev", "dev-detach"),
+                    session_id,
+                })
+                .await
+                .expect("detach"),
+            CommandOutcome::Accepted
+        );
+        assert!(!has_command(&handle, "development-marker"));
+        assert!(has_command(&handle, "generation-marker"));
+        assert_eq!(extension_controller.attaches.load(Ordering::SeqCst), 2);
+        assert_eq!(extension_controller.detaches.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

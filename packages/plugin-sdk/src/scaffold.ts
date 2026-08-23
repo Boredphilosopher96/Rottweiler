@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs"
 import { lstat, mkdir, realpath, rename, rm, writeFile } from "node:fs/promises"
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 
@@ -20,82 +21,21 @@ function packageName(name: string): string {
 /** Deterministic template consumed by `rw plugin scaffold --lang ts`. */
 export function renderTypeScriptScaffold(options: ScaffoldOptions = {}): readonly ScaffoldFile[] {
   const name = packageName(options.name ?? "rottweiler-plugin")
-  return [
-    {
-      path: "package.json",
-      contents: `${JSON.stringify(
-        {
-          name,
-          version: "0.1.0",
-          private: true,
-          type: "module",
-          scripts: {
-            build: "mkdir -p dist && bun build --compile src/index.ts --outfile dist/plugin",
-            start: "bun run src/index.ts",
-            test: "bun test",
-            typecheck: "tsc --noEmit",
-          },
-          dependencies: { "@rottweiler/plugin": "^0.1.4" },
-          devDependencies: { "@types/bun": "^1.3.14", typescript: "^7.0.2" },
-        },
-        null,
-        2,
-      )}\n`,
-    },
-    {
-      path: "tsconfig.json",
-      contents: `${JSON.stringify(
-        {
-          compilerOptions: {
-            exactOptionalPropertyTypes: true,
-            module: "Preserve",
-            moduleResolution: "Bundler",
-            noEmit: true,
-            resolveJsonModule: true,
-            strict: true,
-            target: "ES2022",
-            types: ["bun"],
-          },
-          include: ["src/**/*.ts", "test/**/*.ts"],
-        },
-        null,
-        2,
-      )}\n`,
-    },
-    {
-      path: "manifest.json",
-      contents: `${JSON.stringify(
-        {
-          name,
-          version: "0.1.0",
-          protocol: 2,
-          capabilities: {
-            tools: [{
-              name: "hello",
-              description: "Return a greeting",
-              schema: { type: "object", properties: { name: { type: "string" } } },
-              caps: ["reads-fs"],
-            }],
-            hooks: [{ name: "pre_tool", failure_policy: "fail-closed" }],
-          },
-        },
-        null,
-        2,
-      )}\n`,
-    },
-    {
-      path: "src/index.ts",
-      contents: `import { definePlugin, parsePluginManifest, runPlugin } from "@rottweiler/plugin"\nimport manifestDocument from "../manifest.json"\n\nexport const plugin = definePlugin({\n  manifest: parsePluginManifest(manifestDocument),\n  handlers: {\n    tools: {\n      hello: ({ input }) => ({\n        content: \`Hello, \${String(input.name ?? "world")}!\`,\n        data: { text: \`Hello, \${String(input.name ?? "world")}!\` },\n      }),\n    },\n    hooks: {\n      pre_tool: ({ payload }) =>\n        payload.name === "bash"\n          ? { decision: "deny", message: "This plugin blocks shell execution" }\n          : { decision: "allow" },\n    },\n  },\n})\n\nif (import.meta.main) await runPlugin(plugin)\n`,
-    },
-    {
-      path: "test/plugin.test.ts",
-      contents: `import { expect, test } from "bun:test"\nimport { plugin } from "../src/index"\n\ntest("declares a fail-closed pre_tool hook and custom tool", () => {\n  expect(plugin.manifest.capabilities.tools?.[0]?.name).toBe("hello")\n  expect(plugin.manifest.capabilities.hooks?.[0]).toEqual({\n    name: "pre_tool",\n    failure_policy: "fail-closed",\n  })\n})\n`,
-    },
-    {
-      path: ".gitignore",
-      contents: "node_modules/\ndist/\n",
-    },
-  ]
+  const root = resolve(import.meta.dir, "../fixtures/scaffold")
+  return readFileSync(join(root, "files.txt"), "utf8")
+    .trimEnd()
+    .split("\n")
+    .map((line) => {
+      const [source, path, unexpected] = line.split("\t")
+      if (source === undefined || path === undefined || unexpected !== undefined) {
+        throw new Error("invalid canonical scaffold file mapping")
+      }
+      return {
+        path,
+        contents: readFileSync(join(root, source), "utf8")
+          .replaceAll("__ROTTWEILER_PLUGIN_NAME__", name),
+      }
+    })
 }
 
 export async function scaffoldTypeScriptPlugin(

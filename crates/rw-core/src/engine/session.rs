@@ -30,6 +30,7 @@ pub struct SessionActorConfig {
     pub checkpoints: Arc<dyn MutationCheckpointCoordinator>,
     pub folder_trust: Arc<dyn FolderTrustController>,
     pub workspace_roots: Arc<dyn WorkspaceRootController>,
+    pub extension_development: Arc<dyn SessionExtensionController>,
     pub recovered: SessionRecoveredState,
     pub max_turns: usize,
     pub identical_tool_failure_limit: usize,
@@ -87,6 +88,7 @@ impl SessionActorConfig {
             checkpoints: Arc::clone(&self.checkpoints),
             folder_trust: Arc::clone(&self.folder_trust),
             workspace_roots: Arc::clone(&self.workspace_roots),
+            extension_development: Arc::clone(&self.extension_development),
             recovered: self.recovered.clone(),
             max_turns: self.max_turns,
             identical_tool_failure_limit: self.identical_tool_failure_limit,
@@ -124,6 +126,14 @@ impl SessionActorConfig {
         configured
             .initial_session_context
             .extend(generation.supplemental_context.iter().cloned());
+        configured
+    }
+
+    pub(super) fn with_extension_snapshot(&self, snapshot: &SessionExtensionSnapshot) -> Self {
+        let mut configured = self.with_model_alias(self.model_alias.clone());
+        configured.tools = Arc::clone(&snapshot.tools);
+        configured.hooks = Arc::clone(&snapshot.hooks);
+        configured.commands = Arc::clone(&snapshot.commands);
         configured
     }
 

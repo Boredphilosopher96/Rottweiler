@@ -172,7 +172,7 @@ impl WasmHookHost {
     ) -> Result<(), HookRegistrationError> {
         let shared: Arc<dyn HookHandler> = Arc::new(self.clone());
         for declaration in &self.manifest.capabilities.hooks {
-            let hook = declaration.name();
+            let hook = declaration.name;
             let id = format!("wasm:{}:{}", self.manifest.name, hook.as_str());
             dispatcher.register_shared(
                 crate::plugin_hook_registration(*declaration, id),
@@ -368,9 +368,10 @@ mod tests {
             version: "1.0.0".to_owned(),
             protocol: rw_plugin_protocol::PROTOCOL_VERSION,
             capabilities: rw_plugin_protocol::PluginCapabilities {
-                hooks: vec![rw_plugin_protocol::PluginHookDeclaration::Name(
-                    rw_plugin_protocol::PluginHook::PreTool,
-                )],
+                hooks: vec![rw_plugin_protocol::PluginHookCapability {
+                    name: rw_plugin_protocol::PluginHook::PreTool,
+                    failure_policy: rw_plugin_protocol::PluginHookFailurePolicy::FailOpen,
+                }],
                 ..rw_plugin_protocol::PluginCapabilities::default()
             },
         }

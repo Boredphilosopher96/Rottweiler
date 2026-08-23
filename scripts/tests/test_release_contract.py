@@ -179,16 +179,18 @@ class ReleaseContractTests(unittest.TestCase):
                 output.truncate(30_000_000)
             wasm_host = root / "rottweiler-wasm-host"
             wasm_host.write_bytes(b"wasm")
+            plugin_host = root / "rottweiler-plugin-host"
+            plugin_host.write_bytes(b"plugin")
             tui = root / "rottweiler-tui"
             tui.write_bytes(b"tui")
             native = root / "libopentui.dylib"
             native.write_bytes(b"native")
             self.module.validate_build(
-                contract, "darwin-arm64", engine, wasm_host, tui, native
+                contract, "darwin-arm64", engine, wasm_host, plugin_host, tui, native
             )
             with self.assertRaisesRegex(ValueError, "product budget is <28000000"):
                 self.module.validate_build(
-                    contract, "linux-x86_64", engine, wasm_host, tui, native
+                    contract, "linux-x86_64", engine, wasm_host, plugin_host, tui, native
                 )
 
     def test_stage_release_projects_exact_archive_shape_and_modes(self) -> None:
@@ -197,7 +199,7 @@ class ReleaseContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             sources: dict[str, Path] = {}
-            for member_id in ("engine", "wasm_host", "tui", "opentui_native"):
+            for member_id in ("engine", "wasm_host", "plugin_host", "tui", "opentui_native"):
                 source = root / member_id
                 source.write_bytes(member_id.encode("ascii"))
                 sources[member_id] = source
@@ -210,6 +212,7 @@ class ReleaseContractTests(unittest.TestCase):
                 platform_id,
                 sources["engine"],
                 sources["wasm_host"],
+                sources["plugin_host"],
                 sources["tui"],
                 sources["opentui_native"],
             )

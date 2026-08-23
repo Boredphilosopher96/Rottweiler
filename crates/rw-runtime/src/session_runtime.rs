@@ -2148,6 +2148,17 @@ pub async fn run(options: RunOptions) -> Result<()> {
     }
     let runtime_commands = Arc::new(runtime_commands);
     let _ = commands_cell.set(Arc::clone(&runtime_commands));
+    let extension_development: Arc<dyn rw_core::SessionExtensionController> = if inspection {
+        Arc::new(rw_core::NoopSessionExtensionController)
+    } else {
+        Arc::new(
+            crate::extension_runtime::RuntimeSessionExtensionController::new(
+                storage_root.clone(),
+                std::env::current_exe().into_diagnostic()?,
+                Arc::clone(&plugin_redactor),
+            ),
+        )
+    };
     let initial_thinking = configured_session_thinking(&loaded_config.config, &model_alias);
     let actor = SessionActor::spawn(SessionActorConfig {
         session_id: SessionId(session_id.clone()),
@@ -2171,6 +2182,7 @@ pub async fn run(options: RunOptions) -> Result<()> {
         checkpoints: checkpoint_coordinator,
         folder_trust,
         workspace_roots: workspace_root_controller,
+        extension_development,
         recovered,
         max_turns: options.max_turns,
         identical_tool_failure_limit: DEFAULT_DOOM_LOOP_LIMIT,
@@ -2960,6 +2972,13 @@ pub(crate) async fn compose_hosted_actor(
     }
     let runtime_commands = Arc::new(runtime_commands);
     let _ = commands_cell.set(Arc::clone(&runtime_commands));
+    let extension_development: Arc<dyn rw_core::SessionExtensionController> = Arc::new(
+        crate::extension_runtime::RuntimeSessionExtensionController::new(
+            options.storage_root.clone(),
+            std::env::current_exe().into_diagnostic()?,
+            Arc::clone(&plugin_redactor),
+        ),
+    );
     let initial_thinking = configured_session_thinking(&options.config, &persisted_model_alias);
     let handle = SessionActor::spawn(SessionActorConfig {
         session_id: options.session_id,
@@ -2983,6 +3002,7 @@ pub(crate) async fn compose_hosted_actor(
         checkpoints: checkpoint_coordinator,
         folder_trust,
         workspace_roots: workspace_root_controller,
+        extension_development,
         recovered,
         max_turns: options.max_turns,
         identical_tool_failure_limit: DEFAULT_DOOM_LOOP_LIMIT,
@@ -5417,6 +5437,7 @@ impl RuntimeWorkspaceRootController {
                 roots,
             )),
             workspace_roots: workspace_controller,
+            extension_development: Arc::new(rw_core::NoopSessionExtensionController),
             recovered,
             max_turns,
             identical_tool_failure_limit: DEFAULT_DOOM_LOOP_LIMIT,
@@ -13911,6 +13932,7 @@ mod tests {
             checkpoints: Arc::new(rw_core::NoopMutationCheckpointCoordinator),
             folder_trust: Arc::new(rw_core::NoopFolderTrustController),
             workspace_roots: Arc::new(rw_core::NoopWorkspaceRootController),
+            extension_development: Arc::new(rw_core::NoopSessionExtensionController),
             recovered: rw_core::SessionRecoveredState {
                 driver_client_id: Some(ClientId("driver".to_owned())),
                 ..rw_core::SessionRecoveredState::default()
@@ -14224,6 +14246,7 @@ mod tests {
             checkpoints: Arc::new(rw_core::NoopMutationCheckpointCoordinator),
             folder_trust: Arc::new(rw_core::NoopFolderTrustController),
             workspace_roots: Arc::new(rw_core::NoopWorkspaceRootController),
+            extension_development: Arc::new(rw_core::NoopSessionExtensionController),
             recovered: rw_core::SessionRecoveredState {
                 driver_client_id: Some(ClientId("driver".to_owned())),
                 ..rw_core::SessionRecoveredState::default()
@@ -15265,6 +15288,7 @@ mod tests {
             checkpoints: Arc::new(rw_core::NoopMutationCheckpointCoordinator),
             folder_trust: Arc::new(rw_core::NoopFolderTrustController),
             workspace_roots: Arc::new(rw_core::NoopWorkspaceRootController),
+            extension_development: Arc::new(rw_core::NoopSessionExtensionController),
             recovered: rw_core::SessionRecoveredState::default(),
             max_turns: 5,
             identical_tool_failure_limit: 3,
@@ -16680,7 +16704,7 @@ mod tests {
                 "name":"retained-hook",
                 "version":"1.0.0",
                 "protocol":2,
-                "capabilities":{"hooks":["post_tool"]}
+                "capabilities":{"hooks":[{"name":"post_tool","failure_policy":"fail-open"}]}
             }"#,
         )
         .expect("manifest");
@@ -18734,6 +18758,7 @@ mod tests {
             checkpoints: Arc::new(rw_core::NoopMutationCheckpointCoordinator),
             folder_trust: Arc::new(rw_core::NoopFolderTrustController),
             workspace_roots: Arc::new(rw_core::NoopWorkspaceRootController),
+            extension_development: Arc::new(rw_core::NoopSessionExtensionController),
             recovered: rw_core::SessionRecoveredState {
                 conversation: vec![user],
                 ..rw_core::SessionRecoveredState::default()
@@ -20392,6 +20417,7 @@ mod tests {
             checkpoints,
             folder_trust: Arc::new(rw_core::NoopFolderTrustController),
             workspace_roots: Arc::new(rw_core::NoopWorkspaceRootController),
+            extension_development: Arc::new(rw_core::NoopSessionExtensionController),
             recovered: rw_core::SessionRecoveredState::default(),
             max_turns: 4,
             identical_tool_failure_limit: 5,
@@ -20551,6 +20577,7 @@ mod tests {
                 checkpoints: Arc::new(rw_core::NoopMutationCheckpointCoordinator),
                 folder_trust: Arc::new(rw_core::NoopFolderTrustController),
                 workspace_roots: Arc::new(rw_core::NoopWorkspaceRootController),
+                extension_development: Arc::new(rw_core::NoopSessionExtensionController),
                 recovered,
                 max_turns: 4,
                 identical_tool_failure_limit: 3,

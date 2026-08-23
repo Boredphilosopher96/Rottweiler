@@ -12,6 +12,7 @@ pub struct ReleaseArchiveMember {
 pub struct ReleaseProductBudgets {
     pub engine_less_than_bytes: u64,
     pub wasm_host_less_than_bytes: u64,
+    pub plugin_host_less_than_bytes: u64,
     pub tui_bundle_less_than_bytes: u64,
 }
 
@@ -60,6 +61,12 @@ const DARWIN_ARM64_ARCHIVE_MEMBERS: &[ReleaseArchiveMember] = &[
         max_bytes: 104_857_600,
     },
     ReleaseArchiveMember {
+        id: "plugin_host",
+        path: "bin/rottweiler-plugin-host",
+        mode: 0o755,
+        max_bytes: 83_886_080,
+    },
+    ReleaseArchiveMember {
         id: "opentui_native",
         path: "bin/libopentui.dylib",
         mode: 0o644,
@@ -91,6 +98,12 @@ const DARWIN_X86_64_ARCHIVE_MEMBERS: &[ReleaseArchiveMember] = &[
         path: "bin/rottweiler-wasm-host",
         mode: 0o755,
         max_bytes: 104_857_600,
+    },
+    ReleaseArchiveMember {
+        id: "plugin_host",
+        path: "bin/rottweiler-plugin-host",
+        mode: 0o755,
+        max_bytes: 83_886_080,
     },
     ReleaseArchiveMember {
         id: "opentui_native",
@@ -126,6 +139,12 @@ const LINUX_AARCH64_ARCHIVE_MEMBERS: &[ReleaseArchiveMember] = &[
         max_bytes: 104_857_600,
     },
     ReleaseArchiveMember {
+        id: "plugin_host",
+        path: "bin/rottweiler-plugin-host",
+        mode: 0o755,
+        max_bytes: 83_886_080,
+    },
+    ReleaseArchiveMember {
         id: "opentui_native",
         path: "bin/libopentui.so",
         mode: 0o644,
@@ -159,6 +178,12 @@ const LINUX_X86_64_ARCHIVE_MEMBERS: &[ReleaseArchiveMember] = &[
         max_bytes: 104_857_600,
     },
     ReleaseArchiveMember {
+        id: "plugin_host",
+        path: "bin/rottweiler-plugin-host",
+        mode: 0o755,
+        max_bytes: 83_886_080,
+    },
+    ReleaseArchiveMember {
         id: "opentui_native",
         path: "bin/libopentui.so",
         mode: 0o644,
@@ -177,6 +202,7 @@ pub const RELEASE_PLATFORMS: &[ReleasePlatform] = &[
         product_budgets: ReleaseProductBudgets {
             engine_less_than_bytes: 40_000_000,
             wasm_host_less_than_bytes: 30_000_000,
+            plugin_host_less_than_bytes: 75_000_000,
             tui_bundle_less_than_bytes: 100_000_000,
         },
         archive_members: DARWIN_ARM64_ARCHIVE_MEMBERS,
@@ -191,6 +217,7 @@ pub const RELEASE_PLATFORMS: &[ReleasePlatform] = &[
         product_budgets: ReleaseProductBudgets {
             engine_less_than_bytes: 40_000_000,
             wasm_host_less_than_bytes: 30_000_000,
+            plugin_host_less_than_bytes: 75_000_000,
             tui_bundle_less_than_bytes: 100_000_000,
         },
         archive_members: DARWIN_X86_64_ARCHIVE_MEMBERS,
@@ -205,6 +232,7 @@ pub const RELEASE_PLATFORMS: &[ReleasePlatform] = &[
         product_budgets: ReleaseProductBudgets {
             engine_less_than_bytes: 28_000_000,
             wasm_host_less_than_bytes: 30_000_000,
+            plugin_host_less_than_bytes: 75_000_000,
             tui_bundle_less_than_bytes: 150_000_000,
         },
         archive_members: LINUX_AARCH64_ARCHIVE_MEMBERS,
@@ -219,6 +247,7 @@ pub const RELEASE_PLATFORMS: &[ReleasePlatform] = &[
         product_budgets: ReleaseProductBudgets {
             engine_less_than_bytes: 28_000_000,
             wasm_host_less_than_bytes: 30_000_000,
+            plugin_host_less_than_bytes: 75_000_000,
             tui_bundle_less_than_bytes: 150_000_000,
         },
         archive_members: LINUX_X86_64_ARCHIVE_MEMBERS,

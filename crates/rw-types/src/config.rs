@@ -67,7 +67,7 @@ pub struct CompactionConfig {
     pub auto: bool,
     /// Explicit token reserve. By default, the engine uses the smallest of
     /// 20,000, the model output limit, and half of the context window.
-    #[serde(rename = "reserved", alias = "reserved_tokens")]
+    #[serde(rename = "reserved")]
     pub reserved_tokens: Option<u64>,
     /// Optional compaction model alias; absent or unresolved falls back to the
     /// current session alias.
@@ -596,7 +596,8 @@ pub struct NetworkConfig {
     pub proxy_password_credential: Option<String>,
 }
 
-/// Optional generic search API used when provider-native search is unavailable.
+/// Optional configured search API used when provider-native search is unavailable.
+/// The endpoint returns the one strict response contract owned by `rw-tools`.
 /// This section is accepted only from user configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
@@ -708,7 +709,7 @@ pub struct ToolchainConfig {
     /// Optional default test command surfaced to initialization and commands.
     pub test: Option<String>,
     /// Glob-specific toolchain overrides, in declaration order.
-    #[serde(rename = "rule", alias = "rules")]
+    #[serde(rename = "rule")]
     pub rules: Vec<ToolchainRule>,
 }
 
@@ -823,7 +824,7 @@ pub struct ConfigFile {
 #[serde(deny_unknown_fields)]
 pub struct CompactionConfigFile {
     pub auto: Option<bool>,
-    #[serde(rename = "reserved", alias = "reserved_tokens")]
+    #[serde(rename = "reserved")]
     pub reserved_tokens: Option<u64>,
     pub model_alias: Option<String>,
 }

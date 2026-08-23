@@ -28,13 +28,12 @@ use rw_plugin_protocol::{
     FrameDecoder, FrameError, MAX_FRAME_BYTES, MAX_MANIFEST_BYTES, MAX_VERSION_BYTES,
     METHOD_PROVIDER_CANCEL, METHOD_PROVIDER_COMPLETE, METHOD_PROVIDER_EVENT, METHOD_PROVIDER_HTTP,
     METHOD_PROVIDER_HTTP_CANCEL, METHOD_PROVIDER_HTTP_EVENT, METHOD_PROVIDER_MODELS,
-    METHOD_TOOL_CALL, METHOD_UI_NOTIFY, PROTOCOL_VERSION, PluginHookCapability,
-    PluginProviderCapability,
+    METHOD_TOOL_CALL, METHOD_UI_NOTIFY, PROTOCOL_VERSION, PluginProviderCapability,
 };
 use rw_plugin_protocol::{
     HookInvokeParams, MAX_CAPABILITIES_PER_KIND, MAX_HOOK_PAYLOAD_BYTES, MAX_NAME_BYTES,
     MAX_RPC_MESSAGE_BYTES, METHOD_HOOK_INVOKE, ManifestError, PluginCapabilities, PluginHook,
-    PluginHookDeclaration, PluginHookFailurePolicy, PluginManifest, PluginPush,
+    PluginHookCapability, PluginHookFailurePolicy, PluginManifest, PluginPush,
     PluginToolCapability, PluginToolEffect,
 };
 
@@ -80,11 +79,11 @@ impl From<HookEvent> for PluginHook {
 /// Converts a protocol hook declaration into rw-ext's runtime registration.
 #[must_use]
 pub fn plugin_hook_registration(
-    declaration: PluginHookDeclaration,
+    declaration: PluginHookCapability,
     id: impl Into<String>,
 ) -> crate::HookRegistration {
-    crate::HookRegistration::new(id, declaration.name().into())
-        .with_failure_policy(declaration.failure_policy().into())
+    crate::HookRegistration::new(id, declaration.name.into())
+        .with_failure_policy(declaration.failure_policy.into())
 }
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -193,6 +192,7 @@ pub struct PluginProcessConfig {
     executable_identity: ExecutableIdentity,
     attested_files: Vec<ExecutableIdentity>,
     code_root: Option<CodeRootIdentity>,
+    source_identity: Option<SourcePluginIdentity>,
 }
 
 /// Stable filesystem identity pinned when a plugin executable is configured.
@@ -211,6 +211,16 @@ pub struct CodeRootIdentity {
     pub canonical_path: PathBuf,
     pub device: u64,
     pub inode: u64,
+}
+
+/// Content identity of one host-prepared TypeScript source package.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct SourcePluginIdentity {
+    pub graph_blake3: String,
+    pub lockfile_blake3: String,
+    pub bundle_blake3: String,
+    pub host_abi: u32,
+    pub bundle_format: String,
 }
 
 impl PluginProcessConfig {
@@ -233,6 +243,7 @@ impl PluginProcessConfig {
             allowed_domains: BTreeSet::new(),
             attested_files: Vec::new(),
             code_root: None,
+            source_identity: None,
         })
     }
 
@@ -382,6 +393,13 @@ impl PluginProcessConfig {
         Ok(self)
     }
 
+    /// Binds this process to the normalized source graph prepared by the private host.
+    #[must_use]
+    pub fn with_source_identity(mut self, identity: SourcePluginIdentity) -> Self {
+        self.source_identity = Some(identity);
+        self
+    }
+
     #[must_use]
     pub fn executable(&self) -> &Path {
         &self.executable
@@ -425,6 +443,11 @@ impl PluginProcessConfig {
     #[must_use]
     pub const fn code_root(&self) -> Option<&CodeRootIdentity> {
         self.code_root.as_ref()
+    }
+
+    #[must_use]
+    pub const fn source_identity(&self) -> Option<&SourcePluginIdentity> {
+        self.source_identity.as_ref()
     }
 
     /// Revalidates the executable immediately before a launcher calls `exec`.
@@ -790,7 +813,7 @@ impl CapabilityEnforcer {
             self.capabilities
                 .hooks
                 .iter()
-                .any(|declaration| declaration.name() == hook),
+                .any(|declaration| declaration.name == hook),
         )
     }
 
@@ -1125,10 +1148,10 @@ mod tests {
                     schema: json!({"type":"object","properties":{"path":{"type":"string"}}}),
                     caps: vec![PluginToolEffect::ReadsFilesystem],
                 }],
-                hooks: vec![PluginHookDeclaration::Detailed(PluginHookCapability {
+                hooks: vec![PluginHookCapability {
                     name: PluginHook::PreTool,
                     failure_policy: PluginHookFailurePolicy::FailClosed,
-                })],
+                }],
                 providers: vec![PluginProviderCapability {
                     alias_prefix: "custom/".to_owned(),
                     capabilities: vec!["models".to_owned()],
@@ -1207,7 +1230,7 @@ mod tests {
         let manifest = PluginManifest::from_slice(&bytes).expect("TS SDK manifest");
         assert_eq!(manifest.capabilities.tools[0].caps.len(), 2);
         assert_eq!(
-            manifest.capabilities.hooks[0].failure_policy(),
+            manifest.capabilities.hooks[0].failure_policy,
             PluginHookFailurePolicy::FailClosed
         );
     }

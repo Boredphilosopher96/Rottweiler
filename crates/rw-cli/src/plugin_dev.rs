@@ -1,447 +1,306 @@
-//! Explicit-authority, sandboxed plugin development supervisor.
+//! Actor-owned live TypeScript plugin attachment.
 
 use std::{
     fs,
     io::Read as _,
+    os::unix::fs::{MetadataExt as _, PermissionsExt as _},
     path::{Path, PathBuf},
-    sync::Arc,
     time::{Duration, Instant},
 };
 
+use http_body_util::{BodyExt as _, Full, Limited};
+use hyper::{
+    Method, Request, StatusCode,
+    body::{Bytes, Incoming},
+    client::conn::http1 as client_http1,
+    header::{AUTHORIZATION, CONTENT_TYPE, HOST},
+};
+use hyper_util::rt::TokioIo;
 use miette::{IntoDiagnostic as _, Result, miette};
-#[cfg(all(test, unix))]
-use rw_ext::plugin_hook_registration;
-use rw_ext::{
-    LaunchedPluginProcess, PluginLauncher, PluginProcessConfig, PluginSandboxMode,
-    PluginSandboxProfile, SupervisedPluginProcess,
-};
-use rw_plugin_protocol::{
-    DEFAULT_HANDLER_TIMEOUT_MS, FrameDecoder, FrameError, InitializeParams, JSON_RPC_VERSION,
-    MAX_FRAME_BYTES, METHOD_COMMAND_EXECUTE, METHOD_EVENT_PUBLISH, METHOD_EXIT, METHOD_HOOK_INVOKE,
-    METHOD_INITIALIZE, METHOD_PROVIDER_COMPLETE, METHOD_SESSION_INJECT_MESSAGE,
-    METHOD_SESSION_SET_STATUS, METHOD_SHUTDOWN, METHOD_TOOL_CALL, METHOD_UI_NOTIFY,
-    MIN_PROTOCOL_VERSION, PLUGIN_HOST_ID, PluginCapabilities, PluginManifest, PluginToolCapability,
-    PluginToolEffect, RpcFrame, RpcId, RpcNotification, RpcRequest, RpcSuccess, encode_frame,
-};
-use serde_json::json;
-use tokio::{
-    io::{AsyncBufReadExt as _, AsyncWriteExt as _},
-    sync::watch,
-    task::JoinHandle,
-};
+use rw_core::{ClientCommand, CommandMeta, CommandOutcome, PROTOCOL_VERSION, RequestId, SessionId};
+use serde::Deserialize;
+use tokio::net::UnixStream;
 
-use rw_runtime::plugin::SandboxedPluginLauncher;
+use crate::server::{CAPABILITY_HEADER, CLIENT_HEADER, ClientCredentials};
 
-const MAX_SOURCE_FILES: usize = 4_096;
-const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
-const MAX_SOURCE_DEPTH: usize = 64;
-const RPC_DEADLINE: Duration = Duration::from_millis(DEFAULT_HANDLER_TIMEOUT_MS);
-const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(2);
+const CONTROL_BODY_LIMIT: usize = 64 * 1024;
+const MAX_WATCH_BYTES: u64 = 16 * 1024 * 1024;
+const POLL_INTERVAL: Duration = Duration::from_millis(200);
+const DEBOUNCE: Duration = Duration::from_millis(400);
 
-type Trace = Arc<dyn Fn(&'static str) + Send + Sync>;
-
-struct DevTarget {
-    root: PathBuf,
-    config: PluginProcessConfig,
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeDescriptor {
+    version: u16,
+    pid: u32,
+    session_id: Option<String>,
+    socket: PathBuf,
+    token_file: PathBuf,
 }
 
-#[derive(Clone, Copy)]
-struct SupervisorOptions {
-    poll: Duration,
-    debounce: Duration,
-    max_launches: Option<usize>,
+struct DevelopmentClient {
+    socket: PathBuf,
+    credentials: ClientCredentials,
+    session_id: SessionId,
+    request: u64,
 }
 
-impl Default for SupervisorOptions {
-    fn default() -> Self {
-        Self {
-            poll: Duration::from_millis(200),
-            debounce: Duration::from_millis(400),
-            max_launches: None,
+impl DevelopmentClient {
+    async fn connect(runtime_root: &Path, selector: &str) -> Result<Self> {
+        let descriptor = select_runtime(runtime_root, selector)?;
+        let bootstrap = read_private_token(&descriptor.token_file)?;
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/connect")
+            .header(HOST, "localhost")
+            .header(AUTHORIZATION, format!("Bearer {bootstrap}"))
+            .header(CAPABILITY_HEADER, "plugin_development")
+            .body(Full::new(Bytes::new()))
+            .map_err(|_| miette!("could not build plugin development authentication"))?;
+        let response = unix_request(&descriptor.socket, request).await?;
+        if response.status() != StatusCode::CREATED {
+            return Err(miette!(
+                "the local engine rejected plugin development authentication"
+            ));
+        }
+        let credentials = collect_json(response.into_body()).await?;
+        Ok(Self {
+            socket: descriptor.socket,
+            credentials,
+            session_id: SessionId(
+                descriptor
+                    .session_id
+                    .ok_or_else(|| miette!("selected engine has no session binding"))?,
+            ),
+            request: 0,
+        })
+    }
+
+    async fn attach(&mut self, source: &Path) -> Result<()> {
+        self.request = self.request.saturating_add(1);
+        self.dispatch(ClientCommand::AttachDevelopmentPlugin {
+            meta: self.meta(),
+            session_id: self.session_id.clone(),
+            source: source.to_string_lossy().into_owned(),
+        })
+        .await
+    }
+
+    async fn detach(&mut self) -> Result<()> {
+        self.request = self.request.saturating_add(1);
+        self.dispatch(ClientCommand::DetachDevelopmentPlugin {
+            meta: self.meta(),
+            session_id: self.session_id.clone(),
+        })
+        .await
+    }
+
+    fn meta(&self) -> CommandMeta {
+        CommandMeta {
+            protocol_version: PROTOCOL_VERSION,
+            client_id: self.credentials.client_id.clone(),
+            request_id: RequestId(format!("plugin-dev-{}", self.request)),
+        }
+    }
+
+    async fn dispatch(&self, command: ClientCommand) -> Result<()> {
+        let body = serde_json::to_vec(&command).into_diagnostic()?;
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/command")
+            .header(HOST, "localhost")
+            .header(AUTHORIZATION, format!("Bearer {}", self.credentials.token))
+            .header(CLIENT_HEADER, &self.credentials.client_id.0)
+            .header(CONTENT_TYPE, "application/json")
+            .body(Full::new(Bytes::from(body)))
+            .map_err(|_| miette!("could not build plugin development command"))?;
+        let response = unix_request(&self.socket, request).await?;
+        if response.status() != StatusCode::ACCEPTED {
+            return Err(miette!(
+                "the local engine rejected the plugin development command"
+            ));
+        }
+        match collect_json(response.into_body()).await? {
+            CommandOutcome::Accepted => Ok(()),
+            CommandOutcome::Rejected { error } => Err(miette!(
+                "plugin development was rejected ({}): {}",
+                error.code,
+                error.message
+            )),
         }
     }
 }
 
-/// Runs a local plugin only after the CLI has checked `--allow-dev-exec`.
-pub(crate) async fn run(path: &Path) -> Result<()> {
-    let target = resolve_target(path)?;
-    let scratch = DevScratch::create()?;
-    let helper = fs::canonicalize(std::env::current_exe().into_diagnostic()?).into_diagnostic()?;
-    let launcher = Arc::new(
-        SandboxedPluginLauncher::new(scratch.path(), &helper)
-            .map_err(|error| miette!("plugin dev sandbox is unavailable: {error}"))?,
-    );
-    let (stop_tx, stop_rx) = watch::channel(false);
-    let signal = tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            let _ = stop_tx.send(true);
-        }
-    });
-    let trace: Trace = Arc::new(|message| eprintln!("{message}"));
-    let result = supervise(
-        launcher,
-        target,
-        stop_rx,
-        trace,
-        SupervisorOptions::default(),
-    )
-    .await;
-    signal.abort();
-    result
-}
-
-async fn supervise(
-    launcher: Arc<dyn PluginLauncher>,
-    target: DevTarget,
-    mut stop: watch::Receiver<bool>,
-    trace: Trace,
-    options: SupervisorOptions,
-) -> Result<()> {
-    let profile = read_only_profile(&target.root);
-    let mut fingerprint = source_fingerprint(&target.root)?;
-    let mut spawn_count = 0_usize;
-    loop {
-        let child = launcher
-            .launch(&target.config, &profile)
-            .await
-            .map_err(|error| miette!("plugin dev launch failed closed: {error}"))?;
-        spawn_count += 1;
-        let mut running = initialize(child, Arc::clone(&trace)).await?;
-        trace("plugin-dev lifecycle running");
-        if options.max_launches == Some(spawn_count) {
-            shutdown(&mut running, Arc::clone(&trace)).await?;
-            return Ok(());
-        }
-
-        let mut pending: Option<(blake3::Hash, Instant)> = None;
-        loop {
-            tokio::select! {
-                changed = stop.changed() => {
-                    if changed.is_err() || *stop.borrow() {
-                        shutdown(&mut running, Arc::clone(&trace)).await?;
-                        return Ok(());
-                    }
+/// Attaches one source package, reloads stable edits, and detaches on Ctrl-C.
+pub async fn run(path: &Path, session: &str, runtime_root: &Path) -> Result<()> {
+    let source = canonical_source(path)?;
+    let mut client = DevelopmentClient::connect(runtime_root, session).await?;
+    client.attach(&source).await?;
+    eprintln!("plugin development attached; press Ctrl-C to detach");
+    let mut fingerprint = source_fingerprint(&source)?;
+    let mut pending: Option<(blake3::Hash, Instant)> = None;
+    let result = loop {
+        tokio::select! {
+            signal = tokio::signal::ctrl_c() => {
+                break signal.into_diagnostic();
+            }
+            () = tokio::time::sleep(POLL_INTERVAL) => {
+                let current = source_fingerprint(&source)?;
+                if current == fingerprint {
+                    pending = None;
+                    continue;
                 }
-                status = running.process.wait() => {
-                    running.trace.abort();
-                    status.map_err(|error| miette!("plugin dev child wait failed: {error}"))?;
-                    running.process.reap().await
-                        .map_err(|error| miette!("plugin dev child reap failed: {error}"))?;
-                    return Err(miette!("plugin dev child exited before shutdown"));
-                }
-                trace = &mut running.trace => {
-                    terminate_and_reap(running.process.as_ref()).await;
-                    return match trace {
-                        Ok(Ok(())) => Err(miette!("plugin dev protocol stream ended unexpectedly")),
-                        Ok(Err(error)) => Err(error),
-                        Err(_) => Err(miette!("plugin dev protocol trace task failed")),
-                    };
-                }
-                () = tokio::time::sleep(options.poll) => {
-                    let current = match source_fingerprint(&target.root) {
-                        Ok(current) => current,
-                        Err(error) => {
-                            shutdown(&mut running, Arc::clone(&trace)).await?;
-                            return Err(error);
+                match pending {
+                    Some((candidate, since)) if candidate == current && since.elapsed() >= DEBOUNCE => {
+                        match client.attach(&source).await {
+                            Ok(()) => {
+                                fingerprint = current;
+                                pending = None;
+                                eprintln!("plugin development reloaded");
+                            }
+                            Err(error) => {
+                                pending = None;
+                                eprintln!("plugin development reload rejected; retaining last good generation: {error}");
+                            }
                         }
-                    };
-                    if current == fingerprint {
-                        pending = None;
-                        continue;
                     }
-                    match pending {
-                        Some((candidate, since)) if candidate == current && since.elapsed() >= options.debounce => {
-                            fingerprint = current;
-                            trace("plugin-dev lifecycle restart source-changed");
-                            shutdown(&mut running, Arc::clone(&trace)).await?;
-                            break;
-                        }
-                        Some((candidate, _)) if candidate == current => {}
-                        _ => pending = Some((current, Instant::now())),
-                    }
+                    Some((candidate, _)) if candidate == current => {}
+                    _ => pending = Some((current, Instant::now())),
                 }
             }
         }
-    }
+    };
+    let detach = client.detach().await;
+    result?;
+    detach?;
+    eprintln!("plugin development detached");
+    Ok(())
 }
 
-struct RunningPlugin {
-    stdin: rw_ext::PluginStdin,
-    process: Arc<dyn SupervisedPluginProcess>,
-    trace: JoinHandle<Result<()>>,
-}
-
-async fn initialize(mut child: LaunchedPluginProcess, trace: Trace) -> Result<RunningPlugin> {
-    let handshake = async {
-        let initialize = RpcFrame::Request(RpcRequest {
-            jsonrpc: JSON_RPC_VERSION.to_owned(),
-            id: RpcId::String("rottweiler-dev-init".to_owned()),
-            method: METHOD_INITIALIZE.to_owned(),
-            params: Some(
-                serde_json::to_value(InitializeParams {
-                    host: PLUGIN_HOST_ID.to_owned(),
-                    protocol: MIN_PROTOCOL_VERSION,
-                    min_protocol: MIN_PROTOCOL_VERSION,
-                    max_frame_bytes: MAX_FRAME_BYTES,
-                    capabilities: Vec::new(),
-                })
-                .into_diagnostic()?,
-            ),
-        });
-        write_frame(&mut child.stdin, &initialize).await?;
-        let response = tokio::time::timeout(RPC_DEADLINE, read_frame(&mut child.stdout))
-            .await
-            .map_err(|_| miette!("plugin dev initialize timed out"))??;
-        let manifest_value = match response {
-            RpcFrame::Success(RpcSuccess {
-                id: Some(RpcId::String(id)),
-                result,
-                ..
-            }) if id == "rottweiler-dev-init" => result,
-            _ => return Err(miette!("plugin dev initialize was rejected")),
+fn select_runtime(root: &Path, selector: &str) -> Result<RuntimeDescriptor> {
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(root).into_diagnostic()? {
+        let entry = entry.into_diagnostic()?;
+        let descriptor_path = entry.path().join("runtime.json");
+        let Ok(bytes) = read_private_file(&descriptor_path, CONTROL_BODY_LIMIT as u64) else {
+            continue;
         };
-        let manifest: PluginManifest = serde_json::from_value(manifest_value)
-            .map_err(|_| miette!("plugin dev initialize returned an invalid manifest"))?;
-        manifest.validate().map_err(|error| {
-            miette!("plugin dev initialize returned an invalid manifest: {error}")
-        })?;
-        Result::<()>::Ok(())
-    }
-    .await;
-    if let Err(error) = handshake {
-        terminate_and_reap(child.process.as_ref()).await;
-        return Err(error);
-    }
-    // Do not print names, versions, payloads, IDs, params, or results: all are plugin-controlled.
-    trace("plugin-rpc response initialize manifest-validated");
-    let mut stdout = child.stdout;
-    let trace_task = tokio::spawn(async move {
-        loop {
-            let frame = read_frame(&mut stdout).await?;
-            let label = match &frame {
-                RpcFrame::Request(request) => safe_method(&request.method),
-                RpcFrame::Notification(notification) => safe_method(&notification.method),
-                RpcFrame::Success(_) | RpcFrame::Failure(_) => "response",
-            };
-            trace(label);
+        let Ok(descriptor) = serde_json::from_slice::<RuntimeDescriptor>(&bytes) else {
+            continue;
+        };
+        if descriptor.version != 1
+            || descriptor.pid == 0
+            || !descriptor.socket.is_absolute()
+            || !descriptor.token_file.is_absolute()
+            || descriptor
+                .session_id
+                .as_deref()
+                .is_none_or(|session| selector != "current" && selector != session)
+            || std::os::unix::net::UnixStream::connect(&descriptor.socket).is_err()
+        {
+            continue;
         }
-    });
-    Ok(RunningPlugin {
-        stdin: child.stdin,
-        process: child.process,
-        trace: trace_task,
-    })
-}
-
-fn safe_method(method: &str) -> &'static str {
-    match method {
-        METHOD_TOOL_CALL => "plugin-rpc request tool/call",
-        METHOD_COMMAND_EXECUTE => "plugin-rpc request command/execute",
-        METHOD_HOOK_INVOKE => "plugin-rpc request hook/invoke",
-        METHOD_PROVIDER_COMPLETE => "plugin-rpc request provider/complete",
-        METHOD_EVENT_PUBLISH => "plugin-rpc notification event/publish",
-        METHOD_SESSION_INJECT_MESSAGE => "plugin-rpc request session/inject_message",
-        METHOD_SESSION_SET_STATUS => "plugin-rpc request session/set_status",
-        METHOD_UI_NOTIFY => "plugin-rpc request ui/notify",
-        METHOD_SHUTDOWN => "plugin-rpc request shutdown",
-        METHOD_EXIT => "plugin-rpc notification exit",
-        _ => "plugin-rpc unknown-method",
+        candidates.push(descriptor);
     }
-}
-
-async fn shutdown(running: &mut RunningPlugin, trace: Trace) -> Result<()> {
-    trace("plugin-dev lifecycle shutdown");
-    let _ = write_frame(
-        &mut running.stdin,
-        &RpcFrame::Request(RpcRequest {
-            jsonrpc: JSON_RPC_VERSION.to_owned(),
-            id: RpcId::String("rottweiler-dev-shutdown".to_owned()),
-            method: METHOD_SHUTDOWN.to_owned(),
-            params: None,
-        }),
-    )
-    .await;
-    let _ = write_frame(
-        &mut running.stdin,
-        &RpcFrame::Notification(RpcNotification {
-            jsonrpc: JSON_RPC_VERSION.to_owned(),
-            method: METHOD_EXIT.to_owned(),
-            params: None,
-        }),
-    )
-    .await;
-    if !matches!(
-        tokio::time::timeout(Duration::from_millis(250), running.process.wait()).await,
-        Ok(Ok(_))
-    ) {
-        running
-            .process
-            .kill_tree()
-            .map_err(|error| miette!("plugin dev tree termination failed: {error}"))?;
+    if candidates.len() != 1 {
+        return Err(miette!(
+            "plugin development requires exactly one live engine matching --session {selector:?}"
+        ));
     }
-    tokio::time::timeout(SHUTDOWN_DEADLINE, running.process.reap())
-        .await
-        .map_err(|_| miette!("plugin dev child reap timed out"))?
-        .map_err(|error| miette!("plugin dev child reap failed: {error}"))?;
-    running.trace.abort();
-    trace("plugin-dev lifecycle stopped");
-    Ok(())
+    candidates
+        .pop()
+        .ok_or_else(|| miette!("live engine selection failed"))
 }
 
-async fn terminate_and_reap(process: &dyn SupervisedPluginProcess) {
-    let _ = process.kill_tree();
-    let _ = tokio::time::timeout(SHUTDOWN_DEADLINE, process.reap()).await;
-}
-
-async fn write_frame(writer: &mut rw_ext::PluginStdin, frame: &RpcFrame) -> Result<()> {
-    let bytes = encode_frame(frame, MAX_FRAME_BYTES)
-        .map_err(|error| miette!("plugin dev host frame is invalid: {error}"))?;
-    writer.write_all(&bytes).await.into_diagnostic()?;
-    writer.flush().await.into_diagnostic()
-}
-
-async fn read_frame(reader: &mut rw_ext::PluginStdout) -> Result<RpcFrame> {
-    let mut decoder = FrameDecoder::default();
-    loop {
-        let available = reader.fill_buf().await.into_diagnostic()?;
-        if available.is_empty() {
-            return Err(miette!("plugin dev protocol stream ended"));
-        }
-        let take = available
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .map_or(available.len(), |index| index + 1);
-        let frames = decoder
-            .push(&available[..take])
-            .map_err(plugin_frame_error)?;
-        reader.consume(take);
-        if let Some(frame) = frames.into_iter().next() {
-            return Ok(frame);
-        }
-    }
-}
-
-fn plugin_frame_error(error: FrameError) -> miette::Report {
-    match error {
-        FrameError::TooLarge { .. } => miette!("plugin dev frame exceeded the protocol limit"),
-        FrameError::Empty => miette!("plugin dev returned an empty frame"),
-        other => miette!("plugin dev returned an invalid frame: {other}"),
-    }
-}
-
-fn resolve_target(path: &Path) -> Result<DevTarget> {
+fn canonical_source(path: &Path) -> Result<PathBuf> {
     if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        return Err(miette!("plugin dev refuses a symlink target"));
+        return Err(miette!("plugin development source cannot be a symlink"));
     }
-    let canonical = fs::canonicalize(path).into_diagnostic()?;
-    let (root, entry) = if canonical.is_dir() {
-        let entry = canonical.join("src/index.ts");
-        (canonical, entry)
-    } else if canonical.is_file() {
-        let root = canonical
-            .parent()
-            .ok_or_else(|| miette!("plugin dev path has no parent"))?
-            .to_path_buf();
-        (root, canonical)
-    } else {
-        return Err(miette!("plugin dev target must be a file or directory"));
-    };
-    if !entry.is_file() {
-        return Err(miette!("plugin dev entrypoint does not exist"));
+    let path = fs::canonicalize(path).into_diagnostic()?;
+    if !path.is_dir() {
+        return Err(miette!(
+            "plugin development source must be a package directory"
+        ));
     }
-    let interpreted = matches!(
-        entry.extension().and_then(|value| value.to_str()),
-        Some("ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs")
-    );
-    let (executable, argv) = if interpreted {
-        (find_executable("bun")?, vec![entry.into_os_string()])
-    } else {
-        ensure_executable(&entry)?;
-        (entry, Vec::new())
-    };
-    let config = PluginProcessConfig::new(executable)
-        .and_then(|config| config.with_argv(argv))
-        .and_then(|config| config.with_cwd(&root))
-        .map_err(|error| miette!("plugin dev process configuration is invalid: {error}"))?;
-    Ok(DevTarget { root, config })
-}
-
-fn find_executable(name: &str) -> Result<PathBuf> {
-    let path = std::env::var_os("PATH").ok_or_else(|| miette!("PATH is unavailable"))?;
-    for directory in std::env::split_paths(&path) {
-        let candidate = directory.join(name);
-        if candidate.is_file() {
-            ensure_executable(&candidate)?;
-            return fs::canonicalize(candidate).into_diagnostic();
-        }
-    }
-    Err(miette!("{name} executable was not found"))
-}
-
-fn ensure_executable(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        if fs::metadata(path).into_diagnostic()?.permissions().mode() & 0o111 == 0 {
-            return Err(miette!("plugin dev target is not executable"));
-        }
-    }
-    Ok(())
-}
-
-fn read_only_profile(root: &Path) -> PluginSandboxProfile {
-    PluginSandboxProfile {
-        mode: PluginSandboxMode::Approved,
-        capabilities: PluginCapabilities {
-            tools: vec![PluginToolCapability {
-                name: "dev-manifest-read".to_owned(),
-                description: "Development manifest discovery with read-only filesystem access"
-                    .to_owned(),
-                schema: json!({"type":"object","additionalProperties":false}),
-                caps: vec![PluginToolEffect::ReadsFilesystem],
-            }],
-            ..PluginCapabilities::default()
-        },
-        approved_roots: vec![root.to_path_buf()],
-        allowed_domains: Vec::new(),
-    }
+    Ok(path)
 }
 
 fn source_fingerprint(root: &Path) -> Result<blake3::Hash> {
-    let mut files = Vec::new();
-    collect_sources(root, &mut files, 0)?;
+    let mut files = vec![
+        root.join("manifest.json"),
+        root.join("package.json"),
+        root.join("bun.lock"),
+    ];
+    collect_source_files(&root.join("src"), &mut files, 0)?;
     files.sort();
+    files.dedup();
+    let mut total = 0_u64;
     let mut hasher = blake3::Hasher::new();
-    let mut total = 0_usize;
     for path in files {
-        let metadata = fs::symlink_metadata(&path).into_diagnostic()?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(miette!(
-                "plugin dev source identity changed during fingerprinting"
-            ));
-        }
-        let length = usize::try_from(metadata.len())
-            .map_err(|_| miette!("plugin dev source file size is unsupported"))?;
+        let bytes = read_private_file(&path, MAX_WATCH_BYTES)?;
         total = total
-            .checked_add(length)
-            .ok_or_else(|| miette!("plugin dev source tree size overflowed"))?;
-        if total > MAX_SOURCE_BYTES {
-            return Err(miette!("plugin dev source tree exceeds 16 MiB"));
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| miette!("plugin development source size overflowed"))?;
+        if total > MAX_WATCH_BYTES {
+            return Err(miette!("plugin development source exceeds 16 MiB"));
         }
-        let bytes = read_source_nofollow(&path, length)?;
         hasher.update(
             path.strip_prefix(root)
-                .unwrap_or(&path)
+                .into_diagnostic()?
                 .as_os_str()
                 .as_encoded_bytes(),
         );
+        hasher.update(b"\0");
         hasher.update(&bytes);
     }
     Ok(hasher.finalize())
 }
 
-fn read_source_nofollow(path: &Path, expected: usize) -> Result<Vec<u8>> {
-    #[cfg(unix)]
+fn collect_source_files(current: &Path, files: &mut Vec<PathBuf>, depth: usize) -> Result<()> {
+    if depth > 64 {
+        return Err(miette!(
+            "plugin development source exceeds 64 directory levels"
+        ));
+    }
+    for entry in fs::read_dir(current).into_diagnostic()? {
+        let entry = entry.into_diagnostic()?;
+        let metadata = fs::symlink_metadata(entry.path()).into_diagnostic()?;
+        if metadata.file_type().is_symlink() {
+            return Err(miette!("plugin development source contains a symlink"));
+        }
+        if metadata.is_dir() {
+            collect_source_files(&entry.path(), files, depth + 1)?;
+        } else if metadata.is_file() {
+            files.push(entry.path());
+        } else {
+            return Err(miette!("plugin development source contains a special file"));
+        }
+    }
+    Ok(())
+}
+
+fn read_private_token(path: &Path) -> Result<String> {
+    let bytes = read_private_file(path, 128)?;
+    let token = String::from_utf8(bytes).into_diagnostic()?;
+    let token = token.trim();
+    if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(miette!("engine bootstrap token is invalid"));
+    }
+    Ok(token.to_owned())
+}
+
+fn read_private_file(path: &Path, limit: u64) -> Result<Vec<u8>> {
+    let metadata = fs::symlink_metadata(path).into_diagnostic()?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.uid() != rustix::process::geteuid().as_raw()
+        || metadata.permissions().mode() & 0o022 != 0
+        || metadata.len() > limit
+    {
+        return Err(miette!(
+            "plugin development input is not an owner-controlled regular file"
+        ));
+    }
     let file = {
         use rustix::fs::{Mode, OFlags};
         let descriptor = rustix::fs::open(
@@ -449,545 +308,39 @@ fn read_source_nofollow(path: &Path, expected: usize) -> Result<Vec<u8>> {
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )
-        .map_err(|error| miette!("plugin dev source could not be opened safely: {error}"))?;
+        .map_err(|error| miette!("plugin development input could not open safely: {error}"))?;
         fs::File::from(descriptor)
     };
-    #[cfg(not(unix))]
-    let file = fs::File::open(path).into_diagnostic()?;
-    let mut bytes = Vec::with_capacity(expected);
-    let read_limit = u64::try_from(expected)
-        .unwrap_or(u64::MAX)
-        .saturating_add(1);
-    file.take(read_limit)
+    let mut bytes = Vec::new();
+    file.take(limit.saturating_add(1))
         .read_to_end(&mut bytes)
         .into_diagnostic()?;
-    if bytes.len() != expected {
-        return Err(miette!(
-            "plugin dev source identity changed during fingerprinting"
-        ));
+    if bytes.len() as u64 > limit {
+        return Err(miette!("plugin development input exceeds its byte limit"));
     }
     Ok(bytes)
 }
 
-fn collect_sources(current: &Path, out: &mut Vec<PathBuf>, depth: usize) -> Result<()> {
-    if depth > MAX_SOURCE_DEPTH {
-        return Err(miette!(
-            "plugin dev source tree exceeds 64 directory levels"
-        ));
-    }
-    for entry in fs::read_dir(current).into_diagnostic()? {
-        let entry = entry.into_diagnostic()?;
-        if matches!(
-            entry.file_name().to_str(),
-            Some("node_modules" | "dist" | "target" | ".git")
-        ) {
-            continue;
-        }
-        let path = entry.path();
-        let metadata = fs::symlink_metadata(&path).into_diagnostic()?;
-        if metadata.file_type().is_symlink() {
-            return Err(miette!("plugin dev refuses symlinked source entries"));
-        }
-        if metadata.is_dir() {
-            collect_sources(&path, out, depth + 1)?;
-        } else if metadata.is_file() {
-            out.push(path);
-        }
-        if out.len() > MAX_SOURCE_FILES {
-            return Err(miette!("plugin dev source tree exceeds 4096 files"));
-        }
-    }
-    Ok(())
+async fn unix_request(
+    socket: &Path,
+    request: Request<Full<Bytes>>,
+) -> Result<hyper::Response<Incoming>> {
+    let stream = UnixStream::connect(socket).await.into_diagnostic()?;
+    let (mut sender, connection) = client_http1::handshake(TokioIo::new(stream))
+        .await
+        .into_diagnostic()?;
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    sender.send_request(request).await.into_diagnostic()
 }
 
-struct DevScratch(PathBuf);
-
-impl DevScratch {
-    fn create() -> Result<Self> {
-        let mut random = [0_u8; 8];
-        getrandom::fill(&mut random)
-            .map_err(|error| miette!("plugin dev entropy failed: {error}"))?;
-        let path = std::env::temp_dir().join(format!(
-            "rottweiler-plugin-dev-{}-{}",
-            std::process::id(),
-            u64::from_ne_bytes(random)
-        ));
-        fs::create_dir(&path).into_diagnostic()?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).into_diagnostic()?;
-        }
-        Ok(Self(path))
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for DevScratch {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-#[cfg(all(test, unix))]
-mod tests {
-    #![allow(clippy::expect_used)]
-
-    use std::{
-        os::unix::fs::PermissionsExt as _,
-        process::Stdio,
-        sync::{
-            Mutex,
-            atomic::{AtomicUsize, Ordering},
-        },
-    };
-
-    use async_trait::async_trait;
-    use rw_ext::{
-        ApprovalStore, ApprovalStoreError, DenyPushHandler, ExecutableIdentity, HookDispatcher,
-        HookEvent, PluginBoundaryRedactor, PluginHost, PluginProcessError, RpcHookHandler,
-        RpcToolAdapter, approve_plugin_launch,
-    };
-    use rw_tools::{Tool as _, ToolContext};
-    use serde_json::json;
-    use tokio::{io::BufReader, process::Child};
-
-    use super::*;
-
-    struct DirectLauncher {
-        launches: AtomicUsize,
-    }
-
-    #[async_trait]
-    impl PluginLauncher for DirectLauncher {
-        async fn launch(
-            &self,
-            config: &PluginProcessConfig,
-            _profile: &PluginSandboxProfile,
-        ) -> std::result::Result<LaunchedPluginProcess, PluginProcessError> {
-            config.validate_executable_identity()?;
-            let mut command = tokio::process::Command::new(config.executable());
-            command
-                .args(config.argv())
-                .current_dir(config.cwd())
-                .env_clear()
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(true)
-                .process_group(0);
-            let mut child = command.spawn().map_err(|error| process_error(&error))?;
-            let stdin = child
-                .stdin
-                .take()
-                .ok_or_else(|| process_error_message("stdin"))?;
-            let stdout = child
-                .stdout
-                .take()
-                .ok_or_else(|| process_error_message("stdout"))?;
-            let stderr = child
-                .stderr
-                .take()
-                .ok_or_else(|| process_error_message("stderr"))?;
-            let group = child.id();
-            self.launches.fetch_add(1, Ordering::SeqCst);
-            Ok(LaunchedPluginProcess {
-                stdin: Box::pin(stdin),
-                stdout: Box::pin(BufReader::new(stdout)),
-                stderr: Box::pin(BufReader::new(stderr)),
-                process: Arc::new(DirectProcess {
-                    child: Mutex::new(child),
-                    group,
-                }),
-                executable_identity: ExecutableIdentity {
-                    canonical_path: config.executable_identity().canonical_path.clone(),
-                    device: config.executable_identity().device,
-                    inode: config.executable_identity().inode,
-                    length: config.executable_identity().length,
-                    content_blake3: config.executable_identity().content_blake3.clone(),
-                },
-            })
-        }
-    }
-
-    struct DirectProcess {
-        child: Mutex<Child>,
-        group: Option<u32>,
-    }
-
-    impl Drop for DirectProcess {
-        fn drop(&mut self) {
-            let _ = self.kill_tree();
-        }
-    }
-
-    #[async_trait]
-    impl SupervisedPluginProcess for DirectProcess {
-        fn mark_capability_violation(&self, _violation: &rw_ext::CapabilityViolation) {}
-
-        fn kill_tree(&self) -> std::result::Result<(), PluginProcessError> {
-            if let Some(pid) = self
-                .group
-                .and_then(|value| i32::try_from(value).ok())
-                .and_then(rustix::process::Pid::from_raw)
-            {
-                rustix::process::kill_process_group(pid, rustix::process::Signal::KILL)
-                    .or_else(|error| {
-                        (error == rustix::io::Errno::SRCH)
-                            .then_some(())
-                            .ok_or(error)
-                    })
-                    .map_err(|error| process_error_message(&error.to_string()))?;
-            }
-            Ok(())
-        }
-
-        async fn wait(&self) -> std::result::Result<Option<i32>, PluginProcessError> {
-            loop {
-                if let Some(status) = self
-                    .child
-                    .lock()
-                    .map_err(|_| process_error_message("lock"))?
-                    .try_wait()
-                    .map_err(|error| process_error(&error))?
-                {
-                    return Ok(status.code());
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        }
-    }
-
-    fn process_error(error: &std::io::Error) -> PluginProcessError {
-        process_error_message(&error.to_string())
-    }
-
-    fn process_error_message(message: &str) -> PluginProcessError {
-        PluginProcessError {
-            message: message.to_owned(),
-        }
-    }
-
-    #[derive(Default)]
-    struct MemoryApproval(Mutex<std::collections::BTreeMap<String, String>>);
-
-    struct IdentityRedactor;
-
-    impl PluginBoundaryRedactor for IdentityRedactor {
-        fn redact(&self, value: serde_json::Value) -> serde_json::Value {
-            value
-        }
-    }
-
-    impl ApprovalStore for MemoryApproval {
-        fn approved_fingerprint(
-            &self,
-            name: &str,
-        ) -> std::result::Result<Option<String>, ApprovalStoreError> {
-            Ok(self.0.lock().expect("approval lock").get(name).cloned())
-        }
-
-        fn record_approval(
-            &self,
-            name: &str,
-            fingerprint: &str,
-        ) -> std::result::Result<(), ApprovalStoreError> {
-            self.0
-                .lock()
-                .expect("approval lock")
-                .insert(name.to_owned(), fingerprint.to_owned());
-            Ok(())
-        }
-    }
-
-    fn stage_local_sdk(scaffold: &Path) {
-        let sdk = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../packages/plugin-sdk")
-            .canonicalize()
-            .expect("SDK root");
-        let package = scaffold.join("node_modules/@rottweiler/plugin");
-        fs::create_dir_all(&package).expect("package root");
-        fs::write(
-            package.join("package.json"),
-            r#"{"name":"@rottweiler/plugin","type":"module","exports":{"types":"./src/index.ts","default":"./src/index.ts"}}"#,
-        )
-        .expect("local package manifest");
-        std::os::unix::fs::symlink(sdk.join("src"), package.join("src")).expect("SDK source link");
-        for dependency in ["@types", "bun-types", "typescript", "undici-types"] {
-            let source = sdk.join("node_modules").join(dependency);
-            let destination = scaffold.join("node_modules").join(dependency);
-            if let Some(parent) = destination.parent() {
-                fs::create_dir_all(parent).expect("dependency parent");
-            }
-            std::os::unix::fs::symlink(source, destination).expect("dependency link");
-        }
-    }
-
-    #[tokio::test]
-    #[allow(clippy::too_many_lines)]
-    async fn cli_scaffold_typechecks_tests_and_crosses_the_rust_host() {
-        let temporary = tempfile::tempdir().expect("scaffold root");
-        let scaffold = temporary.path().join("fixture");
-        crate::plugin_cli::scaffold_typescript(&scaffold, Some("fixture"), false)
-            .expect("generate scaffold");
-        stage_local_sdk(&scaffold);
-
-        let sdk = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../packages/plugin-sdk")
-            .canonicalize()
-            .expect("SDK root");
-        let typecheck = std::process::Command::new(sdk.join("node_modules/.bin/tsc"))
-            .args(["--project", "tsconfig.json"])
-            .current_dir(&scaffold)
-            .output()
-            .expect("run typecheck");
-        assert!(
-            typecheck.status.success(),
-            "generated typecheck failed:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&typecheck.stdout),
-            String::from_utf8_lossy(&typecheck.stderr)
-        );
-        let bun = find_executable("bun").expect("Bun");
-        let tests = std::process::Command::new(&bun)
-            .args(["test"])
-            .current_dir(&scaffold)
-            .output()
-            .expect("run generated tests");
-        assert!(
-            tests.status.success(),
-            "generated tests failed: {}",
-            String::from_utf8_lossy(&tests.stderr)
-        );
-
-        let manifest = PluginManifest::from_slice(
-            &fs::read(scaffold.join("manifest.json")).expect("manifest bytes"),
-        )
-        .expect("trusted manifest");
-        let process = PluginProcessConfig::new(bun)
-            .and_then(|config| config.with_argv([scaffold.join("src/index.ts").into_os_string()]))
-            .and_then(|config| config.with_cwd(&scaffold))
-            .expect("plugin process config");
-        let approvals = MemoryApproval::default();
-        approve_plugin_launch(&approvals, &manifest, &process, "scaffold:fixture")
-            .expect("approve exact scaffold");
-        let launcher = DirectLauncher {
-            launches: AtomicUsize::new(0),
-        };
-        let host = PluginHost::launch_approved(
-            &launcher,
-            &approvals,
-            &process,
-            "scaffold:fixture",
-            std::slice::from_ref(&scaffold),
-            manifest.clone(),
-            Arc::new(DenyPushHandler),
-            Arc::new(IdentityRedactor),
-        )
+async fn collect_json<T: serde::de::DeserializeOwned>(body: Incoming) -> Result<T> {
+    let bytes = Limited::new(body, CONTROL_BODY_LIMIT)
+        .collect()
         .await
-        .expect("launch scaffold through Rust host");
-        let tool = RpcToolAdapter::new(
-            manifest.capabilities.tools[0].clone(),
-            host.client(),
-            host.enforcer(),
-        )
-        .expect("tool adapter");
-        let output = tool
-            .execute(
-                &ToolContext::new(&scaffold).expect("tool context"),
-                json!({"name":"Rottweiler"}),
-            )
-            .await
-            .expect("custom tool");
-        assert_eq!(output.content, "Hello, Rottweiler!");
-        let hook = RpcHookHandler::new(host.client(), host.enforcer());
-        let mut dispatcher = HookDispatcher::new();
-        dispatcher
-            .register(
-                plugin_hook_registration(manifest.capabilities.hooks[0], "scaffold:pre-tool"),
-                hook,
-            )
-            .expect("hook registration");
-        assert!(matches!(
-            dispatcher
-                .dispatch(HookEvent::PreTool, json!({"name":"bash"}))
-                .await
-                .status(),
-            rw_ext::HookDispatchStatus::Blocked { .. }
-        ));
-        host.shutdown().await.expect("scaffold shutdown");
-        assert_eq!(launcher.launches.load(Ordering::SeqCst), 1);
-
-        let dev_launcher = Arc::new(DirectLauncher {
-            launches: AtomicUsize::new(0),
-        });
-        let (_stop_tx, stop_rx) = watch::channel(false);
-        supervise(
-            dev_launcher.clone(),
-            resolve_target(&scaffold).expect("development target"),
-            stop_rx,
-            Arc::new(|_| {}),
-            SupervisorOptions {
-                max_launches: Some(1),
-                ..SupervisorOptions::default()
-            },
-        )
-        .await
-        .expect("generated SDK plugin must accept the development handshake");
-        assert_eq!(dev_launcher.launches.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn malformed_post_init_stream_is_detected_and_child_is_reaped() {
-        let project = tempfile::tempdir().expect("project");
-        let script = project.path().join("oversized.sh");
-        let pid_file = project.path().join("pid");
-        fs::write(
-            &script,
-            r#"#!/bin/sh
-printf '%s' "$$" > "$1"
-while IFS= read -r frame; do
-  case "$frame" in
-    *'"method":"initialize"'*)
-      printf '%s\n' '{"jsonrpc":"2.0","id":"rottweiler-dev-init","result":{"name":"oversized","version":"1","protocol":2,"capabilities":{}}}'
-      head -c 4194305 /dev/zero | tr '\000' x
-      printf '\n'
-      ;;
-  esac
-done
-"#,
-        )
-        .expect("script");
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).expect("mode");
-        let config = PluginProcessConfig::new(fs::canonicalize(&script).expect("script path"))
-            .and_then(|config| config.with_argv([pid_file.clone().into_os_string()]))
-            .and_then(|config| config.with_cwd(project.path()))
-            .expect("process config");
-        let target = DevTarget {
-            root: fs::canonicalize(project.path()).expect("root"),
-            config,
-        };
-        let launcher = Arc::new(DirectLauncher {
-            launches: AtomicUsize::new(0),
-        });
-        let (_stop_tx, stop_rx) = watch::channel(false);
-        let error = tokio::time::timeout(
-            Duration::from_secs(5),
-            supervise(
-                launcher,
-                target,
-                stop_rx,
-                Arc::new(|_| {}),
-                SupervisorOptions::default(),
-            ),
-        )
-        .await
-        .expect("supervisor deadline")
-        .expect_err("oversized trace must fail");
-        assert!(error.to_string().contains("frame exceeded"));
-        let pid = fs::read_to_string(pid_file)
-            .expect("pid")
-            .parse::<i32>()
-            .expect("numeric pid");
-        let pid = rustix::process::Pid::from_raw(pid).expect("positive pid");
-        assert_eq!(
-            rustix::process::test_kill_process(pid).expect_err("child must be reaped"),
-            rustix::io::Errno::SRCH
-        );
-    }
-
-    #[tokio::test]
-    async fn source_change_restarts_once_traces_are_redacted_and_children_are_reaped() {
-        let project = tempfile::tempdir().expect("project");
-        let state = tempfile::tempdir().expect("state");
-        let script = project.path().join("fixture.sh");
-        let source = project.path().join("source.txt");
-        let pids = state.path().join("pids");
-        fs::write(&source, "one").expect("source");
-        fs::write(
-            &script,
-            r#"#!/bin/sh
-printf '%s\n' "$$" >> "$1"
-while IFS= read -r frame; do
-  case "$frame" in
-    *'"method":"initialize"'*)
-      printf '%s\n' '{"jsonrpc":"2.0","id":"rottweiler-dev-init","result":{"name":"fixture","version":"CANARY_SECRET","protocol":2,"capabilities":{}}}'
-      printf '%s\n' '{"jsonrpc":"2.0","id":"push","method":"ui/notify","params":{"message":"CANARY_SECRET"}}'
-      ;;
-    *'"method":"shutdown"'*) exit 0 ;;
-  esac
-done
-"#,
-        )
-        .expect("script");
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).expect("mode");
-        let executable = fs::canonicalize(&script).expect("canonical script");
-        let config = PluginProcessConfig::new(executable)
-            .and_then(|config| config.with_argv([pids.clone().into_os_string()]))
-            .and_then(|config| config.with_cwd(project.path()))
-            .expect("config");
-        let target = DevTarget {
-            root: fs::canonicalize(project.path()).expect("root"),
-            config,
-        };
-        let launcher = Arc::new(DirectLauncher {
-            launches: AtomicUsize::new(0),
-        });
-        let captured = Arc::new(Mutex::new(Vec::<String>::new()));
-        let trace_values = Arc::clone(&captured);
-        let trace: Trace = Arc::new(move |line| {
-            trace_values
-                .lock()
-                .expect("trace lock")
-                .push(line.to_owned());
-        });
-        let (_stop_tx, stop_rx) = watch::channel(false);
-        let edit = tokio::spawn({
-            let pids = pids.clone();
-            let source = source.clone();
-            async move {
-                loop {
-                    if fs::read_to_string(&pids).is_ok_and(|contents| contents.lines().count() == 1)
-                    {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
-                fs::write(&source, "two").expect("edit");
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                fs::write(&source, "three").expect("coalesced edit");
-            }
-        });
-        supervise(
-            launcher.clone(),
-            target,
-            stop_rx,
-            trace,
-            SupervisorOptions {
-                poll: Duration::from_millis(10),
-                debounce: Duration::from_millis(40),
-                max_launches: Some(2),
-            },
-        )
-        .await
-        .expect("supervise");
-        edit.await.expect("edit task");
-        assert_eq!(launcher.launches.load(Ordering::SeqCst), 2);
-        let pid_values = fs::read_to_string(&pids).expect("pids");
-        assert_eq!(pid_values.lines().count(), 2);
-        for pid in pid_values.lines() {
-            let status = std::process::Command::new("/bin/kill")
-                .args(["-0", pid])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .expect("kill probe");
-            assert!(!status.success(), "child {pid} was not reaped");
-        }
-        let rendered = captured.lock().expect("trace lock").join("\n");
-        assert!(!rendered.contains("CANARY_SECRET"));
-        assert_eq!(rendered.matches("lifecycle restart").count(), 1);
-    }
+        .map_err(|_| miette!("plugin development response exceeded its byte limit"))?
+        .to_bytes();
+    serde_json::from_slice(&bytes)
+        .map_err(|_| miette!("plugin development response contained invalid JSON"))
 }

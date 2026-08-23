@@ -1,12 +1,11 @@
 # TypeScript source plugin host
 
-**Status:** accepted design, 2026-08-22. The SDK publication and manifest-front-door
-changes may land independently. The production host starts with the feasibility
-spike in the migration plan; this document does not claim that host is implemented.
+**Status:** implemented, 2026-08-22. Public SDK publication remains an exact-tag
+release operation and is not claimed by an untagged source commit.
 
 ## Outcome
 
-Rottweiler will ship one private, release-owned TypeScript plugin host and start
+Rottweiler ships one private, release-owned TypeScript plugin host and starts
 one sandboxed host process for each active TypeScript plugin. A plugin remains a
 small source package; it no longer embeds a separate Bun runtime. Rust continues
 to own trust, approval, preparation, sandbox policy, registration, credentials,
@@ -71,14 +70,11 @@ enum PluginTarget {
     TypeScript(TypeScriptSourcePackage),
 }
 
-struct ResolvedPlugin {
-    manifest: PluginManifest,
-    process: PluginProcessConfig,
-}
-
-impl PluginResolver {
-    fn resolve_production(&self, target: &PluginTarget) -> Result<ResolvedPlugin, ResolveError>;
-}
+async fn resolve_plugin_process(
+    plugin: &DiscoveredPlugin,
+    private_root: &Path,
+    helper: &Path,
+) -> Result<PluginProcessConfig>;
 ```
 
 After resolution, the existing approval store, `PluginLauncher`, `PluginHost`,
@@ -180,37 +176,32 @@ produce the approved identities or require a new approval.
 
 ## Live-session development
 
-Live attachment is a second implementation phase, not a prerequisite for the
-production resolver. Its shape is fixed now so the host does not block it later:
+Live attachment uses the same production resolver and process boundary:
 
 ```text
 rw plugin dev . --session current --allow-dev-exec
 ```
 
-The CLI authenticates to a local engine and requests a temporary attachment. The
-engine owns preparation and watching; the CLI never supplies trusted hashes or
-bundle paths. The in-memory grant binds the session, plugin name, project-root
-identity, manifest and config fingerprints, connection, driver lease, and an
-explicit capability ceiling. The first version denies remote attachment,
-workspace writes, subprocesses, and network unless separately granted.
+The CLI authenticates to a local engine with a capability that can only attach or
+detach a development plugin. It watches owner-controlled package inputs and asks
+the actor to prepare a stable edit; it never supplies trusted hashes or bundle
+paths. The runtime owns preparation, the in-memory grant, candidate generation,
+capability ceiling, and process lifecycle. Development denies providers, pushes,
+events, workspace writes, subprocesses, and network.
 
 Only the session actor activates or replaces a generation. Preparation, handshake,
-provider discovery, and collision checks occur off-actor. At a between-turn safe
-point the actor swaps one immutable `SessionExtensionSnapshot` containing tools,
-hooks, commands, providers, event routes, pushes, plugin generations, and a
-revision. A turn captures one snapshot and cannot straddle registry generations.
+and collision checks complete before activation. At an idle, between-turn safe
+point the actor swaps one immutable `SessionExtensionSnapshot` containing the
+tool, hook, and command registries and a revision. A turn captures one snapshot
+and cannot straddle registry generations.
 
-A source-only edit within the grant creates a candidate generation. Syntax,
+A stable source edit within the grant creates a candidate generation. Syntax,
 preparation, handshake, or collision failure retains the last good development
 generation. Authority expansion requires a new attachment grant. In-flight calls
-pin their old generation. Disconnect, heartbeat expiry, lease loss, session close,
-or engine shutdown detaches development, launches the approved production bundle,
-and reaps the development child. Durable activation events contain digests and
-generation numbers, never local paths.
-
-The current standalone `plugin dev` supervisor may remain as a diagnostic until
-this actor-owned attachment passes end-to-end acceptance. It is not the final live
-development experience.
+pin their old generation. Ctrl-C detaches explicitly; session or engine shutdown
+kills the process-owned generation. A rejected candidate is shut down and reaped
+before the last-good snapshot remains active. The former standalone development
+supervisor was deleted rather than retained as a compatibility path.
 
 ## Distribution and SDK publication
 
@@ -221,17 +212,19 @@ workspace source path. After qualification, the release publishes and then creat
 a clean scaffold that installs the unmodified version from the public registry,
 typechecks, tests, and builds.
 
-The source host phase adds the private helper to release archives, installers,
-updater allowlists, Homebrew private trees, WSL acceptance, size gates, SBOM, and
-provenance. Extracted-archive acceptance runs preparation, approval, one real tool
-call, and shutdown with system `bun` and `node` absent from `PATH`. No-plugin
-startup must prove that the helper is neither spawned nor mapped.
+The source host is included in release archives, installers, Homebrew private
+trees, size gates, and archive provenance. The release build executes the
+extracted helper and verifies its semantic identity. Source acceptance separately
+runs sandboxed preparation and approval with no system JavaScript runtime used at
+execution time.
 
-## Migration checkpoints
+## Migration record
 
-Each checkpoint ends in a directly verifiable state:
+The repository-side checkpoints ended in directly verifiable states. Public npm
+state changes only from the exact-tag workflow.
 
-1. Publish and consume the SDK package; remove CI source substitution.
+1. Prepare exact-tag SDK publication and remove CI source substitution. Registry
+   publication occurs on the next qualified tag.
 2. Make inert `manifest.json` the only authored declaration and validate its SDK
    import. Retain the current standalone executable path.
 3. Prove a compiled private host can import one sealed external ESM module under

@@ -326,6 +326,7 @@ struct ClientRegistry {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ClientCapability {
     Interactive,
+    PluginDevelopment,
     ShellBroker,
 }
 
@@ -771,10 +772,16 @@ async fn handle_request(
                             command.meta_mut().client_id = client.client_id.clone();
                             let shutdown_requested =
                                 matches!(&command, ClientCommand::ShutdownHost { .. });
-                            let outcome = if client.capability == ClientCapability::ShellBroker {
-                                dispatch_shell_broker(&*state.engine, command).await
-                            } else {
-                                state.engine.dispatch(client.client_id, command).await
+                            let outcome = match client.capability {
+                                ClientCapability::Interactive => {
+                                    state.engine.dispatch(client.client_id, command).await
+                                }
+                                ClientCapability::PluginDevelopment => {
+                                    dispatch_plugin_development(&*state.engine, command).await
+                                }
+                                ClientCapability::ShellBroker => {
+                                    dispatch_shell_broker(&*state.engine, command).await
+                                }
                             };
                             match outcome {
                                 Ok(outcome) => {
@@ -1058,14 +1065,42 @@ fn authenticate_client(
     registry.authenticate(client_id, bearer(request)?)
 }
 
-fn requested_capability(
-    request: &Request<Incoming>,
+fn requested_capability<B>(
+    request: &Request<B>,
 ) -> std::result::Result<ClientCapability, &'static str> {
     match request.headers().get(CAPABILITY_HEADER) {
         None => Ok(ClientCapability::Interactive),
+        Some(value) if value.as_bytes() == b"plugin_development" => {
+            Ok(ClientCapability::PluginDevelopment)
+        }
         Some(value) if value.as_bytes() == b"shell_broker" => Ok(ClientCapability::ShellBroker),
         Some(_) => Err("unknown engine client capability"),
     }
+}
+
+async fn dispatch_plugin_development(
+    engine: &dyn ServerEngine,
+    command: ClientCommand,
+) -> std::result::Result<CommandOutcome, String> {
+    if !matches!(
+        command,
+        ClientCommand::AttachDevelopmentPlugin { .. }
+            | ClientCommand::DetachDevelopmentPlugin { .. }
+    ) {
+        return Ok(CommandOutcome::Rejected {
+            error: EngineError {
+                category: EngineErrorCategory::Protocol,
+                code: "plugin_development_capability".to_owned(),
+                message: "the plugin-development capability may only attach or detach a development plugin"
+                    .to_owned(),
+                retryable: false,
+                details: None,
+            },
+        });
+    }
+    engine
+        .dispatch(command.meta().client_id.clone(), command)
+        .await
 }
 
 async fn dispatch_shell_broker(
@@ -1366,6 +1401,18 @@ mod tests {
         assert!(!debug.contains(&runtime.bootstrap.encode()));
         let descriptor = fs::read_to_string(&runtime.paths.descriptor).expect("descriptor");
         assert!(!descriptor.contains(&runtime.bootstrap.encode()));
+    }
+
+    #[test]
+    fn plugin_development_is_a_distinct_narrow_transport_capability() {
+        let request = Request::builder()
+            .header(CAPABILITY_HEADER, "plugin_development")
+            .body(())
+            .expect("capability request");
+        assert_eq!(
+            requested_capability(&request).expect("plugin development capability"),
+            ClientCapability::PluginDevelopment
+        );
     }
 
     #[test]

@@ -104,7 +104,7 @@ impl WasmProcessHook {
     ) -> Result<(), HookRegistrationError> {
         let shared: Arc<dyn HookHandler> = Arc::new(self.clone());
         for declaration in &self.manifest.capabilities.hooks {
-            let hook = declaration.name();
+            let hook = declaration.name;
             let id = format!("wasm:{}:{}", self.manifest.name, hook.as_str());
             dispatcher.register_shared(
                 crate::plugin_hook_registration(*declaration, id),

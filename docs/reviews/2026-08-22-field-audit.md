@@ -17,11 +17,9 @@ Effort is my estimate for a scoped Codex brief, not a team-week.
 ## Resolution — 2026-08-22
 
 The measurement, speed, UI, correctness, packaging, and scaffold defects below
-are implemented and covered by executable checks. Two production-plugin phases
-remain intentionally open: the public SDK will first be published by an exact-tag
-release after npm trusted-publisher configuration, and the accepted TypeScript
-source-host/live-attachment design is staged behind its feasibility and migration
-gates. Neither is reported as shipped.
+are implemented and covered by executable checks. The public SDK will first be
+published by an exact-tag release after npm trusted-publisher configuration; an
+untagged source commit cannot truthfully claim that external registry state.
 
 | Area | Resolution and evidence |
 |---|---|
@@ -32,12 +30,23 @@ gates. Neither is reported as shipped.
 | Correctness | Incremental UTF-8 carry preserves split multibyte output. Parent-death handling uses Linux `PDEATHSIG`, macOS `kqueue NOTE_EXIT`, and a portable polling fallback; M4 kills the supervisor, proves both children exit, and relaunches the exact workspace without manual recovery. The lease itself is already a kernel `flock`, so there was no stale PID record to reclaim. |
 | Distribution | Homebrew now exposes a symlink instead of an environment wrapper, and package-manager ownership is detected from canonical Cellar/Caskroom paths. |
 | SDK front door | PR CI installs the exact packed SDK rather than rewriting the dependency to workspace source. The exact-tag release uses npm OIDC trusted publishing, verifies an existing version byte-for-byte on rerun, then installs the unmodified public dependency in a clean scaffold. Actual registry publication awaits the next tag and repository trusted-publisher setup. |
-| Plugin architecture | `manifest.json` is the one inert declaration and is validated by `parsePluginManifest`; executing TypeScript to discover authority was rejected. ADR-027 and `docs/design/typescript-source-plugin-host.md` specify one release-owned host process per plugin, two-pass sealing, current-runtime resolution, immutable per-turn registries, and actor-owned live development. The production host and live attachment are designed, not implemented. |
+| Plugin architecture | `manifest.json` is the one inert declaration and is validated by `parsePluginManifest`; executing TypeScript to discover authority was rejected. The source path uses one release-owned host process per plugin, sandboxed two-pass sealing, lock-backed source identity, immutable actor-swapped registries, last-good live reload, and explicit detach. The old standalone development supervisor was deleted. |
 | Baselines | Darwin was recalibrated from the new 100-sample M4/headless rulers and real-renderer TUI fixtures. Linux retains prior measured metrics but is deliberately marked bootstrap for the two new rulers, so protected `--require-measured` qualification stays closed until a native Linux calibration replaces the ceilings. |
 
 `scripts/check-field-audit-remediation.py` fails closed if the remediation shape
-regresses. Checked items below are implemented or experimentally settled; open
-items name genuine publication or staged-runtime work.
+regresses. Checked items below are implemented or experimentally settled; the
+only open plugin item is the external exact-tag npm publication.
+
+The source-plugin acceptance used a fresh `rw plugin scaffold`, a packed local
+SDK tarball, Bun's generated text lockfile, and the compiled private host beside
+`rw`. `rw plugin status` completed both sandboxed graph passes, published a
+26,326-byte sealed bundle, and produced a first-load approval identity containing
+the source graph, lockfile, bundle, host ABI, and bundle format. Package-host tests
+also prove graph discovery does not execute top-level code and rejects dynamic
+imports and symlinks. The extracted host completed the protocol-2 handshake and
+returned `Hello, audit!` from the scaffold's real `hello` tool. Actor tests cover
+successful activation, rejected reload with last-good retention, and detach
+restoration.
 
 ---
 
@@ -343,7 +352,7 @@ downstream consequences.
       a gate that rewrites the artifact under test is not testing the artifact —
       worth grepping CI for other instances.
 
-- [ ] **PLG-2 · P0 · [verified] · design pass first, then large** — a hello-world
+- [x] **PLG-2 · P0 · [verified] · design pass first, then large** — a hello-world
       plugin compiles to a 64 MB executable, and every edit invalidates its approval.
       Building the generated scaffold with the SDK linked locally produced
       `dist/plugin` at **63,943,538 bytes** — an entire embedded Bun runtime, per
@@ -370,7 +379,7 @@ downstream consequences.
       (transitive npm deps are no longer frozen into one attested artifact), so it
       needs a written design before any code. Do not let a Codex brief start here.
 
-- [ ] **PLG-4 · P1 · unblocked by PLG-2 · medium** — `rw plugin dev` cannot attach
+- [x] **PLG-4 · P1 · unblocked by PLG-2 · medium** — `rw plugin dev` cannot attach
       to a live session.
       Reading `crates/rw-cli/src/plugin_dev.rs`, it launches the plugin, runs the
       handshake, traces RPC and restarts on file change (200 ms poll, 400 ms
@@ -466,8 +475,8 @@ should not start as a Codex brief.
 The original open experiments are now resolved: SPD-6 has a controlled 100-sample
 comparison plus a qualified fat-LTO build, and UI-2 has a full-turn subscription
 capability regression test with a non-zero usable context window. PLG-1's external
-registry publication and the PLG-2/PLG-4 production phases remain open for the
-reasons recorded in the resolution section.
+registry publication remains an exact-tag release action. The PLG-2/PLG-4
+production phases are implemented and verified locally.
 
 ---
 

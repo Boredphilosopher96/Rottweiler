@@ -133,6 +133,7 @@ class DistributionRenderTests(unittest.TestCase):
             self.assertNotIn('bin.install "rottweiler-tui"', formula_text)
             self.assertIn('refute_path_exists bin/"rottweiler-tui"', formula_text)
             self.assertIn('libexec/"rottweiler-wasm-host"', formula_text)
+            self.assertIn('libexec/"rottweiler-plugin-host"', formula_text)
             self.assertIn('license "Apache-2.0"', formula_text)
             self.assertIn("preserve_rpath", formula_text)
             self.assertIn("managed by Homebrew", formula_text)
@@ -276,12 +277,14 @@ class DistributionRenderTests(unittest.TestCase):
         self.assertIn('"scripts/cargo-release.sh", "build", "--locked", "--release"', text)
         self.assertIn('libexec.install "packages/tui/dist/rottweiler-tui"', text)
         self.assertIn('libexec.install "#{release_dir}/rottweiler-wasm-host"', text)
+        self.assertIn('libexec.install "packages/plugin-host/dist/rottweiler-plugin-host"', text)
         self.assertIn(
             'bin.install_symlink libexec/"rw"',
             text,
         )
         self.assertNotIn('bin.install "rottweiler-tui"', text)
         self.assertIn('refute_path_exists bin/"rottweiler-tui"', text)
+        self.assertIn('refute_path_exists bin/"rottweiler-plugin-host"', text)
         self.assertIn("managed by Homebrew", text)
         self.assertIn("brew upgrade", text)
         if subprocess.run(["sh", "-c", "command -v ruby"], check=False).returncode == 0:

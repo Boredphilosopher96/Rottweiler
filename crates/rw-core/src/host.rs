@@ -4621,6 +4621,7 @@ mod tests {
                 checkpoints: Arc::new(NoopMutationCheckpointCoordinator),
                 folder_trust: Arc::new(NoopFolderTrustController),
                 workspace_roots: Arc::new(crate::NoopWorkspaceRootController),
+                extension_development: Arc::new(crate::NoopSessionExtensionController),
                 recovered: SessionRecoveredState::default(),
                 max_turns: 2,
                 identical_tool_failure_limit: 2,

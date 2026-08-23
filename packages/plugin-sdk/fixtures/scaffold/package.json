@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "mkdir -p dist && bun build --compile src/index.ts --outfile dist/plugin",
+    "build": "bun build src/index.ts --outdir dist --target bun",
     "start": "bun run src/index.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"

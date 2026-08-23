@@ -71,7 +71,11 @@ Plugin returns a manifest on `initialize`:
   "capabilities": {
     "tools": [ { "name": "...", "description": "...", "schema": {...}, "caps": ["reads-fs"] } ],
     "commands": [ ... ],
-    "hooks": [ "pre_tool", "post_tool", "session_start" ],
+    "hooks": [
+      { "name": "pre_tool", "failure_policy": "fail-closed" },
+      { "name": "post_tool", "failure_policy": "fail-open" },
+      { "name": "session_start", "failure_policy": "fail-open" }
+    ],
     "providers": [ {
       "alias-prefix": "custom/",
       "capabilities": ["models"],
@@ -82,7 +86,7 @@ Plugin returns a manifest on `initialize`:
 }
 ```
 
-Capabilities are permission-gated: the user approves a plugin's capability set on first load (recorded, re-prompted on change) — a plugin that suddenly wants `hooks: [pre_tool]` after an update is a supply-chain signal, not a silent upgrade.
+Capabilities are permission-gated: the user approves a plugin's capability set on first load (recorded, re-prompted on change) — a plugin that suddenly declares a `pre_tool` hook after an update is a supply-chain signal, not a silent upgrade.
 
 Provider alias-prefix syntax and its 128-byte wire limit are owned by the extension
 protocol. Rust manifest validation and core provider composition use the same
@@ -139,7 +143,7 @@ require a larger protocol design.
 
 Official plugin SDKs: **TypeScript first** (npm `@rottweiler/plugin`), Rust second. The dependency-leaf `rw-plugin-protocol` crate owns the public wire version, methods, limits, envelopes, manifest grammar, and DTOs. Its checked-in TypeScript, schema, and protocol-2 fixture projections are generated and CI-checked. The exact tag workflow publishes the version-matched TypeScript package through npm trusted publishing, then proves an unmodified clean scaffold can install it from the public registry. Pull-request CI consumes the packed package artifact rather than rewriting the dependency to workspace source.
 
-### Executable configuration and approval
+### Plugin configuration and approval
 
 Executable configuration follows the normal `.agents`-before-`.rottweiler` discovery rule and is ignored at project scope until its project extension inventory is trusted. Commands are literal argv arrays: shell parsing and `PATH` lookup are never implicit, and the executable must resolve to an absolute executable file.
 
@@ -180,17 +184,23 @@ publish_document = ["network", "exec"]
 # .agents/plugins.toml
 [[plugins]]
 name = "example"
-argv = ["/absolute/workspace/.agents/plugins/example/dist/plugin"]
-manifest = ".agents/plugins/example/manifest.json"
+source = ".agents/plugins/example"
 inherit_env = []
 allowed_domains = []
 ```
 
+The TypeScript `source` target owns `manifest.json`, `package.json`, `bun.lock`,
+and `src/index.ts` as one package. It cannot be combined with `argv`, `manifest`,
+or `cwd`. The separate any-language executable target uses literal `argv` plus
+one `manifest`; it is not a fallback for an invalid source target.
+
 `/mcp` shows connection and approval state. Stdio servers receive only intrinsic runtime reads, scratch writes, and no network by default. `read_roots`, `write_roots`, and `allowed_domains` are bounded explicit process grants; roots must stay within active workspace authority, and domains use the supervised policy proxy with DNS pinning and private/local-address denial. Separately, virtual MCP tool calls classify as `network + exec` unless user-level `capability_overrides` supplies a server default or an exact per-tool override (`reads_fs`, `writes_fs`, `network`, `exec`); project configuration cannot downgrade this permission classification. Tool entries take precedence over the server default. Approval is bound to both kinds of grants together with the exact origin, transport, argv/environment names, OAuth references, and configuration fingerprint; changed configuration requires a new explicit fingerprint confirmation. `rw mcp login <server>` uses Authorization Code + PKCE and atomically stores the access token, optional refresh token, expiry, and exact resource/audience binding in the Rottweiler credential vault. Expired access is refreshed only against the same trusted token endpoint/client/proxy configuration, and a rotated refresh token is durably replaced before the new bearer is exposed. Plaintext tokens and environment-backed MCP OAuth references are rejected. Remote prompts are available through `/mcp.prompt <server> <prompt> [JSON object]`; catalog-derived namespaced aliases are conveniences and the stable command resolves the live server state at invocation.
 
-`rw plugin status|approve|revoke` manages the separately fingerprinted plugin approval ledger. Production approval pins and displays the executable plus every explicit interpreter entrypoint and adjacent dependency descriptor by canonical path, length, and BLAKE3 identity; identities are revalidated immediately before launch, and eval/module/package-runner forms are rejected because their executed content cannot be attested narrowly. A separately pinned `code_root` (the manifest's parent directory) is the only plugin-owned directory readable without `reads-fs`; it must be a strict descendant of an approved workspace root, never the workspace root itself. Omit `cwd` to default it to that code root. The current TypeScript production path is the scaffold's `bun run build`, which emits a standalone `dist/plugin`; `bun run start` remains the development path. The scaffold contains one inert `manifest.json`, imported through `parsePluginManifest`, so code and the approval artifact cannot drift. `rw plugin dev <path> --allow-dev-exec` runs the official SDK handshake under the restrictive plugin sandbox, watches source files without a build loop, and never grants or mutates production approval.
+`rw plugin status|approve|revoke` manages the separately fingerprinted plugin approval ledger. For a source target, the release-owned sibling host discovers the complete graph without executing top-level plugin code; Rust validates the Bun lock identities, copies exact no-follow bytes to private scratch, rebuilds from that sealed tree, requires the second graph to match, and publishes one content-addressed bundle. Approval binds the manifest, source graph, lockfile, bundle, host ABI, format, origin, environment names, domains, and sandbox policy. Each plugin launches in its own host process. A source failure leaves other plugins running.
 
-ADR-027 and `docs/design/typescript-source-plugin-host.md` define the accepted replacement for the per-plugin compiled Bun executable: one release-owned private host, one sandboxed process per plugin, two-pass sealed source preparation, and a later actor-owned live-session development attachment. This is an accepted staged design, not a shipped runtime claim. Until its extracted-release acceptance passes, standalone compilation remains the production recipe and `plugin dev` does not attach to a live session.
+The scaffold contains one inert `manifest.json`, imported through `parsePluginManifest`, so authority has one owner. `rw plugin dev <path> --session current --allow-dev-exec` attaches that package to one live local session. Stable edits prepare candidates through the same resolver; the actor swaps a complete immutable tool/hook/command snapshot only after success, retains the last-good generation on rejection, blocks capability changes until detach, and never writes the ephemeral grant to production approval.
+
+The separate executable target pins its executable, explicit interpreter entrypoints, adjacent dependency descriptors, manifest, code root, origin, environment names, and domains by canonical path, length, and BLAKE3 identity. Eval, module-runner, package-runner, and `PATH`-resolved forms are rejected.
 
 Protocol 2 is the only supported generation. The Rust host and TypeScript SDK consume the same generated contract projections. Provider plugins emit request-correlated `provider/event` notifications incrementally and receive `provider/cancel` when the consumer drops; their streams are bounded and cancellation-cleaned without a whole-call five-second deadline. Catalog and host-HTTP requests are separately bounded and negotiated. `packages/plugin-sdk/PROTOCOL.md` explains the wire contract; its current schema and fixture are projections of `rw-plugin-protocol`, not additional owners.
 
@@ -225,7 +235,7 @@ Registry catalogs are bounded refreshable caches, and every entry is validated b
 ## Extension of the extension system
 
 - `rw plugin scaffold --lang ts` generates a working plugin skeleton with tests.
-- `rw plugin dev <path>` runs a plugin with hot-restart and RPC tracing for debugging.
+- `rw plugin dev <path> --session current --allow-dev-exec` hot-reloads a source plugin inside a live local session.
 - Protocol 2 is the sole accepted generation; upgrades migrate every caller and
   remove the previous contract in the same change.
 

@@ -321,7 +321,7 @@ enum Command {
         #[command(subcommand)]
         command: TrustCommand,
     },
-    /// Author and debug out-of-process plugins.
+    /// Author, approve, and debug process-isolated plugins.
     Plugin {
         #[command(subcommand)]
         command: PluginCommand,
@@ -531,10 +531,13 @@ enum PluginCommand {
         #[arg(long)]
         force: bool,
     },
-    /// Run a plugin under the development supervisor (experimental).
+    /// Attach a source plugin to a live local session with hot reload.
     Dev {
         #[arg(value_name = "PATH")]
         path: PathBuf,
+        /// Live session selector (`current` or an exact session ID).
+        #[arg(long, default_value = "current")]
+        session: String,
         /// Explicitly authorize direct local development execution.
         #[arg(long)]
         allow_dev_exec: bool,
@@ -1109,17 +1112,18 @@ async fn main() -> Result<()> {
         }
         Some(Command::Plugin {
             command: PluginCommand::Status,
-        }) => run_plugin_approval(None, false)?,
+        }) => run_plugin_approval(None, false).await?,
         Some(Command::Plugin {
             command: PluginCommand::Approve { name },
-        }) => run_plugin_approval(Some(&name), false)?,
+        }) => run_plugin_approval(Some(&name), false).await?,
         Some(Command::Plugin {
             command: PluginCommand::Revoke { name },
-        }) => run_plugin_approval(Some(&name), true)?,
+        }) => run_plugin_approval(Some(&name), true).await?,
         Some(Command::Plugin {
             command:
                 PluginCommand::Dev {
                     path,
+                    session,
                     allow_dev_exec,
                 },
         }) => {
@@ -1128,7 +1132,7 @@ async fn main() -> Result<()> {
                     "plugin dev executes local code; pass --allow-dev-exec to grant explicit development authority"
                 ));
             }
-            plugin_dev::run(&path).await?;
+            plugin_dev::run(&path, &session, &configuration_root_path()?.join("run")).await?;
         }
         Some(Command::Extension {
             command:
@@ -2541,7 +2545,7 @@ fn ensure_folder_trust_grantable(
     Ok(())
 }
 
-fn run_plugin_approval(name: Option<&str>, revoke: bool) -> Result<()> {
+async fn run_plugin_approval(name: Option<&str>, revoke: bool) -> Result<()> {
     use std::io::IsTerminal as _;
 
     let workspace =
@@ -2582,7 +2586,12 @@ fn run_plugin_approval(name: Option<&str>, revoke: bool) -> Result<()> {
             continue;
         }
         let manifest = plugin.load_manifest()?;
-        let process = plugin.process_config()?;
+        let process = rw_runtime::plugin::resolve_plugin_process(
+            plugin,
+            &storage_root,
+            &std::env::current_exe().into_diagnostic()?,
+        )
+        .await?;
         let scope = match plugin.origin {
             executable_config::ExecutableConfigOrigin::User(_) => "user",
             executable_config::ExecutableConfigOrigin::TrustedProject(_) => "project",

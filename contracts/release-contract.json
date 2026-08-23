@@ -29,6 +29,12 @@
         "max_bytes": 104857600
       },
       {
+        "id": "plugin_host",
+        "path": "bin/rottweiler-plugin-host",
+        "mode": "0755",
+        "max_bytes": 83886080
+      },
+      {
         "id": "opentui_native",
         "path": "bin/{native_library}",
         "mode": "0644",
@@ -47,6 +53,7 @@
       "product_budgets": {
         "engine_less_than_bytes": 40000000,
         "wasm_host_less_than_bytes": 30000000,
+        "plugin_host_less_than_bytes": 75000000,
         "tui_bundle_less_than_bytes": 100000000
       },
       "distribution": {
@@ -65,6 +72,7 @@
       "product_budgets": {
         "engine_less_than_bytes": 40000000,
         "wasm_host_less_than_bytes": 30000000,
+        "plugin_host_less_than_bytes": 75000000,
         "tui_bundle_less_than_bytes": 100000000
       },
       "distribution": {
@@ -83,6 +91,7 @@
       "product_budgets": {
         "engine_less_than_bytes": 28000000,
         "wasm_host_less_than_bytes": 30000000,
+        "plugin_host_less_than_bytes": 75000000,
         "tui_bundle_less_than_bytes": 150000000
       },
       "distribution": {
@@ -101,6 +110,7 @@
       "product_budgets": {
         "engine_less_than_bytes": 28000000,
         "wasm_host_less_than_bytes": 30000000,
+        "plugin_host_less_than_bytes": 75000000,
         "tui_bundle_less_than_bytes": 150000000
       },
       "distribution": {

@@ -72,6 +72,8 @@ pub enum PluginSandboxMode {
     /// Initialization-only launch: deny network/writes and expose only runtime/entrypoint reads.
     #[cfg(test)]
     ManifestProbe,
+    /// Release-owned source graph discovery and sealed-bundle preparation.
+    Preparation,
     Approved,
 }
 
@@ -240,6 +242,8 @@ pub struct PluginApprovalIdentity {
     pub executable: ExecutableIdentity,
     pub config_fingerprint: String,
     pub origin: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<crate::SourcePluginIdentity>,
 }
 
 impl PluginApprovalIdentity {
@@ -260,20 +264,27 @@ fn approval_identity(
             "plugin origin is invalid".to_owned(),
         ));
     }
-    let config_bytes = serde_json::to_vec(&json!({
+    let mut config_value = json!({
         "argv": config.argv().iter().map(|value| os_fingerprint_bytes(value)).collect::<Vec<_>>(),
         "cwd": config.cwd(),
         "environment": config.environment_allowlist().iter().map(|value| os_fingerprint_bytes(value)).collect::<Vec<_>>(),
         "allowed_domains": config.allowed_domains(),
         "attested_files": config.attested_files(),
         "code_root": config.code_root(),
-    })).map_err(|error| PluginHostError::Protocol(error.to_string()))?;
+    });
+    if let Some(source) = config.source_identity() {
+        config_value["source"] = serde_json::to_value(source)
+            .map_err(|error| PluginHostError::Protocol(error.to_string()))?;
+    }
+    let config_bytes = serde_json::to_vec(&config_value)
+        .map_err(|error| PluginHostError::Protocol(error.to_string()))?;
     Ok(PluginApprovalIdentity {
         plugin_name: manifest.name.clone(),
         manifest_fingerprint: manifest.fingerprint().map_err(PluginApprovalError::from)?,
         executable: config.executable_identity().clone(),
         config_fingerprint: blake3::hash(&config_bytes).to_hex().to_string(),
         origin: origin.to_owned(),
+        source: config.source_identity().cloned(),
     })
 }
 
@@ -1403,9 +1414,16 @@ fn approved_plugin_profile(
     }
     config.validate_executable_identity()?;
     let roots = canonical_roots(approved_roots)?;
-    if !roots.iter().any(|root| config.cwd().starts_with(root)) {
+    let cwd_authorized = if config.source_identity().is_some() {
+        config
+            .code_root()
+            .is_some_and(|root| config.cwd().starts_with(&root.canonical_path))
+    } else {
+        roots.iter().any(|root| config.cwd().starts_with(root))
+    };
+    if !cwd_authorized {
         return Err(PluginHostError::Approval(
-            "plugin cwd is outside approved roots".to_owned(),
+            "plugin cwd is outside its owned runtime root".to_owned(),
         ));
     }
     let reads_workspace = expected_manifest.capabilities.tools.iter().any(|tool| {
@@ -2288,8 +2306,8 @@ mod tests {
     use super::*;
     use crate::plugin::{ApprovalStoreError, CapabilityViolation};
     use rw_plugin_protocol::{
-        PluginCommandCapability, PluginHookDeclaration, PluginProviderCapability, PluginPush,
-        PluginToolCapability, PluginToolEffect,
+        PluginCommandCapability, PluginHookCapability, PluginHookFailurePolicy,
+        PluginProviderCapability, PluginPush, PluginToolCapability, PluginToolEffect,
     };
 
     fn manifest() -> PluginManifest {
@@ -2310,9 +2328,10 @@ mod tests {
                     argument_hint: None,
                     allowed_tools: Vec::new(),
                 }],
-                hooks: vec![PluginHookDeclaration::Name(
-                    rw_plugin_protocol::PluginHook::PreTool,
-                )],
+                hooks: vec![PluginHookCapability {
+                    name: rw_plugin_protocol::PluginHook::PreTool,
+                    failure_policy: PluginHookFailurePolicy::FailOpen,
+                }],
                 providers: vec![PluginProviderCapability {
                     alias_prefix: "fixture/".to_owned(),
                     capabilities: Vec::new(),
@@ -2880,6 +2899,14 @@ mod tests {
             config.with_environment_allowlist(["DYLD_INSERT_LIBRARIES"]),
             Err(crate::plugin::PluginProcessConfigError::UnsafeEnvironmentName)
         ));
+    }
+
+    #[test]
+    fn direct_executable_approval_identity_has_no_source_projection() {
+        let config = PluginProcessConfig::new(PathBuf::from("/bin/sh")).expect("shell");
+        let identity = approval_identity(&manifest(), &config, "user:fixture").expect("identity");
+        let serialized = serde_json::to_value(identity).expect("approval identity JSON");
+        assert!(serialized.get("source").is_none());
     }
 
     #[test]

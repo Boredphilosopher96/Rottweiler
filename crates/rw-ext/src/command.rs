@@ -149,6 +149,7 @@ pub enum CommandRegistryError {
     },
 }
 
+#[derive(Clone)]
 struct RegisteredCommand<Context, Output> {
     descriptor: CommandDescriptor,
     handler: Arc<dyn CommandHandler<Context, Output>>,
@@ -159,6 +160,7 @@ struct RegisteredCommand<Context, Output> {
 /// Resolution is an exact, case-sensitive lookup. Introspection is sorted by
 /// canonical name and duplicate names are rejected instead of load-order
 /// overriding an existing command.
+#[derive(Clone)]
 pub struct CommandRegistry<Context, Output> {
     commands: BTreeMap<String, RegisteredCommand<Context, Output>>,
 }

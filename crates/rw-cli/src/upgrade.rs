@@ -1365,55 +1365,33 @@ mod tests {
                 .append_data(&mut header, directory, std::io::empty())
                 .expect("directory fixture");
         }
-        let native = if cfg!(target_os = "macos") {
-            "libopentui.dylib"
-        } else {
-            "libopentui.so"
-        };
-        for (relative, bytes) in [
-            ("install.sh", b"#!/bin/sh\n".as_slice()),
-            ("bin/rottweiler-tui", b"tui".as_slice()),
-            ("bin/rottweiler-wasm-host", b"wasm".as_slice()),
-            ("bin/native-placeholder", b"native".as_slice()),
-        ] {
-            let relative = if relative == "bin/native-placeholder" {
-                format!("bin/{native}")
-            } else {
-                relative.to_owned()
-            };
+        let platform = platform_for_rust_target(std::env::consts::OS, std::env::consts::ARCH)
+            .expect("supported test platform");
+        for member in platform.archive_members {
             let mut header = Header::new_gnu();
-            header.set_entry_type(EntryType::Regular);
-            header.set_mode(0o755);
-            header.set_size(bytes.len() as u64);
+            let is_engine = member.id == "engine";
+            if is_engine && link_rw {
+                header.set_entry_type(EntryType::Symlink);
+                header.set_link_name("../../outside").expect("link target");
+                header.set_size(0);
+            } else {
+                header.set_entry_type(EntryType::Regular);
+                header.set_size(member.id.len() as u64);
+            }
+            header.set_mode(member.mode);
             header.set_cksum();
             builder
-                .append_data(&mut header, format!("{root}/{relative}"), bytes)
-                .expect("file fixture");
+                .append_data(
+                    &mut header,
+                    format!("{root}/{}", member.path),
+                    if is_engine && link_rw {
+                        b"".as_slice()
+                    } else {
+                        member.id.as_bytes()
+                    },
+                )
+                .expect("release-contract member fixture");
         }
-        let mut rw_header = Header::new_gnu();
-        if link_rw {
-            rw_header.set_entry_type(EntryType::Symlink);
-            rw_header
-                .set_link_name("../../outside")
-                .expect("link target");
-            rw_header.set_size(0);
-        } else {
-            rw_header.set_entry_type(EntryType::Regular);
-            rw_header.set_size(2);
-        }
-        rw_header.set_mode(0o755);
-        rw_header.set_cksum();
-        builder
-            .append_data(
-                &mut rw_header,
-                format!("{root}/bin/rw"),
-                if link_rw {
-                    b"".as_slice()
-                } else {
-                    b"rw".as_slice()
-                },
-            )
-            .expect("rw fixture");
         if unexpected {
             let mut header = Header::new_gnu();
             header.set_entry_type(EntryType::Regular);
@@ -1585,10 +1563,10 @@ mod tests {
             &archive_fixture(false, false),
         )
         .expect("exact archive");
-        assert_eq!(fs::read(staging.join("bin/rw")).expect("rw"), b"rw");
+        assert_eq!(fs::read(staging.join("bin/rw")).expect("rw"), b"engine");
         assert_eq!(
             fs::read(staging.join("bin/rottweiler-wasm-host")).expect("WASM host"),
-            b"wasm"
+            b"wasm_host"
         );
         assert!(
             fs::symlink_metadata(staging.join("bin/rw"))

@@ -1815,13 +1815,6 @@ fn apply_override(
             reason: "expected KEY=VALUE".to_owned(),
         });
     };
-    // Accept the earlier draft spelling without exposing it in provenance or
-    // `config check`; M3's public key is `compaction.reserved`.
-    let key = if key == "compaction.reserved_tokens" {
-        "compaction.reserved"
-    } else {
-        key
-    };
     if apply_engine_override(loaded, key, value, raw)?
         || apply_m3_override(loaded, key, value, raw)?
     {

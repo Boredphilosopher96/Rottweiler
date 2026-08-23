@@ -24,7 +24,8 @@ use rw_ext::{
     HookRegistration, PluginBoundaryRedactor, PluginEventRouter, PluginHost,
     PluginHttpStreamResponse, PluginLauncher, PluginProviderHttpHandler, PluginRpcClient,
     PluginRpcError, PushHandler, RpcCommandAdapter, RpcHookHandler, RpcProviderAdapter,
-    RpcToolAdapter, plugin_hook_registration, plugin_launch_approval_requirement,
+    RpcToolAdapter, approve_plugin_launch, plugin_hook_registration,
+    plugin_launch_approval_requirement,
 };
 use rw_ext::{
     CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation, CommandRegistry,
@@ -50,6 +51,328 @@ use crate::extension_config::DiscoveredMcpServer;
 
 const MAX_CONTROL_OUTPUT: usize = 32 * 1024;
 const APPROVAL_VERSION: u16 = 1;
+
+#[derive(Default)]
+struct SessionDevelopmentApprovalStore(Mutex<BTreeMap<String, String>>);
+
+impl ApprovalStore for SessionDevelopmentApprovalStore {
+    fn approved_fingerprint(
+        &self,
+        plugin_name: &str,
+    ) -> std::result::Result<Option<String>, ApprovalStoreError> {
+        Ok(self
+            .0
+            .lock()
+            .map_err(|_| ApprovalStoreError {
+                message: "development approval state is unavailable".to_owned(),
+            })?
+            .get(plugin_name)
+            .cloned())
+    }
+
+    fn record_approval(
+        &self,
+        plugin_name: &str,
+        fingerprint: &str,
+    ) -> std::result::Result<(), ApprovalStoreError> {
+        self.0
+            .lock()
+            .map_err(|_| ApprovalStoreError {
+                message: "development approval state is unavailable".to_owned(),
+            })?
+            .insert(plugin_name.to_owned(), fingerprint.to_owned());
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct DevelopmentExtensionState {
+    base: Option<rw_core::SessionExtensionSnapshot>,
+    ceiling: Option<rw_plugin_protocol::PluginCapabilities>,
+    active: Option<PluginSessionRuntime>,
+    revision: u64,
+}
+
+/// Sole owner of a session's temporary source-plugin generation.
+pub(crate) struct RuntimeSessionExtensionController {
+    private_root: PathBuf,
+    helper: PathBuf,
+    redactor: Arc<SharedPluginRedactor>,
+    state: tokio::sync::Mutex<DevelopmentExtensionState>,
+}
+
+impl RuntimeSessionExtensionController {
+    pub(crate) fn new(
+        private_root: PathBuf,
+        helper: PathBuf,
+        redactor: Arc<SharedPluginRedactor>,
+    ) -> Self {
+        Self {
+            private_root,
+            helper,
+            redactor,
+            state: tokio::sync::Mutex::new(DevelopmentExtensionState::default()),
+        }
+    }
+
+    fn discovered(
+        source: &Path,
+        workspace_roots: &[PathBuf],
+    ) -> Result<(crate::extension_config::DiscoveredPlugin, PluginManifest)> {
+        if fs::symlink_metadata(source).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+            return Err(miette!("development plugin source cannot be a symlink"));
+        }
+        let root = fs::canonicalize(source).into_diagnostic()?;
+        if !root.is_dir()
+            || !workspace_roots
+                .iter()
+                .any(|workspace| root.starts_with(workspace))
+        {
+            return Err(miette!(
+                "development plugin source is outside this session's workspace roots"
+            ));
+        }
+        let manifest_path = root.join("manifest.json");
+        let manifest = PluginManifest::from_slice(&fs::read(&manifest_path).into_diagnostic()?)
+            .map_err(|error| miette!(error.to_string()))?;
+        manifest
+            .validate()
+            .map_err(|error| miette!(error.to_string()))?;
+        if !manifest.capabilities.providers.is_empty()
+            || !manifest.capabilities.event_subscriptions.is_empty()
+            || !manifest.capabilities.push.is_empty()
+            || manifest.capabilities.tools.iter().any(|tool| {
+                tool.caps.iter().any(|effect| {
+                    matches!(
+                        effect,
+                        rw_plugin_protocol::PluginToolEffect::WritesFilesystem
+                            | rw_plugin_protocol::PluginToolEffect::Network
+                            | rw_plugin_protocol::PluginToolEffect::Execute
+                    )
+                })
+            })
+        {
+            return Err(miette!(
+                "development attachment permits tools, hooks, commands, and read-only filesystem authority only"
+            ));
+        }
+        let entry = root.join("src/index.ts");
+        if !entry.is_file() {
+            return Err(miette!(
+                "development plugin entrypoint src/index.ts is unavailable"
+            ));
+        }
+        let plugin = crate::extension_config::DiscoveredPlugin {
+            name: manifest.name.clone(),
+            enabled: true,
+            target: crate::extension_config::DiscoveredPluginTarget::TypeScript {
+                package_root: root,
+                entry,
+            },
+            inherit_env: Vec::new(),
+            manifest_path,
+            allowed_domains: Vec::new(),
+            origin: crate::extension_config::ExecutableConfigOrigin::TrustedProject(
+                source.to_path_buf(),
+            ),
+        };
+        Ok((plugin, manifest))
+    }
+
+    async fn prepare_candidate(
+        &self,
+        plugin: &crate::extension_config::DiscoveredPlugin,
+        manifest: &PluginManifest,
+        workspace_roots: &[PathBuf],
+    ) -> std::result::Result<PluginSessionRuntime, rw_core::AgentLoopError> {
+        let scratch = PrivateMcpScratch::create().map_err(development_error)?;
+        let launcher =
+            crate::plugin_process::SandboxedPluginLauncher::new(scratch.path(), &self.helper)
+                .map_err(development_error)?;
+        let source_host = self
+            .helper
+            .parent()
+            .ok_or_else(|| development_error("Rottweiler executable has no release directory"))?
+            .join("rottweiler-plugin-host");
+        let resolver = crate::source_plugin::SourcePluginResolver::new(
+            &source_host,
+            &self.private_root,
+            scratch.path(),
+            &launcher,
+        )
+        .map_err(development_error)?;
+        let process = resolver.resolve(plugin).await.map_err(development_error)?;
+        let approvals = SessionDevelopmentApprovalStore::default();
+        let origin = format!("development:{}", plugin.manifest_path.display());
+        approve_plugin_launch(&approvals, manifest, &process, &origin)
+            .map_err(development_error)?;
+        let candidate = PluginSessionRuntime::start_with_launcher(
+            std::slice::from_ref(plugin),
+            &self.private_root,
+            workspace_roots,
+            &launcher,
+            &approvals,
+            Arc::clone(&self.redactor),
+            scratch,
+            Some(&resolver),
+            None,
+        )
+        .await
+        .map_err(development_error)?;
+        if candidate.pending.is_empty() {
+            return Ok(candidate);
+        }
+        let message = candidate.pending.join("; ");
+        candidate.shutdown().await;
+        Err(development_error(message))
+    }
+
+    fn compose_candidate(
+        base: &rw_core::SessionExtensionSnapshot,
+        candidate: &PluginSessionRuntime,
+        revision: u64,
+    ) -> std::result::Result<rw_core::SessionExtensionSnapshot, rw_core::AgentLoopError> {
+        let mut tools = base.tools.as_ref().clone();
+        for tool in &candidate.tools {
+            tools.register(Arc::clone(tool)).map_err(|error| {
+                development_error(format!("development plugin tool collision: {error}"))
+            })?;
+        }
+        let mut hooks = base.hooks.as_ref().clone();
+        for (registration, handler) in &candidate.hooks {
+            hooks
+                .register_shared(registration.clone(), Arc::clone(handler))
+                .map_err(|error| {
+                    development_error(format!("development plugin hook collision: {error}"))
+                })?;
+        }
+        let mut commands = base.commands.as_ref().clone();
+        for (descriptor, handler) in &candidate.commands {
+            commands
+                .register_shared(descriptor.clone(), Arc::clone(handler))
+                .map_err(|error| {
+                    development_error(format!("development plugin command collision: {error}"))
+                })?;
+        }
+        Ok(rw_core::SessionExtensionSnapshot {
+            revision,
+            workspace_roots: Arc::clone(&base.workspace_roots),
+            tools: Arc::new(tools),
+            hooks: Arc::new(hooks),
+            commands: Arc::new(commands),
+        })
+    }
+}
+
+fn development_error(error: impl ToString) -> rw_core::AgentLoopError {
+    let message = error.to_string();
+    drop(error);
+    rw_core::AgentLoopError::InvalidConfiguration(message)
+}
+
+#[async_trait]
+impl rw_core::SessionExtensionController for RuntimeSessionExtensionController {
+    async fn attach(
+        &self,
+        source: &Path,
+        current: rw_core::SessionExtensionSnapshot,
+    ) -> std::result::Result<rw_core::SessionExtensionSnapshot, rw_core::AgentLoopError> {
+        let (plugin, manifest) =
+            Self::discovered(source, &current.workspace_roots).map_err(development_error)?;
+        let (base, ceiling, current_revision) = {
+            let state = self.state.lock().await;
+            (
+                state.base.clone().unwrap_or_else(|| current.clone()),
+                state.ceiling.clone(),
+                state.revision.max(current.revision),
+            )
+        };
+        if ceiling
+            .as_ref()
+            .is_some_and(|ceiling| ceiling != &manifest.capabilities)
+        {
+            return Err(rw_core::AgentLoopError::InvalidConfiguration(
+                "development plugin capability expansion requires detach and a new explicit grant"
+                    .to_owned(),
+            ));
+        }
+        let candidate = self
+            .prepare_candidate(&plugin, &manifest, &current.workspace_roots)
+            .await?;
+        let revision = current_revision.saturating_add(1);
+        let snapshot = match Self::compose_candidate(&base, &candidate, revision) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                candidate.shutdown().await;
+                return Err(error);
+            }
+        };
+        let retired = {
+            let mut state = self.state.lock().await;
+            if state.base.is_none() {
+                state.base = Some(base);
+            }
+            if state.ceiling.is_none() {
+                state.ceiling = Some(manifest.capabilities);
+            }
+            state.revision = revision;
+            state.active.replace(candidate)
+        };
+        if let Some(retired) = retired {
+            retired.shutdown().await;
+        }
+        Ok(snapshot)
+    }
+
+    async fn detach(
+        &self,
+    ) -> std::result::Result<rw_core::SessionExtensionSnapshot, rw_core::AgentLoopError> {
+        let (base, active) = {
+            let mut state = self.state.lock().await;
+            let base = state.base.take().ok_or_else(|| {
+                rw_core::AgentLoopError::InvalidConfiguration(
+                    "no development plugin is attached".to_owned(),
+                )
+            })?;
+            state.ceiling = None;
+            state.revision = state.revision.saturating_add(1);
+            (base, state.active.take())
+        };
+        if let Some(active) = active {
+            active.shutdown().await;
+        }
+        Ok(base)
+    }
+
+    async fn rebase(
+        &self,
+        current: rw_core::SessionExtensionSnapshot,
+    ) -> (rw_core::SessionExtensionSnapshot, bool) {
+        let (snapshot, retired) = {
+            let mut state = self.state.lock().await;
+            let Some(active) = state.active.as_ref() else {
+                return (current, false);
+            };
+            let revision = state.revision.max(current.revision).saturating_add(1);
+            if let Ok(snapshot) = Self::compose_candidate(&current, active, revision) {
+                state.base = Some(current);
+                state.revision = revision;
+                (snapshot, None)
+            } else {
+                let retired = state.active.take();
+                state.base = None;
+                state.ceiling = None;
+                state.revision = revision;
+                (current, retired)
+            }
+        };
+        if let Some(retired) = retired {
+            retired.shutdown().await;
+            return (snapshot, true);
+        }
+        (snapshot, false)
+    }
+}
 
 type McpCredentialResolver = Arc<dyn Fn(&str) -> Result<String> + Send + Sync + 'static>;
 
@@ -1090,16 +1413,17 @@ pub(crate) struct PrivateMcpScratch {
     path: PathBuf,
 }
 impl PrivateMcpScratch {
-    fn create() -> Result<Self> {
+    pub(crate) fn create() -> Result<Self> {
         let mut random = [0_u8; 8];
         getrandom::fill(&mut random)
             .map_err(|error| miette!("MCP scratch entropy failed: {error}"))?;
-        let path = std::env::temp_dir().join(format!(
+        let requested = std::env::temp_dir().join(format!(
             "rottweiler-mcp-{}-{}",
             std::process::id(),
             u64::from_ne_bytes(random)
         ));
-        fs::create_dir(&path).into_diagnostic()?;
+        fs::create_dir(&requested).into_diagnostic()?;
+        let path = fs::canonicalize(&requested).into_diagnostic()?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -1107,7 +1431,7 @@ impl PrivateMcpScratch {
         }
         Ok(Self { path })
     }
-    fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 }
@@ -1336,6 +1660,16 @@ pub(crate) struct PluginSessionRuntime {
     _scratch: PrivateMcpScratch,
 }
 
+struct PluginStartContext<'a> {
+    private_root: &'a Path,
+    workspace_roots: &'a [PathBuf],
+    launcher: &'a dyn PluginLauncher,
+    store: &'a dyn ApprovalStore,
+    redactor: Arc<SharedPluginRedactor>,
+    source_resolver: Option<&'a crate::source_plugin::SourcePluginResolver<'a>>,
+    source_error: Option<&'a str>,
+}
+
 impl PluginSessionRuntime {
     pub(crate) async fn start(
         configs: &[crate::extension_config::DiscoveredPlugin],
@@ -1348,6 +1682,16 @@ impl PluginSessionRuntime {
         let scratch = PrivateMcpScratch::create()?;
         let launcher = crate::plugin_process::SandboxedPluginLauncher::new(scratch.path(), helper)
             .map_err(|error| miette!(error.to_string()))?;
+        let source_host = helper
+            .parent()
+            .ok_or_else(|| miette!("Rottweiler executable has no release directory"))?
+            .join("rottweiler-plugin-host");
+        let source_resolver = crate::source_plugin::SourcePluginResolver::new(
+            &source_host,
+            private_root,
+            scratch.path(),
+            &launcher,
+        );
         Self::start_with_launcher(
             configs,
             private_root,
@@ -1356,6 +1700,8 @@ impl PluginSessionRuntime {
             &store,
             redactor,
             scratch,
+            source_resolver.as_ref().ok(),
+            source_resolver.as_ref().err().map(ToString::to_string),
         )
         .await
     }
@@ -1369,6 +1715,8 @@ impl PluginSessionRuntime {
         store: &dyn ApprovalStore,
         redactor: Arc<SharedPluginRedactor>,
         scratch: PrivateMcpScratch,
+        source_resolver: Option<&crate::source_plugin::SourcePluginResolver<'_>>,
+        source_error: Option<String>,
     ) -> Result<Self> {
         let mut runtime = Self {
             hosts: Vec::new(),
@@ -1381,20 +1729,20 @@ impl PluginSessionRuntime {
             pending: Vec::new(),
             _scratch: scratch,
         };
+        let context = PluginStartContext {
+            private_root,
+            workspace_roots,
+            launcher,
+            store,
+            redactor,
+            source_resolver,
+            source_error: source_error.as_deref(),
+        };
         for config in configs.iter().filter(|config| config.enabled) {
-            if let Err(error) = runtime
-                .start_plugin(
-                    config,
-                    workspace_roots,
-                    launcher,
-                    store,
-                    private_root,
-                    redactor.clone(),
-                )
-                .await
-            {
-                runtime.shutdown().await;
-                return Err(error);
+            if let Err(error) = runtime.start_plugin(config, &context).await {
+                runtime
+                    .pending
+                    .push(format!("{}: unavailable: {error}", config.name));
             }
         }
         Ok(runtime)
@@ -1403,20 +1751,31 @@ impl PluginSessionRuntime {
     async fn start_plugin(
         &mut self,
         config: &crate::extension_config::DiscoveredPlugin,
-        workspace_roots: &[PathBuf],
-        launcher: &dyn PluginLauncher,
-        store: &dyn ApprovalStore,
-        private_root: &Path,
-        redactor: Arc<SharedPluginRedactor>,
+        context: &PluginStartContext<'_>,
     ) -> Result<()> {
         let manifest = config.load_manifest()?;
-        let process = config.process_config()?;
+        let process = match &config.target {
+            crate::extension_config::DiscoveredPluginTarget::Executable { .. } => {
+                config.executable_process_config()?
+            }
+            crate::extension_config::DiscoveredPluginTarget::TypeScript { .. } => {
+                let resolver = context.source_resolver.ok_or_else(|| {
+                    miette!(
+                        "TypeScript source host is unavailable: {}",
+                        context
+                            .source_error
+                            .unwrap_or("release helper was not packaged")
+                    )
+                })?;
+                resolver.resolve(config).await?
+            }
+        };
         let scope = match config.origin {
             crate::extension_config::ExecutableConfigOrigin::User(_) => "user",
             crate::extension_config::ExecutableConfigOrigin::TrustedProject(_) => "project",
         };
         let origin = format!("{scope}:{}", config.origin.path().display());
-        match plugin_launch_approval_requirement(store, &manifest, &process, &origin)
+        match plugin_launch_approval_requirement(context.store, &manifest, &process, &origin)
             .map_err(|error| miette!(error.to_string()))?
         {
             ApprovalRequirement::Approved => {}
@@ -1432,10 +1791,10 @@ impl PluginSessionRuntime {
             }
         }
         let push_handler = Arc::new(SessionPluginPushHandler::default());
-        let registrar: Arc<dyn rw_providers::KnownSecretRegistrar> = redactor.clone();
+        let registrar: Arc<dyn rw_providers::KnownSecretRegistrar> = context.redactor.clone();
         let provider_http: Arc<dyn PluginProviderHttpHandler> =
             Arc::new(RuntimePluginProviderHttp::new(
-                &private_root.join("credentials.toml"),
+                &context.private_root.join("credentials.toml"),
                 process
                     .allowed_domains()
                     .iter()
@@ -1444,13 +1803,13 @@ impl PluginSessionRuntime {
                     .as_slice(),
                 registrar,
             )?);
-        let boundary_redactor: Arc<dyn PluginBoundaryRedactor> = redactor;
+        let boundary_redactor: Arc<dyn PluginBoundaryRedactor> = context.redactor.clone();
         let host = PluginHost::launch_approved_with_http(
-            launcher,
-            store,
+            context.launcher,
+            context.store,
             &process,
             &origin,
-            workspace_roots,
+            context.workspace_roots,
             manifest.clone(),
             push_handler.clone(),
             provider_http,
@@ -1481,7 +1840,7 @@ impl PluginSessionRuntime {
             self.hooks.push((
                 plugin_hook_registration(
                     *declaration,
-                    format!("plugin:{}:{}", config.name, declaration.name().as_str()),
+                    format!("plugin:{}:{}", config.name, declaration.name.as_str()),
                 ),
                 Arc::new(RpcHookHandler::new(client.clone(), enforcer.clone())),
             ));
@@ -2602,8 +2961,10 @@ mod tests {
             crate::extension_config::DiscoveredPlugin {
                 name: name.to_owned(),
                 enabled: true,
-                argv: vec![executable.to_string_lossy().into_owned()],
-                cwd: plugin_root,
+                target: crate::extension_config::DiscoveredPluginTarget::Executable {
+                    argv: vec![executable.to_string_lossy().into_owned()],
+                    cwd: plugin_root,
+                },
                 inherit_env: Vec::new(),
                 manifest_path,
                 allowed_domains: Vec::new(),
@@ -2614,7 +2975,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plugin_startup_failure_rolls_back_already_started_plugins() {
+    async fn one_plugin_startup_failure_does_not_tear_down_other_plugins() {
         let root = tempfile::tempdir().expect("root");
         #[cfg(unix)]
         {
@@ -2629,7 +2990,7 @@ mod tests {
             .iter()
             .zip([first_manifest.clone(), second_manifest])
         {
-            let process = config.process_config().expect("process config");
+            let process = config.executable_process_config().expect("process config");
             let origin = format!("user:{}", config.origin.path().display());
             rw_ext::approve_plugin_launch(&store, &manifest, &process, &origin).expect("approve");
         }
@@ -2649,13 +3010,19 @@ mod tests {
                 rw_providers::FixtureRedactor::default(),
             )),
             PrivateMcpScratch::create().expect("scratch"),
+            None,
+            None,
         )
-        .await;
+        .await
+        .expect("isolated plugin startup");
 
-        assert!(result.is_err());
+        assert_eq!(result.hosts.len(), 1);
+        assert_eq!(result.pending.len(), 1);
+        assert!(result.pending[0].contains("second: unavailable"));
+        result.shutdown().await;
         assert!(
             process.waited.load(Ordering::Acquire) >= 1,
-            "the first plugin must be shut down and reaped before startup fails"
+            "the surviving plugin must still reap during session shutdown"
         );
     }
 

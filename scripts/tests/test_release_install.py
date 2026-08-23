@@ -39,12 +39,15 @@ class ReleaseInstallTests(unittest.TestCase):
         tui.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         wasm_host = binary_dir / "rottweiler-wasm-host"
         wasm_host.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        plugin_host = binary_dir / "rottweiler-plugin-host"
+        plugin_host.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         native = binary_dir / PLATFORM_CONTRACT.native_library
         native.write_bytes(b"native fixture\n")
         (release / "install.sh").chmod(0o755)
         rw.chmod(0o755)
         tui.chmod(0o755)
         wasm_host.chmod(0o755)
+        plugin_host.chmod(0o755)
         return release
 
     def install(self, release: Path, prefix: Path) -> subprocess.CompletedProcess[bytes]:

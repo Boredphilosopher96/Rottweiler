@@ -13,6 +13,8 @@ struct TemplateFile {
     contents: String,
 }
 
+include!(concat!(env!("OUT_DIR"), "/typescript_scaffold.rs"));
+
 pub(crate) fn scaffold_typescript(
     destination: &Path,
     name: Option<&str>,
@@ -149,38 +151,14 @@ fn package_name(value: &str) -> Result<String> {
 
 fn typescript_template(name: &str) -> Vec<TemplateFile> {
     const MARKER: &str = "__ROTTWEILER_PLUGIN_NAME__";
-    [
-        (
-            "package.json",
-            include_str!("../../../packages/plugin-sdk/fixtures/scaffold/package.json"),
-        ),
-        (
-            "tsconfig.json",
-            include_str!("../../../packages/plugin-sdk/fixtures/scaffold/tsconfig.json"),
-        ),
-        (
-            "manifest.json",
-            include_str!("../../../packages/plugin-sdk/fixtures/scaffold/manifest.json"),
-        ),
-        (
-            "src/index.ts",
-            include_str!("../../../packages/plugin-sdk/fixtures/scaffold/src/index.ts"),
-        ),
-        (
-            "test/plugin.test.ts",
-            include_str!("../../../packages/plugin-sdk/fixtures/scaffold/test/plugin.test.ts"),
-        ),
-        (
-            ".gitignore",
-            include_str!("../../../packages/plugin-sdk/fixtures/scaffold/gitignore"),
-        ),
-    ]
-    .into_iter()
-    .map(|(path, contents)| TemplateFile {
-        path,
-        contents: contents.replace(MARKER, name),
-    })
-    .collect()
+    TYPESCRIPT_SCAFFOLD
+        .iter()
+        .copied()
+        .map(|(path, contents)| TemplateFile {
+            path,
+            contents: contents.replace(MARKER, name),
+        })
+        .collect()
 }
 
 #[cfg(test)]

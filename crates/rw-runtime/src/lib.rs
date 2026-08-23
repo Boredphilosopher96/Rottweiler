@@ -15,6 +15,7 @@ mod plugin_process;
 mod project_commands;
 mod session_host;
 mod session_runtime;
+mod source_plugin;
 mod storage_root;
 mod subagent_metadata;
 mod workflow_runtime;
@@ -34,7 +35,7 @@ pub mod session_history {
 pub mod executable_config {
     pub use crate::extension_config::{
         ContentAttestation, CredentialBinding, DiscoveredMcpServer, DiscoveredMcpTransport,
-        DiscoveredPlugin, ExecutableConfigCatalog, ExecutableConfigOrigin,
+        DiscoveredPlugin, DiscoveredPluginTarget, ExecutableConfigCatalog, ExecutableConfigOrigin,
         discover_executable_configs,
     };
 }
@@ -52,6 +53,7 @@ pub mod session {
 /// Sandboxed extension-process launch boundary.
 pub mod plugin {
     pub use crate::plugin_process::SandboxedPluginLauncher;
+    pub use crate::source_plugin::resolve_plugin_process;
 }
 
 /// Provider-output rendering selected by a non-interactive runtime client.

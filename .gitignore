@@ -20,6 +20,9 @@ packages/tui/*.bun-build
 packages/plugin-sdk/node_modules/
 packages/plugin-sdk/dist/
 packages/plugin-sdk/*.bun-build
+packages/plugin-host/node_modules/
+packages/plugin-host/dist/
+packages/plugin-host/*.bun-build
 packages/plugin-docs/node_modules/
 packages/plugin-docs/dist/
 packages/plugin-docs/*.bun-build

@@ -349,21 +349,37 @@ impl DiscoveredMcpServer {
 pub struct DiscoveredPlugin {
     pub name: String,
     pub enabled: bool,
-    pub argv: Vec<String>,
-    pub cwd: PathBuf,
+    pub target: DiscoveredPluginTarget,
     pub inherit_env: Vec<String>,
     pub manifest_path: PathBuf,
     pub allowed_domains: Vec<String>,
     pub origin: ExecutableConfigOrigin,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DiscoveredPluginTarget {
+    Executable {
+        argv: Vec<String>,
+        cwd: PathBuf,
+    },
+    TypeScript {
+        package_root: PathBuf,
+        entry: PathBuf,
+    },
+}
+
 impl DiscoveredPlugin {
     /// # Errors
     /// Returns an error when the discovered process authority is invalid.
-    pub fn process_config(&self) -> Result<rw_ext::PluginProcessConfig> {
-        rw_ext::PluginProcessConfig::new(PathBuf::from(&self.argv[0]))
-            .and_then(|config| config.with_argv(self.argv[1..].iter().cloned()))
-            .and_then(|config| config.with_cwd(&self.cwd))
+    pub fn executable_process_config(&self) -> Result<rw_ext::PluginProcessConfig> {
+        let DiscoveredPluginTarget::Executable { argv, cwd } = &self.target else {
+            return Err(miette!(
+                "TypeScript source plugins must be prepared by the source resolver"
+            ));
+        };
+        rw_ext::PluginProcessConfig::new(PathBuf::from(&argv[0]))
+            .and_then(|config| config.with_argv(argv[1..].iter().cloned()))
+            .and_then(|config| config.with_cwd(cwd))
             .and_then(|config| {
                 config.with_code_root(
                     self.manifest_path
@@ -387,9 +403,12 @@ impl DiscoveredPlugin {
             .manifest_path
             .parent()
             .ok_or_else(|| miette!("plugin manifest has no package directory"))?;
-        Ok(attested_command_paths(&self.argv, &self.cwd)?
+        let DiscoveredPluginTarget::Executable { argv, cwd } = &self.target else {
+            return Ok(Vec::new());
+        };
+        Ok(attested_command_paths(argv, cwd)?
             .into_iter()
-            .filter(|path| path == Path::new(&self.argv[0]) || path.starts_with(code_root))
+            .filter(|path| path == Path::new(&argv[0]) || path.starts_with(code_root))
             .collect())
     }
 
@@ -501,11 +520,12 @@ struct PluginEntry {
     name: String,
     #[serde(default = "yes")]
     enabled: bool,
-    argv: Vec<String>,
+    argv: Option<Vec<String>>,
+    source: Option<PathBuf>,
     cwd: Option<PathBuf>,
     #[serde(default)]
     inherit_env: Vec<String>,
-    manifest: PathBuf,
+    manifest: Option<PathBuf>,
     #[serde(default)]
     allowed_domains: Vec<String>,
 }
@@ -935,24 +955,50 @@ fn load_plugin_layer(
     }
     for entry in file.plugins {
         validate_plugin_name(&entry.name)?;
-        let argv = pin_argv(entry.argv, base)?;
         validate_env_names(&entry.inherit_env, false)?;
-        let manifest_path = resolve_existing_file(base, &entry.manifest)?;
-        let cwd = entry.cwd.as_ref().map_or_else(
-            || {
-                manifest_path
-                    .parent()
-                    .map(Path::to_path_buf)
-                    .ok_or_else(|| miette!("plugin manifest has no package directory"))
-            },
-            |cwd| resolve_existing_directory(base, cwd),
-        )?;
+        let (target, manifest_path) = match (entry.argv, entry.source, entry.manifest, entry.cwd) {
+            (Some(argv), None, Some(manifest), cwd) => {
+                let argv = pin_argv(argv, base)?;
+                let manifest_path = resolve_existing_file(base, &manifest)?;
+                let cwd = cwd.as_ref().map_or_else(
+                    || {
+                        manifest_path
+                            .parent()
+                            .map(Path::to_path_buf)
+                            .ok_or_else(|| miette!("plugin manifest has no package directory"))
+                    },
+                    |cwd| resolve_existing_directory(base, cwd),
+                )?;
+                (
+                    DiscoveredPluginTarget::Executable { argv, cwd },
+                    manifest_path,
+                )
+            }
+            (None, Some(source), None, None) => {
+                let package_root = resolve_existing_directory(base, &source)?;
+                let manifest_path =
+                    resolve_existing_file(&package_root, Path::new("manifest.json"))?;
+                let entry = resolve_existing_file(&package_root, Path::new("src/index.ts"))?;
+                (
+                    DiscoveredPluginTarget::TypeScript {
+                        package_root,
+                        entry,
+                    },
+                    manifest_path,
+                )
+            }
+            _ => {
+                return Err(miette!(
+                    "plugin {:?} must declare exactly one target: argv with manifest, or source alone",
+                    entry.name
+                ));
+            }
+        };
         let allowed_domains = validate_domains(entry.allowed_domains, "plugin")?;
         out.entry(entry.name.clone()).or_insert(DiscoveredPlugin {
             name: entry.name,
             enabled: entry.enabled,
-            argv,
-            cwd,
+            target,
             inherit_env: entry.inherit_env,
             manifest_path,
             allowed_domains,
@@ -1928,8 +1974,65 @@ oauth_client_id = 'public-native-client'
         .expect("config");
         let catalog = discover_executable_configs(&user, &project, false).expect("catalog");
         assert_eq!(
-            catalog.plugins[0].cwd,
-            package.canonicalize().expect("package")
+            catalog.plugins[0].target,
+            DiscoveredPluginTarget::Executable {
+                argv: vec!["/usr/bin/true".to_owned()],
+                cwd: package.canonicalize().expect("package"),
+            }
         );
+    }
+
+    #[test]
+    fn source_plugin_target_owns_its_entry_and_manifest_locations() {
+        let (_temp, user, project) = roots();
+        let package = user.join("plugins/source-example");
+        fs::create_dir_all(package.join("src")).expect("package");
+        fs::write(package.join("src/index.ts"), "export const plugin = {};\n").expect("entry");
+        fs::write(
+            package.join("manifest.json"),
+            r#"{"name":"source-example","version":"1.0.0","protocol":2,"capabilities":{}}"#,
+        )
+        .expect("manifest");
+        fs::write(
+            user.join(".rottweiler/plugins.toml"),
+            format!(
+                "[[plugins]]\nname='source-example'\nsource='{}'\n",
+                package.display()
+            ),
+        )
+        .expect("config");
+        let catalog = discover_executable_configs(&user, &project, false).expect("catalog");
+        let canonical = package.canonicalize().expect("canonical package");
+        assert_eq!(
+            catalog.plugins[0].target,
+            DiscoveredPluginTarget::TypeScript {
+                package_root: canonical.clone(),
+                entry: canonical.join("src/index.ts"),
+            }
+        );
+        assert_eq!(
+            catalog.plugins[0].manifest_path,
+            canonical.join("manifest.json")
+        );
+    }
+
+    #[test]
+    fn plugin_target_rejects_dual_or_incomplete_ownership() {
+        let (_temp, user, project) = roots();
+        let package = user.join("plugins/invalid");
+        fs::create_dir_all(package.join("src")).expect("package");
+        fs::write(package.join("src/index.ts"), "export {};\n").expect("entry");
+        fs::write(package.join("manifest.json"), "{}").expect("manifest");
+        for config in [
+            format!(
+                "[[plugins]]\nname='invalid'\nsource='{}'\nargv=['/usr/bin/true']\nmanifest='{}'\n",
+                package.display(),
+                package.join("manifest.json").display()
+            ),
+            "[[plugins]]\nname='invalid'\nargv=['/usr/bin/true']\n".to_owned(),
+        ] {
+            fs::write(user.join(".rottweiler/plugins.toml"), config).expect("config");
+            assert!(discover_executable_configs(&user, &project, false).is_err());
+        }
     }
 }
