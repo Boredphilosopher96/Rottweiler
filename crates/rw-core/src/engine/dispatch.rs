@@ -533,8 +533,7 @@ fn start_manual_compaction(
                 &config.event_sink,
                 &config.model.budget_config(),
                 local_session_accounting,
-                0,
-                0,
+                BudgetUsage::default(),
             )
             .await?;
             for event in pre_budget.events {
@@ -554,6 +553,7 @@ fn start_manual_compaction(
                 &cancellation,
                 &signals,
                 local_session_accounting,
+                0,
                 0,
                 0,
                 instructions,
@@ -2359,7 +2359,9 @@ pub(super) async fn handle_actor_command(
                         );
                     }
                     if let Some(complete) = completion.take() {
-                        let _ = complete.send(result.map(ProtocolCompletion::Cost));
+                        let _ = complete.send(
+                            result.map(|snapshot| ProtocolCompletion::Cost(Box::new(snapshot))),
+                        );
                     }
                 }
                 ClientCommand::DumpPrompt { turn_id, .. } => {

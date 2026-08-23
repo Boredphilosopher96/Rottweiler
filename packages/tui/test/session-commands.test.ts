@@ -30,6 +30,8 @@ describe("session command policy", () => {
 
   test("parses TUI-owned actions without intercepting engine command arguments", () => {
     expect(parseSessionAction("  /exit  ")).toEqual({ type: "exit" })
+    expect(parseSessionAction("/new")).toEqual({ type: "new" })
+    expect(parseSessionAction("/new now")).toEqual({ type: "invalid", message: "usage: /new" })
     expect(parseSessionAction("/rewind")).toEqual({ type: "rewindTimeline" })
     expect(parseSessionAction("/models")).toEqual({ type: "models" })
     expect(parseSessionAction("/providers")).toEqual({ type: "providers" })

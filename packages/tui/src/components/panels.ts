@@ -1024,9 +1024,10 @@ function mcpGlyph(state: "connecting" | "ready" | "stopping"): string {
   }
 }
 
-function runtimeServiceLabel(kind: "lsp" | "linter" | "formatter"): string {
+function runtimeServiceLabel(kind: "lsp" | "linter" | "formatter" | "test"): string {
   if (kind === "lsp") return "LSP"
   if (kind === "formatter") return "Format"
+  if (kind === "test") return "Test"
   return "Lint"
 }
 
@@ -1260,6 +1261,7 @@ function budgetScopeLabel(scope: string): string {
 
 function formatBudgetAmount(value: string, unit: string): string {
   if (!/^(0|[1-9][0-9]*)$/.test(value)) return "unknown"
+  if (unit === "tokens") return `${BigInt(value).toLocaleString()} tokens`
   const micros = BigInt(value)
   const whole = micros / 1_000_000n
   const fraction = (micros % 1_000_000n).toString().padStart(6, "0").replace(/0+$/, "")

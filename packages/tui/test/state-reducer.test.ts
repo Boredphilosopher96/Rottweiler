@@ -497,6 +497,46 @@ describe("pure TUI state reducer", () => {
     expect(refreshed.provider).toBe("anthropic")
   })
 
+  test("an authoritative empty catalog clears a fresh unresolved session alias", () => {
+    const withDriver = reduce(createInitialState(), {
+      type: "driver_changed",
+      meta: meta("1"),
+      driver_client_id: "active-client",
+    })
+    const withDescriptor = reduce(withDriver, {
+      type: "sessions_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "client",
+        request_id: "sessions",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      sessions: [{
+        session_id: "fresh-session",
+        workspace_name: "Rottweiler",
+        model: "fast",
+        driver_client_id: "active-client",
+        shell_active: false,
+      }],
+    })
+    expect(withDescriptor.model).toBe("fast")
+    const resolved = reduce(withDescriptor, {
+      type: "models_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "client",
+        request_id: "models",
+        emitted_at: "2026-01-01T00:00:01Z",
+      },
+      models: [],
+      aliases: [],
+      providers: [],
+    })
+    expect(resolved.model).toBeNull()
+    expect(resolved.provider).toBeNull()
+    expect(resolved.modelCatalogLoaded).toBeTrue()
+  })
+
   test("projects only bounded successful todo tool snapshots", () => {
     let state = reduce(createInitialState(), {
       type: "tool_call_started",
@@ -1820,17 +1860,23 @@ describe("pure TUI state reducer", () => {
         },
         session_cost_micros_usd: "0",
         session_ai_credit_micros: "0",
+        session_subscription_tokens: "0",
         daily_cost_micros_usd: "0",
         daily_ai_credit_micros: "0",
+        daily_subscription_tokens: "0",
         trailing_minute_cost_micros_usd: "0",
         trailing_minute_ai_credit_micros: "0",
+        trailing_minute_subscription_tokens: "0",
         cache_hit_basis_points: 6700,
         session_cost_cap_micros_usd: null,
         daily_cost_cap_micros_usd: null,
         session_ai_credit_cap_micros: null,
         daily_ai_credit_cap_micros: null,
+        session_token_cap: null,
+        daily_token_cap: null,
         spend_rate_alarm_micros_usd_per_minute: null,
         ai_credit_rate_alarm_micros_per_minute: null,
+        token_rate_alarm_per_minute: null,
         hard_cap_reached: false,
         session_monetary_accounting_complete: false,
         daily_monetary_accounting_complete: false,
@@ -1890,17 +1936,23 @@ describe("pure TUI state reducer", () => {
       session_usage: usage,
       session_cost_micros_usd: "5",
       session_ai_credit_micros: "0",
+      session_subscription_tokens: "0",
       daily_cost_micros_usd: "5",
       daily_ai_credit_micros: "0",
+      daily_subscription_tokens: "0",
       trailing_minute_cost_micros_usd: "5",
       trailing_minute_ai_credit_micros: "0",
+      trailing_minute_subscription_tokens: "0",
       cache_hit_basis_points: 0,
       session_cost_cap_micros_usd: null,
       daily_cost_cap_micros_usd: null,
       session_ai_credit_cap_micros: null,
       daily_ai_credit_cap_micros: null,
+      session_token_cap: null,
+      daily_token_cap: null,
       spend_rate_alarm_micros_usd_per_minute: null,
       ai_credit_rate_alarm_micros_per_minute: null,
+      token_rate_alarm_per_minute: null,
       hard_cap_reached: false,
       session_monetary_accounting_complete: true,
       daily_monetary_accounting_complete: true,

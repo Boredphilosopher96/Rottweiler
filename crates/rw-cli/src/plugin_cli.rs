@@ -4,6 +4,7 @@ use std::{
     fs,
     io::Write as _,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use miette::{IntoDiagnostic, Result, miette};
@@ -57,6 +58,67 @@ pub(crate) fn scaffold_typescript(
         written.push(target);
     }
     Ok(written)
+}
+
+pub(crate) fn check_typescript(source: &Path) -> Result<()> {
+    let root = canonical_project_root(source)?;
+    let manifest = read_regular_file(&root, "manifest.json")?;
+    let manifest = rw_plugin_protocol::PluginManifest::from_slice(&manifest)
+        .map_err(|error| miette!("plugin manifest is invalid: {error}"))?;
+    let package = read_regular_file(&root, "package.json")?;
+    let package: serde_json::Value = serde_json::from_slice(&package).into_diagnostic()?;
+    let package_name = package.get("name").and_then(serde_json::Value::as_str);
+    if package_name != Some(manifest.name.as_str()) {
+        return Err(miette!(
+            "package name and manifest name must match exactly (manifest: {:?}, package: {:?})",
+            manifest.name,
+            package_name
+        ));
+    }
+    for script in ["typecheck", "test"] {
+        if package
+            .pointer(&format!("/scripts/{script}"))
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            return Err(miette!(
+                "package.json must define a non-empty {script} script"
+            ));
+        }
+        run_bun_script(&root, script)?;
+    }
+    Ok(())
+}
+
+fn canonical_project_root(source: &Path) -> Result<PathBuf> {
+    let metadata = fs::symlink_metadata(source).into_diagnostic()?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(miette!("plugin path must be a real directory"));
+    }
+    fs::canonicalize(source).into_diagnostic()
+}
+
+fn read_regular_file(root: &Path, relative: &str) -> Result<Vec<u8>> {
+    let path = root.join(relative);
+    let metadata = fs::symlink_metadata(&path).into_diagnostic()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(miette!("plugin {relative} must be a regular file"));
+    }
+    fs::read(path).into_diagnostic()
+}
+
+fn run_bun_script(root: &Path, script: &str) -> Result<()> {
+    let status = Command::new("bun")
+        .args(["run", script])
+        .current_dir(root)
+        .env("CI", "1")
+        .status()
+        .into_diagnostic()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(miette!("plugin {script} failed with {status}"))
+    }
 }
 
 fn prepare_root(destination: &Path) -> Result<PathBuf> {
@@ -195,5 +257,18 @@ mod tests {
                 .to_string_lossy()
                 .contains(".tmp")
         }));
+    }
+
+    #[test]
+    fn check_rejects_package_manifest_identity_drift_before_execution() {
+        let root = tempfile::tempdir().expect("root");
+        scaffold_typescript(root.path(), Some("manifest-name"), false).expect("scaffold");
+        let package = root.path().join("package.json");
+        let changed = fs::read_to_string(&package)
+            .expect("package")
+            .replace("manifest-name", "different-name");
+        fs::write(package, changed).expect("rewrite fixture");
+        let error = check_typescript(root.path()).expect_err("identity drift must fail");
+        assert!(error.to_string().contains("must match exactly"));
     }
 }

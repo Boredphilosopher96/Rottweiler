@@ -555,6 +555,7 @@ export interface RottweilerState {
   readonly modelAliases: readonly ModelAliasChoice[]
   readonly providers: readonly ProviderChoice[]
   readonly providerAuth: ProviderAuthProjection
+  readonly modelCatalogLoaded: boolean
   readonly modelCatalogCached: boolean
   readonly settings: readonly UserSettingChoice[]
   readonly mcpServers: readonly McpServerDescriptor[]
@@ -629,6 +630,7 @@ export function createInitialState(): RottweilerState {
     modelAliases: [],
     providers: [],
     providerAuth: { pending: null, last: null },
+    modelCatalogLoaded: false,
     modelCatalogCached: false,
     settings: [],
     mcpServers: [],

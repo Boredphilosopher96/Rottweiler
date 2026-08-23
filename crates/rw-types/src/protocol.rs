@@ -356,6 +356,7 @@ pub enum RuntimeServiceKind {
     Lsp,
     Linter,
     Formatter,
+    Test,
 }
 
 /// Scope of a remembered exact approval.
@@ -905,6 +906,18 @@ pub struct CostSnapshot {
     #[schemars(with = "String")]
     #[ts(type = "string")]
     pub trailing_minute_ai_credit_micros: u64,
+    #[serde(default, with = "decimal_u64")]
+    #[schemars(with = "String")]
+    #[ts(type = "string")]
+    pub session_subscription_tokens: u64,
+    #[serde(default, with = "decimal_u64")]
+    #[schemars(with = "String")]
+    #[ts(type = "string")]
+    pub daily_subscription_tokens: u64,
+    #[serde(default, with = "decimal_u64")]
+    #[schemars(with = "String")]
+    #[ts(type = "string")]
+    pub trailing_minute_subscription_tokens: u64,
     pub cache_hit_basis_points: u16,
     #[serde(default, with = "decimal_option_u64")]
     #[schemars(with = "Option<String>")]
@@ -925,11 +938,23 @@ pub struct CostSnapshot {
     #[serde(default, with = "decimal_option_u64")]
     #[schemars(with = "Option<String>")]
     #[ts(type = "string | null")]
+    pub session_token_cap: Option<u64>,
+    #[serde(default, with = "decimal_option_u64")]
+    #[schemars(with = "Option<String>")]
+    #[ts(type = "string | null")]
+    pub daily_token_cap: Option<u64>,
+    #[serde(default, with = "decimal_option_u64")]
+    #[schemars(with = "Option<String>")]
+    #[ts(type = "string | null")]
     pub spend_rate_alarm_micros_usd_per_minute: Option<u64>,
     #[serde(default, with = "decimal_option_u64")]
     #[schemars(with = "Option<String>")]
     #[ts(type = "string | null")]
     pub ai_credit_rate_alarm_micros_per_minute: Option<u64>,
+    #[serde(default, with = "decimal_option_u64")]
+    #[schemars(with = "Option<String>")]
+    #[ts(type = "string | null")]
+    pub token_rate_alarm_per_minute: Option<u64>,
     pub hard_cap_reached: bool,
     pub session_monetary_accounting_complete: bool,
     pub daily_monetary_accounting_complete: bool,
@@ -1592,6 +1617,7 @@ pub enum CompactionReason {
 pub enum BudgetUnit {
     MicrosUsd,
     AiCreditMicros,
+    Tokens,
 }
 
 /// Severity of a budget transition.
@@ -1792,6 +1818,39 @@ pub enum Cost {
     Unavailable {
         reason: String,
     },
+}
+
+/// Token accounting derived from one provider billing disposition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubscriptionTokenAccounting {
+    /// The disposition is not subscription quota.
+    NotApplicable,
+    /// The provider reported a valid token count.
+    Metered(u64),
+    /// Subscription quota was reported without a usable token count.
+    Unavailable,
+}
+
+impl Cost {
+    /// Returns the canonical token-accounting interpretation for subscription quota.
+    #[must_use]
+    pub fn subscription_token_accounting(&self) -> SubscriptionTokenAccounting {
+        let Self::SubscriptionQuota { used, unit } = self else {
+            return SubscriptionTokenAccounting::NotApplicable;
+        };
+        if !unit
+            .as_deref()
+            .is_some_and(|unit| unit.eq_ignore_ascii_case("tokens"))
+        {
+            return SubscriptionTokenAccounting::Unavailable;
+        }
+        used.as_deref()
+            .and_then(|used| used.parse::<u64>().ok())
+            .map_or(
+                SubscriptionTokenAccounting::Unavailable,
+                SubscriptionTokenAccounting::Metered,
+            )
+    }
 }
 
 /// Stable error categories used across engine boundaries.
@@ -2645,10 +2704,40 @@ impl EngineEvent {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClientCommand, ClientId, CommandAckMeta, CommandMeta, EngineEvent, EngineEventDelivery,
-        EventMeta, McpEnvironmentEntry, ModeId, RequestId, SequenceId, SessionId, SubagentId,
-        TranscriptFormat,
+        ClientCommand, ClientId, CommandAckMeta, CommandMeta, Cost, EngineEvent,
+        EngineEventDelivery, EventMeta, McpEnvironmentEntry, ModeId, RequestId, SequenceId,
+        SessionId, SubagentId, SubscriptionTokenAccounting, TranscriptFormat,
     };
+
+    #[test]
+    fn cost_owns_subscription_token_interpretation() {
+        let metered = Cost::SubscriptionQuota {
+            used: Some("736".to_owned()),
+            unit: Some("TOKENS".to_owned()),
+        };
+        let missing = Cost::SubscriptionQuota {
+            used: None,
+            unit: Some("tokens".to_owned()),
+        };
+        let other = Cost::AiCredits {
+            credits_micros: 1,
+            nominal_amount_micros: None,
+            currency: None,
+        };
+
+        assert_eq!(
+            metered.subscription_token_accounting(),
+            SubscriptionTokenAccounting::Metered(736)
+        );
+        assert_eq!(
+            missing.subscription_token_accounting(),
+            SubscriptionTokenAccounting::Unavailable
+        );
+        assert_eq!(
+            other.subscription_token_accounting(),
+            SubscriptionTokenAccounting::NotApplicable
+        );
+    }
 
     #[test]
     fn transport_can_replace_untrusted_wire_client_identity() {

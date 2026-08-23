@@ -25,6 +25,9 @@ pub struct ModelPricing {
     /// Reasoning-control capability marker.
     #[serde(default)]
     pub supports_thinking: bool,
+    /// Image-input capability marker.
+    #[serde(default)]
+    pub supports_vision: bool,
     /// Exact provider-neutral reasoning efforts advertised by the catalog.
     /// An empty list means the source did not provide a usable effort mapping.
     #[serde(default)]

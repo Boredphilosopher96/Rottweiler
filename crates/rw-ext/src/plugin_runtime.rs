@@ -1963,6 +1963,7 @@ impl RpcProviderAdapter {
                 max_output_tokens,
                 supports_tools: capabilities.tool_calling,
                 supports_thinking: capabilities.thinking,
+                supports_vision: capabilities.vision,
                 reasoning_efforts: Vec::new(),
                 input_per_million_micros_usd: pricing
                     .input_per_million_micros_usd

@@ -2759,6 +2759,18 @@
         "trailing_minute_ai_credit_micros": {
           "type": "string"
         },
+        "session_subscription_tokens": {
+          "type": "string",
+          "default": "0"
+        },
+        "daily_subscription_tokens": {
+          "type": "string",
+          "default": "0"
+        },
+        "trailing_minute_subscription_tokens": {
+          "type": "string",
+          "default": "0"
+        },
         "cache_hit_basis_points": {
           "type": "integer",
           "format": "uint16",
@@ -2793,6 +2805,20 @@
           ],
           "default": null
         },
+        "session_token_cap": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "daily_token_cap": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "spend_rate_alarm_micros_usd_per_minute": {
           "type": [
             "string",
@@ -2801,6 +2827,13 @@
           "default": null
         },
         "ai_credit_rate_alarm_micros_per_minute": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "token_rate_alarm_per_minute": {
           "type": [
             "string",
             "null"
@@ -4049,7 +4082,8 @@
       "enum": [
         "lsp",
         "linter",
-        "formatter"
+        "formatter",
+        "test"
       ]
     },
     "McpApprovalReview": {
@@ -4748,7 +4782,8 @@
       "type": "string",
       "enum": [
         "micros_usd",
-        "ai_credit_micros"
+        "ai_credit_micros",
+        "tokens"
       ]
     },
     "CompactionReason": {

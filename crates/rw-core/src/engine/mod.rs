@@ -53,9 +53,9 @@ use rw_types::{
     PermissionStateDescriptor, PlanArtifact, PlanDecision, PromptDump, PromptTool, Question,
     QuestionId, QuestionOption, QuestionResponseKind, RequestId, ReviewFileDecision,
     ReviewFileStatus, RewindTarget, Role, SequenceId, SessionId, SessionMode, SessionReview,
-    ShellId, StoredAttachment, SubagentId, ToolCallId, ToolOutput, ToolOutputPart,
-    ToolOutputStream, Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus, UnifiedDiff,
-    UnrestorablePath, Usage,
+    ShellId, StoredAttachment, SubagentId, SubscriptionTokenAccounting, ToolCallId, ToolOutput,
+    ToolOutputPart, ToolOutputStream, Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus,
+    UnifiedDiff, UnrestorablePath, Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -116,11 +116,11 @@ use turn::{
     frame_command_tool_output, prompt_turn, redacted_json,
 };
 use turn::{
-    CommandTurnOverrides, RunningTurn, StartTurnRuntime, TurnSignal, append_text, append_thinking,
-    assemble_session_context, build_cost_snapshot, compact_during_turn, context_snapshot,
-    current_approval_diff, emit, emit_batch, evaluate_budget, handle_turn_signal, hook_event_name,
-    normalize_manual_session_title, persist_event, prompt_dump, session_accounting_fallback,
-    start_turn, start_turn_with_overrides, validate_mutation_scope,
+    BudgetUsage, CommandTurnOverrides, RunningTurn, StartTurnRuntime, TurnSignal, append_text,
+    append_thinking, assemble_session_context, build_cost_snapshot, compact_during_turn,
+    context_snapshot, current_approval_diff, emit, emit_batch, evaluate_budget, handle_turn_signal,
+    hook_event_name, normalize_manual_session_title, persist_event, prompt_dump,
+    session_accounting_fallback, start_turn, start_turn_with_overrides, validate_mutation_scope,
 };
 
 const SESSION_TITLE_TIMEOUT: Duration = Duration::from_secs(4);
@@ -1115,10 +1115,15 @@ pub struct BudgetLedgerTotals {
     pub daily_ai_credit_micros: u64,
     pub trailing_minute_cost_micros_usd: u64,
     pub trailing_minute_ai_credit_micros: u64,
+    pub session_subscription_tokens: u64,
+    pub daily_subscription_tokens: u64,
+    pub trailing_minute_subscription_tokens: u64,
     pub session_subscription_quota_entries: u64,
     pub session_cost_unavailable_entries: u64,
     pub session_non_usd_monetary_entries: u64,
     pub daily_subscription_quota_entries: u64,
+    pub session_unmetered_subscription_quota_entries: u64,
+    pub daily_unmetered_subscription_quota_entries: u64,
     pub daily_cost_unavailable_entries: u64,
     pub daily_non_usd_monetary_entries: u64,
 }
@@ -3347,11 +3352,31 @@ mod tests {
                         totals.daily_non_usd_monetary_entries =
                             totals.daily_non_usd_monetary_entries.saturating_add(1);
                     }
-                    Some(Cost::SubscriptionQuota { .. }) => {
+                    Some(cost @ Cost::SubscriptionQuota { .. }) => {
                         totals.session_subscription_quota_entries =
                             totals.session_subscription_quota_entries.saturating_add(1);
                         totals.daily_subscription_quota_entries =
                             totals.daily_subscription_quota_entries.saturating_add(1);
+                        match cost.subscription_token_accounting() {
+                            SubscriptionTokenAccounting::Metered(tokens) => {
+                                totals.session_subscription_tokens =
+                                    totals.session_subscription_tokens.saturating_add(tokens);
+                                totals.daily_subscription_tokens =
+                                    totals.daily_subscription_tokens.saturating_add(tokens);
+                                totals.trailing_minute_subscription_tokens = totals
+                                    .trailing_minute_subscription_tokens
+                                    .saturating_add(tokens);
+                            }
+                            SubscriptionTokenAccounting::Unavailable => {
+                                totals.session_unmetered_subscription_quota_entries = totals
+                                    .session_unmetered_subscription_quota_entries
+                                    .saturating_add(1);
+                                totals.daily_unmetered_subscription_quota_entries = totals
+                                    .daily_unmetered_subscription_quota_entries
+                                    .saturating_add(1);
+                            }
+                            SubscriptionTokenAccounting::NotApplicable => {}
+                        }
                     }
                     Some(Cost::Unavailable { .. }) => {
                         totals.session_cost_unavailable_entries =
@@ -12011,6 +12036,63 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[tokio::test]
+    async fn subscription_token_cap_stops_after_the_response_and_blocks_later_dispatch() {
+        let root = TempDir::new().expect("tempdir");
+        let mut model = M3Model::new([
+            stop_script("visible response", &[]),
+            stop_script("must remain unused", &[]),
+        ]);
+        model.cost_override = Some(Cost::SubscriptionQuota {
+            used: Some("736".to_owned()),
+            unit: Some("tokens".to_owned()),
+        });
+        model.budget.session_token_cap = Some(700);
+        let model = Arc::new(model);
+        let mut actor_config = config(
+            root.path(),
+            model.clone(),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        actor_config.event_sink = Arc::new(AccountingRecordingSink::default());
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let mut events = handle.subscribe();
+
+        handle.send_message("first").await.expect("first message");
+        let first = collect_turn(&mut events).await;
+        assert!(first.iter().any(|event| matches!(
+            event.kind,
+            PendingEvent::BudgetStatus {
+                level: BudgetLevel::HardCap,
+                scope: BudgetScope::Session,
+                unit: BudgetUnit::Tokens,
+                current: 736,
+                limit: 700,
+                ..
+            }
+        )));
+        assert!(matches!(
+            first.last().map(|event| &event.kind),
+            Some(PendingEvent::TurnFinished {
+                status: AgentTurnStatus::BudgetExceeded,
+                ..
+            })
+        ));
+
+        handle.send_message("second").await.expect("second message");
+        let second = collect_turn(&mut events).await;
+        assert_eq!(model.requests().len(), 1);
+        assert!(matches!(
+            second.last().map(|event| &event.kind),
+            Some(PendingEvent::TurnFinished {
+                status: AgentTurnStatus::BudgetExceeded,
+                ..
+            })
+        ));
     }
 
     #[tokio::test]

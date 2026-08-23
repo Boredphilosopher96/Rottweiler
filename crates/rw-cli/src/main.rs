@@ -523,6 +523,14 @@ enum PluginCommand {
         #[arg(long)]
         force: bool,
     },
+    /// Validate a TypeScript plugin manifest, types, and behavior tests.
+    Check {
+        #[arg(value_name = "PATH", default_value = ".")]
+        path: PathBuf,
+        /// Explicitly authorize the plugin's local typecheck and test commands.
+        #[arg(long)]
+        allow_exec: bool,
+    },
     /// Attach a source plugin to a live local session with hot reload.
     Dev {
         #[arg(value_name = "PATH")]
@@ -1099,6 +1107,17 @@ async fn main() -> Result<()> {
             }
         }
         Some(Command::Plugin {
+            command: PluginCommand::Check { path, allow_exec },
+        }) => {
+            if !allow_exec {
+                return Err(miette!(
+                    "plugin check executes local plugin code; pass --allow-exec to grant explicit authority"
+                ));
+            }
+            plugin_cli::check_typescript(&path)?;
+            println!("plugin check passed: {}", path.display());
+        }
+        Some(Command::Plugin {
             command: PluginCommand::Status,
         }) => run_plugin_approval(None, false).await?,
         Some(Command::Plugin {
@@ -1120,7 +1139,7 @@ async fn main() -> Result<()> {
                     "plugin dev executes local code; pass --allow-dev-exec to grant explicit development authority"
                 ));
             }
-            plugin_dev::run(&path, &session, &configuration_root_path()?.join("run")).await?;
+            plugin_dev::run(&path, &session, &runtime_root(&configuration_root_path()?)).await?;
         }
         Some(Command::Extension {
             command:
@@ -1512,7 +1531,7 @@ async fn run_local_tui(cli: &Cli) -> Result<()> {
     {
         return Err(miette!("session {session_id:?} does not exist"));
     }
-    let paths = allocate_runtime_paths(&storage_root.join("run"))?;
+    let paths = allocate_runtime_paths(&storage_root)?;
     let mut runtime_directory = RuntimeDirectoryGuard::capture(&paths.directory)?;
     let supervisor = supervisor::Supervisor::new(
         supervisor::SupervisorConfig {
@@ -1762,7 +1781,7 @@ async fn run_history_replay_with_tui(
         .map_err(|error| miette!(error.to_string()))?;
     let through_sequence = events.last().map(|envelope| envelope.sequence);
     let events = historical_replay_items(storage_root, session, events)?;
-    let paths = allocate_runtime_paths(&storage_root.join("run"))?;
+    let paths = allocate_runtime_paths(storage_root)?;
     let _runtime_directory = RuntimeDirectoryGuard::capture(&paths.directory)?;
     let (runtime, listener) = server::ServerRuntime::create_for_session(paths, Some(session))?;
     let state = server::ServerState::new(
@@ -2779,13 +2798,60 @@ impl Drop for RuntimeDirectoryGuard {
     }
 }
 
-fn allocate_runtime_paths(root: &Path) -> Result<server::ServerRuntimePaths> {
+const MAX_UNIX_SOCKET_PATH_BYTES: usize = 103;
+
+fn runtime_root(storage_root: &Path) -> PathBuf {
+    let configured = storage_root.join("run");
+    let longest_child = configured
+        .join("engine-0000000000000000")
+        .join("engine.sock");
+    if longest_child.as_os_str().as_encoded_bytes().len() <= MAX_UNIX_SOCKET_PATH_BYTES {
+        return configured;
+    }
+
+    let digest = blake3::hash(storage_root.as_os_str().as_encoded_bytes())
+        .to_hex()
+        .to_string();
+    let name = format!(
+        "rottweiler-{}-{}",
+        rustix::process::geteuid().as_raw(),
+        &digest[..16]
+    );
+    let preferred = std::env::temp_dir().join(&name);
+    let preferred_socket = preferred
+        .join("engine-0000000000000000")
+        .join("engine.sock");
+    if preferred_socket.as_os_str().as_encoded_bytes().len() <= MAX_UNIX_SOCKET_PATH_BYTES {
+        preferred
+    } else {
+        PathBuf::from("/tmp").join(name)
+    }
+}
+
+fn ensure_private_runtime_root(root: &Path) -> Result<()> {
     fs::create_dir_all(root).into_diagnostic()?;
     #[cfg(unix)]
     {
+        use std::os::unix::fs::MetadataExt as _;
         use std::os::unix::fs::PermissionsExt as _;
+        let metadata = fs::symlink_metadata(root).into_diagnostic()?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_dir()
+            || metadata.uid() != rustix::process::geteuid().as_raw()
+        {
+            return Err(miette!(
+                "engine runtime root must be a real directory owned by the current user: {}",
+                root.display()
+            ));
+        }
         fs::set_permissions(root, fs::Permissions::from_mode(0o700)).into_diagnostic()?;
     }
+    Ok(())
+}
+
+fn allocate_runtime_paths(storage_root: &Path) -> Result<server::ServerRuntimePaths> {
+    let root = runtime_root(storage_root);
+    ensure_private_runtime_root(&root)?;
     for _ in 0..32 {
         let mut random = [0_u8; 8];
         getrandom::fill(&mut random).into_diagnostic()?;
@@ -2843,7 +2909,7 @@ fn resolve_server_paths(
     if token_file.is_some() {
         return Err(miette!("--token-file requires --socket"));
     }
-    allocate_runtime_paths(&storage_root.join("run"))
+    allocate_runtime_paths(storage_root)
 }
 
 fn locate_tui_executable() -> Result<PathBuf> {
@@ -3055,7 +3121,7 @@ async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
         .clone()
         .map_or_else(session::new_session_id, Ok)?;
     let storage_root = configuration_root()?;
-    let local_paths = allocate_runtime_paths(&storage_root.join("run"))?;
+    let local_paths = allocate_runtime_paths(&storage_root)?;
     let _runtime_directory = RuntimeDirectoryGuard::capture(&local_paths.directory)?;
     let uid = rustix::process::geteuid().as_raw();
     let session_key = blake3::hash(session_id.as_bytes()).to_hex();
@@ -3762,15 +3828,17 @@ fn sync_install_paths(paths: &[PathBuf]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use async_trait::async_trait;
     use clap::{CommandFactory as _, Parser as _};
 
     use super::{
-        Cli, Command, DeferredHostedEngine, DetachedServerReady, McpServerCommand, ModelsCommand,
-        OutputFormat, PromptCommand, RuntimeDirectoryGuard, UpgradeChannel,
-        append_execution_lease_restart_flag, create_guarded_server_runtime,
+        Cli, Command, DeferredHostedEngine, DetachedServerReady, MAX_UNIX_SOCKET_PATH_BYTES,
+        McpServerCommand, ModelsCommand, OutputFormat, PromptCommand, RuntimeDirectoryGuard,
+        UpgradeChannel, append_execution_lease_restart_flag, create_guarded_server_runtime,
         discover_local_workspace, ensure_folder_trust_grantable, render_session_search_text,
-        resolve_tui_executable, scripted_provider_options, sync_install_paths,
+        resolve_tui_executable, runtime_root, scripted_provider_options, sync_install_paths,
         valid_bootstrap_token, validate_cli_option_scope, write_github_device_prompt,
         write_private_file_atomic,
     };
@@ -3962,6 +4030,15 @@ mod tests {
                 .get_args()
                 .any(|argument| argument == "--wait-for-execution-lease")
         );
+    }
+
+    #[test]
+    fn long_configuration_roots_use_a_short_runtime_socket_root() {
+        let storage_root = PathBuf::from(format!("/tmp/{}", "long-home-segment-".repeat(12)));
+        let root = runtime_root(&storage_root);
+        let socket = root.join("engine-0000000000000000").join("engine.sock");
+        assert_ne!(root, storage_root.join("run"));
+        assert!(socket.as_os_str().as_encoded_bytes().len() <= MAX_UNIX_SOCKET_PATH_BYTES);
     }
 
     #[cfg(unix)]

@@ -60,6 +60,7 @@ export class ComposerRenderable extends BoxRenderable {
   #theme: RottweilerTheme
   #submitting = false
   #shellMode = false
+  #imagePasteAvailable = false
   #dockHeight = 4
   #history: string[] = []
   #historyIndex: number | null = null
@@ -87,7 +88,7 @@ export class ComposerRenderable extends BoxRenderable {
     })
     this.#options = options
     this.#theme = theme
-    this.#placeholder = composerPlaceholder(options)
+    this.#placeholder = composerPlaceholder(options, false)
     this.attachmentsText = new TextRenderable(ctx, {
       id: "composer-attachments",
       content: "",
@@ -229,6 +230,13 @@ export class ComposerRenderable extends BoxRenderable {
       : this.#placeholder
   }
 
+  setImagePasteAvailable(available: boolean): void {
+    if (this.#imagePasteAvailable === available) return
+    this.#imagePasteAvailable = available
+    this.#placeholder = composerPlaceholder(this.#options, available)
+    if (!this.#shellMode) this.editor.placeholder = this.#placeholder
+  }
+
   currentFileMention(): ComposerFileMention | null {
     const value = this.editor.plainText
     const cursor = characterIndexForByteOffset(value, this.editor.cursorOffset)
@@ -342,6 +350,12 @@ export class ComposerRenderable extends BoxRenderable {
   }
 
   addAttachment(attachment: Attachment): boolean {
+    if (attachment.media_type.startsWith("image/") && !this.#imagePasteAvailable) {
+      this.#options.onAttachmentError?.(
+        "The selected model does not support image input. Choose a vision-capable model first.",
+      )
+      return false
+    }
     const identity = attachmentIdentity(attachment)
     if (this.#attachments.some((existing) => attachmentIdentity(existing) === identity)) return true
     const error = attachmentBudgetError(attachment, this.#attachments, this.editor.plainText)
@@ -375,6 +389,7 @@ export class ComposerRenderable extends BoxRenderable {
   }
 
   async pasteImage(): Promise<boolean> {
+    if (!this.#imagePasteAvailable) return false
     const image = await this.#options.imagePaste.readImage()
     if (image === null) {
       return false
@@ -542,9 +557,14 @@ export class ComposerRenderable extends BoxRenderable {
   }
 }
 
-function composerPlaceholder(options: Pick<ComposerOptions, "pasteImageKeycap" | "externalEditorKeycap">): string {
+function composerPlaceholder(
+  options: Pick<ComposerOptions, "pasteImageKeycap" | "externalEditorKeycap">,
+  imagePasteAvailable: boolean,
+): string {
   const hints = [
-    options.pasteImageKeycap === undefined ? null : `${options.pasteImageKeycap} image`,
+    !imagePasteAvailable || options.pasteImageKeycap === undefined
+      ? null
+      : `${options.pasteImageKeycap} image`,
     options.externalEditorKeycap === undefined ? null : `${options.externalEditorKeycap} $EDITOR`,
   ]
   let placeholder = COMPOSER_PLACEHOLDER_PREFIX

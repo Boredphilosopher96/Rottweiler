@@ -252,6 +252,9 @@ enum EditableSettingKey {
     DefaultPermission,
     SessionCostCap,
     DailyCostCap,
+    SessionTokenCap,
+    DailyTokenCap,
+    TokenRateAlarm,
     BudgetWarning,
     McpServerEnabled(String),
     McpAddHttp(String),
@@ -266,6 +269,9 @@ impl EditableSettingKey {
     const DEFAULT_PERMISSION: &'static str = "permissions.default";
     const SESSION_COST_CAP: &'static str = "budget.session_cost_cap_micros_usd";
     const DAILY_COST_CAP: &'static str = "budget.daily_cost_cap_micros_usd";
+    const SESSION_TOKEN_CAP: &'static str = "budget.session_token_cap";
+    const DAILY_TOKEN_CAP: &'static str = "budget.daily_token_cap";
+    const TOKEN_RATE_ALARM: &'static str = "budget.token_rate_alarm_per_minute";
     const BUDGET_WARNING: &'static str = "budget.warn_at_percent";
     const MCP_SERVER_PREFIX: &'static str = "mcp.servers.";
     const MCP_SERVER_ENABLED_SUFFIX: &'static str = ".enabled";
@@ -280,6 +286,9 @@ impl EditableSettingKey {
             Self::DEFAULT_PERMISSION => Some(Self::DefaultPermission),
             Self::SESSION_COST_CAP => Some(Self::SessionCostCap),
             Self::DAILY_COST_CAP => Some(Self::DailyCostCap),
+            Self::SESSION_TOKEN_CAP => Some(Self::SessionTokenCap),
+            Self::DAILY_TOKEN_CAP => Some(Self::DailyTokenCap),
+            Self::TOKEN_RATE_ALARM => Some(Self::TokenRateAlarm),
             Self::BUDGET_WARNING => Some(Self::BudgetWarning),
             _ => None,
         };
@@ -313,6 +322,9 @@ impl EditableSettingKey {
             Self::DefaultPermission => Self::DEFAULT_PERMISSION.to_owned(),
             Self::SessionCostCap => Self::SESSION_COST_CAP.to_owned(),
             Self::DailyCostCap => Self::DAILY_COST_CAP.to_owned(),
+            Self::SessionTokenCap => Self::SESSION_TOKEN_CAP.to_owned(),
+            Self::DailyTokenCap => Self::DAILY_TOKEN_CAP.to_owned(),
+            Self::TokenRateAlarm => Self::TOKEN_RATE_ALARM.to_owned(),
             Self::BudgetWarning => Self::BUDGET_WARNING.to_owned(),
             Self::McpServerEnabled(server) => format!(
                 "{}{server}{}",
@@ -2409,12 +2421,19 @@ fn format_cost_cap(micros: Option<u64>) -> String {
     format!("${}.{:02}", cents / 100, cents % 100)
 }
 
+fn format_token_limit(tokens: Option<u64>) -> String {
+    tokens.map_or_else(|| "Unlimited".to_owned(), |tokens| tokens.to_string())
+}
+
 fn budget_setting_descriptors(
     loaded: &rw_store::config::LoadedConfig,
-) -> [UserSettingDescriptor; 3] {
+) -> [UserSettingDescriptor; 6] {
     let session_cost_key = EditableSettingKey::SessionCostCap.render();
     let daily_cost_key = EditableSettingKey::DailyCostCap.render();
     let warning_key = EditableSettingKey::BudgetWarning.render();
+    let session_token_key = EditableSettingKey::SessionTokenCap.render();
+    let daily_token_key = EditableSettingKey::DailyTokenCap.render();
+    let token_rate_key = EditableSettingKey::TokenRateAlarm.render();
     let provenance = |key: &str| {
         loaded
             .provenance(key)
@@ -2435,6 +2454,30 @@ fn budget_setting_descriptors(
             value: format_cost_cap(loaded.config.budget.daily_cost_cap_micros_usd),
             choices: Vec::new(),
             provenance: provenance(&daily_cost_key),
+            applies_immediately: false,
+        },
+        UserSettingDescriptor {
+            key: session_token_key.clone(),
+            label: "Session token cap".to_owned(),
+            value: format_token_limit(loaded.config.budget.session_token_cap),
+            choices: Vec::new(),
+            provenance: provenance(&session_token_key),
+            applies_immediately: false,
+        },
+        UserSettingDescriptor {
+            key: daily_token_key.clone(),
+            label: "Daily token cap".to_owned(),
+            value: format_token_limit(loaded.config.budget.daily_token_cap),
+            choices: Vec::new(),
+            provenance: provenance(&daily_token_key),
+            applies_immediately: false,
+        },
+        UserSettingDescriptor {
+            key: token_rate_key.clone(),
+            label: "Token rate alarm".to_owned(),
+            value: format_token_limit(loaded.config.budget.token_rate_alarm_per_minute),
+            choices: Vec::new(),
+            provenance: provenance(&token_rate_key),
             applies_immediately: false,
         },
         UserSettingDescriptor {

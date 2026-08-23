@@ -185,6 +185,8 @@ pub(crate) async fn collect(options: DoctorOptions) -> DoctorReport {
     checks.push(config_check);
     append_extension_checks(&mut checks, &credentials_path);
 
+    append_provider_readiness_checks(&mut checks, &effective.config);
+
     if effective.config.providers.len() > MAX_DOCTOR_PROVIDERS {
         checks.push(check(
             "providers",
@@ -208,6 +210,56 @@ pub(crate) async fn collect(options: DoctorOptions) -> DoctorReport {
     let inventory = inventory_credentials(&credentials_path, references);
     append_provider_checks(&mut checks, &plans, &inventory, options.network, timeout_ms).await;
     finish_report(options.network, checks)
+}
+
+fn append_provider_readiness_checks(checks: &mut Vec<DoctorCheck>, config: &Config) {
+    if config.providers.is_empty() {
+        checks.push(check(
+            "providers",
+            CheckStatus::Fail,
+            "provider_not_configured",
+            "no provider is configured; connect one with `rw auth login` or `rw auth set-key`",
+        ));
+    } else {
+        checks.push(check(
+            "providers",
+            CheckStatus::Pass,
+            "provider_configured",
+            "at least one provider is configured",
+        ));
+    }
+
+    let default = config.models.default.trim();
+    let candidates = config.models.aliases.get(default);
+    let resolved = !default.is_empty()
+        && candidates.is_some_and(|candidates| {
+            !candidates.is_empty()
+                && candidates.iter().any(|candidate| {
+                    candidate.split_once('/').is_some_and(|(provider, model)| {
+                        !provider.is_empty()
+                            && !model.is_empty()
+                            && config.providers.contains_key(provider)
+                    })
+                })
+        });
+    checks.push(if resolved {
+        check(
+            "models.default",
+            CheckStatus::Pass,
+            "default_model_resolved",
+            "the default model resolves to a configured provider route",
+        )
+    } else {
+        check(
+            "models.default",
+            CheckStatus::Fail,
+            "default_model_unresolved",
+            format!(
+                "default model alias {:?} does not resolve to a configured provider route",
+                config.models.default
+            ),
+        )
+    });
 }
 
 fn append_extension_checks(checks: &mut Vec<DoctorCheck>, credentials_path: &Path) {
@@ -1202,6 +1254,37 @@ mod tests {
 
     fn seeded_report(checks: Vec<DoctorCheck>) -> DoctorReport {
         finish_report(false, checks)
+    }
+
+    #[test]
+    fn fresh_configuration_fails_provider_and_default_model_readiness() {
+        let mut checks = Vec::new();
+        append_provider_readiness_checks(&mut checks, &Config::default());
+        assert_eq!(checks.len(), 2);
+        assert!(checks.iter().all(|item| item.status == CheckStatus::Fail));
+        assert_eq!(checks[0].code, "provider_not_configured");
+        assert_eq!(checks[1].code, "default_model_unresolved");
+    }
+
+    #[test]
+    fn configured_provider_and_default_route_pass_readiness() {
+        let mut config = Config::default();
+        config.providers.insert(
+            "openai".to_owned(),
+            ProviderConfig {
+                kind: "openai".to_owned(),
+                ..ProviderConfig::default()
+            },
+        );
+        config.models.default = "fast".to_owned();
+        config.models.aliases.insert(
+            "fast".to_owned(),
+            vec!["missing/gpt-5".to_owned(), "openai/gpt-5".to_owned()],
+        );
+        let mut checks = Vec::new();
+        append_provider_readiness_checks(&mut checks, &config);
+        assert_eq!(checks.len(), 2);
+        assert!(checks.iter().all(|item| item.status == CheckStatus::Pass));
     }
 
     #[test]

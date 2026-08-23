@@ -1012,3 +1012,333 @@ rather than in dedicated subsystems: `engine/mod.rs` (14.2k), `host.rs` (7.4k),
 `store/config.rs` (5.3k), `store/session.rs` (5.3k), `engine/dispatch.rs` (3.5k),
 `tools/worktree.rs` (3.1k), plus `admin.rs`, `update.rs`, `memory.rs`,
 `search.rs`, `intelligence.rs`, and `workflow_runtime.rs`.
+
+---
+
+# Round 5 — 2026-08-23, verification and feature gaps
+
+## Verification of rounds 3–4
+
+Re-checked against `d562185`, empirically where possible rather than by reading
+the remediation notes.
+
+| Item | Status | Evidence |
+|---|---|---|
+| ENG-1 compaction threshold | **Fixed** | Reserve is now `min(20_000, max_output, context_window / 2)`. Re-running the arithmetic across all 5,031 catalog entries: zero-threshold models drop from **157 → 28**. |
+| ENG-2 Anthropic caching | **Fixed, both halves** | `last_stable_system` is now marked first (it strictly dominates marking a tool), and `mark_last_cacheable_message_block` adds a second breakpoint on the last cacheable block of the conversation. The growing transcript is now cached. |
+| ENG-3 doom-loop guard | **Fixed** | Single slot replaced with a `VecDeque` window of capacity `threshold * 4`; successes push `None` rather than clearing, so alternating and success-interleaved loops accumulate. |
+| SEC-1 sandbox denylist | **Fixed, and then some** | 15 → 31 entries, including every path named in round 4 plus `.authinfo.gpg`, `.config/hub`, `.oci`, `.kaggle`. |
+
+**One residual on ENG-1, negligible impact.** The remaining 28 zero-threshold
+entries all have `max_context_tokens = 0` — a different root than the reserve.
+They are image and TTS models (`azure/gpt-image-1`, `nvidia/*-tts-*`), none of
+which is realistically bindable as a session model, so the practical impact is
+nil. But the second half of round 3's recommendation is still open: `validate()`
+rejects a zero window and is still applied only to user-supplied overrides, not
+to catalog metadata at the trigger site. `Some(0)` reaches `calculate()` and
+yields `would_overflow = true` at any token count. A one-line guard treating a
+zero window as *unknown* would close it.
+
+---
+
+## Feature gaps
+
+The remit for this section was "what important features are missing", so this is
+not a defect list. Each item below is a capability a user can reasonably expect
+that does not exist, evidenced rather than asserted. Items the project has
+already written down as deferred are marked as such — those are sequencing
+decisions, not oversights, and are listed only where the consequence is larger
+than the roadmap entry suggests.
+
+- [x] **FEAT-1 · Two sessions cannot share a repository, and the second one says
+      nothing.** [verified]
+      Running `rw` in a workspace that already has a live session produces a UI
+      that alternates between `◆ Rottweiler / waking the engine…` and
+      `Connecting to the engine…` **indefinitely — observed for 171 seconds,
+      never connecting and never exiting.**
+      The mechanism is deliberate: the supervisor spawns the engine with
+      `--wait-for-execution-lease` (`crates/rw-cli/src/supervisor.rs:645`), so it
+      blocks on the workspace lease rather than failing. The engine *has* a
+      precise message for this condition — run `rw serve` directly against a held
+      workspace and you get `execution lease could not lock: … Resource
+      temporarily unavailable (os error 35)` — but that path is not the one the
+      supervisor takes, so the user never sees it.
+      Two terminals on one repository is an ordinary workflow: run tests in one,
+      ask a question in the other. The manual workaround (`git worktree add`, then
+      run there) works because it is a different root, but nothing suggests it.
+      **What is missing:** either concurrent sessions per workspace with the write
+      lease held per turn rather than per session, or — much cheaper — an honest
+      queued state. "Waiting for the session in `<path>` to finish · Ctrl+C to
+      cancel" with a bounded timeout would convert an app that looks broken into
+      one that looks careful.
+
+- [x] **FEAT-2 · Every budget control is inert on subscription routes.**
+      [verified]
+      `rw config check` exposes exactly six budget keys:
+      `session_cost_cap_micros_usd`, `daily_cost_cap_micros_usd`,
+      `session_ai_credit_cap_micros`, `daily_ai_credit_cap_micros`, and the two
+      matching rate alarms. All of them are denominated in **USD or AI credits**.
+      Subscription usage is neither. The engine models it correctly and emits
+      `{"kind":"subscription_quota","used":"6616","unit":"tokens"}` on
+      `turn_finished`, and `docs/06-ROADMAP.md` M1 requires subscription usage to
+      be reported as quota rather than dollars. The consequence is that on a
+      ChatGPT or Copilot subscription — including the maintainer's own default
+      configuration — **there is no spend cap, no rate alarm, and no hard stop of
+      any kind.** A runaway agent has no guardrail on the one route where the
+      user cannot see the cost accumulating either.
+      This is the same underlying gap as round 2's `$0.000` status line: the
+      accounting layer has a first-class "quota in tokens" concept that neither
+      the controls nor the presentation understands.
+      **What is missing:** token-denominated caps and rate alarms
+      (`session_token_cap`, `daily_token_cap`) that bind to the quota accounting
+      the engine already produces.
+
+- [x] **FEAT-3 · Image input cannot work on subscription routes, while the
+      composer advertises it.** [verified]
+      `provider_factory.rs:3664` hardcodes `vision: false` for the OpenAI
+      subscription transport, and `provider_factory.rs:2898` turns any request
+      carrying an image block into a hard error: *"selected model is not
+      catalogued as supporting image input."* The TUI composer meanwhile shows
+      `Ctrl+V image` on every screen.
+      GitHub Copilot escapes this because it discovers vision from its live
+      `/models` response (`github_copilot/models.rs:349`); the ChatGPT/Codex route
+      is deliberately isolated from model discovery and has no such source.
+      The root is structural rather than an oversight: `ModelPricing`
+      (`rw-providers/src/pricing.rs:12`) carries `supports_tools` and
+      `supports_thinking` but **no modality field at all**, the catalog contains
+      none, and the struct is `#[serde(deny_unknown_fields)]`. So the enrichment
+      path that fixed the context window for subscription routes cannot be reused
+      for vision — the data does not exist to enrich from.
+      Screenshots are among the highest-value inputs to a coding agent: a failing
+      UI, a stack trace, a design to match.
+      **What is missing:** a modality field on `ModelPricing`, populated from the
+      upstream catalog, and capability enrichment for the subscription transport
+      that reads it. Until then, the composer should not advertise `Ctrl+V image`
+      on a route where it cannot work.
+
+- [x] **FEAT-4 · Extension authors have no way to test what they write.**
+      [verified]
+      Neither `rw plugin --help` nor `rw extension --help` exposes any eval,
+      test, or check surface. A user can author commands, skills, agents, modes,
+      workflows, `hooks.toml` entries, RPC plugins, and WASM hook extensions —
+      seven extension surfaces — and the only way to find out whether any of them
+      behaves as intended is to run a real session against a real provider and
+      watch.
+      For a product whose third stated thesis is pi-grade extensibility, and
+      which now ships a documented protocol, an SDK, and a docs site, the missing
+      piece is the feedback loop: `rw plugin eval`, or a fixture runner that
+      replays a recorded session against a candidate hook and asserts the
+      decision. The replay infrastructure to build it on already exists.
+
+- [ ] **FEAT-5 · The client/server split has exactly one client.** [known
+      deferred — noted for consequence, not as an oversight]
+      `docs/01-FEATURES.md:10` states the design intent plainly: the split exists
+      "precisely so any UI can attach to any engine; the protocol must never
+      assume localhost." `rw serve` speaks authenticated HTTP+SSE, `--remote`
+      tunnels over SSH, and `rw mcp-server` even exposes Rottweiler's own tools to
+      another agent. What does not exist is a second *user interface*. IDE
+      integration and a web client are both explicitly post-v1.
+      Recording it because the cost is asymmetric: the protocol discipline is
+      already paid for on every event and every projection, and the payoff is
+      entirely unrealised. Most developers live in an editor, and an editor client
+      is the single largest adoption lever this architecture has already built the
+      hard part of.
+
+## Correctly scoped, not a gap
+
+- **Budget caps do exist** — round 1's note that "a max-budget flag remains
+  product intent" understates what shipped. Session and daily caps, rate alarms,
+  and a warn threshold are all configurable. Only a per-invocation CLI flag for
+  CI is absent, which is minor. The real gap is FEAT-2's denomination, not the
+  mechanism.
+
+---
+
+# Round 6 — 2026-08-23, user-perspective feature analysis
+
+Round 5 named five gaps from the architecture's point of view. This round walks
+the day instead: install it, start it, work in it, finish a task, come back
+tomorrow — and records where the path is missing a step. Everything below was
+driven against the built binary, not inferred.
+
+Ordered by how many users hit it, not by how hard it is to build.
+
+---
+
+- [x] **FEAT-6 · There is no first run.** [verified]
+      A brand-new user — empty `$HOME`, no config, no credentials — gets this,
+      captured on a real screen over 56 seconds:
+
+      | t | what the user sees |
+      |---|---|
+      | +5 s | `Ready for a task` · `model fast` |
+      | +15 s | back to `◆ Rottweiler / waking the engine…` |
+      | +25 s | `Connecting to the engine…` |
+      | +30 s | back to the splash |
+      | +40 s | `Connecting…` · +45 s splash · +51 s `model not selected · Alt+M` |
+      | +56 s | `Ready for a task` · `model fast` again |
+
+      Roughly four restart cycles, then a UI that says it is ready while bound to
+      a model alias that does not resolve. Ask it anything and the headless path
+      gives the honest answer — `model alias "fast" is not configured` — but the
+      TUI never says so.
+      There is no provider picker, no "add a credential to get started", no
+      pointer to `rw auth set-key`. Nothing tells a new user that the single
+      remaining step is authentication.
+      **What is missing:** a first-run path. Detect zero configured providers
+      before the session opens, and put a provider picker in front of the
+      composer instead of behind `Alt+M`. Do not present `model fast` as the
+      active model when the alias cannot resolve — `model not selected · Alt+M`
+      is already the correct string and it appears for five seconds out of
+      fifty-six.
+      **Assessment:** this is the highest-impact item in the whole audit by reach.
+      It is the only one that affects **every** user exactly once, at the moment
+      they decide whether the tool is worth a second try. The restart cycling is
+      worth separating from the onboarding: even with a provider configured, a
+      supervisor that visibly bounces for 50 seconds reads as instability.
+
+- [x] **FEAT-7 · `rw doctor` reports "healthy" on an installation that cannot run
+      a single turn.** [verified]
+      Same fresh home. `rw doctor` returns:
+
+      ```
+      Rottweiler doctor: healthy
+      [PASS] runtime_paths · [PASS] os · [WARN] terminal
+      [PASS] sandbox · [PASS] sandbox_egress · [PASS] config · [PASS] extensions
+      ```
+
+      No provider is configured, no credential exists, and the default alias does
+      not resolve. The cause is structural: `append_provider_checks`
+      (`crates/rw-cli/src/doctor.rs:797`) is written as `for plan in plans`, so
+      with zero providers **the loop body never executes and no check is emitted
+      at all**. Nothing else asks whether any provider exists, and nothing
+      verifies that `models.default` resolves to a usable route.
+      The M10 acceptance criterion asks doctor to diagnose "bad key, unreachable
+      provider" — both of which presuppose a provider. The unconfigured case,
+      which is every user's day one, is not covered.
+      **What is missing:** two checks that need no network — "at least one
+      provider is configured" and "the default model alias resolves to a
+      configured provider" — plus a non-zero exit so scripted setup can detect it.
+      **Assessment:** pairs with FEAT-6 and is far cheaper. Doctor is where a
+      stuck user goes; today it confirms their broken install is fine.
+
+- [x] **FEAT-8 · You cannot start a new conversation without quitting.**
+      [verified]
+      The complete command palette is 28 actions across five sections. It has
+      *Switch session*, *Fork session*, *Rewind to a turn*, *Compact context*,
+      and *Export session*. It has no **New session** and no **Clear
+      conversation**. There is no `/new`, no `/clear`, and no entry for it in
+      `KeybindingAction` — which does include `open_session_picker`, so switching
+      is bound but starting is not. The session picker itself
+      (`packages/tui/src/app.ts:3940`) lists existing sessions and offers no
+      "start a new one" row.
+      Fork carries the history forward; compact summarises it; neither starts
+      clean. The only way to begin a fresh conversation is to exit the TUI and
+      relaunch.
+      **What is missing:** a `New session` palette entry and a bound action, both
+      already trivially expressible — the runtime creates a fresh session id on
+      every launch, and reattachment to a live engine is already fast (measured at
+      **0.5 s** in the detach test below), so no new plumbing is required.
+      **Assessment:** highest *frequency* item in the audit. "Finish a task, start
+      the next one" happens many times a day, and in comparable harnesses `/clear`
+      is among the most-used commands.
+
+- [x] **FEAT-9 · The harness runs formatters and linters after every edit, and
+      never runs the tests.** [verified]
+      `toolchain.test` is a real, validated configuration key — `rw config check`
+      lists `toolchain.test = <unset>`, and `ToolchainRule` carries a per-glob
+      `test` override too. Its own doc comment states the limit exactly:
+      *"Optional default test command **surfaced to initialization and
+      commands**."* Surfaced, not executed.
+      Meanwhile the post-edit hook pipeline is real and wired:
+      `compose_runtime_hooks_with_extensions` registers
+      `RuntimeServiceKind::Formatter` and `RuntimeServiceKind::Linter`
+      (`session_runtime.rs:9164,9179`) so a formatter runs on the touched file and
+      linter diagnostics append to the tool result. Nothing registers the test
+      command anywhere.
+      So the harness verifies **syntax and style** automatically and leaves
+      **behaviour** entirely to whether the model decides to run tests on its own.
+      **What is missing:** the third hook. At minimum an opt-in
+      `toolchain.test.after = "turn"` that runs the configured suite at turn end
+      and appends failures to the context, so the agent sees a red test the same
+      way it already sees a linter diagnostic. The mechanism exists; only the
+      registration is absent.
+      **Assessment:** the highest-leverage item for autonomy. Whether you can
+      leave an agent unattended is mostly determined by whether it checks its own
+      work, and formatters and linters check the two things least likely to be
+      wrong.
+
+- [x] **FEAT-10 · The runtime socket path is derived from `$HOME`, so a long home
+      path makes the product unusable with an unactionable error.** [verified]
+      With `ROTTWEILER_HOME` set to a path around 120 characters, every launch
+      fails:
+
+      ```
+      Error: × engine did not become ready: engine exited before authenticated
+        readiness (exit status: 1): Error: × path must be shorter than SUN_LEN
+      ```
+
+      `SUN_LEN` is 104 bytes on macOS. The message names neither the offending
+      path nor the setting that produced it, and there is no fallback.
+      Ordinary `/Users/name` homes are fine; containers, CI images, and
+      organisation-prefixed home paths are where this bites.
+      **What is missing:** derive the socket from a short hashed path under
+      `$TMPDIR` rather than from the home directory, or fall back to one
+      automatically and say so. Failing that, the error should name the path, the
+      limit, and the override.
+
+## Checked, and not a gap
+
+- **Detach and reattach work, and are fast.** `rw --detach`, close the TUI, then
+  relaunch in the same workspace: **reconnected in 0.5 s** to the still-running
+  engine. I expected this to deadlock against the workspace lease and it does
+  not. It also means FEAT-1's queued-session problem is cheaper than round 5
+  implied — the "attach to a live engine" path already exists and is quick.
+- **Headless exit codes are correct.** `rw -p` against an unresolvable model
+  alias exits **1** with a precise message. An earlier reading of `0` was my
+  pipeline's exit status, not the program's.
+- **Edits cannot silently clobber external changes.** `edit` and `multi_edit`
+  re-snapshot immediately before writing and compare-and-swap on a BLAKE3 hash,
+  returning `FileChangedSinceRead` if the file moved underneath. The edit is also
+  applied against freshly read content rather than the possibly-stale copy in
+  context, so an out-of-date transcript produces a clean "not found" rather than
+  a wrong edit.
+- **Session switching exists**, via `open_session_picker`; only *creation* is
+  missing (FEAT-8).
+- **The round-2 status-line fix is visible in the wild** — a fresh session now
+  reads `ctx 3.9k · limit unknown` rather than `ctx 3.9k/0 (—%)`.
+
+## Where a further round would look
+
+Not yet examined from the user's side: what a long autonomous run actually feels
+like (needs provider quota to observe), transcript search within a session,
+hunk-level rather than file-level accept in `/review`, and whether large pastes
+(stack traces, logs) into the composer stay responsive.
+
+---
+
+# Resolution — rounds 5 and 6
+
+The open findings above were resolved against the product in this repository.
+The original observations remain in place so the fixes can be checked against
+the exact failure modes that prompted them.
+
+| Finding | Resolution |
+|---|---|
+| ENG-1 residual | The reported zero-threshold path does not reach overflow calculation. `resolved_overflow_policy` validates the resolved context window first; a zero window becomes an unknown window and automatic compaction is disabled. The context snapshot reports the validation reason. The engine test `invalid_resolved_overflow_policy_disables_automatic_compaction` covers the boundary. |
+| FEAT-1 | Recovery lease acquisition now has a 15-second deadline. The supervisor reports that another session owns the workspace and advertises `Ctrl+C`; it no longer waits indefinitely. Users who want another conversation in the attached engine can create one with `Ctrl+N` or `/new`. |
+| FEAT-2 | Subscription tokens are a first-class accounting unit across durable session/day/trailing-minute ledgers, budget evaluation, cost snapshots, protocol projections, and the TUI. `session_token_cap`, `daily_token_cap`, and `token_rate_alarm_per_minute` are available in config and the budget picker. A configured cap fails closed if subscription quota is not token-metered. `Cost::subscription_token_accounting` is the single owner of quota parsing. |
+| FEAT-3 | The model catalog owns image-input capability alongside context and pricing metadata. Subscription routes derive vision support from that catalog. The composer exposes image controls only for a selected vision-capable model and rejects unsupported image files before dispatch. |
+| FEAT-4 | `rw plugin check <path> --allow-exec` validates regular-file boundaries, manifest/package identity, and the required `typecheck` and `test` scripts, then runs both without attaching the plugin to a live session. |
+| FEAT-5 | This was explicitly recorded as a known product choice rather than a missing current feature. The client API remains documented for independent clients; this audit does not invent a second UI as remediation for an unrelated workflow gap. |
+| FEAT-6 | Fresh state no longer revives an unresolved session alias after the authoritative model catalog arrives. Once session and model projections confirm that no provider is ready, the TUI opens provider onboarding and leaves the model unselected. Model projection now has one owner in the reducer, parameterized by the attached session identity. |
+| FEAT-7 | `rw doctor` now fails when no provider is configured or when the default alias has no candidate backed by a configured provider. Valid fallback chains pass when at least one candidate is usable. |
+| FEAT-8 | New conversation creation is available from `Ctrl+N`, `/new`, the command palette, and the first row of the session picker. All entry points use one correlated create-session action and switch only after the engine returns the new identity. |
+| FEAT-9 | The single workspace-level `toolchain.test` command runs in the sandbox after every otherwise-successful turn, with no network grant and a bounded timeout. A failed test marks the turn failed and commits a bounded system diagnostic after the assistant response so the next turn receives it. The unused per-rule test field was deleted instead of retained as a second owner or compatibility path. |
+| FEAT-10 | Runtime files stay below the configured storage root when the resulting socket path fits. Long roots automatically use a private, owner-checked, hashed directory below the system temporary directory, with `/tmp` as the bounded final fallback. Durable session data never moves. |
+
+The official npm package remains a release action rather than a source edit:
+`@rottweiler/plugin` must be published by the exact-tag trusted-publishing
+workflow. The repository contains the publish and public-byte verification
+gates; a non-tag development run cannot legitimately substitute for that
+registry action.

@@ -2799,6 +2799,7 @@ describe("M4 retained components", () => {
     expect(commands.at(-1)).toMatchObject({ type: "search_sessions", query: "rott", limit: 100 })
     expect(app.picker.select.options.map((option) => option.value)).toEqual([
       "session-rottweiler",
+      "sessions.new",
     ])
   })
 

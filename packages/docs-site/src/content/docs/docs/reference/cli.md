@@ -49,6 +49,7 @@ rw trust status
 rw trust grant
 rw trust revoke
 rw plugin scaffold --lang ts --name <name> <path>
+rw plugin check <path> --allow-exec
 rw plugin dev <path> --session <id|current> --allow-dev-exec
 rw plugin status
 rw plugin approve <plugin>
@@ -82,3 +83,7 @@ rw upgrade [--channel stable|beta]
 
 Aliases are not part of the CLI contract. The command tree has one spelling for
 each operation.
+
+`plugin check` validates manifest/package identity, then runs the plugin's
+declared `typecheck` and `test` scripts. It executes local code only after the
+explicit `--allow-exec` grant and does not attach the plugin to a live session.

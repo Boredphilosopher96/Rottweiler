@@ -14,11 +14,11 @@ wire incrementally, and the handler signal aborts when the host drops or
 cancels that request. Provider streams are bounded but have no whole-call
 five-second deadline.
 
-Protocol-2 providers can declare `capabilities: ["models"]` and implement the
+Provider plugins can declare `capabilities: ["models"]` and implement the
 matching `providerModels` handler. Its bounded catalog supplies selectable model
 ids, capabilities, limits, and optional integral pricing to the host.
 
-Authenticated protocol-2 providers declare `"credential-references"` on their
+Authenticated providers declare `"credential-references"` on their
 provider entry and call `context.providerHttp.request`. The host resolves and
 attaches the credential, enforces `allowed_domains`, and streams the response;
 the plugin receives the reference and response bytes, never the credential value.

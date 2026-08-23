@@ -31,6 +31,7 @@ export type KeybindingAction =
   | "move_left"
   | "move_right"
   | "move_up"
+  | "new_session"
   | "open_command_picker"
   | "open_external_editor"
   | "open_mode_picker"
@@ -114,6 +115,7 @@ const ACTIONS: readonly KeybindingAction[] = [
   "move_left",
   "move_right",
   "move_up",
+  "new_session",
   "open_command_picker",
   "open_external_editor",
   "open_mode_picker",
@@ -150,6 +152,7 @@ export const KEYBINDING_ACTION_LABELS: Record<KeybindingAction, string> = {
   move_left: "Move left",
   move_right: "Move right",
   move_up: "Move up",
+  new_session: "Start a new session",
   open_command_picker: "Open command palette",
   open_external_editor: "Open external editor",
   open_mode_picker: "Switch mode",
@@ -170,6 +173,7 @@ export const KEYBINDING_ACTION_LABELS: Record<KeybindingAction, string> = {
 const STANDARD_DEFAULTS = {
   global: {
     open_review: ["ctrl+r"],
+    new_session: ["ctrl+n"],
     cycle_agent_mode: ["shift+tab"],
     open_command_picker: ["ctrl+p"],
     // Ctrl+M is carriage return in legacy terminal input and collides with
@@ -202,6 +206,7 @@ const STANDARD_DEFAULTS = {
 const VIM_DEFAULTS = {
   global: {
     open_review: ["ctrl+r"],
+    new_session: ["ctrl+n"],
     cycle_agent_mode: ["shift+tab"],
     open_command_picker: ["ctrl+p"],
     open_model_picker: ["alt+m"],

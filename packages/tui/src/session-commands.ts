@@ -3,6 +3,7 @@ import type { RottweilerState } from "./state"
 export type CommandChoice = RottweilerState["commands"][number]
 
 export const TUI_SLASH_COMMANDS: readonly CommandChoice[] = [
+  { name: "new", description: "Start a new conversation", usage: "/new" },
   { name: "models", description: "Switch the active model", usage: "/models" },
   { name: "providers", description: "Choose a configured provider and model", usage: "/providers" },
   { name: "agents", description: "Inspect and manage child agents", usage: "/agents" },
@@ -35,6 +36,7 @@ export function mergeSlashCommandChoices(
 
 export type SessionAction =
   | { readonly type: "exit" }
+  | { readonly type: "new" }
   | { readonly type: "review" }
   | { readonly type: "fork"; readonly atTurn: string | null }
   | { readonly type: "rewindTimeline" }
@@ -50,6 +52,11 @@ export type SessionAction =
 export function parseSessionAction(content: string): SessionAction | null {
   const tokens = content.trim().split(/\s+/)
   const command = tokens[0]
+  if (command === "/new") {
+    return tokens.length === 1
+      ? { type: "new" }
+      : { type: "invalid", message: "usage: /new" }
+  }
   if (command === "/exit") {
     return tokens.length === 1
       ? { type: "exit" }

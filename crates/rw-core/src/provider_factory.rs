@@ -3309,6 +3309,7 @@ fn configured_model_pricing(
         max_output_tokens: None,
         supports_tools: false,
         supports_thinking: false,
+        supports_vision: false,
         reasoning_efforts: Vec::new(),
         input_per_million_micros_usd: rate(pricing.input_per_million.as_ref()?)?,
         output_per_million_micros_usd: rate(pricing.output_per_million.as_ref()?)?,
@@ -3661,7 +3662,7 @@ fn subscription_model_capabilities(pricing: Option<&ModelPricing>) -> Capabiliti
         // Tool compatibility is a property of the isolated subscription
         // transport, not something models.dev pricing metadata may revoke.
         tool_calling: true,
-        vision: false,
+        vision: pricing.is_some_and(|value| value.supports_vision),
         thinking: true,
         cache_breakpoints: CacheBreakpointSupport::Automatic,
         max_context_tokens: pricing.and_then(|value| value.max_context_tokens),
@@ -3715,8 +3716,7 @@ fn model_capabilities(kind: AdapterKind, pricing: Option<&ModelPricing>) -> Capa
     };
     Capabilities {
         tool_calling: pricing.is_some_and(|value| value.supports_tools),
-        // The current catalog has no authoritative per-model vision field.
-        vision: false,
+        vision: pricing.is_some_and(|value| value.supports_vision),
         thinking: pricing.is_some_and(|value| {
             value
                 .reasoning_efforts
@@ -4191,6 +4191,7 @@ mod native_search_tests {
             max_output_tokens: Some(128_000),
             supports_tools: true,
             supports_thinking: true,
+            supports_vision: true,
             reasoning_efforts: vec![ThinkingLevel::Low, ThinkingLevel::High],
             input_per_million_micros_usd: 1,
             output_per_million_micros_usd: 1,
@@ -4208,6 +4209,7 @@ mod native_search_tests {
         assert_eq!(subscription.max_output_tokens, Some(128_000));
         assert!(subscription.tool_calling);
         assert!(subscription.thinking);
+        assert!(subscription.vision);
 
         let copilot = github_copilot_capabilities(Some(&pricing));
         assert_eq!(copilot.max_context_tokens, Some(400_000));

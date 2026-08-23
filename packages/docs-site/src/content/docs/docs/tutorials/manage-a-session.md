@@ -8,6 +8,18 @@ sidebar:
 Rottweiler persists session events so the UI process is not the owner of your
 work.
 
+## Start a clean conversation
+
+Press `Ctrl+N`, choose **New session** from the command or session picker, or
+enter:
+
+```text
+/new
+```
+
+The engine creates the session and returns its identity before the TUI switches.
+The previous conversation remains durable and available from **Switch session**.
+
 ## Find the session
 
 ```sh

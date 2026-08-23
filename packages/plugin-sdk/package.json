@@ -1,7 +1,7 @@
 {
   "name": "@rottweiler/plugin",
   "version": "0.1.4",
-  "description": "Official TypeScript SDK for Rottweiler protocol 2 plugins",
+  "description": "Official TypeScript SDK for capability-bound Rottweiler plugins",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -23,8 +23,8 @@
       "types": "./dist/scaffold.d.ts",
       "default": "./dist/scaffold.js"
     },
-    "./protocol-2.json": "./fixtures/wire/protocol-2.json",
-    "./protocol-2.schema.json": "./fixtures/wire/protocol-2.schema.json"
+    "./protocol.json": "./fixtures/wire/protocol-2.json",
+    "./protocol.schema.json": "./fixtures/wire/protocol-2.schema.json"
   },
   "bin": {
     "rottweiler-plugin-scaffold": "./dist/bin/scaffold.js"

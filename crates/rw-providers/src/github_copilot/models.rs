@@ -53,6 +53,7 @@ impl GitHubCopilotPricing {
             max_output_tokens: Some(max_output_tokens),
             supports_tools,
             supports_thinking: !reasoning_efforts.is_empty(),
+            supports_vision: false,
             reasoning_efforts,
             input_per_million_micros_usd: github_copilot_micros_usd_per_million(
                 self.input_ai_credits_per_batch,

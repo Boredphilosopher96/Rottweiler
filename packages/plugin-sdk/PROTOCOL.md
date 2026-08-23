@@ -1,20 +1,15 @@
-# Rottweiler plugin protocol 2
+# Rottweiler plugin API
 
-Status: **stable**. The dependency-leaf `rw-plugin-protocol` crate owns the contract and generates
-the TypeScript, schema, and fixture projections beside this file. Protocol 2 is the only supported
-generation.
+The dependency-leaf `rw-plugin-protocol` crate owns the contract and generates
+the TypeScript, schema, and fixture projections beside this file.
 
-## Version negotiation
+## Initialization
 
 The host sends `initialize` with `protocol`, `min_protocol`, and an optional bounded string
-`capabilities` list. Both version fields are 2, and the plugin's approved manifest must select 2.
-Protocol 2 requires `provider-models` for declared model discovery and `provider-http` for any
-declared credential reference. Unknown host capability strings are ignored, so later additive
-facilities remain negotiable without protocol 3.
-
-The engine accepts protocol 2 only. Additive optional methods and capability strings may be
-introduced within protocol 2. Breaking wire-shape, framing, or existing-method semantic changes
-require a new protocol generation and a direct migration; the host does not carry legacy adapters.
+`capabilities` list. A plugin's approved manifest must select the version offered
+by the host. Declared model discovery requires `provider-models`, and declared
+credential references require `provider-http`. Unknown host capability strings
+do not grant authority.
 
 Transport is newline-terminated JSON-RPC 2.0 over stdin/stdout. Empty or unterminated lines,
 invalid UTF-8/JSON, unknown response IDs, and malformed envelopes are fatal protocol violations.
@@ -35,11 +30,11 @@ subscriptions, and plugin-to-host push methods. Tool effects are exactly `reads-
 approved declaration. Hooks declare `fail-open` or `fail-closed` and use the generated default
 handler timeout. Events are notifications. Pushes are requests and require an explicit declaration.
 
-The generated `RPC_METHODS` object is the canonical method catalog. Exact examples live in
-`fixtures/wire/protocol-2.json`.
+The generated `RPC_METHODS` object is the canonical method catalog. The
+generated wire fixture contains exact examples.
 
 `tool/call` returns `{ "content": string, "data": JSON, "truncated"?: boolean }`.
-Protocol-2 provider declarations opt into catalog RPC with
+Provider declarations opt into catalog RPC with
 `"capabilities": ["models"]`; this declaration is part of the approved manifest fingerprint.
 Other bounded canonical capability strings are retained in that fingerprint but confer no host
 authority unless the host recognizes and negotiates them.

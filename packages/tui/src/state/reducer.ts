@@ -149,10 +149,11 @@ function knownEventDelivery(type: string): EngineEventDelivery | null {
 export function reduceRottweilerState(
   state: RottweilerState = createInitialState(),
   action: RottweilerAction,
+  activeSessionId: string | null = null,
 ): RottweilerState {
   switch (action.type) {
     case "engine_event":
-      return reduceWireEvent(state, action.event)
+      return reduceWireEvent(state, action.event, activeSessionId)
     case "transport_connecting":
       return {
         ...state,
@@ -206,14 +207,15 @@ export function reduceRottweilerState(
 export function reduceWireEvent(
   state: RottweilerState,
   event: WireEngineEvent,
+  activeSessionId: string | null = null,
 ): RottweilerState {
   const scope = knownEventDelivery(event.type)
   // Transient progress updates retained projections without consuming the durable replay cursor.
   if (scope === "transient") {
-    return applyKnownEvent(state, event as EngineEvent, null)
+    return applyKnownEvent(state, event as EngineEvent, null, activeSessionId)
   }
   if (scope === "connection") {
-    return applyKnownEvent(state, event as EngineEvent, null)
+    return applyKnownEvent(state, event as EngineEvent, null, activeSessionId)
   }
 
   const sequenceText = durableSequenceId(event)
@@ -269,7 +271,7 @@ export function reduceWireEvent(
   if (scope === null) {
     return recordUnknown(ready, event.type)
   }
-  return applyKnownEvent(ready, event as EngineEvent, sequenceText)
+  return applyKnownEvent(ready, event as EngineEvent, sequenceText, activeSessionId)
 }
 
 export function projectSessionTitleUpdate(
@@ -290,6 +292,7 @@ function applyKnownEvent(
   state: RottweilerState,
   event: EngineEvent,
   sequenceId: string | null,
+  activeSessionId: string | null,
 ): RottweilerState {
   switch (event.type) {
     case "command_acknowledged":
@@ -366,14 +369,27 @@ function applyKnownEvent(
       }
     case "sessions_listed":
       const activeSession =
-        state.driverClientId === null
-          ? undefined
-          : event.sessions.find((session) => session.driver_client_id === state.driverClientId)
+        activeSessionId === null
+          ? state.driverClientId === null
+            ? undefined
+            : event.sessions.find((session) => session.driver_client_id === state.driverClientId)
+          : event.sessions.find((session) => session.session_id === activeSessionId)
+      const activeSessionModelResolved = activeSession !== undefined && state.models.some(
+        (model) =>
+          model.available !== false &&
+          (model.id === activeSession.model || model.aliases.includes(activeSession.model)),
+      )
       return {
         ...state,
-        ...(state.model !== null || activeSession === undefined
+        ...(state.model !== null || activeSession === undefined ||
+          (state.modelCatalogLoaded && !activeSessionModelResolved)
           ? {}
-          : { model: activeSession.model }),
+          : {
+              model: activeSession.model,
+              provider: activeSession.model.includes("/")
+                ? activeSession.model.slice(0, activeSession.model.indexOf("/"))
+                : null,
+            }),
         sessions: event.sessions.map((session) => ({
           sessionId: session.session_id,
           ...(session.title ? { title: session.title } : {}),
@@ -430,14 +446,24 @@ function applyKnownEvent(
         (model) => model.current === true && model.available !== false,
       )
       const currentModel = currentModels.length === 1 ? currentModels[0] : undefined
+      const hasReadyProvider = event.providers.some(
+        (provider) => provider.configured && provider.authenticated && provider.reachable,
+      )
+      const freshUnresolvedSelection =
+        !hasReadyProvider &&
+        currentModel === undefined &&
+        state.transcript.length === 0 &&
+        state.streamingTail === null
       return {
         ...state,
-        ...(state.model !== null || currentModel === undefined
-          ? {}
-          : {
+        ...(state.model === null && currentModel !== undefined
+          ? {
               model: currentModel.id,
               provider: currentModel.provider,
-            }),
+            }
+          : freshUnresolvedSelection
+            ? { model: null, provider: null }
+            : {}),
         models: event.models.map((model) => ({
           id: model.id,
           displayName: model.display_name,
@@ -455,7 +481,7 @@ function applyKnownEvent(
           candidates: alias.candidates,
           current: alias.current,
         })),
-        providers: (event.providers ?? []).map((provider) => ({
+        providers: event.providers.map((provider) => ({
           name: provider.name,
           authKind: provider.auth_kind,
           nextAction: provider.next_action,
@@ -482,6 +508,7 @@ function applyKnownEvent(
                 },
               }
             : state.providerAuth,
+        modelCatalogLoaded: true,
         commandAcks: responseAck(state, event.meta.request_id, event.type, null),
       }
     case "settings_listed":

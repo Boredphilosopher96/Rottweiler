@@ -432,6 +432,27 @@ impl ExecutionLease {
         acquire_execution_lease(path.as_ref(), false)
     }
 
+    /// Opens an execution lease for recovery, waiting no longer than `timeout`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the lease remains owned at the deadline or the
+    /// private lease file cannot be opened safely.
+    pub fn acquire_for(path: impl AsRef<Path>, timeout: Duration) -> Result<Self, ToolError> {
+        #[cfg(unix)]
+        {
+            acquire_execution_lease_with_wait(
+                path.as_ref(),
+                ExecutionLeaseWait::Until(std::time::Instant::now() + timeout),
+            )
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = timeout;
+            acquire_execution_lease(path.as_ref(), false)
+        }
+    }
+
     #[cfg(unix)]
     fn watchdog_stdio(&self) -> Result<Stdio, ToolError> {
         self.file
@@ -452,6 +473,29 @@ impl ExecutionLease {
 
 #[cfg(unix)]
 fn acquire_execution_lease(path: &Path, wait: bool) -> Result<ExecutionLease, ToolError> {
+    acquire_execution_lease_with_wait(
+        path,
+        if wait {
+            ExecutionLeaseWait::Forever
+        } else {
+            ExecutionLeaseWait::Never
+        },
+    )
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+enum ExecutionLeaseWait {
+    Never,
+    Forever,
+    Until(std::time::Instant),
+}
+
+#[cfg(unix)]
+fn acquire_execution_lease_with_wait(
+    path: &Path,
+    wait: ExecutionLeaseWait,
+) -> Result<ExecutionLease, ToolError> {
     let parent_path = path
         .parent()
         .ok_or_else(|| ToolError::Command("execution lease has no parent".to_owned()))?;
@@ -539,8 +583,12 @@ fn acquire_execution_lease(path: &Path, wait: bool) -> Result<ExecutionLease, To
 }
 
 #[cfg(unix)]
-fn lock_execution_lease(file: &std::fs::File, path: &Path, wait: bool) -> Result<(), ToolError> {
-    let operation = if wait {
+fn lock_execution_lease(
+    file: &std::fs::File,
+    path: &Path,
+    wait: ExecutionLeaseWait,
+) -> Result<(), ToolError> {
+    let operation = if matches!(wait, ExecutionLeaseWait::Forever) {
         rustix::fs::FlockOperation::LockExclusive
     } else {
         rustix::fs::FlockOperation::NonBlockingLockExclusive
@@ -549,6 +597,18 @@ fn lock_execution_lease(file: &std::fs::File, path: &Path, wait: bool) -> Result
         match rustix::fs::flock(file, operation) {
             Ok(()) => return Ok(()),
             Err(rustix::io::Errno::INTR) => {}
+            Err(rustix::io::Errno::WOULDBLOCK) if matches!(wait, ExecutionLeaseWait::Until(_)) => {
+                let ExecutionLeaseWait::Until(deadline) = wait else {
+                    unreachable!();
+                };
+                if std::time::Instant::now() >= deadline {
+                    return Err(ToolError::Command(format!(
+                        "execution lease remained busy until the recovery timeout at {}",
+                        path.display()
+                    )));
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
             Err(source) => {
                 return Err(ToolError::Io {
                     operation: "lock execution lease",
@@ -2686,6 +2746,19 @@ mod tests {
         assert!(
             matches!(error, ToolError::Io { source, .. } if source.kind() == std::io::ErrorKind::WouldBlock)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_execution_lease_wait_is_bounded() {
+        let root = tempdir().expect("temp directory");
+        let path = root.path().join("execution.lock");
+        let _owner = ExecutionLease::acquire(&path).expect("initial execution lease");
+        let started = std::time::Instant::now();
+        let error = ExecutionLease::acquire_for(&path, Duration::from_millis(20))
+            .expect_err("recovery lease must time out");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(error.to_string().contains("recovery timeout"));
     }
 
     #[test]

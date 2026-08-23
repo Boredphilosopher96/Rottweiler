@@ -15,14 +15,35 @@ fn add_usage(total: &mut Usage, usage: &Usage) {
         .saturating_add(usage.reasoning_tokens);
 }
 
-fn cost_units(cost: &Cost) -> (u64, u64) {
+#[derive(Clone, Copy, Default)]
+pub(super) struct BudgetUsage {
+    cost_micros_usd: u64,
+    ai_credit_micros: u64,
+    subscription_tokens: u64,
+}
+
+fn cost_units(cost: &Cost) -> BudgetUsage {
     match cost {
         Cost::Monetary {
             amount_micros,
             currency,
-        } if currency.eq_ignore_ascii_case("USD") => (*amount_micros, 0),
-        Cost::AiCredits { credits_micros, .. } => (0, *credits_micros),
-        Cost::Monetary { .. } | Cost::SubscriptionQuota { .. } | Cost::Unavailable { .. } => (0, 0),
+        } if currency.eq_ignore_ascii_case("USD") => BudgetUsage {
+            cost_micros_usd: *amount_micros,
+            ..BudgetUsage::default()
+        },
+        Cost::AiCredits { credits_micros, .. } => BudgetUsage {
+            ai_credit_micros: *credits_micros,
+            ..BudgetUsage::default()
+        },
+        Cost::SubscriptionQuota { .. } => match cost.subscription_token_accounting() {
+            SubscriptionTokenAccounting::Metered(tokens) => BudgetUsage {
+                subscription_tokens: tokens,
+                ..BudgetUsage::default()
+            },
+            SubscriptionTokenAccounting::NotApplicable
+            | SubscriptionTokenAccounting::Unavailable => BudgetUsage::default(),
+        },
+        Cost::Monetary { .. } | Cost::Unavailable { .. } => BudgetUsage::default(),
     }
 }
 
@@ -68,6 +89,7 @@ async fn persist_incomplete_budget_caps(
     cost: &Cost,
     current_cost_micros: u64,
     current_credit_micros: u64,
+    current_tokens: u64,
 ) -> Result<bool, AgentLoopError> {
     let mut hard_stop = false;
     if !dollar_accounting_complete(cost) {
@@ -90,6 +112,33 @@ async fn persist_incomplete_budget_caps(
                     scope,
                     unit: BudgetUnit::AiCreditMicros,
                     current: current_credit_micros,
+                    limit,
+                },
+            )
+            .await?;
+            hard_stop = true;
+        }
+    }
+    let token_accounting_unknown = matches!(
+        cost.subscription_token_accounting(),
+        SubscriptionTokenAccounting::Unavailable
+    );
+    if token_accounting_unknown {
+        for (scope, limit) in [
+            (BudgetScope::Session, budget.session_token_cap),
+            (BudgetScope::Daily, budget.daily_token_cap),
+        ] {
+            let Some(limit) = limit else {
+                continue;
+            };
+            persist_event(
+                signals,
+                PendingEvent::BudgetStatus {
+                    turn,
+                    level: BudgetLevel::HardCap,
+                    scope,
+                    unit: BudgetUnit::Tokens,
+                    current: current_tokens,
                     limit,
                 },
             )
@@ -171,6 +220,8 @@ pub(super) struct BudgetCheck {
 pub(super) struct SessionAccountingFallback {
     cost_micros_usd: u64,
     ai_credit_micros: u64,
+    subscription_tokens: u64,
+    unmetered_subscription_quota_entries: u64,
     subscription_quota_entries: u64,
     cost_unavailable_entries: u64,
     non_usd_monetary_entries: u64,
@@ -195,6 +246,18 @@ pub(super) fn session_accounting_fallback(
             Cost::SubscriptionQuota { .. } => {
                 fallback.subscription_quota_entries =
                     fallback.subscription_quota_entries.saturating_add(1);
+                match turn.cost.subscription_token_accounting() {
+                    SubscriptionTokenAccounting::Metered(tokens) => {
+                        fallback.subscription_tokens =
+                            fallback.subscription_tokens.saturating_add(tokens);
+                    }
+                    SubscriptionTokenAccounting::Unavailable => {
+                        fallback.unmetered_subscription_quota_entries = fallback
+                            .unmetered_subscription_quota_entries
+                            .saturating_add(1);
+                    }
+                    SubscriptionTokenAccounting::NotApplicable => {}
+                }
             }
             Cost::Unavailable { .. } => {
                 fallback.cost_unavailable_entries =
@@ -255,8 +318,7 @@ pub(super) async fn evaluate_budget(
     sink: &Arc<dyn SessionEventSink>,
     budget: &BudgetConfig,
     local_session: SessionAccountingFallback,
-    current_turn_cost: u64,
-    current_turn_credits: u64,
+    current_turn: BudgetUsage,
 ) -> Result<BudgetCheck, AgentLoopError> {
     if budget.session_cost_cap_micros_usd.is_none()
         && budget.daily_cost_cap_micros_usd.is_none()
@@ -264,6 +326,9 @@ pub(super) async fn evaluate_budget(
         && budget.daily_ai_credit_cap_micros.is_none()
         && budget.spend_rate_alarm_micros_usd_per_minute.is_none()
         && budget.ai_credit_rate_alarm_micros_per_minute.is_none()
+        && budget.session_token_cap.is_none()
+        && budget.daily_token_cap.is_none()
+        && budget.token_rate_alarm_per_minute.is_none()
     {
         return Ok(BudgetCheck {
             events: Vec::new(),
@@ -283,25 +348,37 @@ pub(super) async fn evaluate_budget(
     } else {
         local_session.cost_micros_usd
     }
-    .saturating_add(current_turn_cost);
+    .saturating_add(current_turn.cost_micros_usd);
     let session_credits = if ledger.authoritative {
         ledger.session_ai_credit_micros
     } else {
         local_session.ai_credit_micros
     }
-    .saturating_add(current_turn_credits);
+    .saturating_add(current_turn.ai_credit_micros);
+    let session_tokens = if ledger.authoritative {
+        ledger.session_subscription_tokens
+    } else {
+        local_session.subscription_tokens
+    }
+    .saturating_add(current_turn.subscription_tokens);
     let daily_cost = ledger
         .daily_cost_micros_usd
-        .saturating_add(current_turn_cost);
+        .saturating_add(current_turn.cost_micros_usd);
     let daily_credits = ledger
         .daily_ai_credit_micros
-        .saturating_add(current_turn_credits);
+        .saturating_add(current_turn.ai_credit_micros);
     let trailing_cost = ledger
         .trailing_minute_cost_micros_usd
-        .saturating_add(current_turn_cost);
+        .saturating_add(current_turn.cost_micros_usd);
     let trailing_credits = ledger
         .trailing_minute_ai_credit_micros
-        .saturating_add(current_turn_credits);
+        .saturating_add(current_turn.ai_credit_micros);
+    let daily_tokens = ledger
+        .daily_subscription_tokens
+        .saturating_add(current_turn.subscription_tokens);
+    let trailing_tokens = ledger
+        .trailing_minute_subscription_tokens
+        .saturating_add(current_turn.subscription_tokens);
     let mut events = Vec::new();
     let mut hard_stop = false;
     if !ledger.authoritative {
@@ -387,6 +464,38 @@ pub(super) async fn evaluate_budget(
         });
         hard_stop = true;
     }
+    let session_token_accounting_incomplete = if ledger.authoritative {
+        ledger.session_unmetered_subscription_quota_entries > 0
+    } else {
+        local_session.unmetered_subscription_quota_entries > 0
+    };
+    if let Some(limit) = budget.session_token_cap
+        && session_token_accounting_incomplete
+    {
+        events.push(PendingEvent::BudgetStatus {
+            turn,
+            level: BudgetLevel::HardCap,
+            scope: BudgetScope::Session,
+            unit: BudgetUnit::Tokens,
+            current: session_tokens,
+            limit,
+        });
+        hard_stop = true;
+    }
+    if ledger.authoritative
+        && let Some(limit) = budget.daily_token_cap
+        && ledger.daily_unmetered_subscription_quota_entries > 0
+    {
+        events.push(PendingEvent::BudgetStatus {
+            turn,
+            level: BudgetLevel::HardCap,
+            scope: BudgetScope::Daily,
+            unit: BudgetUnit::Tokens,
+            current: daily_tokens,
+            limit,
+        });
+        hard_stop = true;
+    }
     if ledger.authoritative
         && let Some(limit) = budget.daily_ai_credit_cap_micros
         && ledger.daily_cost_unavailable_entries > 0
@@ -418,6 +527,26 @@ pub(super) async fn evaluate_budget(
             BudgetUnit::MicrosUsd,
             daily_cost,
             budget.daily_cost_cap_micros_usd,
+            budget.warn_at_percent,
+        );
+    }
+    hard_stop |= push_cap_event(
+        &mut events,
+        turn,
+        BudgetScope::Session,
+        BudgetUnit::Tokens,
+        session_tokens,
+        budget.session_token_cap,
+        budget.warn_at_percent,
+    );
+    if ledger.authoritative {
+        hard_stop |= push_cap_event(
+            &mut events,
+            turn,
+            BudgetScope::Daily,
+            BudgetUnit::Tokens,
+            daily_tokens,
+            budget.daily_token_cap,
             budget.warn_at_percent,
         );
     }
@@ -471,6 +600,19 @@ pub(super) async fn evaluate_budget(
                 .unwrap_or_default(),
         });
     }
+    if budget
+        .token_rate_alarm_per_minute
+        .is_some_and(|limit| trailing_tokens >= limit)
+    {
+        events.push(PendingEvent::BudgetStatus {
+            turn,
+            level: BudgetLevel::SpendRateAlarm,
+            scope: BudgetScope::TrailingMinute,
+            unit: BudgetUnit::Tokens,
+            current: trailing_tokens,
+            limit: budget.token_rate_alarm_per_minute.unwrap_or_default(),
+        });
+    }
     Ok(BudgetCheck { events, hard_stop })
 }
 
@@ -499,6 +641,8 @@ pub(super) async fn build_cost_snapshot(
     let mut local_cost = 0_u64;
     let mut local_credits = 0_u64;
     let mut local_subscription = 0_u64;
+    let mut local_subscription_tokens = 0_u64;
+    let mut local_unmetered_subscription = 0_u64;
     let mut local_unavailable = 0_u64;
     let mut local_non_usd = 0_u64;
     for turn in &state.accounting {
@@ -516,6 +660,17 @@ pub(super) async fn build_cost_snapshot(
             Cost::Monetary { .. } => local_non_usd = local_non_usd.saturating_add(1),
             Cost::SubscriptionQuota { .. } => {
                 local_subscription = local_subscription.saturating_add(1);
+                match turn.cost.subscription_token_accounting() {
+                    SubscriptionTokenAccounting::Metered(tokens) => {
+                        local_subscription_tokens =
+                            local_subscription_tokens.saturating_add(tokens);
+                    }
+                    SubscriptionTokenAccounting::Unavailable => {
+                        local_unmetered_subscription =
+                            local_unmetered_subscription.saturating_add(1);
+                    }
+                    SubscriptionTokenAccounting::NotApplicable => {}
+                }
             }
             Cost::Unavailable { .. } => {
                 local_unavailable = local_unavailable.saturating_add(1);
@@ -524,6 +679,9 @@ pub(super) async fn build_cost_snapshot(
     }
     let session_cost = ledger.session_cost_micros_usd.max(local_cost);
     let session_credits = ledger.session_ai_credit_micros.max(local_credits);
+    let session_tokens = ledger
+        .session_subscription_tokens
+        .max(local_subscription_tokens);
     // UTC-day/trailing windows are storage-authoritative. Session totals are
     // safely recoverable from this session's durable events; day membership is not.
     let daily_cost = ledger.daily_cost_micros_usd;
@@ -535,6 +693,9 @@ pub(super) async fn build_cost_snapshot(
         .session_cost_unavailable_entries
         .max(local_unavailable);
     let session_non_usd = ledger.session_non_usd_monetary_entries.max(local_non_usd);
+    let session_unmetered_subscription = ledger
+        .session_unmetered_subscription_quota_entries
+        .max(local_unmetered_subscription);
     let budget = config.model.budget_config();
     let hard_cap_reached = budget
         .session_cost_cap_micros_usd
@@ -547,7 +708,14 @@ pub(super) async fn build_cost_snapshot(
             .is_some_and(|limit| session_credits >= limit)
         || budget
             .daily_ai_credit_cap_micros
-            .is_some_and(|limit| daily_credits >= limit);
+            .is_some_and(|limit| daily_credits >= limit)
+        || budget
+            .session_token_cap
+            .is_some_and(|limit| session_tokens >= limit || session_unmetered_subscription > 0)
+        || budget.daily_token_cap.is_some_and(|limit| {
+            ledger.daily_subscription_tokens >= limit
+                || ledger.daily_unmetered_subscription_quota_entries > 0
+        });
     let input_total = usage
         .input_tokens
         .saturating_add(usage.cache_read_tokens)
@@ -567,17 +735,23 @@ pub(super) async fn build_cost_snapshot(
         session_usage: usage,
         session_cost_micros_usd: session_cost,
         session_ai_credit_micros: session_credits,
+        session_subscription_tokens: session_tokens,
         daily_cost_micros_usd: daily_cost,
         daily_ai_credit_micros: daily_credits,
+        daily_subscription_tokens: ledger.daily_subscription_tokens,
         trailing_minute_cost_micros_usd: ledger.trailing_minute_cost_micros_usd,
         trailing_minute_ai_credit_micros: ledger.trailing_minute_ai_credit_micros,
+        trailing_minute_subscription_tokens: ledger.trailing_minute_subscription_tokens,
         cache_hit_basis_points,
         session_cost_cap_micros_usd: budget.session_cost_cap_micros_usd,
         daily_cost_cap_micros_usd: budget.daily_cost_cap_micros_usd,
         session_ai_credit_cap_micros: budget.session_ai_credit_cap_micros,
         daily_ai_credit_cap_micros: budget.daily_ai_credit_cap_micros,
+        session_token_cap: budget.session_token_cap,
+        daily_token_cap: budget.daily_token_cap,
         spend_rate_alarm_micros_usd_per_minute: budget.spend_rate_alarm_micros_usd_per_minute,
         ai_credit_rate_alarm_micros_per_minute: budget.ai_credit_rate_alarm_micros_per_minute,
+        token_rate_alarm_per_minute: budget.token_rate_alarm_per_minute,
         hard_cap_reached,
         session_monetary_accounting_complete: session_subscription == 0
             && session_unavailable == 0
@@ -1166,7 +1340,9 @@ fn start_session_title_generation(
     let hard_cap_configured = budget.session_cost_cap_micros_usd.is_some()
         || budget.daily_cost_cap_micros_usd.is_some()
         || budget.session_ai_credit_cap_micros.is_some()
-        || budget.daily_ai_credit_cap_micros.is_some();
+        || budget.daily_ai_credit_cap_micros.is_some()
+        || budget.session_token_cap.is_some()
+        || budget.daily_token_cap.is_some();
     // Background metadata must never race an ordinary turn past a hard cap.
     // Use the deterministic title in capped sessions; uncapped calls are
     // durably accounted when their result is persisted.
@@ -3749,6 +3925,7 @@ struct CompactionExecution {
     hard_stop: bool,
     failed_attempt_cost_micros: u64,
     failed_attempt_credit_micros: u64,
+    failed_attempt_tokens: u64,
 }
 
 fn context_compaction_reason(reason: &CompactionReason) -> ContextCompactionReason {
@@ -3808,6 +3985,7 @@ async fn execute_compaction(
     turn: u64,
     current_turn_cost_micros: u64,
     current_turn_credit_micros: u64,
+    current_turn_tokens: u64,
     enforce_budget_via_signals: bool,
 ) -> Result<CompactionExecution, AgentLoopError> {
     let hook_result = dispatch_hook(
@@ -3909,6 +4087,7 @@ async fn execute_compaction(
     let mut completed = None;
     let mut failed_attempt_cost_micros = 0_u64;
     let mut failed_attempt_credit_micros = 0_u64;
+    let mut failed_attempt_tokens = 0_u64;
     for (attempt_index, alias) in aliases.into_iter().enumerate() {
         let attempt = u32::try_from(attempt_index).unwrap_or(u32::MAX);
         send_compaction_progress(
@@ -3928,8 +4107,13 @@ async fn execute_compaction(
                 &config.event_sink,
                 &config.model.budget_config(),
                 local_session_accounting,
-                current_turn_cost_micros.saturating_add(failed_attempt_cost_micros),
-                current_turn_credit_micros.saturating_add(failed_attempt_credit_micros),
+                BudgetUsage {
+                    cost_micros_usd: current_turn_cost_micros
+                        .saturating_add(failed_attempt_cost_micros),
+                    ai_credit_micros: current_turn_credit_micros
+                        .saturating_add(failed_attempt_credit_micros),
+                    subscription_tokens: current_turn_tokens.saturating_add(failed_attempt_tokens),
+                },
             )
             .await?;
             for event in budget.events {
@@ -4044,6 +4228,7 @@ async fn execute_compaction(
                     &cost,
                     current_turn_cost_micros,
                     current_turn_credit_micros,
+                    current_turn_tokens,
                 )
                 .await?
                 {
@@ -4051,10 +4236,13 @@ async fn execute_compaction(
                         "budget cap cannot price a failed compaction attempt".to_owned(),
                     ));
                 }
-                let (cost_micros, credit_micros) = cost_units(&cost);
-                failed_attempt_cost_micros = failed_attempt_cost_micros.saturating_add(cost_micros);
+                let units = cost_units(&cost);
+                failed_attempt_cost_micros =
+                    failed_attempt_cost_micros.saturating_add(units.cost_micros_usd);
                 failed_attempt_credit_micros =
-                    failed_attempt_credit_micros.saturating_add(credit_micros);
+                    failed_attempt_credit_micros.saturating_add(units.ai_credit_micros);
+                failed_attempt_tokens =
+                    failed_attempt_tokens.saturating_add(units.subscription_tokens);
             }
             if cancelled {
                 return Err(error);
@@ -4100,6 +4288,7 @@ async fn execute_compaction(
                     &cost,
                     current_turn_cost_micros,
                     current_turn_credit_micros,
+                    current_turn_tokens,
                 )
                 .await?
                 {
@@ -4107,10 +4296,13 @@ async fn execute_compaction(
                         "budget cap cannot price a failed compaction attempt".to_owned(),
                     ));
                 }
-                let (cost_micros, credit_micros) = cost_units(&cost);
-                failed_attempt_cost_micros = failed_attempt_cost_micros.saturating_add(cost_micros);
+                let units = cost_units(&cost);
+                failed_attempt_cost_micros =
+                    failed_attempt_cost_micros.saturating_add(units.cost_micros_usd);
                 failed_attempt_credit_micros =
-                    failed_attempt_credit_micros.saturating_add(credit_micros);
+                    failed_attempt_credit_micros.saturating_add(units.ai_credit_micros);
+                failed_attempt_tokens =
+                    failed_attempt_tokens.saturating_add(units.subscription_tokens);
             }
             last_error = Some(AgentLoopError::Provider(
                 "compaction model returned an empty summary".to_owned(),
@@ -4123,7 +4315,7 @@ async fn execute_compaction(
             reported_model.as_deref(),
             usage.into(),
         );
-        let (compaction_cost, compaction_credits) = cost_units(&cost);
+        let compaction_usage = cost_units(&cost);
         let hard_stop = if enforce_budget_via_signals {
             let post_budget = evaluate_budget(
                 turn,
@@ -4131,12 +4323,17 @@ async fn execute_compaction(
                 &config.event_sink,
                 &config.model.budget_config(),
                 local_session_accounting,
-                current_turn_cost_micros
-                    .saturating_add(failed_attempt_cost_micros)
-                    .saturating_add(compaction_cost),
-                current_turn_credit_micros
-                    .saturating_add(failed_attempt_credit_micros)
-                    .saturating_add(compaction_credits),
+                BudgetUsage {
+                    cost_micros_usd: current_turn_cost_micros
+                        .saturating_add(failed_attempt_cost_micros)
+                        .saturating_add(compaction_usage.cost_micros_usd),
+                    ai_credit_micros: current_turn_credit_micros
+                        .saturating_add(failed_attempt_credit_micros)
+                        .saturating_add(compaction_usage.ai_credit_micros),
+                    subscription_tokens: current_turn_tokens
+                        .saturating_add(failed_attempt_tokens)
+                        .saturating_add(compaction_usage.subscription_tokens),
+                },
             )
             .await?;
             for event in post_budget.events {
@@ -4149,6 +4346,7 @@ async fn execute_compaction(
                 &cost,
                 current_turn_cost_micros.saturating_add(failed_attempt_cost_micros),
                 current_turn_credit_micros.saturating_add(failed_attempt_credit_micros),
+                current_turn_tokens.saturating_add(failed_attempt_tokens),
             )
             .await?;
             post_budget.hard_stop || incomplete
@@ -4182,6 +4380,7 @@ async fn execute_compaction(
         hard_stop,
         failed_attempt_cost_micros,
         failed_attempt_credit_micros,
+        failed_attempt_tokens,
     })
 }
 
@@ -4197,8 +4396,9 @@ pub(super) async fn compact_during_turn(
     local_session_accounting: SessionAccountingFallback,
     current_turn_cost_micros: u64,
     current_turn_credit_micros: u64,
+    current_turn_tokens: u64,
     instructions: Option<String>,
-) -> Result<(u64, u64, bool), AgentLoopError> {
+) -> Result<(u64, u64, u64, bool), AgentLoopError> {
     persist_event(
         signals,
         PendingEvent::CompactionStarted {
@@ -4219,6 +4419,7 @@ pub(super) async fn compact_during_turn(
             turn,
             current_turn_cost_micros,
             current_turn_credit_micros,
+            current_turn_tokens,
             true,
         )
         .await?;
@@ -4241,11 +4442,16 @@ pub(super) async fn compact_during_turn(
                 effective_after_agent_turn: turn,
             });
         }
-        let (successful_cost_micros, successful_credit_micros) = cost_units(&execution.cost);
-        let cost_micros =
-            successful_cost_micros.saturating_add(execution.failed_attempt_cost_micros);
-        let credit_micros =
-            successful_credit_micros.saturating_add(execution.failed_attempt_credit_micros);
+        let successful = cost_units(&execution.cost);
+        let cost_micros = successful
+            .cost_micros_usd
+            .saturating_add(execution.failed_attempt_cost_micros);
+        let credit_micros = successful
+            .ai_credit_micros
+            .saturating_add(execution.failed_attempt_credit_micros);
+        let tokens = successful
+            .subscription_tokens
+            .saturating_add(execution.failed_attempt_tokens);
         let now = config.event_clock.unix_time_millis();
         let ledger = config
             .event_sink
@@ -4273,6 +4479,7 @@ pub(super) async fn compact_during_turn(
             } else {
                 credit_micros
             },
+            if ledger.authoritative { 0 } else { tokens },
             execution.hard_stop,
         ))
     }
@@ -4520,6 +4727,7 @@ async fn run_turn(
     let mut deferred_terminal_turn = None;
     let mut current_turn_cost_micros = 0_u64;
     let mut current_turn_credit_micros = 0_u64;
+    let mut current_turn_tokens = 0_u64;
     let budget_config = config.model.budget_config();
     let mut turn_cost = None;
 
@@ -4534,8 +4742,11 @@ async fn run_turn(
             &config.event_sink,
             &budget_config,
             local_session_accounting,
-            current_turn_cost_micros,
-            current_turn_credit_micros,
+            BudgetUsage {
+                cost_micros_usd: current_turn_cost_micros,
+                ai_credit_micros: current_turn_credit_micros,
+                subscription_tokens: current_turn_tokens,
+            },
         )
         .await
         {
@@ -4610,15 +4821,17 @@ async fn run_turn(
                     local_session_accounting,
                     current_turn_cost_micros,
                     current_turn_credit_micros,
+                    current_turn_tokens,
                     None,
                 )
                 .await
                 {
-                    Ok((cost_micros, credit_micros, hard_stop)) => {
+                    Ok((cost_micros, credit_micros, tokens, hard_stop)) => {
                         current_turn_cost_micros =
                             current_turn_cost_micros.saturating_add(cost_micros);
                         current_turn_credit_micros =
                             current_turn_credit_micros.saturating_add(credit_micros);
+                        current_turn_tokens = current_turn_tokens.saturating_add(tokens);
                         if hard_stop {
                             status = AgentTurnStatus::BudgetExceeded;
                             break;
@@ -4814,15 +5027,17 @@ async fn run_turn(
                             local_session_accounting,
                             current_turn_cost_micros,
                             current_turn_credit_micros,
+                            current_turn_tokens,
                             None,
                         )
                         .await
                         {
-                            Ok((cost_micros, credit_micros, hard_stop)) => {
+                            Ok((cost_micros, credit_micros, tokens, hard_stop)) => {
                                 current_turn_cost_micros =
                                     current_turn_cost_micros.saturating_add(cost_micros);
                                 current_turn_credit_micros =
                                     current_turn_credit_micros.saturating_add(credit_micros);
+                                current_turn_tokens = current_turn_tokens.saturating_add(tokens);
                                 if hard_stop {
                                     status = AgentTurnStatus::BudgetExceeded;
                                     stream_failed = true;
@@ -5020,9 +5235,13 @@ async fn run_turn(
             assistant.meta.model = Some(qualified);
         }
         turn_cost = Some(combine_cost(turn_cost.take(), iteration_cost.clone()));
-        let (cost_micros, credit_micros) = cost_units(&iteration_cost);
-        current_turn_cost_micros = current_turn_cost_micros.saturating_add(cost_micros);
-        current_turn_credit_micros = current_turn_credit_micros.saturating_add(credit_micros);
+        let iteration_usage = cost_units(&iteration_cost);
+        current_turn_cost_micros =
+            current_turn_cost_micros.saturating_add(iteration_usage.cost_micros_usd);
+        current_turn_credit_micros =
+            current_turn_credit_micros.saturating_add(iteration_usage.ai_credit_micros);
+        current_turn_tokens =
+            current_turn_tokens.saturating_add(iteration_usage.subscription_tokens);
         let mut budget_stop = false;
         match evaluate_budget(
             turn,
@@ -5030,8 +5249,11 @@ async fn run_turn(
             &config.event_sink,
             &budget_config,
             local_session_accounting,
-            current_turn_cost_micros,
-            current_turn_credit_micros,
+            BudgetUsage {
+                cost_micros_usd: current_turn_cost_micros,
+                ai_credit_micros: current_turn_credit_micros,
+                subscription_tokens: current_turn_tokens,
+            },
         )
         .await
         {
@@ -5066,6 +5288,7 @@ async fn run_turn(
             &iteration_cost,
             current_turn_cost_micros,
             current_turn_credit_micros,
+            current_turn_tokens,
         )
         .await
         {
@@ -5254,6 +5477,31 @@ async fn run_turn(
                 config.secret_redactor.as_ref(),
             );
             if !hook.completed() && status == AgentTurnStatus::Completed {
+                if let Some(message) =
+                    hook_rejection(hook.status(), config.secret_redactor.as_ref())
+                {
+                    if let Some(assistant) = deferred_terminal_turn.take() {
+                        if let Some(text) = deferred_terminal_delta.take() {
+                            let _ = persist_event(&signals, PendingEvent::TextDelta { turn, text })
+                                .await;
+                        }
+                        let _ = persist_conversation_turn(&signals, turn, &assistant).await;
+                    }
+                    let diagnostic = Turn {
+                        role: Role::System,
+                        blocks: vec![Block::Text { text: message }],
+                        meta: TurnMeta {
+                            synthetic: true,
+                            ..TurnMeta::default()
+                        },
+                    };
+                    if persist_conversation_turn(&signals, turn, &diagnostic)
+                        .await
+                        .is_ok()
+                    {
+                        conversation.push(diagnostic);
+                    }
+                }
                 status = AgentTurnStatus::Failed;
             }
         }

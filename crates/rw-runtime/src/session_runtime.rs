@@ -3518,6 +3518,7 @@ fn acquire_shared_execution_lease(
     path: &Path,
     wait: bool,
 ) -> std::result::Result<Arc<ExecutionLease>, rw_tools::ToolError> {
+    const RECOVERY_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
     static LEASES: OnceLock<Mutex<HashMap<PathBuf, std::sync::Weak<ExecutionLease>>>> =
         OnceLock::new();
     let mut leases = LEASES
@@ -3529,8 +3530,9 @@ fn acquire_shared_execution_lease(
     }
     let lease = Arc::new(if wait {
         // A replacement engine must wait for an old watchdog to finish killing
-        // its command group before it can safely recover the workspace.
-        ExecutionLease::acquire(path)?
+        // its command group before it can safely recover the workspace. The
+        // wait is bounded so a competing live session can never look hung.
+        ExecutionLease::acquire_for(path, RECOVERY_WAIT_TIMEOUT)?
     } else {
         // A competing interactive host must fail fast instead of waiting until
         // the supervisor's health deadline.
@@ -4890,10 +4892,17 @@ impl SessionEventSink for DurableEventSink {
             daily_ai_credit_micros: totals.day_ai_credit_micros,
             trailing_minute_cost_micros_usd: totals.trailing_all_sessions_micros_usd,
             trailing_minute_ai_credit_micros: totals.trailing_all_sessions_ai_credit_micros,
+            session_subscription_tokens: totals.session_subscription_tokens,
+            daily_subscription_tokens: totals.day_subscription_tokens,
+            trailing_minute_subscription_tokens: totals.trailing_all_sessions_subscription_tokens,
             session_subscription_quota_entries: totals.session_subscription_quota_turns,
             session_cost_unavailable_entries: totals.session_unavailable_turns,
             session_non_usd_monetary_entries: totals.session_non_usd_monetary_turns,
             daily_subscription_quota_entries: totals.day_subscription_quota_turns,
+            session_unmetered_subscription_quota_entries: totals
+                .session_unmetered_subscription_quota_turns,
+            daily_unmetered_subscription_quota_entries: totals
+                .day_unmetered_subscription_quota_turns,
             daily_cost_unavailable_entries: totals.day_unavailable_turns,
             daily_non_usd_monetary_entries: totals.day_non_usd_monetary_turns,
         })
@@ -8961,6 +8970,7 @@ const fn runtime_service_order(kind: RuntimeServiceKind) -> u8 {
         RuntimeServiceKind::Lsp => 0,
         RuntimeServiceKind::Formatter => 1,
         RuntimeServiceKind::Linter => 2,
+        RuntimeServiceKind::Test => 3,
     }
 }
 
@@ -8968,6 +8978,7 @@ fn toolchain_command_identity(kind: RuntimeServiceKind, command: &str) -> String
     let fallback = || match kind {
         RuntimeServiceKind::Formatter => "formatter".to_owned(),
         RuntimeServiceKind::Linter => "linter".to_owned(),
+        RuntimeServiceKind::Test => "test".to_owned(),
         RuntimeServiceKind::Lsp => "language server".to_owned(),
     };
     shell_words::split(command)
@@ -9002,6 +9013,65 @@ struct ToolchainHook {
     rules: Vec<CompiledToolchainRule>,
     runtime: Arc<ToolchainRuntime>,
     tools: Arc<ToolRegistry>,
+}
+
+struct ToolchainTestHook {
+    command: String,
+    runtime: Arc<ToolchainRuntime>,
+}
+
+#[async_trait]
+impl HookHandler for ToolchainTestHook {
+    async fn invoke(
+        &self,
+        invocation: HookInvocation<'_>,
+    ) -> std::result::Result<HookDirective, HookError> {
+        if invocation.event() != HookEvent::TurnEnd
+            || invocation
+                .payload()
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                != Some("Completed")
+        {
+            return Ok(HookDirective::Continue);
+        }
+        let boundary = self.runtime.current();
+        let cwd = boundary.workspace_roots.first().ok_or_else(|| {
+            HookError::new("toolchain_test", "test command has no workspace root")
+        })?;
+        let _activity = self.runtime.enter(
+            RuntimeServiceKind::Test,
+            toolchain_command_identity(RuntimeServiceKind::Test, &self.command),
+        );
+        let capture = Arc::new(HookCommandCapture::default());
+        let outcome = boundary
+            .executor
+            .run(
+                CommandRequest {
+                    command: self.command.clone(),
+                    cwd: cwd.clone(),
+                    env: BTreeMap::new(),
+                    network_domains: Vec::new(),
+                    sandbox: BashSandboxMode::Sandboxed,
+                },
+                invocation.cancellation().clone(),
+                capture.clone(),
+            )
+            .await
+            .map_err(|error| HookError::new("toolchain_test", error.to_string()))?;
+        if outcome.exit_code == 0 {
+            return Ok(HookDirective::Continue);
+        }
+        let (stdout, stderr) = capture.finish();
+        Ok(HookDirective::Block {
+            message: HookCommandResult {
+                exit_code: outcome.exit_code,
+                stdout,
+                stderr,
+            }
+            .render("test"),
+        })
+    }
 }
 
 impl ToolchainHook {
@@ -10408,6 +10478,22 @@ fn compose_runtime_hooks(
                 ToolchainHook::compile(config, Arc::clone(&runtime), Arc::clone(&tools))?,
             )
             .map_err(|error| miette!("toolchain hook could not register: {error}"))?;
+    }
+    if let Some(command) = config.test.clone() {
+        hooks
+            .register(
+                HookRegistration::new("builtin.toolchain_test", HookEvent::TurnEnd)
+                    .with_priority(100)
+                    .with_failure_policy(HookFailurePolicy::FailClosed)
+                    .with_effect(HookEffect::WorkspaceMutating)
+                    .with_required_capabilities([ToolCapability::Execute])
+                    .with_timeout(std::time::Duration::from_mins(10)),
+                ToolchainTestHook {
+                    command,
+                    runtime: Arc::clone(&runtime),
+                },
+            )
+            .map_err(|error| miette!("toolchain test hook could not register: {error}"))?;
     }
     if let Some(intelligence) = intelligence {
         let applicable_tools = tools
@@ -17084,6 +17170,68 @@ mod tests {
         assert!(calls.iter().all(|call| {
             call.sandbox == BashSandboxMode::Sandboxed && call.network_domains.is_empty()
         }));
+    }
+
+    #[tokio::test]
+    async fn toolchain_test_runs_only_after_successful_turns_and_blocks_on_failure() {
+        let root = tempdir().expect("workspace");
+        let executor = Arc::new(FixtureToolchainExecutor::default());
+        let runtime = Arc::new(ToolchainRuntime::new(
+            executor.clone(),
+            &[root.path().to_path_buf()],
+        ));
+        let hooks = compose_runtime_hooks(
+            &ToolchainConfig {
+                formatter: None,
+                linters: Vec::new(),
+                test: Some("fixture-lint suite".to_owned()),
+                rules: Vec::new(),
+            },
+            runtime,
+            semantic_file_tools(),
+            None,
+        )
+        .expect("toolchain hooks");
+
+        let skipped = hooks
+            .dispatch(
+                HookEvent::TurnEnd,
+                serde_json::json!({"turn": 1, "status": "Failed"}),
+            )
+            .await;
+        assert!(skipped.completed());
+        assert!(
+            executor
+                .calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+        );
+
+        let failed = hooks
+            .dispatch(
+                HookEvent::TurnEnd,
+                serde_json::json!({"turn": 2, "status": "Completed"}),
+            )
+            .await;
+        assert!(matches!(
+            failed.status(),
+            rw_ext::HookDispatchStatus::Blocked { hook_id, message }
+                if hook_id == "builtin.toolchain_test"
+                    && message.contains("test exit code: 1")
+                    && message.contains("fixture diagnostic")
+        ));
+        let calls = executor
+            .calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].cwd,
+            std::fs::canonicalize(root.path()).expect("canonical workspace")
+        );
+        assert_eq!(calls[0].sandbox, BashSandboxMode::Sandboxed);
+        assert!(calls[0].network_domains.is_empty());
     }
 
     #[tokio::test]

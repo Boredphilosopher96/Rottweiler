@@ -208,8 +208,16 @@ struct UpstreamModel {
     #[serde(default)]
     tool_call: bool,
     #[serde(default)]
+    modalities: UpstreamModalities,
+    #[serde(default)]
     limit: UpstreamLimit,
     cost: Option<UpstreamCost>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct UpstreamModalities {
+    #[serde(default)]
+    input: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -270,6 +278,11 @@ fn convert_models_dev(
                     max_output_tokens: model.limit.output,
                     supports_tools: model.tool_call,
                     supports_thinking: model.reasoning,
+                    supports_vision: model
+                        .modalities
+                        .input
+                        .iter()
+                        .any(|modality| modality.eq_ignore_ascii_case("image")),
                     reasoning_efforts: reasoning_efforts(&model.reasoning_options),
                     input_per_million_micros_usd: input,
                     output_per_million_micros_usd: output,
@@ -525,6 +538,7 @@ mod tests {
                       {"type":"budget_tokens"}
                     ],
                     "tool_call": true,
+                    "modalities": {"input": ["text", "image"], "output": ["text"]},
                     "limit": {"context": 12345, "output": 678},
                     "cost": {"input": 0.25, "output": 2, "cache_read": 0.025, "reasoning": 0}
                   },
@@ -547,6 +561,7 @@ mod tests {
         assert_eq!(model.max_output_tokens, Some(678));
         assert!(model.supports_tools);
         assert!(model.supports_thinking);
+        assert!(model.supports_vision);
         assert_eq!(
             model.reasoning_efforts,
             vec![ThinkingLevel::Off, ThinkingLevel::Low, ThinkingLevel::High,]

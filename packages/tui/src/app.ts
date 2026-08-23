@@ -215,6 +215,9 @@ export interface TuiRecycleState {
 type BudgetSettingKey =
   | "budget.session_cost_cap_micros_usd"
   | "budget.daily_cost_cap_micros_usd"
+  | "budget.session_token_cap"
+  | "budget.daily_token_cap"
+  | "budget.token_rate_alarm_per_minute"
   | "budget.warn_at_percent"
 const MAX_VISIBLE_SUBAGENTS = 256
 const EMPTY_TEXT_PROMPT_SENTINEL = "\u200B"
@@ -258,6 +261,10 @@ type QueuedMessagePickerAction =
   | { readonly kind: "remove"; readonly position: string }
   | { readonly kind: "clear" }
 type SessionProjection = RottweilerState["sessions"][number]
+type SessionListAction =
+  | { readonly kind: "new" }
+  | { readonly kind: "session"; readonly session: SessionProjection }
+  | { readonly kind: "retry" }
 type SessionPickerAction =
   | { readonly kind: "resume"; readonly session: SessionProjection }
   | { readonly kind: "rename"; readonly session: SessionProjection }
@@ -392,6 +399,7 @@ export class RottweilerApp extends BoxRenderable {
   #composerSubmissionsInFlight = 0
   #deferredTheme: RottweilerTheme | null = null
   #sessionId: string
+  #pendingSessionCreateRequestId: string | null = null
   #terminalFocused = true
   #systemThemeMode: ThemeMode | null
   #systemTheme: RottweilerTheme
@@ -699,7 +707,11 @@ export class RottweilerApp extends BoxRenderable {
       this.#vimFocusBeforePicker = "transcript"
     }
     if (options.initialEvent !== undefined) {
-      this.#state = reduceRottweilerState(this.#state, engineEvent(options.initialEvent))
+      this.#state = reduceRottweilerState(
+        this.#state,
+        engineEvent(options.initialEvent),
+        this.#sessionId,
+      )
     }
     this.#presentation = new PresentationController({
       scheduler: options.presentationFrame,
@@ -1149,20 +1161,7 @@ export class RottweilerApp extends BoxRenderable {
             previous,
             event as Extract<EngineEvent, { type: "session_title_updated" }>,
           )
-        : reduceRottweilerState(previous, engineEvent(event))
-    if (event.type === "sessions_listed" && Array.isArray(eventRecord.sessions)) {
-      const active = eventRecord.sessions.find(
-        (session) => isRecord(session) && session.session_id === this.#sessionId,
-      )
-      if (isRecord(active) && typeof active.model === "string") {
-        const separator = active.model.indexOf("/")
-        next = {
-          ...next,
-          model: active.model,
-          provider: separator > 0 ? active.model.slice(0, separator) : null,
-        }
-      }
-    }
+        : reduceRottweilerState(previous, engineEvent(event), this.#sessionId)
     // Advance protocol state immediately so reconnect cursors and durable handoff
     // observe every accepted event even when its presentation waits for a frame.
     this.#state = next
@@ -1214,6 +1213,29 @@ export class RottweilerApp extends BoxRenderable {
     const rewindAckOutcome = commandRequestId === null
       ? null
       : next.commandAcks[commandRequestId]?.outcome ?? null
+    if (
+      event.type === "command_acknowledged" &&
+      commandRequestId !== null &&
+      commandRequestId === this.#pendingSessionCreateRequestId
+    ) {
+      const acknowledgement = event as Extract<EngineEvent, { type: "command_acknowledged" }>
+      this.#pendingSessionCreateRequestId = null
+      if (acknowledgement.outcome.type === "rejected") {
+        this.#projectRejection(acknowledgement.outcome)
+      } else if (
+        acknowledgement.session_id === null ||
+        acknowledgement.session_id === undefined
+      ) {
+        this.#projectClientError(
+          "session_create_missing_identity",
+          "the engine accepted the new session without returning its identity",
+          true,
+        )
+      } else {
+        this.closePicker()
+        void this.#options.onSessionSelect?.(acknowledgement.session_id)
+      }
+    }
     if (
       pendingRewind !== null &&
       event.type === "command_acknowledged" &&
@@ -1497,10 +1519,6 @@ export class RottweilerApp extends BoxRenderable {
     const ready = state.providers.some(
       (provider) => provider.configured && provider.authenticated && provider.reachable,
     )
-    // Waiting for both projections closes their ordering gap, but durable turn replay is
-    // independently timed; state.model remains the final guard if replay restores it first,
-    // with accepted residual risk only when neither restoration path has populated it before
-    // a transiently unready provider catalog is evaluated.
     if (
       !ready &&
       state.model === null &&
@@ -1548,6 +1566,15 @@ export class RottweilerApp extends BoxRenderable {
     this.#pendingRecycleScrollTop = null
   }
 
+  #modelSupportsVision(state: RottweilerState): boolean {
+    const selected = state.models.find((model) => model.current && model.available !== false)
+      ?? state.models.find(
+        (model) => model.available !== false &&
+          (model.id === state.model || model.aliases.includes(state.model ?? "")),
+      )
+    return selected?.vision === true
+  }
+
   #bindStateToComponents(state: RottweilerState): void {
     const previousConnectionPhase = this.#state.connection.phase
     const previousFocusOwner = this.#visibleFocusOwner()
@@ -1561,6 +1588,7 @@ export class RottweilerApp extends BoxRenderable {
       this.#providerAuthActionNotice = null
     }
     const presented = this.#presentedState()
+    this.composer.setImagePasteAvailable(this.#modelSupportsVision(presented))
     const viewingSubagent = this.#activeSubagentId !== null
     const childDescriptor = this.#activeSubagentId === null
       ? undefined
@@ -1754,8 +1782,18 @@ export class RottweilerApp extends BoxRenderable {
       ? "Session limit in USD, e.g. 12.50"
       : key === "budget.daily_cost_cap_micros_usd"
         ? "Daily limit in USD, e.g. 12.50"
-        : "Warning threshold as a percent, e.g. 70"
-    const placeholder = key === "budget.warn_at_percent" ? "70" : "12.50"
+        : key === "budget.session_token_cap"
+          ? "Session token limit, e.g. 250000"
+          : key === "budget.daily_token_cap"
+            ? "Daily token limit, e.g. 1000000"
+            : key === "budget.token_rate_alarm_per_minute"
+              ? "Token rate alarm per minute, e.g. 100000"
+              : "Warning threshold as a percent, e.g. 70"
+    const placeholder = key === "budget.warn_at_percent"
+      ? "70"
+      : key.includes("token")
+        ? "250000"
+        : "12.50"
     this.picker.openTextPrompt(prompt, placeholder, (value) => {
       const selectedKey = this.#budgetSettingKey
       this.closePicker()
@@ -2101,6 +2139,59 @@ export class RottweilerApp extends BoxRenderable {
     this.#pickerController.refresh()
   }
 
+  async #createSession(): Promise<void> {
+    if (this.#state.replay.active) {
+      this.#projectClientError(
+        "new_session_unavailable_in_replay",
+        "return to the live session before starting a new conversation",
+      )
+      return
+    }
+    if (this.#pendingSessionCreateRequestId !== null) return
+    const cwd = this.#state.workspaceRoots?.roots[0]
+    if (cwd === undefined) {
+      this.#projectClientError(
+        "new_session_workspace_unavailable",
+        "the engine has not published the current workspace yet; try again after it connects",
+        true,
+      )
+      return
+    }
+    const meta = this.#projectionRequests.meta()
+    this.#pendingSessionCreateRequestId = meta.request_id
+    try {
+      const outcome = await this.#projectionRequests.emit({
+        type: "create_session",
+        meta,
+        cwd,
+        model: null,
+      })
+      if (outcome?.type === "rejected") {
+        this.#pendingSessionCreateRequestId = null
+        this.#projectRejection(outcome)
+      } else if (outcome === null) {
+        this.#pendingSessionCreateRequestId = null
+        this.#projectClientError(
+          "new_session_unavailable",
+          "the engine connection is unavailable",
+          true,
+        )
+      }
+    } catch (error) {
+      this.#pendingSessionCreateRequestId = null
+      this.#projectClientError(
+        "new_session_failed",
+        presentError({
+          category: "protocol",
+          code: "new_session_failed",
+          message: safeErrorMessage(error),
+          requestId: meta.request_id,
+        }).text,
+        true,
+      )
+    }
+  }
+
   #openSessionActionPicker(session: SessionProjection): void {
     this.#sessionActionId = session.sessionId
     this.#pickerController.kind = "sessionActions"
@@ -2310,6 +2401,10 @@ export class RottweilerApp extends BoxRenderable {
       this.openSessionPicker()
       return true
     }
+    if (action === "new_session") {
+      void this.#createSession()
+      return true
+    }
     if (action === "open_subagent_picker") {
       this.openSubagentPicker()
       return true
@@ -2352,6 +2447,7 @@ export class RottweilerApp extends BoxRenderable {
         this.openModePicker()
         return true
       case "paste_image":
+        if (!this.#modelSupportsVision(this.#presentedState())) return false
         void this.composer.pasteImage()
         // Let the terminal's normal text-paste path continue. When the
         // clipboard contains an image pasteImage attaches it asynchronously;
@@ -3164,7 +3260,9 @@ export class RottweilerApp extends BoxRenderable {
         }
         if (providerItems.length === 0) {
           this.#pickerController.showStatus(
-            "Providers",
+            this.#providerPickerOnboarding
+              ? "Welcome to Rottweiler · connect a provider to start"
+              : "Providers",
             "No providers are connected",
             "Connect a provider, then reopen this panel.",
           )
@@ -3633,6 +3731,21 @@ export class RottweilerApp extends BoxRenderable {
             description: "Maximum spend per UTC day",
           },
           {
+            key: "budget.session_token_cap",
+            label: "Session tokens",
+            description: "Maximum subscription tokens for this session",
+          },
+          {
+            key: "budget.daily_token_cap",
+            label: "Daily tokens",
+            description: "Maximum subscription tokens per UTC day",
+          },
+          {
+            key: "budget.token_rate_alarm_per_minute",
+            label: "Token rate alarm",
+            description: "Alert when one minute of subscription usage reaches this value",
+          },
+          {
             key: "budget.warn_at_percent",
             label: "Warn at",
             description: "Warn when a configured cap reaches this percentage",
@@ -3673,11 +3786,18 @@ export class RottweilerApp extends BoxRenderable {
           break
         }
         const isWarning = key === "budget.warn_at_percent"
+        const isToken = key.includes("token")
         const title = key === "budget.session_cost_cap_micros_usd"
           ? "Session limit"
           : key === "budget.daily_cost_cap_micros_usd"
             ? "Daily limit"
-            : "Warn at"
+            : key === "budget.session_token_cap"
+              ? "Session tokens"
+              : key === "budget.daily_token_cap"
+                ? "Daily tokens"
+                : key === "budget.token_rate_alarm_per_minute"
+                  ? "Token rate alarm"
+                  : "Warn at"
         const presets = isWarning
           ? [
               { label: "50%", value: "50" },
@@ -3686,7 +3806,16 @@ export class RottweilerApp extends BoxRenderable {
               { label: "90%", value: "90" },
               { label: "Custom…", value: null },
             ]
-          : [
+          : isToken
+            ? [
+                { label: "50k tokens", value: "50000" },
+                { label: "100k tokens", value: "100000" },
+                { label: "250k tokens", value: "250000" },
+                { label: "1m tokens", value: "1000000" },
+                { label: "Unlimited", value: "unlimited" },
+                { label: "Custom amount…", value: null },
+              ]
+            : [
               { label: "$5", value: "5" },
               { label: "$10", value: "10" },
               { label: "$20", value: "20" },
@@ -3703,9 +3832,11 @@ export class RottweilerApp extends BoxRenderable {
             description: preset.value === null
               ? isWarning
                 ? "Enter a custom warning percentage"
-                : "Enter a USD amount with up to two decimals"
+                : isToken
+                  ? "Enter a positive whole-token amount"
+                  : "Enter a USD amount with up to two decimals"
               : isWarning
-                ? `Warn at ${preset.label} of either configured cap`
+                ? `Warn at ${preset.label} of every configured cap`
                 : preset.value === "unlimited"
                   ? `Remove the ${title.toLowerCase()} cap`
                   : `Set the ${title.toLowerCase()} to ${preset.label}`,
@@ -3929,29 +4060,27 @@ export class RottweilerApp extends BoxRenderable {
           this.#pickerController.showLoading("Sessions", "Loading sessions")
           break
         }
-        if (sessionError === undefined && this.#state.sessions.length === 0) {
-          this.#pickerController.showStatus(
-            "Sessions",
-            "No sessions found",
-            "Start a conversation to create a session.",
-          )
-          break
-        }
-        const sessionItems: PickerItem<RottweilerState["sessions"][number] | null>[] = [
+        const sessionItems: PickerItem<SessionListAction>[] = [
+          {
+            id: "sessions.new",
+            label: "New session",
+            description: "Start a clean conversation in this workspace",
+            value: { kind: "new" },
+          },
           ...(sessionError === undefined
             ? []
             : [{
                 id: "sessions.error",
                 label: "Couldn't load sessions",
                 description: `${sessionError} · select to retry`,
-                value: null,
+                value: { kind: "retry" } as const,
               }]),
           ...this.#state.sessions.map((session) => ({
             id: session.sessionId,
             label: session.title || session.workspaceName,
             description: `${session.workspaceName} · ${session.model}${session.shellActive ? " · shell active" : ""}`,
             searchText: `${session.sessionId} ${session.title ?? ""} ${session.workspaceName} ${session.model}`,
-            value: session,
+            value: { kind: "session", session } as const,
           })),
         ]
         this.#pickerController.show(
@@ -3960,8 +4089,11 @@ export class RottweilerApp extends BoxRenderable {
             : "Sessions",
           sessionItems,
           (item) => {
-            const session = item.value as RottweilerState["sessions"][number] | null
-            if (session === null) {
+            if (item.value.kind === "new") {
+              void this.#createSession()
+              return
+            }
+            if (item.value.kind === "retry") {
               const query = this.picker.input.value.trim()
               if (query.length === 0) {
                 this.#projectionRequests.command({ type: "list_sessions" })
@@ -3970,7 +4102,7 @@ export class RottweilerApp extends BoxRenderable {
               }
               return
             }
-            this.#openSessionActionPicker(session)
+            this.#openSessionActionPicker(item.value.session)
           },
         )
         break
@@ -4155,6 +4287,7 @@ export class RottweilerApp extends BoxRenderable {
       { id: "compact.run", title: "Compact context", section: "Conversation", description: "Compact the conversation context", run: submit("/compact") },
       { id: "rewind.run", title: "Rewind to a turn", section: "Conversation", description: "Choose from completed user turns", run: open(() => this.openTimelinePicker()) },
       { id: "fork.run", title: "Fork session", section: "Conversation", description: "Fork at the latest completed turn", run: open(() => void this.#requestFork(null)) },
+      { id: "session.new", title: "New session", section: "Conversation", description: this.#paletteDescription("Start a clean conversation", "new_session"), run: open(() => void this.#createSession()) },
       { id: "session.list", title: "Switch session", section: "Conversation", description: this.#paletteDescription("Resume another durable session", "open_session_picker"), run: open(() => this.openSessionPicker()) },
       { id: "review.open", title: "Review changes", section: "Conversation", description: this.#paletteDescription("Open the cumulative session diff", "open_review"), run: open(() => this.openReview()) },
       { id: "session.export", title: "Export session", section: "Conversation", description: "Save this session's transcript to a file", run: open(() => this.openExportSessionPicker()) },
@@ -4182,7 +4315,7 @@ export class RottweilerApp extends BoxRenderable {
 
       { id: "permissions.mode", title: "Permission mode", section: "Safety", description: "Choose when tool use needs confirmation", run: open(() => this.openPermissionModePicker()) },
       { id: "permissions.manage", title: "Permission rules", section: "Safety", description: "Inspect, add, and remove session rules", run: open(() => this.openPermissionPicker()) },
-      { id: "budget.manage", title: "Budget limits", section: "Safety", description: "Set session and daily spend caps", run: open(() => this.openBudgetPicker()) },
+      { id: "budget.manage", title: "Budget limits", section: "Safety", description: "Set spend and subscription-token limits", run: open(() => this.openBudgetPicker()) },
 
       { id: "theme.list", title: "Switch theme", section: "Appearance & settings", description: "Preview and choose an interface theme", run: open(() => this.openThemePicker()) },
       { id: "settings.open", title: "Settings", section: "Appearance & settings", description: "Change safe persisted user settings", run: open(() => this.openSettingsPicker()) },
@@ -4857,6 +4990,11 @@ export class RottweilerApp extends BoxRenderable {
     if (sessionAction?.type === "exit") {
       this.closePicker()
       this.#options.onExit?.()
+      return true
+    }
+    if (sessionAction?.type === "new") {
+      this.closePicker()
+      void this.#createSession()
       return true
     }
     if (sessionAction?.type === "rewindTimeline") {

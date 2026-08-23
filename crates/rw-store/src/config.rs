@@ -27,8 +27,11 @@ const ENV_BUDGET_SESSION_COST_CAP: &str = "RW_BUDGET_SESSION_COST_CAP_MICROS_USD
 const ENV_BUDGET_DAILY_COST_CAP: &str = "RW_BUDGET_DAILY_COST_CAP_MICROS_USD";
 const ENV_BUDGET_SESSION_CREDIT_CAP: &str = "RW_BUDGET_SESSION_AI_CREDIT_CAP_MICROS";
 const ENV_BUDGET_DAILY_CREDIT_CAP: &str = "RW_BUDGET_DAILY_AI_CREDIT_CAP_MICROS";
+const ENV_BUDGET_SESSION_TOKEN_CAP: &str = "RW_BUDGET_SESSION_TOKEN_CAP";
+const ENV_BUDGET_DAILY_TOKEN_CAP: &str = "RW_BUDGET_DAILY_TOKEN_CAP";
 const ENV_BUDGET_SPEND_RATE: &str = "RW_BUDGET_SPEND_RATE_ALARM_MICROS_USD_PER_MINUTE";
 const ENV_BUDGET_CREDIT_RATE: &str = "RW_BUDGET_AI_CREDIT_RATE_ALARM_MICROS_PER_MINUTE";
+const ENV_BUDGET_TOKEN_RATE: &str = "RW_BUDGET_TOKEN_RATE_ALARM_PER_MINUTE";
 const ENV_BUDGET_WARN_PERCENT: &str = "RW_BUDGET_WARN_AT_PERCENT";
 const ENV_NETWORK_PROXY: &str = "RW_NETWORK_PROXY";
 const ENV_NETWORK_PROXY_USERNAME: &str = "RW_NETWORK_PROXY_USERNAME";
@@ -195,12 +198,21 @@ impl LoadedConfig {
                 self.config.budget.daily_ai_credit_cap_micros,
             ),
             (
+                "budget.session_token_cap",
+                self.config.budget.session_token_cap,
+            ),
+            ("budget.daily_token_cap", self.config.budget.daily_token_cap),
+            (
                 "budget.spend_rate_alarm_micros_usd_per_minute",
                 self.config.budget.spend_rate_alarm_micros_usd_per_minute,
             ),
             (
                 "budget.ai_credit_rate_alarm_micros_per_minute",
                 self.config.budget.ai_credit_rate_alarm_micros_per_minute,
+            ),
+            (
+                "budget.token_rate_alarm_per_minute",
+                self.config.budget.token_rate_alarm_per_minute,
             ),
         ] {
             lines.push(self.render_leaf(key, &optional_u64(value)));
@@ -709,6 +721,9 @@ impl ConfigLoader {
             key,
             "budget.session_cost_cap_micros_usd"
                 | "budget.daily_cost_cap_micros_usd"
+                | "budget.session_token_cap"
+                | "budget.daily_token_cap"
+                | "budget.token_rate_alarm_per_minute"
                 | "budget.warn_at_percent"
         ) && matches!(
             effective.provenance(key),
@@ -724,6 +739,10 @@ impl ConfigLoader {
                 parse_tui_budget_cap(key, value)?
                     .map_or_else(|| "unlimited".to_owned(), |micros| micros.to_string())
             }
+            "budget.session_token_cap"
+            | "budget.daily_token_cap"
+            | "budget.token_rate_alarm_per_minute" => parse_tui_token_limit(key, value)?
+                .map_or_else(|| "unlimited".to_owned(), |tokens| tokens.to_string()),
             "budget.warn_at_percent" => parse_tui_budget_warning(key, value)?.to_string(),
             _ => value.to_owned(),
         };
@@ -764,7 +783,11 @@ impl ConfigLoader {
             thinking.insert(alias.to_owned(), toml::Value::String(value.to_owned()));
         } else if matches!(
             key,
-            "budget.session_cost_cap_micros_usd" | "budget.daily_cost_cap_micros_usd"
+            "budget.session_cost_cap_micros_usd"
+                | "budget.daily_cost_cap_micros_usd"
+                | "budget.session_token_cap"
+                | "budget.daily_token_cap"
+                | "budget.token_rate_alarm_per_minute"
         ) && value.trim().eq_ignore_ascii_case("unlimited")
         {
             clear_toml_leaf(&mut document, key)?;
@@ -1353,8 +1376,11 @@ fn defaults_with_provenance() -> LoadedConfig {
         "budget.daily_cost_cap_micros_usd",
         "budget.session_ai_credit_cap_micros",
         "budget.daily_ai_credit_cap_micros",
+        "budget.session_token_cap",
+        "budget.daily_token_cap",
         "budget.spend_rate_alarm_micros_usd_per_minute",
         "budget.ai_credit_rate_alarm_micros_per_minute",
+        "budget.token_rate_alarm_per_minute",
         "budget.warn_at_percent",
         "providers",
         "network.proxy",
@@ -1593,8 +1619,11 @@ fn apply_file(
         apply_budget!(daily_cost_cap_micros_usd);
         apply_budget!(session_ai_credit_cap_micros);
         apply_budget!(daily_ai_credit_cap_micros);
+        apply_budget!(session_token_cap);
+        apply_budget!(daily_token_cap);
         apply_budget!(spend_rate_alarm_micros_usd_per_minute);
         apply_budget!(ai_credit_rate_alarm_micros_per_minute);
+        apply_budget!(token_rate_alarm_per_minute);
         if let Some(value) = budget.warn_at_percent {
             loaded.config.budget.warn_at_percent = value;
             set_source(loaded, "budget.warn_at_percent", source);
@@ -1768,6 +1797,8 @@ fn apply_environment(
             ENV_BUDGET_DAILY_CREDIT_CAP,
             "budget.daily_ai_credit_cap_micros",
         ),
+        (ENV_BUDGET_SESSION_TOKEN_CAP, "budget.session_token_cap"),
+        (ENV_BUDGET_DAILY_TOKEN_CAP, "budget.daily_token_cap"),
         (
             ENV_BUDGET_SPEND_RATE,
             "budget.spend_rate_alarm_micros_usd_per_minute",
@@ -1776,6 +1807,7 @@ fn apply_environment(
             ENV_BUDGET_CREDIT_RATE,
             "budget.ai_credit_rate_alarm_micros_per_minute",
         ),
+        (ENV_BUDGET_TOKEN_RATE, "budget.token_rate_alarm_per_minute"),
         (ENV_BUDGET_WARN_PERCENT, "budget.warn_at_percent"),
         (ENV_NETWORK_PROXY, "network.proxy"),
         (ENV_NETWORK_PROXY_USERNAME, "network.proxy_username"),
@@ -1957,6 +1989,12 @@ fn apply_m3_override(
         "budget.daily_ai_credit_cap_micros" => {
             loaded.config.budget.daily_ai_credit_cap_micros = parse_optional_u64(value, raw)?;
         }
+        "budget.session_token_cap" => {
+            loaded.config.budget.session_token_cap = parse_optional_u64(value, raw)?;
+        }
+        "budget.daily_token_cap" => {
+            loaded.config.budget.daily_token_cap = parse_optional_u64(value, raw)?;
+        }
         "budget.spend_rate_alarm_micros_usd_per_minute" => {
             loaded.config.budget.spend_rate_alarm_micros_usd_per_minute =
                 parse_optional_u64(value, raw)?;
@@ -1964,6 +2002,9 @@ fn apply_m3_override(
         "budget.ai_credit_rate_alarm_micros_per_minute" => {
             loaded.config.budget.ai_credit_rate_alarm_micros_per_minute =
                 parse_optional_u64(value, raw)?;
+        }
+        "budget.token_rate_alarm_per_minute" => {
+            loaded.config.budget.token_rate_alarm_per_minute = parse_optional_u64(value, raw)?;
         }
         "budget.warn_at_percent" => {
             loaded.config.budget.warn_at_percent =
@@ -2248,6 +2289,11 @@ fn validate_tui_setting(config: &Config, key: &str, value: &str) -> Result<(), C
         "budget.warn_at_percent" => {
             return parse_tui_budget_warning(key, value).map(|_| ());
         }
+        "budget.session_token_cap"
+        | "budget.daily_token_cap"
+        | "budget.token_rate_alarm_per_minute" => {
+            return parse_tui_token_limit(key, value).map(|_| ());
+        }
         _ => {}
     }
     let valid = match key {
@@ -2330,6 +2376,23 @@ fn parse_tui_budget_warning(key: &str, value: &str) -> Result<u8, ConfigError> {
         key: key.to_owned(),
         reason: "warning threshold must be an integer from 1 through 100".to_owned(),
     })
+}
+
+fn parse_tui_token_limit(key: &str, value: &str) -> Result<Option<u64>, ConfigError> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("unlimited") {
+        return Ok(None);
+    }
+    let tokens = (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| value.parse::<u64>().ok())
+        .flatten()
+        .filter(|tokens| *tokens > 0 && i64::try_from(*tokens).is_ok());
+    tokens
+        .map(Some)
+        .ok_or_else(|| ConfigError::InvalidUserSetting {
+            key: key.to_owned(),
+            reason: "token limit must be \"unlimited\" or a positive whole number".to_owned(),
+        })
 }
 
 fn prepare_tui_config_parent(parent: &Path, user_path: &Path) -> Result<(), ConfigError> {
@@ -2784,6 +2847,15 @@ fn configured_setting_value(config: &Config, key: &str) -> Option<String> {
             .budget
             .daily_cost_cap_micros_usd
             .map(|value| value.to_string()),
+        "budget.session_token_cap" => config
+            .budget
+            .session_token_cap
+            .map(|value| value.to_string()),
+        "budget.daily_token_cap" => config.budget.daily_token_cap.map(|value| value.to_string()),
+        "budget.token_rate_alarm_per_minute" => config
+            .budget
+            .token_rate_alarm_per_minute
+            .map(|value| value.to_string()),
         "budget.warn_at_percent" => Some(config.budget.warn_at_percent.to_string()),
         _ if key.starts_with("models.thinking.") => config
             .models
@@ -2835,6 +2907,9 @@ fn set_toml_leaf(document: &mut toml::Value, key: &str, value: &str) -> Result<(
         key,
         "budget.session_cost_cap_micros_usd"
             | "budget.daily_cost_cap_micros_usd"
+            | "budget.session_token_cap"
+            | "budget.daily_token_cap"
+            | "budget.token_rate_alarm_per_minute"
             | "budget.warn_at_percent"
     );
     let stored = if boolean_leaf {
@@ -2850,6 +2925,13 @@ fn set_toml_leaf(document: &mut toml::Value, key: &str, value: &str) -> Result<(
                 })?
             }
             "budget.warn_at_percent" => u64::from(parse_tui_budget_warning(key, value)?),
+            "budget.session_token_cap"
+            | "budget.daily_token_cap"
+            | "budget.token_rate_alarm_per_minute" => parse_tui_token_limit(key, value)?
+                .ok_or_else(|| ConfigError::InvalidUserSetting {
+                    key: key.to_owned(),
+                    reason: "unlimited token limits must clear the TOML leaf".to_owned(),
+                })?,
             _ => unreachable!("matched integer TUI setting"),
         };
         toml::Value::Integer(
@@ -2939,7 +3021,6 @@ fn validate_toolchain(config: &rw_types::config::ToolchainConfig) -> Result<(), 
             .formatter
             .as_deref()
             .is_some_and(invalid_toolchain_command)
-            || rule.test.as_deref().is_some_and(invalid_toolchain_command)
             || rule
                 .linters
                 .iter()
@@ -3435,6 +3516,7 @@ mod tests {
         let config = Config::default();
         let session_key = "budget.session_cost_cap_micros_usd";
         let daily_key = "budget.daily_cost_cap_micros_usd";
+        let token_key = "budget.session_token_cap";
         let warning_key = "budget.warn_at_percent";
 
         for value in ["1", "12.5", " 12.5 ", "999999.99", "unlimited", "UNLIMITED"] {
@@ -3457,6 +3539,16 @@ mod tests {
         for value in ["0", "101"] {
             assert!(matches!(
                 super::validate_tui_setting(&config, warning_key, value),
+                Err(ConfigError::InvalidUserSetting { .. })
+            ));
+        }
+        for value in ["1", "250000", " 1000000 ", "unlimited", "UNLIMITED"] {
+            super::validate_tui_setting(&config, token_key, value)
+                .unwrap_or_else(|error| panic!("{value:?} should be valid: {error}"));
+        }
+        for value in ["", "0", "-1", "1.5", "1,000"] {
+            assert!(matches!(
+                super::validate_tui_setting(&config, token_key, value),
                 Err(ConfigError::InvalidUserSetting { .. })
             ));
         }
@@ -3488,11 +3580,16 @@ mod tests {
             .persist_tui_setting(warning_key, "100")
             .expect("upper warning bound");
         assert_eq!(applied.config.budget.warn_at_percent, 100);
+        let applied = loader
+            .persist_tui_setting(token_key, "250000")
+            .expect("session token cap");
+        assert_eq!(applied.config.budget.session_token_cap, Some(250_000));
 
         let persisted = fs::read_to_string(user).expect("user config");
         assert!(persisted.contains("session_cost_cap_micros_usd = 12000000"));
         assert!(persisted.contains("daily_cost_cap_micros_usd = 12500000"));
         assert!(persisted.contains("warn_at_percent = 100"));
+        assert!(persisted.contains("session_token_cap = 250000"));
     }
 
     #[test]

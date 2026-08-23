@@ -539,6 +539,9 @@ impl<B: ProcessBackend> Supervisor<B> {
                         if await_or_shutdown!(self.backend.sleep(delay)).is_none() {
                             return Ok(());
                         }
+                        eprintln!(
+                            "Rottweiler is waiting briefly for the active session in this workspace to finish · Ctrl+C to cancel"
+                        );
                         let Some(spawned) = await_or_shutdown!(self.spawn_engine(true)) else {
                             return Ok(());
                         };

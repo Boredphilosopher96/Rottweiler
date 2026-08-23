@@ -995,7 +995,7 @@ impl SessionHandle {
             })
             .await?
         {
-            ProtocolCompletion::Cost(snapshot) => Ok(snapshot),
+            ProtocolCompletion::Cost(snapshot) => Ok(*snapshot),
             _ => Err(AgentLoopError::Closed),
         }
     }
@@ -1501,7 +1501,7 @@ pub(super) enum ProtocolCompletion {
     Message(MessageDisposition),
     Rewind(Vec<UnrestorablePath>),
     Context(ContextSnapshot),
-    Cost(CostSnapshot),
+    Cost(Box<CostSnapshot>),
     Prompt(PromptDump),
     Unit,
 }

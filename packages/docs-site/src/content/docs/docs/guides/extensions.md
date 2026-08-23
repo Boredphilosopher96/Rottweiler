@@ -29,3 +29,7 @@ against declared capabilities.
 
 Use the [TypeScript plugin SDK](../reference/plugin-sdk.md) to scaffold, validate,
 develop, and package a plugin.
+
+Run `rw plugin check <path> --allow-exec` before live development. It validates
+package identity and runs the plugin's declared typecheck and test scripts
+without attaching it to an engine.

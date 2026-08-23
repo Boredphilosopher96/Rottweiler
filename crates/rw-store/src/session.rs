@@ -16,7 +16,9 @@ use std::{
 };
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
-use rw_types::{AccountingAttribution, Cost, SequenceId, TurnId, Usage};
+use rw_types::{
+    AccountingAttribution, Cost, SequenceId, SubscriptionTokenAccounting, TurnId, Usage,
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tempfile::TempDir;
 use thiserror::Error;
@@ -909,10 +911,22 @@ pub struct AccountingTotals {
     pub trailing_session_ai_credit_micros: u64,
     /// AI-credit micro-units across all sessions inside the trailing window.
     pub trailing_all_sessions_ai_credit_micros: u64,
+    /// Subscription tokens for the selected session.
+    pub session_subscription_tokens: u64,
+    /// Subscription tokens across all sessions during the selected UTC day.
+    pub day_subscription_tokens: u64,
+    /// Subscription tokens for the selected session inside the trailing window.
+    pub trailing_session_subscription_tokens: u64,
+    /// Subscription tokens across all sessions inside the trailing window.
+    pub trailing_all_sessions_subscription_tokens: u64,
     /// Subscription-quota turns in the selected session.
     pub session_subscription_quota_turns: u64,
     /// Subscription-quota turns during the selected UTC day.
     pub day_subscription_quota_turns: u64,
+    /// Subscription turns whose quota was absent or not token-denominated.
+    pub session_unmetered_subscription_quota_turns: u64,
+    /// Unmetered subscription turns during the selected UTC day.
+    pub day_unmetered_subscription_quota_turns: u64,
     /// Cost-unavailable turns in the selected session.
     pub session_unavailable_turns: u64,
     /// Cost-unavailable turns during the selected UTC day.
@@ -1210,8 +1224,14 @@ impl AccountingTotals {
             day_ai_credit_micros: 0,
             trailing_session_ai_credit_micros: 0,
             trailing_all_sessions_ai_credit_micros: 0,
+            session_subscription_tokens: 0,
+            day_subscription_tokens: 0,
+            trailing_session_subscription_tokens: 0,
+            trailing_all_sessions_subscription_tokens: 0,
             session_subscription_quota_turns: 0,
             day_subscription_quota_turns: 0,
+            session_unmetered_subscription_quota_turns: 0,
+            day_unmetered_subscription_quota_turns: 0,
             session_unavailable_turns: 0,
             day_unavailable_turns: 0,
             session_non_usd_monetary_turns: 0,
@@ -1266,13 +1286,50 @@ fn add_accounting_cost(
                 *credits_micros,
             ),
         },
-        Cost::SubscriptionQuota { .. } => match scope {
-            AccountingScope::Session => {
-                checked_add(&mut totals.session_subscription_quota_turns, 1)
+        Cost::SubscriptionQuota { .. } => {
+            let accounting = cost.subscription_token_accounting();
+            match scope {
+                AccountingScope::Session => {
+                    checked_add(&mut totals.session_subscription_quota_turns, 1)?;
+                    match accounting {
+                        SubscriptionTokenAccounting::Metered(tokens) => {
+                            checked_add(&mut totals.session_subscription_tokens, tokens)
+                        }
+                        SubscriptionTokenAccounting::Unavailable => {
+                            checked_add(&mut totals.session_unmetered_subscription_quota_turns, 1)
+                        }
+                        SubscriptionTokenAccounting::NotApplicable => Ok(()),
+                    }
+                }
+                AccountingScope::Day => {
+                    checked_add(&mut totals.day_subscription_quota_turns, 1)?;
+                    match accounting {
+                        SubscriptionTokenAccounting::Metered(tokens) => {
+                            checked_add(&mut totals.day_subscription_tokens, tokens)
+                        }
+                        SubscriptionTokenAccounting::Unavailable => {
+                            checked_add(&mut totals.day_unmetered_subscription_quota_turns, 1)
+                        }
+                        SubscriptionTokenAccounting::NotApplicable => Ok(()),
+                    }
+                }
+                AccountingScope::TrailingSession => match accounting {
+                    SubscriptionTokenAccounting::Metered(tokens) => {
+                        checked_add(&mut totals.trailing_session_subscription_tokens, tokens)
+                    }
+                    SubscriptionTokenAccounting::NotApplicable
+                    | SubscriptionTokenAccounting::Unavailable => Ok(()),
+                },
+                AccountingScope::TrailingAllSessions => match accounting {
+                    SubscriptionTokenAccounting::Metered(tokens) => checked_add(
+                        &mut totals.trailing_all_sessions_subscription_tokens,
+                        tokens,
+                    ),
+                    SubscriptionTokenAccounting::NotApplicable
+                    | SubscriptionTokenAccounting::Unavailable => Ok(()),
+                },
             }
-            AccountingScope::Day => checked_add(&mut totals.day_subscription_quota_turns, 1),
-            AccountingScope::TrailingSession | AccountingScope::TrailingAllSessions => Ok(()),
-        },
+        }
         Cost::Unavailable { .. } => match scope {
             AccountingScope::Session => checked_add(&mut totals.session_unavailable_turns, 1),
             AccountingScope::Day => checked_add(&mut totals.day_unavailable_turns, 1),

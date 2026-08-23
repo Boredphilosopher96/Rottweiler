@@ -119,10 +119,16 @@ pub struct BudgetConfig {
     pub session_ai_credit_cap_micros: Option<u64>,
     /// UTC-day provider-credit cap in micro-credits.
     pub daily_ai_credit_cap_micros: Option<u64>,
+    /// Session subscription-quota cap in tokens.
+    pub session_token_cap: Option<u64>,
+    /// UTC-day subscription-quota cap in tokens.
+    pub daily_token_cap: Option<u64>,
     /// Ordinary API spend-rate alarm over a trailing minute.
     pub spend_rate_alarm_micros_usd_per_minute: Option<u64>,
     /// Provider-credit burn-rate alarm over a trailing minute.
     pub ai_credit_rate_alarm_micros_per_minute: Option<u64>,
+    /// Subscription token burn-rate alarm over a trailing minute.
+    pub token_rate_alarm_per_minute: Option<u64>,
     /// Percentage of a cap at which a warning is emitted.
     pub warn_at_percent: u8,
 }
@@ -134,8 +140,11 @@ impl Default for BudgetConfig {
             daily_cost_cap_micros_usd: None,
             session_ai_credit_cap_micros: None,
             daily_ai_credit_cap_micros: None,
+            session_token_cap: None,
+            daily_token_cap: None,
             spend_rate_alarm_micros_usd_per_minute: None,
             ai_credit_rate_alarm_micros_per_minute: None,
+            token_rate_alarm_per_minute: None,
             warn_at_percent: 80,
         }
     }
@@ -706,7 +715,7 @@ pub struct ToolchainConfig {
     pub formatter: Option<String>,
     /// Linters applied when no more-specific rule overrides them.
     pub linters: Vec<String>,
-    /// Optional default test command surfaced to initialization and commands.
+    /// Test command run once after every otherwise-successful agent turn.
     pub test: Option<String>,
     /// Glob-specific toolchain overrides, in declaration order.
     #[serde(rename = "rule")]
@@ -725,8 +734,6 @@ pub struct ToolchainRule {
     /// Linter override. `{file}` expands to the touched path.
     #[serde(default)]
     pub linters: Vec<String>,
-    /// Optional test command associated with this file class.
-    pub test: Option<String>,
 }
 
 /// Telemetry settings. Telemetry is disabled unless explicitly enabled.
@@ -837,8 +844,11 @@ pub struct BudgetConfigFile {
     pub daily_cost_cap_micros_usd: Option<u64>,
     pub session_ai_credit_cap_micros: Option<u64>,
     pub daily_ai_credit_cap_micros: Option<u64>,
+    pub session_token_cap: Option<u64>,
+    pub daily_token_cap: Option<u64>,
     pub spend_rate_alarm_micros_usd_per_minute: Option<u64>,
     pub ai_credit_rate_alarm_micros_per_minute: Option<u64>,
+    pub token_rate_alarm_per_minute: Option<u64>,
     pub warn_at_percent: Option<u8>,
 }
 

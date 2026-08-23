@@ -4,9 +4,9 @@ Goal: pi-grade extensibility — nothing in the harness is magic. Built-in tools
 commands, and modes use the shared registries documented here, and built-in and
 RPC providers meet at the same provider abstraction. If a built-in needs a
 private hook, the public API grows until it does not.
-Protocol-2 provider plugins now have the model metadata and host-mediated
-authentication needed for first-class routing; their remaining replay and
-execution-tier boundaries are stated below.
+Provider plugins have the model metadata and host-mediated authentication
+needed for first-class routing. Their replay and execution boundaries are
+stated below.
 
 ## Tier 1 — Declarative (no code)
 
@@ -28,7 +28,7 @@ Discovery order (ADR-014), first match by name wins: `.agents/` (project) → `.
 | Modes | `modes/*.toml` | tool filter + permission overlay + prompt fragment (built-in discuss/plan/execute live in this format, embedded) |
 | Workflows | `workflows/*.toml` | DAG of steps: `agent`/`command` refs, `parallel = true`, `on-fail`, artifact passing between steps |
 | Shell hooks | `hooks.toml` | one-liner hooks without writing a plugin: `[[hook]] event = "post_tool" matcher = "edit(*.rs)" run = "cargo fmt --check {file}"` — the command's exit code/stdout map onto the hook response (nonzero on a `pre_*` hook = deny with stderr as message). Registered on the same internal dispatcher; trust-gated at project level; this is what Claude Code settings-hooks import onto |
-| Toolchain | `toolchain.toml` (or `[toolchain]` in config) | per-language/glob `formatter`, `linters`, `test` commands; registers built-in `post_tool` hooks — after edit/write, formatter runs on the touched file and linter diagnostics append to the tool result. Sugar over the public hook API (dogfooding rule) |
+| Toolchain | `toolchain.toml` (or `[toolchain]` in config) | per-language/glob `formatter` and `linters`, plus one workspace `test` command; after edit/write, the matching formatter and linters run on the touched file. After every otherwise-successful turn, the test command runs once and its failure is appended to durable context. Sugar over the public hook API (dogfooding rule) |
 | Themes/keybindings | `themes/*.toml`, `keybindings.toml` | TUI only |
 
 Mode files use one bounded schema. The file stem must match `id`; `permission`
@@ -115,14 +115,14 @@ Plugins can also *push*: `session/inject_message`, `session/set_status`, `ui/not
 ### Provider plugins
 
 A plugin can register an inference route (capability `providers`): the router
-forwards provider-neutral IR requests for matching aliases over RPC. Protocol 2
+forwards provider-neutral IR requests for matching aliases over RPC. A provider
 can declare the approval-fingerprinted `models` capability and answer
 `provider/models` with a bounded catalog containing model capabilities,
 cache-breakpoint behavior, context/output limits, and optional pricing. The
 `RpcProviderAdapter` exposes that discovery and metadata through the normal live
 catalog, model binding, and accounting paths.
 
-Protocol-2 providers can also declare bounded, approval-fingerprinted
+Providers can also declare bounded, approval-fingerprinted
 `credential-references`. For `provider/http`, the plugin sends the declared
 reference and a credential-free request. The host resolves and registers the
 secret, attaches it to the requested header, and owns the guarded HTTP request;
@@ -134,14 +134,13 @@ the plugin's public `allowed_domains` entries, matching an exact host or
 subdomain. An undeclared alias/reference pair is a capability violation and
 terminates the plugin (ADR-022).
 
-Provider plugins are recordable and replayable, but currently at normalized
-provider-event fidelity: their adapter uses `WireMode::NormalizedReplay`.
-Replaying an arbitrary plugin-specific wire dialect through the plugin would
-require a larger protocol design.
+Provider plugins record and replay normalized provider events through
+`WireMode::NormalizedReplay`; plugin-specific wire bytes are outside the
+recording contract.
 
 ### SDKs
 
-Official plugin SDKs: **TypeScript first** (npm `@rottweiler/plugin`), Rust second. The dependency-leaf `rw-plugin-protocol` crate owns the public wire version, methods, limits, envelopes, manifest grammar, and DTOs. Its checked-in TypeScript, schema, and protocol-2 fixture projections are generated and CI-checked. The exact tag workflow publishes the version-matched TypeScript package through npm trusted publishing, then proves an unmodified clean scaffold can install it from the public registry. Pull-request CI consumes the packed package artifact rather than rewriting the dependency to workspace source.
+Official plugin SDKs: **TypeScript first** (npm `@rottweiler/plugin`), Rust second. The dependency-leaf `rw-plugin-protocol` crate owns the public wire version, methods, limits, envelopes, manifest grammar, and DTOs. Its checked-in TypeScript, schema, and fixture projections are generated and CI-checked. The release workflow publishes the version-matched TypeScript package through npm trusted publishing, then proves an unmodified clean scaffold can install it from the public registry. Pull-request CI consumes the packed package artifact rather than rewriting the dependency to workspace source.
 
 ### Plugin configuration and approval
 
@@ -196,13 +195,13 @@ one `manifest`; it is not a fallback for an invalid source target.
 
 `/mcp` shows connection and approval state. Stdio servers receive only intrinsic runtime reads, scratch writes, and no network by default. `read_roots`, `write_roots`, and `allowed_domains` are bounded explicit process grants; roots must stay within active workspace authority, and domains use the supervised policy proxy with DNS pinning and private/local-address denial. Separately, virtual MCP tool calls classify as `network + exec` unless user-level `capability_overrides` supplies a server default or an exact per-tool override (`reads_fs`, `writes_fs`, `network`, `exec`); project configuration cannot downgrade this permission classification. Tool entries take precedence over the server default. Approval is bound to both kinds of grants together with the exact origin, transport, argv/environment names, OAuth references, and configuration fingerprint; changed configuration requires a new explicit fingerprint confirmation. `rw mcp login <server>` uses Authorization Code + PKCE and atomically stores the access token, optional refresh token, expiry, and exact resource/audience binding in the Rottweiler credential vault. Expired access is refreshed only against the same trusted token endpoint/client/proxy configuration, and a rotated refresh token is durably replaced before the new bearer is exposed. Plaintext tokens and environment-backed MCP OAuth references are rejected. Remote prompts are available through `/mcp.prompt <server> <prompt> [JSON object]`; catalog-derived namespaced aliases are conveniences and the stable command resolves the live server state at invocation.
 
-`rw plugin status|approve|revoke` manages the separately fingerprinted plugin approval ledger. For a source target, the release-owned sibling host discovers the complete graph without executing top-level plugin code; Rust validates the Bun lock identities, copies exact no-follow bytes to private scratch, rebuilds from that sealed tree, requires the second graph to match, and publishes one content-addressed bundle. Approval binds the manifest, source graph, lockfile, bundle, host ABI, format, origin, environment names, domains, and sandbox policy. Each plugin launches in its own host process. A source failure leaves other plugins running.
+`rw plugin status|approve|revoke` manages the separately fingerprinted plugin approval ledger. `rw plugin check <path> --allow-exec` validates source-package identity and runs the declared typecheck and test scripts without attaching the plugin to a session. For a source target, the release-owned sibling host discovers the complete graph without executing top-level plugin code; Rust validates the Bun lock identities, copies exact no-follow bytes to private scratch, rebuilds from that sealed tree, requires the second graph to match, and publishes one content-addressed bundle. Approval binds the manifest, source graph, lockfile, bundle, host ABI, format, origin, environment names, domains, and sandbox policy. Each plugin launches in its own host process. A source failure leaves other plugins running.
 
 The scaffold contains one inert `manifest.json`, imported through `parsePluginManifest`, so authority has one owner. `rw plugin dev <path> --session current --allow-dev-exec` attaches that package to one live local session. Stable edits prepare candidates through the same resolver; the actor swaps a complete immutable tool/hook/command snapshot only after success, retains the last-good generation on rejection, blocks capability changes until detach, and never writes the ephemeral grant to production approval.
 
 The separate executable target pins its executable, explicit interpreter entrypoints, adjacent dependency descriptors, manifest, code root, origin, environment names, and domains by canonical path, length, and BLAKE3 identity. Eval, module-runner, package-runner, and `PATH`-resolved forms are rejected.
 
-Protocol 2 is the only supported generation. The Rust host and TypeScript SDK consume the same generated contract projections. Provider plugins emit request-correlated `provider/event` notifications incrementally and receive `provider/cancel` when the consumer drops; their streams are bounded and cancellation-cleaned without a whole-call five-second deadline. Catalog and host-HTTP requests are separately bounded and negotiated. `packages/plugin-sdk/PROTOCOL.md` explains the wire contract; its current schema and fixture are projections of `rw-plugin-protocol`, not additional owners.
+The Rust host and TypeScript SDK consume the same generated contract projections. Provider plugins emit request-correlated `provider/event` notifications incrementally and receive `provider/cancel` when the consumer drops; their streams are bounded and cancellation-cleaned without a whole-call five-second deadline. Catalog and host-HTTP requests are separately bounded and negotiated. `packages/plugin-sdk/PROTOCOL.md` explains the wire contract; its schema and fixture are projections of `rw-plugin-protocol`, not additional owners.
 
 The public documentation site in `packages/docs-site` copies the protocol
 crate's generated schema and fixture byte-for-byte and links to the SDK's
