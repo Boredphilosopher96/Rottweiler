@@ -33,3 +33,4 @@ Each feature file names the user path, exact helper command, expected screen sta
 - [Conversation](./conversation.md) covers user and assistant hierarchy, reasoning, tool rows, side context, composer, and status.
 - [Command palette](./command-palette.md) covers the Ctrl+P entry path and command discovery.
 - [Approvals](./approvals.md) covers pending tool permission context and available choices.
+- [Tools workspace](./tools.md) covers retained tool activity, truthful turn totals, queue semantics, and complete-output discovery.

@@ -8,7 +8,8 @@ import {
 } from "@opentui/core/testing"
 
 import { createRottweilerApp } from "../src/app"
-import { ContextPanelRenderable, FuzzyPickerRenderable, ImageAttachmentRenderable, ListDetailRenderable, ReasoningBlockRenderable, SubagentPanelRenderable, SubagentTrayRenderable, ToolBlockRenderable, formatElapsed, fuzzyScore, toolOutputContent, type ListDetailRow } from "../src/components"
+import { ContextPanelRenderable, FuzzyPickerRenderable, ImageAttachmentRenderable, ListDetailRenderable, ReasoningBlockRenderable, SubagentPanelRenderable, SubagentTrayRenderable, ToolBlockRenderable, ToolsWorkspaceRenderable, formatElapsed, fuzzyScore, toolOutputContent, type ListDetailRow } from "../src/components"
+import type { ActivityPresentation, ToolsWorkspacePresentation } from "../src/render"
 import { stringCellWidth } from "../src/render"
 import {
   PROTOCOL_VERSION,
@@ -65,6 +66,7 @@ function transcriptBlockState(): RottweilerState {
     output: { type: "text" as const, text: "first output" },
     isError: false,
     callIndex: 0,
+    timing: { kind: "unknown" as const },
   }
   const secondTool = {
     ...firstTool,
@@ -674,6 +676,7 @@ describe("M4 retained components", () => {
         output: null,
         isError: null,
         callIndex: 0,
+        timing: { kind: "unknown" as const },
       }
       const setup = await createTestRenderer({ width: 86, height: 16, useThread: false })
       renderer = setup.renderer
@@ -703,6 +706,7 @@ describe("M4 retained components", () => {
       output: { type: "text", text: "Path=src/main.rs" },
       isError: false,
       callIndex: 0,
+      timing: { kind: "unknown" as const },
     })
     renderer.root.add(card)
     await setup.renderOnce()
@@ -736,6 +740,7 @@ describe("M4 retained components", () => {
       output: { type: "text", text: "1 change applied" },
       isError: false,
       callIndex: 0,
+      timing: { kind: "unknown" },
     })
     renderer.root.add(card)
     await setup.renderOnce()
@@ -762,6 +767,7 @@ describe("M4 retained components", () => {
       output: null,
       isError: null,
       callIndex: 0,
+      timing: { kind: "unknown" as const },
     }
     const card = new ToolBlockRenderable(renderer, kennelTheme, running)
     renderer.root.add(card)
@@ -814,6 +820,7 @@ describe("M4 retained components", () => {
       output: null,
       isError: null,
       callIndex: 0,
+      timing: { kind: "unknown" as const },
     }
     const card = new ToolBlockRenderable(renderer, kennelTheme, tool, true)
     renderer.root.add(card)
@@ -858,6 +865,7 @@ describe("M4 retained components", () => {
       output: null,
       isError: null,
       callIndex: 0,
+      timing: { kind: "unknown" as const },
     }
     const initial: RottweilerState = {
       ...createInitialState(),
@@ -955,6 +963,7 @@ describe("M4 retained components", () => {
       output: null,
       isError: null,
       callIndex: 0,
+      timing: { kind: "unknown" },
     }, true, undefined, {
       syntaxStyle: SyntaxStyle.create(),
       onOpenToolOutput: (toolCallId) => opened.push(toolCallId),
@@ -1286,6 +1295,7 @@ describe("M4 retained components", () => {
             status: "completed",
             usage,
             cost: { kind: "subscription_quota", used: null, unit: null },
+            timing: { kind: "unknown" },
           },
         },
         context: {
@@ -1442,6 +1452,7 @@ describe("M4 retained components", () => {
       output: null,
       isError: null,
       callIndex: 0,
+      timing: { kind: "unknown" as const },
     }
     const initial: RottweilerState = {
       ...createInitialState(),
@@ -1511,6 +1522,7 @@ describe("M4 retained components", () => {
       output: { type: "text" as const, text: "contents" },
       isError: false,
       callIndex: 0,
+      timing: { kind: "unknown" as const },
     }
     const initial: RottweilerState = {
       ...createInitialState(),
@@ -1570,6 +1582,7 @@ describe("M4 retained components", () => {
       output: { type: "text" as const, text: "all tests passed" },
       isError: false,
       callIndex: 0,
+      timing: { kind: "unknown" as const },
     }
     const edit = {
       toolCallId: "edit-inline",
@@ -1592,6 +1605,7 @@ describe("M4 retained components", () => {
       output: { type: "text" as const, text: "applied 1 edit\nError parsing diff: Removed line count did not match for hunk at line 3" },
       isError: false,
       callIndex: 1,
+      timing: { kind: "unknown" as const },
     }
     const initial: RottweilerState = {
       ...createInitialState(),
@@ -1697,6 +1711,7 @@ describe("M4 retained components", () => {
       output: { type: "text", text: "26 changes applied" },
       isError: false,
       callIndex: 0,
+      timing: { kind: "unknown" },
     })
     renderer.root.add(card)
     await setup.renderOnce()
@@ -1740,6 +1755,7 @@ describe("M4 retained components", () => {
       output: { type: "text", text: "26 changes applied" },
       isError: false,
       callIndex: 0,
+      timing: { kind: "unknown" },
     }, undefined, undefined, { syntaxStyle: SyntaxStyle.create() })
     renderer.root.add(card)
     await setup.renderOnce()
@@ -1797,6 +1813,7 @@ describe("M4 retained components", () => {
       },
       isError: false,
       callIndex: 0,
+      timing: { kind: "unknown" as const },
     }
     const app = createRottweilerApp(renderer, {
       initialState: {
@@ -1896,6 +1913,7 @@ describe("M4 retained components", () => {
           output: null,
           isError: null,
           callIndex: 0,
+          timing: { kind: "unknown" },
         },
       },
     }
@@ -1970,6 +1988,7 @@ describe("M4 retained components", () => {
       output: null,
       isError: null,
       callIndex: 0,
+      timing: { kind: "unknown" as const },
     }
     const app = createRottweilerApp(renderer, {
       initialState: { ...createInitialState(), tools: { [tool.toolCallId]: tool } },
@@ -2051,6 +2070,7 @@ describe("M4 retained components", () => {
       output: null,
       isError: null,
       callIndex: 0,
+      timing: { kind: "unknown" as const },
     }
     const app = createRottweilerApp(renderer, {
       initialState: {
@@ -2151,6 +2171,7 @@ describe("M4 retained components", () => {
           output: null,
           isError: null,
           callIndex: 0,
+          timing: { kind: "unknown" },
         },
       },
     }
@@ -2193,6 +2214,7 @@ describe("M4 retained components", () => {
           output: null,
           isError: null,
           callIndex: 0,
+          timing: { kind: "unknown" },
         },
       },
     }
@@ -2470,7 +2492,7 @@ describe("M4 retained components", () => {
     const state: RottweilerState = {
       ...createInitialState(),
       turns: {
-        "1": { turnId: "1", status: "running", usage: null, cost: null },
+        "1": { turnId: "1", status: "running", usage: null, cost: null, timing: { kind: "unknown" } },
       },
       subagentOrder: ["child-row"],
       subagents: {
@@ -2524,7 +2546,7 @@ describe("M4 retained components", () => {
     )
     tray.update({
       ...createInitialState(),
-      turns: { "1": { turnId: "1", status: "running", usage: null, cost: null } },
+      turns: { "1": { turnId: "1", status: "running", usage: null, cost: null, timing: { kind: "unknown" } } },
       subagentOrder: Object.keys(subagents),
       subagents,
     }, 84_000)
@@ -2542,7 +2564,7 @@ describe("M4 retained components", () => {
     const tray = new SubagentTrayRenderable(renderer, kennelTheme, () => {})
     tray.update({
       ...createInitialState(),
-      turns: { "1": { turnId: "1", status: "running", usage: null, cost: null } },
+      turns: { "1": { turnId: "1", status: "running", usage: null, cost: null, timing: { kind: "unknown" } } },
       subagentOrder: ["child-wide"],
       subagents: {
         "child-wide": {
@@ -2954,7 +2976,199 @@ describe("M4 retained components", () => {
     expect(image.height).toBe(2)
     expect(setup.captureCharFrame()).toContain("screen.png")
   })
+
+  test("retains keyed Tools rows through lifecycle, selection, and user folding", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 27, useThread: false })
+    renderer = setup.renderer
+    const opened: string[] = []
+    const workspace = new ToolsWorkspaceRenderable(renderer, kennelTheme, {
+      onOpenToolOutput(toolCallId) {
+        opened.push(toolCallId)
+      },
+    })
+    renderer.root.add(workspace)
+    workspace.resizeForTerminal(110, 27)
+
+    const liveFirst = toolsActivity("stable-first", 12, "running", 3)
+    const liveSecond = toolsActivity("stable-second", 4, "running", 2)
+    workspace.update(toolsWorkspaceModel([liveFirst, liveSecond]))
+    await setup.renderOnce()
+
+    const firstRow = workspace.rowForKey("tool:stable-first")
+    const secondRow = workspace.rowForKey("tool:stable-second")
+    expect(firstRow).toBeDefined()
+    expect(secondRow).toBeDefined()
+    expect(firstRow?.expanded).toBeTrue()
+
+    workspace.selectNextBlock()
+    workspace.selectNextBlock()
+    expect(workspace.selectedRowKey).toBe("tool:stable-second")
+    firstRow?.expand(false)
+
+    workspace.update(toolsWorkspaceModel([
+      { ...liveFirst, outcome: { kind: "awaiting_approval", label: "approval needed" } },
+      { ...liveSecond, outcome: { kind: "succeeded", label: "Completed" } },
+    ]))
+    workspace.update(toolsWorkspaceModel([
+      { ...liveFirst, outcome: { kind: "succeeded", label: "Completed" } },
+      { ...liveSecond, outcome: { kind: "succeeded", label: "Completed" } },
+    ]))
+    await setup.renderOnce()
+
+    expect(workspace.rowForKey("tool:stable-first")).toBe(firstRow)
+    expect(workspace.rowForKey("tool:stable-second")).toBe(secondRow)
+    expect(firstRow?.expanded).toBeFalse()
+    expect(workspace.selectedRowKey).toBe("tool:stable-second")
+
+    firstRow?.expand(true)
+    await setup.renderOnce()
+    expect(firstRow?.output.selectable).toBeTrue()
+    expect(firstRow?.getChildren().filter((child) => child.id.includes("output"))).toHaveLength(1)
+    expect(firstRow?.marker.visible).toBeTrue()
+    await setup.mockMouse.click(firstRow!.marker.x, firstRow!.marker.y)
+    expect(opened).toEqual(["stable-first"])
+  })
+
+  test("renders foreground shell hidden lines as a non-actionable marker", async () => {
+    const setup = await createTestRenderer({ width: 70, height: 12, useThread: false })
+    renderer = setup.renderer
+    const opened: string[] = []
+    const workspace = new ToolsWorkspaceRenderable(renderer, kennelTheme, {
+      onOpenToolOutput(toolCallId) {
+        opened.push(toolCallId)
+      },
+    })
+    renderer.root.add(workspace)
+    workspace.resizeForTerminal(70, 12)
+    workspace.update(toolsWorkspaceModel([{
+      kind: "foreground_shell",
+      key: "shell:foreground-current",
+      shellId: "foreground-current",
+      command: "bun test",
+      active: true,
+      status: null,
+      output: {
+        kind: "text",
+        text: Array.from({ length: 8 }, (_, index) => `shell-${index + 5}`).join("\n"),
+        retainedLineCount: 12,
+        visibleLineCount: 8,
+        hiddenRetainedLineCount: 4,
+        window: "tail",
+        sourceTruncated: false,
+      },
+    }]))
+    await setup.renderOnce()
+
+    const shellRow = workspace.rowForKey("shell:foreground-current")
+    expect(shellRow?.marker.visible).toBeTrue()
+    expect(shellRow?.marker.plainText).toBe("… 4 more retained lines")
+    expect(shellRow?.marker.plainText).not.toContain("view all")
+    expect(shellRow?.openOutput()).toBeFalse()
+    await setup.mockMouse.click(shellRow!.marker.x, shellRow!.marker.y)
+    expect(opened).toEqual([])
+  })
+
+  test("follows growing live output only from the bottom", async () => {
+    const setup = await createTestRenderer({ width: 70, height: 10, useThread: false })
+    renderer = setup.renderer
+    const workspace = new ToolsWorkspaceRenderable(renderer, kennelTheme, {
+      onOpenToolOutput() {},
+    })
+    renderer.root.add(workspace)
+    workspace.resizeForTerminal(70, 10)
+    const initial = Array.from({ length: 6 }, (_, index) =>
+      toolsActivity(`scroll-${index}`, 1, "running", 1))
+    workspace.update(toolsWorkspaceModel(initial))
+    await setup.renderOnce()
+
+    workspace.activityScroller.scrollTo(workspace.activityScroller.scrollHeight)
+    await setup.renderOnce()
+    const bottomBeforeGrowth = workspace.activityScroller.scrollTop
+    workspace.update(toolsWorkspaceModel(initial.map((row, index) =>
+      index === 5 ? toolsActivity(row.toolCallId, 8, "running", 1) : row)))
+    await setup.renderOnce()
+    expect(workspace.activityScroller.scrollTop).toBeGreaterThanOrEqual(bottomBeforeGrowth)
+
+    workspace.activityScroller.scrollTo(0)
+    await setup.renderOnce()
+    workspace.update(toolsWorkspaceModel(initial.map((row, index) =>
+      index === 4 ? toolsActivity(row.toolCallId, 8, "running", 1) : row)))
+    await setup.renderOnce()
+    expect(workspace.activityScroller.scrollTop).toBe(0)
+  })
+
+  test("uses exact 74 divider 35 rail geometry and removes the rail below 100 columns", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 27, useThread: false })
+    renderer = setup.renderer
+    const workspace = new ToolsWorkspaceRenderable(renderer, kennelTheme, {
+      onOpenToolOutput() {},
+    })
+    renderer.root.add(workspace)
+    workspace.update(toolsWorkspaceModel([toolsActivity("geometry", 1, "running", 1)]))
+    workspace.resizeForTerminal(110, 27)
+    await setup.renderOnce()
+
+    expect(workspace.activityPane.x).toBe(0)
+    expect(workspace.activityPane.width).toBe(74)
+    expect(workspace.turnRail.x).toBe(74)
+    expect(workspace.turnRail.width).toBe(36)
+    expect(workspace.turnSummary.x).toBe(75)
+    expect(workspace.header.plainText).toBe("● rottweiler  running tools")
+
+    workspace.resizeForTerminal(99, 27)
+    await setup.renderOnce()
+    expect(workspace.turnRail.visible).toBeFalse()
+    expect(workspace.activityPane.width).toBe(99)
+  })
 })
+
+function toolsActivity(
+  toolCallId: string,
+  visibleLines: number,
+  outcome: "running" | "succeeded",
+  hiddenRetainedLineCount: number,
+): Extract<ActivityPresentation, { readonly kind: "tool" }> {
+  return {
+    kind: "tool",
+    key: `tool:${toolCallId}`,
+    toolCallId,
+    name: "bash",
+    subject: `bun test ${toolCallId}`,
+    outcome: outcome === "running"
+      ? { kind: "running", label: "live" }
+      : { kind: "succeeded", label: "Completed" },
+    elapsed: { kind: "known", milliseconds: 12_000, label: "00:12" },
+    output: {
+      kind: "text",
+      text: Array.from({ length: visibleLines }, (_, index) => `${toolCallId}-${index + 1}`).join("\n"),
+      retainedLineCount: visibleLines + hiddenRetainedLineCount,
+      visibleLineCount: visibleLines,
+      hiddenRetainedLineCount,
+      window: outcome === "running" ? "tail" : "head",
+      sourceTruncated: false,
+    },
+    defaultExpanded: outcome === "running",
+    canOpenRetainedOutput: true,
+  }
+}
+
+function toolsWorkspaceModel(rows: readonly ActivityPresentation[]): ToolsWorkspacePresentation {
+  return {
+    replay: false,
+    rows,
+    turn: {
+      kind: "running",
+      turnId: "turn-tools",
+      toolCount: rows.filter((row) => row.kind === "tool").length,
+      liveCount: rows.filter((row) => row.kind === "tool" && row.outcome.kind === "running").length,
+      deniedCount: 0,
+      elapsed: { kind: "known", milliseconds: 12_000, label: "00:12" },
+      usage: null,
+      cost: null,
+    },
+    queuedMessages: [],
+  }
+}
 
 function neverUsage() {
   return {

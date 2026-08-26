@@ -179,7 +179,7 @@ describe("standard TUI keyboard safety", () => {
     const app = createRottweilerApp(renderer, {
       initialState: {
         ...createInitialState(),
-        turns: { active: { turnId: "active", status: "running", usage: null, cost: null } },
+        turns: { active: { turnId: "active", status: "running", usage: null, cost: null, timing: { kind: "unknown" } } },
       },
       onCommand(command) {
         commands.push(command)
@@ -203,7 +203,7 @@ describe("standard TUI keyboard safety", () => {
     const app = createRottweilerApp(renderer, {
       initialState: {
         ...createInitialState(),
-        turns: { active: { turnId: "active", status: "running", usage: null, cost: null } },
+        turns: { active: { turnId: "active", status: "running", usage: null, cost: null, timing: { kind: "unknown" } } },
       },
       onCommand(command) {
         if (command.type !== "interrupt") return { type: "accepted" }
@@ -408,6 +408,7 @@ describe("Vim TUI interaction", () => {
       output: { type: "text" as const, text: "vim output" },
       isError: false,
       callIndex: 0,
+      timing: { kind: "unknown" as const },
     }
     const app = createRottweilerApp(renderer, {
       keybindings: { preset: "vim" },
@@ -450,7 +451,7 @@ describe("Vim TUI interaction", () => {
       keybindings: { preset: "vim" },
       initialState: {
         ...createInitialState(),
-        turns: { active: { turnId: "active", status: "running", usage: null, cost: null } },
+        turns: { active: { turnId: "active", status: "running", usage: null, cost: null, timing: { kind: "unknown" } } },
       },
       onCommand(command) {
         commands.push(command)
@@ -476,7 +477,7 @@ describe("Vim TUI interaction", () => {
     const app = createRottweilerApp(renderer, {
       initialState: {
         ...createInitialState(),
-        turns: { active: { turnId: "active", status: "running", usage: null, cost: null } },
+        turns: { active: { turnId: "active", status: "running", usage: null, cost: null, timing: { kind: "unknown" } } },
         tools: {
           approval: {
             toolCallId: "approval",
@@ -491,6 +492,7 @@ describe("Vim TUI interaction", () => {
             output: null,
             isError: null,
             callIndex: 0,
+            timing: { kind: "unknown" },
           },
         },
       },
@@ -614,6 +616,7 @@ describe("Vim TUI interaction", () => {
           output: null,
           isError: null,
           callIndex: 0,
+          timing: { kind: "unknown" },
         },
       },
     })

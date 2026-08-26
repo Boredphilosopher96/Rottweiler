@@ -18,6 +18,7 @@ const usage = {
   reasoning_tokens: "40",
 }
 const money = { kind: "monetary", amount_micros: "12450", currency: "USD" } as const
+const TOOLS_FIXTURE_NOW_MS = Date.parse("2026-01-01T12:00:41.000Z")
 
 function fixtureState(): RottweilerState {
   return {
@@ -56,7 +57,7 @@ function fixtureState(): RottweilerState {
       },
     ],
     turns: {
-      "1": { turnId: "1", status: "completed", usage, cost: money },
+      "1": { turnId: "1", status: "completed", usage, cost: money, timing: { kind: "unknown" } },
     },
     context: {
       turn_id: "1",
@@ -193,6 +194,7 @@ function pendingTool(diff: boolean): ToolProjection {
     output: null,
     isError: null,
     callIndex: 0,
+    timing: { kind: "unknown" },
   }
 }
 
@@ -281,6 +283,89 @@ function replayFixtureState(): RottweilerState {
   return {
     ...replayed,
     connection: { phase: "connected", attempt: 0, error: null, gap: null },
+  }
+}
+
+function toolsFixtureState(): RottweilerState {
+  const startedAtMs = TOOLS_FIXTURE_NOW_MS - 41_000
+  const makeTool = (
+    toolCallId: string,
+    callIndex: number,
+    extra: Partial<ToolProjection>,
+  ): ToolProjection => ({
+    toolCallId,
+    turnId: "tools-turn",
+    name: "read",
+    args: { path: `${toolCallId}.ts` },
+    status: "finished",
+    capabilities: [],
+    rationale: null,
+    diff: null,
+    chunks: [],
+    output: { type: "text", text: "Completed retained output" },
+    isError: false,
+    callIndex,
+    timing: { kind: "closed", startedAtMs, finishedAtMs: startedAtMs + 5_000 },
+    ...extra,
+  })
+  const tools = [
+    makeTool("read-config", 0, { name: "read", args: { path: "packages/tui/src/app.ts" } }),
+    makeTool("search-layout", 1, { name: "grep", args: { pattern: "ToolsWorkspaceRenderable" } }),
+    makeTool("run-tests", 2, {
+      name: "bash",
+      args: { command: "bun test test/components.test.ts" },
+      status: "running",
+      chunks: [{
+        stream: "stdout",
+        chunk: Array.from({ length: 12 }, (_, index) => `component check ${index + 1} passed`).join("\n"),
+      }],
+      output: null,
+      isError: null,
+      timing: { kind: "open", startedAtMs, lastObservedAtMs: startedAtMs + 39_000 },
+    }),
+    makeTool("denied-edit", 3, {
+      name: "edit",
+      args: { path: "generated/output.ts" },
+      output: { type: "text", text: "permission denied for tool edit" },
+      isError: true,
+    }),
+    makeTool("failed-edit", 4, {
+      name: "edit",
+      args: { path: "packages/tui/src/app.ts" },
+      output: { type: "text", text: "validation failed" },
+      isError: true,
+    }),
+    makeTool("explicit-diagnostics", 5, {
+      name: "diagnostics",
+      args: { path: "packages/tui/src/app.ts" },
+      output: { type: "text", text: "No diagnostics." },
+    }),
+  ]
+  return {
+    ...createInitialState(),
+    connection: { phase: "connected", attempt: 0, error: null, gap: null },
+    streamingTail: {
+      turnId: "tools-turn",
+      text: "",
+      thinking: "",
+      citations: [],
+      toolCallIds: tools.map((tool) => tool.toolCallId),
+      finished: null,
+    },
+    turns: {
+      "tools-turn": {
+        turnId: "tools-turn",
+        status: "running",
+        usage: null,
+        cost: null,
+        timing: { kind: "open", startedAtMs, lastObservedAtMs: startedAtMs + 40_000 },
+      },
+    },
+    tools: Object.fromEntries(tools.map((tool) => [tool.toolCallId, tool])),
+    queuedMessages: [
+      { position: "1", content: "Run the complete suite" },
+      { position: "2", content: "Inspect the direct raster" },
+    ],
   }
 }
 
@@ -568,6 +653,67 @@ describe("M4 golden screens", () => {
       ).toMatchSnapshot()
     })
   }
+
+  test("Tools workspace keeps exact production cells at 110 by 32", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      initialState: toolsFixtureState(),
+      nowMs: () => TOOLS_FIXTURE_NOW_MS,
+    })
+    renderer.root.add(app)
+    app.showToolsView()
+    await setup.flush()
+    const lines = setup.captureCharFrame().split("\n").slice(0, 32)
+
+    expect(lines).toHaveLength(32)
+    expect(app.main.height).toBe(27)
+    expect(lines.every((line) => Bun.stringWidth(line) === 110)).toBeTrue()
+    expect(lines.slice(0, 27).map((line) => line[74])).toEqual(Array(27).fill("│"))
+    expect(lines[0]?.slice(1)).toStartWith("● rottweiler  running tools")
+    expect(lines[0]?.slice(75)).toStartWith("THIS TURN")
+    expect(lines.join("\n")).toContain("bun test test/components.test.ts")
+    expect(lines.join("\n")).toContain("validation failed")
+    expect(lines.join("\n")).toContain("denied")
+    expect(lines.join("\n")).not.toContain("D I A G N O S T I C S")
+    expect(lines.join("\n")).not.toContain("BACKGROUND")
+  })
+
+  test("Tools workspace removes its rail below 100 columns", async () => {
+    const setup = await createTestRenderer({ width: 99, height: 32, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      initialState: toolsFixtureState(),
+      nowMs: () => TOOLS_FIXTURE_NOW_MS,
+    })
+    renderer.root.add(app)
+    app.showToolsView()
+    await setup.flush()
+    const lines = setup.captureCharFrame().split("\n").slice(0, 32)
+
+    expect(lines.every((line) => Bun.stringWidth(line) === 99)).toBeTrue()
+    expect(lines[0]).toContain("● rottweiler  running tools")
+    expect(lines.slice(0, 27).join("\n")).not.toContain("THIS TURN")
+  })
+
+  test("Tools workspace keeps a usable scroller on a short terminal", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 11, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      initialState: toolsFixtureState(),
+      nowMs: () => TOOLS_FIXTURE_NOW_MS,
+    })
+    renderer.root.add(app)
+    app.showToolsView()
+    await setup.flush()
+    const frame = setup.captureCharFrame()
+    const lines = frame.split("\n").slice(0, 11)
+
+    expect(lines.every((line) => Bun.stringWidth(line) === 110)).toBeTrue()
+    expect(frame).toContain("● rottweiler  running tools")
+    expect(frame).not.toContain("THIS TURN")
+    expect(app.toolsWorkspace.activityScroller.height).toBeGreaterThanOrEqual(1)
+  })
 })
 
 function stableDigest(value: string): string {

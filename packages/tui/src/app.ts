@@ -23,6 +23,7 @@ import {
   StateBannerRenderable,
   StatusLineRenderable,
   SubagentTrayRenderable,
+  ToolsWorkspaceRenderable,
   TranscriptRenderable,
   formatSubagentElapsed,
   type PickerItem,
@@ -82,7 +83,12 @@ import {
   type PresentationFrameScheduler,
 } from "./presentation"
 import { PickerController, type PickerKind } from "./picker-controller"
-import { presentError, sanitizeErrorFragment } from "./render"
+import {
+  presentError,
+  projectToolsWorkspace,
+  sanitizeErrorFragment,
+  type ToolsWorkspacePresentation,
+} from "./render"
 import { setWorkspaceRoots } from "./render/tool-presentation"
 import {
   commandSourceLabel,
@@ -173,6 +179,8 @@ export interface RottweilerAppOptions {
   }>
   readonly onProviderActivate?: (provider: string) => Promise<void>
   readonly requestId?: () => string
+  /** Presentation clock. Production uses wall time; deterministic fixtures may inject a fixed value. */
+  readonly nowMs?: () => number
   readonly theme?: RottweilerTheme
   readonly systemThemeMode?: ThemeMode | null
   readonly systemTheme?: RottweilerTheme
@@ -304,6 +312,8 @@ type PaletteSection =
   | "Help & system"
   | "Commands"
 
+export type PrimaryView = "conversation" | "tools"
+
 type PermissionMode = PermissionModeDescriptor | "default"
 
 interface PermissionModeChoice {
@@ -373,6 +383,7 @@ type McpServerAction =
 
 export class RottweilerApp extends BoxRenderable {
   transcript!: TranscriptRenderable
+  toolsWorkspace!: ToolsWorkspaceRenderable
   contextPanel!: ContextPanelRenderable
   interactionPanel!: InteractionPanelRenderable
   outputViewer!: OutputViewerRenderable
@@ -393,6 +404,7 @@ export class RottweilerApp extends BoxRenderable {
       | "sessionId"
       | "clientId"
       | "requestId"
+      | "nowMs"
       | "notifications"
       | "editor"
       | "imagePaste"
@@ -450,6 +462,8 @@ export class RottweilerApp extends BoxRenderable {
   #mcpActionName: string | null = null
   #budgetSettingKey: BudgetSettingKey | null = null
   #outputViewerToolCallId: string | null = null
+  #primaryView: PrimaryView = "conversation"
+  #toolsElapsedTimer: ReturnType<typeof setInterval> | null = null
   #reviewOpen = false
   #pendingReviewSelection: string | null = null
   #postSubmitPicker: "models" | "providers" | "themes" | "settings" | "permissions" | "mcp" | "agents" | null = null
@@ -671,6 +685,7 @@ export class RottweilerApp extends BoxRenderable {
       sessionId: options.sessionId ?? "session-local",
       clientId: options.clientId ?? "tui-client",
       requestId: options.requestId ?? (() => crypto.randomUUID()),
+      nowMs: options.nowMs ?? (() => Date.now()),
       notifications: options.notifications ?? noNotifications,
       editor: options.editor ?? noExternalEditor,
       imagePaste: options.imagePaste ?? noImagePaste,
@@ -831,6 +846,10 @@ export class RottweilerApp extends BoxRenderable {
       },
       onOpenToolOutput: (toolCallId) => this.#openToolOutput(toolCallId),
     })
+    this.toolsWorkspace = new ToolsWorkspaceRenderable(this.ctx, theme, {
+      onOpenToolOutput: (toolCallId) => this.#openToolOutput(toolCallId),
+    })
+    this.toolsWorkspace.visible = this.#primaryView === "tools"
     this.contextPanel = new ContextPanelRenderable(this.ctx, theme, {
       onOpenDiff: (path) => this.#openChangedFileDiff(path),
       onOpenSubagent: (subagentId) => {
@@ -838,6 +857,7 @@ export class RottweilerApp extends BoxRenderable {
       },
     })
     this.main.add(this.transcript)
+    this.main.add(this.toolsWorkspace)
     this.main.add(this.contextPanel)
     this.interactionPanel = new InteractionPanelRenderable(
       this.ctx,
@@ -1007,6 +1027,22 @@ export class RottweilerApp extends BoxRenderable {
 
   get state(): RottweilerState {
     return this.#state
+  }
+
+  get primaryView(): PrimaryView {
+    return this.#primaryView
+  }
+
+  get toolsElapsedTimerActive(): boolean {
+    return this.#toolsElapsedTimer !== null
+  }
+
+  showToolsView(): void {
+    this.#setPrimaryView("tools")
+  }
+
+  showConversationView(): void {
+    this.#setPrimaryView("conversation")
   }
 
   get activeSubagentId(): string | null {
@@ -1628,6 +1664,7 @@ export class RottweilerApp extends BoxRenderable {
       presented,
       viewingSubagent ? childDescriptor?.agent || "Child agent" : "Rottweiler",
     )
+    this.#updateToolsWorkspace(presented)
     const viewedTool = this.#outputViewerToolCallId === null
       ? undefined
       : presented.tools[this.#outputViewerToolCallId]
@@ -1644,14 +1681,18 @@ export class RottweilerApp extends BoxRenderable {
     this.subagentTray.update(state)
     this.contextPanel.update(state)
     this.contextPanel.visible =
+      this.#primaryView === "conversation" &&
       !viewingSubagent &&
       !state.replay.active &&
       contextPanelHasContent(state) &&
       (this.width === 0 ? this.ctx.width >= 100 : this.width >= 100)
+    this.#applyPrimaryViewVisibility()
     this.subagentTray.setPresentationEnabled(!this.contextPanel.visible)
     this.interactionPanel.update(viewingSubagent ? childPassiveInteractionState(presented) : state)
     this.reviewPanel.update(state, !viewingSubagent && this.#reviewOpen)
-    this.composer.setQueuedMessages(viewingSubagent ? [] : state.queuedMessages)
+    this.composer.setQueuedMessages(
+      viewingSubagent || this.#primaryView === "tools" ? [] : state.queuedMessages,
+    )
     const subagentReadOnly = this.#isActiveSubagentRunning()
     const subagentBecameWritable = this.#activeSubagentReadOnly && !subagentReadOnly
     this.#activeSubagentReadOnly = subagentReadOnly
@@ -2277,6 +2318,88 @@ export class RottweilerApp extends BoxRenderable {
     this.#pickerController.refresh()
   }
 
+  #setPrimaryView(view: PrimaryView): void {
+    if (this.#primaryView === view) {
+      this.#applyPrimaryViewVisibility()
+      this.#updateToolsWorkspace(this.#presentedState())
+      return
+    }
+    this.#primaryView = view
+    this.#applyPrimaryViewVisibility()
+    this.#updateToolsWorkspace(this.#presentedState())
+  }
+
+  #applyPrimaryViewVisibility(): void {
+    const toolsVisible = this.#primaryView === "tools"
+    this.transcript.visible = !toolsVisible
+    this.toolsWorkspace.visible = toolsVisible
+    const width = this.width === 0 ? this.ctx.width : this.width
+    const height = this.height === 0 ? this.ctx.height : this.height
+    this.contextPanel.visible =
+      !toolsVisible &&
+      this.#activeSubagentId === null &&
+      !this.#state.replay.active &&
+      contextPanelHasContent(this.#state) &&
+      width >= 100 &&
+      height >= 12
+    this.composer.setQueuedMessages(
+      toolsVisible || this.#activeSubagentId !== null ? [] : this.#state.queuedMessages,
+    )
+    this.subagentTray.setPresentationEnabled(!this.contextPanel.visible)
+  }
+
+  #updateToolsWorkspace(state: RottweilerState): void {
+    const model = projectToolsWorkspace(state, this.#options.nowMs())
+    this.toolsWorkspace.update(model)
+    this.#syncToolsElapsedTimer(model)
+  }
+
+  #syncToolsElapsedTimer(model: ToolsWorkspacePresentation): void {
+    const hasKnownOpenTimer =
+      (model.turn.kind === "running" && model.turn.elapsed.kind === "known") ||
+      model.rows.some((row) =>
+        row.kind === "tool" &&
+        row.outcome.kind === "running" &&
+        row.elapsed.kind === "known")
+    const shouldRun =
+      this.#primaryView === "tools" &&
+      !model.replay &&
+      hasKnownOpenTimer
+    if (!shouldRun) {
+      this.#clearToolsElapsedTimer()
+      return
+    }
+    if (this.#toolsElapsedTimer !== null) return
+    this.#toolsElapsedTimer = setInterval(() => {
+      if (this.#destroyed || this.#primaryView !== "tools") {
+        this.#clearToolsElapsedTimer()
+        return
+      }
+      const presented = this.#presentedState()
+      if (presented.replay.active) {
+        this.#clearToolsElapsedTimer()
+        return
+      }
+      const next = projectToolsWorkspace(presented, this.#options.nowMs())
+      this.toolsWorkspace.update(next)
+      if (
+        next.turn.kind !== "running" &&
+        !next.rows.some((row) =>
+          row.kind === "tool" &&
+          row.outcome.kind === "running" &&
+          row.elapsed.kind === "known")
+      ) {
+        this.#clearToolsElapsedTimer()
+      }
+    }, 1_000)
+  }
+
+  #clearToolsElapsedTimer(): void {
+    if (this.#toolsElapsedTimer === null) return
+    clearInterval(this.#toolsElapsedTimer)
+    this.#toolsElapsedTimer = null
+  }
+
   #openToolOutput(toolCallId: string): void {
     const tool = this.#presentedState().tools[toolCallId]
     if (tool === undefined) return
@@ -2344,12 +2467,7 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   protected override onResize(width: number, height: number): void {
-    this.contextPanel.visible =
-      this.#activeSubagentId === null &&
-      !this.#state.replay.active &&
-      contextPanelHasContent(this.#state) &&
-      width >= 100 &&
-      height >= 12
+    this.#applyPrimaryViewVisibility()
     this.composer.resizeForTerminal(height)
     this.interactionPanel.resizeForTerminal(
       height,
@@ -2369,6 +2487,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#clearPluginNotificationTimer()
     this.#clearSessionSearchTimer()
     this.#clearRuntimeServicesTimer()
+    this.#clearToolsElapsedTimer()
     this.#clearInterruptEscape(false)
     this.#clearClipboardNotice()
     this.#clearExportNotice()
@@ -2460,9 +2579,10 @@ export class RottweilerApp extends BoxRenderable {
         (this.#keybindings.preset === "vim" && focusOwner !== "transcript") ||
         (this.#keybindings.preset === "standard" && focusOwner !== "composer")
       ) return false
-      if (action === "block_previous") this.transcript.selectPreviousBlock()
-      else if (action === "block_next") this.transcript.selectNextBlock()
-      else this.transcript.toggleSelectedBlock()
+      const blocks = this.#primaryView === "tools" ? this.toolsWorkspace : this.transcript
+      if (action === "block_previous") blocks.selectPreviousBlock()
+      else if (action === "block_next") blocks.selectNextBlock()
+      else blocks.toggleSelectedBlock()
       return true
     }
     if (this.#state.replay.active) {
@@ -2560,12 +2680,12 @@ export class RottweilerApp extends BoxRenderable {
         this.#scrollTranscript(1, "viewport")
         return true
       case "view_top":
-        if (this.#keybindings.preset === "standard") this.transcript.scrollTo(0)
+        if (this.#keybindings.preset === "standard") this.#scrollPrimaryTo(0)
         else this.#moveToBoundary(false)
         return true
       case "view_bottom":
         if (this.#keybindings.preset === "standard") {
-          this.transcript.scrollTo(this.transcript.scroller.scrollHeight)
+          this.#scrollPrimaryTo(this.#primaryScrollHeight())
         } else {
           this.#moveToBoundary(true)
         }
@@ -2594,10 +2714,10 @@ export class RottweilerApp extends BoxRenderable {
         this.#scrollTranscript(1, "viewport")
         return true
       case "view_top":
-        this.transcript.scrollTo(0)
+        this.#scrollPrimaryTo(0)
         return true
       case "view_bottom":
-        this.transcript.scrollTo(this.transcript.scroller.scrollHeight)
+        this.#scrollPrimaryTo(this.#primaryScrollHeight())
         return true
       default:
         return false
@@ -2650,7 +2770,8 @@ export class RottweilerApp extends BoxRenderable {
     }
     this.composer.editor.showCursor = this.#inputMode === "insert"
     if (this.#vimFocus === "transcript" || this.#state.replay.active) {
-      this.transcript.scroller.focus()
+      if (this.#primaryView === "tools") this.toolsWorkspace.activityScroller.focus()
+      else this.transcript.scroller.focus()
     } else {
       this.composer.focus()
     }
@@ -2681,7 +2802,11 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #scrollTranscript(direction: 1 | -1, unit: "step" | "viewport"): void {
-    this.transcript.scrollBy(direction, unit)
+    if (this.#primaryView === "tools") {
+      this.toolsWorkspace.activityScroller.scrollBy(direction, unit)
+    } else {
+      this.transcript.scrollBy(direction, unit)
+    }
   }
 
   #moveToBoundary(end: boolean): void {
@@ -2693,8 +2818,19 @@ export class RottweilerApp extends BoxRenderable {
       if (end) this.composer.editor.gotoBufferEnd()
       else this.composer.editor.gotoBufferHome()
     } else {
-      this.transcript.scrollTo(end ? this.transcript.scroller.scrollHeight : 0)
+      this.#scrollPrimaryTo(end ? this.#primaryScrollHeight() : 0)
     }
+  }
+
+  #scrollPrimaryTo(position: number): void {
+    if (this.#primaryView === "tools") this.toolsWorkspace.activityScroller.scrollTo(position)
+    else this.transcript.scrollTo(position)
+  }
+
+  #primaryScrollHeight(): number {
+    return this.#primaryView === "tools"
+      ? this.toolsWorkspace.activityScroller.scrollHeight
+      : this.transcript.scroller.scrollHeight
   }
 
   #restoreFocusAfterTranscriptInteraction(): void {
@@ -4430,6 +4566,8 @@ export class RottweilerApp extends BoxRenderable {
       } satisfies PaletteAction]),
       { id: "status.show", title: "Show agent status", section: "Agents & models", description: "Display running and queue state", run: submit("/status") },
 
+      { id: "view.conversation", title: "View conversation", section: "Workspace", description: "Return to the conversation transcript", run: open(() => this.showConversationView()) },
+      { id: "view.tools", title: "View tools", section: "Workspace", description: "Inspect retained tool activity and output", run: open(() => this.showToolsView()) },
       { id: "workspace.add", title: "Add workspace directory", section: "Workspace", description: "Prefills /add-dir · give a directory path", run: prefill("/add-dir") },
       { id: "workspace.roots", title: "Workspace roots", section: "Workspace", description: "See every live workspace root", run: open(() => this.openWorkspaceRootsPicker()) },
       { id: "trust.manage", title: "Folder trust", section: "Workspace", description: "Show, grant, or revoke folder trust", run: open(() => this.openTrustPicker()) },

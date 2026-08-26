@@ -63,6 +63,7 @@ describe("subagent state boundary", () => {
           status: "completed" as const,
           usage: null,
           cost: null,
+          timing: { kind: "unknown" as const },
         },
       ]),
     )
@@ -85,6 +86,7 @@ describe("subagent state boundary", () => {
           output: null,
           isError: null,
           callIndex: 0,
+          timing: { kind: "unknown" },
         },
       },
     })

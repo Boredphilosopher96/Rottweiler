@@ -21,6 +21,7 @@ import {
   MAX_TERMINAL_SUBAGENT_HISTORY,
   MAX_TODO_CONTENT_BYTES,
   reduceRottweilerState,
+  enterReplayMode,
   transportConnected,
   transportDisconnected,
   type RottweilerState,
@@ -34,6 +35,10 @@ function meta(sequence: string) {
     sequence_id: sequence,
     emitted_at: "2026-01-01T00:00:00Z",
   }
+}
+
+function metaAt(sequence: string, emittedAt: string) {
+  return { ...meta(sequence), emitted_at: emittedAt }
 }
 
 function reduce(state: RottweilerState, event: WireEngineEvent): RottweilerState {
@@ -69,6 +74,160 @@ function childResult(
 describe("pure TUI state reducer", () => {
   test("starts without inventing an engine mode catalog", () => {
     expect(createInitialState().modes).toEqual([])
+  })
+
+  test("projects exact durable tool and turn timing from event timestamps", () => {
+    let state = reduce(createInitialState(), {
+      type: "turn_started",
+      meta: metaAt("1", "2026-01-01T12:00:00.000Z"),
+      turn_id: "timed-turn",
+    })
+    state = reduce(state, {
+      type: "tool_call_started",
+      meta: metaAt("2", "2026-01-01T12:00:00.000Z"),
+      turn_id: "timed-turn",
+      tool_call_id: "timed-tool",
+      name: "bash",
+      args: { command: "bun test" },
+      call_index: 0,
+    })
+    state = reduce(state, {
+      type: "tool_output_delta",
+      meta: metaAt("3", "2026-01-01T12:00:03.000Z"),
+      turn_id: "timed-turn",
+      tool_call_id: "timed-tool",
+      stream: "stdout",
+      chunk: "running",
+    })
+    state = reduce(state, {
+      type: "tool_call_finished",
+      meta: metaAt("4", "2026-01-01T12:00:05.000Z"),
+      turn_id: "timed-turn",
+      tool_call_id: "timed-tool",
+      output: { type: "text", text: "done" },
+      is_error: false,
+      call_index: 0,
+    })
+    state = reduce(state, {
+      type: "turn_finished",
+      meta: metaAt("5", "2026-01-01T12:00:05.000Z"),
+      turn_id: "timed-turn",
+      status: "completed",
+      usage: {
+        input_tokens: "1",
+        output_tokens: "1",
+        cache_read_tokens: "0",
+        cache_write_tokens: "0",
+        reasoning_tokens: "0",
+      },
+      cost: { kind: "unavailable", reason: "fixture" },
+    })
+
+    expect(state.tools["timed-tool"]?.timing).toEqual({
+      kind: "closed",
+      startedAtMs: Date.parse("2026-01-01T12:00:00.000Z"),
+      finishedAtMs: Date.parse("2026-01-01T12:00:05.000Z"),
+    })
+    expect(state.turns["timed-turn"]?.timing).toEqual({
+      kind: "closed",
+      startedAtMs: Date.parse("2026-01-01T12:00:00.000Z"),
+      finishedAtMs: Date.parse("2026-01-01T12:00:05.000Z"),
+    })
+  })
+
+  test("keeps late tool observations unknown and records a late finish without a start", () => {
+    let state = reduce(createInitialState(), {
+      type: "tool_approval_needed",
+      meta: metaAt("1", "2026-01-01T12:00:03.000Z"),
+      turn_id: "late-turn",
+      tool_call_id: "late-tool",
+      name: "edit",
+      args: { path: "src/app.ts" },
+      capabilities: ["write_filesystem"],
+      rationale: "Apply the requested change",
+    })
+    state = reduce(state, {
+      type: "tool_output_delta",
+      meta: metaAt("2", "2026-01-01T12:00:04.000Z"),
+      turn_id: "late-turn",
+      tool_call_id: "late-tool",
+      stream: "stderr",
+      chunk: "waiting",
+    })
+    expect(state.tools["late-tool"]?.timing).toEqual({ kind: "unknown" })
+
+    state = reduce(state, {
+      type: "tool_call_finished",
+      meta: metaAt("3", "2026-01-01T12:00:05.000Z"),
+      turn_id: "late-turn",
+      tool_call_id: "late-tool",
+      output: { type: "text", text: "permission denied for tool edit" },
+      is_error: true,
+      call_index: 0,
+    })
+    expect(state.tools["late-tool"]?.timing).toEqual({
+      kind: "closed",
+      startedAtMs: null,
+      finishedAtMs: Date.parse("2026-01-01T12:00:05.000Z"),
+    })
+  })
+
+  test("replays the same timing deterministically and never substitutes wall time", () => {
+    const events: WireEngineEvent[] = [
+      {
+        type: "turn_started",
+        meta: metaAt("1", "2026-01-01T12:00:00.000Z"),
+        turn_id: "replay-turn",
+      },
+      {
+        type: "tool_call_started",
+        meta: metaAt("2", "2026-01-01T12:00:01.000Z"),
+        turn_id: "replay-turn",
+        tool_call_id: "replay-tool",
+        name: "read",
+        args: { path: "README.md" },
+        call_index: 0,
+      },
+      {
+        type: "tool_output_delta",
+        meta: metaAt("3", "2026-01-01T12:00:03.000Z"),
+        turn_id: "replay-turn",
+        tool_call_id: "replay-tool",
+        stream: "stdout",
+        chunk: "retained",
+      },
+    ]
+    const replayed = events.reduce(
+      (state, event) => reduce(state, event),
+      enterReplayMode(createInitialState(), "session-state"),
+    )
+    const repeated = events.reduce(
+      (state, event) => reduce(state, event),
+      enterReplayMode(createInitialState(), "session-state"),
+    )
+    expect(replayed.tools["replay-tool"]?.timing).toEqual(repeated.tools["replay-tool"]?.timing)
+    expect(replayed.tools["replay-tool"]?.timing).toEqual({
+      kind: "open",
+      startedAtMs: Date.parse("2026-01-01T12:00:01.000Z"),
+      lastObservedAtMs: Date.parse("2026-01-01T12:00:03.000Z"),
+    })
+
+    let malformed = reduce(createInitialState(), {
+      type: "turn_started",
+      meta: metaAt("1", "not-a-timestamp"),
+      turn_id: "malformed-turn",
+    })
+    malformed = reduce(malformed, {
+      type: "tool_call_started",
+      meta: metaAt("2", "still-not-a-timestamp"),
+      turn_id: "malformed-turn",
+      tool_call_id: "malformed-tool",
+      name: "read",
+      args: { path: "README.md" },
+      call_index: 0,
+    })
+    expect(malformed.turns["malformed-turn"]?.timing).toEqual({ kind: "unknown" })
+    expect(malformed.tools["malformed-tool"]?.timing).toEqual({ kind: "unknown" })
   })
 
   test("bounds retained transcript and completed turn history", () => {
@@ -755,6 +914,68 @@ describe("pure TUI state reducer", () => {
       unrestorable_paths: [],
     })
     expect(state.todos).toEqual([{ id: "first", content: "First task", status: "pending" }])
+  })
+
+  test("prunes future numeric turn and tool projections when conversation rewinds", () => {
+    let state = reduce(createInitialState(), {
+      type: "turn_started",
+      meta: meta("1"),
+      turn_id: "1",
+    })
+    state = reduce(state, {
+      type: "tool_call_started",
+      meta: meta("2"),
+      turn_id: "1",
+      tool_call_id: "tool-1",
+      name: "read",
+      args: { path: "one.txt" },
+      call_index: 0,
+    })
+    state = reduce(state, {
+      type: "turn_started",
+      meta: meta("3"),
+      turn_id: "2",
+    })
+    state = reduce(state, {
+      type: "tool_call_started",
+      meta: meta("4"),
+      turn_id: "2",
+      tool_call_id: "tool-2",
+      name: "read",
+      args: { path: "two.txt" },
+      call_index: 0,
+    })
+    state = {
+      ...state,
+      turns: {
+        ...state.turns,
+        "opaque-turn": {
+          ...state.turns["2"]!,
+          turnId: "opaque-turn",
+        },
+      },
+      tools: {
+        ...state.tools,
+        "opaque-tool": {
+          ...state.tools["tool-2"]!,
+          toolCallId: "opaque-tool",
+          turnId: "opaque-turn",
+        },
+      },
+    }
+
+    state = reduce(state, {
+      type: "conversation_rewound",
+      meta: meta("5"),
+      to_agent_turn: "1",
+      operation_id: "rewind-projections",
+      unrestorable_paths: [],
+    })
+
+    expect(Object.keys(state.turns)).toEqual(["1", "opaque-turn"])
+    expect(Object.keys(state.tools)).toEqual(["tool-1", "opaque-tool"])
+    expect(state.turns["2"]).toBeUndefined()
+    expect(state.tools["tool-2"]).toBeUndefined()
   })
 
   test("projects plugin status and bounded UI notifications as known durable events", () => {

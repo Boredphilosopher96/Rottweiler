@@ -16,7 +16,7 @@ case "$command_name" in
       "$(bun --version)" \
       "$(bun -e 'import p from "./node_modules/@opentui/core/package.json" with {type:"json"}; process.stdout.write(p.version)')"
     ;;
-  conversation|command-palette|approval)
+  conversation|command-palette|approval|tools)
     bun run scripts/tui-visual-harness.ts "$command_name" "$output_directory"
     ;;
   present)
@@ -43,7 +43,7 @@ case "$command_name" in
     printf 'No persistent process or scratch state to clean. Evidence remains under %s.\n' "$output_directory"
     ;;
   *)
-    printf 'usage: %s {doctor|conversation|command-palette|approval|smoke|cleanup} [evidence-dir]\n       %s present <scenario.ansi>\n' "$0" "$0" >&2
+    printf 'usage: %s {doctor|conversation|command-palette|approval|tools|smoke|cleanup} [evidence-dir]\n       %s present <scenario.ansi>\n' "$0" "$0" >&2
     exit 2
     ;;
 esac

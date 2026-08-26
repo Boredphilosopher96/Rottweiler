@@ -8,6 +8,7 @@ import { durableSequenceId, isRecord, type WireEngineEvent } from "../transport"
 import type { RottweilerAction } from "./actions"
 import {
   createInitialState,
+  type ActivityTimingProjection,
   type BoundedCommandTextProjection,
   type CommandResultProjection,
   type RottweilerState,
@@ -19,6 +20,7 @@ import {
 } from "./model"
 
 const MAX_U64 = 18_446_744_073_709_551_615n
+const UNKNOWN_ACTIVITY_TIMING: ActivityTimingProjection = { kind: "unknown" }
 export const MAX_SUBAGENT_TASK_BYTES = 1_024
 export const MAX_TERMINAL_SUBAGENT_HISTORY = 128
 export const MAX_TODO_ITEMS = 128
@@ -112,6 +114,46 @@ function compareToolOrder(left: ToolProjection, right: ToolProjection): number {
   }
   if (left.callIndex !== right.callIndex) return left.callIndex - right.callIndex
   return left.toolCallId.localeCompare(right.toolCallId)
+}
+
+function activityTimestamp(value: string): number | null {
+  const timestamp = Date.parse(value)
+  return Number.isFinite(timestamp) ? timestamp : null
+}
+
+function openActivityTiming(emittedAt: string): ActivityTimingProjection {
+  const timestamp = activityTimestamp(emittedAt)
+  return timestamp === null
+    ? UNKNOWN_ACTIVITY_TIMING
+    : { kind: "open", startedAtMs: timestamp, lastObservedAtMs: timestamp }
+}
+
+function observeActivityTiming(
+  current: ActivityTimingProjection | undefined,
+  emittedAt: string,
+): ActivityTimingProjection {
+  if (current?.kind !== "open") return current ?? UNKNOWN_ACTIVITY_TIMING
+  const timestamp = activityTimestamp(emittedAt)
+  return timestamp === null
+    ? current
+    : {
+        kind: "open",
+        startedAtMs: current.startedAtMs,
+        lastObservedAtMs: Math.max(current.lastObservedAtMs, timestamp),
+      }
+}
+
+function closeActivityTiming(
+  current: ActivityTimingProjection | undefined,
+  emittedAt: string,
+): ActivityTimingProjection {
+  const timestamp = activityTimestamp(emittedAt)
+  if (timestamp === null) return UNKNOWN_ACTIVITY_TIMING
+  return {
+    kind: "closed",
+    startedAtMs: current?.kind === "open" ? current.startedAtMs : null,
+    finishedAtMs: timestamp,
+  }
 }
 
 function retainTranscriptEntry(
@@ -713,6 +755,19 @@ function applyKnownEvent(
     }
     case "conversation_rewound": {
       const target = parseU64(event.to_agent_turn)
+      const todos = target === null ? [] : deriveTodosFromTools(state.tools, target)
+      const turns = target === null
+        ? state.turns
+        : Object.fromEntries(Object.entries(state.turns).filter(([turnId]) => {
+            const turn = parseU64(turnId)
+            return turn === null || turn <= target
+          }))
+      const tools = target === null
+        ? state.tools
+        : Object.fromEntries(Object.entries(state.tools).filter(([, tool]) => {
+            const turn = parseU64(tool.turnId)
+            return turn === null || turn <= target
+          }))
       const retainedSubagentIds = state.subagentOrder.filter((subagentId) => {
         const turn = parseU64(state.subagents[subagentId]?.parentTurnId ?? null)
         return target === null || turn === null || turn <= target
@@ -734,7 +789,9 @@ function applyKnownEvent(
               }),
         streamingTail: null,
         queuedMessages: [],
-        todos: target === null ? [] : deriveTodosFromTools(state.tools, target),
+        turns,
+        tools,
+        todos,
         subagents,
         subagentOrder: retainedSubagentIds,
       }
@@ -751,6 +808,7 @@ function applyKnownEvent(
             status: "running",
             usage: null,
             cost: null,
+            timing: openActivityTiming(event.meta.emitted_at),
           },
         ),
     }
@@ -906,6 +964,7 @@ function applyKnownEvent(
         output: null,
         isError: null,
         callIndex: event.call_index,
+        timing: openActivityTiming(event.meta.emitted_at),
       }
       return {
         ...state,
@@ -934,6 +993,7 @@ function applyKnownEvent(
         output: existing?.output ?? null,
         isError: existing?.isError ?? null,
         callIndex: existing?.callIndex ?? 0,
+        timing: observeActivityTiming(existing?.timing, event.meta.emitted_at),
       }
       return {
         ...state,
@@ -955,13 +1015,18 @@ function applyKnownEvent(
         output: null,
         isError: null,
         callIndex: 0,
+        timing: UNKNOWN_ACTIVITY_TIMING,
       }
       return {
         ...state,
         tools: updateTool(
           state.tools,
           event.tool_call_id,
-          { ...existing, diff: event.diff },
+          {
+            ...existing,
+            diff: event.diff,
+            timing: observeActivityTiming(existing.timing, event.meta.emitted_at),
+          },
         ),
         streamingTail: attachToolToTail(state.streamingTail, event.turn_id, event.tool_call_id),
       }
@@ -980,12 +1045,14 @@ function applyKnownEvent(
         output: null,
         isError: null,
         callIndex: 0,
+        timing: UNKNOWN_ACTIVITY_TIMING,
       }
       return {
         ...state,
         tools: updateTool(state.tools, event.tool_call_id, {
           ...existing,
           chunks: [...existing.chunks, { stream: event.stream, chunk: event.chunk }],
+          timing: observeActivityTiming(existing.timing, event.meta.emitted_at),
         }),
         streamingTail: attachToolToTail(state.streamingTail, event.turn_id, event.tool_call_id),
       }
@@ -1005,6 +1072,7 @@ function applyKnownEvent(
         output: event.output,
         isError: event.is_error,
         callIndex: event.call_index,
+        timing: closeActivityTiming(existing?.timing, event.meta.emitted_at),
       }
       const todos =
         tool.name === "todo" && !event.is_error ? projectTodoOutput(event.output) : null
@@ -1064,6 +1132,10 @@ function applyKnownEvent(
             status: event.status,
             usage: event.usage,
             cost: event.cost,
+            timing: closeActivityTiming(
+              state.turns[event.turn_id]?.timing,
+              event.meta.emitted_at,
+            ),
           },
         ),
         streamingTail: tail,

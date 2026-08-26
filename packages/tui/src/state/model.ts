@@ -229,11 +229,25 @@ export interface StreamingTail {
   } | null
 }
 
+export type ActivityTimingProjection =
+  | { readonly kind: "unknown" }
+  | {
+      readonly kind: "open"
+      readonly startedAtMs: number
+      readonly lastObservedAtMs: number
+    }
+  | {
+      readonly kind: "closed"
+      readonly startedAtMs: number | null
+      readonly finishedAtMs: number
+    }
+
 export interface TurnProjection {
   readonly turnId: string
   readonly status: "running" | TurnStatus
   readonly usage: Usage | null
   readonly cost: Cost | null
+  readonly timing: ActivityTimingProjection
 }
 
 export type ToolStatus = "running" | "awaiting_approval" | "finished"
@@ -256,6 +270,7 @@ export interface ToolProjection {
   readonly output: ToolOutput | null
   readonly isError: boolean | null
   readonly callIndex: number
+  readonly timing: ActivityTimingProjection
 }
 
 export type TodoStatusProjection = "pending" | "in_progress" | "completed" | "blocked"

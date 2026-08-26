@@ -28,6 +28,7 @@ afterAll(() => {
     "tui_frame_p999_us",
     "tui_input_echo_best_p99_us",
     "tui_tool_output_frame_p95_us",
+    "tui_tools_workspace_frame_p95_us",
     "tui_vim_echo_best_p99_us",
   ]
   expect(Object.keys(emittedMetrics).sort()).toEqual(expected)
@@ -272,6 +273,87 @@ describe("M4 executable TUI performance budgets", () => {
     const p95 = percentile(samples.slice(10), 0.95)
     emittedMetrics.tui_tool_output_frame_p95_us = Math.ceil(p95 * 1_000)
     expect(p95).toBeLessThan(frameP95BudgetMs)
+  }, 20_000)
+
+  test("visible Tools workspace streams bounded retained rows without identity churn", async () => {
+    Bun.gc(true)
+    const setup = await createTestRenderer({
+      width: 110,
+      height: 32,
+      useThread: false,
+      gatherStats: true,
+    })
+    renderer = setup.renderer
+    const meta = (sequence: number) => ({
+      protocol_version: PROTOCOL_VERSION,
+      session_id: "tools-workspace-performance",
+      sequence_id: String(10_000 + sequence),
+      emitted_at: "2026-08-25T12:00:00Z",
+    })
+    let state = reduceRottweilerState(createInitialState(), engineEvent({
+      type: "turn_started",
+      meta: meta(0),
+      turn_id: "tools-performance-turn",
+    }))
+    for (let index = 0; index < 16; index += 1) {
+      state = reduceRottweilerState(state, engineEvent({
+        type: "tool_call_started",
+        meta: meta(index + 1),
+        turn_id: "tools-performance-turn",
+        tool_call_id: `tools-performance-${index}`,
+        name: "bash",
+        args: { command: `fixture-${index}` },
+        call_index: index,
+      }))
+    }
+    const app = createRottweilerApp(renderer, { initialState: state })
+    renderer.root.add(app)
+    app.showToolsView()
+    await setup.renderOnce()
+    expect(app.toolsWorkspace.mountedRowCount).toBe(16)
+    expect(app.toolsElapsedTimerActive).toBeTrue()
+    const rowIdentities = new Map(
+      app.toolsWorkspace.mountedRowKeys.map((key) => [key, app.toolsWorkspace.rowForKey(key)]),
+    )
+
+    const samples: number[] = []
+    const chunk = "tools-output-line 0123456789abcdef\n".repeat(240).slice(0, 8 * 1_024)
+    for (let index = 0; index < 120; index += 1) {
+      const started = process.cpuUsage()
+      state = reduceRottweilerState(state, engineEvent({
+        type: "tool_output_delta",
+        meta: meta(100 + index),
+        turn_id: "tools-performance-turn",
+        tool_call_id: `tools-performance-${index % 16}`,
+        stream: "stdout",
+        chunk,
+      }))
+      app.setState(state)
+      await setup.renderOnce()
+      const used = process.cpuUsage(started)
+      samples.push((used.user + used.system) / 1_000)
+    }
+
+    const p95 = percentile(samples.slice(10), 0.95)
+    emittedMetrics.tui_tools_workspace_frame_p95_us = Math.ceil(p95 * 1_000)
+    expect(p95).toBeLessThan(frameP95BudgetMs)
+    expect(app.toolsWorkspace.mountedRowCount).toBe(16)
+    for (const [key, identity] of rowIdentities) {
+      expect(app.toolsWorkspace.rowForKey(key)).toBe(identity)
+    }
+
+    app.showConversationView()
+    expect(app.toolsElapsedTimerActive).toBeFalse()
+    app.setState({
+      ...state,
+      replay: {
+        active: true,
+        sessionId: "tools-workspace-performance",
+        completedThrough: state.lastSequence,
+      },
+    })
+    app.showToolsView()
+    expect(app.toolsElapsedTimerActive).toBeFalse()
   }, 20_000)
 
   test("Vim mode dispatch and insert echo stay below 16ms p99", async () => {

@@ -17,7 +17,7 @@ import {
   TuiEngineRuntime,
   type RuntimeEngineClient,
 } from "../src/runtime"
-import { createInitialState, engineEvent, reduceRottweilerState } from "../src/state"
+import { createInitialState, engineEvent, reduceRottweilerState, type RottweilerState, type ToolProjection } from "../src/state"
 import type { EngineSubscriptionOptions } from "../src/transport"
 import {
   daylightTheme,
@@ -147,6 +147,7 @@ describe("Rottweiler OpenTUI shell", () => {
       output: { type: "text" as const, text: "keyboard output" },
       isError: false,
       callIndex: 0,
+      timing: { kind: "unknown" as const },
     }
     const app = createRottweilerApp(renderer, {
       initialState: {
@@ -1059,6 +1060,7 @@ describe("Rottweiler OpenTUI shell", () => {
           output: null,
           isError: null,
           callIndex: 0,
+          timing: { kind: "unknown" },
         },
       },
     })
@@ -1711,6 +1713,7 @@ describe("Rottweiler OpenTUI shell", () => {
             output: { type: "text", text: "done" },
             isError: false,
             callIndex: 0,
+            timing: { kind: "unknown" },
           },
         },
       },
@@ -2899,6 +2902,7 @@ describe("Rottweiler OpenTUI shell", () => {
             status: "running",
             usage: null,
             cost: null,
+            timing: { kind: "unknown" },
           },
         },
         subagentOrder: ["child-one"],
@@ -8912,4 +8916,283 @@ describe("Rottweiler OpenTUI shell", () => {
     })
     expect(commands).toEqual([])
   })
+
+  test("projects Tools elapsed labels from an injected presentation clock", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 24, useThread: false })
+    renderer = setup.renderer
+    let nowMs = Date.parse("2026-01-01T12:00:41.000Z")
+    const app = createRottweilerApp(renderer, {
+      initialState: toolsAppState(),
+      nowMs: () => nowMs,
+    })
+    renderer.root.add(app)
+    app.showToolsView()
+    await setup.renderOnce()
+
+    expect(app.toolsWorkspace.rowForKey("tool:tools-0")?.header.plainText).toContain(
+      "live · 00:41",
+    )
+
+    nowMs += 1_000
+    app.setState({ ...app.state })
+    await setup.renderOnce()
+    expect(app.toolsWorkspace.rowForKey("tool:tools-0")?.header.plainText).toContain(
+      "live · 00:42",
+    )
+  })
+
+  test("switches mounted conversation and Tools views from the palette without sharing scroll state", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 24, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, { initialState: toolsAppState() })
+    renderer.root.add(app)
+    await setup.renderOnce()
+    app.transcript.scrollTo(app.transcript.scroller.scrollHeight)
+    await setup.renderOnce()
+    const transcriptScroll = app.transcript.scroller.scrollTop
+    expect(transcriptScroll).toBeGreaterThan(0)
+
+    app.openCommandPicker()
+    expect(app.commandPalette.itemIds).toContain("view.tools")
+    expect(app.commandPalette.itemIds).toContain("view.conversation")
+    app.commandPalette.selectById("view.tools")
+    app.commandPalette.activateSelected()
+    await setup.renderOnce()
+
+    expect(app.primaryView).toBe("tools")
+    expect(app.toolsWorkspace.visible).toBeTrue()
+    expect(app.transcript.visible).toBeFalse()
+    expect(app.contextPanel.visible).toBeFalse()
+    expect(app.toolsElapsedTimerActive).toBeTrue()
+    expect(app.toolsWorkspace.activeStatus.plainText).toContain("Esc Esc to interrupt")
+    expect(app.toolsWorkspace.queueBlock.plainText).toContain("Next sends when this turn ends")
+    expect(app.toolsWorkspace.queueBlock.plainText).toContain("1 later message remains queued")
+
+    app.toolsWorkspace.activityScroller.scrollTo(2)
+    await setup.renderOnce()
+    const toolsScroll = app.toolsWorkspace.activityScroller.scrollTop
+    app.openCommandPicker()
+    app.commandPalette.selectById("view.conversation")
+    app.commandPalette.activateSelected()
+    await setup.renderOnce()
+    expect(app.primaryView).toBe("conversation")
+    expect(app.transcript.scroller.scrollTop).toBe(transcriptScroll)
+    expect(app.toolsElapsedTimerActive).toBeFalse()
+
+    app.openCommandPicker()
+    app.commandPalette.selectById("view.tools")
+    app.commandPalette.activateSelected()
+    await setup.renderOnce()
+    expect(app.toolsWorkspace.activityScroller.scrollTop).toBe(toolsScroll)
+
+    setup.mockInput.pressKey("o", { ctrl: true })
+    expect(app.picker.visible).toBeTrue()
+    expect(app.picker.title).toContain("Modes")
+  })
+
+  test("keeps approval focus above Tools and preserves existing output viewer lifecycle", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 24, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, { initialState: toolsAppState() })
+    renderer.root.add(app)
+    app.showToolsView()
+    await setup.renderOnce()
+
+    const first = app.toolsWorkspace.rowForKey("tool:tools-0")
+    expect(first?.openOutput()).toBeTrue()
+    await setup.renderOnce()
+    expect(app.outputViewer.visible).toBeTrue()
+    app.outputViewer.scroller.scrollTo(2)
+    const viewerScroll = app.outputViewer.scroller.scrollTop
+    const changed = toolsAppState()
+    const original = changed.tools["tools-0"]!
+    app.setState({
+      ...changed,
+      tools: {
+        ...changed.tools,
+        "tools-0": {
+          ...original,
+          chunks: [...original.chunks, { stream: "stdout", chunk: "late line\n" }],
+        },
+      },
+    })
+    expect(app.outputViewer.scroller.scrollTop).toBe(viewerScroll)
+
+    const withoutViewedTool = { ...app.state.tools }
+    delete withoutViewedTool["tools-0"]
+    app.setState({ ...app.state, tools: withoutViewedTool })
+    expect(app.outputViewer.visible).toBeFalse()
+
+    app.handleEvent({
+      type: "tool_approval_needed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-tools",
+        sequence_id: "90",
+        emitted_at: "2026-01-01T12:00:15.000Z",
+      },
+      turn_id: "turn-tools",
+      tool_call_id: "approval-tools",
+      name: "edit",
+      args: { path: "src/app.ts" },
+      capabilities: ["write_filesystem"],
+      rationale: "Apply the requested view",
+    })
+    expect(app.interactionPanel.capturesInput).toBeTrue()
+    expect(renderer.currentFocusedRenderable).toBe(app.interactionPanel.select)
+    expect(app.primaryView).toBe("tools")
+  })
+
+  test("reprojects Tools to the retained turn after conversation rewind", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 24, useThread: false })
+    renderer = setup.renderer
+    const toolForTurn = (turnId: string): ToolProjection => ({
+      toolCallId: `tool-${turnId}`,
+      turnId,
+      name: "read",
+      args: { path: `${turnId}.txt` },
+      status: "finished",
+      capabilities: [],
+      rationale: null,
+      diff: null,
+      chunks: [],
+      output: { type: "text", text: `turn ${turnId}` },
+      isError: false,
+      callIndex: 0,
+      timing: { kind: "unknown" },
+    })
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        turns: Object.fromEntries(["1", "2"].map((turnId) => [turnId, {
+          turnId,
+          status: "running" as const,
+          usage: null,
+          cost: null,
+          timing: { kind: "unknown" as const },
+        }])),
+        tools: {
+          "tool-1": toolForTurn("1"),
+          "tool-2": toolForTurn("2"),
+        },
+      },
+    })
+    renderer.root.add(app)
+    app.showToolsView()
+    await setup.renderOnce()
+    expect(app.toolsWorkspace.rowForKey("tool:tool-2")).toBeDefined()
+    expect(app.toolsWorkspace.rowForKey("tool:tool-1")).toBeUndefined()
+
+    app.handleEvent({
+      type: "conversation_rewound",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-tools",
+        sequence_id: "1",
+        emitted_at: "2026-01-01T12:00:00.000Z",
+      },
+      to_agent_turn: "1",
+      operation_id: "rewind-tools-view",
+      unrestorable_paths: [],
+    })
+    await setup.renderOnce()
+
+    expect(app.state.turns["2"]).toBeUndefined()
+    expect(app.state.tools["tool-2"]).toBeUndefined()
+    expect(app.toolsWorkspace.rowForKey("tool:tool-1")).toBeDefined()
+    expect(app.toolsWorkspace.rowForKey("tool:tool-2")).toBeUndefined()
+  })
+
+  test("allows read-only Tools inspection in replay without emitting a command or timer", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 24, useThread: false })
+    renderer = setup.renderer
+    const commands: ClientCommand[] = []
+    const base = toolsAppState()
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...base,
+        replay: { active: true, sessionId: "session-tools", completedThrough: "80" },
+      },
+      onCommand(command) {
+        commands.push(command)
+      },
+    })
+    renderer.root.add(app)
+    app.showToolsView()
+    await setup.renderOnce()
+
+    expect(app.primaryView).toBe("tools")
+    expect(app.toolsElapsedTimerActive).toBeFalse()
+    app.toolsWorkspace.selectNextBlock()
+    app.toolsWorkspace.toggleSelectedBlock()
+    expect(app.toolsWorkspace.openSelectedOutput()).toBeTrue()
+    expect(app.outputViewer.visible).toBeTrue()
+    expect(commands).toEqual([])
+  })
 })
+
+function toolsAppState(): RottweilerState {
+  const tools = Object.fromEntries(Array.from({ length: 8 }, (_, index) => {
+    const item: ToolProjection = {
+      toolCallId: `tools-${index}`,
+      turnId: "turn-tools",
+      name: "bash",
+      args: { command: `bun test tools-${index}` },
+      status: "running",
+      capabilities: ["execute"],
+      rationale: null,
+      diff: null,
+      chunks: [{
+        stream: "stdout",
+        chunk: Array.from({ length: 8 }, (__, line) => `tools-${index}-${line + 1}`).join("\n"),
+      }],
+      output: null,
+      isError: null,
+      callIndex: index,
+      timing: {
+        kind: "open",
+        startedAtMs: Date.parse("2026-01-01T12:00:00.000Z"),
+        lastObservedAtMs: Date.parse("2026-01-01T12:00:10.000Z"),
+      },
+    }
+    return [item.toolCallId, item]
+  }))
+  return {
+    ...createInitialState(),
+    transcript: Array.from({ length: 24 }, (_, index) => ({
+      sequenceId: `${index + 1}`,
+      agentTurn: `history-${index}`,
+      turn: {
+        role: "assistant" as const,
+        blocks: [{ type: "text" as const, text: `Historical response ${index}\nsecond line` }],
+        meta: { synthetic: false, summary: false },
+      },
+    })),
+    streamingTail: {
+      turnId: "turn-tools",
+      text: "",
+      thinking: "",
+      citations: [],
+      toolCallIds: Object.keys(tools),
+      finished: null,
+    },
+    turns: {
+      "turn-tools": {
+        turnId: "turn-tools",
+        status: "running",
+        usage: null,
+        cost: null,
+        timing: {
+          kind: "open",
+          startedAtMs: Date.parse("2026-01-01T12:00:00.000Z"),
+          lastObservedAtMs: Date.parse("2026-01-01T12:00:10.000Z"),
+        },
+      },
+    },
+    tools,
+    queuedMessages: [
+      { position: "1", content: "Run the focused suite" },
+      { position: "2", content: "Inspect the raster" },
+    ],
+  }
+}

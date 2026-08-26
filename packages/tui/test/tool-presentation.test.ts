@@ -23,6 +23,7 @@ function finished(
     output,
     isError: false,
     callIndex: 0,
+    timing: { kind: "unknown" },
     ...extra,
   }
 }

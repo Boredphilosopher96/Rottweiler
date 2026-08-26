@@ -18,8 +18,9 @@ import type { RottweilerState, ToolProjection } from "../src/state"
 import { createInitialState } from "../src/state"
 import { kennelTheme } from "../src/theme"
 
-type VisualScenario = "conversation" | "command-palette" | "approval"
+type VisualScenario = "conversation" | "command-palette" | "approval" | "tools"
 
+const TOOLS_FIXTURE_NOW_MS = Date.parse("2026-01-01T12:00:41.000Z")
 const scenarioInput = process.argv[2] ?? "conversation"
 if (!isVisualScenario(scenarioInput)) {
   throw new Error(`Unknown scenario: ${scenarioInput}`)
@@ -38,6 +39,7 @@ try {
     initialState: scenarioState(scenarioInput),
     requestId: () => "visual-proof-request",
     treeSitterClient: treeSitter,
+    ...(scenarioInput === "tools" ? { nowMs: () => TOOLS_FIXTURE_NOW_MS } : {}),
   })
   setup.renderer.root.add(app)
   await settleHighlights(setup.renderer.root, setup)
@@ -48,6 +50,15 @@ try {
     setup.mockInput.pressKey("p", { ctrl: true })
     actions.push("typed context into the focused production query input")
     await setup.mockInput.typeText("context")
+    await setup.flush()
+  } else if (scenarioInput === "tools") {
+    actions.push("pressed Ctrl+P through the renderer input path")
+    setup.mockInput.pressKey("p", { ctrl: true })
+    actions.push("typed view tools into the focused production query input")
+    await setup.mockInput.typeText("view tools")
+    await setup.flush()
+    actions.push("pressed Enter to activate the selected View tools action")
+    setup.mockInput.pressEnter()
     await setup.flush()
   } else if (scenarioInput === "approval") {
     actions.push("launched a session with a pending terminal-command approval")
@@ -91,7 +102,7 @@ try {
 }
 
 function isVisualScenario(value: string): value is VisualScenario {
-  return value === "conversation" || value === "command-palette" || value === "approval"
+  return value === "conversation" || value === "command-palette" || value === "approval" || value === "tools"
 }
 
 function scenarioAssertions(scenario: VisualScenario): readonly string[] {
@@ -102,6 +113,16 @@ function scenarioAssertions(scenario: VisualScenario): readonly string[] {
       return ["COMMAND PALETTE", "context", "Compact context", "Manage context"]
     case "approval":
       return ["Permission required", "Terminal command", "Allow once"]
+    case "tools":
+      return [
+        "● rottweiler  running tools",
+        "THIS TURN",
+        "tools    6",
+        "live     1",
+        "denied   1",
+        "Esc Esc to interrupt",
+        "Next sends when this turn ends",
+      ]
   }
 }
 
@@ -143,6 +164,46 @@ function visualAssertions(
       colorAssertion(styledFrame, "matched title text uses primary", 5, 6, kennelTheme.primary, kennelTheme.backgroundPanel),
       colorAssertion(styledFrame, "divider uses subtle border", 5, 55, kennelTheme.borderSubtle),
       colorAssertion(styledFrame, "detail metadata is muted", 6, 57, kennelTheme.textMuted),
+    ]
+  }
+  if (scenario === "tools") {
+    const lines = characterFrame.split("\n")
+    return [
+      ...assertions,
+      positionAssertion(lines, "Tools header begins at column 1", 0, 1, "● rottweiler  running tools"),
+      positionAssertion(lines, "turn rail divider is fixed at column 74", 0, 74, "│"),
+      positionAssertion(lines, "turn rail content begins at column 75", 0, 75, "THIS TURN"),
+      frameWidthAssertion(lines),
+      {
+        name: "primary divider spans exactly rows 0 through 26",
+        passed: lines.slice(0, 27).every((line) => line[74] === "│") &&
+          lines[27]?.[74] !== "│" &&
+          lines[31]?.[74] !== "│",
+        expected: "divider at column 74 only for rows 0-26",
+        actual: lines.map((line, row) => line[74] === "│" ? row : -1).filter((row) => row >= 0).join(","),
+      },
+      {
+        name: "complete tool subject is not split or injected with spaces",
+        passed: characterFrame.includes("bun test test/components.test.ts") &&
+          !characterFrame.includes("bun test test/components....ts") &&
+          !characterFrame.includes("r e a s o n") &&
+          !characterFrame.includes("e d i t"),
+        expected: "intact complete text runs",
+        actual: characterFrame.includes("bun test test/components.test.ts") ? "intact" : "missing or clipped",
+      },
+      {
+        name: "unsupported target sections and claims are absent",
+        passed: !characterFrame.includes("DIAGNOSTICS") &&
+          !characterFrame.includes("BACKGROUND") &&
+          !characterFrame.includes("matched rule") &&
+          !characterFrame.includes("by you"),
+        expected: "no unsupported sections, rule, or actor provenance",
+        actual: "checked terminal cells",
+      },
+      colorAtTextAssertion(styledFrame, lines, "Tools product marker uses primary", "● rottweiler", kennelTheme.primary),
+      colorAtTextAssertion(styledFrame, lines, "running outcome uses info", "live · 00:41", kennelTheme.info),
+      colorAtTextAssertion(styledFrame, lines, "denied outcome uses error", "denied · 00:05", kennelTheme.error),
+      colorAtTextAssertion(styledFrame, lines, "turn rail heading stays readable", "THIS TURN", kennelTheme.text),
     ]
   }
   if (scenario !== "conversation") return assertions
@@ -272,6 +333,26 @@ function colorAssertion(
   }
 }
 
+function colorAtTextAssertion(
+  frame: CapturedFrame,
+  lines: readonly string[],
+  name: string,
+  text: string,
+  expectedForeground: string,
+): VisualAssertion {
+  const row = lines.findIndex((line) => line.includes(text))
+  const column = row < 0 ? -1 : lines[row]?.indexOf(text) ?? -1
+  if (row < 0 || column < 0) {
+    return {
+      name,
+      passed: false,
+      expected: `${text} in ${normalizeHex(expectedForeground)}`,
+      actual: "text missing",
+    }
+  }
+  return colorAssertion(frame, name, row, column, expectedForeground)
+}
+
 function capturedCell(frame: CapturedFrame, row: number, column: number) {
   let start = 0
   for (const span of frame.lines[row]?.spans ?? []) {
@@ -312,6 +393,7 @@ async function settleHighlights(
 }
 
 function scenarioState(scenario: VisualScenario): RottweilerState {
+  if (scenario === "tools") return toolsState()
   const state = conversationState()
   if (scenario !== "approval") return state
   const approval = tool({
@@ -336,6 +418,99 @@ function scenarioState(scenario: VisualScenario): RottweilerState {
       finished: null,
     },
     tools: { [approval.toolCallId]: approval },
+  }
+}
+
+function toolsState(): RottweilerState {
+  const startedAtMs = TOOLS_FIXTURE_NOW_MS - 41_000
+  const makeTool = (
+    toolCallId: string,
+    callIndex: number,
+    extra: Partial<ToolProjection>,
+  ): ToolProjection => ({
+    toolCallId,
+    turnId: "tools-turn",
+    name: "read",
+    args: { path: `${toolCallId}.ts` },
+    status: "finished",
+    capabilities: [],
+    rationale: null,
+    diff: null,
+    chunks: [],
+    output: { type: "text", text: "Completed retained output" },
+    isError: false,
+    callIndex,
+    timing: { kind: "closed", startedAtMs, finishedAtMs: startedAtMs + 5_000 },
+    ...extra,
+  })
+  const tools = [
+    makeTool("read-app", 0, {
+      name: "read",
+      args: { path: "packages/tui/src/app.ts" },
+      output: { type: "text", text: "Read 5,894 lines" },
+    }),
+    makeTool("search-workspace", 1, {
+      name: "grep",
+      args: { pattern: "ToolsWorkspaceRenderable" },
+      output: { type: "text", text: "packages/tui/src/app.ts: ToolsWorkspaceRenderable" },
+    }),
+    makeTool("component-tests", 2, {
+      name: "bash",
+      args: { command: "bun test test/components.test.ts" },
+      status: "running",
+      chunks: [{
+        stream: "stdout",
+        chunk: Array.from({ length: 12 }, (_, index) => `component check ${index + 1} passed`).join("\n"),
+      }],
+      output: null,
+      isError: null,
+      timing: { kind: "open", startedAtMs, lastObservedAtMs: startedAtMs + 40_000 },
+    }),
+    makeTool("denied-generated-edit", 3, {
+      name: "edit",
+      args: { path: "generated/output.ts" },
+      output: { type: "text", text: "permission denied for tool edit" },
+      isError: true,
+    }),
+    makeTool("write-component", 4, {
+      name: "write",
+      args: { path: "packages/tui/src/components/tools-workspace.ts" },
+      output: { type: "text", text: "Wrote the retained workspace component" },
+    }),
+    makeTool("explicit-diagnostics", 5, {
+      name: "diagnostics",
+      args: { path: "packages/tui/src/app.ts" },
+      output: { type: "text", text: "No diagnostics." },
+    }),
+  ]
+  return {
+    ...createInitialState(),
+    connection: { phase: "connected", attempt: 0, error: null, gap: null },
+    mode: "execute",
+    provider: "openai",
+    model: "gpt-5",
+    streamingTail: {
+      turnId: "tools-turn",
+      text: "",
+      thinking: "",
+      citations: [],
+      toolCallIds: tools.map((tool) => tool.toolCallId),
+      finished: null,
+    },
+    turns: {
+      "tools-turn": {
+        turnId: "tools-turn",
+        status: "running",
+        usage: null,
+        cost: null,
+        timing: { kind: "open", startedAtMs, lastObservedAtMs: startedAtMs + 40_000 },
+      },
+    },
+    tools: Object.fromEntries(tools.map((item) => [item.toolCallId, item])),
+    queuedMessages: [
+      { position: "1", content: "Run the complete suite" },
+      { position: "2", content: "Inspect the direct raster" },
+    ],
   }
 }
 
@@ -473,6 +648,7 @@ function tool(fields: Omit<ToolProjection, "turnId" | "diff" | "callIndex">): To
     turnId: "2",
     diff: null,
     callIndex: 0,
+    timing: { kind: "unknown" },
   }
 }
 
