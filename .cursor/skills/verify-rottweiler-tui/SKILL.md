@@ -26,6 +26,7 @@ Read [the feature map](./features/README.md), then choose the matching command:
 - `theme-browser` enters through `/theme` and captures the retained theme list, semantic swatches, and live role preview.
 - `settings-browser` enters through `/settings` and captures the retained descriptor-backed settings surface at wide and narrow sizes.
 - `mcp-browser` enters through `/mcp` and captures the retained server inventory, derived totals, selected review detail, and responsive layout.
+- `session-review` enters through `/review` and captures the full-primary cumulative diff, exact selected-file decisions, safety rail, and responsive layout.
 - `smoke` runs TypeScript checking, all golden screens, and the conversation capture.
 
 Each run is isolated in its own native in-memory terminal. It does not connect to a provider, engine, repository mutation path, or another user's session.
@@ -41,6 +42,8 @@ The Theme Browser scenario pins its full-primary 34/1/75 regions, five semantic 
 The Settings Browser scenario pins its full-primary 30/1/79 regions, complete setting labels, authoritative detail text, surface occlusion, unsupported-claim exclusions, and slash-command entry path. It also captures the 72-column single-pane layout and requires byte-identical TXT, ANSI, PNG, and JSON artifacts for both sizes.
 
 The MCP Browser scenario pins its full-primary 73/1/36 regions, derived inventory totals, exact state tones, matching approval-review detail, surface occlusion, and `/mcp` entry. It also captures the 72-column single-pane layout and requires byte-identical TXT, ANSI, PNG, and JSON artifacts for both sizes.
+
+The Session Review scenario pins its full-primary 73/1/36 regions, derived addition and deletion totals, exact selected-file state, fingerprint-bound safety copy, `/review` entry, and the absence of unsupported worktree or bulk-decision claims. It also captures the 72-column layout with the detail rail removed and requires byte-identical TXT, ANSI, PNG, and JSON artifacts for both sizes.
 
 ## Cleanup
 

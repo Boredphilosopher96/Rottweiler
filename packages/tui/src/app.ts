@@ -1030,6 +1030,12 @@ export class RottweilerApp extends BoxRenderable {
           this.height === 0 ? this.ctx.height : this.height,
           this.interactionPanel.usesComposer ? height : 0,
         )
+        if (this.reviewPanel.visible && this.statusLine !== undefined) {
+          this.#resizeReviewPanel(
+            this.width === 0 ? this.ctx.width : this.width,
+            this.height === 0 ? this.ctx.height : this.height,
+          )
+        }
       },
     })
     this.statusLine = new StatusLineRenderable(this.ctx, theme, {
@@ -1770,7 +1776,6 @@ export class RottweilerApp extends BoxRenderable {
     const composerVisible =
       !state.replay.active &&
       this.#outputViewerToolCallId === null &&
-      !this.#reviewOpen &&
       !subagentReadOnly &&
       (!this.interactionPanel.visible || this.interactionPanel.usesComposer)
     if (!composerVisible) this.composer.editor.blur()
@@ -2334,6 +2339,14 @@ export class RottweilerApp extends BoxRenderable {
     this.mcpBrowser.resizeForTerminal(width, height, primaryHeight)
   }
 
+  #resizeReviewPanel(width: number, height: number): void {
+    const primaryHeight = Math.max(
+      1,
+      height - this.statusLine.height - this.composer.dockHeight,
+    )
+    this.reviewPanel.resizeForTerminal(width, height, primaryHeight)
+  }
+
   async #confirmTheme(theme: RottweilerTheme): Promise<void> {
     const outcome = await this.#projectionRequests.emit({
       type: "set_setting",
@@ -2566,6 +2579,10 @@ export class RottweilerApp extends BoxRenderable {
     }
     this.reviewPanel.showSessionReview()
     this.#reviewOpen = true
+    this.#resizeReviewPanel(
+      this.width === 0 ? this.ctx.width : this.width,
+      this.height === 0 ? this.ctx.height : this.height,
+    )
     this.setState(this.#state)
     this.#projectionRequests.command({ type: "get_session_review" })
   }
@@ -2639,7 +2656,7 @@ export class RottweilerApp extends BoxRenderable {
       this.interactionPanel.usesComposer && this.composer.visible ? this.composer.dockHeight : 0,
     )
     this.outputViewer.resizeForTerminal(height)
-    this.reviewPanel.resizeForTerminal(height)
+    this.#resizeReviewPanel(width, height)
     if (this.mcpBrowser.visible) this.#resizeMcpBrowser(width, height)
     else if (this.settingsBrowser.visible) this.#resizeSettingsBrowser(width, height)
     else if (this.themeBrowser.visible) this.#resizeThemeBrowser(width, height)
@@ -5364,6 +5381,10 @@ export class RottweilerApp extends BoxRenderable {
   #openChangedFileDiff(path: string): void {
     if (this.#state.replay.active || this.#state.shell.active) return
     this.#reviewOpen = true
+    this.#resizeReviewPanel(
+      this.width === 0 ? this.ctx.width : this.width,
+      this.height === 0 ? this.ctx.height : this.height,
+    )
     this.reviewPanel.showWorkspaceDiffMessage(path, "Loading changed-file diff…")
     this.setState(this.#state)
     this.#projectionRequests.command({

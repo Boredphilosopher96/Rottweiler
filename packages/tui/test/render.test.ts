@@ -194,6 +194,19 @@ describe("bounded retained rendering", () => {
 
   test("counts changed lines without treating diff metadata as changes", () => {
     expect(diffStats("--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1,2 +1,2 @@\n-old\n+new\n\\ No newline at end of file\n keep\n")).toEqual({ added: 1, removed: 1 })
+
+    const headerLikeContent = "--- a/file\n+++ b/file\n@@ -1 +1 @@\n--- removed-leading-dashes\n+++ added-leading-pluses\n"
+    expect(diffStats(headerLikeContent)).toEqual({ added: 1, removed: 1 })
+    expect(presentableUnifiedDiff("file", headerLikeContent)).toBe(
+      "--- a/file\n+++ b/file\n@@ -1,1 +1,1 @@\n--- removed-leading-dashes\n+++ added-leading-pluses\n",
+    )
+
+    const underdeclared = "--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new\n--- still removed\n+++ still added\n"
+    const repaired = presentableUnifiedDiff("file", underdeclared)
+    expect(repaired).toBe(
+      "--- a/file\n+++ b/file\n@@ -1,2 +1,2 @@\n-old\n+new\n--- still removed\n+++ still added\n",
+    )
+    expect(diffStats(repaired)).toEqual({ added: 2, removed: 2 })
   })
 
   test("truncates unified diffs at hunk boundaries and reports hidden body lines", () => {

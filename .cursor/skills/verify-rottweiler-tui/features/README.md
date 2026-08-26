@@ -37,3 +37,4 @@ Each feature file names the user path, exact helper command, expected screen sta
 - [Theme Browser](./theme-browser.md) covers `/theme`, catalog filtering, live preview, semantic swatches, apply/cancel, and responsive layout.
 - [Settings Browser](./settings-browser.md) covers `/settings`, descriptor-backed sections, authoritative value choices, specialized handoffs, read-only settings, and responsive layout.
 - [MCP Browser](./mcp-browser.md) covers `/mcp`, live server inventory, derived totals, existing management handoffs, and responsive layout.
+- [Session Review](./session-review.md) covers `/review`, cumulative file decisions, exact diffs, fingerprint safety, and responsive layout.

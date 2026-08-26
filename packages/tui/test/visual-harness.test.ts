@@ -154,4 +154,39 @@ describe("TUI visual evidence", () => {
 
     await rm(secondDirectory, { recursive: true, force: true })
   })
+
+  test("proves the production session review at wide and narrow sizes deterministically", async () => {
+    const firstDirectory = await mkdtemp(join(tmpdir(), "rottweiler-session-review-first-"))
+    const secondDirectory = await mkdtemp(join(tmpdir(), "rottweiler-session-review-second-"))
+    evidenceDirectory = firstDirectory
+    const harness = resolve(import.meta.dir, "../scripts/tui-visual-harness.ts")
+    const run = (directory: string) => Bun.spawn(
+      ["bun", "run", harness, "session-review", directory],
+      { cwd: resolve(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe" },
+    )
+
+    for (const directory of [firstDirectory, secondDirectory]) {
+      const process = run(directory)
+      const [exitCode, stderr] = await Promise.all([
+        process.exited,
+        new Response(process.stderr).text(),
+      ])
+      expect(stderr).toBe("")
+      expect(exitCode).toBe(0)
+    }
+
+    for (const artifact of ["session-review", "session-review-narrow"]) {
+      for (const extension of ["txt", "ansi", "png", "json"]) {
+        const firstArtifact = Bun.file(join(firstDirectory, `${artifact}.${extension}`))
+        const secondArtifact = Bun.file(join(secondDirectory, `${artifact}.${extension}`))
+        expect(await firstArtifact.exists()).toBeTrue()
+        expect(await firstArtifact.arrayBuffer()).toEqual(await secondArtifact.arrayBuffer())
+      }
+      expect(await Bun.file(join(firstDirectory, `${artifact}.svg`)).exists()).toBeFalse()
+      const proof = await Bun.file(join(firstDirectory, `${artifact}.json`)).json()
+      expect(proof.assertions.every((assertion: { passed: boolean }) => assertion.passed)).toBeTrue()
+    }
+
+    await rm(secondDirectory, { recursive: true, force: true })
+  })
 })

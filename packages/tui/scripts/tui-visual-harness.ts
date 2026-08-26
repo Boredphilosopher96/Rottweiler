@@ -18,7 +18,7 @@ import type { RottweilerState, ToolProjection } from "../src/state"
 import { createInitialState } from "../src/state"
 import { kennelTheme } from "../src/theme"
 
-type VisualScenario = "conversation" | "command-palette" | "approval" | "tools" | "theme-browser" | "settings-browser" | "mcp-browser"
+type VisualScenario = "conversation" | "command-palette" | "approval" | "tools" | "theme-browser" | "settings-browser" | "mcp-browser" | "session-review"
 
 const TOOLS_FIXTURE_NOW_MS = Date.parse("2026-01-01T12:00:41.000Z")
 const scenarioInput = process.argv[2] ?? "conversation"
@@ -85,6 +85,13 @@ try {
     setup.mockInput.pressArrow("down")
     setup.mockInput.pressArrow("down")
     await setup.flush()
+  } else if (scenarioInput === "session-review") {
+    actions.push("typed /rev into the production composer input")
+    await setup.mockInput.typeText("/rev")
+    actions.push("pressed Enter to activate the /review slash completion")
+    setup.mockInput.pressEnter()
+    await Bun.sleep(0)
+    await setup.flush()
   } else if (scenarioInput === "approval") {
     actions.push("launched a session with a pending terminal-command approval")
   } else {
@@ -100,6 +107,7 @@ try {
     ...(scenarioInput === "theme-browser" ? themeBrowserLayoutAssertions(app) : []),
     ...(scenarioInput === "settings-browser" ? settingsBrowserLayoutAssertions(app, "wide") : []),
     ...(scenarioInput === "mcp-browser" ? mcpBrowserLayoutAssertions(app, "wide") : []),
+    ...(scenarioInput === "session-review" ? sessionReviewLayoutAssertions(app, "wide") : []),
   ]
   await writeEvidence(outputDirectory, scenarioInput, styledFrame, characterFrame, actions, assertions)
 
@@ -142,6 +150,25 @@ try {
       narrowAssertions,
     )
     failed.push(...narrowAssertions.filter((assertion) => !assertion.passed))
+  } else if (scenarioInput === "session-review") {
+    actions.push("resized the production renderer to 72 by 18 columns")
+    setup.resize(72, 18)
+    await setup.flush()
+    const narrowCharacterFrame = setup.captureCharFrame()
+    const narrowStyledFrame = setup.captureSpans()
+    const narrowAssertions = [
+      ...sessionReviewNarrowAssertions(narrowCharacterFrame, narrowStyledFrame),
+      ...sessionReviewLayoutAssertions(app, "narrow"),
+    ]
+    await writeEvidence(
+      outputDirectory,
+      "session-review-narrow",
+      narrowStyledFrame,
+      narrowCharacterFrame,
+      actions,
+      narrowAssertions,
+    )
+    failed.push(...narrowAssertions.filter((assertion) => !assertion.passed))
   }
   if (failed.length > 0) {
     throw new Error(`Visual proof failed: ${failed.map((assertion) => assertion.name).join(", ")}`)
@@ -154,7 +181,7 @@ try {
 }
 
 function isVisualScenario(value: string): value is VisualScenario {
-  return value === "conversation" || value === "command-palette" || value === "approval" || value === "tools" || value === "theme-browser" || value === "settings-browser" || value === "mcp-browser"
+  return value === "conversation" || value === "command-palette" || value === "approval" || value === "tools" || value === "theme-browser" || value === "settings-browser" || value === "mcp-browser" || value === "session-review"
 }
 
 function scenarioAssertions(scenario: VisualScenario): readonly string[] {
@@ -203,6 +230,16 @@ function scenarioAssertions(scenario: VisualScenario): readonly string[] {
         "transport   streamable_http",
         "fingerprint sha256:docs",
         "Enter manage · Esc close",
+      ]
+    case "session-review":
+      return [
+        "SESSION REVIEW   3 files  +4 −2   2 pending",
+        "src/cursor.rs  +2 −1",
+        "THIS FILE",
+        "lines     +2 −1",
+        "DECISIONS",
+        "1 accepted",
+        "fingerprint",
       ]
   }
 }
@@ -383,6 +420,48 @@ function visualAssertions(
       colorAssertion(styledFrame, "connected MCP state uses success", 5, 17, kennelTheme.success),
       colorAssertion(styledFrame, "failed MCP state uses error", 7, 19, kennelTheme.error),
       backgroundAssertion(styledFrame, "MCP surface occludes underlying content", 0, 0, kennelTheme.background),
+    ]
+  }
+  if (scenario === "session-review") {
+    const lines = characterFrame.split("\n")
+    const malformedSpacing = ["S E S S I O N", "s r c /", "c u r s o r", "f i n g e r p r i n t"]
+    const unsupported = ["WORKTREE", "stash", "by       edit", "accept all"].filter(
+      (claim) => characterFrame.includes(claim),
+    )
+    return [
+      ...assertions,
+      positionAssertion(lines, "review heading starts at column 1", 0, 1, "SESSION REVIEW"),
+      positionAssertion(lines, "review divider is fixed at column 73", 0, 73, "│"),
+      positionAssertion(lines, "review detail starts at column 75", 0, 75, "THIS FILE"),
+      frameSizeAssertion(lines, 110, 32),
+      {
+        name: "review divider spans exactly the primary surface",
+        passed: lines.slice(0, 27).every((line) => line[73] === "│") && lines[27]?.[73] !== "│",
+        expected: "divider at column 73 only for rows 0-26",
+        actual: lines.map((line, row) => line[73] === "│" ? row : -1).filter((row) => row >= 0).join(","),
+      },
+      {
+        name: "review labels use complete text runs",
+        passed: malformedSpacing.every((text) => !characterFrame.includes(text)),
+        expected: "intact review paths and labels",
+        actual: malformedSpacing.filter((text) => characterFrame.includes(text)).join(",") || "intact",
+      },
+      {
+        name: "review surface has no rounded modal frame",
+        passed: !characterFrame.includes("╭─ Session review"),
+        expected: "no rounded modal border",
+        actual: "checked terminal cells",
+      },
+      {
+        name: "unsupported worktree and bulk-decision claims are absent",
+        passed: unsupported.length === 0,
+        expected: "no unsupported worktree, actor, or accept-all claims",
+        actual: unsupported.join(",") || "absent",
+      },
+      colorAtTextAssertion(styledFrame, lines, "review heading uses secondary", "SESSION REVIEW", kennelTheme.secondary),
+      colorAssertion(styledFrame, "selected pending state uses warning", 1, 85, kennelTheme.warning),
+      colorAtTextAssertion(styledFrame, lines, "accepted state uses success", "✓", kennelTheme.success),
+      backgroundAssertion(styledFrame, "review surface occludes the conversation", 0, 0, kennelTheme.background),
     ]
   }
   if (scenario !== "conversation") return assertions
@@ -633,6 +712,80 @@ function mcpBrowserNarrowAssertions(
   ]
 }
 
+function sessionReviewLayoutAssertions(
+  app: ReturnType<typeof createRottweilerApp>,
+  size: "wide" | "narrow",
+): readonly VisualAssertion[] {
+  const review = app.reviewPanel
+  if (size === "narrow") {
+    return [
+      exactValueAssertion("narrow review surface begins at column 0", review.x, 0),
+      exactValueAssertion("narrow review surface begins at row 0", review.y, 0),
+      exactValueAssertion("narrow review surface is 72 cells wide", review.width, 72),
+      exactValueAssertion("narrow review surface is 13 rows tall", review.height, 13),
+      exactValueAssertion("narrow review content is 72 cells wide", review.leftPane.width, 72),
+      {
+        name: "narrow review removes the detail rail",
+        passed: !review.rightRail.visible,
+        expected: "hidden detail rail",
+        actual: review.rightRail.visible ? "visible" : "hidden",
+      },
+      {
+        name: "narrow review retains the exact selected diff",
+        passed: review.diff.visible && review.diff.diff.includes("+new") && review.diff.diff.includes("+added"),
+        expected: "visible selected diff",
+        actual: review.diff.visible ? review.diff.diff : "hidden",
+      },
+    ]
+  }
+  return [
+    exactValueAssertion("review surface begins at column 0", review.x, 0),
+    exactValueAssertion("review surface begins at row 0", review.y, 0),
+    exactValueAssertion("review surface is 110 cells wide", review.width, 110),
+    exactValueAssertion("review surface is 27 rows tall", review.height, 27),
+    exactValueAssertion("review content region is 73 cells wide", review.leftPane.width, 73),
+    exactValueAssertion("review detail divider is fixed at column 73", review.rightRail.x, 73),
+    exactValueAssertion("review detail region is 37 cells wide", review.rightRail.width, 37),
+    exactValueAssertion("review detail content begins at column 75", review.details.x, 75),
+    {
+      name: "review file list owns focus after slash activation",
+      passed: review.files.focused,
+      expected: "focused review file list",
+      actual: review.files.focused ? "focused review file list" : "not focused",
+    },
+  ]
+}
+
+function sessionReviewNarrowAssertions(
+  characterFrame: string,
+  styledFrame: CapturedFrame,
+): readonly VisualAssertion[] {
+  const lines = characterFrame.split("\n")
+  const required = [
+    "SESSION REVIEW   3 files  +4 −2   2 pending",
+    "src/cursor.rs  +2 −1",
+    "accept",
+    "revert",
+  ]
+  return [
+    ...required.map((text): VisualAssertion => ({
+      name: `narrow visible text: ${text}`,
+      passed: characterFrame.includes(text),
+      expected: text,
+      actual: characterFrame.includes(text) ? text : "missing",
+    })),
+    frameSizeAssertion(lines, 72, 18),
+    {
+      name: "narrow review has no split divider",
+      passed: lines.slice(0, 13).every((line) => line[73] !== "│"),
+      expected: "no review divider",
+      actual: "checked exact terminal cells",
+    },
+    colorAtTextAssertion(styledFrame, lines, "narrow review heading uses secondary", "SESSION REVIEW", kennelTheme.secondary),
+    backgroundAssertion(styledFrame, "narrow review surface occludes the conversation", 0, 0, kennelTheme.background),
+  ]
+}
+
 function mcpOcclusionAssertion(characterFrame: string): VisualAssertion {
   const leaked = ["AGENTS", "▌ you", "● rottweiler", "\n╎"].filter((text) => characterFrame.includes(text))
   return {
@@ -857,6 +1010,7 @@ function scenarioState(scenario: VisualScenario): RottweilerState {
   if (scenario === "tools") return toolsState()
   if (scenario === "settings-browser") return settingsState()
   if (scenario === "mcp-browser") return mcpState()
+  if (scenario === "session-review") return sessionReviewState()
   const state = conversationState()
   if (scenario !== "approval") return state
   const approval = tool({
@@ -881,6 +1035,44 @@ function scenarioState(scenario: VisualScenario): RottweilerState {
       finished: null,
     },
     tools: { [approval.toolCallId]: approval },
+  }
+}
+
+function sessionReviewState(): RottweilerState {
+  return {
+    ...conversationState(),
+    review: {
+      sessionId: "visual-session",
+      files: [
+        {
+          path: "src/cursor.rs",
+          unifiedDiff: "--- a/src/cursor.rs\n+++ b/src/cursor.rs\n@@ -1,2 +1,3 @@\n-old\n+new\n+added\n context\n",
+          status: "pending",
+          truncated: false,
+          unrestorableReason: null,
+          originalHash: "cursor-before",
+          currentHash: "cursor-after",
+        },
+        {
+          path: "packages/tui/src/app.ts",
+          unifiedDiff: "--- a/packages/tui/src/app.ts\n+++ b/packages/tui/src/app.ts\n@@ -1 +1 @@\n-before\n+after\n",
+          status: "accepted",
+          truncated: false,
+          unrestorableReason: null,
+          originalHash: "app-before",
+          currentHash: "app-after",
+        },
+        {
+          path: "generated/report.txt",
+          unifiedDiff: "--- /dev/null\n+++ b/generated/report.txt\n@@ -0,0 +1 @@\n+generated\n",
+          status: "pending",
+          truncated: false,
+          unrestorableReason: "original bytes were not checkpointed",
+          originalHash: "absent",
+          currentHash: "report-after",
+        },
+      ],
+    },
   }
 }
 

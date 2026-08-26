@@ -8,7 +8,7 @@ import {
 } from "@opentui/core/testing"
 
 import { createRottweilerApp } from "../src/app"
-import { ContextPanelRenderable, FuzzyPickerRenderable, ImageAttachmentRenderable, ListDetailRenderable, ReasoningBlockRenderable, SubagentPanelRenderable, SubagentTrayRenderable, ToolBlockRenderable, ToolsWorkspaceRenderable, formatElapsed, fuzzyScore, toolOutputContent, type ListDetailRow } from "../src/components"
+import { ContextPanelRenderable, FuzzyPickerRenderable, ImageAttachmentRenderable, ListDetailRenderable, ReasoningBlockRenderable, SubagentPanelRenderable, SubagentTrayRenderable, ToolBlockRenderable, ToolsWorkspaceRenderable, formatElapsed, fuzzyScore, reviewLineCounts, toolOutputContent, type ListDetailRow } from "../src/components"
 import type { ActivityPresentation, ToolsWorkspacePresentation } from "../src/render"
 import { stringCellWidth } from "../src/render"
 import {
@@ -2808,6 +2808,93 @@ describe("M4 retained components", () => {
     expect(app.state.review).toEqual(review)
   })
 
+  test("uses the full-primary review layout and collapses its detail rail on narrow terminals", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        review: {
+          sessionId: "session-review-layout",
+          files: [
+            {
+              path: "src/cursor.rs",
+              unifiedDiff: "--- a/src/cursor.rs\n+++ b/src/cursor.rs\n@@ -1,2 +1,3 @@\n-old\n+new\n+added\n context\n",
+              status: "pending",
+              truncated: false,
+              unrestorableReason: null,
+              originalHash: "old-cursor",
+              currentHash: "new-cursor",
+            },
+            {
+              path: "docs/protocol.md",
+              unifiedDiff: "--- a/docs/protocol.md\n+++ b/docs/protocol.md\n@@ -1 +1 @@\n-before\n+after\n",
+              status: "accepted",
+              truncated: false,
+              unrestorableReason: null,
+              originalHash: "old-docs",
+              currentHash: "new-docs",
+            },
+          ],
+        },
+      },
+    })
+    renderer.root.add(app)
+    app.openReview()
+    await setup.renderOnce()
+
+    expect(app.reviewPanel.x).toBe(0)
+    expect(app.reviewPanel.y).toBe(0)
+    expect(app.reviewPanel.width).toBe(110)
+    expect(app.reviewPanel.height).toBe(app.composer.y)
+    expect(app.composer.visible).toBeTrue()
+    expect(app.reviewPanel.leftPane.width).toBe(73)
+    expect(app.reviewPanel.rightRail.x).toBe(73)
+    expect(app.reviewPanel.rightRail.width).toBe(37)
+    expect(app.reviewPanel.details.x).toBe(75)
+    expect(app.reviewPanel.summary.plainText).toContain("SESSION REVIEW")
+    expect(app.reviewPanel.summary.plainText).toContain("2 files")
+    expect(app.reviewPanel.summary.plainText).toContain("+3")
+    expect(app.reviewPanel.summary.plainText).toContain("−2")
+    expect(app.reviewPanel.details.plainText).toContain("THIS FILE")
+    expect(app.reviewPanel.details.plainText).toContain("lines     +2 −1")
+    expect(app.reviewPanel.details.plainText).toContain("DECISIONS")
+    expect(app.reviewPanel.details.plainText).toContain("1 accepted")
+    expect(setup.captureCharFrame()).not.toContain("╭─ Session review")
+
+    setup.resize(109, 18)
+    await setup.renderOnce()
+    await setup.renderOnce()
+    expect(app.reviewPanel.width).toBe(109)
+    expect(app.reviewPanel.leftPane.width).toBe(109)
+    expect(app.reviewPanel.rightRail.visible).toBeFalse()
+
+    setup.resize(110, 18)
+    await setup.renderOnce()
+    await setup.renderOnce()
+    expect(app.reviewPanel.leftPane.width).toBe(73)
+    expect(app.reviewPanel.rightRail.visible).toBeTrue()
+
+    setup.resize(72, 18)
+    await setup.renderOnce()
+    await setup.renderOnce()
+    expect(app.reviewPanel.width).toBe(72)
+    expect(app.reviewPanel.leftPane.width).toBe(72)
+    expect(app.reviewPanel.rightRail.visible).toBeFalse()
+    expect(app.reviewPanel.diff.visible).toBeTrue()
+    expect(app.reviewPanel.hint.plainText).toContain("accept")
+    expect(app.reviewPanel.hint.plainText).toContain("revert")
+  })
+
+  test("counts changed content whose text starts like a diff header", () => {
+    expect(reviewLineCounts(
+      "--- a/file\n+++ b/file\n@@ -1 +1 @@\n--- removed-leading-dashes\n+++ added-leading-pluses\n",
+    )).toEqual({ additions: 1, deletions: 1 })
+    expect(reviewLineCounts(
+      "--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new\n--- still removed\n+++ still added\n",
+    )).toEqual({ additions: 2, deletions: 2 })
+  })
+
   test("keeps one review decision in flight and surfaces a stale fingerprint rejection", async () => {
     const setup = await createTestRenderer({ width: 100, height: 24, useThread: false })
     renderer = setup.renderer
@@ -3055,7 +3142,7 @@ describe("M4 retained components", () => {
     expect(app.reviewPanel.diff.diff).toContain("@@ -1,1 +1,1 @@")
     expect(app.reviewPanel.diff.filetype).toBe("rust")
     expect(app.reviewPanel.diff.diff).not.toContain("Error parsing diff")
-    expect(app.composer.visible).toBeFalse()
+    expect(app.composer.visible).toBeTrue()
 
     setup.mockInput.pressEscape()
     await Bun.sleep(30)

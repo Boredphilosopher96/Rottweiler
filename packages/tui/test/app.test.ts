@@ -81,7 +81,8 @@ function expectCoherentTheme(app: ReturnType<typeof createRottweilerApp>, theme:
   expect(app.transcript.backgroundColor.toInts()).toEqual(rgba(theme.background))
   expect(app.contextPanel.backgroundColor.toInts()).toEqual(rgba(theme.background))
   expect(app.composer.backgroundColor.toInts()).toEqual(rgba(theme.background))
-  expect(app.reviewPanel.backgroundColor.toInts()).toEqual(rgba(theme.backgroundPanel))
+  expect(app.reviewPanel.backgroundColor.toInts()).toEqual(rgba(theme.background))
+  expect(app.reviewPanel.rightRail.backgroundColor.toInts()).toEqual(rgba(theme.backgroundPanel))
   expect(app.interactionPanel.backgroundColor.toInts()).toEqual(rgba(theme.backgroundElement))
   expect(app.picker.backgroundColor.toInts()).toEqual(rgba(theme.backgroundElement))
   expect(app.statusLine.bg.toInts()).toEqual(rgba(theme.backgroundPanel))
@@ -1476,7 +1477,7 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.reviewPanel.title).toContain("Diff · src/worktree.rs")
     expect(app.reviewPanel.diff.diff).toContain("+worktree-only")
     expect(app.reviewPanel.diff.diff).not.toContain("session-review")
-    expect(app.reviewPanel.hint.plainText).toBe("Esc close")
+    expect(app.reviewPanel.hint.plainText).toContain("close")
   })
 
   test("opens slash autocomplete and gives the shared picker complete wrapped navigation", async () => {

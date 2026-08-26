@@ -70,11 +70,10 @@ export function presentableUnifiedDiff(path: string, source: string): string {
     let cursor = index + 1
     for (; cursor < lines.length; cursor += 1) {
       const candidate = lines[cursor] ?? ""
-      if (
-        candidate.startsWith("@@") ||
-        candidate.startsWith("diff --git ") ||
-        (candidate.startsWith("--- ") && (lines[cursor + 1] ?? "").startsWith("+++ "))
-      ) break
+      // This normalizer receives one path at a time. A `--- ` / `+++ ` pair
+      // inside its body can therefore be real changed content, while an
+      // explicit `diff --git` record is an unambiguous file boundary.
+      if (candidate.startsWith("@@") || candidate.startsWith("diff --git ")) break
       if (candidate === "") {
         lines[cursor] = " "
         oldCount += 1
@@ -205,9 +204,22 @@ export function unifiedDiffVisualRows(source: string): number {
 export function diffStats(source: string): { added: number; removed: number } {
   let added = 0
   let removed = 0
+  let inHunk = false
   for (const line of source.split("\n")) {
-    if (line.startsWith("+") && !line.startsWith("+++ ")) added += 1
-    else if (line.startsWith("-") && !line.startsWith("--- ")) removed += 1
+    if (line.startsWith("@@")) {
+      inHunk = true
+      continue
+    }
+    if (line.startsWith("diff --git ")) {
+      inHunk = false
+      continue
+    }
+    if (!inHunk || line.startsWith("\\")) continue
+    if (line.startsWith("+")) {
+      added += 1
+    } else if (line.startsWith("-")) {
+      removed += 1
+    }
   }
   return { added, removed }
 }

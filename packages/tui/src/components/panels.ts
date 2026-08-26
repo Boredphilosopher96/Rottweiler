@@ -15,6 +15,7 @@ import {
 
 import {
   commandPreview,
+  diffStats,
   filetypeForPath,
   formatStatusContext,
   formatStatusModel,
@@ -56,15 +57,22 @@ export interface ReviewPanelCallbacks {
 
 /** Retained cumulative session review with exact per-file decisions. */
 export class ReviewPanelRenderable extends BoxRenderable {
+  readonly leftPane: BoxRenderable
+  readonly rightRail: BoxRenderable
   readonly summary: TextRenderable
+  readonly rule: TextRenderable
   readonly files: SelectRenderable
   readonly hint: TextRenderable
   readonly diff: DiffRenderable
+  readonly details: TextRenderable
   #review: RottweilerState["review"] = null
   #callbacks: ReviewPanelCallbacks
+  #theme: RottweilerTheme
   #pendingPaths = new Set<string>()
   #shellActive = false
   #workspaceDiffMode = false
+  #terminalWidth: number
+  #primaryHeight: number
 
   constructor(
     ctx: RenderContext,
@@ -75,29 +83,61 @@ export class ReviewPanelRenderable extends BoxRenderable {
   ) {
     super(ctx, {
       id: "session-review",
-      width: "100%",
-      height: 17,
-      flexShrink: 0,
-      flexDirection: "column",
-      border: true,
-      borderStyle: "rounded",
-      borderColor: theme.info,
-      backgroundColor: theme.backgroundPanel,
-      paddingX: 1,
+      position: "absolute",
+      left: 0,
+      top: 0,
+      width: ctx.width,
+      height: ctx.height,
+      flexDirection: "row",
+      backgroundColor: theme.background,
+      overflow: "hidden",
       visible: false,
-      zIndex: 9,
+      zIndex: 20,
     })
     this.#callbacks = callbacks
+    this.#theme = theme
+    this.#terminalWidth = ctx.width
+    this.#primaryHeight = ctx.height
+    this.leftPane = new BoxRenderable(ctx, {
+      id: "session-review-left",
+      width: "100%",
+      height: "100%",
+      flexDirection: "column",
+      backgroundColor: theme.background,
+      paddingX: 1,
+      overflow: "hidden",
+    })
+    this.rightRail = new BoxRenderable(ctx, {
+      id: "session-review-right",
+      width: 37,
+      height: "100%",
+      flexShrink: 0,
+      flexDirection: "column",
+      border: ["left"],
+      borderStyle: "single",
+      borderColor: theme.borderSubtle,
+      backgroundColor: theme.backgroundPanel,
+      paddingLeft: 1,
+      overflow: "hidden",
+    })
     this.summary = new TextRenderable(ctx, {
+      id: "session-review-summary",
       content: "",
       fg: theme.text,
+      height: 1,
+      truncate: true,
+    })
+    this.rule = new TextRenderable(ctx, {
+      id: "session-review-rule",
+      content: "",
+      fg: theme.borderSubtle,
       height: 1,
       truncate: true,
     })
     this.diff = new DiffRenderable(ctx, {
       id: "session-review-diff",
       width: "100%",
-      height: 8,
+      height: 1,
       diff: "",
       ...(treeSitterClient === undefined ? {} : { treeSitterClient }),
       syntaxStyle,
@@ -111,7 +151,7 @@ export class ReviewPanelRenderable extends BoxRenderable {
     this.files = new SelectRenderable(ctx, {
       id: "session-review-files",
       width: "100%",
-      height: 5,
+      height: 1,
       options: [],
       backgroundColor: theme.backgroundPanel,
       textColor: theme.text,
@@ -121,9 +161,20 @@ export class ReviewPanelRenderable extends BoxRenderable {
       showScrollIndicator: true,
     })
     this.hint = new TextRenderable(ctx, {
+      id: "session-review-hint",
       content: "A accept · R revert",
       fg: theme.textMuted,
       height: 1,
+      truncate: true,
+    })
+    this.details = new TextRenderable(ctx, {
+      id: "session-review-details",
+      content: "",
+      width: "100%",
+      height: "100%",
+      fg: theme.text,
+      wrapMode: "word",
+      selectable: true,
     })
     this.files.on(SelectRenderableEvents.SELECTION_CHANGED, () => this.#showSelected())
     this.files.onKeyDown = (key) => {
@@ -138,32 +189,60 @@ export class ReviewPanelRenderable extends BoxRenderable {
       }
       this.#callbacks.onDecision(file, decision)
     }
-    this.add(this.summary)
-    this.add(this.diff)
-    this.add(this.files)
-    this.add(this.hint)
-    this.resizeForTerminal(ctx.height)
+    this.leftPane.add(this.summary)
+    this.leftPane.add(this.rule)
+    this.leftPane.add(this.files)
+    this.leftPane.add(this.diff)
+    this.leftPane.add(this.hint)
+    this.rightRail.add(this.details)
+    this.add(this.leftPane)
+    this.add(this.rightRail)
+    this.resizeForTerminal(ctx.width, ctx.height)
   }
 
-  /** Keep the modal and all of its retained children inside the terminal. */
-  resizeForTerminal(terminalHeight: number): void {
-    const panelHeight = Math.max(4, Math.min(17, terminalHeight - 2))
-    this.height = panelHeight
-    const contentRows = Math.max(1, panelHeight - 2)
-    this.summary.height = 1
-    this.summary.visible = true
-    this.hint.height = contentRows >= 2 ? 1 : 0
-    this.hint.visible = contentRows >= 2
-    const remaining = Math.max(0, contentRows - this.summary.height - this.hint.height)
-    const diffRows =
-      remaining <= 1
-        ? remaining
-        : Math.max(1, Math.min(remaining - 1, Math.ceil(remaining * 0.6)))
-    const fileRows = Math.max(0, remaining - diffRows)
-    this.diff.height = diffRows
-    this.diff.visible = diffRows > 0
+  /** Own the primary surface and remove the detail rail before it can compress content. */
+  resizeForTerminal(
+    terminalWidth: number,
+    terminalHeight: number,
+    primaryHeight = terminalHeight,
+  ): void {
+    this.#terminalWidth = Math.max(1, terminalWidth)
+    this.#primaryHeight = Math.max(1, Math.min(terminalHeight, primaryHeight))
+    this.left = 0
+    this.top = 0
+    this.width = this.#terminalWidth
+    this.height = this.#primaryHeight
+
+    const railVisible = this.#terminalWidth >= 110 && this.#primaryHeight >= 12
+    const railWidth = railVisible ? 37 : 0
+    const leftWidth = this.#terminalWidth - railWidth
+    this.leftPane.width = leftWidth
+    this.leftPane.height = this.#primaryHeight
+    this.rightRail.width = railWidth
+    this.rightRail.height = this.#primaryHeight
+    this.rightRail.visible = railVisible
+
+    const summaryRows = this.#primaryHeight >= 1 ? 1 : 0
+    const ruleRows = this.#primaryHeight >= 4 ? 1 : 0
+    const hintRows = this.#primaryHeight >= 2 ? 1 : 0
+    const available = Math.max(0, this.#primaryHeight - summaryRows - ruleRows - hintRows)
+    const requestedFileRows = this.#workspaceDiffMode || this.#review === null
+      ? 0
+      : Math.min(5, this.#review.files.length)
+    const fileRows = available <= 1 ? available : Math.min(requestedFileRows, available - 1)
+    const diffRows = Math.max(0, available - fileRows)
+
+    this.summary.height = summaryRows
+    this.summary.visible = summaryRows > 0
+    this.rule.height = ruleRows
+    this.rule.visible = ruleRows > 0
+    this.rule.content = "─".repeat(Math.max(0, leftWidth - 2))
     this.files.height = fileRows
     this.files.visible = fileRows > 0
+    this.diff.height = diffRows
+    this.diff.visible = diffRows > 0
+    this.hint.height = hintRows
+    this.hint.visible = hintRows > 0
   }
 
   update(state: RottweilerState, open = state.review !== null): void {
@@ -181,6 +260,7 @@ export class ReviewPanelRenderable extends BoxRenderable {
       this.#review = null
       this.visible = true
       this.files.blur()
+      this.resizeForTerminal(this.#terminalWidth, this.ctx.height, this.#primaryHeight)
       return
     }
     const review = state.review
@@ -188,22 +268,28 @@ export class ReviewPanelRenderable extends BoxRenderable {
     if (review === null) {
       this.visible = true
       this.title = " Diff "
-      this.summary.content = "Loading changed-file diff…"
+      this.summary.content = t`${bold(fg(this.#theme.secondary)("SESSION REVIEW"))}${fg(this.#theme.textMuted)("   loading changes")}`
       this.diff.diff = ""
       this.files.options = []
-      this.hint.content = "Esc close"
+      this.details.content = ""
+      this.hint.content = reviewHint(this.#theme, "close")
+      this.resizeForTerminal(this.#terminalWidth, this.ctx.height, this.#primaryHeight)
       return
     }
     const selectedPath = review.files[this.files.getSelectedIndex()]?.path
     const pending = review.files.filter((file) => file.status === "pending").length
     const accepted = review.files.filter((file) => file.status === "accepted").length
     const reverted = review.files.filter((file) => file.status === "reverted").length
+    const totals = review.files.reduce(
+      (sum, file) => addReviewLineCounts(sum, reviewLineCounts(file.unifiedDiff)),
+      { additions: 0, deletions: 0 },
+    )
     this.title = ` Session review · ${review.files.length} files `
     this.summary.content = state.shell.active
-      ? "Foreground shell active · review decisions disabled"
-      : `${pending} pending · ${accepted} accepted · ${reverted} reverted`
+      ? t`${bold(fg(this.#theme.secondary)("SESSION REVIEW"))}${fg(this.#theme.warning)("   foreground shell active · decisions disabled")}`
+      : t`${bold(fg(this.#theme.secondary)("SESSION REVIEW"))}${fg(this.#theme.textMuted)(`   ${review.files.length} files  `)}${fg(this.#theme.diffAdded)(`+${totals.additions}`)}${fg(this.#theme.textMuted)(" ")}${fg(this.#theme.diffRemoved)(`−${totals.deletions}`)}${fg(this.#theme.textMuted)(`   ${pending} pending`)}`
     this.files.options = review.files.map((file) => ({
-      name: `${reviewGlyph(file.status)} ${file.path}`,
+      name: reviewFileLabel(file),
       description:
         (this.#pendingPaths.has(file.path)
           ? "decision pending"
@@ -217,6 +303,7 @@ export class ReviewPanelRenderable extends BoxRenderable {
     )
     this.files.setSelectedIndex(nextIndex)
     this.visible = true
+    this.resizeForTerminal(this.#terminalWidth, this.ctx.height, this.#primaryHeight)
     this.#showSelected()
     this.files.focus()
   }
@@ -247,10 +334,12 @@ export class ReviewPanelRenderable extends BoxRenderable {
   showDiffMessage(path: string, message: string): void {
     this.visible = true
     this.title = ` Diff · ${path} `
-    this.summary.content = message
+    this.summary.content = t`${bold(fg(this.#theme.secondary)("DIFF"))}${fg(this.#theme.textMuted)(`   ${path}`)}`
     this.diff.diff = ""
     this.files.options = []
-    this.hint.content = "Esc close"
+    this.details.content = t`${bold(fg(this.#theme.info)("CURRENT VIEW"))}\n${fg(this.#theme.textMuted)("status   ")}${fg(this.#theme.warning)(message)}`
+    this.hint.content = reviewHint(this.#theme, "close")
+    this.resizeForTerminal(this.#terminalWidth, this.ctx.height, this.#primaryHeight)
   }
 
   showWorkspaceDiff(
@@ -264,14 +353,14 @@ export class ReviewPanelRenderable extends BoxRenderable {
     this.files.blur()
     this.visible = true
     this.title = ` Diff · ${path} `
-    this.summary.content = [
-      binary ? "Binary file" : "Current worktree diff",
-      truncated ? "truncated" : "",
-    ].filter(Boolean).join(" · ")
+    const counts = reviewLineCounts(unifiedDiff)
+    this.summary.content = t`${bold(fg(this.#theme.secondary)("DIFF"))}${fg(this.#theme.textMuted)(`   ${path}  `)}${fg(this.#theme.diffAdded)(`+${counts.additions}`)}${fg(this.#theme.textMuted)(" ")}${fg(this.#theme.diffRemoved)(`−${counts.deletions}`)}`
     this.diff.diff = presentableUnifiedDiff(path, unifiedDiff)
     this.diff.filetype = filetypeForPath(path)
     this.files.options = []
-    this.hint.content = "Esc close"
+    this.details.content = workspaceDiffDetails(this.#theme, path, binary, truncated, counts)
+    this.hint.content = reviewHint(this.#theme, "close")
+    this.resizeForTerminal(this.#terminalWidth, this.ctx.height, this.#primaryHeight)
   }
 
   showWorkspaceDiffMessage(path: string, message: string): void {
@@ -312,12 +401,35 @@ export class ReviewPanelRenderable extends BoxRenderable {
     const revertUnavailable = file !== undefined && file.unrestorableReason !== null
     this.hint.content =
       file === undefined
-        ? "No files changed in this session"
+        ? t`${fg(this.#theme.textMuted)("No files changed in this session")}`
         : this.#shellActive
-          ? "Exit the foreground shell before reviewing files"
+          ? t`${fg(this.#theme.warning)("Exit the foreground shell before reviewing files")}`
           : this.#pendingPaths.has(file.path)
-            ? "Decision pending…"
-            : `A accept · ${revertUnavailable ? "R revert unavailable" : "R revert"}`
+            ? t`${fg(this.#theme.warning)("Decision pending…")}`
+            : reviewHint(this.#theme, revertUnavailable ? "revert-unavailable" : "decide")
+    this.#updateDetails(file)
+  }
+
+  #updateDetails(file: NonNullable<RottweilerState["review"]>["files"][number] | undefined): void {
+    const review = this.#review
+    if (review === null || file === undefined) {
+      this.details.content = ""
+      return
+    }
+    const counts = reviewLineCounts(file.unifiedDiff)
+    const pending = review.files.filter((candidate) => candidate.status === "pending").length
+    const accepted = review.files.filter((candidate) => candidate.status === "accepted").length
+    const reverted = review.files.filter((candidate) => candidate.status === "reverted").length
+    const statusColor = file.status === "accepted"
+      ? this.#theme.success
+      : file.status === "pending"
+        ? this.#theme.warning
+        : this.#theme.textMuted
+    const revert = file.unrestorableReason === null ? "available" : "unavailable"
+    const safety = file.unrestorableReason === null
+      ? "A decision is bound to this exact file fingerprint. External edits reopen it."
+      : file.unrestorableReason
+    this.details.content = t`${bold(fg(this.#theme.info)("THIS FILE"))}\n${fg(this.#theme.textMuted)("status    ")}${fg(statusColor)(file.status)}\n${fg(this.#theme.textMuted)("lines     ")}${fg(this.#theme.diffAdded)(`+${counts.additions}`)}${fg(this.#theme.textMuted)(" ")}${fg(this.#theme.diffRemoved)(`−${counts.deletions}`)}\n${fg(this.#theme.textMuted)("truncated ")}${fg(this.#theme.text)(file.truncated ? "yes" : "no")}\n${fg(this.#theme.textMuted)("revert    ")}${fg(file.unrestorableReason === null ? this.#theme.success : this.#theme.warning)(revert)}\n\n${bold(fg(this.#theme.info)("DECISIONS"))}\n${fg(this.#theme.success)("✓")}${fg(this.#theme.textMuted)(` ${accepted} accepted`)}\n${fg(this.#theme.warning)("○")}${fg(this.#theme.textMuted)(` ${pending} pending`)}\n${fg(this.#theme.textMuted)(`↶ ${reverted} reverted`)}\n\n${bold(fg(this.#theme.info)("SAFETY"))}\n${fg(this.#theme.textMuted)(safety)}`
   }
 
   #fileDescription(index: number): string {
@@ -328,6 +440,49 @@ export class ReviewPanelRenderable extends BoxRenderable {
       (file.truncated ? "diff truncated · checkpoint revert available" : file.status)
     )
   }
+}
+
+export interface ReviewLineCounts {
+  readonly additions: number
+  readonly deletions: number
+}
+
+export function reviewLineCounts(unifiedDiff: string): ReviewLineCounts {
+  const stats = diffStats(presentableUnifiedDiff("file", unifiedDiff))
+  return { additions: stats.added, deletions: stats.removed }
+}
+
+function addReviewLineCounts(left: ReviewLineCounts, right: ReviewLineCounts): ReviewLineCounts {
+  return {
+    additions: left.additions + right.additions,
+    deletions: left.deletions + right.deletions,
+  }
+}
+
+function reviewFileLabel(
+  file: NonNullable<RottweilerState["review"]>["files"][number],
+): string {
+  const counts = reviewLineCounts(file.unifiedDiff)
+  return `${reviewGlyph(file.status)} ${file.path}  +${counts.additions} −${counts.deletions}`
+}
+
+function reviewHint(
+  theme: RottweilerTheme,
+  mode: "decide" | "revert-unavailable" | "close",
+) {
+  const key = (label: string) => bg(theme.backgroundElement)(fg(theme.text)(` ${label} `))
+  if (mode === "close") return t`${key("esc")}${fg(theme.textMuted)(" close")}`
+  return t`${key("a")}${fg(theme.textMuted)(" accept  ")}${key("r")}${fg(theme.textMuted)(mode === "revert-unavailable" ? " revert unavailable  " : " revert  ")}${key("esc")}${fg(theme.textMuted)(" close")}`
+}
+
+function workspaceDiffDetails(
+  theme: RottweilerTheme,
+  path: string,
+  binary: boolean,
+  truncated: boolean,
+  counts: ReviewLineCounts,
+) {
+  return t`${bold(fg(theme.info)("WORKTREE DIFF"))}\n${fg(theme.textMuted)("path      ")}${fg(theme.text)(path)}\n${fg(theme.textMuted)("lines     ")}${fg(theme.diffAdded)(`+${counts.additions}`)}${fg(theme.textMuted)(" ")}${fg(theme.diffRemoved)(`−${counts.deletions}`)}\n${fg(theme.textMuted)("binary    ")}${fg(theme.text)(binary ? "yes" : "no")}\n${fg(theme.textMuted)("truncated ")}${fg(theme.text)(truncated ? "yes" : "no")}\n\n${bold(fg(theme.info)("MODE"))}\n${fg(theme.textMuted)("read-only current worktree diff")}`
 }
 
 function reviewGlyph(status: "pending" | "accepted" | "reverted"): string {
