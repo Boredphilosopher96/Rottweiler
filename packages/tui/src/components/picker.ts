@@ -765,14 +765,24 @@ function isPrintableInput(value: string): boolean {
 }
 
 export function fuzzyScore(query: string, candidate: string): number | null {
+  return fuzzyMatch(query, candidate)?.score ?? null
+}
+
+export interface FuzzyMatch {
+  readonly score: number
+  readonly positions: readonly number[]
+}
+
+export function fuzzyMatch(query: string, candidate: string): FuzzyMatch | null {
   const needle = query.trim().toLocaleLowerCase()
   const haystack = candidate.toLocaleLowerCase()
   if (needle.length === 0) {
-    return 0
+    return { score: 0, positions: [] }
   }
   let cursor = 0
   let score = 0
   let streak = 0
+  const positions: number[] = []
   for (let index = 0; index < haystack.length && cursor < needle.length; index += 1) {
     if (haystack[index] !== needle[cursor]) {
       streak = 0
@@ -783,7 +793,10 @@ export function fuzzyScore(query: string, candidate: string): number | null {
     if (index === 0 || /[\s/_.-]/.test(haystack[index - 1] ?? "")) {
       score += 12
     }
+    positions.push(index)
     cursor += 1
   }
-  return cursor === needle.length ? score - (haystack.length - needle.length) * 0.05 : null
+  return cursor === needle.length
+    ? { score: score - (haystack.length - needle.length) * 0.05, positions }
+    : null
 }

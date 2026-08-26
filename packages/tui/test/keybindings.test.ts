@@ -511,7 +511,7 @@ describe("Vim TUI interaction", () => {
     expect(commands.at(-1)).toMatchObject({ type: "interrupt" })
   })
 
-  test("uses two-stage Escape and normal navigation inside fuzzy pickers", async () => {
+  test("uses two-stage Escape and restores focus from the command palette", async () => {
     const setup = await createTestRenderer({ width: 92, height: 22, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
@@ -527,17 +527,18 @@ describe("Vim TUI interaction", () => {
     renderer.root.add(app)
     setup.mockInput.pressKey("p", { ctrl: true })
     await setup.mockInput.typeText("a")
-    expect(app.picker.visible).toBeTrue()
-    expect(app.picker.input.value).toBe("a")
+    expect(app.commandPalette.visible).toBeTrue()
+    expect(app.commandPalette.input.value).toBe("a")
 
     setup.mockInput.pressEscape()
     await Bun.sleep(30)
-    expect(app.picker.visible).toBeTrue()
+    expect(app.commandPalette.visible).toBeTrue()
     expect(app.composer.hintText.plainText).toContain("NORMAL")
     setup.mockInput.pressEscape()
     await Bun.sleep(30)
-    expect(app.picker.visible).toBeFalse()
+    expect(app.commandPalette.visible).toBeFalse()
     expect(app.composer.hintText.plainText).toContain("NORMAL")
+    expect(renderer.currentFocusedRenderable).toBe(app.composer.editor)
   })
 
   test("switches normal focus to retained transcript navigation without editing", async () => {

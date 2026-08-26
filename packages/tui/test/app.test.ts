@@ -1718,11 +1718,8 @@ describe("Rottweiler OpenTUI shell", () => {
     renderer.root.add(app)
 
     app.openCommandPicker()
-    const rewindAction = app.picker.select.options.findIndex(
-      (option) => option.value === "rewind.run",
-    )
-    app.picker.select.setSelectedIndex(rewindAction)
-    app.picker.select.selectCurrent()
+    app.commandPalette.selectById("rewind.run")
+    app.commandPalette.activateSelected()
 
     expect(app.picker.title).toContain("Conversation timeline")
     const rows = app.picker.select.options.filter(
@@ -1975,7 +1972,7 @@ describe("Rottweiler OpenTUI shell", () => {
 
     app.closePicker()
     app.openCommandPicker()
-    const palette = app.picker.select.options.map((option) => option.value)
+    const palette = app.commandPalette.itemIds
     expect(palette).toContain("session.list")
     expect(palette).toContain("provider.list")
     expect(palette).toContain("agent.children")
@@ -1985,12 +1982,129 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(palette).toContain("permissions.manage")
     expect(palette.length).toBeGreaterThan(10)
 
-    const statusIndex = app.picker.select.options.findIndex(
-      (option) => option.value === "status.show",
-    )
-    app.picker.select.setSelectedIndex(statusIndex)
-    app.picker.select.selectCurrent()
+    app.commandPalette.selectById("status.show")
+    app.commandPalette.activateSelected()
     expect(app.composer.value).toBe("/status")
+  })
+
+  test("opens the command palette as a split list and selected-only detail surface", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer)
+    renderer.root.add(app)
+    app.openCommandPicker()
+    await setup.renderOnce()
+
+    expect(app.picker.visible).toBeFalse()
+    expect(app.commandPalette.visible).toBeTrue()
+    expect(app.commandPalette.x).toBe(1)
+    expect(app.commandPalette.y).toBe(2)
+    expect(app.commandPalette.width).toBe(108)
+    expect(app.commandPalette.height).toBe(25)
+    expect(app.commandPalette.detail.plainText).toContain("Compact the conversation context")
+    expect(app.commandPalette.footer.plainText).toContain("built-in")
+
+    await setup.mockInput.typeText("status")
+    expect(app.commandPalette.detail.plainText).toContain("Display running and queue state")
+    expect(renderer.currentFocusedRenderable).toBe(app.commandPalette.input)
+    setup.mockInput.pressEnter()
+    expect(app.commandPalette.visible).toBeFalse()
+    expect(app.composer.value).toBe("/status")
+  })
+
+  test("keeps local command palette actions usable while the live catalog loads", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
+    renderer = setup.renderer
+    const pending = new Promise<CommandOutcome>(() => {})
+    const app = createRottweilerApp(renderer, {
+      onCommand(command) {
+        return command.type === "list_commands" ? pending : { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    app.openCommandPicker()
+    await setup.renderOnce()
+
+    expect(app.commandPalette.footer.plainText).toContain("Loading extension commands")
+    await setup.mockInput.typeText("workspace roots")
+    expect(app.commandPalette.detail.plainText).toContain("See every live workspace root")
+  })
+
+  test("retries a failed command catalog from the command palette", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
+    renderer = setup.renderer
+    let attempts = 0
+    const app = createRottweilerApp(renderer, {
+      onCommand(command) {
+        if (command.type !== "list_commands") return { type: "accepted" }
+        attempts += 1
+        return {
+          type: "rejected",
+          error: {
+            category: "protocol",
+            code: "catalog_unavailable",
+            message: "driver lease rejected the command catalog",
+            retryable: true,
+          },
+        }
+      },
+    })
+    renderer.root.add(app)
+    app.openCommandPicker()
+    await Bun.sleep(0)
+
+    expect(app.commandPalette.footer.plainText).toContain("driver lease rejected the command catalog")
+    expect(attempts).toBe(1)
+    setup.mockInput.pressKey("r", { ctrl: true })
+    await Bun.sleep(0)
+    expect(attempts).toBe(2)
+  })
+
+  test("derives command palette source counts and truncation from the live catalog", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        commands: [{ name: "deploy", description: "Deploy project", usage: "/deploy", source: "project" }],
+        commandsTruncated: true,
+      },
+    })
+    renderer.root.add(app)
+    app.openCommandPicker()
+
+    expect(app.commandPalette.footer.plainText).toContain("1 extension")
+    expect(app.commandPalette.footer.plainText).toContain("results are truncated")
+  })
+
+  test("preserves local, prefill, open, and live dispatch from the command palette", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        commands: [{ name: "deploy", description: "Deploy project", usage: "/deploy" }],
+      },
+    })
+    renderer.root.add(app)
+
+    app.openCommandPicker()
+    await setup.mockInput.typeText("add workspace directory")
+    setup.mockInput.pressEnter()
+    expect(app.composer.value).toBe("/add-dir ")
+
+    app.composer.value = ""
+    app.openCommandPicker()
+    await setup.mockInput.typeText("switch model")
+    setup.mockInput.pressEnter()
+    expect(app.picker.visible).toBeTrue()
+    expect(app.picker.title).toContain("Models")
+
+    app.closePicker()
+    app.openCommandPicker()
+    await setup.mockInput.typeText("/deploy")
+    setup.mockInput.pressEnter()
+    expect(app.composer.value).toBe("/deploy")
   })
 
   test("groups an empty palette in fixed section order and removes headers while filtering", async () => {
@@ -2010,9 +2124,7 @@ describe("Rottweiler OpenTUI shell", () => {
     renderer.root.add(app)
     app.openCommandPicker()
 
-    const headers = app.picker.select.options
-      .filter((option) => String(option.value).startsWith("palette.section."))
-      .map((option) => option.description)
+    const headers = app.commandPalette.sectionLabels
     expect(headers).toEqual([
       "Conversation",
       "Agents & models",
@@ -2022,14 +2134,12 @@ describe("Rottweiler OpenTUI shell", () => {
       "Help & system",
       "Commands",
     ])
-    expect(app.picker.select.options.map((option) => option.value)).not.toContain("interrupt.run")
-    expect(app.picker.select.getSelectedOption()?.value).toBe("compact.run")
+    expect(app.commandPalette.itemIds).not.toContain("interrupt.run")
+    expect(app.commandPalette.selectedId).toBe("compact.run")
 
     await setup.mockInput.typeText("model")
-    expect(app.picker.select.options.some(
-      (option) => String(option.value).startsWith("palette.section."),
-    )).toBeFalse()
-    expect(app.picker.select.options.map((option) => option.value)).toContain("model.list")
+    expect(app.commandPalette.sectionLabels).toEqual([])
+    expect(app.commandPalette.itemIds).toContain("model.list")
   })
 
   test("lists searchable keyboard shortcuts from the active compiled bindings", async () => {
@@ -2095,18 +2205,16 @@ describe("Rottweiler OpenTUI shell", () => {
     renderer.root.add(app)
 
     app.openCommandPicker()
-    const paletteOptions = app.picker.select.options
-    const planIndex = paletteOptions.findIndex((option) => option.value === "plan.show")
-    const queueIndex = paletteOptions.findIndex((option) => option.value === "queue.manage")
-    const costIndex = paletteOptions.findIndex((option) => option.value === "cost.show")
+    const paletteOptions = app.commandPalette.itemIds
+    const planIndex = paletteOptions.indexOf("plan.show")
+    const queueIndex = paletteOptions.indexOf("queue.manage")
+    const costIndex = paletteOptions.indexOf("cost.show")
     expect(queueIndex).toBe(planIndex + 1)
     expect(costIndex).toBe(queueIndex + 1)
-    expect(paletteOptions[queueIndex]?.name).toBe("Manage queued messages")
-    expect(paletteOptions[queueIndex]?.description).toBe(
-      "Review, remove, or clear queued messages",
-    )
-    app.picker.select.setSelectedIndex(queueIndex)
-    app.picker.select.selectCurrent()
+    app.commandPalette.selectById("queue.manage")
+    expect(app.commandPalette.detail.plainText).toContain("Manage queued messages")
+    expect(app.commandPalette.detail.plainText).toContain("Review, remove, or clear queued messages")
+    app.commandPalette.activateSelected()
 
     expect(app.picker.title).toContain("Queued messages")
     expect(app.picker.select.options.map((option) => option.name)).toEqual([
@@ -2231,16 +2339,14 @@ describe("Rottweiler OpenTUI shell", () => {
     renderer.root.add(app)
 
     app.openCommandPicker()
-    const paletteOptions = app.picker.select.options
-    const reviewIndex = paletteOptions.findIndex((option) => option.value === "review.open")
-    const exportIndex = paletteOptions.findIndex((option) => option.value === "session.export")
+    const paletteOptions = app.commandPalette.itemIds
+    const reviewIndex = paletteOptions.indexOf("review.open")
+    const exportIndex = paletteOptions.indexOf("session.export")
     expect(exportIndex).toBe(reviewIndex + 1)
-    expect(paletteOptions[exportIndex]?.name).toBe("Export session")
-    expect(paletteOptions[exportIndex]?.description).toBe(
-      "Save this session's transcript to a file",
-    )
-    app.picker.select.setSelectedIndex(exportIndex)
-    app.picker.select.selectCurrent()
+    app.commandPalette.selectById("session.export")
+    expect(app.commandPalette.detail.plainText).toContain("Export session")
+    expect(app.commandPalette.detail.plainText).toContain("Save this session's transcript to a file")
+    app.commandPalette.activateSelected()
 
     expect(app.picker.title).toContain("Export session")
     expect(app.picker.select.options.map((option) => option.name)).toEqual([
@@ -2377,17 +2483,16 @@ describe("Rottweiler OpenTUI shell", () => {
     renderer.root.add(app)
 
     app.openCommandPicker()
-    const paletteOptions = app.picker.select.options
-    const addIndex = paletteOptions.findIndex((option) => option.value === "workspace.add")
-    const rootsIndex = paletteOptions.findIndex((option) => option.value === "workspace.roots")
-    const trustIndex = paletteOptions.findIndex((option) => option.value === "trust.manage")
+    const paletteOptions = app.commandPalette.itemIds
+    const addIndex = paletteOptions.indexOf("workspace.add")
+    const rootsIndex = paletteOptions.indexOf("workspace.roots")
+    const trustIndex = paletteOptions.indexOf("trust.manage")
     expect(rootsIndex).toBe(addIndex + 1)
     expect(trustIndex).toBe(rootsIndex + 1)
-    expect(paletteOptions[rootsIndex]?.name).toBe("Workspace roots")
-    expect(paletteOptions[rootsIndex]?.description).toBe("See every live workspace root")
-
-    app.picker.select.setSelectedIndex(rootsIndex)
-    app.picker.select.selectCurrent()
+    app.commandPalette.selectById("workspace.roots")
+    expect(app.commandPalette.detail.plainText).toContain("Workspace roots")
+    expect(app.commandPalette.detail.plainText).toContain("See every live workspace root")
+    app.commandPalette.activateSelected()
 
     expect(app.picker.title).toContain("Workspace roots")
     expect(app.picker.select.options.map((option) => option.name)).toEqual([
@@ -2495,14 +2600,14 @@ describe("Rottweiler OpenTUI shell", () => {
     renderer.root.add(app)
 
     app.openCommandPicker()
-    const paletteOptions = app.picker.select.options
-    const permissionsIndex = paletteOptions.findIndex((option) => option.value === "permissions.manage")
-    const budgetIndex = paletteOptions.findIndex((option) => option.value === "budget.manage")
+    const paletteOptions = app.commandPalette.itemIds
+    const permissionsIndex = paletteOptions.indexOf("permissions.manage")
+    const budgetIndex = paletteOptions.indexOf("budget.manage")
     expect(budgetIndex).toBe(permissionsIndex + 1)
-    expect(paletteOptions[budgetIndex]?.name).toBe("Budget limits")
-    expect(paletteOptions[budgetIndex]?.description).toBe("Set spend and subscription-token limits")
-    app.picker.select.setSelectedIndex(budgetIndex)
-    app.picker.select.selectCurrent()
+    app.commandPalette.selectById("budget.manage")
+    expect(app.commandPalette.detail.plainText).toContain("Budget limits")
+    expect(app.commandPalette.detail.plainText).toContain("Set spend and subscription-token limits")
+    app.commandPalette.activateSelected()
 
     expect(app.picker.title).toContain("Budget limits")
     expect(app.picker.select.options.map((option) => option.name)).toEqual([
@@ -2686,9 +2791,9 @@ describe("Rottweiler OpenTUI shell", () => {
       })
       testRenderer.root.add(app)
       app.openCommandPicker()
-      const model = app.picker.select.options.find((option) => option.value === "model.list")
-      expect(model?.description).toContain("Ctrl+K")
-      expect(model?.description).not.toContain("Ctrl+M")
+      app.commandPalette.selectById("model.list")
+      expect(app.commandPalette.detail.plainText).toContain("Ctrl+K")
+      expect(app.commandPalette.detail.plainText).not.toContain("Ctrl+M")
       expect(app.statusLine.plainText).toContain("model not selected · Ctrl+K")
     })
   })
@@ -5135,15 +5240,12 @@ describe("Rottweiler OpenTUI shell", () => {
     renderer.root.add(app)
     app.openCommandPicker()
     await setup.mockInput.typeText("mcp")
-    expect(app.picker.select.options.map((option) => option.value)).toContain("mcp.manage")
+    expect(app.commandPalette.itemIds).toContain("mcp.manage")
 
-    app.picker.input.value = "folder trust"
-    const trustIndex = app.picker.select.options.findIndex(
-      (option) => option.value === "trust.manage",
-    )
-    expect(trustIndex).toBeGreaterThanOrEqual(0)
-    app.picker.select.setSelectedIndex(trustIndex)
-    app.picker.select.selectCurrent()
+    app.commandPalette.input.value = "folder trust"
+    expect(app.commandPalette.itemIds).toContain("trust.manage")
+    app.commandPalette.selectById("trust.manage")
+    app.commandPalette.activateSelected()
     expect(app.picker.title).toContain("Folder trust")
     const grantIndex = app.picker.select.options.findIndex(
       (option) => option.value === "trust.grant",
@@ -5765,14 +5867,12 @@ describe("Rottweiler OpenTUI shell", () => {
     app.openCommandPicker()
     await setup.renderOnce()
 
-    const offset = () =>
-      (app.picker.select as unknown as { scrollOffset: number }).scrollOffset
-    expect(app.picker.select.getSelectedIndex()).toBe(1)
-    expect(offset()).toBe(0)
-    await setup.mockMouse.scroll(app.picker.select.x + 2, app.picker.select.y + 1, "down")
-    expect(app.picker.select.getSelectedIndex()).toBe(1)
-    expect(offset()).toBe(1)
-    await setup.mockMouse.click(app.picker.select.x + 2, app.picker.select.y)
+    expect(app.commandPalette.selectedId).toBe("compact.run")
+    expect(app.commandPalette.scrollOffset).toBe(0)
+    await setup.mockMouse.scroll(app.commandPalette.listPane.x + 2, app.commandPalette.listPane.y + 1, "down")
+    expect(app.commandPalette.selectedId).toBe("compact.run")
+    expect(app.commandPalette.scrollOffset).toBe(1)
+    await setup.mockMouse.click(app.commandPalette.listPane.x + 2, app.commandPalette.listPane.y)
     expect(app.picker.visible).toBeTrue()
     expect(app.picker.title).toContain("Commands")
     expect(app.composer.value).toBe("/compact")
@@ -5795,27 +5895,24 @@ describe("Rottweiler OpenTUI shell", () => {
     app.openCommandPicker()
     await setup.renderOnce()
 
-    const offset = () =>
-      (app.picker.select as unknown as { scrollOffset: number }).scrollOffset
-    expect(app.picker.select.showDescription).toBeTrue()
-    const visible = Math.max(1, Math.floor(app.picker.select.height / 2))
-    const maximum = app.picker.select.options.length - visible
+    const visible = app.commandPalette.visibleRowCount
+    const maximum = app.commandPalette.rowCount - visible
     for (let index = 1; index <= visible + 2; index += 1) {
       setup.mockInput.pressArrow("down")
       const selected = index + 1
-      expect(app.picker.select.getSelectedIndex()).toBe(selected)
-      expect(offset()).toBe(Math.min(maximum, Math.max(0, selected - Math.floor(visible / 2))))
+      expect(app.commandPalette.selectedRowIndex).toBe(selected)
+      expect(app.commandPalette.scrollOffset).toBe(Math.min(maximum, Math.max(0, selected - Math.floor(visible / 2))))
     }
     setup.mockInput.pressArrow("up")
     const previous = visible + 2
-    expect(app.picker.select.getSelectedIndex()).toBe(previous)
-    expect(offset()).toBe(
+    expect(app.commandPalette.selectedRowIndex).toBe(previous)
+    expect(app.commandPalette.scrollOffset).toBe(
       Math.min(maximum, Math.max(0, previous - Math.floor(visible / 2))),
     )
     setup.mockInput.pressKey("HOME")
-    expect(offset()).toBe(0)
+    expect(app.commandPalette.scrollOffset).toBe(0)
     setup.mockInput.pressKey("END")
-    expect(offset()).toBe(maximum)
+    expect(app.commandPalette.scrollOffset).toBe(maximum)
   })
 
   test("offers exact model-provider route switching through typed pickers", async () => {
@@ -6289,10 +6386,9 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(projectCommand?.description).toContain("Project · Deploy project")
     app.closePicker()
     app.openCommandPicker()
-    const paletteCommand = app.picker.select.options.find(
-      (option) => option.value === "slash.deploy",
-    )
-    expect(paletteCommand?.description).toContain("Project · Deploy project")
+    app.commandPalette.selectById("slash.deploy")
+    expect(app.commandPalette.detail.plainText).toContain("Commands · project")
+    expect(app.commandPalette.detail.plainText).toContain("Deploy project")
   })
 
   test("reviews, confirms, and enables a live MCP server through typed commands", async () => {
@@ -8118,11 +8214,9 @@ describe("Rottweiler OpenTUI shell", () => {
     })
     renderer.root.add(app)
     app.openCommandPicker()
-    const commandIndex = app.picker.select.options.findIndex(
-      (option) => option.value === "slash.command-15",
-    )
-    expect(commandIndex).toBeGreaterThanOrEqual(0)
-    app.picker.select.setSelectedIndex(commandIndex)
+    expect(app.commandPalette.itemIds).toContain("slash.command-15")
+    app.commandPalette.selectById("slash.command-15")
+    const commandIndex = app.commandPalette.selectedRowIndex
     await setup.renderOnce()
 
     app.handleEvent({
@@ -8132,12 +8226,43 @@ describe("Rottweiler OpenTUI shell", () => {
     })
     await setup.renderOnce()
 
-    expect(app.picker.select.getSelectedOption()?.value).toBe("slash.command-15")
-    expect(app.picker.select.getSelectedIndex()).toBe(commandIndex)
+    expect(app.commandPalette.selectedId).toBe("slash.command-15")
+    expect(app.commandPalette.selectedRowIndex).toBe(commandIndex)
     expect(setup.captureCharFrame()).toContain("/command-15")
     setup.mockInput.pressEscape()
     await Bun.sleep(30)
-    expect(app.picker.visible).toBeFalse()
+    expect(app.commandPalette.visible).toBeFalse()
+  })
+
+  test("preserves command palette query, selection, and viewport across a theme rebuild", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      theme: systemThemeFor("dark"),
+      initialState: {
+        ...createInitialState(),
+        commands: Array.from({ length: 30 }, (_, index) => ({
+          name: `command-${index}`,
+          description: `Command ${index}`,
+          usage: `/command-${index}`,
+        })),
+      },
+    })
+    renderer.root.add(app)
+    app.openCommandPicker()
+    await setup.mockInput.typeText("command")
+    app.commandPalette.selectById("slash.command-15")
+    const original = app.commandPalette
+    const offset = app.commandPalette.scrollOffset
+
+    app.setSystemTheme(systemThemeFor("light"))
+    await setup.renderOnce()
+
+    expect(app.commandPalette).not.toBe(original)
+    expect(app.commandPalette.visible).toBeTrue()
+    expect(app.commandPalette.input.value).toBe("command")
+    expect(app.commandPalette.selectedId).toBe("slash.command-15")
+    expect(app.commandPalette.scrollOffset).toBe(offset)
   })
 
   test("keeps picker selection readable and distinct in every bundled theme", () => {

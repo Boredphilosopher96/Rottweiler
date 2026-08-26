@@ -17,6 +17,7 @@ import {
   ContextPanelRenderable,
   FuzzyPickerRenderable,
   InteractionPanelRenderable,
+  ListDetailRenderable,
   OutputViewerRenderable,
   ReviewPanelRenderable,
   StateBannerRenderable,
@@ -25,7 +26,13 @@ import {
   TranscriptRenderable,
   formatSubagentElapsed,
   type PickerItem,
+  type ListDetailPresentation,
 } from "./components"
+import {
+  createCommandPaletteModel,
+  type CommandPaletteCatalog,
+  type CommandPaletteEntry,
+} from "./command-palette"
 import {
   compileKeybindings,
   formatKeycap,
@@ -282,6 +289,9 @@ interface PaletteAction {
   readonly title: string
   readonly description: string
   readonly section: PaletteSection
+  readonly catalogSource?: "builtin" | "extension"
+  readonly sourceLabel?: string
+  readonly detailDescription?: string
   readonly run: () => void
 }
 
@@ -368,6 +378,7 @@ export class RottweilerApp extends BoxRenderable {
   outputViewer!: OutputViewerRenderable
   reviewPanel!: ReviewPanelRenderable
   picker!: FuzzyPickerRenderable<unknown>
+  commandPalette!: ListDetailRenderable<PaletteAction>
   composer!: ComposerRenderable
   statusLine!: StatusLineRenderable
   subagentTray!: SubagentTrayRenderable
@@ -519,7 +530,7 @@ export class RottweilerApp extends BoxRenderable {
     if (
       plainEscape &&
       this.#activeSubagentId !== null &&
-      !this.picker.visible &&
+      !this.#pickerVisible() &&
       this.#outputViewerToolCallId === null &&
       !this.#reviewOpen
     ) {
@@ -539,7 +550,7 @@ export class RottweilerApp extends BoxRenderable {
     }
     if (
       plainEscape &&
-      !this.picker.visible &&
+      !this.#pickerVisible() &&
       this.#outputViewerToolCallId === null &&
       !this.#reviewOpen &&
       this.#isInterruptible()
@@ -560,7 +571,7 @@ export class RottweilerApp extends BoxRenderable {
     }
     if (
       focusOwner === "composer" &&
-      !this.picker.visible &&
+      !this.#pickerVisible() &&
       this.#outputViewerToolCallId === null &&
       !this.#reviewOpen &&
       !key.ctrl &&
@@ -609,7 +620,7 @@ export class RottweilerApp extends BoxRenderable {
     }
     if (
       focusOwner === "composer" &&
-      !this.picker.visible &&
+      !this.#pickerVisible() &&
       key.name === "backspace" &&
       !key.ctrl && !key.meta && !key.option &&
       this.composer.value.length === 0 &&
@@ -773,12 +784,20 @@ export class RottweilerApp extends BoxRenderable {
     const draft = rebuilding ? this.composer.value : ""
     const attachments = rebuilding ? [...this.composer.attachments] : []
     const scrollTop = rebuilding ? this.transcript.scroller.scrollTop : 0
-    const pickerWasVisible = rebuilding && this.picker.visible
+    const pickerWasVisible = rebuilding && this.#pickerVisible()
     const pickerKind = this.#pickerController.kind
-    const pickerQuery = rebuilding ? this.picker.input.value : ""
+    const paletteWasVisible = pickerWasVisible && pickerKind === "palette"
+    const pickerQuery = rebuilding
+      ? paletteWasVisible ? this.commandPalette.input.value : this.picker.input.value
+      : ""
     const pickerSelection = rebuilding
-      ? this.picker.select.getSelectedOption()?.value
+      ? paletteWasVisible
+        ? this.commandPalette.selectedId
+        : this.picker.select.getSelectedOption()?.value
       : undefined
+    const pickerScrollOffset = rebuilding && paletteWasVisible
+      ? this.commandPalette.scrollOffset
+      : 0
     if (rebuilding) {
       for (const child of this.getChildren()) {
         this.remove(child)
@@ -895,6 +914,7 @@ export class RottweilerApp extends BoxRenderable {
     this.picker.top = 2
     this.picker.left = "15%"
     this.picker.width = "70%"
+    this.commandPalette = new ListDetailRenderable<PaletteAction>(this.ctx, theme)
     const pasteImageKeycap = this.#bindingHint("paste_image", ["global", this.#composerKeybindingContext()])
     const externalEditorKeycap = this.#bindingHint("open_external_editor", ["global", this.#composerKeybindingContext()])
     this.composer = new ComposerRenderable(this.ctx, theme, {
@@ -948,21 +968,29 @@ export class RottweilerApp extends BoxRenderable {
     this.add(this.composer)
     this.add(this.statusLine)
     this.add(this.picker)
+    this.add(this.commandPalette)
     this.setState(this.#state)
     this.composer.value = draft
     for (const attachment of attachments) this.composer.addAttachment(attachment)
     this.transcript.setScrollOffset(scrollTop)
 
     if (pickerWasVisible && pickerKind !== null) {
+      this.#pickerController.query = pickerQuery
       this.#pickerController.refresh()
-      const selectedIndex = this.picker.select.options.findIndex(
-        (option) => option.value === pickerSelection,
-      )
-      if (selectedIndex >= 0) this.picker.select.setSelectedIndex(selectedIndex)
-      this.picker.input.value = pickerQuery
+      if (pickerKind === "palette") {
+        if (typeof pickerSelection === "string") this.commandPalette.selectById(pickerSelection)
+        this.commandPalette.restoreViewport(pickerScrollOffset)
+      } else {
+        const selectedIndex = this.picker.select.options.findIndex(
+          (option) => option.value === pickerSelection,
+        )
+        if (selectedIndex >= 0) this.picker.select.setSelectedIndex(selectedIndex)
+        this.picker.input.value = pickerQuery
+      }
     }
     this.#rethemeInProgress = false
-    if (this.picker.visible && !this.#pickerController.anchored) this.picker.input.focus()
+    if (this.commandPalette.visible) this.commandPalette.input.focus()
+    else if (this.picker.visible && !this.#pickerController.anchored) this.picker.input.focus()
   }
 
   #openPostSubmitPicker(): void {
@@ -1690,7 +1718,12 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   openCommandPicker(): void {
+    if (this.picker.visible) this.picker.close()
     this.#pickerController.begin("palette")
+    this.commandPalette.resizeForTerminal(
+      this.width === 0 ? this.ctx.width : this.width,
+      this.height === 0 ? this.ctx.height : this.height,
+    )
     if (!this.#commandsRequested) {
       this.#requestCommands()
     }
@@ -2269,6 +2302,7 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   closePicker(): void {
+    if (this.commandPalette.visible) this.commandPalette.close()
     this.#pickerController.close()
   }
 
@@ -2323,7 +2357,8 @@ export class RottweilerApp extends BoxRenderable {
     )
     this.outputViewer.resizeForTerminal(height)
     this.reviewPanel.resizeForTerminal(height)
-    if (this.picker.visible) this.#pickerController.position(this.#pickerController.anchored)
+    if (this.commandPalette.visible) this.commandPalette.resizeForTerminal(width, height)
+    else if (this.picker.visible) this.#pickerController.position(this.#pickerController.anchored)
   }
 
   override destroy(): void {
@@ -2384,7 +2419,7 @@ export class RottweilerApp extends BoxRenderable {
     if (this.#keybindings.preset === "standard") {
       return this.#outputViewerToolCallId !== null || this.#reviewOpen ? "review" : "standard"
     }
-    if (this.picker.visible && !this.#pickerController.anchored) {
+    if (this.#modalPickerVisible()) {
       return this.#inputMode === "insert" ? "picker_insert" : "picker_normal"
     }
     if (this.#outputViewerToolCallId !== null || this.#reviewOpen) return "review"
@@ -2397,7 +2432,7 @@ export class RottweilerApp extends BoxRenderable {
         this.#closeOutputViewer()
         return true
       }
-      if (this.picker.visible) {
+      if (this.#pickerVisible()) {
         this.closePicker()
         return true
       }
@@ -2465,7 +2500,7 @@ export class RottweilerApp extends BoxRenderable {
         return false
       case "open_external_editor":
         if (
-          this.picker.visible ||
+          this.#pickerVisible() ||
           this.#outputViewerToolCallId !== null ||
           this.#reviewOpen
         ) return false
@@ -2475,14 +2510,14 @@ export class RottweilerApp extends BoxRenderable {
         this.#setInputMode("normal")
         return true
       case "enter_insert":
-        this.#vimFocus = this.picker.visible ? "picker" : "composer"
+        this.#vimFocus = this.#pickerVisible() ? "picker" : "composer"
         this.#setInputMode("insert")
         return true
       case "append_insert":
-        if (!this.picker.visible && this.#vimFocus === "composer") {
+        if (!this.#pickerVisible() && this.#vimFocus === "composer") {
           this.composer.editor.moveCursorRight()
         }
-        this.#vimFocus = this.picker.visible ? "picker" : "composer"
+        this.#vimFocus = this.#pickerVisible() ? "picker" : "composer"
         this.#setInputMode("insert")
         return true
       case "focus_next":
@@ -2536,8 +2571,9 @@ export class RottweilerApp extends BoxRenderable {
         }
         return true
       case "select_current":
-        if (!this.picker.visible) return false
-        this.picker.select.selectCurrent()
+        if (!this.#pickerVisible()) return false
+        if (this.commandPalette.visible) this.commandPalette.activateSelected()
+        else this.picker.select.selectCurrent()
         return true
     }
   }
@@ -2595,9 +2631,8 @@ export class RottweilerApp extends BoxRenderable {
       this.transcript.scroller.focus()
       return
     }
-    if (this.#inputMode === "standard") {
-      this.composer.editor.showCursor = true
-      this.composer.focus()
+    if (this.commandPalette.visible) {
+      this.commandPalette.input.focus()
       return
     }
     if (this.picker.visible && !this.#pickerController.anchored) {
@@ -2606,6 +2641,11 @@ export class RottweilerApp extends BoxRenderable {
       } else {
         this.picker.select.focus()
       }
+      return
+    }
+    if (this.#inputMode === "standard") {
+      this.composer.editor.showCursor = true
+      this.composer.focus()
       return
     }
     this.composer.editor.showCursor = this.#inputMode === "insert"
@@ -2617,7 +2657,7 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #cycleVimFocus(direction: 1 | -1): void {
-    if (this.#keybindings.preset !== "vim" || this.picker.visible) return
+    if (this.#keybindings.preset !== "vim" || this.#pickerVisible()) return
     const targets: readonly Exclude<VimFocus, "picker">[] = ["composer", "transcript"]
     const current = Math.max(0, targets.indexOf(this.#vimFocus as Exclude<VimFocus, "picker">))
     this.#vimFocus = targets[(current + direction + targets.length) % targets.length] ?? "composer"
@@ -2628,7 +2668,9 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #moveVertical(direction: 1 | -1): void {
-    if (this.picker.visible) {
+    if (this.commandPalette.visible) {
+      this.commandPalette.moveSelection(direction)
+    } else if (this.picker.visible) {
       this.picker.moveSelection(direction)
     } else if (this.#vimFocus === "composer") {
       if (direction < 0) this.composer.editor.moveCursorUp()
@@ -2643,7 +2685,9 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #moveToBoundary(end: boolean): void {
-    if (this.picker.visible) {
+    if (this.commandPalette.visible) {
+      this.commandPalette.moveToBoundary(end)
+    } else if (this.picker.visible) {
       this.picker.moveToBoundary(end)
     } else if (this.#vimFocus === "composer") {
       if (end) this.composer.editor.gotoBufferEnd()
@@ -2668,13 +2712,21 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #visibleFocusOwner(): VimFocus | "interaction" | "output" | "review" {
-    if (this.picker.visible && !this.#pickerController.anchored) return "picker"
+    if (this.#modalPickerVisible()) return "picker"
     if (this.outputViewer.visible) return "output"
     if (this.reviewPanel.visible) return "review"
     if (this.interactionPanel.capturesInput) return "interaction"
     if (this.#state.replay.active) return "transcript"
     if (this.#isActiveSubagentRunning()) return "transcript"
     return this.#vimFocus
+  }
+
+  #pickerVisible(): boolean {
+    return this.commandPalette.visible || this.picker.visible
+  }
+
+  #modalPickerVisible(): boolean {
+    return this.commandPalette.visible || (this.picker.visible && !this.#pickerController.anchored)
   }
 
   #statusFocusOwner(): VimFocus | "interaction" | "review" {
@@ -2684,34 +2736,91 @@ export class RottweilerApp extends BoxRenderable {
 
   #renderPicker(): void {
     switch (this.#pickerController.kind) {
-      case "palette":
+      case "palette": {
         const paletteActions = this.#paletteActions()
-        const paletteItems: PickerItem<PaletteAction | null>[] = []
-        for (const section of PALETTE_SECTIONS) {
-          const sectionActions = paletteActions.filter((action) => action.section === section)
-          if (sectionActions.length === 0) continue
-          paletteItems.push({
-            id: `palette.section.${section.toLocaleLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
-            label: section,
-            description: "",
-            value: null,
-            selectable: false,
-            sectionHeader: true,
-          })
-          paletteItems.push(...sectionActions.map((action) => ({
+        const entries: readonly CommandPaletteEntry<PaletteAction>[] = paletteActions.map((action) => ({
             id: action.id,
-            label: action.title,
+            title: action.title,
             description: action.description,
-            searchText: `${action.section} ${action.title} ${action.description}`,
-            value: action,
-          })))
+            section: action.section,
+            source: action.catalogSource ?? "builtin",
+            action,
+          }))
+        const catalog: CommandPaletteCatalog = this.#projectionErrors.commands !== undefined
+          ? {
+              kind: "error",
+              message: this.#projectionErrors.commands,
+              retryable: true,
+            }
+          : this.#commandsRequested && this.#state.commands.length === 0
+            ? { kind: "loading" }
+            : { kind: "ready", truncated: this.#state.commandsTruncated }
+        const query = this.commandPalette.visible
+          ? this.commandPalette.input.value
+          : this.#pickerController.query
+        const preserveSelection = query === this.#pickerController.query
+        this.#pickerController.query = query
+        const model = createCommandPaletteModel({
+          entries,
+          sections: PALETTE_SECTIONS,
+          query,
+          selectedId: this.commandPalette.visible && preserveSelection
+            ? this.commandPalette.selectedId
+            : null,
+          catalog,
+        })
+        const presentation: ListDetailPresentation<PaletteAction> = {
+          title: "COMMAND PALETTE",
+          query,
+          selectedId: model.selectedId,
+          rows: model.rows.map((row) => row.kind === "section"
+            ? row
+            : {
+                kind: "item",
+                id: row.id,
+                label: row.title,
+                matchSpans: row.titleMatches,
+                detail: {
+                  title: row.title,
+                  description: row.action.detailDescription ?? row.description,
+                  meta: `${row.section} · ${row.action.sourceLabel ?? (row.source === "builtin" ? "built-in" : "extension")}`,
+                },
+                action: row.action,
+              }),
+          status: model.status,
+          notice: model.notice === null
+            ? null
+            : {
+                message: model.notice.kind === "error" && model.notice.retryable
+                  ? `${model.notice.message} · Ctrl+R retry`
+                  : model.notice.message,
+                tone: model.notice.kind === "error"
+                  ? "error"
+                  : model.notice.kind === "truncated"
+                    ? "warning"
+                    : "muted",
+              },
         }
-        this.#pickerController.show(
-          "Command palette",
-          paletteItems,
-          (item) => item.value?.run(),
-        )
+        if (this.commandPalette.visible) {
+          this.commandPalette.refresh(presentation)
+        } else {
+          this.commandPalette.open(presentation, (action) => action.run(), {
+            onQuery: () => {
+              this.#renderPicker()
+            },
+            onRetry: () => {
+              this.#requestCommands()
+              this.#renderPicker()
+            },
+          })
+          if (this.#keybindings.preset === "vim" && this.#vimFocus !== "picker") {
+            this.#vimFocusBeforePicker = this.#vimFocus
+            this.#vimFocus = "picker"
+            this.#setInputMode("insert")
+          }
+        }
         break
+      }
       case "keyboardHelp": {
         const items: PickerItem<null>[] = []
         for (const context of KEYBOARD_HELP_CONTEXTS[this.#keybindings.preset]) {
@@ -4346,6 +4455,11 @@ export class RottweilerApp extends BoxRenderable {
         title: `/${command.name}`,
         section: "Commands",
         description: `${commandSourceLabel(command.source)} · ${command.description}`,
+        catalogSource: command.source === undefined || command.source === "builtin"
+          ? "builtin"
+          : "extension",
+        sourceLabel: commandSourceLabel(command.source).toLocaleLowerCase(),
+        detailDescription: command.description,
         run: requiresArgument ? prefill(`/${command.name}`) : submit(`/${command.name}`),
       })
     }

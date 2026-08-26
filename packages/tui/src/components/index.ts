@@ -1,5 +1,6 @@
 export * from "./composer"
 export * from "./image"
+export * from "./list-detail"
 export * from "./output-viewer"
 export * from "./panels"
 export * from "./picker"

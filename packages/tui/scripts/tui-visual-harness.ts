@@ -46,6 +46,8 @@ try {
   if (scenarioInput === "command-palette") {
     actions.push("pressed Ctrl+P through the renderer input path")
     setup.mockInput.pressKey("p", { ctrl: true })
+    actions.push("typed context into the focused production query input")
+    await setup.mockInput.typeText("context")
     await setup.flush()
   } else if (scenarioInput === "approval") {
     actions.push("launched a session with a pending terminal-command approval")
@@ -56,7 +58,10 @@ try {
   await mkdir(outputDirectory, { recursive: true })
   const characterFrame = setup.captureCharFrame()
   const styledFrame = setup.captureSpans()
-  const assertions = visualAssertions(scenarioInput, characterFrame, styledFrame)
+  const assertions = [
+    ...visualAssertions(scenarioInput, characterFrame, styledFrame),
+    ...(scenarioInput === "command-palette" ? commandPaletteLayoutAssertions(app) : []),
+  ]
   await writeRasterPng(styledFrame, join(outputDirectory, `${scenarioInput}.png`))
   await Promise.all([
     writeFile(join(outputDirectory, `${scenarioInput}.txt`), characterFrame),
@@ -94,7 +99,7 @@ function scenarioAssertions(scenario: VisualScenario): readonly string[] {
     case "conversation":
       return ["you", "● rottweiler", "reasoning", "AGENTS", "TASKS", "CHANGED", "SESSION"]
     case "command-palette":
-      return ["Command palette", "Compact context", "Review changes"]
+      return ["COMMAND PALETTE", "context", "Compact context", "Manage context"]
     case "approval":
       return ["Permission required", "Terminal command", "Allow once"]
   }
@@ -118,6 +123,28 @@ function visualAssertions(
     expected: text,
     actual: characterFrame.includes(text) ? text : "missing",
   }))
+  if (scenario === "command-palette") {
+    const lines = characterFrame.split("\n")
+    return [
+      ...assertions,
+      positionAssertion(lines, "query starts at the design column", 3, 3, "context"),
+      positionAssertion(lines, "list/detail divider is fixed at column 55", 5, 55, "│"),
+      positionAssertion(lines, "filtered count and source counts are derived", 25, 3, "4 of 30 commands · 30 built-in · 0 extensions"),
+      frameWidthAssertion(lines),
+      {
+        name: "selected description appears only in detail",
+        passed: occurrenceCount(characterFrame, "Inspect assembled context") === 1,
+        expected: "1 occurrence",
+        actual: `${occurrenceCount(characterFrame, "Inspect assembled context")} occurrences`,
+      },
+      colorAssertion(styledFrame, "query uses normal text", 3, 3, kennelTheme.text),
+      colorAssertion(styledFrame, "selection marker uses primary", 5, 3, kennelTheme.primary, kennelTheme.backgroundPanel),
+      colorAssertion(styledFrame, "unmatched title text stays readable", 5, 5, kennelTheme.text, kennelTheme.backgroundPanel),
+      colorAssertion(styledFrame, "matched title text uses primary", 5, 6, kennelTheme.primary, kennelTheme.backgroundPanel),
+      colorAssertion(styledFrame, "divider uses subtle border", 5, 55, kennelTheme.borderSubtle),
+      colorAssertion(styledFrame, "detail metadata is muted", 6, 57, kennelTheme.textMuted),
+    ]
+  }
   if (scenario !== "conversation") return assertions
 
   const lines = characterFrame.split("\n")
@@ -163,6 +190,40 @@ function visualAssertions(
     colorAssertion(styledFrame, "mode pill uses primary background", 31, 2, kennelTheme.background, kennelTheme.primary),
   ]
   return [...assertions, ...positioned, ...colors]
+}
+
+function commandPaletteLayoutAssertions(
+  app: ReturnType<typeof createRottweilerApp>,
+): readonly VisualAssertion[] {
+  const palette = app.commandPalette
+  return [
+    exactValueAssertion("modal begins at column 1", palette.x, 1),
+    exactValueAssertion("modal begins at row 2", palette.y, 2),
+    exactValueAssertion("modal is 108 cells wide", palette.width, 108),
+    exactValueAssertion("modal is 25 rows tall", palette.height, 25),
+    exactValueAssertion("list pane is 52 cells wide", palette.listPane.width, 52),
+    exactValueAssertion("divider is one cell wide", palette.divider.width, 1),
+    exactValueAssertion("detail pane is 51 cells wide", palette.detailPane.width, 51),
+    {
+      name: "query value remains intact",
+      passed: palette.input.value === "context",
+      expected: "context",
+      actual: palette.input.value,
+    },
+  ]
+}
+
+function exactValueAssertion(name: string, actual: number, expected: number): VisualAssertion {
+  return {
+    name,
+    passed: actual === expected,
+    expected: String(expected),
+    actual: String(actual),
+  }
+}
+
+function occurrenceCount(value: string, needle: string): number {
+  return value.split(needle).length - 1
 }
 
 function frameWidthAssertion(lines: readonly string[]): VisualAssertion {

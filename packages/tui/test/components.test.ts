@@ -8,7 +8,7 @@ import {
 } from "@opentui/core/testing"
 
 import { createRottweilerApp } from "../src/app"
-import { ContextPanelRenderable, FuzzyPickerRenderable, ImageAttachmentRenderable, ReasoningBlockRenderable, SubagentPanelRenderable, SubagentTrayRenderable, ToolBlockRenderable, formatElapsed, fuzzyScore, toolOutputContent } from "../src/components"
+import { ContextPanelRenderable, FuzzyPickerRenderable, ImageAttachmentRenderable, ListDetailRenderable, ReasoningBlockRenderable, SubagentPanelRenderable, SubagentTrayRenderable, ToolBlockRenderable, formatElapsed, fuzzyScore, toolOutputContent, type ListDetailRow } from "../src/components"
 import { stringCellWidth } from "../src/render"
 import {
   PROTOCOL_VERSION,
@@ -113,6 +113,127 @@ function rgba(hex: string): [number, number, number, number] {
     255,
   ]
 }
+
+const listDetailRows: readonly ListDetailRow<string>[] = [
+  { kind: "section", id: "section.conversation", label: "Conversation" },
+  {
+    kind: "item",
+    id: "compact",
+    label: "Compact context",
+    matchSpans: [],
+    detail: { title: "Compact context", description: "Compact the conversation context", meta: "Conversation · built-in" },
+    action: "compact",
+  },
+  {
+    kind: "item",
+    id: "rewind",
+    label: "Rewind to a turn",
+    matchSpans: [[0, 2], [7, 9]],
+    detail: { title: "Rewind to a turn", description: "Choose from completed user turns", meta: "Conversation · built-in" },
+    action: "rewind",
+  },
+  ...Array.from({ length: 22 }, (_, index): ListDetailRow<string> => ({
+    kind: "item",
+    id: `command-${index}`,
+    label: `/command-${index}`,
+    matchSpans: [],
+    detail: { title: `/command-${index}`, description: `Run command ${index}`, meta: "Commands · extension" },
+    action: `command-${index}`,
+  })),
+]
+
+describe("list-detail", () => {
+  let renderer: TestRenderer | undefined
+
+  afterEach(() => {
+    renderer?.destroy()
+    renderer = undefined
+  })
+
+  test("uses the exact 52/1/51 split at the 110-column design size", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
+    renderer = setup.renderer
+    const list = new ListDetailRenderable<string>(renderer, kennelTheme)
+    renderer.root.add(list)
+    list.open({ title: "Command palette", query: "", rows: listDetailRows, selectedId: "compact", status: "24 commands" }, () => {})
+    await setup.renderOnce()
+
+    expect(list.width).toBe(108)
+    expect(list.height).toBe(25)
+    expect(list.listPane.width).toBe(52)
+    expect(list.divider.width).toBe(1)
+    expect(list.detailPane.width).toBe(51)
+    expect(list.divider.x).toBe(list.listPane.x + 52)
+  })
+
+  test("updates detail with selection and keeps scrolling independent", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
+    renderer = setup.renderer
+    const list = new ListDetailRenderable<string>(renderer, kennelTheme)
+    renderer.root.add(list)
+    list.open({ title: "Command palette", query: "", rows: listDetailRows, selectedId: "compact", status: "24 commands" }, () => {})
+    await setup.renderOnce()
+
+    expect(list.detail.plainText).toContain("Compact the conversation context")
+    list.moveSelection(1)
+    expect(list.selectedId).toBe("rewind")
+    expect(list.detail.plainText).toContain("Choose from completed user turns")
+    const selected = list.selectedId
+    list.scrollViewport(1)
+    expect(list.selectedId).toBe(selected)
+    expect(list.scrollOffset).toBe(1)
+  })
+
+  test("activates the exact visible mouse row and styles labels as complete runs", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
+    renderer = setup.renderer
+    const actions: string[] = []
+    const list = new ListDetailRenderable<string>(renderer, kennelTheme)
+    renderer.root.add(list)
+    list.open({ title: "Command palette", query: "re", rows: listDetailRows, selectedId: "compact", status: "24 commands" }, (action) => actions.push(action))
+    await setup.renderOnce()
+
+    const styled = list.rowViews[2]?.content
+    expect(typeof styled).toBe("object")
+    expect((styled as { chunks: readonly { text: string }[] }).chunks.map((chunk) => chunk.text)).toEqual([
+      "  ", "Re", "wind ", "to", " a turn",
+    ])
+    await setup.mockMouse.click(list.listPane.x + 2, list.listPane.y + 3)
+    expect(actions).toEqual(["command-0"])
+  })
+
+  test("does not activate when mouse down and mouse up land on different rows", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
+    renderer = setup.renderer
+    const actions: string[] = []
+    const list = new ListDetailRenderable<string>(renderer, kennelTheme)
+    renderer.root.add(list)
+    list.open({ title: "Command palette", query: "", rows: listDetailRows, selectedId: "rewind", status: "24 commands" }, (action) => actions.push(action))
+    await setup.renderOnce()
+
+    await setup.mockMouse.pressDown(list.listPane.x + 2, list.listPane.y + 1)
+    expect(list.selectedId).toBe("compact")
+    await setup.mockMouse.release(list.listPane.x + 2, list.listPane.y + 2)
+
+    expect(list.selectedId).toBe("compact")
+    expect(actions).toEqual([])
+  })
+
+  test("uses one pane at narrow widths without duplicating the selected description", async () => {
+    const setup = await createTestRenderer({ width: 72, height: 18, useThread: false })
+    renderer = setup.renderer
+    const list = new ListDetailRenderable<string>(renderer, kennelTheme)
+    renderer.root.add(list)
+    list.resizeForTerminal(72, 18)
+    list.open({ title: "Command palette", query: "", rows: listDetailRows, selectedId: "compact", status: "24 commands" }, () => {})
+    await setup.renderOnce()
+
+    expect(list.layoutMode).toBe("single")
+    expect(list.divider.visible).toBeFalse()
+    expect(list.detailPane.visible).toBeFalse()
+    expect(setup.captureCharFrame().match(/Compact the conversation context/g)).toHaveLength(1)
+  })
+})
 
 describe("M4 retained components", () => {
   let renderer: TestRenderer | undefined
