@@ -584,6 +584,8 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.#compact = !anchored && compact
     this.input.visible = !anchored
     this.select.showDescription = !this.#compact
+    this.paddingTop = anchored ? 0 : 1
+    this.paddingBottom = anchored ? 0 : 1
     this.gap = anchored ? 0 : 1
     const compactLimit = Math.max(5, Math.floor(this.ctx.height / 2))
     this.#desiredHeight = anchored

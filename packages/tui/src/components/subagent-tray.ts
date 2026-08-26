@@ -20,6 +20,7 @@ export class SubagentTrayRenderable extends BoxRenderable {
   #rowOrder: readonly string[] = []
   #elapsedTimer: ReturnType<typeof setInterval> | null = null
   #lastRenderNowMs = Date.now()
+  #presentationEnabled = true
 
   constructor(
     ctx: RenderContext,
@@ -33,11 +34,11 @@ export class SubagentTrayRenderable extends BoxRenderable {
       height: 0,
       flexDirection: "column",
       flexShrink: 0,
-      border: true,
+      border: ["left"],
       borderStyle: "single",
-      borderColor: theme.border,
-      backgroundColor: theme.backgroundPanel,
-      paddingX: 1,
+      borderColor: theme.info,
+      backgroundColor: theme.background,
+      paddingLeft: 1,
       visible: false,
     })
     this.#theme = theme
@@ -53,7 +54,7 @@ export class SubagentTrayRenderable extends BoxRenderable {
       wrapMode: "none",
     })
     this.footer = new TextRenderable(ctx, {
-      content: "Ctrl+G inspect · click a row to open",
+      content: "╰ Ctrl+G inspect · click a row to open",
       fg: theme.textMuted,
       height: 1,
       flexShrink: 0,
@@ -99,6 +100,13 @@ export class SubagentTrayRenderable extends BoxRenderable {
     this.#syncElapsedTimer()
   }
 
+  setPresentationEnabled(enabled: boolean): void {
+    if (this.#presentationEnabled === enabled) return
+    this.#presentationEnabled = enabled
+    this.#render(this.#lastRenderNowMs)
+    this.#syncElapsedTimer()
+  }
+
   override destroy(): void {
     this.#clearElapsedTimer()
     super.destroy()
@@ -127,12 +135,13 @@ export class SubagentTrayRenderable extends BoxRenderable {
     this.more.visible = hidden > 0
     this.more.height = hidden > 0 ? 1 : 0
     this.more.content = hidden > 0 ? `… ${hidden} more · Ctrl+G` : ""
-    this.visible = this.#total > 0
-    this.height = this.#total === 0 ? 0 : this.#subagents.length + (hidden > 0 ? 1 : 0) + 3
+    this.visible = this.#presentationEnabled && this.#total > 0
+    this.height = !this.visible ? 0 : this.#subagents.length + (hidden > 0 ? 1 : 0) + 1
   }
 
   #syncElapsedTimer(): void {
-    const running = this.#subagents.some((subagent) => subagent.status === "running")
+    const running = this.#presentationEnabled &&
+      this.#subagents.some((subagent) => subagent.status === "running")
     if (!running) {
       this.#clearElapsedTimer()
       return

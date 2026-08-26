@@ -799,7 +799,7 @@ export class RottweilerApp extends BoxRenderable {
       minHeight: 1,
       flexDirection: "row",
       backgroundColor: theme.background,
-      gap: 1,
+      gap: 0,
     })
     this.transcript = new TranscriptRenderable(this.ctx, theme, {
       syntaxStyle: this.#syntaxStyle,
@@ -814,6 +814,9 @@ export class RottweilerApp extends BoxRenderable {
     })
     this.contextPanel = new ContextPanelRenderable(this.ctx, theme, {
       onOpenDiff: (path) => this.#openChangedFileDiff(path),
+      onOpenSubagent: (subagentId) => {
+        void this.#enterSubagent(subagentId)
+      },
     })
     this.main.add(this.transcript)
     this.main.add(this.contextPanel)
@@ -1617,6 +1620,7 @@ export class RottweilerApp extends BoxRenderable {
       !state.replay.active &&
       contextPanelHasContent(state) &&
       (this.width === 0 ? this.ctx.width >= 100 : this.width >= 100)
+    this.subagentTray.setPresentationEnabled(!this.contextPanel.visible)
     this.interactionPanel.update(viewingSubagent ? childPassiveInteractionState(presented) : state)
     this.reviewPanel.update(state, !viewingSubagent && this.#reviewOpen)
     this.composer.setQueuedMessages(viewingSubagent ? [] : state.queuedMessages)
@@ -1652,6 +1656,9 @@ export class RottweilerApp extends BoxRenderable {
     this.statusLine.setKeybindingMode(
       this.#inputMode === "standard" ? null : this.#inputMode,
       this.#inputMode === "standard" ? null : this.#statusFocusOwner(),
+    )
+    this.composer.setKeybindingMode(
+      this.#inputMode === "standard" ? null : this.#inputMode,
     )
     this.statusLine.update(presented)
     this.banner.update(presented)
@@ -2295,6 +2302,9 @@ export class RottweilerApp extends BoxRenderable {
         this.#inputMode === "normal" ? "normal" : "insert",
         this.#statusFocusOwner(),
       )
+      this.composer.setKeybindingMode(
+        this.#inputMode === "normal" ? "normal" : "insert",
+      )
       this.statusLine.update(this.#presentedState())
     }
   }
@@ -2563,6 +2573,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#inputMode = mode
     this.#focusForInputMode()
     this.statusLine.setKeybindingMode(mode, this.#statusFocusOwner())
+    this.composer.setKeybindingMode(mode)
     this.statusLine.update(this.#presentedState())
   }
 
@@ -2612,6 +2623,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#vimFocus = targets[(current + direction + targets.length) % targets.length] ?? "composer"
     this.#focusForInputMode()
     this.statusLine.setKeybindingMode("normal", this.#vimFocus)
+    this.composer.setKeybindingMode("normal")
     this.statusLine.update(this.#presentedState())
   }
 
@@ -2651,6 +2663,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#vimFocusBeforePicker = "transcript"
     this.#focusForInputMode()
     this.statusLine.setKeybindingMode(this.#inputMode, "transcript")
+    this.composer.setKeybindingMode(this.#inputMode)
     this.statusLine.update(this.#presentedState())
   }
 

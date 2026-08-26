@@ -4,6 +4,10 @@ import {
   SelectRenderable,
   SelectRenderableEvents,
   TextRenderable,
+  bg,
+  bold,
+  fg,
+  t,
   type RenderContext,
   type SyntaxStyle,
   type TreeSitterClient,
@@ -25,7 +29,6 @@ import type {
   PlanArtifact,
   PlanDecision,
   Question,
-  Usage,
 } from "../protocol"
 import type { QuestionProjection, RottweilerState, ToolProjection } from "../state"
 import type { RottweilerTheme } from "../theme"
@@ -737,11 +740,14 @@ function approvalCommand(command: string): string {
 
 export interface ContextPanelCallbacks {
   readonly onOpenDiff?: (path: string) => void
+  readonly onOpenSubagent?: (subagentId: string) => void
 }
 
 const MAX_SIDEBAR_CHANGED_FILES = 128
 
 export class ContextPanelRenderable extends BoxRenderable {
+  readonly agentsTitle: TextRenderable
+  readonly agents: SelectRenderable
   readonly todoTitle: TextRenderable
   readonly todos: SelectRenderable
   readonly mcpTitle: TextRenderable
@@ -750,43 +756,77 @@ export class ContextPanelRenderable extends BoxRenderable {
   readonly runtimeServices: SelectRenderable
   readonly changedTitle: TextRenderable
   readonly changedFiles: SelectRenderable
+  readonly sessionTitle: TextRenderable
+  readonly session: TextRenderable
   #callbacks: ContextPanelCallbacks
+  readonly #theme: RottweilerTheme
+  #agentIds: readonly string[] = []
   #changedPaths: readonly string[] = []
+  #activeAgentCount = 0
   #activeMcpCount = 0
   #activeServiceCount = 0
+  #showSession = false
 
   constructor(ctx: RenderContext, theme: RottweilerTheme, callbacks: ContextPanelCallbacks) {
     super(ctx, {
       id: "context-panel",
-      width: 32,
+      width: 36,
       height: "100%",
       flexDirection: "column",
       flexShrink: 0,
-      border: true,
-      borderStyle: "rounded",
-      borderColor: theme.border,
-      backgroundColor: theme.backgroundPanel,
-      padding: 1,
+      border: ["left"],
+      borderStyle: "single",
+      borderColor: theme.borderSubtle,
+      backgroundColor: theme.background,
+      marginRight: 1,
       gap: 0,
-      title: " Session ",
-      titleColor: theme.info,
     })
     this.#callbacks = callbacks
+    this.#theme = theme
+    this.agentsTitle = new TextRenderable(ctx, {
+      content: "",
+      fg: theme.info,
+      height: 0,
+      flexShrink: 0,
+      marginLeft: 1,
+      visible: false,
+    })
+    this.agents = new SelectRenderable(ctx, {
+      id: "session-agents",
+      width: "100%",
+      height: 0,
+      flexShrink: 0,
+      options: [],
+      backgroundColor: theme.background,
+      textColor: theme.text,
+      selectedBackgroundColor: theme.background,
+      selectedTextColor: theme.text,
+      descriptionColor: theme.textMuted,
+      showScrollIndicator: true,
+      showSelectionIndicator: false,
+      showDescription: false,
+      visible: false,
+    })
+    this.agents.on(SelectRenderableEvents.ITEM_SELECTED, (index: number) => {
+      const subagentId = this.#agentIds[index]
+      if (subagentId !== undefined) this.#callbacks.onOpenSubagent?.(subagentId)
+    })
     this.todoTitle = new TextRenderable(ctx, {
-      content: "Tasks",
+      content: "TASKS",
       fg: theme.info,
       height: 1,
       flexShrink: 0,
+      marginLeft: 1,
     })
     this.todos = new SelectRenderable(ctx, {
       id: "session-todos",
       width: "100%",
       height: "45%",
       options: [],
-      backgroundColor: theme.backgroundPanel,
+      backgroundColor: theme.background,
       textColor: theme.text,
-      selectedBackgroundColor: theme.backgroundElement,
-      selectedTextColor: theme.primary,
+      selectedBackgroundColor: theme.background,
+      selectedTextColor: theme.text,
       descriptionColor: theme.textMuted,
       showScrollIndicator: true,
       showSelectionIndicator: false,
@@ -797,6 +837,7 @@ export class ContextPanelRenderable extends BoxRenderable {
       fg: theme.info,
       height: 0,
       flexShrink: 0,
+      marginLeft: 1,
       visible: false,
     })
     this.mcps = new SelectRenderable(ctx, {
@@ -805,10 +846,10 @@ export class ContextPanelRenderable extends BoxRenderable {
       height: 0,
       flexShrink: 0,
       options: [],
-      backgroundColor: theme.backgroundPanel,
+      backgroundColor: theme.background,
       textColor: theme.text,
-      selectedBackgroundColor: theme.backgroundElement,
-      selectedTextColor: theme.primary,
+      selectedBackgroundColor: theme.background,
+      selectedTextColor: theme.text,
       descriptionColor: theme.textMuted,
       showScrollIndicator: true,
       showDescription: false,
@@ -816,10 +857,11 @@ export class ContextPanelRenderable extends BoxRenderable {
       visible: false,
     })
     this.runtimeTitle = new TextRenderable(ctx, {
-      content: "Services",
+      content: "SERVICES",
       fg: theme.info,
       height: 0,
       flexShrink: 0,
+      marginLeft: 1,
       visible: false,
     })
     this.runtimeServices = new SelectRenderable(ctx, {
@@ -828,10 +870,10 @@ export class ContextPanelRenderable extends BoxRenderable {
       height: 0,
       flexShrink: 0,
       options: [],
-      backgroundColor: theme.backgroundPanel,
+      backgroundColor: theme.background,
       textColor: theme.text,
-      selectedBackgroundColor: theme.backgroundElement,
-      selectedTextColor: theme.primary,
+      selectedBackgroundColor: theme.background,
+      selectedTextColor: theme.text,
       descriptionColor: theme.textMuted,
       showScrollIndicator: true,
       showDescription: false,
@@ -839,24 +881,42 @@ export class ContextPanelRenderable extends BoxRenderable {
       visible: false,
     })
     this.changedTitle = new TextRenderable(ctx, {
-      content: "Changed files",
+      content: "CHANGED",
       fg: theme.info,
       height: 1,
       flexShrink: 0,
+      marginLeft: 1,
     })
     this.changedFiles = new SelectRenderable(ctx, {
       id: "session-changed-files",
       width: "100%",
       flexGrow: 1,
       options: [],
-      backgroundColor: theme.backgroundPanel,
+      backgroundColor: theme.background,
       textColor: theme.text,
-      selectedBackgroundColor: theme.backgroundElement,
-      selectedTextColor: theme.primary,
+      selectedBackgroundColor: theme.background,
+      selectedTextColor: theme.text,
       descriptionColor: theme.textMuted,
       showScrollIndicator: true,
       showDescription: false,
       showSelectionIndicator: false,
+    })
+    this.sessionTitle = new TextRenderable(ctx, {
+      content: "",
+      fg: theme.info,
+      height: 0,
+      flexShrink: 0,
+      marginLeft: 1,
+      visible: false,
+    })
+    this.session = new TextRenderable(ctx, {
+      content: "",
+      fg: theme.textMuted,
+      height: 0,
+      flexShrink: 0,
+      marginLeft: 1,
+      wrapMode: "none",
+      visible: false,
     })
     this.changedFiles.on(SelectRenderableEvents.ITEM_SELECTED, (index: number) => {
       this.#activateChangedFile(index)
@@ -874,20 +934,47 @@ export class ContextPanelRenderable extends BoxRenderable {
       event.preventDefault()
       event.stopPropagation()
     }
+    this.add(this.agentsTitle)
+    this.add(this.agents)
     this.add(this.todoTitle)
     this.add(this.todos)
+    this.add(this.changedTitle)
+    this.add(this.changedFiles)
+    this.add(this.sessionTitle)
+    this.add(this.session)
     this.add(this.mcpTitle)
     this.add(this.mcps)
     this.add(this.runtimeTitle)
     this.add(this.runtimeServices)
-    this.add(this.changedTitle)
-    this.add(this.changedFiles)
   }
 
   update(state: RottweilerState): void {
+    const activeAgents = state.subagentOrder
+      .map((subagentId) => state.subagents[subagentId])
+      .filter((subagent): subagent is NonNullable<typeof subagent> =>
+        subagent !== undefined && subagent.status === "running")
+    this.#agentIds = activeAgents.map((subagent) => subagent.subagentId)
+    this.#activeAgentCount = activeAgents.length
+    this.agentsTitle.content = panelHeading(
+      this.#theme,
+      "AGENTS",
+      activeAgents.length === 0 ? "" : `${activeAgents.length} running`,
+    )
+    this.agents.options = activeAgents.map((subagent) => ({
+      name: `${subagentStatusGlyph(subagent.status)} ${subagent.subagentId}  ${subagent.activity ?? subagent.task}`,
+      description: "",
+      value: subagent.subagentId,
+    }))
+
+    const completedTodos = state.todos.filter((todo) => todo.status === "completed").length
+    this.todoTitle.content = panelHeading(
+      this.#theme,
+      "TASKS",
+      state.todos.length === 0 ? "" : `${completedTodos}/${state.todos.length}`,
+    )
     this.todos.options =
       state.todos.length === 0
-        ? [{ name: "No tasks", description: "", value: "" }]
+        ? [{ name: "○ No tasks", description: "", value: "" }]
         : state.todos.map((todo) => ({
             name: `${todoGlyph(todo.status)} ${todo.content}`,
             description: todo.id,
@@ -921,7 +1008,6 @@ export class ContextPanelRenderable extends BoxRenderable {
     }))
     this.#activeMcpCount = activeMcps.length
     this.#activeServiceCount = activeServices.length
-    this.#layoutSectionHeights()
 
     const reviewPaths = state.review?.files.map((file) => file.path) ?? []
     const statusPaths = state.workspaceStatus?.changedPaths
@@ -940,8 +1026,25 @@ export class ContextPanelRenderable extends BoxRenderable {
       .slice(0, MAX_SIDEBAR_CHANGED_FILES)
     this.changedFiles.options =
       this.#changedPaths.length === 0
-        ? [{ name: "No changed files", description: "", value: "" }]
-        : this.#changedPaths.map((path) => ({ name: path, description: "", value: path }))
+        ? [{ name: "○ No changed files", description: "", value: "" }]
+        : this.#changedPaths.map((path) => ({ name: `M ${path}`, description: "", value: path }))
+    this.changedTitle.content = panelHeading(
+      this.#theme,
+      "CHANGED",
+      this.#changedPaths.length === 0 ? "" : String(this.#changedPaths.length),
+    )
+
+    this.#showSession = state.context !== null || state.cost !== null
+    this.sessionTitle.content = panelHeading(this.#theme, "SESSION", "")
+    const context = state.context === null ? "ctx    —" : formatStatusContext(state.context)
+    const cache = state.cost === null
+      ? "—"
+      : `${(state.cost.cache_hit_basis_points / 100).toFixed(0)}%`
+    const cost = state.cost === null
+      ? "—"
+      : formatStatusSessionCost(state.cost, state.provider, state.context?.used_tokens ?? null)
+    this.session.content = t`${fg(this.#theme.textMuted)("ctx    ")}${fg(this.#theme.text)(context.replace(/^ctx\s*/i, ""))}\n${fg(this.#theme.textMuted)("cache  ")}${fg(this.#theme.success)(cache)}\n${fg(this.#theme.textMuted)("spend  ")}${fg(this.#theme.text)(cost)}`
+    this.#layoutSectionHeights()
   }
 
   protected override onResize(_width: number, _height: number): void {
@@ -950,66 +1053,96 @@ export class ContextPanelRenderable extends BoxRenderable {
 
   #layoutSectionHeights(): void {
     const rows = Math.max(1, this.height || this.ctx.height)
-    const gap = rows >= 26 ? 1 : 0
-    this.gap = gap
-    // Rounded border and vertical padding consume four rows. Every visible
-    // section reserves one title and at least one data row; service rows then
-    // share only the remaining budget so they can never displace changed files.
-    const innerRows = Math.max(1, rows - 4)
+    this.gap = 0
+    let showAgents = this.#activeAgentCount > 0
+    let showSession = this.#showSession
     let showMcp = this.#activeMcpCount > 0
     let showServices = this.#activeServiceCount > 0
-    const minimumRows = () => {
-      const sections = 2 + Number(showMcp) + Number(showServices)
-      return sections * 2 + gap * Math.max(0, sections * 2 - 1)
+    let agentRows = showAgents ? Math.min(3, this.#activeAgentCount) : 0
+    let todoRows = Math.max(1, Math.min(4, this.todos.options.length))
+    let changedRows = Math.max(1, Math.min(4, this.changedFiles.options.length))
+    let sessionRows = showSession ? 3 : 0
+    let mcpRows = showMcp ? Math.min(3, this.#activeMcpCount) : 0
+    let serviceRows = showServices ? Math.min(3, this.#activeServiceCount) : 0
+    const totalRows = () => {
+      const sections = 2 + Number(showAgents) + Number(showSession) + Number(showMcp) + Number(showServices)
+      return sections + Math.max(0, sections - 1) + agentRows + todoRows + changedRows + sessionRows + mcpRows + serviceRows
     }
-    // At unusually short heights, keep the mandatory todo/changed-file sections
-    // intact and suppress optional service sections rather than corrupting the
-    // border. Prefer the newly requested runtime activity when only one fits.
-    if (minimumRows() > innerRows) showMcp = false
-    if (minimumRows() > innerRows) showServices = false
-    const sectionCount = 2 + Number(showMcp) + Number(showServices)
-    const visibleChildren = sectionCount * 2
-    this.mcpTitle.visible = showMcp
-    this.mcpTitle.height = showMcp ? 1 : 0
-    this.mcps.visible = showMcp
-    this.runtimeTitle.visible = showServices
-    this.runtimeTitle.height = showServices ? 1 : 0
-    this.runtimeServices.visible = showServices
-    const listBudget = Math.max(
-      2,
-      innerRows - sectionCount - gap * Math.max(0, visibleChildren - 1),
-    )
-    const todoRows = Math.max(1, Math.min(4, Math.floor(listBudget / 4)))
-    const desiredMcpRows = showMcp ? Math.min(4, this.#activeMcpCount) : 0
-    const desiredServiceRows = showServices ? Math.min(5, this.#activeServiceCount) : 0
-    const serviceBudget = Math.max(0, listBudget - todoRows - 1)
-    let mcpRows = 0
-    let serviceRows = 0
-    if (showMcp && showServices && serviceBudget >= 2) {
-      mcpRows = Math.min(desiredMcpRows, Math.max(1, Math.floor(serviceBudget / 2)))
-      serviceRows = Math.min(desiredServiceRows, Math.max(1, serviceBudget - mcpRows))
-      const spare = serviceBudget - mcpRows - serviceRows
-      if (spare > 0) {
-        const addMcp = Math.min(spare, desiredMcpRows - mcpRows)
-        mcpRows += addMcp
-        serviceRows += Math.min(spare - addMcp, desiredServiceRows - serviceRows)
-      }
-    } else if (showMcp) {
-      mcpRows = Math.min(desiredMcpRows, serviceBudget)
-    } else if (showServices) {
-      serviceRows = Math.min(desiredServiceRows, serviceBudget)
+    while (totalRows() > rows && changedRows > 1) changedRows -= 1
+    while (totalRows() > rows && todoRows > 1) todoRows -= 1
+    while (totalRows() > rows && sessionRows > 1) sessionRows -= 1
+    while (totalRows() > rows && agentRows > 1) agentRows -= 1
+    while (totalRows() > rows && serviceRows > 1) serviceRows -= 1
+    while (totalRows() > rows && mcpRows > 1) mcpRows -= 1
+    if (totalRows() > rows && showMcp) {
+      showMcp = false
+      mcpRows = 0
     }
-    const changedRows = Math.max(1, listBudget - todoRows - mcpRows - serviceRows)
+    if (totalRows() > rows && showServices) {
+      showServices = false
+      serviceRows = 0
+    }
+    if (totalRows() > rows && showSession) {
+      showSession = false
+      sessionRows = 0
+    }
+    if (totalRows() > rows && showAgents) {
+      showAgents = false
+      agentRows = 0
+    }
+
+    this.agentsTitle.visible = showAgents
+    this.agentsTitle.height = showAgents ? 1 : 0
+    this.agentsTitle.marginTop = 0
+    this.agents.visible = showAgents
+    this.agents.height = agentRows
+    this.todoTitle.marginTop = showAgents ? 1 : 0
     this.todos.height = todoRows
-    this.mcps.height = mcpRows
-    this.runtimeServices.height = serviceRows
+    this.changedTitle.marginTop = 1
     this.changedFiles.flexGrow = 0
     this.changedFiles.height = changedRows
+    this.sessionTitle.visible = showSession
+    this.sessionTitle.height = showSession ? 1 : 0
+    this.sessionTitle.marginTop = showSession ? 1 : 0
+    this.session.visible = showSession
+    this.session.height = sessionRows
+    this.mcpTitle.visible = showMcp
+    this.mcpTitle.height = showMcp ? 1 : 0
+    this.mcpTitle.marginTop = showMcp ? 1 : 0
+    this.mcps.visible = showMcp
+    this.mcps.height = mcpRows
+    this.runtimeTitle.visible = showServices
+    this.runtimeTitle.height = showServices ? 1 : 0
+    this.runtimeTitle.marginTop = showServices ? 1 : 0
+    this.runtimeServices.visible = showServices
+    this.runtimeServices.height = serviceRows
   }
 
   #activateChangedFile(index: number): void {
     const path = this.#changedPaths[index]
     if (path !== undefined) this.#callbacks.onOpenDiff?.(path)
+  }
+}
+
+function panelHeading(theme: RottweilerTheme, label: string, meta: string): ReturnType<typeof t> {
+  const spacing = " ".repeat(Math.max(1, 34 - label.length - meta.length))
+  return t`${bold(fg(theme.info)(label))}${meta === "" ? "" : fg(theme.borderActive)(`${spacing}${meta}`)}`
+}
+
+function subagentStatusGlyph(status: RottweilerState["subagents"][string]["status"]): string {
+  switch (status) {
+    case "running":
+      return "◌"
+    case "completed":
+      return "✓"
+    case "failed":
+      return "✕"
+    case "cancelled":
+      return "■"
+    case "timed_out":
+      return "◷"
+    case "max_turns":
+      return "◇"
   }
 }
 
@@ -1046,9 +1179,8 @@ function todoGlyph(status: RottweilerState["todos"][number]["status"]): string {
 
 export class StatusLineRenderable extends TextRenderable {
   #branch: string | null = null
-  #inputMode: "normal" | "insert" | null = null
-  #inputTarget: "composer" | "transcript" | "picker" | "interaction" | "review" | null = null
   readonly #modelPickerKeycap: string | null
+  readonly #theme: RottweilerTheme
 
   constructor(
     ctx: RenderContext,
@@ -1057,14 +1189,17 @@ export class StatusLineRenderable extends TextRenderable {
   ) {
     super(ctx, {
       id: "status-line",
-      width: "100%",
+      width: "auto",
       height: 1,
       content: "",
       fg: theme.textMuted,
       bg: theme.backgroundPanel,
+      marginLeft: 1,
+      marginRight: 1,
       truncate: true,
     })
     this.#modelPickerKeycap = options.modelPickerKeycap ?? null
+    this.#theme = theme
   }
 
   setBranch(branch: string | null): void {
@@ -1072,11 +1207,11 @@ export class StatusLineRenderable extends TextRenderable {
   }
 
   setKeybindingMode(
-    mode: "normal" | "insert" | null,
-    target: "composer" | "transcript" | "picker" | "interaction" | "review" | null,
+    _mode: "normal" | "insert" | null,
+    _target: "composer" | "transcript" | "picker" | "interaction" | "review" | null,
   ): void {
-    this.#inputMode = mode
-    this.#inputTarget = target
+    // Input-mode chrome belongs next to the composer. Keep this method so the
+    // app's focus state does not leak into the session identity row.
   }
 
   update(state: RottweilerState): void {
@@ -1092,13 +1227,7 @@ export class StatusLineRenderable extends TextRenderable {
     const context =
       state.context === null
         ? (hasSessionActivity ? "ctx —" : null)
-        : formatStatusContext(state.context)
-    const cache =
-      state.cost === null
-        ? (hasSessionActivity ? "cache —" : null)
-        : !hasRecordedUsage(state.cost.session_usage)
-        ? "cache —"
-        : `cache ${(state.cost.cache_hit_basis_points / 100).toFixed(0)}%`
+        : headlineContext(formatStatusContext(state.context))
     const pluginStatus = Object.entries(state.pluginStatuses).at(-1)
     const statusModel = state.model === null
       ? null
@@ -1106,45 +1235,38 @@ export class StatusLineRenderable extends TextRenderable {
     const statusProvider = statusModel?.includes("/") === true
       ? statusModel.slice(0, statusModel.indexOf("/"))
       : state.provider
-    this.content = [
-      ...(this.#inputMode === null
-        ? []
-        : [
-            `${this.#inputMode === "normal" ? "NORMAL" : "INSERT"}${
-              this.#inputTarget === null ? "" : ` · ${this.#inputTarget}`
-            }`,
-          ]),
-      ...(state.replay.active ? ["◉ replay"] : []),
-      ...(state.replay.active
-        ? []
-        : [`◉ ${state.mode ?? "—"}${permissionMode === null ? "" : ` · ${permissionMode}`}`]),
-      ...(waitingApproval === undefined ? [] : [`approval · ${toolDisplayName(waitingApproval.name)}`]),
-      statusModel === null
-        ? `model not selected${
-            this.#modelPickerKeycap === null ? "" : ` · ${this.#modelPickerKeycap}`
-          }`
-        : `model ${statusModel}`,
-      ...(context === null ? [] : [context]),
-      ...(state.cost === null && !hasSessionActivity
-        ? []
-        : [formatStatusSessionCost(state.cost, statusProvider, state.context?.used_tokens ?? null)]),
-      ...(cache === null ? [] : [cache]),
-      ...(this.#branch === null && !hasSessionActivity
-        ? []
-        : [`git ${this.#branch ?? "—"}`]),
-      ...(pluginStatus === undefined ? [] : [`Extension · ${humanLabel(pluginStatus[1])}`]),
-    ].join("  │  ")
+    const mode = state.replay.active ? "REPLAY" : (state.mode ?? "—").toUpperCase()
+    const modeColor = state.replay.active ? this.#theme.info : this.#theme.primary
+    const modePill = bg(modeColor)(fg(this.#theme.background)(` ${mode} `))
+    const model = statusModel === null
+      ? `model not selected${this.#modelPickerKeycap === null ? "" : ` · ${this.#modelPickerKeycap}`}`
+      : compactStatusModel(statusModel)
+    const approval = waitingApproval === undefined
+      ? ""
+      : `  approval · ${toolDisplayName(waitingApproval.name)}`
+    const cost = state.cost === null && !hasSessionActivity
+      ? ""
+      : `  ${formatStatusSessionCost(state.cost, statusProvider, state.context?.used_tokens ?? null)}`
+    const branch = this.#branch === null && !hasSessionActivity ? "" : `  ${this.#branch ?? "—"}`
+    const changedCount = state.workspaceStatus?.changedPaths.length ?? 0
+    const changed = changedCount === 0 ? "" : `  ${changedCount} changed`
+    const runningAgents = Object.values(state.subagents)
+      .filter((subagent) => subagent.status === "running").length
+    const extension = pluginStatus === undefined ? "" : `  Extension · ${humanLabel(pluginStatus[1])}`
+    const contextLabel = context === null ? "" : context.replace(/^(ctx)\s*/, "")
+    const agentLabel = runningAgents === 1 ? " agent" : " agents"
+    this.content = t`${bold(modePill)}${permissionMode === null ? "" : fg(this.#theme.textMuted)(`  ${permissionMode}`)}  ${fg(this.#theme.textMuted)(model)}${approval === "" ? "" : fg(this.#theme.warning)(approval)}${contextLabel === "" ? "" : fg(this.#theme.border)("    ctx ")}${contextLabel === "" ? "" : fg(this.#theme.text)(contextLabel)}${fg(this.#theme.text)(cost)}${branch === "" ? "" : fg(this.#theme.secondary)(branch)}${changed === "" ? "" : fg(this.#theme.warning)(changed)}${runningAgents === 0 ? "" : fg(this.#theme.info)(`    ${runningAgents}`)}${runningAgents === 0 ? "" : fg(this.#theme.textMuted)(agentLabel)}${extension === "" ? "" : fg(this.#theme.textMuted)(extension)}`
   }
 }
 
-function hasRecordedUsage(usage: Usage): boolean {
-  return [
-    usage.input_tokens,
-    usage.output_tokens,
-    usage.cache_read_tokens,
-    usage.cache_write_tokens,
-    usage.reasoning_tokens,
-  ].some((value) => /^(0|[1-9][0-9]*)$/.test(value) && BigInt(value) > 0n)
+function compactStatusModel(model: string): string {
+  const separator = model.indexOf("/")
+  return separator < 0 ? model : model.slice(separator + 1)
+}
+
+function headlineContext(context: string): string {
+  const percent = /\(([^)]+)\)$/.exec(context)?.[1]
+  return percent === undefined ? context : `ctx ${percent}`
 }
 
 export class StateBannerRenderable extends TextRenderable {

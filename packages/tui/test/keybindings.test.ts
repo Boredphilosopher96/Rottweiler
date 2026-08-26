@@ -372,19 +372,19 @@ describe("Vim TUI interaction", () => {
 
     await setup.mockInput.typeText("zzzz")
     expect(app.composer.value).toBe("")
-    expect(app.statusLine.plainText).toContain("NORMAL · composer")
+    expect(app.composer.hintText.plainText).toContain("NORMAL")
 
     setup.mockInput.pressKey("i")
     await setup.mockInput.typeText("hound")
     expect(app.composer.value).toBe("hound")
-    expect(app.statusLine.plainText).toContain("INSERT")
+    expect(app.composer.hintText.plainText).toContain("INSERT")
 
     setup.mockInput.pressEscape()
     await Bun.sleep(30)
     setup.mockInput.pressKey("h")
     setup.mockInput.pressKey("x")
     expect(app.composer.value).toBe("houn")
-    expect(app.statusLine.plainText).toContain("NORMAL · composer")
+    expect(app.composer.hintText.plainText).toContain("NORMAL")
   })
 
   test("toggles the selected block with Return only while the transcript owns focus", async () => {
@@ -437,7 +437,7 @@ describe("Vim TUI interaction", () => {
     expect(app.composer.value).toBe("")
 
     setup.mockInput.pressTab()
-    expect(app.statusLine.plainText).toContain("NORMAL · transcript")
+    expect(app.composer.hintText.plainText).toContain("NORMAL")
     setup.mockInput.pressEnter()
     expect(block?.body.visible).toBeTrue()
   })
@@ -461,7 +461,7 @@ describe("Vim TUI interaction", () => {
     setup.mockInput.pressKey("i")
     setup.mockInput.pressEscape()
     await Bun.sleep(30)
-    expect(app.statusLine.plainText).toContain("NORMAL")
+    expect(app.composer.hintText.plainText).toContain("NORMAL")
     expect(app.banner.plainText).toContain("Esc again")
     expect(commands).toHaveLength(0)
     setup.mockInput.pressEscape()
@@ -533,11 +533,11 @@ describe("Vim TUI interaction", () => {
     setup.mockInput.pressEscape()
     await Bun.sleep(30)
     expect(app.picker.visible).toBeTrue()
-    expect(app.statusLine.plainText).toContain("NORMAL · picker")
+    expect(app.composer.hintText.plainText).toContain("NORMAL")
     setup.mockInput.pressEscape()
     await Bun.sleep(30)
     expect(app.picker.visible).toBeFalse()
-    expect(app.statusLine.plainText).toContain("NORMAL · composer")
+    expect(app.composer.hintText.plainText).toContain("NORMAL")
   })
 
   test("switches normal focus to retained transcript navigation without editing", async () => {
@@ -565,7 +565,7 @@ describe("Vim TUI interaction", () => {
 
     expect(app.composer.value).toBe("")
     expect(app.transcript.scroller.scrollTop).toBeGreaterThan(0)
-    expect(app.statusLine.plainText).toContain("NORMAL · transcript")
+    expect(app.composer.hintText.plainText).toContain("NORMAL")
   })
 
   test("leaves plan, tool, question, and review decisions with their focused safety panels", async () => {
@@ -593,7 +593,7 @@ describe("Vim TUI interaction", () => {
     renderer.root.add(app)
     await setup.renderOnce()
 
-    expect(app.statusLine.plainText).toContain("NORMAL · interaction")
+    expect(app.composer.hintText.plainText).toContain("NORMAL")
     setup.mockInput.pressEnter()
     expect(commands.at(-1)).toMatchObject({ type: "approve_plan", decision: "approve" })
 
@@ -660,7 +660,7 @@ describe("Vim TUI interaction", () => {
     }
     app.setState({ ...base, review })
     app.openReview()
-    expect(app.statusLine.plainText).toContain("NORMAL · review")
+    expect(app.composer.hintText.plainText).toContain("NORMAL")
     setup.mockInput.pressKey("a", { shift: true })
     await Bun.sleep(1)
     setup.mockInput.pressKey("r", { shift: true })
@@ -673,7 +673,7 @@ describe("Vim TUI interaction", () => {
     setup.mockInput.pressEscape()
     await Bun.sleep(30)
     app.setState(base)
-    expect(app.statusLine.plainText).toContain("NORMAL · composer")
+    expect(app.composer.hintText.plainText).toContain("NORMAL")
     expect(app.composer.editor.focused).toBeTrue()
   })
 })

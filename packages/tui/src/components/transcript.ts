@@ -6,6 +6,9 @@ import {
   MarkdownRenderable,
   ScrollBoxRenderable,
   TextRenderable,
+  bold,
+  fg,
+  t,
   type RenderContext,
   type SyntaxStyle,
   type TreeSitterClient,
@@ -54,13 +57,34 @@ const MAX_VISIBLE_SUBAGENTS = 8
 // renderables per turn even after context compaction.
 const MAX_MOUNTED_TRANSCRIPT_ENTRIES = 16
 
+const GUTTER_BORDER = {
+  topLeft: "╎",
+  topRight: "╎",
+  bottomLeft: "╎",
+  bottomRight: "╎",
+  horizontal: "╎",
+  vertical: "╎",
+  topT: "╎",
+  bottomT: "╎",
+  leftT: "╎",
+  rightT: "╎",
+  cross: "╎",
+} as const
+
+const USER_GUTTER_BORDER = {
+  ...GUTTER_BORDER,
+  topLeft: "▌",
+  bottomLeft: "▌",
+  vertical: "▌",
+} as const
+
 function entryKey(entry: TranscriptEntry): string {
   return `${entry.sequenceId}:${entry.agentTurn}:${entry.turn.role}`
 }
 
 export class ReasoningBlockRenderable extends BoxRenderable {
   readonly header: TextRenderable
-  readonly body: MarkdownRenderable
+  readonly body: TextRenderable
   #blockId: string
   #content = ""
   #expanded = false
@@ -76,7 +100,7 @@ export class ReasoningBlockRenderable extends BoxRenderable {
   constructor(
     ctx: RenderContext,
     theme: RottweilerTheme,
-    syntaxStyle: SyntaxStyle,
+    _syntaxStyle: SyntaxStyle,
     options: {
       readonly blockId: string
       readonly content: string
@@ -93,7 +117,12 @@ export class ReasoningBlockRenderable extends BoxRenderable {
       width: "100%",
       flexDirection: "column",
       flexShrink: 0,
+      border: ["left"],
+      customBorderChars: GUTTER_BORDER,
+      borderColor: theme.borderSubtle,
       backgroundColor: theme.background,
+      paddingLeft: 1,
+      marginTop: 1,
       focusable: false,
     })
     this.#blockId = options.blockId
@@ -114,17 +143,13 @@ export class ReasoningBlockRenderable extends BoxRenderable {
       wrapMode: "none",
       selectable: true,
     })
-    this.body = new MarkdownRenderable(ctx, {
+    this.body = new TextRenderable(ctx, {
       content: "",
-      syntaxStyle,
-      ...(options.treeSitterClient === undefined ? {} : { treeSitterClient: options.treeSitterClient }),
-      fg: colorWithOpacity(theme.markdownText, theme.thinkingOpacity),
-      conceal: true,
-      concealCode: false,
-      streaming: this.#streaming,
+      fg: theme.textMuted,
+      bg: theme.background,
       width: "100%",
+      wrapMode: "word",
       visible: this.#expanded,
-      internalBlockMode: "top-level",
     })
     this.body.selectable = true
     this.header.onMouseDown = () => {
@@ -168,7 +193,6 @@ export class ReasoningBlockRenderable extends BoxRenderable {
     this.#streaming = streaming
     this.#width = width
     this.visible = this.#content !== ""
-    this.body.streaming = streaming
     this.#layout()
   }
 
@@ -199,14 +223,16 @@ export class ReasoningBlockRenderable extends BoxRenderable {
       this.body.visible = false
       return
     }
-    const indicator = this.#streaming ? "◌" : this.#expanded ? "⌄" : "›"
     const state = this.#streaming
-      ? "Thinking…"
+      ? "reasoning"
       : this.#elapsedMs === null
-        ? "Thought"
-        : `Thought for ${formatElapsed(this.#elapsedMs)}`
+        ? "reasoning"
+        : `reasoning · ${formatElapsed(this.#elapsedMs)}`
     const title = this.#expanded ? "" : ` · ${reasoningTitle(this.#content)}`
-    this.header.content = `${indicator} ${state}${title}`
+    const label = `${state}${title}`
+    const indicator = this.#expanded ? "⌄" : "›"
+    const spacing = " ".repeat(Math.max(1, this.#width - label.length - indicator.length - 3))
+    this.header.content = t`${fg(this.#theme.textMuted)(label)}${fg(this.#theme.borderSubtle)(`${spacing}${indicator}`)}`
     this.body.visible = this.#expanded
     this.body.content = this.#expanded ? this.#content : ""
   }
@@ -224,7 +250,18 @@ export function formatElapsed(elapsedMs: number): string {
 }
 
 function presentableReasoning(content: string): string {
-  return content.replaceAll("[REDACTED]", "").trim()
+  return content
+    .replaceAll("[REDACTED]", "")
+    .replace(/!\[([^\]]*)]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]+)]\([^)]*\)/g, "$1")
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+    .replace(/\*\*([^*\n]+)\*\*/g, "$1")
+    .replace(/__([^_\n]+)__/g, "$1")
+    .replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, "$1")
+    .replace(/(?<!_)_([^_\n]+)_(?!_)/g, "$1")
+    .replace(/~~([^~\n]+)~~/g, "$1")
+    .replace(/`([^`\n]+)`/g, "$1")
+    .trim()
 }
 
 function reasoningTitle(content: string): string {
@@ -237,14 +274,6 @@ function reasoningTitle(content: string): string {
       .trim())
     .find(Boolean) ?? "Reasoning"
   return truncateToCells(first.replace(/\s+/g, " ").trim(), 72)
-}
-
-function colorWithOpacity(color: string, opacity: number): string {
-  const match = /^#([0-9A-Fa-f]{6})([0-9A-Fa-f]{2})?$/.exec(color)
-  if (match === null) return color
-  const sourceAlpha = match[2] === undefined ? 255 : Number.parseInt(match[2], 16)
-  const alpha = Math.round(sourceAlpha * Math.max(0, Math.min(1, opacity)))
-  return `#${match[1]}${alpha.toString(16).padStart(2, "0")}`
 }
 
 export class ToolBlockRenderable extends BoxRenderable {
@@ -290,6 +319,7 @@ export class ToolBlockRenderable extends BoxRenderable {
       // transcript scroller/composer. Individual tool rows must not trap it.
       focusable: false,
       paddingX: 0,
+      marginLeft: 2,
       marginTop: 0,
     })
     this.blockId = blockId
@@ -335,6 +365,9 @@ export class ToolBlockRenderable extends BoxRenderable {
       height: 0,
       flexDirection: "column",
       flexShrink: 0,
+      border: ["left"],
+      borderColor: theme.borderSubtle,
+      paddingLeft: 1,
       visible: !this.#collapsed,
     })
     this.onKeyDown = (key) => {
@@ -413,9 +446,7 @@ export class ToolBlockRenderable extends BoxRenderable {
     this.#syncCommand(tool)
     this.#syncDiff(tool)
     const glyph = tool.status === "awaiting_approval" ? "?" : tool.status === "running" ? "◌" : tool.isError === true ? "✕" : "✓"
-    const approval = tool.status === "awaiting_approval" ? " · approval needed" : ""
     const compact = compactToolPresentation(tool)
-    const args = this.command === null ? compact.subject : ""
     const result =
       tool.status === "finished" && this.#collapsed
         ? compact.summary
@@ -423,8 +454,7 @@ export class ToolBlockRenderable extends BoxRenderable {
     const elapsed = tool.status === "running" && Date.now() - this.#startedAt >= 3_000
       ? ` · ${formatElapsed(Date.now() - this.#startedAt)}`
       : ""
-    this.header.content = `${this.#collapsed ? "›" : "⌄"} ${glyph} ${toolDisplayName(tool.name)}${args === "" ? "" : ` · ${args}`}${approval}${result === "" ? "" : ` · ${result}`}${elapsed}`
-    this.header.fg =
+    const statusColor =
       tool.status === "awaiting_approval"
         ? this.#theme.warning
         : tool.isError === true
@@ -432,6 +462,25 @@ export class ToolBlockRenderable extends BoxRenderable {
           : tool.status === "finished"
             ? this.#theme.success
             : this.#theme.info
+    const outcome = tool.status === "awaiting_approval"
+      ? `${glyph} approval needed`
+      : result === ""
+        ? `${glyph}${elapsed}`
+        : `${glyph} ${result}${elapsed}`
+    const rowWidth = Math.max(20, this.#availableWidth - 3)
+    const toolName = truncateToCells(tool.name.replaceAll("_", "-"), 12)
+    const subjectBudget = Math.max(0, rowWidth - toolName.length - outcome.length - 7)
+    const subject = truncateToCells(
+      result !== "" && compact.subject !== "" && result.toLowerCase().includes(compact.subject.toLowerCase())
+        ? ""
+        : compact.subject,
+      subjectBudget,
+    )
+    const name = `${toolName}${subject === "" ? "" : "  "}`
+    const prefix = `${this.#collapsed ? "▸" : "⌄"} ${name}${subject}`
+    const spacing = " ".repeat(Math.max(2, rowWidth - prefix.length - outcome.length))
+    this.header.content = t`${fg(this.#theme.textMuted)(`${this.#collapsed ? "▸" : "⌄"} `)}${fg(this.#theme.secondary)(name)}${subject === "" ? "" : fg(this.#theme.text)(subject)}${spacing}${fg(statusColor)(outcome)}`
+    this.header.fg = this.#theme.text
     if (this.#commandContainer !== null) this.#commandContainer.visible = !this.#collapsed
     if (this.#diffContainer !== null) this.#diffContainer.visible = !this.#collapsed
     if (this.diff !== null) this.diff.visible = !this.#collapsed
@@ -712,11 +761,20 @@ function toolBlockExpanded(
 
 function compactToolPresentation(tool: ToolProjection): { subject: string; summary: string } {
   const presentation = presentTool(tool)
-  const subject = truncateToCells(presentation.subject.replace(/\s+/g, " ").trim(), 80)
+  const arguments_ = isRecord(tool.args) ? tool.args : null
+  const fallbackSubject = [
+    arguments_?.command,
+    arguments_?.path,
+    arguments_?.file_path,
+    arguments_?.pattern,
+    arguments_?.query,
+  ].find((value): value is string => typeof value === "string" && value.trim() !== "") ?? ""
+  const subject = truncateToCells(
+    (presentation.subject || fallbackSubject).replace(/\s+/g, " ").trim(),
+    80,
+  )
   const summary = truncateToCells(presentation.summary.replace(/\s+/g, " ").trim(), 56)
-  return subject !== "" && summary.includes(subject)
-    ? { subject: "", summary }
-    : { subject, summary }
+  return { subject, summary }
 }
 
 export function toolDisplayName(name: string): string {
@@ -773,11 +831,11 @@ export class SubagentPanelRenderable extends BoxRenderable {
       height: 0,
       flexDirection: "column",
       flexShrink: 0,
-      border: true,
+      border: ["left"],
       borderStyle: "single",
-      borderColor: theme.border,
-      backgroundColor: theme.backgroundPanel,
-      paddingX: 1,
+      borderColor: theme.info,
+      backgroundColor: theme.background,
+      paddingLeft: 1,
       marginTop: 1,
       visible: false,
     })
@@ -785,7 +843,7 @@ export class SubagentPanelRenderable extends BoxRenderable {
     this.#onOpenSubagent = onOpenSubagent
     this.header = new TextRenderable(ctx, {
       content: "",
-      fg: theme.primary,
+      fg: theme.info,
       height: 1,
       flexShrink: 0,
     })
@@ -815,7 +873,7 @@ export class SubagentPanelRenderable extends BoxRenderable {
     }
 
     const running = subagents.filter((subagent) => subagent.status === "running").length
-    this.header.content = `Child agents · ${running} running · ${total} total`
+    this.header.content = `AGENTS · ${running} running · ${total} total`
     for (const [index, subagent] of subagents.entries()) {
       let row = this.rows.get(subagent.projectionId)
       if (row === undefined) {
@@ -846,7 +904,7 @@ export class SubagentPanelRenderable extends BoxRenderable {
             : this.#theme.info
     }
     this.visible = subagents.length > 0
-    this.height = subagents.length === 0 ? 0 : subagents.length + 3
+    this.height = subagents.length === 0 ? 0 : subagents.length + 1
   }
 }
 
@@ -881,6 +939,7 @@ export function subagentGlyph(status: SubagentProjection["status"]): string {
 
 interface TurnCardViewModel {
   readonly key: string
+  readonly first: boolean
   readonly width: number
   readonly entry: TranscriptEntry
   readonly detail: string | null
@@ -909,6 +968,7 @@ function sameTurnCardViewModel(
   next: TurnCardViewModel,
 ): boolean {
   return previous.key === next.key &&
+    previous.first === next.first &&
     previous.width === next.width &&
     previous.entry === next.entry &&
     previous.detail === next.detail &&
@@ -962,9 +1022,18 @@ class TurnCardRenderable extends BoxRenderable {
       width: viewModel.width,
       flexDirection: "column",
       flexShrink: 0,
-      border: shell !== undefined,
+      border: shell !== undefined
+        ? true
+        : viewModel.entry.turn.role === "user"
+          ? ["left"]
+          : false,
       ...(shell === undefined
-        ? {}
+        ? viewModel.entry.turn.role === "user"
+          ? {
+              customBorderChars: USER_GUTTER_BORDER,
+              borderColor: theme.primary,
+            }
+          : {}
         : {
             borderStyle: "single" as const,
             borderColor: shell.active
@@ -975,14 +1044,10 @@ class TurnCardRenderable extends BoxRenderable {
                 ? theme.textMuted
                 : theme.error,
           }),
-      backgroundColor: shell !== undefined
-        ? theme.backgroundPanel
-        : viewModel.entry.turn.role === "user"
-          ? theme.backgroundElement
-          : theme.background,
-      paddingX: 1,
-      paddingY: toolOnly ? 0 : 1,
-      marginTop: shell === undefined ? 0 : 1,
+      backgroundColor: shell !== undefined ? theme.backgroundPanel : theme.background,
+      paddingX: viewModel.entry.turn.role === "user" || shell !== undefined ? 1 : 0,
+      paddingY: 0,
+      marginTop: viewModel.first || toolOnly ? 0 : 1,
     })
     this.#theme = theme
     this.#syntaxStyle = syntaxStyle
@@ -1045,6 +1110,8 @@ class TurnCardRenderable extends BoxRenderable {
         // collected, which defeats the window's RSS bound.
         this.#applyCardStyle(viewModel.entry, false)
         this.#updateHeader(viewModel)
+        this.markdown.marginLeft = viewModel.entry.turn.role === "assistant" ? 2 : 0
+        this.markdown.width = Math.max(1, viewModel.width - 2)
         this.markdown.content = turnCardMarkdown(viewModel.entry, viewModel.width)
         this.markdown.visible = true
       } else {
@@ -1094,7 +1161,8 @@ class TurnCardRenderable extends BoxRenderable {
       conceal: true,
       concealCode: false,
       streaming: false,
-      width: Math.max(1, viewModel.width - 2),
+      width: Math.max(1, viewModel.width - (entry.turn.role === "assistant" ? 2 : 2)),
+      marginLeft: entry.turn.role === "assistant" ? 2 : 0,
       flexShrink: 0,
       visible: !toolOnly,
       internalBlockMode: "top-level",
@@ -1190,6 +1258,10 @@ class TurnCardRenderable extends BoxRenderable {
   #applyCardStyle(entry: TranscriptEntry, toolOnly: boolean): void {
     const shell = entry.presentation === "shell_result" ? entry.shell : undefined
     this.border = shell !== undefined
+      ? true
+      : entry.turn.role === "user"
+        ? ["left"]
+        : false
     if (shell !== undefined) {
       this.borderStyle = "single"
       this.borderColor = shell.active
@@ -1200,14 +1272,14 @@ class TurnCardRenderable extends BoxRenderable {
           ? this.#theme.textMuted
           : this.#theme.error
     }
-    this.backgroundColor = shell !== undefined
-      ? this.#theme.backgroundPanel
-      : entry.turn.role === "user"
-        ? this.#theme.backgroundElement
-        : this.#theme.background
-    this.paddingX = 1
-    this.paddingY = toolOnly ? 0 : 1
-    this.marginTop = shell === undefined ? 0 : 1
+    if (shell === undefined && entry.turn.role === "user") {
+      this.customBorderChars = USER_GUTTER_BORDER
+      this.borderColor = this.#theme.primary
+    }
+    this.backgroundColor = shell !== undefined ? this.#theme.backgroundPanel : this.#theme.background
+    this.paddingX = entry.turn.role === "user" || shell !== undefined ? 1 : 0
+    this.paddingY = 0
+    this.marginTop = this.#viewModel.first || toolOnly ? 0 : 1
   }
 
   #updateHeader(viewModel: TurnCardViewModel): void {
@@ -1224,13 +1296,29 @@ class TurnCardRenderable extends BoxRenderable {
         : entry.turn.role === "user"
           ? "You"
           : "Tools"
+    const marker = entry.turn.role === "assistant"
+      ? "● "
+      : entry.turn.role === "user"
+        ? ""
+        : entry.turn.role === "tool"
+          ? "▸ "
+          : ""
+    const label = role.toLowerCase()
     this.header.content = shell === undefined
-      ? entry.presentation === "command_result"
-        ? `${role} · ${entry.title ?? "completed"}`
-        : `${role}${viewModel.detail === null ? "" : ` · ${viewModel.detail}`}`
+      ? entry.turn.role === "assistant"
+        ? t`${fg(this.#theme.accent)(marker)}${bold(fg(this.#theme.text)(label))}${viewModel.detail === null ? "" : fg(this.#theme.textMuted)(`  ${viewModel.detail}`)}`
+        : entry.turn.role === "user"
+          ? t`${bold(fg(this.#theme.primary)(label))}${viewModel.detail === null ? "" : fg(this.#theme.textMuted)(`  ${viewModel.detail}`)}`
+        : entry.presentation === "command_result"
+          ? `${marker}${label} · ${entry.title ?? "completed"}`
+          : `${marker}${label}${viewModel.detail === null ? "" : ` · ${viewModel.detail}`}`
       : shellHeader(shell.active, shell.status)
     this.header.fg = shell === undefined
-      ? entry.turn.role === "assistant" ? this.#theme.primary : this.#theme.info
+      ? entry.turn.role === "assistant"
+        ? this.#theme.text
+        : entry.turn.role === "user"
+          ? this.#theme.primary
+          : this.#theme.info
       : shell.active
         ? this.#theme.info
         : shell.status === 0
@@ -1465,7 +1553,7 @@ export class TranscriptRenderable extends BoxRenderable {
     })
     this.emptyStateTitle = new TextRenderable(ctx, {
       id: "transcript-empty-state-title",
-      content: "Rottweiler",
+      content: "rottweiler",
       fg: theme.primary,
       height: 1,
       flexShrink: 0,
@@ -1473,9 +1561,9 @@ export class TranscriptRenderable extends BoxRenderable {
     })
     this.emptyStateHint = new TextRenderable(ctx, {
       id: "transcript-empty-state-hint",
-      content: "Ready for a task. Type / for commands or @ to add workspace files.",
+      content: "Describe a task, or press / for commands.",
       fg: theme.textMuted,
-      height: 2,
+      height: 3,
       flexShrink: 0,
       wrapMode: "word",
       selectable: true,
@@ -1490,13 +1578,14 @@ export class TranscriptRenderable extends BoxRenderable {
       flexDirection: "column",
       flexShrink: 0,
       backgroundColor: theme.background,
-      paddingX: 1,
-      paddingY: 1,
+      paddingX: 0,
+      paddingY: 0,
+      marginTop: 1,
       visible: false,
     })
     this.#tailHeader = new TextRenderable(ctx, {
-      content: "Rottweiler · streaming",
-      fg: theme.primary,
+      content: "● rottweiler  streaming",
+      fg: theme.text,
       height: 1,
       flexShrink: 0,
     })
@@ -1524,6 +1613,7 @@ export class TranscriptRenderable extends BoxRenderable {
       concealCode: false,
       streaming: true,
       width: "100%",
+      marginLeft: 2,
       flexShrink: 0,
       // OpenTUI's incremental parser can retain every completed top-level
       // block and only reconcile the unstable trailing block. Keeping one
@@ -1544,12 +1634,13 @@ export class TranscriptRenderable extends BoxRenderable {
       id: "streaming-tools",
       width: "100%",
       flexDirection: "column",
+      marginTop: 1,
     })
     this.streamingCard.add(this.#tailHeader)
     this.streamingCard.add(this.#tailReasoning)
     this.streamingCard.add(this.streamingMarkdown)
-    this.streamingCard.add(this.#tailCitations)
     this.streamingCard.add(this.#tailTools)
+    this.streamingCard.add(this.#tailCitations)
     this.scroller.add(this.streamingCard)
     this.compactionCard = new BoxRenderable(ctx, {
       id: "compaction-stream",
@@ -1558,13 +1649,14 @@ export class TranscriptRenderable extends BoxRenderable {
       flexDirection: "column",
       flexShrink: 0,
       backgroundColor: theme.background,
-      paddingX: 1,
-      paddingY: 1,
+      paddingX: 0,
+      paddingY: 0,
+      marginTop: 1,
       visible: false,
     })
     this.#compactionHeader = new TextRenderable(ctx, {
-      content: "Rottweiler · compacting context",
-      fg: theme.primary,
+      content: "● Rottweiler · compacting context",
+      fg: theme.accent,
       height: 1,
       flexShrink: 0,
     })
@@ -1592,6 +1684,7 @@ export class TranscriptRenderable extends BoxRenderable {
       concealCode: false,
       streaming: true,
       width: "100%",
+      marginLeft: 2,
       flexShrink: 0,
       internalBlockMode: "top-level",
       tableOptions: { style: "grid", widthMode: "full", wrapMode: "word" },
@@ -1700,6 +1793,16 @@ export class TranscriptRenderable extends BoxRenderable {
       this.#presentableTranscript.length === 0 &&
       state.streamingTail === null &&
       !state.compaction.active
+    if (this.emptyState.visible) {
+      const workspace = state.workspaceStatus
+      const workspaceLine = workspace === null
+        ? ""
+        : `${workspace.workspaceName}${workspace.branch === null ? "" : ` · ${workspace.branch}`} · ${workspace.changedPaths.length === 0 ? "clean" : `${workspace.changedPaths.length} changed`}`
+      this.emptyStateHint.content = [
+        workspaceLine,
+        "Describe a task, or press / for commands.",
+      ].filter(Boolean).join("\n")
+    }
     this.#updateTail(state)
     this.#updateCompaction(state)
     if (transcriptChanged || cardProjectionChanged || turnProjectionChanged) {
@@ -1786,6 +1889,7 @@ export class TranscriptRenderable extends BoxRenderable {
       )
       const candidateViewModel: TurnCardViewModel = {
         key,
+        first: index === 0,
         width,
         entry,
         detail,
@@ -1793,7 +1897,7 @@ export class TranscriptRenderable extends BoxRenderable {
         visibleSubagents,
         subagentTotal: turnSubagents.length,
         toolExpansion,
-        reasoningExpanded: this.#reasoningExpansion.get(key) ?? false,
+        reasoningExpanded: this.#reasoningExpansion.get(key) ?? true,
         rootsGeneration: state.workspaceRoots?.generation ?? "",
       }
       const viewModel = previous !== undefined && sameTurnCardViewModel(previous, candidateViewModel)
@@ -1884,7 +1988,10 @@ export class TranscriptRenderable extends BoxRenderable {
       Math.max(20, (this.width || this.ctx.width) - 4),
       tail.finished === null ? "streaming" : "complete",
     )
-    this.#tailHeader.content = `${this.#agentName} · ${tail.finished === null ? activity : turnDetail(tail.finished.cost, tail.finished.usage)}`
+    const detail = tail.finished === null
+      ? state.model ?? activity.toLowerCase()
+      : turnDetail(tail.finished.cost, tail.finished.usage)
+    this.#tailHeader.content = t`${fg(this.#theme.accent)("● ")}${bold(fg(this.#theme.text)(this.#agentName.toLowerCase()))}${fg(this.#theme.textMuted)(`  ${detail}`)}`
     if (this.#tailReasoningTurnId !== tail.turnId) {
       this.#tailReasoning.expand(false)
       this.#tailReasoningTurnId = tail.turnId
@@ -1894,11 +2001,15 @@ export class TranscriptRenderable extends BoxRenderable {
       tail.finished === null,
       Math.max(20, this.width || this.ctx.width),
     )
+    this.streamingMarkdown.marginTop = reasoning === "" || tail.text.length === 0 ? 0 : 1
     this.#tailCitations.visible = tail.citations.length > 0
     this.#tailCitations.content = tail.citations
       .map((citation, index) => `[${index + 1}] ${citation.title ?? citation.uri}`)
       .join("  ")
     this.#tailCitations.height = tail.citations.length > 0 ? 1 : 0
+    this.#tailCitations.marginLeft = 2
+    this.#tailCitations.marginTop = tail.citations.length > 0 ? 1 : 0
+    this.#tailTools.marginTop = tools.length > 0 && tail.text.length > 0 ? 1 : 0
     this.#replaceTailTools(tools)
   }
 
@@ -1969,10 +2080,11 @@ export class TranscriptRenderable extends BoxRenderable {
             (expanded) => this.#rememberToolExpansion(tool.toolCallId, expanded),
           )
         }
+        card.update(tool, Math.max(20, this.width || this.ctx.width))
         this.#tailToolCards.set(tool.toolCallId, card)
         this.#tailTools.add(card)
       } else {
-        card.update(tool)
+        card.update(tool, Math.max(20, this.width || this.ctx.width))
       }
     }
     while (this.#tailToolPool.length > 16) this.#tailToolPool.shift()?.destroyRecursively()

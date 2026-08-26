@@ -79,8 +79,8 @@ function expectCoherentTheme(app: ReturnType<typeof createRottweilerApp>, theme:
   expect(app.backgroundColor.toInts()).toEqual(rgba(theme.background))
   expect(app.main.backgroundColor.toInts()).toEqual(rgba(theme.background))
   expect(app.transcript.backgroundColor.toInts()).toEqual(rgba(theme.background))
-  expect(app.contextPanel.backgroundColor.toInts()).toEqual(rgba(theme.backgroundPanel))
-  expect(app.composer.backgroundColor.toInts()).toEqual(rgba(theme.backgroundPanel))
+  expect(app.contextPanel.backgroundColor.toInts()).toEqual(rgba(theme.background))
+  expect(app.composer.backgroundColor.toInts()).toEqual(rgba(theme.background))
   expect(app.reviewPanel.backgroundColor.toInts()).toEqual(rgba(theme.backgroundPanel))
   expect(app.interactionPanel.backgroundColor.toInts()).toEqual(rgba(theme.backgroundElement))
   expect(app.picker.backgroundColor.toInts()).toEqual(rgba(theme.backgroundElement))
@@ -538,7 +538,7 @@ describe("Rottweiler OpenTUI shell", () => {
     await setup.renderOnce()
 
     const frame = setup.captureCharFrame()
-    expect(frame).toContain("Rottweiler")
+    expect(frame).toContain("rottweiler")
     expect(frame).toContain("hello")
     expect(frame).toContain("model not selected · Alt+M")
 
@@ -562,8 +562,8 @@ describe("Rottweiler OpenTUI shell", () => {
     await setup.renderOnce()
 
     const frame = setup.captureCharFrame()
-    expect(frame).toContain("Rottweiler")
-    expect(frame).toContain("Ready for a task. Type / for commands or @ to add workspace files.")
+    expect(frame).toContain("rottweiler")
+    expect(frame).toContain("Describe a task, or press / for commands.")
     expect(frame).toContain("model not selected · Alt+M")
     expect(frame).not.toContain("No tasks")
     expect(frame).not.toContain("No changed files")
@@ -990,7 +990,7 @@ describe("Rottweiler OpenTUI shell", () => {
     await setup.renderOnce()
 
     expect(app.composer.editor.lineCount).toBe(1)
-    expect(app.composer.height).toBe(7)
+    expect(app.composer.height).toBe(8)
     expect(app.composer.y + app.composer.height).toBeLessThanOrEqual(18)
   })
 
@@ -1488,7 +1488,7 @@ describe("Rottweiler OpenTUI shell", () => {
 
     expect(app.state.transcript.at(-1)?.presentation).toBe("command_result")
     const commandCard = [...app.transcript.mountedCards.values()].at(-1)
-    expect(commandCard?.header.plainText).toBe("Command result · /status")
+    expect(commandCard?.header.plainText).toBe("command result · /status")
     expect(commandCard?.markdown.content).toContain("actor idle · queue empty")
   })
 
@@ -1560,7 +1560,7 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.banner.plainText).toBe("Connection lost · retrying…")
     expect(app.banner.plainText).not.toContain("attempt")
     expect(app.banner.plainText).not.toContain("disconnected")
-    expect(app.statusLine.plainText).toContain("◉ execute")
+    expect(app.statusLine.plainText).toContain("EXECUTE")
     expect(app.statusLine.plainText).toContain("model not selected · Alt+M")
     expect(app.statusLine.plainText).not.toContain("ctx")
     expect(app.statusLine.plainText).not.toContain("cache")
@@ -2707,9 +2707,9 @@ describe("Rottweiler OpenTUI shell", () => {
         },
       })
       testRenderer.root.add(app)
-      expect(app.composer.editor.placeholder).toContain("Ctrl+K image")
-      expect(app.composer.editor.placeholder).not.toContain("Ctrl+V image")
-      expect(app.composer.editor.placeholder).not.toContain("$EDITOR")
+      expect(app.composer.hintText.plainText).toContain("Ctrl+K image")
+      expect(app.composer.hintText.plainText).not.toContain("Ctrl+V image")
+      expect(app.composer.hintText.plainText).not.toContain("$EDITOR")
     })
   })
 
@@ -2984,7 +2984,7 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.banner.plainText).not.toContain("Ctrl+G children")
     expect(app.banner.plainText).not.toContain("palette")
     await setup.renderOnce()
-    expect(setup.captureCharFrame()).toContain("reviewer · Streaming")
+    expect(setup.captureCharFrame()).toContain("● reviewer  fast")
     expect(app.contextPanel.visible).toBeFalse()
 
     app.handleEvent({
@@ -3265,11 +3265,11 @@ describe("Rottweiler OpenTUI shell", () => {
     await Bun.sleep(0)
     expect(app.activeSubagentId).toBe("child-vim")
     setup.mockInput.pressKey("i")
-    expect(app.statusLine.plainText).toContain("INSERT")
+    expect(app.composer.hintText.plainText).toContain("INSERT")
     setup.mockInput.pressEscape()
     await Bun.sleep(30)
     expect(app.activeSubagentId).toBe("child-vim")
-    expect(app.statusLine.plainText).toContain("NORMAL")
+    expect(app.composer.hintText.plainText).toContain("NORMAL")
     setup.mockInput.pressEscape()
     await Bun.sleep(30)
     expect(app.activeSubagentId).toBeNull()
@@ -3537,11 +3537,11 @@ describe("Rottweiler OpenTUI shell", () => {
         cache_hit_basis_points: 0,
       },
     })
-    expect(app.statusLine.plainText).toContain("ctx 2.0k/10k")
+    expect(app.statusLine.plainText).toContain("ctx 20%")
     app.openSubagentActionPicker()
     expect(Number(app.picker.height)).toBeLessThanOrEqual(7)
     app.closePicker()
-    expect(app.statusLine.plainText).toContain("ctx 2.0k/10k")
+    expect(app.statusLine.plainText).toContain("ctx 20%")
 
     app.composer.value = "!pwd"
     expect(await app.composer.submit()).toBeTrue()
@@ -5229,7 +5229,7 @@ describe("Rottweiler OpenTUI shell", () => {
       meta: { protocol_version: PROTOCOL_VERSION, session_id: "session-local", sequence_id: "2", emitted_at: "2026-01-01T00:00:03Z" },
       mode: "audit",
     })
-    expect(app.statusLine.plainText).toContain("audit")
+    expect(app.statusLine.plainText).toContain("AUDIT")
     app.openModePicker()
     const currentAudit = app.picker.select.options.find((option) => option.value === "mode:audit")
     expect(currentAudit?.name).toBe("● Audit")
@@ -5871,7 +5871,7 @@ describe("Rottweiler OpenTUI shell", () => {
       provider: "copilot",
     })
     expect(app.state.provider).toBe("copilot")
-    expect(app.statusLine.plainText).toContain("model copilot/steady")
+    expect(app.statusLine.plainText).toContain("steady")
 
     app.composer.value = "/models"
     expect(await app.composer.submit()).toBeTrue()
@@ -6232,7 +6232,7 @@ describe("Rottweiler OpenTUI shell", () => {
       model: "copilot/gpt-5",
       provider: "copilot",
     })
-    expect(app.statusLine.plainText).toContain("model copilot/gpt-5")
+    expect(app.statusLine.plainText).toContain("gpt-5")
     expect(app.statusLine.plainText).not.toContain("copilot/copilot")
     app.handleEvent({
       type: "conversation_turn_committed",
@@ -6255,7 +6255,7 @@ describe("Rottweiler OpenTUI shell", () => {
     })
     expect(app.state.provider).toBe("openai")
     expect(app.state.model).toBe("openai/gpt-5-fallback")
-    expect(app.statusLine.plainText).toContain("model openai/gpt-5-fallback")
+    expect(app.statusLine.plainText).toContain("gpt-5-fallback")
     expect(app.statusLine.plainText).not.toContain("openai/openai")
     expect(emitted).not.toContainEqual(expect.objectContaining({
       type: "set_setting",
@@ -8074,8 +8074,8 @@ describe("Rottweiler OpenTUI shell", () => {
     })
     presentationFrame.flush()
     await setup.renderOnce()
-    expect(app.statusLine.plainText).toContain("ctx 500/1.0k (50%)")
-    expect(app.statusLine.plainText).toContain("git feature/live-status")
+    expect(app.statusLine.plainText).toContain("ctx 50%")
+    expect(app.statusLine.plainText).toContain("feature/live-status")
 
     app.handleEvent({
       type: "turn_finished",
@@ -8492,7 +8492,7 @@ describe("Rottweiler OpenTUI shell", () => {
 
     expect(app.state.model).toBe("openai_codex/gpt-5.6-sol")
     expect(app.state.provider).toBe("openai_codex")
-    expect(app.statusLine.plainText).toContain("openai_codex/gpt-5.6-sol")
+    expect(app.statusLine.plainText).toContain("gpt-5.6-sol")
   })
 
   test("routes /review and /fork through typed protocol commands", async () => {

@@ -2,6 +2,9 @@ import {
   BoxRenderable,
   TextRenderable,
   TextareaRenderable,
+  bg,
+  fg,
+  t,
   type PasteEvent,
   type RenderContext,
 } from "@opentui/core"
@@ -17,8 +20,7 @@ import type { ClipboardImage, EditorAdapter, ImagePasteAdapter } from "../platfo
 import type { RottweilerTheme } from "../theme"
 import { ImageAttachmentRenderable } from "./image"
 
-const COMPOSER_PLACEHOLDER_PREFIX = "Message Rottweiler · / commands · ! shell · @ files"
-const MAX_DISCOVERY_PLACEHOLDER_CELLS = 83
+const COMPOSER_PLACEHOLDER = "Describe a task…"
 
 export interface ComposerOptions {
   readonly editor: EditorAdapter
@@ -54,6 +56,7 @@ export class ComposerRenderable extends BoxRenderable {
   readonly editor: TextareaRenderable
   readonly attachmentsText: TextRenderable
   readonly queueText: TextRenderable
+  readonly hintText: TextRenderable
   #attachments: Attachment[] = []
   #imagePreview: ImageAttachmentRenderable | null = null
   #options: ComposerOptions
@@ -61,6 +64,7 @@ export class ComposerRenderable extends BoxRenderable {
   #submitting = false
   #shellMode = false
   #imagePasteAvailable = false
+  #inputMode: "normal" | "insert" | null = null
   #dockHeight = 4
   #history: string[] = []
   #historyIndex: number | null = null
@@ -72,7 +76,7 @@ export class ComposerRenderable extends BoxRenderable {
   constructor(ctx: RenderContext, theme: RottweilerTheme, options: ComposerOptions) {
     super(ctx, {
       id: "composer",
-      width: "100%",
+      width: "auto",
       height: 4,
       minHeight: 4,
       maxHeight: 9,
@@ -82,13 +86,15 @@ export class ComposerRenderable extends BoxRenderable {
       border: true,
       borderStyle: "rounded",
       borderColor: theme.border,
-      focusedBorderColor: theme.borderActive,
-      backgroundColor: theme.backgroundPanel,
+      focusedBorderColor: theme.border,
+      backgroundColor: theme.background,
       paddingX: 1,
+      marginLeft: 1,
+      marginRight: 1,
     })
     this.#options = options
     this.#theme = theme
-    this.#placeholder = composerPlaceholder(options, false)
+    this.#placeholder = COMPOSER_PLACEHOLDER
     this.attachmentsText = new TextRenderable(ctx, {
       id: "composer-attachments",
       content: "",
@@ -102,17 +108,15 @@ export class ComposerRenderable extends BoxRenderable {
       width: "100%",
       flexGrow: 1,
       flexShrink: 1,
-      minHeight: 2,
+      minHeight: 1,
       maxHeight: 5,
       initialValue: "",
-      // Keep the binding-derived discovery copy within the measured 83-cell
-      // budget; this editor has 76 usable cells at an 80-column terminal.
       placeholder: this.#placeholder,
-      backgroundColor: theme.backgroundPanel,
+      backgroundColor: theme.background,
       textColor: theme.text,
-      focusedBackgroundColor: theme.backgroundElement,
+      focusedBackgroundColor: theme.background,
       focusedTextColor: theme.text,
-      placeholderColor: theme.borderSubtle,
+      placeholderColor: theme.textMuted,
       wrapMode: "word",
       scrollMargin: 0,
       keyBindings: [
@@ -141,8 +145,17 @@ export class ComposerRenderable extends BoxRenderable {
       height: 1,
       visible: false,
     })
+    this.hintText = new TextRenderable(ctx, {
+      id: "composer-hints",
+      content: composerHints(theme, options, false, null),
+      fg: theme.textMuted,
+      height: 1,
+      flexShrink: 0,
+      wrapMode: "none",
+    })
     this.add(this.attachmentsText)
     this.add(this.editor)
+    this.add(this.hintText)
     this.add(this.queueText)
   }
 
@@ -224,7 +237,7 @@ export class ComposerRenderable extends BoxRenderable {
     this.#shellMode = active
     this.title = active ? " Shell " : ""
     this.borderColor = active ? this.#theme.warning : this.#theme.border
-    this.focusedBorderColor = active ? this.#theme.warning : this.#theme.borderActive
+    this.focusedBorderColor = active ? this.#theme.warning : this.#theme.border
     this.editor.placeholder = active
       ? "Shell command · Enter to run in foreground"
       : this.#placeholder
@@ -233,8 +246,18 @@ export class ComposerRenderable extends BoxRenderable {
   setImagePasteAvailable(available: boolean): void {
     if (this.#imagePasteAvailable === available) return
     this.#imagePasteAvailable = available
-    this.#placeholder = composerPlaceholder(this.#options, available)
-    if (!this.#shellMode) this.editor.placeholder = this.#placeholder
+    this.hintText.content = composerHints(this.#theme, this.#options, available, this.#inputMode)
+  }
+
+  setKeybindingMode(mode: "normal" | "insert" | null): void {
+    if (this.#inputMode === mode) return
+    this.#inputMode = mode
+    this.hintText.content = composerHints(
+      this.#theme,
+      this.#options,
+      this.#imagePasteAvailable,
+      mode,
+    )
   }
 
   currentFileMention(): ComposerFileMention | null {
@@ -520,7 +543,6 @@ export class ComposerRenderable extends BoxRenderable {
 
   #refreshHeight(): void {
     const terminalLimit = Math.max(3, Math.min(9, this.ctx.height - 3))
-    const compactTerminal = this.ctx.height <= 8
     const editorWidth = Math.max(
       1,
       this.editor.width > 0
@@ -530,21 +552,25 @@ export class ComposerRenderable extends BoxRenderable {
           : this.ctx.width - 4,
     )
     const wrappedRows = estimateWrappedRows(this.editor.plainText, editorWidth)
-    const minimumEditorRows = compactTerminal || terminalLimit < 4 ? 1 : 2
+    const minimumEditorRows = 1
     this.editor.minHeight = minimumEditorRows
     const editorRows = Math.min(
       5,
       Math.max(minimumEditorRows, this.editor.lineCount, this.editor.virtualLineCount, wrappedRows),
     )
+    this.hintText.visible = terminalLimit >= 4
+    this.hintText.height = this.hintText.visible ? 1 : 0
     const fixedExtras =
-      (this.attachmentsText.visible ? 1 : 0) + (this.queueText.visible ? 1 : 0)
+      (this.attachmentsText.visible ? 1 : 0) +
+      (this.queueText.visible ? 1 : 0) +
+      (this.hintText.visible ? 1 : 0)
     const imageRows = this.#imagePreview?.height ?? 0
     // Preserve at least one editable row after borders and labels. A preview is
     // decorative and must collapse before it can cover the active textarea.
     const imageVisible = imageRows > 0 && terminalLimit - 2 - fixedExtras - 1 >= imageRows
     if (this.#imagePreview !== null) this.#imagePreview.visible = imageVisible
     const extras = fixedExtras + (imageVisible ? imageRows : 0)
-    const minimumDockRows = compactTerminal ? 3 : 4
+    const minimumDockRows = this.ctx.height <= 8 ? 3 : 4
     this.minHeight = minimumDockRows
     const nextHeight = Math.min(
       terminalLimit,
@@ -557,24 +583,24 @@ export class ComposerRenderable extends BoxRenderable {
   }
 }
 
-function composerPlaceholder(
+function composerHints(
+  theme: RottweilerTheme,
   options: Pick<ComposerOptions, "pasteImageKeycap" | "externalEditorKeycap">,
   imagePasteAvailable: boolean,
-): string {
-  const hints = [
-    !imagePasteAvailable || options.pasteImageKeycap === undefined
-      ? null
-      : `${options.pasteImageKeycap} image`,
-    options.externalEditorKeycap === undefined ? null : `${options.externalEditorKeycap} $EDITOR`,
-  ]
-  let placeholder = COMPOSER_PLACEHOLDER_PREFIX
-  for (const hint of hints) {
-    if (hint === null) continue
-    const candidate = `${placeholder} · ${hint}`
-    if (candidate.length > MAX_DISCOVERY_PLACEHOLDER_CELLS) continue
-    placeholder = candidate
-  }
-  return placeholder
+  inputMode: "normal" | "insert" | null,
+): ReturnType<typeof t> {
+  const editor = options.externalEditorKeycap === undefined
+    ? ""
+    : `   ${options.externalEditorKeycap} editor`
+  const image = !imagePasteAvailable || options.pasteImageKeycap === undefined
+    ? ""
+    : `   ${options.pasteImageKeycap} image`
+  const mode = inputMode === null
+    ? ""
+    : bg(inputMode === "normal" ? theme.success : theme.primary)(
+        fg(theme.background)(` ${inputMode.toUpperCase()} `),
+      )
+  return t`${mode}${inputMode === null ? "" : fg(theme.textMuted)("  ")}${fg(theme.textMuted)("/ commands   @ files   ! shell")}${editor === "" ? "" : fg(theme.textMuted)(editor)}${image === "" ? "" : fg(theme.textMuted)(image)}${fg(theme.textMuted)("   ")}${bg(theme.backgroundElement)(fg(theme.borderActive)(" ⏎ "))}${fg(theme.textMuted)(" send")}`
 }
 
 function estimateWrappedRows(value: string, columns: number): number {

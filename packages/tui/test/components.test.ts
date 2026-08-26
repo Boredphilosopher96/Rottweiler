@@ -183,7 +183,7 @@ describe("M4 retained components", () => {
       .flatMap((child) => child.getChildren())
       .filter((child): child is ToolBlockRenderable => child instanceof ToolBlockRenderable)
     expect(cards).toHaveLength(1)
-    expect(cards[0]?.header.plainText).toContain("Read file")
+    expect(cards[0]?.header.plainText).toContain("read  README.md")
     expect(cards[0]?.header.plainText).toContain("1 line")
     cards[0]?.toggle()
     expect(cards[0]?.body.visible).toBeTrue()
@@ -236,7 +236,7 @@ describe("M4 retained components", () => {
     expect([...app.transcript.mountedCards.values()][0]).toBe(toolOnlyCard)
     expect(cards[0]?.body.visible).toBeFalse()
     const visibleToolText = `${cards[0]?.header.plainText ?? ""}\n${cards[0]?.body.plainText ?? ""}`
-    expect(visibleToolText).toContain("Read file")
+    expect(visibleToolText).toContain("read  README.md")
     expect(visibleToolText).toContain("1 line")
     expect(visibleToolText).not.toContain("canary output")
   })
@@ -528,7 +528,8 @@ describe("M4 retained components", () => {
 
       now = 13_000
       reasoning?.update(initial.streamingTail.thinking, false, 86)
-      expect(reasoning?.header.plainText).toBe("⌄ Thought for 12s")
+      expect(reasoning?.header.plainText).toStartWith("reasoning · 12s")
+      expect(reasoning?.header.plainText).toEndWith("⌄")
     } finally {
       Date.now = originalNow
     }
@@ -585,7 +586,9 @@ describe("M4 retained components", () => {
     renderer.root.add(card)
     await setup.renderOnce()
 
-    expect(card.header.plainText).toBe("› ✓ Custom tool · Path=src/main.rs")
+    expect(card.header.plainText).toStartWith("▸ custom-tool")
+    expect(card.header.plainText).toEndWith("✓ Path=src/main.rs")
+    expect(card.header.plainText.match(/src\/main\.rs/g)).toHaveLength(1)
   })
 
   test("expands a successful file edit and shows its diff by default", async () => {
@@ -616,7 +619,8 @@ describe("M4 retained components", () => {
     renderer.root.add(card)
     await setup.renderOnce()
 
-    expect(card.header.plainText).toStartWith("⌄ ✓ Edit file")
+    expect(card.header.plainText).toStartWith("⌄ edit  src/main.rs")
+    expect(card.header.plainText).toContain("✓")
     expect(card.diff).not.toBeNull()
     expect(card.diff?.visible).toBeTrue()
   })
@@ -641,7 +645,8 @@ describe("M4 retained components", () => {
     const card = new ToolBlockRenderable(renderer, kennelTheme, running)
     renderer.root.add(card)
     await setup.renderOnce()
-    expect(card.header.plainText).toStartWith("› ◌ Edit file")
+    expect(card.header.plainText).toStartWith("▸ edit  src/live.rs")
+    expect(card.header.plainText).toContain("◌")
 
     card.update({
       ...running,
@@ -660,7 +665,8 @@ describe("M4 retained components", () => {
     })
     await setup.renderOnce()
 
-    expect(card.header.plainText).toStartWith("⌄ ✓ Edit file")
+    expect(card.header.plainText).toStartWith("⌄ edit  src/live.rs")
+    expect(card.header.plainText).toContain("✓")
     expect(card.diff?.visible).toBeTrue()
     const renderedDiff = card.diff instanceof DiffRenderable
       ? card.diff.diff
@@ -1176,10 +1182,10 @@ describe("M4 retained components", () => {
     renderer.root.add(app)
     await setup.renderOnce()
 
-    expect(app.transcript.mountedCards.get("1:1:user")?.header.plainText).toBe("You")
+    expect(app.transcript.mountedCards.get("1:1:user")?.header.plainText).toBe("you")
     expect(app.transcript.mountedCards.get("2:1:assistant")?.header.plainText)
       .toContain("turn usage · 1234 tokens")
-    expect(app.statusLine.plainText).toContain("ctx 5.0k/100k (5%)")
+    expect(app.statusLine.plainText).toContain("ctx 5%")
   })
 
   test("shows the active permission mode beside the agent mode without unknown-state noise", async () => {
@@ -1194,14 +1200,15 @@ describe("M4 retained components", () => {
     renderer.root.add(app)
     await setup.renderOnce()
 
-    expect(app.statusLine.plainText).toContain("◉ execute · auto-safe")
+    expect(app.statusLine.plainText).toContain("EXECUTE")
+    expect(app.statusLine.plainText).toContain("auto-safe")
     app.setState({ ...app.state, permissions: null })
     await setup.renderOnce()
-    expect(app.statusLine.plainText).toContain("◉ execute")
-    expect(app.statusLine.plainText).not.toContain("execute ·")
+    expect(app.statusLine.plainText).toContain("EXECUTE")
+    expect(app.statusLine.plainText).not.toContain("auto-safe")
   })
 
-  test("keeps committed reasoning compact and expands its Markdown without stealing composer focus", async () => {
+  test("keeps committed reasoning visible and collapses it without stealing composer focus", async () => {
     const setup = await createTestRenderer({ width: 86, height: 22, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
@@ -1228,9 +1235,11 @@ describe("M4 retained components", () => {
     const card = [...app.transcript.mountedCards.values()][0]
     const reasoning = card?.reasoning
     expect(reasoning).toBeInstanceOf(ReasoningBlockRenderable)
-    expect(reasoning?.header.plainText).toBe("› Thought · Inspecting workspace")
-    expect(reasoning?.body.visible).toBeFalse()
-    expect(setup.captureCharFrame()).not.toContain("Read `Cargo.toml` next.")
+    expect(reasoning?.header.plainText).toStartWith("reasoning")
+    expect(reasoning?.header.plainText).toEndWith("⌄")
+    expect(reasoning?.body.visible).toBeTrue()
+    expect(reasoning?.body.plainText).toContain("Read Cargo.toml next.")
+    expect(reasoning?.body.plainText).not.toMatch(/\*\*|`/)
     expect(setup.captureCharFrame()).not.toContain("REDACTED")
 
     // Exercise the same public toggle used by the reasoning header.
@@ -1241,9 +1250,10 @@ describe("M4 retained components", () => {
     const expanded = [...app.transcript.mountedCards.values()][0]?.reasoning
     expect([...app.transcript.mountedCards.values()][0]).toBe(card)
     expect(expanded).toBe(reasoning)
-    expect(expanded?.header.plainText).toBe("⌄ Thought")
-    expect(expanded?.body.visible).toBeTrue()
-    expect(expanded?.body.content).toContain("Read `Cargo.toml` next.")
+    expect(expanded?.header.plainText).toStartWith("reasoning · Inspecting workspace")
+    expect(expanded?.header.plainText).toEndWith("›")
+    expect(expanded?.body.visible).toBeFalse()
+    expect(expanded?.body.plainText).not.toContain("Read Cargo.toml next.")
     await setup.mockMouse.click(app.composer.editor.x + 2, app.composer.editor.y)
     expect(renderer.currentFocusedRenderable?.id).toBe("composer-editor")
   })
@@ -1269,7 +1279,8 @@ describe("M4 retained components", () => {
     const live = app.transcript.streamingCard
       .getChildren()
       .find((child): child is ReasoningBlockRenderable => child instanceof ReasoningBlockRenderable)
-    expect(live?.header.plainText).toBe("◌ Thinking…")
+    expect(live?.header.plainText).toStartWith("reasoning")
+    expect(live?.header.plainText).toEndWith("⌄")
     expect(live?.body.visible).toBeTrue()
     expect(setup.captureCharFrame()).toContain("Reading manifests now.")
 
@@ -1289,7 +1300,8 @@ describe("M4 retained components", () => {
     await setup.renderOnce()
 
     const committed = [...app.transcript.mountedCards.values()][0]?.reasoning
-    expect(committed?.header.plainText).toBe("⌄ Thought")
+    expect(committed?.header.plainText).toStartWith("reasoning")
+    expect(committed?.header.plainText).toEndWith("⌄")
     expect(committed?.body.visible).toBeTrue()
   })
 
@@ -1325,10 +1337,10 @@ describe("M4 retained components", () => {
     const app = createRottweilerApp(renderer, { initialState: initial })
     renderer.root.add(app)
     await setup.renderOnce()
-    expect(setup.captureCharFrame()).toContain("Running tools")
-    expect(setup.captureCharFrame()).toContain("◌ Thinking…")
+    expect(setup.captureCharFrame()).toContain("● rottweiler  running tools")
+    expect(setup.captureCharFrame()).toContain("╎ reasoning")
     expect(setup.captureCharFrame().match(/checking the workspace/g)).toHaveLength(1)
-    expect(setup.captureCharFrame()).toContain("Find files")
+    expect(setup.captureCharFrame()).toContain("glob  **/*.rs")
     expect(setup.captureCharFrame()).toContain("**/*.rs")
     expect(setup.captureCharFrame()).not.toContain("Working…")
 
@@ -1342,7 +1354,8 @@ describe("M4 retained components", () => {
       },
     })
     await setup.renderOnce()
-    expect(setup.captureCharFrame()).toContain("? Find files")
+    expect(setup.captureCharFrame()).toContain("glob  **/*.rs")
+    expect(setup.captureCharFrame()).toContain("? approval")
     expect(setup.captureCharFrame()).toContain("Awaiting approval…")
 
     app.setState({
@@ -1486,13 +1499,13 @@ describe("M4 retained components", () => {
     const bashCard = cards.find((card) => card.id === "tool-bash-inline")
     const editCard = cards.find((card) => card.id === "tool-edit-inline")
     expect(bashCard?.command).toBeInstanceOf(CodeRenderable)
-    expect(bashCard?.header.plainText).toContain("Terminal command")
+    expect(bashCard?.header.plainText).toContain("bash  cargo test --workspace")
     expect((bashCard?.command as CodeRenderable).filetype).toBe("bash")
     expect((bashCard?.command as CodeRenderable).content).toBe("cargo test --workspace")
     expect(bashCard?.commandPrompt?.plainText).toBe("$")
     expect(setup.captureCharFrame()).not.toContain("$ cargo test --workspace")
     expect(editCard?.diff).toBeInstanceOf(DiffRenderable)
-    expect(editCard?.header.plainText).toContain("Edit file")
+    expect(editCard?.header.plainText).toContain("edit  src/main.rs")
     expect((editCard?.diff as DiffRenderable).filetype).toBe("rust")
     expect((editCard?.diff as DiffRenderable).view).toBe("unified")
     expect((editCard?.diff as DiffRenderable).height).toBe(2)
@@ -2399,7 +2412,7 @@ describe("M4 retained components", () => {
     expect(tray.rows.size).toBe(6)
     expect([...tray.rows.keys()]).toEqual(Array.from({ length: 6 }, (_, index) => `child-${index}`))
     expect(tray.more.plainText).toBe("… 3 more · Ctrl+G")
-    expect(tray.footer.plainText).toBe("Ctrl+G inspect · click a row to open")
+    expect(tray.footer.plainText).toBe("╰ Ctrl+G inspect · click a row to open")
   })
 
   test("bounds a composed subagent tray row to its measured content width", async () => {
@@ -2636,14 +2649,14 @@ describe("M4 retained components", () => {
       "linter:clippy-driver",
     ])
     const frame = setup.captureCharFrame()
-    expect(frame).toContain("Tasks")
+    expect(frame).toContain("TASKS")
     expect(frame).toContain("MCP")
     expect(frame).toContain("docs · 4 tools")
     expect(frame).not.toContain("disabled")
     expect(frame).not.toContain("failed")
-    expect(frame).toContain("Services")
+    expect(frame).toContain("SERVICES")
     expect(frame).toContain("LSP · rust-analyzer")
-    expect(frame).toContain("Changed files")
+    expect(frame).toContain("CHANGED")
     expect(frame).not.toContain("context")
 
     panel.changedFiles.focus()
@@ -2686,11 +2699,9 @@ describe("M4 retained components", () => {
     await setup.renderOnce()
 
     const frame = setup.captureCharFrame()
-    expect(frame).toContain("Changed files")
+    expect(frame).toContain("CHANGED")
     expect(frame).toContain("src/changed.rs")
-    const lastRow = frame.split("\n").filter((line) => line.length > 0).at(-1) ?? ""
-    expect(lastRow).toContain("╰")
-    expect(lastRow).not.toContain("service")
+    expect(frame.indexOf("CHANGED")).toBeGreaterThan(frame.indexOf("service-4"))
   })
 
   test("opens the exact retained diff from the default changed-files sidebar", async () => {
