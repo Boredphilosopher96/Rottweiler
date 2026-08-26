@@ -23,6 +23,7 @@ export type ProjectionRequestKind =
   | "workspace_status"
   | "workspace_diff"
   | "review"
+  | "mcp_review"
   | "settings_pending"
   | "subagents"
   | "provider_activation_models"
@@ -107,6 +108,7 @@ export class ProjectionRequestBroker {
     workspace_status: null,
     workspace_diff: null,
     review: null,
+    mcp_review: null,
     settings_pending: null,
     subagents: null,
     provider_activation_models: null,
@@ -124,6 +126,7 @@ export class ProjectionRequestBroker {
     workspace_status: null,
     workspace_diff: null,
     review: null,
+    mcp_review: null,
     settings_pending: null,
     subagents: null,
     provider_activation_models: null,
@@ -185,6 +188,7 @@ export class ProjectionRequestBroker {
     for (const kind of [
       "workspace_status",
       "review",
+      "mcp_review",
       "commands",
       "modes",
       "models",
@@ -204,6 +208,7 @@ export class ProjectionRequestBroker {
       "workspace_status",
       "workspace_diff",
       "review",
+      "mcp_review",
       "commands",
       "modes",
       "models",
@@ -297,7 +302,11 @@ export class ProjectionRequestBroker {
       case "permissions_listed":
         return this.accepts("permissions", requestId)
       case "mcp_servers_listed":
-        return this.accepts("mcp", requestId)
+        return record.session_id === this.#options.sessionId() &&
+          this.matches("mcp", requestId)
+      case "mcp_server_approval_reviewed":
+        return record.session_id === this.#options.sessionId() &&
+          this.matches("mcp_review", requestId)
       case "sessions_listed":
       case "sessions_search_ready":
         return this.accepts("sessions", requestId)
@@ -332,6 +341,9 @@ export class ProjectionRequestBroker {
         return "permissions"
       case "mcp_servers_listed":
         this.clear("mcp")
+        return "mcp"
+      case "mcp_server_approval_reviewed":
+        this.clear("mcp_review")
         return "mcp"
       case "runtime_services_listed":
         this.clear("runtime_services")
@@ -411,12 +423,15 @@ export class ProjectionRequestBroker {
       case "list_mcp_servers":
         this.#track("mcp", requestId)
         break
+      case "review_mcp_server":
+        this.#track("mcp_review", requestId)
+        break
       case "add_mcp_http_server":
       case "add_mcp_stdio_server":
       case "remove_mcp_server":
       case "approve_mcp_server":
       case "set_mcp_server_enabled":
-        this.#latestRequests.mcp = requestId
+        this.#track("mcp", requestId)
         break
       case "list_runtime_services":
         this.#track("runtime_services", requestId)
@@ -480,6 +495,21 @@ export class ProjectionRequestBroker {
     const kind = projectionKind(type)
     if (kind === null) {
       if (type === "switch_model") this.#modelSwitchRequests.delete(requestId)
+      if (type === "review_mcp_server" && this.matches("mcp_review", requestId)) {
+        this.clear("mcp_review")
+      }
+      if (
+        (
+          type === "add_mcp_http_server" ||
+          type === "add_mcp_stdio_server" ||
+          type === "remove_mcp_server" ||
+          type === "approve_mcp_server" ||
+          type === "set_mcp_server_enabled"
+        ) &&
+        this.matches("mcp", requestId)
+      ) {
+        this.clear("mcp")
+      }
       if (type === "set_setting") {
         if (this.#latestRequests.settings === requestId) {
           this.#latestRequests.settings = this.#settingPredecessors.get(requestId) ?? null

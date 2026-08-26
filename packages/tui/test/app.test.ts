@@ -6221,11 +6221,176 @@ describe("Rottweiler OpenTUI shell", () => {
 
     app.openMcpPicker()
     await Bun.sleep(0)
-    expect(app.picker.select.options[0]?.value).toBe("mcp.error")
-    expect(app.picker.select.options[0]?.description).toContain("MCP discovery timed out")
-    app.picker.select.selectCurrent()
+    expect(app.mcpBrowser.itemIds[0]).toBe("mcp.retry")
+    expect(app.mcpBrowser.footer.plainText).toContain("MCP discovery timed out")
+    app.mcpBrowser.activateSelected()
     await Bun.sleep(0)
     expect(commands.filter((command) => command.type === "list_mcp_servers")).toHaveLength(2)
+  })
+
+  test("opens the retained MCP browser and routes inventory actions without changing nested pickers", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
+    renderer = setup.renderer
+    const commands: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        mcpServers: [{
+          name: "docs.remote",
+          enabled: true,
+          approved: true,
+          state: { type: "ready" },
+          tool_count: 6,
+          resource_count: 2,
+          prompt_count: 1,
+        }],
+      },
+      onCommand(command) {
+        commands.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+
+    app.openMcpPicker()
+    await setup.renderOnce()
+    expect(commands.filter((command) => command.type === "list_mcp_servers")).toHaveLength(1)
+    expect(app.mcpBrowser.visible).toBeTrue()
+    expect(app.picker.visible).toBeFalse()
+    expect(app.mcpBrowser).toMatchObject({ x: 0, y: 0, width: 110, height: 27 })
+    expect(app.mcpBrowser.listPane.width).toBe(72)
+    expect(app.mcpBrowser.divider.x).toBe(73)
+    expect(app.mcpBrowser.detailPane.x).toBe(74)
+
+    app.mcpBrowser.selectById("mcp.server.docs.remote")
+    expect(app.mcpBrowser.activateSelected()).toBeTrue()
+    expect(app.mcpBrowser.visible).toBeFalse()
+    expect(app.picker.title).toContain("MCP actions · docs.remote")
+
+    app.closePicker()
+    app.openMcpPicker()
+    app.mcpBrowser.selectById("mcp.add.http")
+    expect(app.mcpBrowser.activateSelected()).toBeTrue()
+    expect(app.picker.title).toContain("Add remote MCP server")
+  })
+
+  test("keeps cached MCP rows on list failure, retries, and collapses below 108 columns", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
+    renderer = setup.renderer
+    let attempts = 0
+    const app = createRottweilerApp(renderer, {
+      keybindings: { preset: "vim" },
+      initialState: {
+        ...createInitialState(),
+        mcpServers: [{
+          name: "broken.remote",
+          enabled: true,
+          approved: true,
+          state: { type: "failed", message: "TLS certificate rejected" },
+          tool_count: 2,
+          resource_count: 0,
+          prompt_count: 0,
+        }],
+      },
+      onCommand(command) {
+        if (command.type === "list_mcp_servers") {
+          attempts += 1
+          return {
+            type: "rejected",
+            error: { category: "protocol", code: "mcp_unavailable", message: "MCP discovery timed out", retryable: true },
+          }
+        }
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+
+    app.openMcpPicker()
+    await Bun.sleep(0)
+    await setup.renderOnce()
+    expect(app.mcpBrowser.itemIds).toContain("mcp.server.broken.remote")
+    expect(app.mcpBrowser.itemIds).toContain("mcp.retry")
+    expect(app.mcpBrowser.footer.plainText).toContain("MCP discovery timed out")
+    setup.mockInput.pressKey("r", { ctrl: true })
+    await Bun.sleep(0)
+    expect(attempts).toBe(2)
+
+    app.mcpBrowser.selectById("mcp.server.broken.remote")
+    setup.resize(107, 18)
+    await setup.renderOnce()
+    await setup.renderOnce()
+    expect(app.mcpBrowser.layoutMode).toBe("single")
+    expect(app.mcpBrowser.listPane.width).toBe(105)
+    expect(app.mcpBrowser.divider.visible).toBeFalse()
+    expect(app.mcpBrowser.compactDetail.plainText).toContain("TLS certificate rejected")
+    expect(app.mcpBrowser.footer.plainText).toContain("Esc×2 close")
+
+    setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+    expect(app.mcpBrowser.visible).toBeTrue()
+    setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+    expect(app.mcpBrowser.visible).toBeFalse()
+  })
+
+  test("returns from every nested MCP picker to the retained inventory", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        mcpServers: [{
+          name: "docs.remote",
+          enabled: true,
+          approved: true,
+          state: { type: "ready" },
+          tool_count: 6,
+          resource_count: 2,
+          prompt_count: 1,
+        }],
+      },
+    })
+    renderer.root.add(app)
+
+    const expectRestored = (): void => {
+      expect(app.mcpBrowser.visible).toBeTrue()
+      expect(app.mcpBrowser.input.focused).toBeTrue()
+      expect(app.mcpBrowser.input.value).toBe("docs")
+      expect(app.mcpBrowser.selectedId).toBe("mcp.server.docs.remote")
+    }
+
+    app.openMcpPicker()
+    await setup.mockInput.typeText("docs")
+    app.mcpBrowser.selectById("mcp.server.docs.remote")
+    app.mcpBrowser.activateSelected()
+    await setup.renderOnce()
+    setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+    expectRestored()
+
+    app.mcpBrowser.close()
+    app.openMcpPicker()
+    await setup.mockInput.typeText("docs")
+    app.mcpBrowser.selectById("mcp.server.docs.remote")
+    app.mcpBrowser.activateSelected()
+    const remove = app.picker.select.options.findIndex((option) => option.value === "mcp.remove.docs.remote")
+    app.picker.select.setSelectedIndex(remove)
+    app.picker.select.selectCurrent()
+    await setup.renderOnce()
+    setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+    expectRestored()
+
+    app.mcpBrowser.close()
+    app.openMcpPicker()
+    app.mcpBrowser.selectById("mcp.add.http")
+    app.mcpBrowser.activateSelected()
+    await setup.renderOnce()
+    setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+    expect(app.mcpBrowser.visible).toBeTrue()
+    expect(app.mcpBrowser.input.focused).toBeTrue()
+    expect(app.mcpBrowser.selectedId).toBe("mcp.add.http")
   })
 
   test("clears a partial anchored trigger before opening a local slash action", async () => {
@@ -6813,12 +6978,12 @@ describe("Rottweiler OpenTUI shell", () => {
       session_id: "session-local",
       servers: [],
     })
-    expect(app.picker.select.options.map((option) => option.value)).toEqual([
+    expect(app.mcpBrowser.itemIds).toEqual([
       "mcp.add.http",
       "mcp.add.stdio",
-      "mcp.empty",
     ])
-    app.picker.select.selectCurrent()
+    app.mcpBrowser.selectById("mcp.add.http")
+    app.mcpBrowser.activateSelected()
     await setup.mockInput.typeText("docs.remote")
     setup.mockInput.pressEnter()
     await setup.mockInput.typeText("https://example.com/mcp")
@@ -6854,13 +7019,11 @@ describe("Rottweiler OpenTUI shell", () => {
         prompt_count: 0,
       }],
     })
-    const serverIndex = app.picker.select.options.findIndex(
-      (option) => option.value === "mcp.server.docs.remote",
-    )
-    expect(app.picker.select.options[serverIndex]?.description).toContain("Approval needed")
-    expect(app.picker.select.options[serverIndex]?.description).not.toContain("approval_required")
-    app.picker.select.setSelectedIndex(serverIndex)
-    app.picker.select.selectCurrent()
+    expect(app.mcpBrowser.itemIds).toContain("mcp.server.docs.remote")
+    app.mcpBrowser.selectById("mcp.server.docs.remote")
+    expect(app.mcpBrowser.detail.plainText).toContain("Approval needed")
+    expect(app.mcpBrowser.detail.plainText).not.toContain("approval_required")
+    app.mcpBrowser.activateSelected()
     expect(app.picker.title).toContain("MCP actions · docs.remote")
     expect(app.picker.select.options.map((option) => option.name)).toEqual([
       "Enable",
@@ -6876,6 +7039,10 @@ describe("Rottweiler OpenTUI shell", () => {
       type: "review_mcp_server",
       name: "docs.remote",
     }))
+    const reviewCommand = emitted.at(-1)
+    if (reviewCommand?.type !== "review_mcp_server") {
+      throw new Error("missing MCP review command")
+    }
 
     const fingerprint = "a".repeat(64)
     app.handleEvent({
@@ -6883,7 +7050,7 @@ describe("Rottweiler OpenTUI shell", () => {
       meta: {
         protocol_version: PROTOCOL_VERSION,
         client_id: "tui",
-        request_id: "mcp-review",
+        request_id: reviewCommand.meta.request_id,
         emitted_at: "2026-01-01T00:00:01Z",
       },
       session_id: "session-local",
@@ -6910,13 +7077,17 @@ describe("Rottweiler OpenTUI shell", () => {
       name: "docs.remote",
       fingerprint,
     }))
+    const approveCommand = emitted.at(-1)
+    if (approveCommand?.type !== "approve_mcp_server") {
+      throw new Error("missing MCP approve command")
+    }
 
     app.handleEvent({
       type: "mcp_servers_listed",
       meta: {
         protocol_version: PROTOCOL_VERSION,
         client_id: "tui",
-        request_id: "mcp-approved",
+        request_id: approveCommand.meta.request_id,
         emitted_at: "2026-01-01T00:00:02Z",
       },
       session_id: "session-local",
@@ -6940,13 +7111,17 @@ describe("Rottweiler OpenTUI shell", () => {
       name: "docs.remote",
       enabled: true,
     }))
+    const enableCommand = emitted.at(-1)
+    if (enableCommand?.type !== "set_mcp_server_enabled") {
+      throw new Error("missing MCP enable command")
+    }
 
     app.handleEvent({
       type: "mcp_servers_listed",
       meta: {
         protocol_version: PROTOCOL_VERSION,
         client_id: "tui",
-        request_id: "mcp-deferred",
+        request_id: enableCommand.meta.request_id,
         emitted_at: "2026-01-01T00:00:03Z",
       },
       session_id: "session-local",
@@ -7012,11 +7187,8 @@ describe("Rottweiler OpenTUI shell", () => {
       session_id: "session-local",
       servers: [],
     })
-    const stdioIndex = app.picker.select.options.findIndex(
-      (option) => option.value === "mcp.add.stdio",
-    )
-    app.picker.select.setSelectedIndex(stdioIndex)
-    app.picker.select.selectCurrent()
+    app.mcpBrowser.selectById("mcp.add.stdio")
+    app.mcpBrowser.activateSelected()
     expect((app.picker.title ?? "").trim()).toBe("Server name, e.g. docs")
     await setup.mockInput.typeText("docs")
     setup.mockInput.pressEnter()
@@ -7076,6 +7248,7 @@ describe("Rottweiler OpenTUI shell", () => {
     app.openMcpPicker()
     expect(emitted).toEqual([])
     expect(app.picker.visible).toBeFalse()
+    expect(app.mcpBrowser.visible).toBeFalse()
   })
 
   test("manages typed permission rows without transcript JSON or manual ids", async () => {

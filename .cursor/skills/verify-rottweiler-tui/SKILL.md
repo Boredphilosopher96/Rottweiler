@@ -25,6 +25,7 @@ Read [the feature map](./features/README.md), then choose the matching command:
 - `tools` presses Ctrl+P, selects `View tools`, and captures the retained Tools workspace.
 - `theme-browser` enters through `/theme` and captures the retained theme list, semantic swatches, and live role preview.
 - `settings-browser` enters through `/settings` and captures the retained descriptor-backed settings surface at wide and narrow sizes.
+- `mcp-browser` enters through `/mcp` and captures the retained server inventory, derived totals, selected review detail, and responsive layout.
 - `smoke` runs TypeScript checking, all golden screens, and the conversation capture.
 
 Each run is isolated in its own native in-memory terminal. It does not connect to a provider, engine, repository mutation path, or another user's session.
@@ -38,6 +39,8 @@ Pass a unique directory under `/tmp/rottweiler-tui-evidence`. The helper preserv
 The Theme Browser scenario pins its full-primary 34/1/75 regions, five semantic swatches, selected-theme role preview, surface occlusion, complete text runs, and slash-command entry path. Its visual regression test runs the fixture twice and requires byte-identical TXT, ANSI, PNG, and JSON artifacts.
 
 The Settings Browser scenario pins its full-primary 30/1/79 regions, complete setting labels, authoritative detail text, surface occlusion, unsupported-claim exclusions, and slash-command entry path. It also captures the 72-column single-pane layout and requires byte-identical TXT, ANSI, PNG, and JSON artifacts for both sizes.
+
+The MCP Browser scenario pins its full-primary 73/1/36 regions, derived inventory totals, exact state tones, matching approval-review detail, surface occlusion, and `/mcp` entry. It also captures the 72-column single-pane layout and requires byte-identical TXT, ANSI, PNG, and JSON artifacts for both sizes.
 
 ## Cleanup
 

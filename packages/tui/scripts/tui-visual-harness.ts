@@ -18,7 +18,7 @@ import type { RottweilerState, ToolProjection } from "../src/state"
 import { createInitialState } from "../src/state"
 import { kennelTheme } from "../src/theme"
 
-type VisualScenario = "conversation" | "command-palette" | "approval" | "tools" | "theme-browser" | "settings-browser"
+type VisualScenario = "conversation" | "command-palette" | "approval" | "tools" | "theme-browser" | "settings-browser" | "mcp-browser"
 
 const TOOLS_FIXTURE_NOW_MS = Date.parse("2026-01-01T12:00:41.000Z")
 const scenarioInput = process.argv[2] ?? "conversation"
@@ -74,6 +74,17 @@ try {
     setup.mockInput.pressEnter()
     await Bun.sleep(0)
     await setup.flush()
+  } else if (scenarioInput === "mcp-browser") {
+    actions.push("typed /mc into the production composer input")
+    await setup.mockInput.typeText("/mc")
+    actions.push("pressed Enter to activate the /mcp slash completion")
+    setup.mockInput.pressEnter()
+    await Bun.sleep(0)
+    await setup.flush()
+    actions.push("pressed Down twice to select docs.remote through the retained list")
+    setup.mockInput.pressArrow("down")
+    setup.mockInput.pressArrow("down")
+    await setup.flush()
   } else if (scenarioInput === "approval") {
     actions.push("launched a session with a pending terminal-command approval")
   } else {
@@ -88,6 +99,7 @@ try {
     ...(scenarioInput === "command-palette" ? commandPaletteLayoutAssertions(app) : []),
     ...(scenarioInput === "theme-browser" ? themeBrowserLayoutAssertions(app) : []),
     ...(scenarioInput === "settings-browser" ? settingsBrowserLayoutAssertions(app, "wide") : []),
+    ...(scenarioInput === "mcp-browser" ? mcpBrowserLayoutAssertions(app, "wide") : []),
   ]
   await writeEvidence(outputDirectory, scenarioInput, styledFrame, characterFrame, actions, assertions)
 
@@ -111,6 +123,25 @@ try {
       narrowAssertions,
     )
     failed.push(...narrowAssertions.filter((assertion) => !assertion.passed))
+  } else if (scenarioInput === "mcp-browser") {
+    actions.push("resized the production renderer to 72 by 18 columns")
+    setup.resize(72, 18)
+    await setup.flush()
+    const narrowCharacterFrame = setup.captureCharFrame()
+    const narrowStyledFrame = setup.captureSpans()
+    const narrowAssertions = [
+      ...mcpBrowserNarrowAssertions(narrowCharacterFrame, narrowStyledFrame),
+      ...mcpBrowserLayoutAssertions(app, "narrow"),
+    ]
+    await writeEvidence(
+      outputDirectory,
+      "mcp-browser-narrow",
+      narrowStyledFrame,
+      narrowCharacterFrame,
+      actions,
+      narrowAssertions,
+    )
+    failed.push(...narrowAssertions.filter((assertion) => !assertion.passed))
   }
   if (failed.length > 0) {
     throw new Error(`Visual proof failed: ${failed.map((assertion) => assertion.name).join(", ")}`)
@@ -123,7 +154,7 @@ try {
 }
 
 function isVisualScenario(value: string): value is VisualScenario {
-  return value === "conversation" || value === "command-palette" || value === "approval" || value === "tools" || value === "theme-browser" || value === "settings-browser"
+  return value === "conversation" || value === "command-palette" || value === "approval" || value === "tools" || value === "theme-browser" || value === "settings-browser" || value === "mcp-browser"
 }
 
 function scenarioAssertions(scenario: VisualScenario): readonly string[] {
@@ -162,6 +193,16 @@ function scenarioAssertions(scenario: VisualScenario): readonly string[] {
         "current    medium",
         "choices    low · medium · high",
         "Enter choose · Esc close",
+      ]
+    case "mcp-browser":
+      return [
+        "MCP   4 servers · 1 ready · 12 tools   /mcp",
+        "Filter MCP connections…",
+        "docs.remote · Connected · 6 tools",
+        "Approval review",
+        "transport   streamable_http",
+        "fingerprint sha256:docs",
+        "Enter manage · Esc close",
       ]
   }
 }
@@ -314,6 +355,34 @@ function visualAssertions(
       colorAssertion(styledFrame, "settings divider uses subtle border", 0, 30, kennelTheme.borderSubtle),
       colorAssertion(styledFrame, "settings detail heading remains readable", 0, 32, kennelTheme.text, kennelTheme.background),
       backgroundAssertion(styledFrame, "settings surface occludes underlying content", 0, 0, kennelTheme.background),
+    ]
+  }
+  if (scenario === "mcp-browser") {
+    const lines = characterFrame.split("\n")
+    return [
+      ...assertions,
+      positionAssertion(lines, "MCP heading starts at the design column", 0, 1, "MCP   4 servers · 1 ready · 12 tools   /mcp"),
+      positionAssertion(lines, "MCP divider is fixed at column 73", 0, 73, "│"),
+      positionAssertion(lines, "MCP detail content starts at column 75", 0, 75, "docs.remote"),
+      frameSizeAssertion(lines, 110, 32),
+      {
+        name: "MCP divider spans exactly the primary surface",
+        passed: lines.slice(0, 27).every((line) => line[73] === "│") && lines[27]?.[73] !== "│",
+        expected: "divider at column 73 only for rows 0-26",
+        actual: lines.map((line, row) => line[73] === "│" ? row : -1).filter((row) => row >= 0).join(","),
+      },
+      {
+        name: "MCP names remain contiguous complete text",
+        passed: characterFrame.includes("docs.remote") && characterFrame.includes("broken.remote") &&
+          !characterFrame.includes("d o c s") && !characterFrame.includes("b r o k e n"),
+        expected: "contiguous server names",
+        actual: "checked exact terminal cells",
+      },
+      mcpOcclusionAssertion(characterFrame),
+      unsupportedMcpClaimsAssertion(characterFrame),
+      colorAssertion(styledFrame, "connected MCP state uses success", 5, 17, kennelTheme.success),
+      colorAssertion(styledFrame, "failed MCP state uses error", 7, 19, kennelTheme.error),
+      backgroundAssertion(styledFrame, "MCP surface occludes underlying content", 0, 0, kennelTheme.background),
     ]
   }
   if (scenario !== "conversation") return assertions
@@ -485,6 +554,113 @@ function settingsBrowserNarrowAssertions(
     colorAssertion(styledFrame, "narrow settings selection marker uses primary", 4, 1, kennelTheme.primary, kennelTheme.backgroundPanel),
     backgroundAssertion(styledFrame, "narrow settings surface occludes underlying content", 0, 0, kennelTheme.background),
   ]
+}
+
+function mcpBrowserLayoutAssertions(
+  app: ReturnType<typeof createRottweilerApp>,
+  size: "wide" | "narrow",
+): readonly VisualAssertion[] {
+  const browser = app.mcpBrowser
+  if (size === "narrow") {
+    return [
+      exactValueAssertion("narrow MCP surface begins at column 0", browser.x, 0),
+      exactValueAssertion("narrow MCP surface begins at row 0", browser.y, 0),
+      exactValueAssertion("narrow MCP surface is 72 cells wide", browser.width, 72),
+      exactValueAssertion("narrow MCP surface is 13 rows tall", browser.height, 13),
+      exactValueAssertion("narrow MCP list is 70 cells wide", browser.listPane.width, 70),
+      {
+        name: "narrow MCP uses the single-pane layout",
+        passed: browser.layoutMode === "single" && !browser.divider.visible && !browser.detailPane.visible,
+        expected: "single pane with hidden divider and detail pane",
+        actual: `${browser.layoutMode}; divider ${browser.divider.visible}; detail ${browser.detailPane.visible}`,
+      },
+      {
+        name: "narrow MCP preserves compact selected detail",
+        passed: browser.compactDetail.visible && browser.compactDetail.plainText.includes("Connected · enabled · approved"),
+        expected: "visible compact selected server truth",
+        actual: browser.compactDetail.visible ? browser.compactDetail.plainText : "hidden",
+      },
+    ]
+  }
+  return [
+    exactValueAssertion("MCP surface begins at column 0", browser.x, 0),
+    exactValueAssertion("MCP surface begins at row 0", browser.y, 0),
+    exactValueAssertion("MCP surface is 110 cells wide", browser.width, 110),
+    exactValueAssertion("MCP surface is 27 rows tall", browser.height, 27),
+    exactValueAssertion("MCP list pane begins at column 1", browser.listPane.x, 1),
+    exactValueAssertion("MCP list pane is 72 cells wide", browser.listPane.width, 72),
+    exactValueAssertion("MCP divider is fixed at column 73", browser.divider.x, 73),
+    exactValueAssertion("MCP detail begins at column 74", browser.detailPane.x, 74),
+    exactValueAssertion("MCP detail pane is 35 cells wide", browser.detailPane.width, 35),
+    {
+      name: "MCP browser owns focus after slash activation",
+      passed: browser.input.focused,
+      expected: "focused MCP query",
+      actual: browser.input.focused ? "focused MCP query" : "not focused",
+    },
+  ]
+}
+
+function mcpBrowserNarrowAssertions(
+  characterFrame: string,
+  styledFrame: CapturedFrame,
+): readonly VisualAssertion[] {
+  const lines = characterFrame.split("\n")
+  const required = [
+    "MCP   4 servers · 1 ready · 12 tools   /mcp",
+    "Filter MCP connections…",
+    "docs.remote · Connected · 6 tools",
+    "Connected · enabled · approved",
+  ]
+  return [
+    ...required.map((text): VisualAssertion => ({
+      name: `narrow visible text: ${text}`,
+      passed: characterFrame.includes(text),
+      expected: text,
+      actual: characterFrame.includes(text) ? text : "missing",
+    })),
+    frameSizeAssertion(lines, 72, 18),
+    {
+      name: "narrow MCP does not retain its split divider",
+      passed: lines.slice(0, 13).every((line) => line[73] !== "│"),
+      expected: "no MCP divider",
+      actual: "checked exact terminal cells",
+    },
+    mcpOcclusionAssertion(characterFrame),
+    unsupportedMcpClaimsAssertion(characterFrame),
+    colorAtTextAssertion(styledFrame, lines, "narrow connected MCP state uses success", "Connected", kennelTheme.success),
+    backgroundAssertion(styledFrame, "narrow MCP surface occludes underlying content", 0, 0, kennelTheme.background),
+  ]
+}
+
+function mcpOcclusionAssertion(characterFrame: string): VisualAssertion {
+  const leaked = ["AGENTS", "▌ you", "● rottweiler", "\n╎"].filter((text) => characterFrame.includes(text))
+  return {
+    name: "MCP surface fully occludes prior conversation and context",
+    passed: leaked.length === 0,
+    expected: "no prior screen labels or gutter glyphs",
+    actual: leaked.join(",") || "occluded",
+  }
+}
+
+function unsupportedMcpClaimsAssertion(characterFrame: string): VisualAssertion {
+  const unsupported = [
+    "context tokens",
+    "eager cost",
+    "capability",
+    "allowlist",
+    "reauthorize",
+    "sandbox",
+    "TOON",
+    "rw serve --mcp",
+    "Retry server",
+  ].filter((claim) => characterFrame.toLocaleLowerCase().includes(claim.toLocaleLowerCase()))
+  return {
+    name: "unsupported MCP capability and server-operation claims are absent",
+    passed: unsupported.length === 0,
+    expected: "no unsupported MCP claims",
+    actual: unsupported.join(",") || "absent",
+  }
 }
 
 function settingsOcclusionAssertion(characterFrame: string): VisualAssertion {
@@ -680,6 +856,7 @@ async function settleHighlights(
 function scenarioState(scenario: VisualScenario): RottweilerState {
   if (scenario === "tools") return toolsState()
   if (scenario === "settings-browser") return settingsState()
+  if (scenario === "mcp-browser") return mcpState()
   const state = conversationState()
   if (scenario !== "approval") return state
   const approval = tool({
@@ -704,6 +881,32 @@ function scenarioState(scenario: VisualScenario): RottweilerState {
       finished: null,
     },
     tools: { [approval.toolCallId]: approval },
+  }
+}
+
+function mcpState(): RottweilerState {
+  const base = conversationState()
+  return {
+    ...base,
+    commands: [
+      ...base.commands,
+      { name: "mcp", description: "Inspect and manage MCP connections", usage: "/mcp" },
+    ],
+    mcpServers: [
+      { name: "docs.remote", enabled: true, approved: true, state: { type: "ready" }, tool_count: 6, resource_count: 2, prompt_count: 1 },
+      { name: "build.local", enabled: true, approved: true, state: { type: "connecting" }, tool_count: 3, resource_count: 0, prompt_count: 0 },
+      { name: "broken.remote", enabled: true, approved: true, state: { type: "failed", message: "TLS certificate rejected" }, tool_count: 2, resource_count: 0, prompt_count: 0 },
+      { name: "approval.pending", enabled: true, approved: false, state: { type: "approval_required" }, tool_count: 1, resource_count: 1, prompt_count: 0 },
+    ],
+    mcpApprovalReview: {
+      server: "docs.remote",
+      transport: "streamable_http",
+      endpoint: "https://docs.example/mcp",
+      origin: "user configuration",
+      defer_tools: true,
+      fingerprint: "sha256:docs",
+      previously_approved: true,
+    },
   }
 }
 

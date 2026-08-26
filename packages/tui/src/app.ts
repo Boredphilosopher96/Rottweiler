@@ -44,6 +44,12 @@ import {
   type SettingsCatalog,
 } from "./settings-browser"
 import {
+  createMcpBrowserModel,
+  mcpBrowserRow,
+  type McpBrowserAction,
+  type McpCatalog,
+} from "./mcp-browser"
+import {
   compileKeybindings,
   formatKeycap,
   keyStrokeFromEvent,
@@ -382,11 +388,6 @@ type ProviderAuthPickerAction =
   | { readonly kind: "copy_code"; readonly value: string }
   | { readonly kind: "cancel" }
 
-type McpPickerAction =
-  | { readonly kind: "actions"; readonly server: string }
-  | { readonly kind: "add_http" }
-  | { readonly kind: "add_stdio" }
-  | { readonly kind: "retry" }
 type McpServerAction =
   | { readonly kind: "toggle"; readonly server: string; readonly enabled: boolean }
   | { readonly kind: "review"; readonly server: string }
@@ -402,6 +403,7 @@ export class RottweilerApp extends BoxRenderable {
   reviewPanel!: ReviewPanelRenderable
   picker!: FuzzyPickerRenderable<unknown>
   commandPalette!: ListDetailRenderable<PaletteAction>
+  mcpBrowser!: ListDetailRenderable<McpBrowserAction>
   settingsBrowser!: ListDetailRenderable<SettingsBrowserAction>
   themeBrowser!: ListDetailRenderable<RottweilerTheme>
   composer!: ComposerRenderable
@@ -817,11 +819,14 @@ export class RottweilerApp extends BoxRenderable {
     const pickerWasVisible = rebuilding && this.#pickerVisible()
     const pickerKind = this.#pickerController.kind
     const paletteWasVisible = pickerWasVisible && pickerKind === "palette"
+    const mcpBrowserWasVisible = pickerWasVisible && pickerKind === "mcp"
     const settingsBrowserWasVisible = pickerWasVisible && pickerKind === "settings"
     const themeBrowserWasVisible = pickerWasVisible && pickerKind === "themes"
     const pickerQuery = rebuilding
       ? paletteWasVisible
         ? this.commandPalette.input.value
+        : mcpBrowserWasVisible
+          ? this.mcpBrowser.input.value
         : settingsBrowserWasVisible
           ? this.settingsBrowser.input.value
         : themeBrowserWasVisible
@@ -831,6 +836,8 @@ export class RottweilerApp extends BoxRenderable {
     const pickerSelection = rebuilding
       ? paletteWasVisible
         ? this.commandPalette.selectedId
+        : mcpBrowserWasVisible
+          ? this.mcpBrowser.selectedId
         : settingsBrowserWasVisible
           ? this.settingsBrowser.selectedId
         : themeBrowserWasVisible
@@ -840,6 +847,8 @@ export class RottweilerApp extends BoxRenderable {
     const pickerScrollOffset = rebuilding
       ? paletteWasVisible
         ? this.commandPalette.scrollOffset
+        : mcpBrowserWasVisible
+          ? this.mcpBrowser.scrollOffset
         : settingsBrowserWasVisible
           ? this.settingsBrowser.scrollOffset
         : themeBrowserWasVisible
@@ -947,6 +956,21 @@ export class RottweilerApp extends BoxRenderable {
     this.picker.left = "15%"
     this.picker.width = "70%"
     this.commandPalette = new ListDetailRenderable<PaletteAction>(this.ctx, theme)
+    this.mcpBrowser = new ListDetailRenderable<McpBrowserAction>(this.ctx, theme, {
+      surfaceLayout: "primary",
+      splitListWidth: 72,
+      splitMinWidth: 108,
+      inputPlaceholder: "Filter MCP connections…",
+      emptyCopy: "No MCP servers configured",
+      surfaceBackground: theme.background,
+      renderRow: (row, selected) => {
+        const action = row.action
+        const server = action.kind === "manage"
+          ? this.#state.mcpServers.find((candidate) => candidate.name === action.server)
+          : undefined
+        return mcpBrowserRow(row, server, selected, theme)
+      },
+    })
     this.settingsBrowser = new ListDetailRenderable<SettingsBrowserAction>(this.ctx, theme, {
       surfaceLayout: "primary",
       splitListWidth: 29,
@@ -1021,6 +1045,7 @@ export class RottweilerApp extends BoxRenderable {
     this.add(this.statusLine)
     this.add(this.picker)
     this.add(this.commandPalette)
+    this.add(this.mcpBrowser)
     this.add(this.settingsBrowser)
     this.add(this.themeBrowser)
     this.setState(this.#state)
@@ -1034,6 +1059,9 @@ export class RottweilerApp extends BoxRenderable {
       if (pickerKind === "palette") {
         if (typeof pickerSelection === "string") this.commandPalette.selectById(pickerSelection)
         this.commandPalette.restoreViewport(pickerScrollOffset)
+      } else if (pickerKind === "mcp") {
+        if (typeof pickerSelection === "string") this.mcpBrowser.selectById(pickerSelection)
+        this.mcpBrowser.restoreViewport(pickerScrollOffset)
       } else if (pickerKind === "settings") {
         if (typeof pickerSelection === "string") this.settingsBrowser.selectById(pickerSelection)
         this.settingsBrowser.restoreViewport(pickerScrollOffset)
@@ -1049,7 +1077,8 @@ export class RottweilerApp extends BoxRenderable {
       }
     }
     this.#rethemeInProgress = false
-    if (this.settingsBrowser.visible) this.settingsBrowser.input.focus()
+    if (this.mcpBrowser.visible) this.mcpBrowser.input.focus()
+    else if (this.settingsBrowser.visible) this.settingsBrowser.input.focus()
     else if (this.themeBrowser.visible) this.themeBrowser.input.focus()
     else if (this.commandPalette.visible) this.commandPalette.input.focus()
     else if (this.picker.visible && !this.#pickerController.anchored) this.picker.input.focus()
@@ -2063,8 +2092,30 @@ export class RottweilerApp extends BoxRenderable {
     this.#mcpActionName = null
     this.#clearMcpDraft()
     this.#pickerController.begin("mcp")
+    this.#resizeMcpBrowser(
+      this.width === 0 ? this.ctx.width : this.width,
+      this.height === 0 ? this.ctx.height : this.height,
+    )
     this.#projectionRequests.command({ type: "list_mcp_servers" })
     this.#pickerController.refresh()
+    this.mcpBrowser.input.focus()
+  }
+
+  #activateMcpBrowserAction(action: McpBrowserAction): void {
+    if (action.kind === "retry") {
+      this.#projectionRequests.command({ type: "list_mcp_servers" })
+      this.#pickerController.refresh()
+      return
+    }
+    this.mcpBrowser.visible = false
+    this.mcpBrowser.input.blur()
+    if (action.kind === "addHttp") {
+      this.#openMcpHttpNamePrompt()
+    } else if (action.kind === "addStdio") {
+      this.#openMcpStdioNamePrompt()
+    } else {
+      this.#openMcpActionPicker(action.server)
+    }
   }
 
   #openMcpActionPicker(server: string): void {
@@ -2273,6 +2324,14 @@ export class RottweilerApp extends BoxRenderable {
       height - this.statusLine.height - this.composer.dockHeight,
     )
     this.settingsBrowser.resizeForTerminal(width, height, primaryHeight)
+  }
+
+  #resizeMcpBrowser(width: number, height: number): void {
+    const primaryHeight = Math.max(
+      6,
+      height - this.statusLine.height - this.composer.dockHeight,
+    )
+    this.mcpBrowser.resizeForTerminal(width, height, primaryHeight)
   }
 
   async #confirmTheme(theme: RottweilerTheme): Promise<void> {
@@ -2512,6 +2571,7 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   closePicker(): void {
+    if (this.mcpBrowser.visible) this.mcpBrowser.close()
     if (this.settingsBrowser.visible) this.settingsBrowser.close()
     if (this.themeBrowser.visible) this.themeBrowser.close()
     if (this.commandPalette.visible) this.commandPalette.close()
@@ -2520,6 +2580,7 @@ export class RottweilerApp extends BoxRenderable {
 
   #afterPickerClosed(kind: PickerKind | null): void {
     const restoreSettingsBrowser = kind === "settingChoices"
+    const restoreMcpBrowser = kind === "mcpActions" || kind === "mcpInput" || kind === "mcpRemoveConfirm"
     const capturedTheme =
       kind === "themes"
         && !this.#themePreviewCommitted
@@ -2546,7 +2607,11 @@ export class RottweilerApp extends BoxRenderable {
     ) {
       this.#createThemedSurface(restoreTheme)
     }
-    if (restoreSettingsBrowser) {
+    if (restoreMcpBrowser) {
+      this.#pickerController.kind = "mcp"
+      this.mcpBrowser.visible = true
+      if (this.#keybindings.preset === "vim") this.#vimFocus = "picker"
+    } else if (restoreSettingsBrowser) {
       this.#pickerController.kind = "settings"
       this.settingsBrowser.visible = true
       if (this.#keybindings.preset === "vim") this.#vimFocus = "picker"
@@ -2575,7 +2640,8 @@ export class RottweilerApp extends BoxRenderable {
     )
     this.outputViewer.resizeForTerminal(height)
     this.reviewPanel.resizeForTerminal(height)
-    if (this.settingsBrowser.visible) this.#resizeSettingsBrowser(width, height)
+    if (this.mcpBrowser.visible) this.#resizeMcpBrowser(width, height)
+    else if (this.settingsBrowser.visible) this.#resizeSettingsBrowser(width, height)
     else if (this.themeBrowser.visible) this.#resizeThemeBrowser(width, height)
     else if (this.commandPalette.visible) this.commandPalette.resizeForTerminal(width, height)
     else if (this.picker.visible) this.#pickerController.position(this.#pickerController.anchored)
@@ -2854,6 +2920,10 @@ export class RottweilerApp extends BoxRenderable {
       this.transcript.scroller.focus()
       return
     }
+    if (this.mcpBrowser.visible) {
+      this.mcpBrowser.input.focus()
+      return
+    }
     if (this.settingsBrowser.visible) {
       this.settingsBrowser.input.focus()
       return
@@ -2900,7 +2970,9 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #moveVertical(direction: 1 | -1): void {
-    if (this.settingsBrowser.visible) {
+    if (this.mcpBrowser.visible) {
+      this.mcpBrowser.moveSelection(direction)
+    } else if (this.settingsBrowser.visible) {
       this.settingsBrowser.moveSelection(direction)
     } else if (this.themeBrowser.visible) {
       this.themeBrowser.moveSelection(direction)
@@ -2925,7 +2997,9 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #moveToBoundary(end: boolean): void {
-    if (this.themeBrowser.visible) {
+    if (this.mcpBrowser.visible) {
+      this.mcpBrowser.moveToBoundary(end)
+    } else if (this.themeBrowser.visible) {
       this.themeBrowser.moveToBoundary(end)
     } else if (this.commandPalette.visible) {
       this.commandPalette.moveToBoundary(end)
@@ -2975,11 +3049,11 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #pickerVisible(): boolean {
-    return this.settingsBrowser.visible || this.themeBrowser.visible || this.commandPalette.visible || this.picker.visible
+    return this.mcpBrowser.visible || this.settingsBrowser.visible || this.themeBrowser.visible || this.commandPalette.visible || this.picker.visible
   }
 
   #modalPickerVisible(): boolean {
-    return this.settingsBrowser.visible || this.themeBrowser.visible || this.commandPalette.visible || (this.picker.visible && !this.#pickerController.anchored)
+    return this.mcpBrowser.visible || this.settingsBrowser.visible || this.themeBrowser.visible || this.commandPalette.visible || (this.picker.visible && !this.#pickerController.anchored)
   }
 
   #statusFocusOwner(): VimFocus | "interaction" | "review" {
@@ -3814,53 +3888,55 @@ export class RottweilerApp extends BoxRenderable {
       case "mcpInput":
         break
       case "mcp": {
-        const mcpError = this.#projectionErrors.mcp
-        if (
-          mcpError === undefined &&
-          this.#projectionRequests.current("mcp") !== null &&
-          this.#state.mcpServers.length === 0
-        ) {
-          this.#pickerController.showLoading("MCP connections", "Loading MCP connections")
-          break
-        }
-        const items: PickerItem<McpPickerAction>[] = [
-          ...(mcpError === undefined
-            ? []
-            : [{
-                id: "mcp.error",
-                label: "Couldn't load MCP connections",
-                description: `${mcpError} · select to retry`,
-                value: { kind: "retry" as const },
-              }]),
-          { id: "mcp.add.http", label: "Add HTTPS server…", description: "Remote HTTPS · registers live and starts disabled", value: { kind: "add_http" } },
-          { id: "mcp.add.stdio", label: "Add stdio server…", description: "Local argv process · starts disabled with no extra sandbox authority", value: { kind: "add_stdio" } },
-          ...(mcpError === undefined && this.#state.mcpServers.length === 0
-            ? [{
-                id: "mcp.empty",
-                label: "No MCP servers configured",
-                description: "Add an HTTPS or stdio server to connect tools and resources.",
-                value: { kind: "add_stdio" as const },
-                selectable: false,
-              }]
-            : []),
-          ...this.#state.mcpServers.map<PickerItem<McpPickerAction>>((server) => ({
-              id: `mcp.server.${server.name}`,
-              label: server.name,
-              description: `${server.approved ? "Approved" : "Approval needed"} · ${mcpStateLabel(server.state.type)} · ${server.tool_count} tools`,
-              value: { kind: "actions", server: server.name },
-          })),
-        ]
-        this.#pickerController.show(
-          "MCP connections",
-          items,
-          (item) => {
-            const action = item.value
-            if (action.kind === "retry") this.#projectionRequests.command({ type: "list_mcp_servers" })
-            else if (action.kind === "add_http") this.#openMcpHttpNamePrompt()
-            else if (action.kind === "add_stdio") this.#openMcpStdioNamePrompt()
-            else this.#openMcpActionPicker(action.server)
-          },
+        this.#resizeMcpBrowser(
+          this.width === 0 ? this.ctx.width : this.width,
+          this.height === 0 ? this.ctx.height : this.height,
         )
+        const catalog: McpCatalog = this.#projectionErrors.mcp === undefined
+          ? this.#state.mcpServers.length === 0 && this.#projectionRequests.current("mcp") !== null
+            ? { kind: "loading" }
+            : { kind: "ready", servers: this.#state.mcpServers }
+          : {
+              kind: "error",
+              message: this.#projectionErrors.mcp,
+              stale: this.#state.mcpServers,
+            }
+        const query = this.mcpBrowser.visible
+          ? this.mcpBrowser.input.value
+          : this.#pickerController.query
+        const preserveSelection = query === this.#pickerController.query
+        this.#pickerController.query = query
+        const model = createMcpBrowserModel({
+          catalog,
+          review: this.#state.mcpApprovalReview,
+          query,
+          selectedId: this.mcpBrowser.visible && preserveSelection
+            ? this.mcpBrowser.selectedId
+            : null,
+        })
+        const presentation = this.#keybindings.preset === "vim" && model.status.includes("Esc close")
+          ? { ...model, status: model.status.replace("Esc close", "Esc×2 close") }
+          : model
+        if (this.mcpBrowser.visible) {
+          this.mcpBrowser.refresh(presentation)
+        } else {
+          this.picker.close()
+          this.mcpBrowser.open(presentation, (action) => {
+            this.#activateMcpBrowserAction(action)
+          }, {
+            onQuery: () => this.#renderPicker(),
+            onSelection: () => this.#renderPicker(),
+            onRetry: () => {
+              this.#projectionRequests.command({ type: "list_mcp_servers" })
+              this.#pickerController.refresh()
+            },
+          })
+          if (this.#keybindings.preset === "vim" && this.#vimFocus !== "picker") {
+            this.#vimFocusBeforePicker = this.#vimFocus
+            this.#vimFocus = "picker"
+            this.#setInputMode("insert")
+          }
+        }
         break
       }
       case "mcpActions": {
