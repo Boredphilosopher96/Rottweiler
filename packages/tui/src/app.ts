@@ -1,7 +1,6 @@
 import {
   BoxRenderable,
   CliRenderEvents,
-  SelectRenderableEvents,
   StyledText,
   bg,
   bold,
@@ -39,6 +38,11 @@ import {
   type CommandPaletteEntry,
 } from "./command-palette"
 import { createThemeBrowserModel } from "./theme-browser"
+import {
+  createSettingsBrowserModel,
+  type SettingsBrowserAction,
+  type SettingsCatalog,
+} from "./settings-browser"
 import {
   compileKeybindings,
   formatKeycap,
@@ -398,6 +402,7 @@ export class RottweilerApp extends BoxRenderable {
   reviewPanel!: ReviewPanelRenderable
   picker!: FuzzyPickerRenderable<unknown>
   commandPalette!: ListDetailRenderable<PaletteAction>
+  settingsBrowser!: ListDetailRenderable<SettingsBrowserAction>
   themeBrowser!: ListDetailRenderable<RottweilerTheme>
   composer!: ComposerRenderable
   statusLine!: StatusLineRenderable
@@ -470,6 +475,7 @@ export class RottweilerApp extends BoxRenderable {
   #mcpDraftEnvironment: Array<{ readonly key: string; readonly value: string }> = []
   #mcpActionName: string | null = null
   #budgetSettingKey: BudgetSettingKey | null = null
+  #settingChoiceKey: string | null = null
   #outputViewerToolCallId: string | null = null
   #primaryView: PrimaryView = "conversation"
   #toolsElapsedTimer: ReturnType<typeof setInterval> | null = null
@@ -766,7 +772,7 @@ export class RottweilerApp extends BoxRenderable {
       focusComposer: () => this.composer.focus(),
       renderPicker: () => this.#renderPicker(),
       withRefreshGuard: (kind, refresh) => {
-        const suppressThemePreview = kind === "themes" || kind === "settings"
+        const suppressThemePreview = kind === "themes"
         const rethemeWasInProgress = this.#rethemeInProgress
         if (suppressThemePreview) this.#rethemeInProgress = true
         try {
@@ -811,10 +817,13 @@ export class RottweilerApp extends BoxRenderable {
     const pickerWasVisible = rebuilding && this.#pickerVisible()
     const pickerKind = this.#pickerController.kind
     const paletteWasVisible = pickerWasVisible && pickerKind === "palette"
+    const settingsBrowserWasVisible = pickerWasVisible && pickerKind === "settings"
     const themeBrowserWasVisible = pickerWasVisible && pickerKind === "themes"
     const pickerQuery = rebuilding
       ? paletteWasVisible
         ? this.commandPalette.input.value
+        : settingsBrowserWasVisible
+          ? this.settingsBrowser.input.value
         : themeBrowserWasVisible
           ? this.themeBrowser.input.value
           : this.picker.input.value
@@ -822,6 +831,8 @@ export class RottweilerApp extends BoxRenderable {
     const pickerSelection = rebuilding
       ? paletteWasVisible
         ? this.commandPalette.selectedId
+        : settingsBrowserWasVisible
+          ? this.settingsBrowser.selectedId
         : themeBrowserWasVisible
           ? this.themeBrowser.selectedId
           : this.picker.select.getSelectedOption()?.value
@@ -829,6 +840,8 @@ export class RottweilerApp extends BoxRenderable {
     const pickerScrollOffset = rebuilding
       ? paletteWasVisible
         ? this.commandPalette.scrollOffset
+        : settingsBrowserWasVisible
+          ? this.settingsBrowser.scrollOffset
         : themeBrowserWasVisible
           ? this.themeBrowser.scrollOffset
           : 0
@@ -929,32 +942,19 @@ export class RottweilerApp extends BoxRenderable {
       if (this.#pickerController.kind === "sessions") this.#scheduleSessionSearch(query)
     })
     this.picker = picker
-    picker.select.on(SelectRenderableEvents.SELECTION_CHANGED, () => {
-      // A preview rebuild destroys the old picker. Ignore any queued selection
-      // notification from that generation instead of reading its dead buffer.
-      if (this.picker !== picker) return
-      if (this.#pickerController.kind !== "settings" || this.#rethemeInProgress) return
-      const id = picker.select.getSelectedOption()?.value
-      if (typeof id !== "string") return
-      const name = id.startsWith("theme:")
-        ? id.slice("theme:".length)
-        : id.startsWith("ui.theme:")
-          ? id.slice("ui.theme:".length)
-          : null
-      if (name === null) return
-      const selected = name === "system"
-        ? this.#systemTheme
-        : themeByName(name, this.#systemThemeMode ?? "dark")
-      if (selected !== undefined) {
-        if (this.#themeBeforePreview === null) this.#themeBeforePreview = this.#theme
-        this.#previewTheme(selected)
-      }
-    })
     this.picker.position = "absolute"
     this.picker.top = 2
     this.picker.left = "15%"
     this.picker.width = "70%"
     this.commandPalette = new ListDetailRenderable<PaletteAction>(this.ctx, theme)
+    this.settingsBrowser = new ListDetailRenderable<SettingsBrowserAction>(this.ctx, theme, {
+      surfaceLayout: "primary",
+      splitListWidth: 29,
+      splitMinWidth: 90,
+      inputPlaceholder: "Filter settings…",
+      emptyCopy: "No matching settings",
+      surfaceBackground: theme.background,
+    })
     this.themeBrowser = new ListDetailRenderable<RottweilerTheme>(this.ctx, theme, {
       surfaceLayout: "primary",
       splitListWidth: 33,
@@ -1021,6 +1021,7 @@ export class RottweilerApp extends BoxRenderable {
     this.add(this.statusLine)
     this.add(this.picker)
     this.add(this.commandPalette)
+    this.add(this.settingsBrowser)
     this.add(this.themeBrowser)
     this.setState(this.#state)
     this.composer.value = draft
@@ -1033,6 +1034,9 @@ export class RottweilerApp extends BoxRenderable {
       if (pickerKind === "palette") {
         if (typeof pickerSelection === "string") this.commandPalette.selectById(pickerSelection)
         this.commandPalette.restoreViewport(pickerScrollOffset)
+      } else if (pickerKind === "settings") {
+        if (typeof pickerSelection === "string") this.settingsBrowser.selectById(pickerSelection)
+        this.settingsBrowser.restoreViewport(pickerScrollOffset)
       } else if (pickerKind === "themes") {
         if (typeof pickerSelection === "string") this.themeBrowser.selectById(pickerSelection)
         this.themeBrowser.restoreViewport(pickerScrollOffset)
@@ -1045,7 +1049,8 @@ export class RottweilerApp extends BoxRenderable {
       }
     }
     this.#rethemeInProgress = false
-    if (this.themeBrowser.visible) this.themeBrowser.input.focus()
+    if (this.settingsBrowser.visible) this.settingsBrowser.input.focus()
+    else if (this.themeBrowser.visible) this.themeBrowser.input.focus()
     else if (this.commandPalette.visible) this.commandPalette.input.focus()
     else if (this.picker.visible && !this.#pickerController.anchored) this.picker.input.focus()
   }
@@ -1870,8 +1875,35 @@ export class RottweilerApp extends BoxRenderable {
 
   openSettingsPicker(): void {
     this.#pickerController.begin("settings")
+    this.#resizeSettingsBrowser(
+      this.width === 0 ? this.ctx.width : this.width,
+      this.height === 0 ? this.ctx.height : this.height,
+    )
     this.#projectionRequests.command({ type: "list_settings" })
     this.#pickerController.refresh()
+    this.settingsBrowser.input.focus()
+  }
+
+  #activateSettingsAction(action: SettingsBrowserAction): void {
+    switch (action.kind) {
+      case "choose":
+        this.#settingChoiceKey = action.key
+        this.settingsBrowser.visible = false
+        this.settingsBrowser.input.blur()
+        this.#pickerController.kind = "settingChoices"
+        this.#pickerController.refresh()
+        return
+      case "openThemes":
+        this.settingsBrowser.close()
+        this.openThemePicker()
+        return
+      case "openBudgets":
+        this.settingsBrowser.close()
+        this.openBudgetPicker()
+        return
+      case "inspect":
+        return
+    }
   }
 
   openPermissionPicker(): void {
@@ -1882,6 +1914,7 @@ export class RottweilerApp extends BoxRenderable {
 
   openBudgetPicker(): void {
     this.#budgetSettingKey = null
+    this.#settingChoiceKey = null
     this.#pickerController.begin("budgets")
     this.#projectionRequests.command({ type: "list_settings" })
     this.#pickerController.refresh()
@@ -2234,6 +2267,14 @@ export class RottweilerApp extends BoxRenderable {
     this.themeBrowser.resizeForTerminal(width, height, primaryHeight)
   }
 
+  #resizeSettingsBrowser(width: number, height: number): void {
+    const primaryHeight = Math.max(
+      6,
+      height - this.statusLine.height - this.composer.dockHeight,
+    )
+    this.settingsBrowser.resizeForTerminal(width, height, primaryHeight)
+  }
+
   async #confirmTheme(theme: RottweilerTheme): Promise<void> {
     const outcome = await this.#projectionRequests.emit({
       type: "set_setting",
@@ -2471,14 +2512,16 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   closePicker(): void {
+    if (this.settingsBrowser.visible) this.settingsBrowser.close()
     if (this.themeBrowser.visible) this.themeBrowser.close()
     if (this.commandPalette.visible) this.commandPalette.close()
     this.#pickerController.close()
   }
 
   #afterPickerClosed(kind: PickerKind | null): void {
+    const restoreSettingsBrowser = kind === "settingChoices"
     const capturedTheme =
-      (kind === "themes" || kind === "settings")
+      kind === "themes"
         && !this.#themePreviewCommitted
         ? this.#themeBeforePreview
         : null
@@ -2492,6 +2535,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#clearMcpDraft()
     this.#mcpActionName = null
     this.#budgetSettingKey = null
+    this.#settingChoiceKey = null
     this.#subagentActionId = null
     this.#sessionActionId = null
     this.#themeBeforePreview = null
@@ -2502,7 +2546,13 @@ export class RottweilerApp extends BoxRenderable {
     ) {
       this.#createThemedSurface(restoreTheme)
     }
-    if (this.#keybindings.preset === "vim") this.#vimFocus = this.#vimFocusBeforePicker
+    if (restoreSettingsBrowser) {
+      this.#pickerController.kind = "settings"
+      this.settingsBrowser.visible = true
+      if (this.#keybindings.preset === "vim") this.#vimFocus = "picker"
+    } else if (this.#keybindings.preset === "vim") {
+      this.#vimFocus = this.#vimFocusBeforePicker
+    }
     if (!this.#state.replay.active) this.#focusForInputMode()
     if (this.#keybindings.preset === "vim") {
       this.statusLine.setKeybindingMode(
@@ -2525,7 +2575,8 @@ export class RottweilerApp extends BoxRenderable {
     )
     this.outputViewer.resizeForTerminal(height)
     this.reviewPanel.resizeForTerminal(height)
-    if (this.themeBrowser.visible) this.#resizeThemeBrowser(width, height)
+    if (this.settingsBrowser.visible) this.#resizeSettingsBrowser(width, height)
+    else if (this.themeBrowser.visible) this.#resizeThemeBrowser(width, height)
     else if (this.commandPalette.visible) this.commandPalette.resizeForTerminal(width, height)
     else if (this.picker.visible) this.#pickerController.position(this.#pickerController.anchored)
   }
@@ -2803,6 +2854,10 @@ export class RottweilerApp extends BoxRenderable {
       this.transcript.scroller.focus()
       return
     }
+    if (this.settingsBrowser.visible) {
+      this.settingsBrowser.input.focus()
+      return
+    }
     if (this.themeBrowser.visible) {
       this.themeBrowser.input.focus()
       return
@@ -2845,7 +2900,9 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #moveVertical(direction: 1 | -1): void {
-    if (this.themeBrowser.visible) {
+    if (this.settingsBrowser.visible) {
+      this.settingsBrowser.moveSelection(direction)
+    } else if (this.themeBrowser.visible) {
       this.themeBrowser.moveSelection(direction)
     } else if (this.commandPalette.visible) {
       this.commandPalette.moveSelection(direction)
@@ -2918,11 +2975,11 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #pickerVisible(): boolean {
-    return this.themeBrowser.visible || this.commandPalette.visible || this.picker.visible
+    return this.settingsBrowser.visible || this.themeBrowser.visible || this.commandPalette.visible || this.picker.visible
   }
 
   #modalPickerVisible(): boolean {
-    return this.themeBrowser.visible || this.commandPalette.visible || (this.picker.visible && !this.#pickerController.anchored)
+    return this.settingsBrowser.visible || this.themeBrowser.visible || this.commandPalette.visible || (this.picker.visible && !this.#pickerController.anchored)
   }
 
   #statusFocusOwner(): VimFocus | "interaction" | "review" {
@@ -4172,58 +4229,90 @@ export class RottweilerApp extends BoxRenderable {
         break
       }
       case "settings": {
-        type SettingPickerAction =
-          | { kind: "theme"; theme: RottweilerTheme }
-          | { kind: "setting"; setting: RottweilerState["settings"][number]; value: string }
-        const items: PickerItem<SettingPickerAction>[] = []
-        for (const setting of this.#state.settings) {
-          if (setting.key === "ui.theme") {
-            for (const catalogTheme of themeCatalog) {
-              const theme = this.#resolvedTheme(catalogTheme)
-              items.push({
-                id: `ui.theme:${theme.name}`,
-                label: `Theme → ${theme.name}`,
-                description: `${theme.name === this.#theme.name ? "current · " : ""}live preview · ${setting.provenance}`,
-                value: { kind: "theme", theme },
-              })
+        this.#resizeSettingsBrowser(
+          this.width === 0 ? this.ctx.width : this.width,
+          this.height === 0 ? this.ctx.height : this.height,
+        )
+        const catalog: SettingsCatalog = this.#projectionErrors.settings === undefined
+          ? this.#state.settings.length === 0 && this.#projectionRequests.current("settings_pending") !== null
+            ? { kind: "loading" }
+            : { kind: "ready", settings: this.#state.settings }
+          : {
+              kind: "error",
+              message: this.#projectionErrors.settings,
+              stale: this.#state.settings,
             }
-            continue
-          }
-          for (const value of setting.choices) {
-            items.push({
-              id: `${setting.key}:${value}`,
-              label: `${setting.label} → ${value}`,
-              description: `${value === setting.value ? "current · " : ""}${setting.provenance}${setting.appliesImmediately ? " · live" : " · next session"}`,
-              value: { kind: "setting", setting, value },
-            })
+        const query = this.settingsBrowser.visible
+          ? this.settingsBrowser.input.value
+          : this.#pickerController.query
+        const preserveSelection = query === this.#pickerController.query
+        this.#pickerController.query = query
+        const model = createSettingsBrowserModel({
+          catalog,
+          query,
+          selectedId: this.settingsBrowser.visible && preserveSelection
+            ? this.settingsBrowser.selectedId
+            : null,
+        })
+        const presentation = this.#keybindings.preset === "vim" && model.status.includes("Esc close")
+          ? { ...model, status: model.status.replace("Esc close", "Esc×2 close") }
+          : model
+        if (this.settingsBrowser.visible) {
+          this.settingsBrowser.refresh(presentation)
+        } else {
+          this.settingsBrowser.open(presentation, (action) => {
+            this.#activateSettingsAction(action)
+          }, {
+            onQuery: () => this.#renderPicker(),
+            onSelection: () => this.#renderPicker(),
+            onRetry: () => {
+              this.#projectionRequests.command({ type: "list_settings" })
+              this.#pickerController.refresh()
+            },
+          })
+          if (this.#keybindings.preset === "vim" && this.#vimFocus !== "picker") {
+            this.#vimFocusBeforePicker = this.#vimFocus
+            this.#vimFocus = "picker"
+            this.#setInputMode("insert")
           }
         }
-        if (items.length === 0 && this.#projectionRequests.current("settings_pending") !== null) {
-          this.#pickerController.showLoading("Settings", "Loading settings")
-          break
-        }
-        if (items.length === 0) {
+        break
+      }
+      case "settingChoices": {
+        const setting = this.#state.settings.find((candidate) => candidate.key === this.#settingChoiceKey)
+        if (setting === undefined || setting.choices.length === 0) {
           this.#pickerController.showStatus(
-            "Settings",
-            "Settings could not be loaded",
-            "Close and reopen this panel to retry.",
+            "Setting choices",
+            "No choices available",
+            "Close this panel and refresh settings.",
           )
           break
         }
-        this.#pickerController.show("Settings", items, (item) => {
-          const selection = item.value
-          if (selection.kind === "theme") {
-            if (this.#themeBeforePreview === null) this.#themeBeforePreview = this.#theme
-            this.#previewTheme(selection.theme)
-            void this.#confirmTheme(selection.theme)
-            return
-          }
-          this.#projectionRequests.command({
-            type: "set_setting",
-            key: selection.setting.key,
-            value: selection.value,
-          })
-        })
+        this.#pickerController.show(
+          setting.label,
+          setting.choices.map((value) => ({
+            id: value,
+            label: value,
+            description: value === setting.value
+              ? `current · ${setting.provenance}`
+              : setting.provenance,
+            value,
+          })),
+          (item) => {
+            const key = this.#settingChoiceKey
+            if (key === null) return
+            this.picker.close()
+            this.#settingChoiceKey = null
+            this.#pickerController.kind = "settings"
+            this.settingsBrowser.visible = true
+            this.settingsBrowser.input.focus()
+            this.#projectionRequests.command({
+              type: "set_setting",
+              key,
+              value: item.value,
+            })
+          },
+        )
         break
       }
       case "themes": {

@@ -11,7 +11,7 @@ export type PickerKind =
   | "exportFormat" | "exportPath" | "exportOverwrite"
   | "workspaceRoots"
   | "budgets" | "budgetPresets" | "budgetInput"
-  | "sessions" | "sessionActions" | "sessionRename" | "settings"
+  | "sessions" | "sessionActions" | "sessionRename" | "settings" | "settingChoices"
   | "agents" | "agentActions"
   | "timeline" | "timelineActions"
   | "themes"

@@ -40,6 +40,7 @@ export interface ListDetailPresentation<Action> {
   readonly rows: readonly ListDetailRow<Action>[]
   readonly selectedId: string | null
   readonly status: string
+  readonly emptyCopy?: string
   readonly notice?: {
     readonly message: string
     readonly tone: "muted" | "warning" | "error"
@@ -97,6 +98,7 @@ export class ListDetailRenderable<Action> extends BoxRenderable {
   #layoutMode: "split" | "single" = "split"
   #visibleRows = 20
   #listWidth = 52
+  #emptyCopy: string | undefined
   #onKey = (key: KeyEvent) => {
     if (!this.visible) return
     const plain = !key.ctrl && !key.meta && !key.option && !key.shift
@@ -281,6 +283,7 @@ export class ListDetailRenderable<Action> extends BoxRenderable {
     this.heading.content = presentation.title
     if (this.input.value !== presentation.query) this.input.value = presentation.query
     this.#rows = presentation.rows
+    this.#emptyCopy = presentation.emptyCopy
     if (!this.#rows.some((row) => row.kind === "item" && row.id === this.#pressedRowId)) {
       this.#pressedRowId = null
     }
@@ -576,7 +579,7 @@ export class ListDetailRenderable<Action> extends BoxRenderable {
       (row): row is ListDetailItemRow<Action> => row.kind === "item" && row.id === this.#selectedId,
     )
     if (selected === undefined) {
-      const emptyCopy = this.#options.emptyCopy ?? "No matching commands"
+      const emptyCopy = this.#emptyCopy ?? this.#options.emptyCopy ?? "No matching commands"
       this.detail.content = emptyCopy
       this.compactDetail.content = emptyCopy
       return

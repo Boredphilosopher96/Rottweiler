@@ -78,4 +78,45 @@ describe("TUI visual evidence", () => {
 
     await rm(secondDirectory, { recursive: true, force: true })
   })
+
+  test("proves the production settings browser at wide and narrow sizes deterministically", async () => {
+    const firstDirectory = await mkdtemp(join(tmpdir(), "rottweiler-settings-browser-first-"))
+    const secondDirectory = await mkdtemp(join(tmpdir(), "rottweiler-settings-browser-second-"))
+    evidenceDirectory = firstDirectory
+    const harness = resolve(import.meta.dir, "../scripts/tui-visual-harness.ts")
+    const run = (directory: string) => Bun.spawn(
+      ["bun", "run", harness, "settings-browser", directory],
+      { cwd: resolve(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe" },
+    )
+
+    const first = run(firstDirectory)
+    const [firstExit, firstStderr] = await Promise.all([
+      first.exited,
+      new Response(first.stderr).text(),
+    ])
+    expect(firstStderr).toBe("")
+    expect(firstExit).toBe(0)
+
+    const second = run(secondDirectory)
+    const [secondExit, secondStderr] = await Promise.all([
+      second.exited,
+      new Response(second.stderr).text(),
+    ])
+    expect(secondStderr).toBe("")
+    expect(secondExit).toBe(0)
+
+    for (const artifact of ["settings-browser", "settings-browser-narrow"]) {
+      for (const extension of ["txt", "ansi", "png", "json"]) {
+        const firstArtifact = Bun.file(join(firstDirectory, `${artifact}.${extension}`))
+        const secondArtifact = Bun.file(join(secondDirectory, `${artifact}.${extension}`))
+        expect(await firstArtifact.exists()).toBeTrue()
+        expect(await firstArtifact.arrayBuffer()).toEqual(await secondArtifact.arrayBuffer())
+      }
+      expect(await Bun.file(join(firstDirectory, `${artifact}.svg`)).exists()).toBeFalse()
+      const proof = await Bun.file(join(firstDirectory, `${artifact}.json`)).json()
+      expect(proof.assertions.every((assertion: { passed: boolean }) => assertion.passed)).toBeTrue()
+    }
+
+    await rm(secondDirectory, { recursive: true, force: true })
+  })
 })

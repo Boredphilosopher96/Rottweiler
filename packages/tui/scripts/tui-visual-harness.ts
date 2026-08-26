@@ -18,7 +18,7 @@ import type { RottweilerState, ToolProjection } from "../src/state"
 import { createInitialState } from "../src/state"
 import { kennelTheme } from "../src/theme"
 
-type VisualScenario = "conversation" | "command-palette" | "approval" | "tools" | "theme-browser"
+type VisualScenario = "conversation" | "command-palette" | "approval" | "tools" | "theme-browser" | "settings-browser"
 
 const TOOLS_FIXTURE_NOW_MS = Date.parse("2026-01-01T12:00:41.000Z")
 const scenarioInput = process.argv[2] ?? "conversation"
@@ -67,6 +67,13 @@ try {
     setup.mockInput.pressEnter()
     await Bun.sleep(0)
     await setup.flush()
+  } else if (scenarioInput === "settings-browser") {
+    actions.push("typed /sett into the production composer input")
+    await setup.mockInput.typeText("/sett")
+    actions.push("pressed Enter to activate the /settings slash completion")
+    setup.mockInput.pressEnter()
+    await Bun.sleep(0)
+    await setup.flush()
   } else if (scenarioInput === "approval") {
     actions.push("launched a session with a pending terminal-command approval")
   } else {
@@ -80,25 +87,31 @@ try {
     ...visualAssertions(scenarioInput, characterFrame, styledFrame),
     ...(scenarioInput === "command-palette" ? commandPaletteLayoutAssertions(app) : []),
     ...(scenarioInput === "theme-browser" ? themeBrowserLayoutAssertions(app) : []),
+    ...(scenarioInput === "settings-browser" ? settingsBrowserLayoutAssertions(app, "wide") : []),
   ]
-  await writeRasterPng(styledFrame, join(outputDirectory, `${scenarioInput}.png`))
-  await Promise.all([
-    writeFile(join(outputDirectory, `${scenarioInput}.txt`), characterFrame),
-    writeFile(join(outputDirectory, `${scenarioInput}.ansi`), frameAnsi(styledFrame)),
-    writeFile(join(outputDirectory, `${scenarioInput}.json`), JSON.stringify({
-      scenario: scenarioInput,
-      terminal: { columns: styledFrame.cols, rows: styledFrame.rows },
-      presentationContract: {
-        ansi: "24-bit terminal-native text runs",
-        png: "direct raster text runs with a system monospace font",
-        characterSvg: false,
-      },
-      actions,
-      assertions,
-    }, null, 2) + "\n"),
-  ])
+  await writeEvidence(outputDirectory, scenarioInput, styledFrame, characterFrame, actions, assertions)
 
-  const failed = assertions.filter((assertion) => !assertion.passed)
+  const failed = [...assertions.filter((assertion) => !assertion.passed)]
+  if (scenarioInput === "settings-browser") {
+    actions.push("resized the production renderer to 72 by 18 columns")
+    setup.resize(72, 18)
+    await setup.flush()
+    const narrowCharacterFrame = setup.captureCharFrame()
+    const narrowStyledFrame = setup.captureSpans()
+    const narrowAssertions = [
+      ...settingsBrowserNarrowAssertions(narrowCharacterFrame, narrowStyledFrame),
+      ...settingsBrowserLayoutAssertions(app, "narrow"),
+    ]
+    await writeEvidence(
+      outputDirectory,
+      "settings-browser-narrow",
+      narrowStyledFrame,
+      narrowCharacterFrame,
+      actions,
+      narrowAssertions,
+    )
+    failed.push(...narrowAssertions.filter((assertion) => !assertion.passed))
+  }
   if (failed.length > 0) {
     throw new Error(`Visual proof failed: ${failed.map((assertion) => assertion.name).join(", ")}`)
   }
@@ -110,7 +123,7 @@ try {
 }
 
 function isVisualScenario(value: string): value is VisualScenario {
-  return value === "conversation" || value === "command-palette" || value === "approval" || value === "tools" || value === "theme-browser"
+  return value === "conversation" || value === "command-palette" || value === "approval" || value === "tools" || value === "theme-browser" || value === "settings-browser"
 }
 
 function scenarioAssertions(scenario: VisualScenario): readonly string[] {
@@ -139,6 +152,16 @@ function scenarioAssertions(scenario: VisualScenario): readonly string[] {
         "Markdown roles",
         "Themes change semantic roles, not layout.",
         "↑↓ preview · ⏎ apply · esc cancel",
+      ]
+    case "settings-browser":
+      return [
+        "SETTINGS   /settings",
+        "Filter settings…",
+        "MODEL & ROUTING",
+        "Fast thinking",
+        "current    medium",
+        "choices    low · medium · high",
+        "Enter choose · Esc close",
       ]
   }
 }
@@ -263,6 +286,36 @@ function visualAssertions(
       backgroundAssertion(styledFrame, "theme surface occludes underlying content", 0, 0, kennelTheme.background),
     ]
   }
+  if (scenario === "settings-browser") {
+    const lines = characterFrame.split("\n")
+    const prohibited = ["save", "reset", "discard", "diff", ".rottweiler/config.toml"]
+    const malformedSpacing = ["s e t t i n g", "F a s t", "c u r r e n t", "a p p l y"]
+    return [
+      ...assertions,
+      positionAssertion(lines, "settings heading starts at the design column", 0, 1, "SETTINGS   /settings"),
+      positionAssertion(lines, "settings divider is fixed at column 30", 0, 30, "│"),
+      positionAssertion(lines, "settings detail content starts at column 32", 0, 32, "Fast thinking"),
+      frameSizeAssertion(lines, 110, 32),
+      {
+        name: "settings divider spans exactly the primary surface",
+        passed: lines.slice(0, 27).every((line) => line[30] === "│") && lines[27]?.[30] !== "│",
+        expected: "divider at column 30 only for rows 0-26",
+        actual: lines.map((line, row) => line[30] === "│" ? row : -1).filter((row) => row >= 0).join(","),
+      },
+      {
+        name: "settings labels use complete text runs",
+        passed: malformedSpacing.every((text) => !characterFrame.includes(text)),
+        expected: "intact settings labels and details",
+        actual: malformedSpacing.filter((text) => characterFrame.includes(text)).join(",") || "intact",
+      },
+      settingsOcclusionAssertion(characterFrame),
+      unsupportedSettingsClaimsAssertion(characterFrame, prohibited),
+      colorAssertion(styledFrame, "settings selection marker uses primary", 4, 1, kennelTheme.primary, kennelTheme.backgroundPanel),
+      colorAssertion(styledFrame, "settings divider uses subtle border", 0, 30, kennelTheme.borderSubtle),
+      colorAssertion(styledFrame, "settings detail heading remains readable", 0, 32, kennelTheme.text, kennelTheme.background),
+      backgroundAssertion(styledFrame, "settings surface occludes underlying content", 0, 0, kennelTheme.background),
+    ]
+  }
   if (scenario !== "conversation") return assertions
 
   const lines = characterFrame.split("\n")
@@ -355,6 +408,110 @@ function themeBrowserLayoutAssertions(
   ]
 }
 
+function settingsBrowserLayoutAssertions(
+  app: ReturnType<typeof createRottweilerApp>,
+  size: "wide" | "narrow",
+): readonly VisualAssertion[] {
+  const browser = app.settingsBrowser
+  if (size === "narrow") {
+    return [
+      exactValueAssertion("narrow settings surface begins at column 0", browser.x, 0),
+      exactValueAssertion("narrow settings surface begins at row 0", browser.y, 0),
+      exactValueAssertion("narrow settings surface is 72 cells wide", browser.width, 72),
+      exactValueAssertion("narrow settings surface is 13 rows tall", browser.height, 13),
+      exactValueAssertion("narrow settings list begins at column 1", browser.listPane.x, 1),
+      exactValueAssertion("narrow settings list is 70 cells wide", browser.listPane.width, 70),
+      {
+        name: "narrow settings uses the single-pane layout",
+        passed: browser.layoutMode === "single" && !browser.divider.visible && !browser.detailPane.visible,
+        expected: "single pane with hidden divider and detail pane",
+        actual: `${browser.layoutMode}; divider ${browser.divider.visible}; detail ${browser.detailPane.visible}`,
+      },
+      {
+        name: "narrow settings preserves compact current-value detail",
+        passed: browser.compactDetail.visible && browser.compactDetail.plainText.includes("current    medium"),
+        expected: "visible compact current    medium",
+        actual: browser.compactDetail.visible ? browser.compactDetail.plainText : "hidden",
+      },
+    ]
+  }
+  return [
+    exactValueAssertion("settings surface begins at column 0", browser.x, 0),
+    exactValueAssertion("settings surface begins at row 0", browser.y, 0),
+    exactValueAssertion("settings surface is 110 cells wide", browser.width, 110),
+    exactValueAssertion("settings surface is 27 rows tall", browser.height, 27),
+    exactValueAssertion("settings list pane begins at column 1", browser.listPane.x, 1),
+    exactValueAssertion("settings list pane is 29 cells wide", browser.listPane.width, 29),
+    exactValueAssertion("settings divider is fixed at column 30", browser.divider.x, 30),
+    exactValueAssertion("settings detail begins at column 31", browser.detailPane.x, 31),
+    exactValueAssertion("settings detail is 78 cells wide", browser.detailPane.width, 78),
+    {
+      name: "settings browser owns focus after slash activation",
+      passed: browser.input.focused,
+      expected: "focused settings query",
+      actual: browser.input.focused ? "focused settings query" : "not focused",
+    },
+  ]
+}
+
+function settingsBrowserNarrowAssertions(
+  characterFrame: string,
+  styledFrame: CapturedFrame,
+): readonly VisualAssertion[] {
+  const lines = characterFrame.split("\n")
+  const required = [
+    "SETTINGS   /settings",
+    "Filter settings…",
+    "MODEL & ROUTING",
+    "Fast thinking",
+    "current    medium",
+  ]
+  return [
+    ...required.map((text): VisualAssertion => ({
+      name: `narrow visible text: ${text}`,
+      passed: characterFrame.includes(text),
+      expected: text,
+      actual: characterFrame.includes(text) ? text : "missing",
+    })),
+    frameSizeAssertion(lines, 72, 18),
+    {
+      name: "narrow settings does not retain a split-pane divider",
+      passed: lines.slice(0, 13).every((line) => line[30] !== "│"),
+      expected: "no settings divider at column 30",
+      actual: lines.map((line, row) => line[30] === "│" ? row : -1).filter((row) => row >= 0).join(",") || "hidden",
+    },
+    settingsOcclusionAssertion(characterFrame),
+    unsupportedSettingsClaimsAssertion(characterFrame, ["save", "reset", "discard", "diff", ".rottweiler/config.toml"]),
+    colorAssertion(styledFrame, "narrow settings selection marker uses primary", 4, 1, kennelTheme.primary, kennelTheme.backgroundPanel),
+    backgroundAssertion(styledFrame, "narrow settings surface occludes underlying content", 0, 0, kennelTheme.background),
+  ]
+}
+
+function settingsOcclusionAssertion(characterFrame: string): VisualAssertion {
+  const leaked = ["AGENTS", "▌ you", "● rottweiler", "\n╎"].filter((text) => characterFrame.includes(text))
+  return {
+    name: "settings surface fully occludes prior conversation and context",
+    passed: leaked.length === 0,
+    expected: "no prior screen labels or gutter glyphs",
+    actual: leaked.join(",") || "occluded",
+  }
+}
+
+function unsupportedSettingsClaimsAssertion(
+  characterFrame: string,
+  prohibited: readonly string[],
+): VisualAssertion {
+  const found = prohibited.filter((claim) => claim.startsWith(".")
+    ? characterFrame.includes(claim)
+    : new RegExp(`\\b${claim}\\b`, "i").test(characterFrame))
+  return {
+    name: "unsupported staged-editor and config-file claims are absent",
+    passed: found.length === 0,
+    expected: "no save, reset, discard, diff, or config path claims",
+    actual: found.join(",") || "absent",
+  }
+}
+
 function exactValueAssertion(name: string, actual: number, expected: number): VisualAssertion {
   return {
     name,
@@ -369,12 +526,20 @@ function occurrenceCount(value: string, needle: string): number {
 }
 
 function frameWidthAssertion(lines: readonly string[]): VisualAssertion {
-  const widths = lines.slice(0, 32).map((line) => Bun.stringWidth(line))
+  return frameSizeAssertion(lines, 110, 32)
+}
+
+function frameSizeAssertion(
+  lines: readonly string[],
+  columns: number,
+  rows: number,
+): VisualAssertion {
+  const widths = lines.slice(0, rows).map((line) => Bun.stringWidth(line))
   const actual = `${widths.length} rows; widths ${Math.min(...widths)}-${Math.max(...widths)}`
   return {
-    name: "every terminal row retains the complete 110-cell frame",
-    passed: widths.length === 32 && widths.every((width) => width === 110),
-    expected: "32 rows; widths 110-110",
+    name: `every terminal row retains the complete ${columns}-cell frame`,
+    passed: widths.length === rows && widths.every((width) => width === columns),
+    expected: `${rows} rows; widths ${columns}-${columns}`,
     actual,
   }
 }
@@ -465,6 +630,32 @@ function normalizeHex(color: string): string {
   return color.toUpperCase()
 }
 
+async function writeEvidence(
+  directory: string,
+  artifactName: string,
+  styledFrame: CapturedFrame,
+  characterFrame: string,
+  actions: readonly string[],
+  assertions: readonly VisualAssertion[],
+): Promise<void> {
+  await writeRasterPng(styledFrame, join(directory, `${artifactName}.png`))
+  await Promise.all([
+    writeFile(join(directory, `${artifactName}.txt`), characterFrame),
+    writeFile(join(directory, `${artifactName}.ansi`), frameAnsi(styledFrame)),
+    writeFile(join(directory, `${artifactName}.json`), JSON.stringify({
+      scenario: artifactName,
+      terminal: { columns: styledFrame.cols, rows: styledFrame.rows },
+      presentationContract: {
+        ansi: "24-bit terminal-native text runs",
+        png: "direct raster text runs with a system monospace font",
+        characterSvg: false,
+      },
+      actions,
+      assertions,
+    }, null, 2) + "\n"),
+  ])
+}
+
 async function settleHighlights(
   root: BaseRenderable,
   renderer: Awaited<ReturnType<typeof createTestRenderer>>,
@@ -488,6 +679,7 @@ async function settleHighlights(
 
 function scenarioState(scenario: VisualScenario): RottweilerState {
   if (scenario === "tools") return toolsState()
+  if (scenario === "settings-browser") return settingsState()
   const state = conversationState()
   if (scenario !== "approval") return state
   const approval = tool({
@@ -512,6 +704,94 @@ function scenarioState(scenario: VisualScenario): RottweilerState {
       finished: null,
     },
     tools: { [approval.toolCallId]: approval },
+  }
+}
+
+function settingsState(): RottweilerState {
+  return {
+    ...conversationState(),
+    settings: [
+      {
+        key: "models.thinking.fast",
+        label: "Fast thinking",
+        value: "medium",
+        choices: ["low", "medium", "high"],
+        provenance: "user",
+        appliesImmediately: false,
+      },
+      {
+        key: "project.models.default",
+        label: "Project default model",
+        value: "gpt-5",
+        choices: ["gpt-5"],
+        provenance: "private project preference",
+        appliesImmediately: false,
+      },
+      {
+        key: "permissions.default",
+        label: "Default approval policy",
+        value: "ask",
+        choices: ["ask", "allow", "deny"],
+        provenance: "user",
+        appliesImmediately: false,
+      },
+      {
+        key: "compaction.auto",
+        label: "Automatic compaction",
+        value: "true",
+        choices: ["true", "false"],
+        provenance: "built-in",
+        appliesImmediately: false,
+      },
+      {
+        key: "budget.session_token_cap",
+        label: "Session token cap",
+        value: "250000",
+        choices: [],
+        provenance: "user",
+        appliesImmediately: false,
+      },
+      {
+        key: "budget.warn_at_percent",
+        label: "Budget warning",
+        value: "80",
+        choices: [],
+        provenance: "user",
+        appliesImmediately: false,
+      },
+      {
+        key: "mcp.servers.docs.enabled",
+        label: "MCP · docs",
+        value: "true",
+        choices: ["true", "false"],
+        provenance: "user MCP configuration",
+        appliesImmediately: false,
+      },
+      {
+        key: "ui.theme",
+        label: "Theme",
+        value: "kennel",
+        choices: [],
+        provenance: "user",
+        appliesImmediately: false,
+      },
+      {
+        key: "ui.keybindings.preset",
+        label: "Keybinding preset",
+        value: "standard",
+        choices: ["standard", "vim"],
+        provenance: "user",
+        appliesImmediately: false,
+      },
+      {
+        key: "telemetry.detail",
+        label: "Telemetry detail",
+        value: "minimal",
+        choices: ["off", "minimal"],
+        provenance: "built-in",
+        appliesImmediately: false,
+      },
+    ],
   }
 }
 

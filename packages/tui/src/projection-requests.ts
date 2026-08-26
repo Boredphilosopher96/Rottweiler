@@ -89,9 +89,11 @@ interface ProjectionRequestBrokerOptions {
 }
 
 const MAX_PENDING_MODEL_SWITCH_REQUESTS = 128
+const MAX_PENDING_SETTING_REQUESTS = 128
 
 export class ProjectionRequestBroker {
   readonly #options: ProjectionRequestBrokerOptions
+  readonly #settingPredecessors = new Map<string, string | null>()
   readonly #latestRequests: Record<ProjectionRequestKind, string | null> = {
     commands: null,
     modes: null,
@@ -172,6 +174,7 @@ export class ProjectionRequestBroker {
     for (const kind of Object.keys(this.#latestRequests) as ProjectionRequestKind[]) {
       this.#forget(kind)
     }
+    this.#settingPredecessors.clear()
     this.#workspaceDiffPath = null
     this.#filePreview = null
     this.#forkRequests.clear()
@@ -321,6 +324,7 @@ export class ProjectionRequestBroker {
       case "settings_listed":
         // The latest settings id intentionally survives. A set_setting response
         // supersedes an older list_settings response while only the loading flag clears.
+        this.#settingPredecessors.clear()
         this.clear("settings_pending")
         return "settings"
       case "permissions_listed":
@@ -383,12 +387,19 @@ export class ProjectionRequestBroker {
         this.#track("sessions", requestId)
         break
       case "list_settings":
+        this.#settingPredecessors.clear()
         this.#latestRequests.settings = requestId
         this.#track("settings_pending", requestId)
         break
-      case "set_setting":
+      case "set_setting": {
+        if (this.#settingPredecessors.size >= MAX_PENDING_SETTING_REQUESTS) {
+          const oldest = this.#settingPredecessors.keys().next().value
+          if (oldest !== undefined) this.#settingPredecessors.delete(oldest)
+        }
+        this.#settingPredecessors.set(requestId, this.#latestRequests.settings)
         this.#latestRequests.settings = requestId
         break
+      }
       case "list_permissions":
         this.#track("permissions", requestId)
         break
@@ -431,6 +442,7 @@ export class ProjectionRequestBroker {
   }
 
   #forget(kind: ProjectionRequestKind): void {
+    if (kind === "settings") this.#settingPredecessors.clear()
     this.#latestRequests[kind] = null
     this.clear(kind)
   }
@@ -468,10 +480,18 @@ export class ProjectionRequestBroker {
     const kind = projectionKind(type)
     if (kind === null) {
       if (type === "switch_model") this.#modelSwitchRequests.delete(requestId)
+      if (type === "set_setting") {
+        if (this.#latestRequests.settings === requestId) {
+          this.#latestRequests.settings = this.#settingPredecessors.get(requestId) ?? null
+        }
+        this.#settingPredecessors.delete(requestId)
+      }
       this.#options.onCommandFailure(type, requestId, outcome, message, failure)
       return
     }
-    if (!this.matches(kind, requestId)) return
+    if (kind === "settings") {
+      if (!this.matches("settings_pending", requestId) || !this.accepts("settings", requestId)) return
+    } else if (!this.matches(kind, requestId)) return
     if (kind === "commands" || kind === "modes" || kind === "models" || kind === "permissions" || kind === "mcp" || kind === "runtime_services") {
       this.clear(kind)
     } else if (kind === "settings") {

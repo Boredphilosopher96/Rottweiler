@@ -2943,9 +2943,9 @@ describe("Rottweiler OpenTUI shell", () => {
 
     app.openSettingsPicker()
     const olderRequest = emitted.findLast((command) => command.type === "list_settings")
-    const disabled = app.picker.select.options.findIndex(
-      (option) => option.value === "compaction.auto:false",
-    )
+    app.settingsBrowser.selectById("compaction.auto")
+    app.settingsBrowser.activateSelected()
+    const disabled = app.picker.select.options.findIndex((option) => option.value === "false")
     app.picker.select.setSelectedIndex(disabled)
     app.picker.select.selectCurrent()
     const newerRequest = emitted.findLast((command) => command.type === "set_setting")
@@ -2977,6 +2977,202 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.state.settings).toEqual([
       expect.objectContaining({ key: "compaction.auto", value: "false" }),
     ])
+  })
+
+  test("opens the retained Settings browser and applies authoritative choices immediately", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        connection: { phase: "connected", attempt: 0, error: null, gap: null },
+        settings: [
+          { key: "compaction.auto", label: "Automatic compaction", value: "true", choices: ["true", "false"], provenance: "user", appliesImmediately: false },
+          { key: "ui.theme", label: "Theme", value: "opencode", choices: [], provenance: "user", appliesImmediately: false },
+          { key: "project.models.default", label: "Project default model", value: "fast", choices: ["fast"], provenance: "private project preference", appliesImmediately: false },
+        ],
+      },
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+
+    app.openSettingsPicker()
+    await setup.renderOnce()
+    expect(emitted.at(-1)).toEqual(expect.objectContaining({ type: "list_settings" }))
+    expect(app.settingsBrowser.visible).toBeTrue()
+    expect(app.picker.visible).toBeFalse()
+    expect(app.settingsBrowser.divider.x).toBe(30)
+    expect(app.settingsBrowser.detailPane.x).toBe(31)
+
+    app.settingsBrowser.selectById("compaction.auto")
+    expect(app.settingsBrowser.activateSelected()).toBeTrue()
+    expect(app.picker.visible).toBeTrue()
+    const disabled = app.picker.select.options.findIndex((option) => option.value === "false")
+    app.picker.select.setSelectedIndex(disabled)
+    app.picker.select.selectCurrent()
+    expect(emitted.at(-1)).toEqual(expect.objectContaining({
+      type: "set_setting",
+      key: "compaction.auto",
+      value: "false",
+    }))
+    expect(app.settingsBrowser.visible).toBeTrue()
+    const write = emitted.at(-1)
+    if (write?.type !== "set_setting") throw new Error("missing settings write")
+    app.handleEvent({
+      type: "settings_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "ui",
+        request_id: write.meta.request_id,
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "session-local",
+      settings: [
+        { key: "compaction.auto", label: "Automatic compaction", value: "false", choices: ["true", "false"], provenance: "user", applies_immediately: false },
+        { key: "ui.theme", label: "Theme", value: "opencode", choices: [], provenance: "user", applies_immediately: false },
+        { key: "project.models.default", label: "Project default model", value: "fast", choices: ["fast"], provenance: "private project preference", applies_immediately: false },
+      ],
+    })
+    app.settingsBrowser.selectById("compaction.auto")
+    expect(app.settingsBrowser.detail.plainText).toContain("current    false")
+
+    const beforeInspect = emitted.length
+    app.settingsBrowser.selectById("project.models.default")
+    expect(app.settingsBrowser.footer.plainText).toContain("Read only")
+    expect(app.settingsBrowser.activateSelected()).toBeTrue()
+    expect(emitted).toHaveLength(beforeInspect)
+
+    app.settingsBrowser.selectById("ui.theme")
+    expect(app.settingsBrowser.activateSelected()).toBeTrue()
+    expect(app.settingsBrowser.visible).toBeFalse()
+    expect(app.themeBrowser.visible).toBeTrue()
+  })
+
+  test("keeps cached Settings truthful on rejection and retries a failed list", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
+    renderer = setup.renderer
+    let listAttempts = 0
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        settings: [{ key: "compaction.auto", label: "Automatic compaction", value: "true", choices: ["true", "false"], provenance: "user", appliesImmediately: false }],
+      },
+      onCommand(command) {
+        if (command.type === "list_settings") {
+          listAttempts += 1
+          return {
+            type: "rejected",
+            error: { category: "protocol", code: "settings_unavailable", message: "settings unavailable", retryable: true },
+          }
+        }
+        if (command.type === "set_setting") {
+          return {
+            type: "rejected",
+            error: { category: "protocol", code: "setting_rejected", message: "setting rejected", retryable: true },
+          }
+        }
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+
+    app.openSettingsPicker()
+    await Bun.sleep(10)
+    await setup.renderOnce()
+    expect(app.settingsBrowser.itemIds).toContain("compaction.auto")
+    expect(app.settingsBrowser.footer.plainText).toContain("settings unavailable")
+    expect(listAttempts).toBe(1)
+    setup.mockInput.pressKey("r", { ctrl: true })
+    await Bun.sleep(0)
+    expect(listAttempts).toBe(2)
+
+    app.settingsBrowser.selectById("compaction.auto")
+    app.settingsBrowser.activateSelected()
+    const disabled = app.picker.select.options.findIndex((option) => option.value === "false")
+    app.picker.select.setSelectedIndex(disabled)
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    expect(app.settingsBrowser.visible).toBeTrue()
+    expect(app.settingsBrowser.detail.plainText).toContain("current    true")
+    expect(app.banner.plainText).toContain("setting rejected")
+  })
+
+  test("keeps Settings full-primary, responsive, and explicit about Vim Escape", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      keybindings: { preset: "vim" },
+      initialState: {
+        ...createInitialState(),
+        settings: [{ key: "compaction.auto", label: "Automatic compaction", value: "true", choices: ["true", "false"], provenance: "user", appliesImmediately: false }],
+      },
+    })
+    renderer.root.add(app)
+    app.openSettingsPicker()
+    await setup.renderOnce()
+
+    expect(app.settingsBrowser.x).toBe(0)
+    expect(app.settingsBrowser.y).toBe(0)
+    expect(app.settingsBrowser.height).toBe(app.main.height)
+    expect(app.settingsBrowser.divider.x).toBe(30)
+    expect(app.settingsBrowser.detailPane.x).toBe(31)
+    expect(app.settingsBrowser.footer.plainText).toContain("Esc×2 close")
+
+    setup.resize(89, 18)
+    await setup.renderOnce()
+    await setup.renderOnce()
+    expect(app.settingsBrowser.layoutMode).toBe("single")
+    expect(app.settingsBrowser.divider.visible).toBeFalse()
+    expect(app.settingsBrowser.detailPane.visible).toBeFalse()
+    expect(app.settingsBrowser.compactDetail.plainText).toContain("current    true")
+
+    setup.resize(72, 18)
+    await setup.renderOnce()
+    await setup.renderOnce()
+    expect(app.settingsBrowser.listPane.width).toBe(70)
+    setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+    expect(app.settingsBrowser.visible).toBeTrue()
+    setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+    expect(app.settingsBrowser.visible).toBeFalse()
+  })
+
+  test("returns to the retained Settings browser when a value chooser is cancelled", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        settings: [{
+          key: "compaction.auto",
+          label: "Automatic compaction",
+          value: "true",
+          choices: ["true", "false"],
+          provenance: "user",
+          appliesImmediately: false,
+        }],
+      },
+    })
+    renderer.root.add(app)
+
+    app.openSettingsPicker()
+    app.settingsBrowser.selectById("compaction.auto")
+    app.settingsBrowser.activateSelected()
+    expect(app.picker.visible).toBeTrue()
+    expect(app.settingsBrowser.visible).toBeFalse()
+
+    setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+
+    expect(app.picker.visible).toBeFalse()
+    expect(app.settingsBrowser.visible).toBeTrue()
+    expect(renderer.currentFocusedRenderable).toBe(app.settingsBrowser.input)
+    expect(app.settingsBrowser.selectedId).toBe("compaction.auto")
   })
 
   test("derives palette binding hints from custom compiled global bindings", () => {
@@ -6561,17 +6757,17 @@ describe("Rottweiler OpenTUI shell", () => {
 
     expect(app.picker.input.isDestroyed).toBeFalse()
     app.openSettingsPicker()
-    const settingOptions = app.picker.select.options.map((option) => option.value)
-    expect(settingOptions).toContain("models.thinking.fast:high")
-    expect(settingOptions).toContain("permissions.default:deny")
-    expect(settingOptions).toContain("compaction.auto:false")
-    expect(settingOptions).toContain("ui.keybindings.preset:vim")
-    expect(settingOptions).toContain("mcp.servers.docs.enabled:false")
-    const tokyoNight = app.picker.select.options.findIndex(
-      (option) => option.value === "ui.theme:tokyonight",
-    )
-    app.picker.select.setSelectedIndex(tokyoNight)
-    app.picker.select.selectCurrent()
+    const settingOptions = app.settingsBrowser.itemIds
+    expect(settingOptions).toContain("models.thinking.fast")
+    expect(settingOptions).toContain("permissions.default")
+    expect(settingOptions).toContain("compaction.auto")
+    expect(settingOptions).toContain("ui.keybindings.preset")
+    expect(settingOptions).toContain("mcp.servers.docs.enabled")
+    app.settingsBrowser.selectById("ui.theme")
+    app.settingsBrowser.activateSelected()
+    app.themeBrowser.selectById("theme:tokyonight")
+    app.themeBrowser.activateSelected()
+    await Bun.sleep(10)
     expect(emitted).toContainEqual(expect.objectContaining({
       type: "set_setting",
       key: "ui.theme",

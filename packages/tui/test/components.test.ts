@@ -145,6 +145,24 @@ const listDetailRows: readonly ListDetailRow<string>[] = [
 ]
 
 describe("list-detail", () => {
+  test("uses presentation-owned empty copy for request states", () => {
+    return createTestRenderer({ width: 80, height: 18, useThread: false }).then(({ renderer: testRenderer }) => {
+      renderer = testRenderer
+      const list = new ListDetailRenderable<string>(testRenderer, kennelTheme)
+      testRenderer.root.add(list)
+      list.open({
+        title: "SETTINGS   /settings",
+        query: "",
+        rows: [],
+        selectedId: null,
+        status: "Loading settings",
+        emptyCopy: "Loading settings",
+      }, () => {})
+      expect(list.detail.plainText).toBe("Loading settings")
+      expect(list.compactDetail.plainText).toBe("Loading settings")
+    })
+  })
+
   let renderer: TestRenderer | undefined
 
   afterEach(() => {
