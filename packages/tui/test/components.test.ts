@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { CliRenderEvents, CodeRenderable, DiffRenderable, parseKeypress, SyntaxStyle } from "@opentui/core"
+import { CliRenderEvents, CodeRenderable, DiffRenderable, StyledText, bold, fg, parseKeypress, SyntaxStyle } from "@opentui/core"
 import {
   createTestRenderer,
   MockTreeSitterClient,
@@ -166,6 +166,129 @@ describe("list-detail", () => {
     expect(list.divider.width).toBe(1)
     expect(list.detailPane.width).toBe(51)
     expect(list.divider.x).toBe(list.listPane.x + 52)
+  })
+
+  test("supports a 34-cell list and complete styled theme rows and detail without changing defaults", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
+    renderer = setup.renderer
+    const list = new ListDetailRenderable<string>(renderer, kennelTheme, {
+      splitListWidth: 34,
+      inputPlaceholder: "Filter themes…",
+      emptyCopy: "No matching themes",
+      renderRow(row, selected) {
+        return new StyledText([
+          fg(kennelTheme.primary)(selected ? "▸ " : "  "),
+          bold(fg(kennelTheme.text)(row.label)),
+          fg(kennelTheme.background)("██"),
+          fg(kennelTheme.primary)("██"),
+        ])
+      },
+      renderDetail(row) {
+        return new StyledText([
+          bold(fg(kennelTheme.text)(row.detail.title)),
+          fg(kennelTheme.textMuted)("  dark · 52 roles resolved · live sample"),
+          fg(kennelTheme.primary)("\n▌ you"),
+        ])
+      },
+    })
+    renderer.root.add(list)
+    list.open({
+      title: "THEME   34 themes   /theme",
+      query: "",
+      rows: listDetailRows,
+      selectedId: "compact",
+      status: "34 themes · dark · 0 custom",
+    }, () => {})
+    await setup.renderOnce()
+
+    expect(list.listPane.width).toBe(34)
+    expect(list.divider.width).toBe(1)
+    expect(list.detailPane.width).toBe(69)
+    expect(list.divider.x).toBe(list.listPane.x + 34)
+    expect(list.input.placeholder).toBe("Filter themes…")
+    expect((list.rowViews[1]?.content as StyledText).chunks.map((chunk) => chunk.text)).toEqual([
+      "▸ ", "Compact context", "██", "██",
+    ])
+    expect((list.detail.content as StyledText).chunks.map((chunk) => chunk.text)).toEqual([
+      "Compact context", "  dark · 52 roles resolved · live sample", "\n▌ you",
+    ])
+
+    list.scrollViewport(5)
+    expect(list.scrollOffset).toBe(5)
+    list.restoreViewport(2)
+    expect(list.scrollOffset).toBe(2)
+    list.resizeForTerminal(80, 18)
+    expect(list.layoutMode).toBe("split")
+    expect(list.listPane.width).toBe(34)
+    list.resizeForTerminal(79, 18)
+    expect(list.layoutMode).toBe("single")
+    expect(list.divider.visible).toBeFalse()
+    expect(list.detailPane.visible).toBeFalse()
+
+    list.open({
+      title: "THEME   34 themes   /theme",
+      query: "none",
+      rows: [],
+      selectedId: null,
+      status: "0 of 34 themes · dark · 0 custom",
+    }, () => {})
+    expect(list.detail.plainText).toBe("No matching themes")
+    expect(list.compactDetail.plainText).toBe("No matching themes")
+  })
+
+  test("lays the theme variant over the complete primary surface", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
+    renderer = setup.renderer
+    const list = new ListDetailRenderable<string>(renderer, kennelTheme, {
+      surfaceLayout: "primary",
+      splitListWidth: 33,
+      splitMinWidth: 100,
+      compactMinHeight: 8,
+    })
+    renderer.root.add(list)
+    list.open({
+      title: "THEME   34 themes   /theme",
+      query: "",
+      rows: listDetailRows,
+      selectedId: "compact",
+      status: "34 themes · dark · 0 custom",
+    }, () => {})
+    await setup.renderOnce()
+
+    expect(list.x).toBe(0)
+    expect(list.y).toBe(0)
+    expect(list.width).toBe(110)
+    expect(list.height).toBe(27)
+    expect(list.listPane.x).toBe(1)
+    expect(list.listPane.width).toBe(33)
+    expect(list.divider.x).toBe(34)
+    expect(list.divider.y).toBe(0)
+    expect(list.divider.height).toBe(27)
+    expect(list.detailPane.x).toBe(35)
+    expect(list.detailPane.y).toBe(0)
+    expect(list.detailPane.width).toBe(74)
+    expect(list.footer.width).toBe(33)
+
+    list.resizeForTerminal(99, 32, 27)
+    await setup.renderOnce()
+    expect(list.layoutMode).toBe("single")
+    expect(list.listPane.width).toBe(97)
+    expect(list.detailPane.visible).toBeFalse()
+    expect(list.compactDetail.visible).toBeTrue()
+    expect(list.compactDetail.plainText).toBe("Compact the conversation context")
+
+    list.resizeForTerminal(100, 32, 27)
+    await setup.renderOnce()
+    expect(list.layoutMode).toBe("split")
+    expect(list.listPane.width).toBe(33)
+    expect(list.detailPane.x).toBe(35)
+    expect(list.detailPane.width).toBe(64)
+
+    list.resizeForTerminal(64, 14, 9)
+    await setup.renderOnce()
+    expect(list.layoutMode).toBe("single")
+    expect(list.compactDetail.visible).toBeTrue()
+    expect(list.compactDetail.plainText).toBe("Compact the conversation context")
   })
 
   test("updates detail with selection and keeps scrolling independent", async () => {

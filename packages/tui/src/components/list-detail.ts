@@ -53,6 +53,27 @@ export interface ListDetailHandlers<Action> {
   readonly onRetry?: () => void
 }
 
+export interface ListDetailOptions<Action> {
+  readonly surfaceLayout?: "modal" | "primary"
+  readonly splitListWidth?: number
+  readonly splitMinWidth?: number
+  readonly compactMinHeight?: number
+  readonly inputPlaceholder?: string
+  readonly emptyCopy?: string
+  readonly showCompactDetail?: boolean
+  readonly surfaceBackground?: string
+  readonly renderRow?: (
+    row: ListDetailItemRow<Action>,
+    selected: boolean,
+    availableWidth: number,
+  ) => StyledText | string
+  readonly renderDetail?: (
+    row: ListDetailItemRow<Action>,
+    availableWidth: number,
+    availableHeight: number,
+  ) => StyledText | string
+}
+
 export class ListDetailRenderable<Action> extends BoxRenderable {
   readonly heading: TextRenderable
   readonly input: InputRenderable
@@ -71,6 +92,8 @@ export class ListDetailRenderable<Action> extends BoxRenderable {
   #pressedRowId: string | null = null
   #handlers: ListDetailHandlers<Action> | null = null
   #theme: RottweilerTheme
+  #options: ListDetailOptions<Action>
+  #surfaceBackground: string
   #layoutMode: "split" | "single" = "split"
   #visibleRows = 20
   #listWidth = 52
@@ -105,16 +128,23 @@ export class ListDetailRenderable<Action> extends BoxRenderable {
     key.stopPropagation()
   }
 
-  constructor(ctx: RenderContext, theme: RottweilerTheme) {
+  constructor(
+    ctx: RenderContext,
+    theme: RottweilerTheme,
+    options: ListDetailOptions<Action> = {},
+  ) {
+    const surfaceBackground = options.surfaceBackground ?? theme.backgroundElement
     super(ctx, {
       id: "list-detail",
       position: "absolute",
-      backgroundColor: theme.backgroundElement,
+      backgroundColor: surfaceBackground,
       visible: false,
       zIndex: 20,
       overflow: "hidden",
     })
     this.#theme = theme
+    this.#options = options
+    this.#surfaceBackground = surfaceBackground
     this.heading = new TextRenderable(ctx, {
       id: "list-detail-heading",
       position: "absolute",
@@ -125,9 +155,9 @@ export class ListDetailRenderable<Action> extends BoxRenderable {
     this.input = new InputRenderable(ctx, {
       id: "list-detail-query",
       position: "absolute",
-      placeholder: "Type to filter commands…",
-      backgroundColor: theme.backgroundElement,
-      focusedBackgroundColor: theme.backgroundElement,
+      placeholder: options.inputPlaceholder ?? "Type to filter commands…",
+      backgroundColor: surfaceBackground,
+      focusedBackgroundColor: surfaceBackground,
       textColor: theme.text,
       focusedTextColor: theme.text,
     })
@@ -142,7 +172,7 @@ export class ListDetailRenderable<Action> extends BoxRenderable {
       id: "list-detail-list",
       position: "absolute",
       overflow: "hidden",
-      backgroundColor: theme.backgroundElement,
+      backgroundColor: surfaceBackground,
     })
     this.divider = new TextRenderable(ctx, {
       id: "list-detail-divider",
@@ -155,7 +185,7 @@ export class ListDetailRenderable<Action> extends BoxRenderable {
       id: "list-detail-detail-pane",
       position: "absolute",
       overflow: "hidden",
-      backgroundColor: theme.backgroundElement,
+      backgroundColor: surfaceBackground,
       paddingLeft: 1,
     })
     this.detail = new TextRenderable(ctx, {
@@ -287,56 +317,80 @@ export class ListDetailRenderable<Action> extends BoxRenderable {
     this.compactDetail.content = ""
   }
 
-  resizeForTerminal(terminalWidth: number, terminalHeight: number): void {
-    const inset = terminalWidth >= 60 ? 1 : 0
-    const width = Math.max(1, terminalWidth - inset * 2)
-    const top = terminalHeight >= 14 ? 2 : 0
-    const height = Math.max(6, Math.min(25, terminalHeight - top - 5))
+  resizeForTerminal(
+    terminalWidth: number,
+    terminalHeight: number,
+    primaryHeight?: number,
+  ): void {
+    const primarySurface = this.#options.surfaceLayout === "primary"
+    const inset = primarySurface ? 0 : terminalWidth >= 60 ? 1 : 0
+    const width = primarySurface
+      ? Math.max(1, terminalWidth)
+      : Math.max(1, terminalWidth - inset * 2)
+    const top = primarySurface ? 0 : terminalHeight >= 14 ? 2 : 0
+    const height = primarySurface
+      ? Math.max(6, Math.min(terminalHeight, primaryHeight ?? terminalHeight - 5))
+      : Math.max(6, Math.min(25, terminalHeight - top - 5))
     this.left = inset
     this.top = top
     this.width = width
     this.height = height
 
-    const innerWidth = Math.max(1, width - 4)
-    this.#layoutMode = width >= 78 && height >= 10 ? "split" : "single"
-    const listWidth = this.#layoutMode === "split" ? Math.floor(innerWidth / 2) : innerWidth
+    const horizontalPadding = primarySurface ? 1 : 2
+    const innerWidth = Math.max(1, width - horizontalPadding * 2)
+    this.#layoutMode = width >= (this.#options.splitMinWidth ?? 78) && height >= 10
+      ? "split"
+      : "single"
+    const requestedListWidth = this.#options.splitListWidth ?? Math.floor(innerWidth / 2)
+    const listWidth = this.#layoutMode === "split"
+      ? Math.min(Math.max(1, requestedListWidth), Math.max(1, innerWidth - 2))
+      : innerWidth
     const detailWidth = this.#layoutMode === "split" ? innerWidth - listWidth - 1 : 0
-    const hasCompactDetail = this.#layoutMode === "single" && height >= 10
+    const hasCompactDetail =
+      this.#layoutMode === "single" &&
+      height >= (this.#options.compactMinHeight ?? 10) &&
+      this.#options.showCompactDetail !== false
     this.#visibleRows = Math.max(1, height - 5 - (hasCompactDetail ? 1 : 0))
     this.#listWidth = listWidth
 
-    this.heading.left = 2
+    const leftContentWidth = primarySurface && this.#layoutMode === "split"
+      ? listWidth
+      : innerWidth
+    this.heading.left = horizontalPadding
     this.heading.top = 0
-    this.heading.width = innerWidth
-    this.input.left = 2
+    this.heading.width = leftContentWidth
+    this.input.left = horizontalPadding
     this.input.top = 1
-    this.input.width = innerWidth
-    this.rule.left = 2
+    this.input.width = leftContentWidth
+    this.rule.left = horizontalPadding
     this.rule.top = 2
-    this.rule.width = innerWidth
-    this.rule.content = "─".repeat(innerWidth)
-    this.listPane.left = 2
+    this.rule.width = leftContentWidth
+    this.rule.content = "─".repeat(leftContentWidth)
+    this.listPane.left = horizontalPadding
     this.listPane.top = 3
     this.listPane.width = listWidth
     this.listPane.height = this.#visibleRows
-    this.divider.left = 2 + listWidth
-    this.divider.top = 3
+    this.divider.left = horizontalPadding + listWidth
+    this.divider.top = primarySurface ? 0 : 3
     this.divider.width = 1
-    this.divider.height = this.#visibleRows
-    this.divider.content = Array.from({ length: this.#visibleRows }, () => "│").join("\n")
+    this.divider.height = primarySurface ? height : this.#visibleRows
+    this.divider.content = Array.from(
+      { length: primarySurface ? height : this.#visibleRows },
+      () => "│",
+    ).join("\n")
     this.divider.visible = this.#layoutMode === "split"
-    this.detailPane.left = 3 + listWidth
-    this.detailPane.top = 3
+    this.detailPane.left = horizontalPadding + listWidth + 1
+    this.detailPane.top = primarySurface ? 0 : 3
     this.detailPane.width = detailWidth
-    this.detailPane.height = this.#visibleRows
+    this.detailPane.height = primarySurface ? height : this.#visibleRows
     this.detailPane.visible = this.#layoutMode === "split"
-    this.compactDetail.left = 2
+    this.compactDetail.left = horizontalPadding
     this.compactDetail.top = 3 + this.#visibleRows
     this.compactDetail.width = innerWidth
     this.compactDetail.visible = hasCompactDetail
-    this.footer.left = 2
+    this.footer.left = horizontalPadding
     this.footer.top = height - 2
-    this.footer.width = innerWidth
+    this.footer.width = leftContentWidth
     this.#ensureRowViews()
     this.#scrollOffset = Math.min(this.#scrollOffset, this.#maximumScrollOffset())
     this.#renderRows()
@@ -496,19 +550,23 @@ export class ListDetailRenderable<Action> extends BoxRenderable {
       view.top = slot
       if (row === undefined) {
         view.content = ""
-        view.bg = this.#theme.backgroundElement
+        view.bg = this.#surfaceBackground
       } else if (row.kind === "section") {
         view.content = new StyledText([bold(fg(this.#theme.textMuted)(truncateToCells(row.label.toLocaleUpperCase(), Math.max(0, this.#listWidth - 2))))])
-        view.bg = this.#theme.backgroundElement
+        view.bg = this.#surfaceBackground
       } else {
         const selected = row.id === this.#selectedId
-        view.content = styledLabel(
+        view.content = this.#options.renderRow?.(
+          row,
+          selected,
+          this.#listWidth,
+        ) ?? styledLabel(
           truncateToCells(row.label, Math.max(0, this.#listWidth - 2)),
           row.matchSpans,
           selected,
           this.#theme,
         )
-        view.bg = selected ? this.#theme.backgroundPanel : this.#theme.backgroundElement
+        view.bg = selected ? this.#theme.backgroundPanel : this.#surfaceBackground
       }
     }
   }
@@ -518,15 +576,20 @@ export class ListDetailRenderable<Action> extends BoxRenderable {
       (row): row is ListDetailItemRow<Action> => row.kind === "item" && row.id === this.#selectedId,
     )
     if (selected === undefined) {
-      this.detail.content = "No matching commands"
-      this.compactDetail.content = "No matching commands"
+      const emptyCopy = this.#options.emptyCopy ?? "No matching commands"
+      this.detail.content = emptyCopy
+      this.compactDetail.content = emptyCopy
       return
     }
-    this.detail.content = new StyledText([
-      bold(fg(this.#theme.text)(selected.detail.title)),
-      fg(this.#theme.textMuted)(`\n${selected.detail.meta}\n\n`),
-      fg(this.#theme.text)(selected.detail.description),
-    ])
+    this.detail.content = this.#options.renderDetail?.(
+      selected,
+      this.detailPane.width,
+      this.detailPane.height,
+    ) ?? new StyledText([
+        bold(fg(this.#theme.text)(selected.detail.title)),
+        fg(this.#theme.textMuted)(`\n${selected.detail.meta}\n\n`),
+        fg(this.#theme.text)(selected.detail.description),
+      ])
     this.compactDetail.content = selected.detail.description
   }
 }

@@ -600,6 +600,7 @@ function scenarios(): ScreenScenario[] {
       },
       setup: (app) => app.openReview(),
     },
+    { name: "19-theme-browser", state: base, setup: (app) => app.openThemePicker() },
   ]
 }
 

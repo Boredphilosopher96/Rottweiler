@@ -2,6 +2,9 @@ import {
   BoxRenderable,
   CliRenderEvents,
   SelectRenderableEvents,
+  StyledText,
+  bg,
+  bold,
   fg,
   t,
   type KeyEvent,
@@ -27,6 +30,7 @@ import {
   TranscriptRenderable,
   formatSubagentElapsed,
   type PickerItem,
+  type ListDetailItemRow,
   type ListDetailPresentation,
 } from "./components"
 import {
@@ -34,6 +38,7 @@ import {
   type CommandPaletteCatalog,
   type CommandPaletteEntry,
 } from "./command-palette"
+import { createThemeBrowserModel } from "./theme-browser"
 import {
   compileKeybindings,
   formatKeycap,
@@ -87,6 +92,8 @@ import {
   presentError,
   projectToolsWorkspace,
   sanitizeErrorFragment,
+  stringCellWidth,
+  truncateToCells,
   type ToolsWorkspacePresentation,
 } from "./render"
 import { setWorkspaceRoots } from "./render/tool-presentation"
@@ -130,6 +137,7 @@ import {
   createSyntaxStyle,
   kennelTheme,
   systemThemeFor,
+  THEME_ROLE_KEYS,
   themeByName,
   themeCatalog,
   type RottweilerTheme,
@@ -390,6 +398,7 @@ export class RottweilerApp extends BoxRenderable {
   reviewPanel!: ReviewPanelRenderable
   picker!: FuzzyPickerRenderable<unknown>
   commandPalette!: ListDetailRenderable<PaletteAction>
+  themeBrowser!: ListDetailRenderable<RottweilerTheme>
   composer!: ComposerRenderable
   statusLine!: StatusLineRenderable
   subagentTray!: SubagentTrayRenderable
@@ -499,17 +508,17 @@ export class RottweilerApp extends BoxRenderable {
   }
   #onTerminalThemeMode = (mode: ThemeMode) => {
     this.#systemThemeMode = mode
+    this.#systemTheme = systemThemeFor(mode)
     if (this.#theme.name !== "system") {
       const next = themeByName(this.#theme.name, mode)
-      if (next !== undefined && next.background !== this.#theme.background) this.#createThemedSurface(next)
+      if (next !== undefined && next.mode !== this.#theme.mode) this.#createThemedSurface(next)
       return
     }
     // Palette refresh is owned by production startup. If the terminal changes
     // mode during a session, immediately switch to a safe matching fallback
     // rather than retaining an unreadable stale palette.
-    this.#systemTheme = systemThemeFor(mode)
     const next = this.#systemTheme
-    if (next.background !== this.#theme.background) this.#createThemedSurface(next)
+    if (next.mode !== this.#theme.mode) this.#createThemedSurface(next)
   }
   #onSelection = (selection: Selection) => {
     const selectedText = selection.getSelectedText()
@@ -802,16 +811,27 @@ export class RottweilerApp extends BoxRenderable {
     const pickerWasVisible = rebuilding && this.#pickerVisible()
     const pickerKind = this.#pickerController.kind
     const paletteWasVisible = pickerWasVisible && pickerKind === "palette"
+    const themeBrowserWasVisible = pickerWasVisible && pickerKind === "themes"
     const pickerQuery = rebuilding
-      ? paletteWasVisible ? this.commandPalette.input.value : this.picker.input.value
+      ? paletteWasVisible
+        ? this.commandPalette.input.value
+        : themeBrowserWasVisible
+          ? this.themeBrowser.input.value
+          : this.picker.input.value
       : ""
     const pickerSelection = rebuilding
       ? paletteWasVisible
         ? this.commandPalette.selectedId
-        : this.picker.select.getSelectedOption()?.value
+        : themeBrowserWasVisible
+          ? this.themeBrowser.selectedId
+          : this.picker.select.getSelectedOption()?.value
       : undefined
-    const pickerScrollOffset = rebuilding && paletteWasVisible
-      ? this.commandPalette.scrollOffset
+    const pickerScrollOffset = rebuilding
+      ? paletteWasVisible
+        ? this.commandPalette.scrollOffset
+        : themeBrowserWasVisible
+          ? this.themeBrowser.scrollOffset
+          : 0
       : 0
     if (rebuilding) {
       for (const child of this.getChildren()) {
@@ -913,7 +933,7 @@ export class RottweilerApp extends BoxRenderable {
       // A preview rebuild destroys the old picker. Ignore any queued selection
       // notification from that generation instead of reading its dead buffer.
       if (this.picker !== picker) return
-      if ((this.#pickerController.kind !== "themes" && this.#pickerController.kind !== "settings") || this.#rethemeInProgress) return
+      if (this.#pickerController.kind !== "settings" || this.#rethemeInProgress) return
       const id = picker.select.getSelectedOption()?.value
       if (typeof id !== "string") return
       const name = id.startsWith("theme:")
@@ -935,6 +955,18 @@ export class RottweilerApp extends BoxRenderable {
     this.picker.left = "15%"
     this.picker.width = "70%"
     this.commandPalette = new ListDetailRenderable<PaletteAction>(this.ctx, theme)
+    this.themeBrowser = new ListDetailRenderable<RottweilerTheme>(this.ctx, theme, {
+      surfaceLayout: "primary",
+      splitListWidth: 33,
+      splitMinWidth: 100,
+      compactMinHeight: 8,
+      inputPlaceholder: "Filter themes…",
+      emptyCopy: "No matching themes",
+      surfaceBackground: theme.background,
+      renderRow: (row, selected, availableWidth) =>
+        themeBrowserRow(row, selected, availableWidth, theme),
+      renderDetail: (row) => themeBrowserDetail(row.action),
+    })
     const pasteImageKeycap = this.#bindingHint("paste_image", ["global", this.#composerKeybindingContext()])
     const externalEditorKeycap = this.#bindingHint("open_external_editor", ["global", this.#composerKeybindingContext()])
     this.composer = new ComposerRenderable(this.ctx, theme, {
@@ -989,6 +1021,7 @@ export class RottweilerApp extends BoxRenderable {
     this.add(this.statusLine)
     this.add(this.picker)
     this.add(this.commandPalette)
+    this.add(this.themeBrowser)
     this.setState(this.#state)
     this.composer.value = draft
     for (const attachment of attachments) this.composer.addAttachment(attachment)
@@ -1000,6 +1033,9 @@ export class RottweilerApp extends BoxRenderable {
       if (pickerKind === "palette") {
         if (typeof pickerSelection === "string") this.commandPalette.selectById(pickerSelection)
         this.commandPalette.restoreViewport(pickerScrollOffset)
+      } else if (pickerKind === "themes") {
+        if (typeof pickerSelection === "string") this.themeBrowser.selectById(pickerSelection)
+        this.themeBrowser.restoreViewport(pickerScrollOffset)
       } else {
         const selectedIndex = this.picker.select.options.findIndex(
           (option) => option.value === pickerSelection,
@@ -1009,7 +1045,8 @@ export class RottweilerApp extends BoxRenderable {
       }
     }
     this.#rethemeInProgress = false
-    if (this.commandPalette.visible) this.commandPalette.input.focus()
+    if (this.themeBrowser.visible) this.themeBrowser.input.focus()
+    else if (this.commandPalette.visible) this.commandPalette.input.focus()
     else if (this.picker.visible && !this.#pickerController.anchored) this.picker.input.focus()
   }
 
@@ -2174,18 +2211,27 @@ export class RottweilerApp extends BoxRenderable {
     this.#themeBeforePreview = this.#theme
     this.#themePreviewCommitted = false
     this.#pickerController.begin("themes")
+    this.#resizeThemeBrowser(
+      this.width === 0 ? this.ctx.width : this.width,
+      this.height === 0 ? this.ctx.height : this.height,
+    )
     this.#rethemeInProgress = true
     this.#pickerController.refresh()
-    const selectedIndex = this.picker.select.options.findIndex(
-      (option) => option.value === `theme:${this.#theme.name}`,
-    )
-    if (selectedIndex >= 0) this.picker.select.setSelectedIndex(selectedIndex)
     this.#rethemeInProgress = false
+    this.themeBrowser.input.focus()
   }
 
   #previewTheme(theme: RottweilerTheme): void {
     if (theme.name === this.#theme.name && this.#deferredTheme === null) return
     this.#createThemedSurface(theme)
+  }
+
+  #resizeThemeBrowser(width: number, height: number): void {
+    const primaryHeight = Math.max(
+      6,
+      height - this.statusLine.height - this.composer.dockHeight,
+    )
+    this.themeBrowser.resizeForTerminal(width, height, primaryHeight)
   }
 
   async #confirmTheme(theme: RottweilerTheme): Promise<void> {
@@ -2425,16 +2471,20 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   closePicker(): void {
+    if (this.themeBrowser.visible) this.themeBrowser.close()
     if (this.commandPalette.visible) this.commandPalette.close()
     this.#pickerController.close()
   }
 
   #afterPickerClosed(kind: PickerKind | null): void {
-    const restoreTheme =
+    const capturedTheme =
       (kind === "themes" || kind === "settings")
         && !this.#themePreviewCommitted
         ? this.#themeBeforePreview
         : null
+    const restoreTheme = capturedTheme === null
+      ? null
+      : this.#resolvedTheme(capturedTheme)
     this.#projectionRequests.clear("files")
     this.#projectionRequests.setFilePreview(null)
     this.#providerApiKeyProvider = null
@@ -2475,7 +2525,8 @@ export class RottweilerApp extends BoxRenderable {
     )
     this.outputViewer.resizeForTerminal(height)
     this.reviewPanel.resizeForTerminal(height)
-    if (this.commandPalette.visible) this.commandPalette.resizeForTerminal(width, height)
+    if (this.themeBrowser.visible) this.#resizeThemeBrowser(width, height)
+    else if (this.commandPalette.visible) this.commandPalette.resizeForTerminal(width, height)
     else if (this.picker.visible) this.#pickerController.position(this.#pickerController.anchored)
   }
 
@@ -2692,7 +2743,8 @@ export class RottweilerApp extends BoxRenderable {
         return true
       case "select_current":
         if (!this.#pickerVisible()) return false
-        if (this.commandPalette.visible) this.commandPalette.activateSelected()
+        if (this.themeBrowser.visible) this.themeBrowser.activateSelected()
+        else if (this.commandPalette.visible) this.commandPalette.activateSelected()
         else this.picker.select.selectCurrent()
         return true
     }
@@ -2751,6 +2803,10 @@ export class RottweilerApp extends BoxRenderable {
       this.transcript.scroller.focus()
       return
     }
+    if (this.themeBrowser.visible) {
+      this.themeBrowser.input.focus()
+      return
+    }
     if (this.commandPalette.visible) {
       this.commandPalette.input.focus()
       return
@@ -2789,7 +2845,9 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #moveVertical(direction: 1 | -1): void {
-    if (this.commandPalette.visible) {
+    if (this.themeBrowser.visible) {
+      this.themeBrowser.moveSelection(direction)
+    } else if (this.commandPalette.visible) {
       this.commandPalette.moveSelection(direction)
     } else if (this.picker.visible) {
       this.picker.moveSelection(direction)
@@ -2810,7 +2868,9 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #moveToBoundary(end: boolean): void {
-    if (this.commandPalette.visible) {
+    if (this.themeBrowser.visible) {
+      this.themeBrowser.moveToBoundary(end)
+    } else if (this.commandPalette.visible) {
       this.commandPalette.moveToBoundary(end)
     } else if (this.picker.visible) {
       this.picker.moveToBoundary(end)
@@ -2858,11 +2918,11 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #pickerVisible(): boolean {
-    return this.commandPalette.visible || this.picker.visible
+    return this.themeBrowser.visible || this.commandPalette.visible || this.picker.visible
   }
 
   #modalPickerVisible(): boolean {
-    return this.commandPalette.visible || (this.picker.visible && !this.#pickerController.anchored)
+    return this.themeBrowser.visible || this.commandPalette.visible || (this.picker.visible && !this.#pickerController.anchored)
   }
 
   #statusFocusOwner(): VimFocus | "interaction" | "review" {
@@ -4167,18 +4227,66 @@ export class RottweilerApp extends BoxRenderable {
         break
       }
       case "themes": {
-        const items: PickerItem<RottweilerTheme>[] = themeCatalog.map((catalogTheme) => {
-          const theme = this.#resolvedTheme(catalogTheme)
-          return {
-            id: `theme:${theme.name}`,
-            label: `${theme.name === this.#theme.name ? "● " : ""}${theme.name}`,
-            description: `${theme.background} · ${theme.text} · ${theme.accent}`,
-            value: theme,
+        this.#resizeThemeBrowser(
+          this.width === 0 ? this.ctx.width : this.width,
+          this.height === 0 ? this.ctx.height : this.height,
+        )
+        const themes = themeCatalog.map((catalogTheme) => this.#resolvedTheme(catalogTheme))
+        const query = this.themeBrowser.visible
+          ? this.themeBrowser.input.value
+          : this.#pickerController.query
+        const preserveSelection = query === this.#pickerController.query
+        this.#pickerController.query = query
+        const selectedId = this.themeBrowser.visible && preserveSelection
+          ? this.themeBrowser.selectedId
+          : null
+        const model = createThemeBrowserModel({
+          themes,
+          query,
+          selectedName: selectedId?.slice("theme:".length) ?? null,
+          currentName: this.#theme.name,
+        })
+        const presentation: ListDetailPresentation<RottweilerTheme> = {
+          title: `${model.title}   ${model.counts.total} themes   /theme`,
+          query,
+          selectedId: model.selectedId,
+          rows: model.rows.map((row) => ({
+            kind: "item",
+            id: row.id,
+            label: row.name,
+            matchSpans: row.matchSpans,
+            detail: {
+              title: row.name,
+              description: "custom ~/.rottweiler/themes/ · data only, never executed",
+              meta: `${row.mode} · ${row.source}`,
+            },
+            action: row.theme,
+          })),
+          status: this.#keybindings.preset === "vim"
+            ? "↑↓ preview  ⏎ apply  esc×2 cancel"
+            : "↑↓ preview · ⏎ apply · esc cancel",
+        }
+        if (this.themeBrowser.visible) {
+          this.themeBrowser.refresh(presentation)
+        } else {
+          this.themeBrowser.open(presentation, (theme) => {
+            void this.#confirmTheme(theme)
+          }, {
+            onQuery: () => this.#renderPicker(),
+            onSelection: (id) => {
+              if (this.#rethemeInProgress || id === null) return
+              const selectedTheme = themes.find((theme) => `theme:${theme.name}` === id)
+              if (selectedTheme === undefined) return
+              if (this.#themeBeforePreview === null) this.#themeBeforePreview = this.#theme
+              this.#previewTheme(selectedTheme)
+            },
+          })
+          if (this.#keybindings.preset === "vim" && this.#vimFocus !== "picker") {
+            this.#vimFocusBeforePicker = this.#vimFocus
+            this.#vimFocus = "picker"
+            this.#setInputMode("insert")
           }
-        })
-        this.#pickerController.show("Themes · arrows preview · Enter confirms", items, (item) => {
-          void this.#confirmTheme(item.value)
-        })
+        }
         break
       }
       case "modes": {
@@ -5850,6 +5958,89 @@ export class RottweilerApp extends BoxRenderable {
       })
     }
   }
+}
+
+function themeBrowserRow(
+  row: ListDetailItemRow<RottweilerTheme>,
+  selected: boolean,
+  availableWidth: number,
+  chromeTheme: RottweilerTheme,
+): StyledText {
+  const theme = row.action
+  const pointer = selected ? "› " : "  "
+  const tag = theme.name === "system" ? " ansi" : selected ? ` ${theme.mode}` : ""
+  const swatchColors = [
+    theme.background,
+    theme.primary,
+    theme.accent,
+    theme.success,
+    theme.error,
+  ] as const
+  const fixedWidth = stringCellWidth(pointer) + stringCellWidth(tag)
+  const swatchCount = Math.min(
+    swatchColors.length,
+    Math.max(0, Math.floor((availableWidth - fixedWidth - 7) / 2)),
+  )
+  const swatchWidth = swatchCount * 2
+  const nameWidth = Math.max(0, availableWidth - fixedWidth - swatchWidth - 1)
+  const name = truncateToCells(row.label, nameWidth)
+  const gap = " ".repeat(Math.max(1, nameWidth - stringCellWidth(name) + 1))
+  const nameChunk = fg(selected ? chromeTheme.selectedListItemText : chromeTheme.text)(name)
+  const chunks: StyledText["chunks"] = [
+    fg(selected ? chromeTheme.primary : chromeTheme.textMuted)(pointer),
+    selected ? bold(nameChunk) : nameChunk,
+    fg(chromeTheme.textMuted)(gap),
+  ]
+  for (const color of swatchColors.slice(0, swatchCount)) {
+    chunks.push(fg(color)("██"))
+  }
+  if (tag.length > 0) chunks.push(fg(chromeTheme.textMuted)(tag))
+  return new StyledText(chunks)
+}
+
+function themeBrowserDetail(theme: RottweilerTheme): StyledText {
+  return new StyledText([
+    bold(fg(theme.primary)(`${theme.name}  `)),
+    fg(theme.textMuted)(`${theme.mode} · ${THEME_ROLE_KEYS.length} roles resolved · live sample\n`),
+    fg(theme.borderSubtle)("────────────────────────────────────────────────────────────\n"),
+    bold(fg(theme.primary)("you       ")),
+    fg(theme.markdownText)("Make the picker feel deliberate.\n"),
+    bold(fg(theme.accent)("assistant ")),
+    fg(theme.text)("The layout stays fixed; roles supply the color.\n"),
+    fg(theme.textMuted)("reasoning  Keep hierarchy quiet and readable.\n"),
+    bold(fg(theme.markdownHeading)("Markdown roles\n")),
+    fg(theme.markdownText)("text  "),
+    fg(theme.markdownCode)("`inline code`  "),
+    fg(theme.markdownLink)("link\n"),
+    fg(theme.markdownBlockQuote)("│ quoted context stays secondary\n"),
+    bold(fg(theme.syntaxFunction)("function ")),
+    fg(theme.syntaxVariable)("applyTheme"),
+    fg(theme.syntaxPunctuation)("("),
+    fg(theme.syntaxVariable)("name"),
+    fg(theme.syntaxPunctuation)(") {\n"),
+    fg(theme.syntaxComment)("  // roles change; geometry does not\n"),
+    fg(theme.syntaxKeyword)("  const "),
+    fg(theme.syntaxVariable)("active"),
+    fg(theme.syntaxOperator)(" = "),
+    fg(theme.syntaxString)("name"),
+    fg(theme.syntaxPunctuation)("\n}\n"),
+    bg(theme.diffRemovedBg)(fg(theme.diffRemoved)("− removed line")),
+    fg(theme.text)("\n"),
+    bg(theme.diffAddedBg)(fg(theme.diffAdded)("+ added line")),
+    fg(theme.text)("\n"),
+    bold(fg(theme.success)("success  ")),
+    bold(fg(theme.warning)("warning  ")),
+    bold(fg(theme.error)("error\n")),
+    fg(theme.textMuted)("background / panel / element  "),
+    fg(theme.text)(`${theme.background}  ${theme.backgroundPanel}  ${theme.backgroundElement}\n`),
+    fg(theme.textMuted)("border / text / muted          "),
+    fg(theme.text)(`${theme.border}  ${theme.text}  ${theme.textMuted}\n`),
+    fg(theme.textMuted)("Themes change semantic roles, not layout.\n"),
+    fg(theme.textMuted)("Every sample above is rendered from the selected theme.\n"),
+    fg(theme.textMuted)("custom "),
+    fg(theme.success)("~/.rottweiler/themes/\n"),
+    fg(theme.textMuted)("data only, never executed"),
+  ])
 }
 
 function timelineUserMessage(turn: RottweilerState["transcript"][number]["turn"]): {

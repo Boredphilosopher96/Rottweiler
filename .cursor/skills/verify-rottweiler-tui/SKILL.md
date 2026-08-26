@@ -23,6 +23,7 @@ Read [the feature map](./features/README.md), then choose the matching command:
 - `command-palette` presses Ctrl+P through the renderer input path, then captures the resulting picker.
 - `approval` launches a real pending-tool projection and captures the focused permission path.
 - `tools` presses Ctrl+P, selects `View tools`, and captures the retained Tools workspace.
+- `theme-browser` enters through `/theme` and captures the retained theme list, semantic swatches, and live role preview.
 - `smoke` runs TypeScript checking, all golden screens, and the conversation capture.
 
 Each run is isolated in its own native in-memory terminal. It does not connect to a provider, engine, repository mutation path, or another user's session.
@@ -32,6 +33,8 @@ To inspect typography, present the ANSI artifact in a real terminal emulator wit
 ## Evidence
 
 Pass a unique directory under `/tmp/rottweiler-tui-evidence`. The helper preserves `<scenario>.txt`, `<scenario>.ansi`, `<scenario>.png`, and `<scenario>.json`. The text file proves the exact terminal cells. The ANSI file preserves the captured text runs, colors, backgrounds, and attributes for a real terminal emulator to draw. The PNG rasterizer draws complete style runs with a system monospace font. It never routes characters through SVG or positions glyphs individually. The JSON records actions plus text, position, and color assertions. The conversation scenario pins the supplied 110 by 32 design grid, including its column 73 divider and two-cell assistant indent. The Tools scenario pins its 74/1/35 primary-workspace split and rejects unsupported diagnostics, background-process, approval-actor, and matched-rule claims. A valid proof exercises `RottweilerApp`, not an HTML imitation or a manually assembled screenshot. For an input feature, capture both the action in JSON and the resulting screen. For engine side effects, pair this visual proof with the relevant process acceptance test.
+
+The Theme Browser scenario pins its full-primary 34/1/75 regions, five semantic swatches, selected-theme role preview, surface occlusion, complete text runs, and slash-command entry path. Its visual regression test runs the fixture twice and requires byte-identical TXT, ANSI, PNG, and JSON artifacts.
 
 ## Cleanup
 

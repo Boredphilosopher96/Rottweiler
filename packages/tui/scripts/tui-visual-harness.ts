@@ -18,7 +18,7 @@ import type { RottweilerState, ToolProjection } from "../src/state"
 import { createInitialState } from "../src/state"
 import { kennelTheme } from "../src/theme"
 
-type VisualScenario = "conversation" | "command-palette" | "approval" | "tools"
+type VisualScenario = "conversation" | "command-palette" | "approval" | "tools" | "theme-browser"
 
 const TOOLS_FIXTURE_NOW_MS = Date.parse("2026-01-01T12:00:41.000Z")
 const scenarioInput = process.argv[2] ?? "conversation"
@@ -60,6 +60,13 @@ try {
     actions.push("pressed Enter to activate the selected View tools action")
     setup.mockInput.pressEnter()
     await setup.flush()
+  } else if (scenarioInput === "theme-browser") {
+    actions.push("typed /the into the production composer input")
+    await setup.mockInput.typeText("/the")
+    actions.push("pressed Enter to activate the /theme slash completion")
+    setup.mockInput.pressEnter()
+    await Bun.sleep(0)
+    await setup.flush()
   } else if (scenarioInput === "approval") {
     actions.push("launched a session with a pending terminal-command approval")
   } else {
@@ -72,6 +79,7 @@ try {
   const assertions = [
     ...visualAssertions(scenarioInput, characterFrame, styledFrame),
     ...(scenarioInput === "command-palette" ? commandPaletteLayoutAssertions(app) : []),
+    ...(scenarioInput === "theme-browser" ? themeBrowserLayoutAssertions(app) : []),
   ]
   await writeRasterPng(styledFrame, join(outputDirectory, `${scenarioInput}.png`))
   await Promise.all([
@@ -102,7 +110,7 @@ try {
 }
 
 function isVisualScenario(value: string): value is VisualScenario {
-  return value === "conversation" || value === "command-palette" || value === "approval" || value === "tools"
+  return value === "conversation" || value === "command-palette" || value === "approval" || value === "tools" || value === "theme-browser"
 }
 
 function scenarioAssertions(scenario: VisualScenario): readonly string[] {
@@ -122,6 +130,15 @@ function scenarioAssertions(scenario: VisualScenario): readonly string[] {
         "denied   1",
         "Esc Esc to interrupt",
         "Next sends when this turn ends",
+      ]
+    case "theme-browser":
+      return [
+        "THEME   34 themes   /theme",
+        "Filter themes…",
+        "opencode  dark · 52 roles resolved · live sample",
+        "Markdown roles",
+        "Themes change semantic roles, not layout.",
+        "↑↓ preview · ⏎ apply · esc cancel",
       ]
   }
 }
@@ -206,6 +223,46 @@ function visualAssertions(
       colorAtTextAssertion(styledFrame, lines, "turn rail heading stays readable", "THIS TURN", kennelTheme.text),
     ]
   }
+  if (scenario === "theme-browser") {
+    const lines = characterFrame.split("\n")
+    const malformedSpacing = ["s y s t e m", "r e a s o n", "M a r k d o w n", "a p p l y T h e m e"]
+    return [
+      ...assertions,
+      positionAssertion(lines, "theme heading starts at the design column", 0, 1, "THEME   34 themes   /theme"),
+      positionAssertion(lines, "list/detail divider is fixed at column 34", 0, 34, "│"),
+      positionAssertion(lines, "detail content starts at column 36", 0, 36, "opencode  dark · 52 roles resolved · live sample"),
+      frameWidthAssertion(lines),
+      {
+        name: "theme names and semantic samples use complete text runs",
+        passed: characterFrame.includes("catppuccin") && malformedSpacing.every((text) => !characterFrame.includes(text)),
+        expected: "intact names and semantic sample text",
+        actual: malformedSpacing.filter((text) => characterFrame.includes(text)).join(",") || "intact",
+      },
+      {
+        name: "detail content stays inside its pane",
+        passed: lines.slice(0, 27).every((line) => (line[34] ?? "") === "│"),
+        expected: "divider preserved from rows 0 through 26",
+        actual: lines.slice(0, 27).map((line, row) => line[34] === "│" ? row : -1).filter((row) => row >= 0).join(","),
+      },
+      {
+        name: "theme surface fully occludes the prior conversation and context rail",
+        passed: !characterFrame.includes("AGENTS") &&
+          !characterFrame.includes("▌ you") &&
+          !characterFrame.includes("● rottweiler") &&
+          !characterFrame.includes("\n╎"),
+        expected: "no prior screen labels or gutter glyphs",
+        actual: ["AGENTS", "▌ you", "● rottweiler", "\n╎"].filter((text) => characterFrame.includes(text)).join(",") || "occluded",
+      },
+      colorAssertion(styledFrame, "selection marker uses primary", 24, 1, kennelTheme.primary, kennelTheme.backgroundPanel),
+      colorAssertion(styledFrame, "background swatch uses the selected theme", 24, 19, kennelTheme.background, kennelTheme.backgroundPanel),
+      colorAssertion(styledFrame, "primary swatch uses the selected theme", 24, 21, kennelTheme.primary, kennelTheme.backgroundPanel),
+      colorAssertion(styledFrame, "accent swatch uses the selected theme", 24, 23, kennelTheme.accent, kennelTheme.backgroundPanel),
+      colorAssertion(styledFrame, "success swatch uses the selected theme", 24, 25, kennelTheme.success, kennelTheme.backgroundPanel),
+      colorAssertion(styledFrame, "error swatch uses the selected theme", 24, 27, kennelTheme.error, kennelTheme.backgroundPanel),
+      colorAssertion(styledFrame, "detail heading uses selected primary", 0, 36, kennelTheme.primary, kennelTheme.background),
+      backgroundAssertion(styledFrame, "theme surface occludes underlying content", 0, 0, kennelTheme.background),
+    ]
+  }
   if (scenario !== "conversation") return assertions
 
   const lines = characterFrame.split("\n")
@@ -274,6 +331,30 @@ function commandPaletteLayoutAssertions(
   ]
 }
 
+function themeBrowserLayoutAssertions(
+  app: ReturnType<typeof createRottweilerApp>,
+): readonly VisualAssertion[] {
+  const browser = app.themeBrowser
+  return [
+    exactValueAssertion("theme surface begins at column 0", browser.x, 0),
+    exactValueAssertion("theme surface begins at row 0", browser.y, 0),
+    exactValueAssertion("theme surface is 110 cells wide", browser.width, 110),
+    exactValueAssertion("theme surface is 27 rows tall", browser.height, 27),
+    exactValueAssertion("theme list pane begins at column 1", browser.listPane.x, 1),
+    exactValueAssertion("theme list pane is 33 cells wide", browser.listPane.width, 33),
+    exactValueAssertion("theme divider is one cell wide", browser.divider.width, 1),
+    exactValueAssertion("theme divider is fixed at column 34", browser.divider.x, 34),
+    exactValueAssertion("theme detail pane begins at column 35", browser.detailPane.x, 35),
+    exactValueAssertion("theme detail pane is 74 cells wide", browser.detailPane.width, 74),
+    {
+      name: "theme browser owns focus after slash activation",
+      passed: browser.input.focused,
+      expected: "focused theme query",
+      actual: browser.input.focused ? "focused theme query" : "not focused",
+    },
+  ]
+}
+
 function exactValueAssertion(name: string, actual: number, expected: number): VisualAssertion {
   return {
     name,
@@ -331,6 +412,19 @@ function colorAssertion(
     expected,
     actual,
   }
+}
+
+function backgroundAssertion(
+  frame: CapturedFrame,
+  name: string,
+  row: number,
+  column: number,
+  expectedBackground: string,
+): VisualAssertion {
+  const cell = capturedCell(frame, row, column)
+  const actual = cell === null ? "missing" : rgbaHex(cell.bg.toInts())
+  const expected = normalizeHex(expectedBackground)
+  return { name, passed: actual === expected, expected, actual }
 }
 
 function colorAtTextAssertion(

@@ -40,4 +40,42 @@ describe("TUI visual evidence", () => {
     expect(visible).toContain("reasoning")
     expect(visible).toContain("edit  core/cursor.rs")
   })
+
+  test("proves the production theme browser deterministically without character SVG", async () => {
+    const firstDirectory = await mkdtemp(join(tmpdir(), "rottweiler-theme-browser-first-"))
+    const secondDirectory = await mkdtemp(join(tmpdir(), "rottweiler-theme-browser-second-"))
+    evidenceDirectory = firstDirectory
+    const harness = resolve(import.meta.dir, "../scripts/tui-visual-harness.ts")
+    const run = (directory: string) => Bun.spawn(
+      ["bun", "run", harness, "theme-browser", directory],
+      { cwd: resolve(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe" },
+    )
+    const first = run(firstDirectory)
+    const [firstExit, firstStderr] = await Promise.all([
+      first.exited,
+      new Response(first.stderr).text(),
+    ])
+
+    expect(firstStderr).toBe("")
+    expect(firstExit).toBe(0)
+    const second = run(secondDirectory)
+    const [secondExit, secondStderr] = await Promise.all([
+      second.exited,
+      new Response(second.stderr).text(),
+    ])
+    expect(secondStderr).toBe("")
+    expect(secondExit).toBe(0)
+
+    for (const extension of ["txt", "ansi", "png", "json"]) {
+      const firstArtifact = Bun.file(join(firstDirectory, `theme-browser.${extension}`))
+      const secondArtifact = Bun.file(join(secondDirectory, `theme-browser.${extension}`))
+      expect(await firstArtifact.exists()).toBeTrue()
+      expect(await firstArtifact.arrayBuffer()).toEqual(await secondArtifact.arrayBuffer())
+    }
+    expect(await Bun.file(join(firstDirectory, "theme-browser.svg")).exists()).toBeFalse()
+    const proof = await Bun.file(join(firstDirectory, "theme-browser.json")).json()
+    expect(proof.assertions.every((assertion: { passed: boolean }) => assertion.passed)).toBeTrue()
+
+    await rm(secondDirectory, { recursive: true, force: true })
+  })
 })
