@@ -6203,8 +6203,9 @@ describe("Rottweiler OpenTUI shell", () => {
       },
       sessions: [],
     })
-    expect(app.picker.select.options.map((option) => option.name)).toEqual(["New session"])
-    expect(app.picker.select.visible).toBeTrue()
+    expect(app.sessionsBrowser.selectedId).toBe("sessions.new")
+    expect(app.sessionsBrowser.rowViews[0]?.plainText).toContain("New session")
+    expect(app.sessionsBrowser.visible).toBeTrue()
   })
 
   test("retries MCP projection failures from the picker", async () => {
@@ -7583,9 +7584,10 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.picker.select.options[0]?.name).not.toContain("ChatGPT")
     expect(app.picker.select.options[0]?.description).not.toContain("ChatGPT")
     app.openSessionPicker()
-    expect(app.picker.select.options[0]?.name).toBe("New session")
-    expect(app.picker.select.options[1]?.name).toBe("Fix login")
-    expect(app.picker.select.options[1]?.description).toContain("payments-service")
+    expect(app.sessionsBrowser.rowViews[0]?.plainText).toContain("New session")
+    expect(app.sessionsBrowser.rowViews[1]?.plainText).toContain("Fix login")
+    app.sessionsBrowser.selectById("session-workspace")
+    expect(app.sessionsBrowser.detail.plainText).toContain("payments-service")
   })
 
   test("creates a clean session from Ctrl-N and switches only after correlated acceptance", async () => {
@@ -7667,8 +7669,8 @@ describe("Rottweiler OpenTUI shell", () => {
     renderer.root.add(app)
 
     app.openSessionPicker()
-    app.picker.select.setSelectedIndex(1)
-    app.picker.select.selectCurrent()
+    app.sessionsBrowser.selectById("past-session")
+    app.sessionsBrowser.activateSelected()
     expect(app.picker.title).toContain("Session actions · Fix login")
     expect(app.picker.select.options.map((option) => option.name)).toEqual([
       "Resume session",
@@ -7703,8 +7705,9 @@ describe("Rottweiler OpenTUI shell", () => {
       usage: null,
       cost: null,
     })
-    expect(app.picker.title).toContain("Sessions")
-    expect(app.picker.select.options[1]?.name).toBe("Auth refactor")
+    expect(app.sessionsBrowser.visible).toBeTrue()
+    expect(app.sessionsBrowser.heading.plainText).toContain("SESSIONS")
+    expect(app.sessionsBrowser.rowViews[1]?.plainText).toContain("Auth refactor")
     expect(app.state.sessions[0]?.title).toBe("Auth refactor")
     expect(app.state.lastSequence).toBeNull()
     expect(selected).toEqual([])

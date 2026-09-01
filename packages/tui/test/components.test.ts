@@ -3179,10 +3179,12 @@ describe("M4 retained components", () => {
 
     expect(commands[0]).toMatchObject({ type: "list_sessions" })
     expect(commands.at(-1)).toMatchObject({ type: "search_sessions", query: "rott", limit: 100 })
-    expect(app.picker.select.options.map((option) => option.value)).toEqual([
-      "session-rottweiler",
-      "sessions.new",
-    ])
+    const visibleRows = app.sessionsBrowser.rowViews
+      .map((row) => row.plainText.trim())
+      .filter((row) => row.length > 0)
+    expect(visibleRows).toHaveLength(2)
+    expect(visibleRows[0]).toContain("New session")
+    expect(visibleRows[1]).toBe("Rottweiler")
   })
 
   test("fuzzy matching is ordered and image fallback is capability gated", async () => {
