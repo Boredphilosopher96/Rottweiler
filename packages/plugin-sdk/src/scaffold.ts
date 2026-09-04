@@ -18,16 +18,25 @@ function packageName(name: string): string {
   return normalized
 }
 
+function isTemplatePath(path: string): boolean {
+  return !/[<>:"\\|?*\u0000-\u001f\u007f-\u009f]/.test(path) &&
+    path.split("/").every((segment) =>
+      segment !== "" && segment !== "." && segment !== ".." &&
+      !/[. ]$/.test(segment) && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(segment),
+    )
+}
+
 /** Deterministic template consumed by `rw plugin scaffold --lang ts`. */
 export function renderTypeScriptScaffold(options: ScaffoldOptions = {}): readonly ScaffoldFile[] {
   const name = packageName(options.name ?? "rottweiler-plugin")
   const root = resolve(import.meta.dir, "../fixtures/scaffold")
-  return readFileSync(join(root, "files.txt"), "utf8")
-    .trimEnd()
-    .split("\n")
+  const lines = readFileSync(join(root, "files.txt"), "utf8").split(/\r?\n/)
+  if (lines.at(-1) === "") lines.pop()
+  return lines
     .map((line) => {
       const [source, path, unexpected] = line.split("\t")
-      if (source === undefined || path === undefined || unexpected !== undefined) {
+      if (source === undefined || path === undefined || unexpected !== undefined ||
+        !isTemplatePath(source) || !isTemplatePath(path)) {
         throw new Error("invalid canonical scaffold file mapping")
       }
       return {

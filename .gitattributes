@@ -3,3 +3,6 @@ crates/rw-core/tests/fixtures/init/** -text whitespace=-trailing-space
 
 # Windows-hosted WSL acceptance executes repository shell scripts directly.
 *.sh text eol=lf
+
+# Canonical scaffold mappings are machine-readable paths.
+packages/plugin-sdk/fixtures/scaffold/files.txt text eol=lf
