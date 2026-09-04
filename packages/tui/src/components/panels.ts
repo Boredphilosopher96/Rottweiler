@@ -900,6 +900,11 @@ export interface ContextPanelCallbacks {
 
 const MAX_SIDEBAR_CHANGED_FILES = 128
 
+function contextPanelInputs(state: RottweilerState) {
+  return [state.subagentOrder, state.subagents, state.todos, state.mcpServers,
+    state.runtimeServices, state.review, state.workspaceStatus, state.context, state.cost, state.provider]
+}
+
 export class ContextPanelRenderable extends BoxRenderable {
   readonly agentsTitle: TextRenderable
   readonly agents: SelectRenderable
@@ -921,6 +926,7 @@ export class ContextPanelRenderable extends BoxRenderable {
   #activeMcpCount = 0
   #activeServiceCount = 0
   #showSession = false
+  #previousInputs: ReturnType<typeof contextPanelInputs> | null = null
 
   constructor(ctx: RenderContext, theme: RottweilerTheme, callbacks: ContextPanelCallbacks) {
     super(ctx, {
@@ -1104,6 +1110,10 @@ export class ContextPanelRenderable extends BoxRenderable {
   }
 
   update(state: RottweilerState): void {
+    const inputs = contextPanelInputs(state)
+    const previous = this.#previousInputs
+    if (previous !== null && inputs.every((value, index) => value === previous[index])) return
+    this.#previousInputs = inputs
     const activeAgents = state.subagentOrder
       .map((subagentId) => state.subagents[subagentId])
       .filter((subagent): subagent is NonNullable<typeof subagent> =>

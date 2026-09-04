@@ -79,6 +79,7 @@ describe("client-owned renderer handoff", () => {
     original.showToolsView()
     original.toolsWorkspace.selectNextBlock()
     original.toolsWorkspace.toggleSelectedBlock()
+    original.showConversationView()
     const saved = original.recycleState()
     if (saved === null) throw new Error("expected restorable block state")
     expect(saved.transcript.blocks.selectedId).not.toBeNull()
@@ -91,6 +92,7 @@ describe("client-owned renderer handoff", () => {
     await setup.renderOnce()
     replacement.applyPendingRecycleScroll()
     expect(replacement.transcript.captureClientState()).toEqual(saved.transcript)
+    expect(replacement.primaryView).toBe("conversation")
     expect(replacement.toolsWorkspace.captureClientState()).toEqual(saved.tools)
   })
 

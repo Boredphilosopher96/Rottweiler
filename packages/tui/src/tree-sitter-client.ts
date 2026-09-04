@@ -16,6 +16,11 @@ export function stabilizeTreeSitterClient(client: TreeSitterClient): TreeSitterC
 
   const highlightOnce = client.highlightOnce.bind(client)
   client.highlightOnce = async (...arguments_: Parameters<TreeSitterClient["highlightOnce"]>) => {
+    const [content, filetype] = arguments_
+    // Literal single-line prose has no Markdown syntax for the worker to color.
+    if ((filetype === "markdown" || filetype === "markdown_inline") && /^[\p{L}\p{N}][\p{L}\p{N} ]*$/u.test(content)) {
+      return { highlights: [] }
+    }
     try {
       return await highlightOnce(...arguments_)
     } catch (error) {

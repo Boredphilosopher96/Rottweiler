@@ -300,6 +300,8 @@ export class ToolBlockRenderable extends BoxRenderable {
   #selected = false
   #availableWidth: number
   #startedAt = Date.now()
+  #rootsGeneration = ""
+  #lastRender: { readonly tool: ToolProjection; readonly width: number; readonly collapsed: boolean; readonly elapsed: string; readonly rootsGeneration: string } | null = null
   blockId: string
 
   constructor(
@@ -424,11 +426,12 @@ export class ToolBlockRenderable extends BoxRenderable {
     this.update(tool)
   }
 
-  update(tool: ToolProjection, availableWidth = this.#availableWidth): void {
+  update(tool: ToolProjection, availableWidth = this.#availableWidth, rootsGeneration = this.#rootsGeneration): void {
     const previousStatus = this.#tool.status
     const previousDiff = this.#tool.diff
     this.#tool = tool
     this.#availableWidth = Math.max(20, availableWidth)
+    this.#rootsGeneration = rootsGeneration
     if (tool.status === "awaiting_approval" && previousStatus !== "awaiting_approval") {
       this.#collapsed = false
       this.#bodyContainer.visible = true
@@ -446,6 +449,14 @@ export class ToolBlockRenderable extends BoxRenderable {
       this.#collapsed = false
       this.#bodyContainer.visible = true
     }
+    const elapsed = tool.status === "running" && Date.now() - this.#startedAt >= 3_000
+      ? ` · ${formatElapsed(Date.now() - this.#startedAt)}`
+      : ""
+    const previousRender = this.#lastRender
+    if (previousRender?.tool === tool && previousRender.width === this.#availableWidth &&
+        previousRender.collapsed === this.#collapsed && previousRender.elapsed === elapsed &&
+        previousRender.rootsGeneration === rootsGeneration) return
+    this.#lastRender = { tool, width: this.#availableWidth, collapsed: this.#collapsed, elapsed, rootsGeneration }
     this.#syncCommand(tool)
     this.#syncDiff(tool)
     const glyph = tool.status === "awaiting_approval" ? "?" : tool.status === "running" ? "◌" : tool.isError === true ? "✕" : "✓"
@@ -454,9 +465,6 @@ export class ToolBlockRenderable extends BoxRenderable {
       tool.status === "finished" && this.#collapsed
         ? compact.summary
         : ""
-    const elapsed = tool.status === "running" && Date.now() - this.#startedAt >= 3_000
-      ? ` · ${formatElapsed(Date.now() - this.#startedAt)}`
-      : ""
     const statusColor =
       tool.status === "awaiting_approval"
         ? this.#theme.warning
@@ -1404,13 +1412,13 @@ class TurnCardRenderable extends BoxRenderable {
           )
         }
         this.#toolCards.set(tool.toolCallId, card)
-        card.update(tool, viewModel.width)
+        card.update(tool, viewModel.width, viewModel.rootsGeneration)
       } else if (
         previousTools.get(tool.toolCallId) !== tool ||
         previous?.width !== viewModel.width ||
         previous?.rootsGeneration !== viewModel.rootsGeneration
       ) {
-        card.update(tool, viewModel.width)
+        card.update(tool, viewModel.width, viewModel.rootsGeneration)
       }
     }
     const nextOrder = viewModel.tools.map((tool) => tool.toolCallId)
@@ -2135,11 +2143,11 @@ export class TranscriptRenderable extends BoxRenderable {
             (expanded) => this.#rememberToolExpansion(tool.toolCallId, expanded),
           )
         }
-        card.update(tool, Math.max(20, this.width || this.ctx.width))
+        card.update(tool, Math.max(20, this.width || this.ctx.width), this.#state?.workspaceRoots?.generation ?? "")
         this.#tailToolCards.set(tool.toolCallId, card)
         this.#tailTools.add(card)
       } else {
-        card.update(tool, Math.max(20, this.width || this.ctx.width))
+        card.update(tool, Math.max(20, this.width || this.ctx.width), this.#state?.workspaceRoots?.generation ?? "")
       }
     }
     while (this.#tailToolPool.length > 16) this.#tailToolPool.shift()?.destroyRecursively()
