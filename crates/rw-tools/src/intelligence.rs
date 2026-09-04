@@ -767,6 +767,23 @@ if "TYPE_ERROR" in text:
         std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o700))
             .expect("server mode");
         let server = std::fs::canonicalize(server).expect("canonical server");
+        // Resolve Apple's developer-tool shim before entering the sandbox: the
+        // shim can create xcrun caches outside the LSP's private scratch root.
+        #[cfg(target_os = "macos")]
+        let python = {
+            let output = std::process::Command::new("/usr/bin/xcrun")
+                .args(["--find", "python3"])
+                .output()
+                .expect("resolve fixture Python");
+            assert!(output.status.success(), "fixture Python is unavailable");
+            PathBuf::from(
+                String::from_utf8(output.stdout)
+                    .expect("fixture Python path")
+                    .trim(),
+            )
+        };
+        #[cfg(target_os = "linux")]
+        let python = PathBuf::from("/usr/bin/python3");
         let spawner = Arc::new(
             SandboxedLspSpawner::new(
                 &[workspace.path().to_path_buf()],
@@ -781,8 +798,8 @@ if "TYPE_ERROR" in text:
             rw_intel::LspConfig {
                 servers: vec![LspServerConfig {
                     language: Language::Rust,
-                    command: server,
-                    args: Vec::new(),
+                    command: python.clone(),
+                    args: vec![server.to_string_lossy().into_owned()],
                 }],
                 request_timeout: std::time::Duration::from_secs(3),
                 max_restarts: 0,
@@ -798,7 +815,13 @@ if "TYPE_ERROR" in text:
         assert_eq!(result.items[0].message, "content-derived type error");
         assert_eq!(
             intelligence.active_lsp_servers().await,
-            vec!["fake-lsp.py".to_owned()]
+            vec![
+                python
+                    .file_name()
+                    .expect("Python name")
+                    .to_string_lossy()
+                    .into_owned()
+            ]
         );
         assert!(!workspace_canary.exists());
         assert!(!outside_canary.exists());
@@ -812,6 +835,8 @@ if "TYPE_ERROR" in text:
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[tokio::test]
     async fn lsp_handle_kills_and_reaps_the_complete_process_group() {
+        use tokio::io::AsyncBufReadExt as _;
+
         let _lifecycle = crate::acquire_process_lifecycle_test_gate().await;
         if rw_sandbox::probe().support != rw_sandbox::SandboxSupport::Enforced {
             return;
@@ -819,14 +844,10 @@ if "TYPE_ERROR" in text:
         let workspace = tempdir().expect("workspace");
         let outside = tempdir().expect("outside");
         let scratch = tempdir().expect("scratch");
-        let pid_file = scratch.path().join("descendant.pid");
-        let server = outside.path().join("process-tree.py");
+        let server = outside.path().join("process-tree.sh");
         std::fs::write(
             &server,
-            format!(
-                "#!/usr/bin/python3\nimport subprocess,time\nchild=subprocess.Popen(['/bin/sleep','30'])\nopen({:?},'w').write(str(child.pid))\ntime.sleep(30)\n",
-                pid_file.to_string_lossy()
-            ),
+            "#!/bin/sh\n/bin/sleep 30 &\nprintf '%s\\n' \"$!\"\nwait\n",
         )
         .expect("process tree server");
         std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o700))
@@ -848,23 +869,19 @@ if "TYPE_ERROR" in text:
             )
             .await
             .expect("spawn process tree");
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-        let descendant = loop {
-            match std::fs::read_to_string(&pid_file) {
-                Ok(value) => {
-                    if let Ok(pid) = value.parse::<i32>() {
-                        break pid;
-                    }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => panic!("read descendant pid: {error}"),
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "descendant pid was not published before the deadline"
+        let mut readiness = String::new();
+        let ready = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::io::BufReader::new(&mut process.stdout).read_line(&mut readiness),
+        )
+        .await;
+        if !matches!(ready, Ok(Ok(bytes)) if bytes > 0) {
+            let cleanup = process.handle.kill().await;
+            panic!(
+                "process-tree fixture did not announce readiness: {ready:?}; cleanup: {cleanup:?}"
             );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        };
+        }
+        let descendant = readiness.trim().parse::<i32>().expect("descendant pid");
         process.handle.kill().await.expect("kill process group");
         let descendant = rustix::process::Pid::from_raw(descendant).expect("positive pid");
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
