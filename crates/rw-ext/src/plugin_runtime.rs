@@ -698,23 +698,15 @@ impl JsonRpcPluginClient {
             self.send_notification(METHOD_EXIT, json!({})).await
         })
         .await;
-        if graceful.is_ok_and(|result| result.is_ok())
-            && tokio::time::timeout(timeout, self.process.wait())
-                .await
-                .is_ok_and(|result| result.is_ok())
-        {
-            self.shutdown_complete.store(true, Ordering::Release);
-            return Ok(());
+        if graceful.is_ok_and(|result| result.is_ok()) {
+            let _ = tokio::time::timeout(timeout, self.process.wait()).await;
         }
-        let kill_error = self.process.kill_tree().err();
-        let reap = tokio::time::timeout(timeout, self.process.reap()).await;
-        if let Some(error) = kill_error {
-            return Err(PluginHostError::Process(error));
-        }
-        let result = match reap {
-            Ok(result) => result.map_err(PluginHostError::Process),
+        self.termination.begin();
+        let result = match tokio::time::timeout(timeout, self.termination.wait()).await {
+            Ok(()) => Ok(()),
             Err(_) => Err(PluginHostError::Process(PluginProcessError {
-                message: "plugin did not reap before shutdown deadline".to_owned(),
+                message: "plugin effect settlement remains unproven after shutdown deadline"
+                    .to_owned(),
             })),
         };
         if result.is_ok() {
@@ -2715,11 +2707,16 @@ mod tests {
         waited: AtomicUsize,
         violations: StdMutex<Vec<CapabilityViolation>>,
         kill_fails: AtomicBool,
+        settlement_blocked: AtomicBool,
+        settlement_release: tokio::sync::Notify,
     }
 
     #[async_trait]
     impl SupervisedPluginProcess for FakeProcess {
         async fn settle_effects(&self) -> Result<(), PluginProcessError> {
+            if self.settlement_blocked.load(Ordering::Acquire) {
+                self.settlement_release.notified().await;
+            }
             self.reap().await
         }
         fn mark_capability_violation(&self, violation: &CapabilityViolation) {
@@ -3517,6 +3514,55 @@ mod tests {
         .await;
         assert!(result.is_err());
         assert!(process.killed.load(Ordering::Acquire) >= 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_uses_effect_proof_instead_of_kill_attempt_outcome() {
+        for blocked in [false, true] {
+            let root = TempDir::new().expect("tempdir");
+            let config = shell_config(&root)
+                .with_allowed_domains(["example.com"])
+                .expect("allowlist");
+            let manifest = manifest();
+            let approvals = MemoryApproval::default();
+            approve_plugin_launch(&approvals, &manifest, &config, "project:shutdown")
+                .expect("approve");
+            let process = Arc::new(FakeProcess::default());
+            let launcher = MemoryLauncher {
+                manifest: manifest.clone(),
+                process: Arc::clone(&process),
+                push: None,
+                hang_method: None,
+            };
+            let host = PluginHost::launch_approved(
+                &launcher,
+                &approvals,
+                &config,
+                "project:shutdown",
+                &[root.path().to_path_buf()],
+                manifest,
+                Arc::new(DenyPushHandler),
+                Arc::new(NoopPluginBoundaryRedactor),
+            )
+            .await
+            .expect("launch");
+            process.kill_fails.store(true, Ordering::Release);
+            process.settlement_blocked.store(blocked, Ordering::Release);
+            let result = host.client.shutdown(Duration::from_millis(30)).await;
+            assert_eq!(result.is_err(), blocked);
+            assert_eq!(
+                host.client.shutdown_complete.load(Ordering::Acquire),
+                !blocked
+            );
+            assert!(process.killed.load(Ordering::Acquire) > 0);
+            if blocked {
+                process.settlement_release.notify_one();
+                host.shutdown()
+                    .await
+                    .expect("owned cleanup continues after API timeout");
+            }
+            assert!(process.waited.load(Ordering::Acquire) > 0);
+        }
     }
 
     #[tokio::test]
