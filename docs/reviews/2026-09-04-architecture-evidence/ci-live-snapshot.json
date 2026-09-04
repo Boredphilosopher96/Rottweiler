@@ -1,0 +1,1517 @@
+{
+  "fetched_at": "2026-09-04T22:09:20.986440+00:00",
+  "repository": "Boredphilosopher96/Rottweiler",
+  "source": "GitHub Actions and repository REST APIs through gh",
+  "ci_window_start": "2026-08-20T00:00:00Z",
+  "counts": {
+    "failure": 23,
+    "success": 11,
+    "cancelled": 1
+  },
+  "ci_runs": [
+    {
+      "conclusion": "failure",
+      "createdAt": "2026-09-02T12:08:41Z",
+      "databaseId": 33628315225,
+      "event": "pull_request",
+      "headBranch": "dependabot/cargo/rust-3a93c45d3c",
+      "headSha": "25ad4861ab2ea9e63293836757a9bf36778ff2dd",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/33628315225"
+    },
+    {
+      "conclusion": "failure",
+      "createdAt": "2026-09-01T13:13:21Z",
+      "databaseId": 33512087243,
+      "event": "pull_request",
+      "headBranch": "dependabot/github_actions/actions-5c183d6ffa",
+      "headSha": "3d64fa722ed98618a2a8e26d85d8976d8182a005",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/33512087243"
+    },
+    {
+      "conclusion": "failure",
+      "createdAt": "2026-09-01T12:38:15Z",
+      "databaseId": 33508782264,
+      "event": "pull_request",
+      "headBranch": "dependabot/npm_and_yarn/packages/plugin-sdk/plugin-sdk-4da2090919",
+      "headSha": "55a5fdc490302e972ce43b916d473a5c6427ddce",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/33508782264"
+    },
+    {
+      "conclusion": "failure",
+      "createdAt": "2026-09-01T03:09:36Z",
+      "databaseId": 33465186169,
+      "event": "pull_request",
+      "headBranch": "codex/implement-and-test-all-pending-features",
+      "headSha": "e3da00d966bd5c8e17c798e256b92253cbd558a1",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/33465186169"
+    },
+    {
+      "conclusion": "failure",
+      "createdAt": "2026-08-31T23:12:46Z",
+      "databaseId": 33449706940,
+      "event": "pull_request",
+      "headBranch": "dependabot/npm_and_yarn/packages/tui/tui-e80c42bb3a",
+      "headSha": "0cf58e927410304443b2b5b704f5abd46e424af2",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/33449706940"
+    },
+    {
+      "conclusion": "failure",
+      "createdAt": "2026-08-31T23:10:17Z",
+      "databaseId": 33449525614,
+      "event": "push",
+      "headBranch": "main",
+      "headSha": "c729e3bf4d87b6c80f6a2e8655ed935aeb67cafd",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/33449525614"
+    },
+    {
+      "conclusion": "failure",
+      "createdAt": "2026-08-31T12:16:06Z",
+      "databaseId": 33390910152,
+      "event": "pull_request",
+      "headBranch": "dependabot/cargo/rust-d07d4e5e7f",
+      "headSha": "9aae920abdcd48ef021b5d02405ef0c24c986a03",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/33390910152"
+    },
+    {
+      "conclusion": "failure",
+      "createdAt": "2026-08-26T12:08:36Z",
+      "databaseId": 32966982499,
+      "event": "pull_request",
+      "headBranch": "dependabot/cargo/rust-1f09f8e8f0",
+      "headSha": "07400a1efc37923e4cea3ca343260bb4adae1756",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32966982499"
+    },
+    {
+      "conclusion": "failure",
+      "createdAt": "2026-08-24T13:14:52Z",
+      "databaseId": 32731559739,
+      "event": "pull_request",
+      "headBranch": "dependabot/github_actions/actions-5c183d6ffa",
+      "headSha": "7d48053411e2057e56e99c8a384216553bd514ff",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32731559739"
+    },
+    {
+      "conclusion": "failure",
+      "createdAt": "2026-08-24T12:36:49Z",
+      "databaseId": 32728025045,
+      "event": "pull_request",
+      "headBranch": "dependabot/npm_and_yarn/packages/plugin-sdk/plugin-sdk-4da2090919",
+      "headSha": "84adac330f4b0dd552bd4f96bd12dc3cf74a0b33",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32728025045"
+    },
+    {
+      "conclusion": "failure",
+      "createdAt": "2026-08-24T12:18:16Z",
+      "databaseId": 32726384855,
+      "event": "pull_request",
+      "headBranch": "dependabot/npm_and_yarn/packages/tui/tui-e80c42bb3a",
+      "headSha": "9f6fd1e8cf91ef0c036739ac348681d5d0c2a0f4",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32726384855"
+    },
+    {
+      "conclusion": "failure",
+      "createdAt": "2026-08-24T12:13:10Z",
+      "databaseId": 32725922707,
+      "event": "pull_request",
+      "headBranch": "dependabot/cargo/rust-032cd91a9e",
+      "headSha": "928e47442058b8c962d864ec1b83a2421ded7563",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32725922707"
+    },
+    {
+      "conclusion": "failure",
+      "createdAt": "2026-08-23T19:27:19Z",
+      "databaseId": 32661285843,
+      "event": "push",
+      "headBranch": "main",
+      "headSha": "8a82600762f94ae103aa7b9241d81eacf54d28fa",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32661285843"
+    },
+    {
+      "conclusion": "success",
+      "createdAt": "2026-08-23T14:58:18Z",
+      "databaseId": 32647066947,
+      "event": "push",
+      "headBranch": "main",
+      "headSha": "d5621851aaf71514540162d51996521ae146ca0e",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32647066947"
+    },
+    {
+      "conclusion": "success",
+      "createdAt": "2026-08-23T13:47:31Z",
+      "databaseId": 32643426515,
+      "event": "pull_request",
+      "headBranch": "dependabot/cargo/rust-c46514fe26",
+      "headSha": "2d568c5906e7dd3b6a8ca8734df24202ae1c1766",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32643426515"
+    },
+    {
+      "conclusion": "failure",
+      "createdAt": "2026-08-23T13:45:28Z",
+      "databaseId": 32643319167,
+      "event": "pull_request",
+      "headBranch": "dependabot/npm_and_yarn/packages/tui/tui-ba8a090411",
+      "headSha": "9f0fec81eb9ae97c86c4d00577c5278f34f3114d",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32643319167"
+    },
+    {
+      "conclusion": "success",
+      "createdAt": "2026-08-23T13:43:00Z",
+      "databaseId": 32643192171,
+      "event": "push",
+      "headBranch": "main",
+      "headSha": "ffa8aa2c5ebea9b64cedb4cab841d44e69950a2a",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32643192171"
+    },
+    {
+      "conclusion": "failure",
+      "createdAt": "2026-08-21T12:17:45Z",
+      "databaseId": 32481204291,
+      "event": "pull_request",
+      "headBranch": "dependabot/npm_and_yarn/packages/tui/tui-ba8a090411",
+      "headSha": "e75278e282515b60e81953abbf841719e43395ca",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32481204291"
+    },
+    {
+      "conclusion": "failure",
+      "createdAt": "2026-08-21T12:07:08Z",
+      "databaseId": 32480353871,
+      "event": "pull_request",
+      "headBranch": "dependabot/cargo/rust-e50ff1c156",
+      "headSha": "065af5bf3b88779782d1f2fa9c6efd527970fa9a",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32480353871"
+    },
+    {
+      "conclusion": "success",
+      "createdAt": "2026-08-21T00:21:36Z",
+      "databaseId": 32432349642,
+      "event": "push",
+      "headBranch": "main",
+      "headSha": "f67909bdf04cf4bf5864c57f1f7a9ea72dc59cef",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32432349642"
+    },
+    {
+      "conclusion": "success",
+      "createdAt": "2026-08-20T23:22:36Z",
+      "databaseId": 32428383823,
+      "event": "pull_request",
+      "headBranch": "dependabot/cargo/rust-e50ff1c156",
+      "headSha": "2c0068b94ac0803343d9ef4499046f969f755e49",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32428383823"
+    },
+    {
+      "conclusion": "success",
+      "createdAt": "2026-08-20T23:18:25Z",
+      "databaseId": 32428095459,
+      "event": "push",
+      "headBranch": "main",
+      "headSha": "fac23f3ce73662a09e5281116c61d654ef79cbec",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32428095459"
+    },
+    {
+      "conclusion": "failure",
+      "createdAt": "2026-08-20T19:40:14Z",
+      "databaseId": 32409922966,
+      "event": "pull_request",
+      "headBranch": "dependabot/cargo/rust-5c993eea22",
+      "headSha": "c06bb556f4fbc71c8b6da418df71c8fb65e283d0",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32409922966"
+    },
+    {
+      "conclusion": "success",
+      "createdAt": "2026-08-20T19:36:00Z",
+      "databaseId": 32409541874,
+      "event": "push",
+      "headBranch": "main",
+      "headSha": "86a2e22c418ec50f6b94fe24ffaf29ac63ea3d9f",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32409541874"
+    },
+    {
+      "conclusion": "success",
+      "createdAt": "2026-08-20T16:07:22Z",
+      "databaseId": 32390186906,
+      "event": "pull_request",
+      "headBranch": "dependabot/cargo/rust-5c993eea22",
+      "headSha": "1dc6cd9a983a99a821f05c730dd6bbf8789643a8",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32390186906"
+    },
+    {
+      "conclusion": "success",
+      "createdAt": "2026-08-20T16:03:12Z",
+      "databaseId": 32389782583,
+      "event": "push",
+      "headBranch": "main",
+      "headSha": "ae3cc03da2cac970f0b151fbdb93ffa5f86a34f2",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32389782583"
+    },
+    {
+      "conclusion": "failure",
+      "createdAt": "2026-08-20T15:04:29Z",
+      "databaseId": 32383949405,
+      "event": "pull_request",
+      "headBranch": "dependabot/cargo/rust-5c993eea22",
+      "headSha": "dad49a0b694aec7f7c5259f8af4f022bd55dbb54",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32383949405"
+    },
+    {
+      "conclusion": "success",
+      "createdAt": "2026-08-20T15:00:29Z",
+      "databaseId": 32383547696,
+      "event": "push",
+      "headBranch": "main",
+      "headSha": "438e5c6ec8404c3461796c6f5117ccf6369ee0b2",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32383547696"
+    },
+    {
+      "conclusion": "success",
+      "createdAt": "2026-08-20T13:23:27Z",
+      "databaseId": 32373992580,
+      "event": "push",
+      "headBranch": "main",
+      "headSha": "2f3e71187396ff6a3cda7c0b11c225027f8416c4",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32373992580"
+    },
+    {
+      "conclusion": "failure",
+      "createdAt": "2026-08-20T12:50:12Z",
+      "databaseId": 32370920700,
+      "event": "pull_request",
+      "headBranch": "dependabot/cargo/rust-5c993eea22",
+      "headSha": "409dc32363dcf5a25b9cb56d67afd9ba67cdb104",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32370920700"
+    },
+    {
+      "conclusion": "failure",
+      "createdAt": "2026-08-20T12:46:00Z",
+      "databaseId": 32370549450,
+      "event": "push",
+      "headBranch": "main",
+      "headSha": "2e37f730124d690d2c7431ec4ab85a8ec93b28b1",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32370549450"
+    },
+    {
+      "conclusion": "cancelled",
+      "createdAt": "2026-08-20T12:43:43Z",
+      "databaseId": 32370346723,
+      "event": "push",
+      "headBranch": "main",
+      "headSha": "6a26233b50f6f02d45af9912dd5a78745c1e573f",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32370346723"
+    },
+    {
+      "conclusion": "failure",
+      "createdAt": "2026-08-20T12:17:47Z",
+      "databaseId": 32368107847,
+      "event": "pull_request",
+      "headBranch": "dependabot/npm_and_yarn/packages/tui/tui-ba8a090411",
+      "headSha": "f232873a75c13ff7b69b1cc582c0adff4fc461ee",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32368107847"
+    },
+    {
+      "conclusion": "failure",
+      "createdAt": "2026-08-20T12:10:07Z",
+      "databaseId": 32367439470,
+      "event": "pull_request",
+      "headBranch": "dependabot/cargo/rust-5c993eea22",
+      "headSha": "814e53be30d947c0157c4ec0939b9f853ae38ae7",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32367439470"
+    },
+    {
+      "conclusion": "failure",
+      "createdAt": "2026-08-20T03:35:28Z",
+      "databaseId": 32328783418,
+      "event": "push",
+      "headBranch": "main",
+      "headSha": "17bae934a8d59c2d7a54a45d558ffea34a30ed5f",
+      "status": "completed",
+      "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32328783418"
+    }
+  ],
+  "current_main_ci": {
+    "headSha": "c729e3bf4d87b6c80f6a2e8655ed935aeb67cafd",
+    "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/33449525614",
+    "jobs": [
+      {
+        "name": "M4 SSH loopback contract",
+        "conclusion": "failure",
+        "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/33449525614/job/99676049174",
+        "failed_steps": [
+          "Run crates/rw-cli/tests/m4_release_gate.sh"
+        ]
+      },
+      {
+        "name": "M5 Linux sandbox security acceptance",
+        "conclusion": "success",
+        "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/33449525614/job/99676049334",
+        "failed_steps": []
+      },
+      {
+        "name": "Supply chain",
+        "conclusion": "failure",
+        "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/33449525614/job/99676049353",
+        "failed_steps": [
+          "Run cargo deny check"
+        ]
+      },
+      {
+        "name": "Per-PR TUI performance smoke (ubuntu-latest)",
+        "conclusion": "success",
+        "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/33449525614/job/99676049404",
+        "failed_steps": []
+      },
+      {
+        "name": "Test (macos-15)",
+        "conclusion": "failure",
+        "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/33449525614/job/99676049405",
+        "failed_steps": [
+          "Run cargo test --locked --workspace --all-features"
+        ]
+      },
+      {
+        "name": "Test (ubuntu-latest)",
+        "conclusion": "failure",
+        "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/33449525614/job/99676049436",
+        "failed_steps": [
+          "Run cargo test --locked --workspace --all-features"
+        ]
+      },
+      {
+        "name": "Per-PR TUI performance smoke (macos-15)",
+        "conclusion": "failure",
+        "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/33449525614/job/99676049608",
+        "failed_steps": [
+          "Enforce TUI transport and render-loop budgets"
+        ]
+      },
+      {
+        "name": "Per-PR performance smoke",
+        "conclusion": "skipped",
+        "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/33449525614/job/99677532728",
+        "failed_steps": []
+      }
+    ]
+  },
+  "runners": [
+    {
+      "name": "rottweiler-macos-arm64",
+      "status": "offline",
+      "busy": false,
+      "labels": [
+        "self-hosted",
+        "macOS",
+        "ARM64",
+        "performance",
+        "soak"
+      ]
+    }
+  ],
+  "ruleset": {
+    "id": 19590466,
+    "name": "main",
+    "enforcement": "active",
+    "bypass_actors": [
+      {
+        "actor_id": 5,
+        "actor_type": "RepositoryRole",
+        "bypass_mode": "always"
+      }
+    ],
+    "conditions": {
+      "ref_name": {
+        "exclude": [],
+        "include": [
+          "~DEFAULT_BRANCH"
+        ]
+      }
+    },
+    "rules": [
+      {
+        "type": "deletion"
+      },
+      {
+        "type": "non_fast_forward"
+      },
+      {
+        "type": "required_linear_history"
+      },
+      {
+        "type": "pull_request",
+        "parameters": {
+          "required_approving_review_count": 0,
+          "dismiss_stale_reviews_on_push": false,
+          "required_reviewers": [],
+          "require_code_owner_review": false,
+          "require_last_push_approval": false,
+          "required_review_thread_resolution": true,
+          "require_extra_approval_for_unattributed_changes": true,
+          "allowed_merge_methods": [
+            "squash",
+            "rebase"
+          ]
+        }
+      },
+      {
+        "type": "required_status_checks",
+        "parameters": {
+          "strict_required_status_checks_policy": true,
+          "do_not_enforce_on_create": false,
+          "required_status_checks": [
+            {
+              "context": "Test (ubuntu-latest)"
+            },
+            {
+              "context": "Test (macos-15)"
+            },
+            {
+              "context": "M5 Linux sandbox security acceptance"
+            },
+            {
+              "context": "Per-PR performance smoke"
+            },
+            {
+              "context": "M4 SSH loopback contract"
+            },
+            {
+              "context": "Supply chain"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "hardening_runs": [
+    {
+      "run_id": 33387816208,
+      "head_sha_prefix": "8a826007",
+      "jobs": [
+        {
+          "databaseId": 99474298306,
+          "name": "Terminal-Bench 2.1 pinned subset",
+          "conclusion": "success",
+          "startedAt": "2026-08-31T11:37:16Z",
+          "completedAt": "2026-08-31T11:37:24Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/33387816208/job/99474298306",
+          "step_count": 15
+        },
+        {
+          "databaseId": 99474298471,
+          "name": "Fuzz toon_decoder",
+          "conclusion": "success",
+          "startedAt": "2026-08-31T11:37:16Z",
+          "completedAt": "2026-08-31T11:43:48Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/33387816208/job/99474298471",
+          "step_count": 9
+        },
+        {
+          "databaseId": 99474298472,
+          "name": "WSL2 release, sandbox, doctor, and DrvFS acceptance",
+          "conclusion": "failure",
+          "startedAt": "2026-08-31T11:37:14Z",
+          "completedAt": "2026-08-31T11:50:11Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/33387816208/job/99474298472",
+          "step_count": 6
+        },
+        {
+          "databaseId": 99474298489,
+          "name": "Build isolated Linux performance binary",
+          "conclusion": "success",
+          "startedAt": "2026-08-31T11:37:15Z",
+          "completedAt": "2026-08-31T11:42:37Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/33387816208/job/99474298489",
+          "step_count": 14
+        },
+        {
+          "databaseId": 99474298559,
+          "name": "Fuzz plugin_rpc",
+          "conclusion": "failure",
+          "startedAt": "2026-08-31T11:37:16Z",
+          "completedAt": "2026-08-31T11:42:54Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/33387816208/job/99474298559",
+          "step_count": 9
+        },
+        {
+          "databaseId": 99474298600,
+          "name": "Required hardening runner contract",
+          "conclusion": "success",
+          "startedAt": "2026-08-31T11:37:14Z",
+          "completedAt": "2026-08-31T11:37:17Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/33387816208/job/99474298600",
+          "step_count": 3
+        },
+        {
+          "databaseId": 99474298621,
+          "name": "Fuzz config_parser",
+          "conclusion": "success",
+          "startedAt": "2026-08-31T11:37:14Z",
+          "completedAt": "2026-08-31T11:44:01Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/33387816208/job/99474298621",
+          "step_count": 9
+        },
+        {
+          "databaseId": 99474298643,
+          "name": "Build isolated macOS performance binary",
+          "conclusion": "success",
+          "startedAt": "2026-08-31T11:37:15Z",
+          "completedAt": "2026-08-31T11:49:16Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/33387816208/job/99474298643",
+          "step_count": 14
+        },
+        {
+          "databaseId": 99474298723,
+          "name": "Fuzz event_log",
+          "conclusion": "success",
+          "startedAt": "2026-08-31T11:37:14Z",
+          "completedAt": "2026-08-31T11:42:59Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/33387816208/job/99474298723",
+          "step_count": 9
+        },
+        {
+          "databaseId": 99474322757,
+          "name": "Release budgets (fixed hosted macOS)",
+          "conclusion": "failure",
+          "startedAt": "2026-08-31T11:37:21Z",
+          "completedAt": "2026-08-31T12:06:08Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/33387816208/job/99474322757",
+          "step_count": 19
+        },
+        {
+          "databaseId": 99475616517,
+          "name": "Release budgets (protected Linux)",
+          "conclusion": "failure",
+          "startedAt": "2026-08-31T11:42:40Z",
+          "completedAt": "2026-08-31T11:44:04Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/33387816208/job/99475616517",
+          "step_count": 19
+        },
+        {
+          "databaseId": 99477240492,
+          "name": "Eight-hour supervised soak (linux-x86_64)",
+          "conclusion": "cancelled",
+          "startedAt": "2026-08-31T11:49:17Z",
+          "completedAt": "2026-09-01T11:49:17Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/33387816208/job/99477240492",
+          "step_count": 0
+        },
+        {
+          "databaseId": 99477240518,
+          "name": "Eight-hour supervised soak (darwin-arm64)",
+          "conclusion": "cancelled",
+          "startedAt": "2026-08-31T11:49:17Z",
+          "completedAt": "2026-09-01T11:49:17Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/33387816208/job/99477240518",
+          "step_count": 0
+        }
+      ]
+    },
+    {
+      "run_id": 32695199474,
+      "head_sha_prefix": "8a826007",
+      "jobs": [
+        {
+          "databaseId": 97335892453,
+          "name": "Build isolated Linux performance binary",
+          "conclusion": "success",
+          "startedAt": "2026-08-24T05:54:35Z",
+          "completedAt": "2026-08-24T06:00:25Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32695199474/job/97335892453",
+          "step_count": 14
+        },
+        {
+          "databaseId": 97335892516,
+          "name": "Build isolated macOS performance binary",
+          "conclusion": "success",
+          "startedAt": "2026-08-24T05:54:36Z",
+          "completedAt": "2026-08-24T06:04:38Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32695199474/job/97335892516",
+          "step_count": 14
+        },
+        {
+          "databaseId": 97335892525,
+          "name": "Fuzz config_parser",
+          "conclusion": "success",
+          "startedAt": "2026-08-24T05:54:35Z",
+          "completedAt": "2026-08-24T06:01:52Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32695199474/job/97335892525",
+          "step_count": 9
+        },
+        {
+          "databaseId": 97335892566,
+          "name": "Terminal-Bench 2.1 pinned subset",
+          "conclusion": "success",
+          "startedAt": "2026-08-24T05:54:37Z",
+          "completedAt": "2026-08-24T05:54:43Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32695199474/job/97335892566",
+          "step_count": 15
+        },
+        {
+          "databaseId": 97335892574,
+          "name": "Required hardening runner contract",
+          "conclusion": "success",
+          "startedAt": "2026-08-24T05:54:36Z",
+          "completedAt": "2026-08-24T05:54:40Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32695199474/job/97335892574",
+          "step_count": 3
+        },
+        {
+          "databaseId": 97335892576,
+          "name": "Fuzz plugin_rpc",
+          "conclusion": "failure",
+          "startedAt": "2026-08-24T05:54:35Z",
+          "completedAt": "2026-08-24T05:59:58Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32695199474/job/97335892576",
+          "step_count": 9
+        },
+        {
+          "databaseId": 97335892619,
+          "name": "Fuzz event_log",
+          "conclusion": "success",
+          "startedAt": "2026-08-24T05:54:36Z",
+          "completedAt": "2026-08-24T05:59:36Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32695199474/job/97335892619",
+          "step_count": 9
+        },
+        {
+          "databaseId": 97335892643,
+          "name": "WSL2 release, sandbox, doctor, and DrvFS acceptance",
+          "conclusion": "failure",
+          "startedAt": "2026-08-24T05:54:36Z",
+          "completedAt": "2026-08-24T06:07:20Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32695199474/job/97335892643",
+          "step_count": 6
+        },
+        {
+          "databaseId": 97335892656,
+          "name": "Fuzz toon_decoder",
+          "conclusion": "success",
+          "startedAt": "2026-08-24T05:54:35Z",
+          "completedAt": "2026-08-24T06:00:58Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32695199474/job/97335892656",
+          "step_count": 9
+        },
+        {
+          "databaseId": 97335912518,
+          "name": "Release budgets (fixed hosted macOS)",
+          "conclusion": "failure",
+          "startedAt": "2026-08-24T05:54:43Z",
+          "completedAt": "2026-08-24T06:22:40Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32695199474/job/97335912518",
+          "step_count": 19
+        },
+        {
+          "databaseId": 97336875471,
+          "name": "Release budgets (protected Linux)",
+          "conclusion": "failure",
+          "startedAt": "2026-08-24T06:00:28Z",
+          "completedAt": "2026-08-24T06:08:10Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32695199474/job/97336875471",
+          "step_count": 20
+        },
+        {
+          "databaseId": 97337586787,
+          "name": "Eight-hour supervised soak (darwin-arm64)",
+          "conclusion": "cancelled",
+          "startedAt": "2026-08-24T06:04:38Z",
+          "completedAt": "2026-08-25T06:04:39Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32695199474/job/97337586787",
+          "step_count": 0
+        },
+        {
+          "databaseId": 97337586847,
+          "name": "Eight-hour supervised soak (linux-x86_64)",
+          "conclusion": "cancelled",
+          "startedAt": "2026-08-24T06:04:38Z",
+          "completedAt": "2026-08-25T06:04:39Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/32695199474/job/97337586847",
+          "step_count": 0
+        }
+      ]
+    },
+    {
+      "run_id": 31999407971,
+      "head_sha_prefix": "d65c5cf9",
+      "jobs": [
+        {
+          "databaseId": 95296806068,
+          "name": "WSL2 release, sandbox, doctor, and DrvFS acceptance",
+          "conclusion": "success",
+          "startedAt": "2026-08-17T05:52:01Z",
+          "completedAt": "2026-08-17T06:06:49Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31999407971/job/95296806068",
+          "step_count": 6
+        },
+        {
+          "databaseId": 95296806080,
+          "name": "Build isolated Linux performance binary",
+          "conclusion": "success",
+          "startedAt": "2026-08-17T05:52:00Z",
+          "completedAt": "2026-08-17T05:58:00Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31999407971/job/95296806080",
+          "step_count": 14
+        },
+        {
+          "databaseId": 95296806082,
+          "name": "Fuzz toon_decoder",
+          "conclusion": "success",
+          "startedAt": "2026-08-17T05:52:00Z",
+          "completedAt": "2026-08-17T05:58:23Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31999407971/job/95296806082",
+          "step_count": 9
+        },
+        {
+          "databaseId": 95296806090,
+          "name": "Fuzz config_parser",
+          "conclusion": "success",
+          "startedAt": "2026-08-17T05:52:01Z",
+          "completedAt": "2026-08-17T05:58:48Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31999407971/job/95296806090",
+          "step_count": 9
+        },
+        {
+          "databaseId": 95296806096,
+          "name": "Terminal-Bench 2.1 pinned subset",
+          "conclusion": "success",
+          "startedAt": "2026-08-17T05:52:01Z",
+          "completedAt": "2026-08-17T05:52:08Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31999407971/job/95296806096",
+          "step_count": 15
+        },
+        {
+          "databaseId": 95296806109,
+          "name": "Required hardening runner contract",
+          "conclusion": "success",
+          "startedAt": "2026-08-17T05:52:00Z",
+          "completedAt": "2026-08-17T05:52:03Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31999407971/job/95296806109",
+          "step_count": 3
+        },
+        {
+          "databaseId": 95296806115,
+          "name": "Fuzz event_log",
+          "conclusion": "success",
+          "startedAt": "2026-08-17T05:52:00Z",
+          "completedAt": "2026-08-17T05:58:25Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31999407971/job/95296806115",
+          "step_count": 9
+        },
+        {
+          "databaseId": 95296806145,
+          "name": "Build isolated macOS performance binary",
+          "conclusion": "success",
+          "startedAt": "2026-08-17T05:52:01Z",
+          "completedAt": "2026-08-17T05:59:44Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31999407971/job/95296806145",
+          "step_count": 14
+        },
+        {
+          "databaseId": 95296806174,
+          "name": "Fuzz plugin_rpc",
+          "conclusion": "success",
+          "startedAt": "2026-08-17T05:52:01Z",
+          "completedAt": "2026-08-17T05:58:23Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31999407971/job/95296806174",
+          "step_count": 9
+        },
+        {
+          "databaseId": 95296822286,
+          "name": "Release budgets (fixed hosted macOS)",
+          "conclusion": "failure",
+          "startedAt": "2026-08-17T05:52:07Z",
+          "completedAt": "2026-08-17T06:01:18Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31999407971/job/95296822286",
+          "step_count": 18
+        },
+        {
+          "databaseId": 95297761517,
+          "name": "Release budgets (protected Linux)",
+          "conclusion": "success",
+          "startedAt": "2026-08-17T05:58:03Z",
+          "completedAt": "2026-08-17T06:14:51Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31999407971/job/95297761517",
+          "step_count": 20
+        },
+        {
+          "databaseId": 95298030037,
+          "name": "Eight-hour supervised soak (linux-x86_64)",
+          "conclusion": "cancelled",
+          "startedAt": "2026-08-17T05:59:44Z",
+          "completedAt": "2026-08-18T05:59:45Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31999407971/job/95298030037",
+          "step_count": 0
+        },
+        {
+          "databaseId": 95298030091,
+          "name": "Eight-hour supervised soak (darwin-arm64)",
+          "conclusion": "cancelled",
+          "startedAt": "2026-08-17T05:59:44Z",
+          "completedAt": "2026-08-18T05:59:45Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31999407971/job/95298030091",
+          "step_count": 0
+        }
+      ]
+    },
+    {
+      "run_id": 31463615481,
+      "head_sha_prefix": "fb905a13",
+      "jobs": [
+        {
+          "databaseId": 93691898248,
+          "name": "Build isolated macOS performance binary",
+          "conclusion": "success",
+          "startedAt": "2026-08-11T06:01:35Z",
+          "completedAt": "2026-08-11T06:08:54Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31463615481/job/93691898248",
+          "step_count": 14
+        },
+        {
+          "databaseId": 93691898270,
+          "name": "Fuzz event_log",
+          "conclusion": "success",
+          "startedAt": "2026-08-11T06:01:41Z",
+          "completedAt": "2026-08-11T06:07:47Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31463615481/job/93691898270",
+          "step_count": 9
+        },
+        {
+          "databaseId": 93691898273,
+          "name": "Build isolated Linux performance binary",
+          "conclusion": "success",
+          "startedAt": "2026-08-11T06:01:41Z",
+          "completedAt": "2026-08-11T06:07:39Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31463615481/job/93691898273",
+          "step_count": 14
+        },
+        {
+          "databaseId": 93691898283,
+          "name": "Fuzz plugin_rpc",
+          "conclusion": "success",
+          "startedAt": "2026-08-11T06:01:34Z",
+          "completedAt": "2026-08-11T06:07:24Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31463615481/job/93691898283",
+          "step_count": 9
+        },
+        {
+          "databaseId": 93691898286,
+          "name": "Fuzz config_parser",
+          "conclusion": "success",
+          "startedAt": "2026-08-11T06:01:35Z",
+          "completedAt": "2026-08-11T06:07:48Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31463615481/job/93691898286",
+          "step_count": 9
+        },
+        {
+          "databaseId": 93691898291,
+          "name": "Required hardening runner contract",
+          "conclusion": "success",
+          "startedAt": "2026-08-11T06:01:35Z",
+          "completedAt": "2026-08-11T06:01:39Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31463615481/job/93691898291",
+          "step_count": 3
+        },
+        {
+          "databaseId": 93691898293,
+          "name": "Fuzz toon_decoder",
+          "conclusion": "success",
+          "startedAt": "2026-08-11T06:01:34Z",
+          "completedAt": "2026-08-11T06:07:33Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31463615481/job/93691898293",
+          "step_count": 9
+        },
+        {
+          "databaseId": 93691898295,
+          "name": "WSL2 release, sandbox, doctor, and DrvFS acceptance",
+          "conclusion": "success",
+          "startedAt": "2026-08-11T06:01:35Z",
+          "completedAt": "2026-08-11T06:15:42Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31463615481/job/93691898295",
+          "step_count": 6
+        },
+        {
+          "databaseId": 93691898297,
+          "name": "Terminal-Bench 2.1 pinned subset",
+          "conclusion": "success",
+          "startedAt": "2026-08-11T06:01:36Z",
+          "completedAt": "2026-08-11T06:01:43Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31463615481/job/93691898297",
+          "step_count": 15
+        },
+        {
+          "databaseId": 93691918545,
+          "name": "Release budgets (fixed hosted macOS)",
+          "conclusion": "failure",
+          "startedAt": "2026-08-11T06:01:42Z",
+          "completedAt": "2026-08-11T06:20:49Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31463615481/job/93691918545",
+          "step_count": 19
+        },
+        {
+          "databaseId": 93692930183,
+          "name": "Release budgets (protected Linux)",
+          "conclusion": "failure",
+          "startedAt": "2026-08-11T06:07:48Z",
+          "completedAt": "2026-08-11T06:24:57Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31463615481/job/93692930183",
+          "step_count": 20
+        },
+        {
+          "databaseId": 93693133733,
+          "name": "Eight-hour supervised soak (linux-x86_64)",
+          "conclusion": "cancelled",
+          "startedAt": "2026-08-11T06:08:54Z",
+          "completedAt": "2026-08-12T00:09:33Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31463615481/job/93693133733",
+          "step_count": 0
+        },
+        {
+          "databaseId": 93693133756,
+          "name": "Eight-hour supervised soak (darwin-arm64)",
+          "conclusion": "cancelled",
+          "startedAt": "2026-08-11T06:08:54Z",
+          "completedAt": "2026-08-12T00:09:33Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31463615481/job/93693133756",
+          "step_count": 0
+        }
+      ]
+    },
+    {
+      "run_id": 31361645167,
+      "head_sha_prefix": "fb905a13",
+      "jobs": [
+        {
+          "databaseId": 93371508451,
+          "name": "Build isolated Linux performance binary",
+          "conclusion": "success",
+          "startedAt": "2026-08-10T06:21:15Z",
+          "completedAt": "2026-08-10T06:26:52Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31361645167/job/93371508451",
+          "step_count": 14
+        },
+        {
+          "databaseId": 93371508485,
+          "name": "Fuzz config_parser",
+          "conclusion": "success",
+          "startedAt": "2026-08-10T06:21:14Z",
+          "completedAt": "2026-08-10T06:27:21Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31361645167/job/93371508485",
+          "step_count": 9
+        },
+        {
+          "databaseId": 93371508486,
+          "name": "Required hardening runner contract",
+          "conclusion": "success",
+          "startedAt": "2026-08-10T06:21:15Z",
+          "completedAt": "2026-08-10T06:21:19Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31361645167/job/93371508486",
+          "step_count": 3
+        },
+        {
+          "databaseId": 93371508500,
+          "name": "Build isolated macOS performance binary",
+          "conclusion": "success",
+          "startedAt": "2026-08-10T06:21:15Z",
+          "completedAt": "2026-08-10T06:26:04Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31361645167/job/93371508500",
+          "step_count": 14
+        },
+        {
+          "databaseId": 93371508506,
+          "name": "Fuzz plugin_rpc",
+          "conclusion": "success",
+          "startedAt": "2026-08-10T06:21:14Z",
+          "completedAt": "2026-08-10T06:27:10Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31361645167/job/93371508506",
+          "step_count": 9
+        },
+        {
+          "databaseId": 93371508512,
+          "name": "WSL2 release, sandbox, doctor, and DrvFS acceptance",
+          "conclusion": "success",
+          "startedAt": "2026-08-10T06:21:16Z",
+          "completedAt": "2026-08-10T06:35:47Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31361645167/job/93371508512",
+          "step_count": 6
+        },
+        {
+          "databaseId": 93371508517,
+          "name": "Fuzz event_log",
+          "conclusion": "success",
+          "startedAt": "2026-08-10T06:21:15Z",
+          "completedAt": "2026-08-10T06:27:12Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31361645167/job/93371508517",
+          "step_count": 9
+        },
+        {
+          "databaseId": 93371508527,
+          "name": "Terminal-Bench 2.1 pinned subset",
+          "conclusion": "success",
+          "startedAt": "2026-08-10T06:21:16Z",
+          "completedAt": "2026-08-10T06:21:21Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31361645167/job/93371508527",
+          "step_count": 15
+        },
+        {
+          "databaseId": 93371508550,
+          "name": "Fuzz toon_decoder",
+          "conclusion": "success",
+          "startedAt": "2026-08-10T06:21:15Z",
+          "completedAt": "2026-08-10T06:27:09Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31361645167/job/93371508550",
+          "step_count": 9
+        },
+        {
+          "databaseId": 93371533244,
+          "name": "Release budgets (fixed hosted macOS)",
+          "conclusion": "success",
+          "startedAt": "2026-08-10T06:21:22Z",
+          "completedAt": "2026-08-10T06:40:11Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31361645167/job/93371533244",
+          "step_count": 19
+        },
+        {
+          "databaseId": 93372562389,
+          "name": "Eight-hour supervised soak (linux-x86_64)",
+          "conclusion": "cancelled",
+          "startedAt": "2026-08-10T06:26:52Z",
+          "completedAt": "2026-08-11T06:01:31Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31361645167/job/93372562389",
+          "step_count": 0
+        },
+        {
+          "databaseId": 93372562405,
+          "name": "Eight-hour supervised soak (darwin-arm64)",
+          "conclusion": "cancelled",
+          "startedAt": "2026-08-10T06:26:52Z",
+          "completedAt": "2026-08-11T06:01:31Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31361645167/job/93372562405",
+          "step_count": 0
+        },
+        {
+          "databaseId": 93372562513,
+          "name": "Release budgets (protected Linux)",
+          "conclusion": "success",
+          "startedAt": "2026-08-10T06:26:55Z",
+          "completedAt": "2026-08-10T06:43:36Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31361645167/job/93372562513",
+          "step_count": 20
+        }
+      ]
+    },
+    {
+      "run_id": 31297749869,
+      "head_sha_prefix": "fb905a13",
+      "jobs": [
+        {
+          "databaseId": 93205490706,
+          "name": "Terminal-Bench 2.1 pinned subset",
+          "conclusion": "success",
+          "startedAt": "2026-08-09T05:55:51Z",
+          "completedAt": "2026-08-09T05:55:59Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31297749869/job/93205490706",
+          "step_count": 15
+        },
+        {
+          "databaseId": 93205490708,
+          "name": "Fuzz plugin_rpc",
+          "conclusion": "success",
+          "startedAt": "2026-08-09T05:55:50Z",
+          "completedAt": "2026-08-09T06:02:07Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31297749869/job/93205490708",
+          "step_count": 9
+        },
+        {
+          "databaseId": 93205490725,
+          "name": "Build isolated macOS performance binary",
+          "conclusion": "success",
+          "startedAt": "2026-08-09T05:55:51Z",
+          "completedAt": "2026-08-09T06:02:07Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31297749869/job/93205490725",
+          "step_count": 14
+        },
+        {
+          "databaseId": 93205490726,
+          "name": "Fuzz event_log",
+          "conclusion": "success",
+          "startedAt": "2026-08-09T05:55:50Z",
+          "completedAt": "2026-08-09T06:01:56Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31297749869/job/93205490726",
+          "step_count": 9
+        },
+        {
+          "databaseId": 93205490729,
+          "name": "Required hardening runner contract",
+          "conclusion": "success",
+          "startedAt": "2026-08-09T05:55:51Z",
+          "completedAt": "2026-08-09T05:55:55Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31297749869/job/93205490729",
+          "step_count": 3
+        },
+        {
+          "databaseId": 93205490730,
+          "name": "Fuzz toon_decoder",
+          "conclusion": "success",
+          "startedAt": "2026-08-09T05:55:50Z",
+          "completedAt": "2026-08-09T06:01:41Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31297749869/job/93205490730",
+          "step_count": 9
+        },
+        {
+          "databaseId": 93205490732,
+          "name": "Build isolated Linux performance binary",
+          "conclusion": "success",
+          "startedAt": "2026-08-09T05:55:56Z",
+          "completedAt": "2026-08-09T06:01:43Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31297749869/job/93205490732",
+          "step_count": 14
+        },
+        {
+          "databaseId": 93205490734,
+          "name": "WSL2 release, sandbox, doctor, and DrvFS acceptance",
+          "conclusion": "success",
+          "startedAt": "2026-08-09T05:55:50Z",
+          "completedAt": "2026-08-09T06:10:30Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31297749869/job/93205490734",
+          "step_count": 6
+        },
+        {
+          "databaseId": 93205490771,
+          "name": "Fuzz config_parser",
+          "conclusion": "success",
+          "startedAt": "2026-08-09T05:55:50Z",
+          "completedAt": "2026-08-09T06:01:51Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31297749869/job/93205490771",
+          "step_count": 9
+        },
+        {
+          "databaseId": 93205502208,
+          "name": "Release budgets (fixed hosted macOS)",
+          "conclusion": "success",
+          "startedAt": "2026-08-09T05:55:58Z",
+          "completedAt": "2026-08-09T06:19:06Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31297749869/job/93205502208",
+          "step_count": 19
+        },
+        {
+          "databaseId": 93206041680,
+          "name": "Release budgets (protected Linux)",
+          "conclusion": "success",
+          "startedAt": "2026-08-09T06:01:46Z",
+          "completedAt": "2026-08-09T06:18:25Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31297749869/job/93206041680",
+          "step_count": 20
+        },
+        {
+          "databaseId": 93206078502,
+          "name": "Eight-hour supervised soak (darwin-arm64)",
+          "conclusion": "cancelled",
+          "startedAt": "2026-08-09T06:02:08Z",
+          "completedAt": "2026-08-10T06:02:08Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31297749869/job/93206078502",
+          "step_count": 0
+        },
+        {
+          "databaseId": 93206078510,
+          "name": "Eight-hour supervised soak (linux-x86_64)",
+          "conclusion": "cancelled",
+          "startedAt": "2026-08-09T06:02:08Z",
+          "completedAt": "2026-08-10T06:02:08Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31297749869/job/93206078510",
+          "step_count": 0
+        }
+      ]
+    },
+    {
+      "run_id": 31242725798,
+      "head_sha_prefix": "fb905a13",
+      "jobs": [
+        {
+          "databaseId": 93066246431,
+          "name": "Build isolated Linux performance binary",
+          "conclusion": "success",
+          "startedAt": "2026-08-08T05:54:30Z",
+          "completedAt": "2026-08-08T05:59:01Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31242725798/job/93066246431",
+          "step_count": 14
+        },
+        {
+          "databaseId": 93066246438,
+          "name": "Terminal-Bench 2.1 pinned subset",
+          "conclusion": "success",
+          "startedAt": "2026-08-08T05:54:38Z",
+          "completedAt": "2026-08-08T05:54:43Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31242725798/job/93066246438",
+          "step_count": 15
+        },
+        {
+          "databaseId": 93066246440,
+          "name": "Fuzz event_log",
+          "conclusion": "success",
+          "startedAt": "2026-08-08T05:54:37Z",
+          "completedAt": "2026-08-08T06:00:28Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31242725798/job/93066246440",
+          "step_count": 9
+        },
+        {
+          "databaseId": 93066246442,
+          "name": "Fuzz plugin_rpc",
+          "conclusion": "success",
+          "startedAt": "2026-08-08T05:54:31Z",
+          "completedAt": "2026-08-08T06:00:24Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31242725798/job/93066246442",
+          "step_count": 9
+        },
+        {
+          "databaseId": 93066246448,
+          "name": "Fuzz toon_decoder",
+          "conclusion": "success",
+          "startedAt": "2026-08-08T05:54:35Z",
+          "completedAt": "2026-08-08T05:59:18Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31242725798/job/93066246448",
+          "step_count": 9
+        },
+        {
+          "databaseId": 93066246450,
+          "name": "Required hardening runner contract",
+          "conclusion": "success",
+          "startedAt": "2026-08-08T05:54:31Z",
+          "completedAt": "2026-08-08T05:54:34Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31242725798/job/93066246450",
+          "step_count": 3
+        },
+        {
+          "databaseId": 93066246452,
+          "name": "Fuzz config_parser",
+          "conclusion": "success",
+          "startedAt": "2026-08-08T05:54:30Z",
+          "completedAt": "2026-08-08T06:00:43Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31242725798/job/93066246452",
+          "step_count": 9
+        },
+        {
+          "databaseId": 93066246456,
+          "name": "Build isolated macOS performance binary",
+          "conclusion": "success",
+          "startedAt": "2026-08-08T05:54:32Z",
+          "completedAt": "2026-08-08T06:02:16Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31242725798/job/93066246456",
+          "step_count": 14
+        },
+        {
+          "databaseId": 93066246472,
+          "name": "WSL2 release, sandbox, doctor, and DrvFS acceptance",
+          "conclusion": "success",
+          "startedAt": "2026-08-08T05:54:30Z",
+          "completedAt": "2026-08-08T06:06:14Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31242725798/job/93066246472",
+          "step_count": 6
+        },
+        {
+          "databaseId": 93066256007,
+          "name": "Release budgets (fixed hosted macOS)",
+          "conclusion": "success",
+          "startedAt": "2026-08-08T05:54:38Z",
+          "completedAt": "2026-08-08T06:14:44Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31242725798/job/93066256007",
+          "step_count": 19
+        },
+        {
+          "databaseId": 93066657596,
+          "name": "Release budgets (protected Linux)",
+          "conclusion": "success",
+          "startedAt": "2026-08-08T05:59:04Z",
+          "completedAt": "2026-08-08T06:16:29Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31242725798/job/93066657596",
+          "step_count": 20
+        },
+        {
+          "databaseId": 93066977202,
+          "name": "Eight-hour supervised soak (darwin-arm64)",
+          "conclusion": "cancelled",
+          "startedAt": "2026-08-08T06:02:16Z",
+          "completedAt": "2026-08-09T05:55:46Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31242725798/job/93066977202",
+          "step_count": 0
+        },
+        {
+          "databaseId": 93066977218,
+          "name": "Eight-hour supervised soak (linux-x86_64)",
+          "conclusion": "cancelled",
+          "startedAt": "2026-08-08T06:02:16Z",
+          "completedAt": "2026-08-09T05:55:46Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31242725798/job/93066977218",
+          "step_count": 0
+        }
+      ]
+    },
+    {
+      "run_id": 31153388738,
+      "head_sha_prefix": "fb905a13",
+      "jobs": [
+        {
+          "databaseId": 92787558259,
+          "name": "Required hardening runner contract",
+          "conclusion": "success",
+          "startedAt": "2026-08-07T06:16:53Z",
+          "completedAt": "2026-08-07T06:16:55Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31153388738/job/92787558259",
+          "step_count": 3
+        },
+        {
+          "databaseId": 92787558267,
+          "name": "Terminal-Bench 2.1 pinned subset",
+          "conclusion": "success",
+          "startedAt": "2026-08-07T06:16:58Z",
+          "completedAt": "2026-08-07T06:17:04Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31153388738/job/92787558267",
+          "step_count": 15
+        },
+        {
+          "databaseId": 92787558268,
+          "name": "Build isolated macOS performance binary",
+          "conclusion": "success",
+          "startedAt": "2026-08-07T06:16:53Z",
+          "completedAt": "2026-08-07T06:23:28Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31153388738/job/92787558268",
+          "step_count": 14
+        },
+        {
+          "databaseId": 92787558285,
+          "name": "Build isolated Linux performance binary",
+          "conclusion": "success",
+          "startedAt": "2026-08-07T06:16:53Z",
+          "completedAt": "2026-08-07T06:22:41Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31153388738/job/92787558285",
+          "step_count": 14
+        },
+        {
+          "databaseId": 92787558294,
+          "name": "WSL2 release, sandbox, doctor, and DrvFS acceptance",
+          "conclusion": "success",
+          "startedAt": "2026-08-07T06:16:53Z",
+          "completedAt": "2026-08-07T06:27:55Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31153388738/job/92787558294",
+          "step_count": 6
+        },
+        {
+          "databaseId": 92787558296,
+          "name": "Fuzz event_log",
+          "conclusion": "success",
+          "startedAt": "2026-08-07T06:16:53Z",
+          "completedAt": "2026-08-07T06:21:49Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31153388738/job/92787558296",
+          "step_count": 9
+        },
+        {
+          "databaseId": 92787558320,
+          "name": "Fuzz config_parser",
+          "conclusion": "success",
+          "startedAt": "2026-08-07T06:16:53Z",
+          "completedAt": "2026-08-07T06:22:53Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31153388738/job/92787558320",
+          "step_count": 9
+        },
+        {
+          "databaseId": 92787558334,
+          "name": "Fuzz plugin_rpc",
+          "conclusion": "success",
+          "startedAt": "2026-08-07T06:16:53Z",
+          "completedAt": "2026-08-07T06:23:02Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31153388738/job/92787558334",
+          "step_count": 9
+        },
+        {
+          "databaseId": 92787558430,
+          "name": "Fuzz toon_decoder",
+          "conclusion": "success",
+          "startedAt": "2026-08-07T06:16:53Z",
+          "completedAt": "2026-08-07T06:22:25Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31153388738/job/92787558430",
+          "step_count": 9
+        },
+        {
+          "databaseId": 92787573027,
+          "name": "Release budgets (fixed hosted macOS)",
+          "conclusion": "success",
+          "startedAt": "2026-08-07T06:16:58Z",
+          "completedAt": "2026-08-07T06:36:53Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31153388738/job/92787573027",
+          "step_count": 19
+        },
+        {
+          "databaseId": 92788574662,
+          "name": "Release budgets (protected Linux)",
+          "conclusion": "success",
+          "startedAt": "2026-08-07T06:22:44Z",
+          "completedAt": "2026-08-07T06:42:15Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31153388738/job/92788574662",
+          "step_count": 20
+        },
+        {
+          "databaseId": 92788713997,
+          "name": "Eight-hour supervised soak (darwin-arm64)",
+          "conclusion": "failure",
+          "startedAt": "2026-08-07T06:23:31Z",
+          "completedAt": "2026-08-07T06:40:09Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31153388738/job/92788713997",
+          "step_count": 12
+        },
+        {
+          "databaseId": 92788714014,
+          "name": "Eight-hour supervised soak (linux-x86_64)",
+          "conclusion": "cancelled",
+          "startedAt": "2026-08-07T06:23:29Z",
+          "completedAt": "2026-08-08T05:54:27Z",
+          "url": "https://github.com/Boredphilosopher96/Rottweiler/actions/runs/31153388738/job/92788714014",
+          "step_count": 0
+        }
+      ]
+    }
+  ],
+  "historical_soak_failure": {
+    "run_id": 31153388738,
+    "job_id": 92788713997,
+    "artifact_id": 8984683319,
+    "head_sha": "fb905a138298f6b6d00dd36b8e31072ce083a8d2",
+    "workload_started_at": "2026-08-07T06:24:36Z",
+    "workload_failed_at": "2026-08-07T06:39:58Z",
+    "error": "workload step SOAK_STEP_000341_DONE was not accepted after 3 PTY submissions; engine=not observed",
+    "artifact_keys": [
+      "schema_version",
+      "status",
+      "error_type",
+      "error"
+    ],
+    "note": "Only bounded non-sensitive diagnostic summary retained; original artifact also contains an ANSI terminal tail."
+  }
+}
