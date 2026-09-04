@@ -5,7 +5,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -21,8 +21,10 @@ const MAX_REVIEW_FILES: usize = 1_024;
 const MAX_REVIEW_FILE_BYTES: usize = 256 * 1024;
 const MAX_REVIEW_IDENTITY_SCAN_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_REVIEW_TOTAL_DIFF_BYTES: usize = 2 * 1024 * 1024;
+const MAX_CAPTURE_FILE_BYTES: u64 = 64 * 1024 * 1024;
+const CAPTURE_CHUNK_BYTES: usize = 64 * 1024;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-type CapturedRegular = (Vec<u8>, Option<u32>);
+type CapturedRegular = (File, Option<u32>);
 type CapturedReview = (ReviewCurrentState, Option<Vec<u8>>);
 
 /// Pre-mutation state for one workspace-relative path.
@@ -909,39 +911,91 @@ impl CheckpointStore {
     }
 
     fn capture(&self, key: &str) -> Result<CheckpointFileState, CheckpointError> {
-        let Some((bytes, unix_mode)) = capture_regular_confined(&self.workspace, key)? else {
+        let Some((mut file, unix_mode)) = capture_regular_confined(&self.workspace, key)? else {
             return Ok(CheckpointFileState::Absent);
         };
-        self.capture_bytes(&bytes, unix_mode)
+        let before = file.metadata()?;
+        if before.len() > MAX_CAPTURE_FILE_BYTES {
+            return Err(CheckpointError::CaptureFileLimit);
+        }
+        let state = self.capture_reader(&mut file, unix_mode)?;
+        if !same_open_file_identity(&before, &file.metadata()?) {
+            return Err(CheckpointError::CaptureChanged);
+        }
+        Ok(state)
     }
 
-    fn capture_bytes(
+    fn capture_reader(
         &self,
-        bytes: &[u8],
+        reader: &mut impl Read,
         unix_mode: Option<u32>,
     ) -> Result<CheckpointFileState, CheckpointError> {
-        let digest = blake3::hash(bytes).to_hex().to_string();
-        self.write_blob(&digest, bytes)?;
+        let blobs = self.root.join("blobs");
+        let mut temporary = tempfile::Builder::new()
+            .prefix("capture-")
+            .tempfile_in(&blobs)?;
+        let mut hash = blake3::Hasher::new();
+        let mut bytes = 0_u64;
+        let mut chunk = vec![0_u8; CAPTURE_CHUNK_BYTES].into_boxed_slice();
+        loop {
+            let count = reader.read(&mut chunk)?;
+            if count == 0 {
+                break;
+            }
+            bytes += count as u64;
+            if bytes > MAX_CAPTURE_FILE_BYTES {
+                return Err(CheckpointError::CaptureFileLimit);
+            }
+            hash.update(&chunk[..count]);
+            temporary.write_all(&chunk[..count])?;
+        }
+        let digest = hash.finalize().to_hex().to_string();
+        let prefix = digest.get(..2).ok_or(CheckpointError::CorruptBlob)?;
+        let directory = blobs.join(prefix);
+        fs::create_dir_all(&directory)?;
+        File::open(&blobs)?.sync_all()?;
+        temporary.as_file().sync_all()?;
+        match temporary.persist_noclobber(directory.join(&digest)) {
+            Ok(_) => File::open(&directory)?.sync_all()?,
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let existing = File::open(directory.join(&digest))?;
+                if existing.metadata()?.len() != bytes
+                    || hash_reader(existing.take(bytes + 1))?.to_hex().as_str() != digest
+                {
+                    return Err(CheckpointError::CorruptBlob);
+                }
+            }
+            Err(error) => return Err(error.error.into()),
+        }
         Ok(CheckpointFileState::Present {
             blob: digest,
-            bytes: u64::try_from(bytes.len()).map_err(|_| CheckpointError::CorruptBlob)?,
+            bytes,
             unix_mode,
         })
     }
 
     fn capture_git_preimage(&self, tracked: &GitTrackedEntry) -> Option<CheckpointFileState> {
         let unix_mode = tracked.unix_mode?;
-        let output = self
+        let mut child = self
             .git_command()
             .arg("-C")
             .arg(&self.workspace)
             .args(["cat-file", "blob", &tracked.object_id])
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
             .ok()?;
-        if !output.status.success() {
+        let result = match child.stdout.take() {
+            Some(mut stdout) => self.capture_reader(&mut stdout, Some(unix_mode)),
+            None => Err(CheckpointError::GitBaselineCorrupt),
+        };
+        if result.is_err() {
+            let _ = child.kill();
+        }
+        if !child.wait().ok()?.success() {
             return None;
         }
-        self.capture_bytes(&output.stdout, Some(unix_mode)).ok()
+        result.ok()
     }
 
     fn persist_manifest(
@@ -973,8 +1027,13 @@ impl CheckpointStore {
         let prefix = digest.get(..2).ok_or(CheckpointError::CorruptBlob)?;
         let path = self.root.join("blobs").join(prefix).join(digest);
         if path.exists() {
-            let existing = fs::read(&path)?;
-            if existing == bytes {
+            let existing = File::open(&path)?;
+            if existing.metadata()?.len() == bytes.len() as u64
+                && hash_reader(existing.take(bytes.len() as u64 + 1))?
+                    .to_hex()
+                    .as_str()
+                    == digest
+            {
                 return Ok(());
             }
             return Err(CheckpointError::CorruptBlob);
@@ -1016,11 +1075,16 @@ impl CheckpointStore {
     }
 
     fn read_valid_blob(&self, blob: &str, bytes: u64) -> Result<Vec<u8>, CheckpointError> {
-        if !is_lower_blake3(blob) {
+        if !is_lower_blake3(blob) || bytes > MAX_CAPTURE_FILE_BYTES {
             return Err(CheckpointError::CorruptBlob);
         }
         let prefix = blob.get(..2).ok_or(CheckpointError::CorruptBlob)?;
-        let content = fs::read(self.root.join("blobs").join(prefix).join(blob))?;
+        let file = File::open(self.root.join("blobs").join(prefix).join(blob))?;
+        if file.metadata()?.len() != bytes {
+            return Err(CheckpointError::CorruptBlob);
+        }
+        let mut content = Vec::new();
+        file.take(bytes + 1).read_to_end(&mut content)?;
         if u64::try_from(content.len()).map_err(|_| CheckpointError::CorruptBlob)? != bytes
             || blake3::hash(&content).to_hex().as_str() != blob
         {
@@ -1793,10 +1857,7 @@ fn capture_regular_confined(
     let mode = Some(u32::from(
         Mode::from_raw_mode(stat.st_mode).as_raw_mode() & 0o7777,
     ));
-    let mut file = File::from(descriptor);
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    Ok(Some((bytes, mode)))
+    Ok(Some((File::from(descriptor), mode)))
 }
 
 #[cfg(unix)]
@@ -2045,13 +2106,12 @@ fn inventory_directory_fd(
             if !FileType::from_raw_mode(current.st_mode).is_file() {
                 return Err(CheckpointError::UnsupportedFileKind(key));
             }
-            let mut file = File::from(descriptor);
-            let mut bytes = Vec::new();
-            file.read_to_end(&mut bytes)?;
             inventory.insert(
                 key,
                 InventoryEntry::Regular {
-                    digest: blake3::hash(&bytes).to_hex().to_string(),
+                    digest: hash_inventory_file(File::from(descriptor))?
+                        .to_hex()
+                        .to_string(),
                 },
             );
         } else {
@@ -2068,7 +2128,7 @@ fn capture_regular_confined(
 ) -> Result<Option<CapturedRegular>, CheckpointError> {
     let path = checked_workspace_path_fallback(workspace, key)?;
     match fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.is_file() => Ok(Some((fs::read(path)?, None))),
+        Ok(metadata) if metadata.is_file() => Ok(Some((File::open(path)?, None))),
         Ok(_) => Err(CheckpointError::UnsupportedFileKind(key.to_owned())),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
@@ -2155,13 +2215,13 @@ fn inventory_confined(
                     output,
                 )?;
             } else if metadata.is_file() {
-                let bytes = capture_regular_confined(workspace, &key)?
+                let file = capture_regular_confined(workspace, &key)?
                     .ok_or(CheckpointError::UnsafePath)?
                     .0;
                 output.insert(
                     key,
                     InventoryEntry::Regular {
-                        digest: blake3::hash(&bytes).to_hex().to_string(),
+                        digest: hash_inventory_file(file)?.to_hex().to_string(),
                     },
                 );
             }
@@ -2204,6 +2264,27 @@ fn checked_workspace_path_fallback(
     Ok(path)
 }
 
+fn hash_reader(mut reader: impl Read) -> Result<blake3::Hash, CheckpointError> {
+    let mut hash = blake3::Hasher::new();
+    let mut chunk = vec![0_u8; CAPTURE_CHUNK_BYTES].into_boxed_slice();
+    loop {
+        let count = reader.read(&mut chunk)?;
+        if count == 0 {
+            return Ok(hash.finalize());
+        }
+        hash.update(&chunk[..count]);
+    }
+}
+
+fn hash_inventory_file(mut file: File) -> Result<blake3::Hash, CheckpointError> {
+    let before = file.metadata()?;
+    let hash = hash_reader(&mut file)?;
+    if !same_open_file_identity(&before, &file.metadata()?) {
+        return Err(CheckpointError::CaptureChanged);
+    }
+    Ok(hash)
+}
+
 fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), CheckpointError> {
     let parent = path.parent().ok_or(CheckpointError::UnsafePath)?;
     fs::create_dir_all(parent)?;
@@ -2230,6 +2311,12 @@ fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), CheckpointError> {
 /// Checkpoint failure with no captured file contents in diagnostics.
 #[derive(Debug, Error)]
 pub enum CheckpointError {
+    /// A preimage cannot be captured within its file byte budget.
+    #[error("checkpoint preimage exceeds the 64 MiB file capture limit; mutation was not admitted")]
+    CaptureFileLimit,
+    /// A concurrent edit invalidated the captured file version.
+    #[error("checkpoint file changed while being read; capture must be retried")]
+    CaptureChanged,
     /// Session id is not a safe path component.
     #[error("checkpoint session id is invalid")]
     InvalidSessionId,
@@ -2325,6 +2412,102 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{CheckpointFileState, CheckpointStore, RewindReport, render_whole_file_diff};
+
+    #[test]
+    fn oversized_preimage_is_refused_before_a_manifest_is_published()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempdir()?;
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&workspace)?;
+        let file = fs::File::create(workspace.join("huge.bin"))?;
+        file.set_len(super::MAX_CAPTURE_FILE_BYTES + 1)?;
+        let store = CheckpointStore::open(&root.path().join("storage"), &workspace)?;
+        assert!(matches!(
+            store.checkpoint_known("session", 1, [PathBuf::from("huge.bin")]),
+            Err(super::CheckpointError::CaptureFileLimit)
+        ));
+        assert!(!store.manifest_path("session", 1).exists());
+        assert_eq!(fs::read_dir(store.root.join("blobs"))?.count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn capture_reads_fixed_chunks_and_cleans_up_partial_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct Source {
+            remaining: usize,
+            fail: bool,
+        }
+        impl std::io::Read for Source {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                assert!(buffer.len() <= super::CAPTURE_CHUNK_BYTES);
+                if self.remaining == 0 {
+                    return if self.fail {
+                        Err(std::io::Error::other("injected read failure"))
+                    } else {
+                        Ok(0)
+                    };
+                }
+                let count = buffer.len().min(self.remaining);
+                buffer[..count].fill(b'x');
+                self.remaining -= count;
+                Ok(count)
+            }
+        }
+        let root = tempdir()?;
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&workspace)?;
+        let store = CheckpointStore::open(&root.path().join("storage"), &workspace)?;
+        let mut failed = Source {
+            remaining: 2 * super::CAPTURE_CHUNK_BYTES,
+            fail: true,
+        };
+        assert!(store.capture_reader(&mut failed, None).is_err());
+        assert_eq!(fs::read_dir(store.root.join("blobs"))?.count(), 0);
+        let length = 5 * super::CAPTURE_CHUNK_BYTES + 7;
+        let state = store.capture_reader(
+            &mut Source {
+                remaining: length,
+                fail: false,
+            },
+            None,
+        )?;
+        let CheckpointFileState::Present { blob, bytes, .. } = state else {
+            panic!("capture missing");
+        };
+        assert_eq!(bytes, length as u64);
+        assert_eq!(store.read_valid_blob(&blob, bytes)?, vec![b'x'; length]);
+        let duplicate = store.capture_reader(
+            &mut Source {
+                remaining: length,
+                fail: false,
+            },
+            None,
+        )?;
+        assert_eq!(
+            duplicate,
+            CheckpointFileState::Present {
+                blob: blob.clone(),
+                bytes,
+                unix_mode: None
+            }
+        );
+        fs::write(
+            store.root.join("blobs").join(&blob[..2]).join(&blob),
+            b"corrupt",
+        )?;
+        assert!(matches!(
+            store.capture_reader(
+                &mut Source {
+                    remaining: length,
+                    fail: false
+                },
+                None
+            ),
+            Err(super::CheckpointError::CorruptBlob)
+        ));
+        Ok(())
+    }
 
     fn rewind(
         store: &CheckpointStore,
