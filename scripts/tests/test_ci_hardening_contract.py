@@ -92,7 +92,7 @@ class CiHardeningContractTests(unittest.TestCase):
             "  macos-release-budget:", 1
         )[0]
         macos_release = workflow.split("  macos-release-budget:", 1)[1].split(
-            "  eight-hour-soak:", 1
+            "  macos-soak-dispatch:", 1
         )[0]
         runner_contract = workflow.split("  runner-contract:", 1)[1].split(
             "  fuzz:", 1
@@ -115,16 +115,19 @@ class CiHardeningContractTests(unittest.TestCase):
             self.assertIn("scripts/build-release.sh", release_budget)
         self.assertIn("ROTTWEILER_SELF_HOSTED_RUNNERS", runner_contract)
         self.assertIn("exit 1", runner_contract)
-        self.assertEqual(workflow.count("runner-contract"), 2)
         self.assertIn("scripts/check-runner-capacity.py", runner_contract)
-        soak = workflow_job(workflow, "eight-hour-soak")
-        self.assertIn(
-            "needs: [runner-contract, linux-performance-build, macos-performance-build]",
-            soak,
-        )
+        worker = (ROOT / ".github/workflows/protected-soak.yml").read_text(encoding="utf-8")
+        soak = workflow_job(worker, "soak")
+        self.assertIn("needs: validate", soak)
+        for prefix, platform in (("linux", "linux-x86_64"), ("macos", "darwin-arm64")):
+            dispatch = workflow_job(workflow, prefix + "-soak-dispatch")
+            self.assertIn("needs: " + prefix + "-performance-build", dispatch)
+            self.assertIn("--platform " + platform, dispatch)
+            self.assertIn("scripts/check-runner-capacity.py", dispatch)
+            self.assertIn("scripts/soak_dispatch.py dispatch", dispatch)
         self.assertNotIn("cargo-release.sh build", soak)
-        self.assertIn("${{ matrix.artifact }}", soak)
-        self.assertIn("${{ matrix.tui_artifact }}", soak)
+        self.assertIn("${{ needs.validate.outputs.engine_artifact }}", soak)
+        self.assertIn("${{ needs.validate.outputs.tui_artifact }}", soak)
         self.assertIn("rottweiler-soak-binary.noindex/rw", soak)
         self.assertIn("packages/tui/dist/rottweiler-tui", soak)
         self.assertNotIn("bun run build", soak)
@@ -219,11 +222,6 @@ class CiHardeningContractTests(unittest.TestCase):
                 performance,
                 "runner-contract",
                 ("performance-linux", "performance-macos"),
-            ),
-            (
-                nightly,
-                "runner-contract",
-                ("eight-hour-soak",),
             ),
             (
                 release,
@@ -437,7 +435,7 @@ class CiHardeningContractTests(unittest.TestCase):
     def test_rerun_artifacts_preserve_producers_and_version_evidence(self) -> None:
         workflows = {
             name: (ROOT / f".github/workflows/{name}.yml").read_text(encoding="utf-8")
-            for name in ("performance", "nightly", "release", "release-preflight")
+            for name in ("performance", "nightly", "release", "release-preflight", "protected-soak")
         }
 
         for workflow_name in ("performance", "nightly"):
@@ -447,14 +445,18 @@ class CiHardeningContractTests(unittest.TestCase):
                 self.assertIn(
                     "name: linux-performance-rw-${{ github.run_id }}", producer
                 )
-                self.assertNotIn("github.run_attempt", producer)
+                if workflow_name == "performance":
+                    self.assertNotIn("github.run_attempt", producer)
+                else:
+                    self.assertIn("github.run_attempt", producer)
+                    self.assertIn("engine_artifact:", producer)
                 self.assertIn("overwrite: true", producer)
 
         macos_producer = workflow_job(workflows["nightly"], "macos-performance-build")
         self.assertIn(
             "name: macos-performance-rw-${{ github.run_id }}", macos_producer
         )
-        self.assertNotIn("github.run_attempt", macos_producer)
+        self.assertIn("github.run_attempt", macos_producer)
         self.assertIn("overwrite: true", macos_producer)
 
         release = workflows["release"]
@@ -468,6 +470,7 @@ class CiHardeningContractTests(unittest.TestCase):
                 self.assertIn("overwrite: true", build)
 
         expected_evidence_names = {
+            "protected-soak": ("soak-${{ inputs.platform }}-${{ github.run_id }}-${{ github.run_attempt }}",),
             "performance": (
                 "manual-performance-linux-x86_64-${{ github.run_id }}-${{ github.run_attempt }}",
                 "manual-performance-darwin-arm64-${{ github.run_id }}-${{ github.run_attempt }}",
@@ -475,7 +478,6 @@ class CiHardeningContractTests(unittest.TestCase):
             "nightly": (
                 "nightly-performance-linux-x86_64-${{ github.run_id }}-${{ github.run_attempt }}",
                 "nightly-performance-darwin-arm64-${{ github.run_id }}-${{ github.run_attempt }}",
-                "soak-${{ matrix.platform }}-${{ github.run_id }}-${{ github.run_attempt }}",
                 "terminal-bench-${{ github.run_id }}-${{ github.run_attempt }}",
             ),
             "release": (

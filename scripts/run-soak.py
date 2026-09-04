@@ -70,6 +70,7 @@ class SoakProgress:
     def __init__(self, output: Path | None = None) -> None:
         self.output = output
         self.started = time.monotonic()
+        self.last_log_seconds = -60.0
         self.fields: dict[str, object] = {
             "phase": "setup",
             "samples": 0,
@@ -102,6 +103,19 @@ class SoakProgress:
         result = {**self.snapshot(**updates), "schema_version": 1, "status": "running"}
         if self.output is not None:
             write_result(self.output, result)
+        elapsed = float(result["duration_seconds"])
+        if os.environ.get("GITHUB_ACTIONS") == "true" and elapsed - self.last_log_seconds >= 60:
+            # GitHub streams stderr off the runner. Keep an independent,
+            # metadata-only checkpoint when a machine disappears before upload.
+            keys = ("phase", "duration_seconds", "turns_submitted", "turns_accepted", "turns_completed",
+                    "tool_turns_completed", "compactions_completed", "tui_restarts", "samples",
+                    "max_rss_bytes", "max_processes", "process_snapshot_age_seconds")
+            checkpoint = {key: result.get(key) for key in keys}
+            candidate = os.environ.get("ROTTWEILER_CANDIDATE_SHA", "")
+            checkpoint.update(kind="soak_checkpoint", schema_version=1,
+                              source_sha=candidate if re.fullmatch(r"[0-9a-f]{40}", candidate) else None)
+            print(json.dumps(checkpoint, sort_keys=True), file=sys.stderr, flush=True)
+            self.last_log_seconds = elapsed
 
 
 def parse_process_table(output: str) -> dict[int, ProcessRow]:

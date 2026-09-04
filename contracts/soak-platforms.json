@@ -1,0 +1,12 @@
+{
+  "darwin-arm64": {
+    "build_job": "macos-performance-build",
+    "artifact_prefix": "macos",
+    "runner_labels": ["self-hosted", "macOS", "ARM64", "soak"]
+  },
+  "linux-x86_64": {
+    "build_job": "linux-performance-build",
+    "artifact_prefix": "linux",
+    "runner_labels": ["self-hosted", "Linux", "X64", "soak"]
+  }
+}

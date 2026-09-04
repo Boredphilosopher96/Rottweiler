@@ -1,0 +1,208 @@
+name: Protected soak
+run-name: Soak ${{ inputs.platform }} / ${{ inputs.candidate_run_id }}.${{ inputs.candidate_attempt }} / ${{ inputs.candidate_sha }} / ${{ inputs.correlation_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        type: choice
+        options: [darwin-arm64, linux-x86_64]
+        required: true
+      candidate_run_id:
+        type: string
+        required: true
+      candidate_attempt:
+        type: string
+        required: true
+      candidate_sha:
+        type: string
+        required: true
+      correlation_id:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  validate:
+    name: Validate protected candidate
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      engine_artifact: ${{ steps.candidate.outputs.engine_artifact }}
+      tui_artifact: ${{ steps.candidate.outputs.tui_artifact }}
+      runner: ${{ steps.candidate.outputs.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install CI Python dependencies
+        run: |
+          python3 -m venv "$RUNNER_TEMP/ci-python"
+          "$RUNNER_TEMP/ci-python/bin/pip" install -r scripts/requirements-ci.txt
+          echo "$RUNNER_TEMP/ci-python/bin" >> "$GITHUB_PATH"
+      - id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN: ${{ inputs.candidate_run_id }}
+          CANDIDATE_ATTEMPT: ${{ inputs.candidate_attempt }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          SOAK_PLATFORM: ${{ inputs.platform }}
+        run: >-
+          python3 scripts/ci_evidence.py --gate candidate --output candidate-gate.json --
+          python3 scripts/soak_dispatch.py validate --repository "$GITHUB_REPOSITORY"
+          --platform "$SOAK_PLATFORM" --run-id "$CANDIDATE_RUN" --attempt "$CANDIDATE_ATTEMPT"
+          --sha "$CANDIDATE_SHA" --output candidate.json
+      - name: Retain candidate validation
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            candidate.json
+            candidate-gate.json
+          if-no-files-found: error
+          retention-days: 30
+
+  queue-watch:
+    name: Bound worker queue
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
+        with:
+          persist-credentials: false
+      - name: Watch until native workload starts
+        id: watch
+        timeout-minutes: 16
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN: ${{ inputs.candidate_run_id }}
+          CANDIDATE_ATTEMPT: ${{ inputs.candidate_attempt }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          SOAK_PLATFORM: ${{ inputs.platform }}
+        run: >-
+          python3 scripts/soak_dispatch.py watch --repository "$GITHUB_REPOSITORY"
+          --platform "$SOAK_PLATFORM" --run-id "$CANDIDATE_RUN" --attempt "$CANDIDATE_ATTEMPT"
+          --sha "$CANDIDATE_SHA" --output queue-result.json
+      - name: Retain queue outcome
+        timeout-minutes: 2
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: queue-${{ github.run_id }}-${{ github.run_attempt }}
+          path: queue-result.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Cancel only this unstarted worker after retaining evidence
+        if: ${{ always() && steps.watch.outcome != 'success' }}
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/force-cancel"
+
+  soak:
+    name: Eight-hour workload
+    needs: validate
+    runs-on: ${{ fromJSON(needs.validate.outputs.runner) }}
+    timeout-minutes: 510
+    env:
+      ROTTWEILER_CREDENTIAL_BACKEND: file
+      ROTTWEILER_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.candidate_sha }}
+      - name: Download isolated performance binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.validate.outputs.engine_artifact }}
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/rottweiler-soak-binary.noindex
+      - name: Verify isolated performance binary
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          SOAK_PLATFORM: ${{ inputs.platform }}
+        run: |
+          python3 scripts/artifact_bundle.py verify "$RUNNER_TEMP/rottweiler-soak-binary.noindex" --source-sha "$CANDIDATE_SHA" --platform "$SOAK_PLATFORM"
+          chmod 700 "$RUNNER_TEMP/rottweiler-soak-binary.noindex/rw"
+      - name: Download hosted soak TUI
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.validate.outputs.tui_artifact }}
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+          path: packages/tui/dist
+      - name: Verify hosted soak TUI
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          SOAK_PLATFORM: ${{ inputs.platform }}
+        run: |
+          python3 scripts/artifact_bundle.py verify "packages/tui/dist" --source-sha "$CANDIDATE_SHA" --platform "$SOAK_PLATFORM"
+          chmod 700 "packages/tui/dist/rottweiler-tui"
+      - name: Run the real supervisor, engine, and OpenTUI for eight hours
+        run: >-
+          python3 scripts/ci_evidence.py --gate soak --output soak-gate.json --
+          python3 scripts/run-soak.py
+          --rw "$RUNNER_TEMP/rottweiler-soak-binary.noindex/rw"
+          --tui packages/tui/dist/rottweiler-tui
+          --duration-seconds 28800
+          --output soak-result.json
+      - name: Enforce the checked-in 10 percent regression baseline
+        run: >-
+          python3 scripts/check-perf-baseline.py
+          --baseline benchmarks/performance-baseline.json
+          --platform "${{ inputs.platform }}"
+          --suite soak
+          --measurement soak-result.json
+          --output soak-baseline-result.json
+      - name: Retain soak measurements
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: soak-${{ inputs.platform }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            soak-result.json
+            soak-gate.json
+            packages/tui/dist/bundle-identity.json
+            ${{ runner.temp }}/rottweiler-soak-binary.noindex/bundle-identity.json
+            soak-baseline-result.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Reclaim persistent runner workspace
+        if: always()
+        shell: bash
+        run: |
+          rm -rf \
+            "$GITHUB_WORKSPACE/target" \
+            "$GITHUB_WORKSPACE/dist" \
+            "$GITHUB_WORKSPACE/soak-result.json" \
+            "$GITHUB_WORKSPACE/soak-baseline-result.json" \
+            "$GITHUB_WORKSPACE/packages/tui/dist" \
+            "$GITHUB_WORKSPACE/packages/tui/node_modules" \
+            "$RUNNER_TEMP/rottweiler-soak-binary.noindex"
+
+  qualified:
+    name: Soak qualification
+    if: always()
+    needs: [validate, queue-watch, soak]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require exercised workload
+        env:
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+          SOAK_RESULT: ${{ needs.soak.result }}
+          QUEUE_RESULT: ${{ needs.queue-watch.result }}
+        run: test "$VALIDATE_RESULT" = success && test "$QUEUE_RESULT" = success && test "$SOAK_RESULT" = success

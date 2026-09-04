@@ -19,11 +19,15 @@ Functional acceptance may reuse verified immutable artifacts. Budgets stay in
 existing release/performance owners. Reports preserve nonzero process status and
 bounded diagnostics; a failure category is never permission to pass a gate.
 
-Protected work needs an external hosted coordinator to enforce queue deadlines.
-It dispatches independent platform workers, correlates exact candidates, and
-cancels only its owned child on queue expiry. An in-job timeout cannot limit
-waiting for the runner. Capacity provisioning and actual eight-hour runs remain
-qualification obligations; adding a coordinator cannot satisfy them.
+Nightly dispatches an independent protected workflow for each platform after
+that platform's build succeeds. Each worker has a hosted queue watcher beside
+the native workload. The watcher observes at most fifteen minutes, then records
+nonexecution, uploads evidence, and cancels only its own worker workflow.
+Checkout, observation, upload and cancellation have separate step deadlines
+inside the watcher job's larger deadline. A bootstrap failure also reaches the
+owned cleanup step. Once native execution starts, the watcher exits; it does not
+wait eight hours on a hosted runner. Qualification requires validation, watcher
+and workload success. A successful dispatch means pending, never qualified.
 
 ## Design comparison
 
@@ -53,13 +57,35 @@ administration-read token named `ROTTWEILER_RUNNER_READ_TOKEN` where the workflo
 token cannot list runners. Missing permission or capacity fails explicitly and
 retains a report. Hosted performance jobs do not depend on private soak capacity.
 
-The initial guard checks current idle eligibility; it is not a reservation and
-does not solve disappearance after admission. A future external queue controller
-must use a bounded dispatch/watch phase plus completion-triggered collection:
-a GitHub-hosted controller cannot itself wait eight hours because hosted jobs
-have a shorter maximum duration. Full queue lifecycle and independent platform
-soak dependencies remain pending; the current guard prevents the observed
-zero-capacity queue stall. Candidate artifacts now survive fourteen days.
+The admission guard checks current idle eligibility, not a reservation. The
+worker watcher handles disappearance after admission. This mechanism still
+requires GitHub-hosted capacity for the watcher and working cancellation APIs;
+an accepted cancellation request does not prove terminal cancellation. These
+are observable infrastructure failures, not performance passes.
+
+Artifact names include their producer attempt. Failed-job reruns discover the
+latest producer job across attempts: an unchanged successful producer can be
+reused, but a newer failed producer cannot be bypassed. Source SHA, repository,
+main-branch event, workflow identity, producer outcome and artifact expiry are
+validated before private execution. Every engine/TUI file, including native
+sidecars, is checked against a bundle manifest bound to source and platform.
+The metadata and all eight-hour results remain on the worker run; its URL is
+recoverable from the dispatch report's run ID.
+
+Dispatch uses the [versioned workflow API](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event),
+which returns the created run ID. An uncertain response is correlated using an
+unguessable title component; a nearby run is never selected for cancellation.
+The worker owns its own queue deadline even if the dispatch response is lost.
+[Cancellation](https://docs.github.com/en/rest/actions/workflow-runs#force-cancel-a-workflow-run)
+is isolated from package, fuzz, performance and other-platform jobs.
+
+Soaks emit a metadata-only checkpoint to the streamed GitHub job log each minute
+as well as atomic local reports. This preserves another observation path if a
+runner disappears before artifact upload; it does not replace hosted fault
+injection for loss-of-runner retention. No terminal or transcript content is
+included in those heartbeat records. v1 release soak queue ownership and
+cross-platform qualification aggregation still need the corresponding release
+integration; nightly dispatch alone does not satisfy release qualification.
 
 Dependabot's native Bun ecosystem maintains `bun.lock`; see the
 [GitHub options reference](https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference).
