@@ -696,6 +696,9 @@ pub trait SupervisedPluginProcess: Send + Sync {
         let _ = self.wait().await?;
         Ok(())
     }
+
+    /// Reaps the child and proves no descendant can continue executing effects.
+    async fn settle_effects(&self) -> Result<(), PluginProcessError>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -982,6 +985,9 @@ pub type PluginProviderEventStream =
 
 #[async_trait]
 pub trait PluginRpcClient: Send + Sync {
+    /// Waits for teardown started by a cancelled or dropped request.
+    async fn settle_effects(&self) {}
+
     async fn request(&self, method: &str, params: Value) -> Result<Value, PluginRpcError>;
 
     async fn request_cancellable(
@@ -1050,6 +1056,9 @@ pub enum RpcHookResponse {
 
 #[async_trait]
 impl HookHandler for RpcHookHandler {
+    async fn settle_effects(&self) {
+        self.client.settle_effects().await;
+    }
     async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError> {
         let hook = PluginHook::from(invocation.event());
         self.enforcer
@@ -1332,7 +1341,11 @@ mod tests {
         kill_count: AtomicUsize,
     }
 
+    #[async_trait]
     impl SupervisedPluginProcess for ProcessState {
+        async fn settle_effects(&self) -> Result<(), PluginProcessError> {
+            Ok(())
+        }
         fn mark_capability_violation(&self, violation: &CapabilityViolation) {
             self.violations
                 .lock()
@@ -1377,7 +1390,11 @@ mod tests {
         kill_count: AtomicUsize,
     }
 
+    #[async_trait]
     impl SupervisedPluginProcess for RetryProcess {
+        async fn settle_effects(&self) -> Result<(), PluginProcessError> {
+            Ok(())
+        }
         fn mark_capability_violation(&self, _violation: &CapabilityViolation) {}
 
         fn kill_tree(&self) -> Result<(), PluginProcessError> {

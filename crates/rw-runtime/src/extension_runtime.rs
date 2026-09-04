@@ -2826,6 +2826,10 @@ mod tests {
 
     #[async_trait]
     impl rw_ext::SupervisedPluginProcess for RollbackProcess {
+        async fn settle_effects(&self) -> std::result::Result<(), rw_ext::PluginProcessError> {
+            self.reap().await
+        }
+
         fn mark_capability_violation(&self, _violation: &rw_ext::CapabilityViolation) {}
 
         fn kill_tree(&self) -> std::result::Result<(), rw_ext::PluginProcessError> {

@@ -3080,6 +3080,53 @@ mod tests {
         completed: Arc<AtomicBool>,
     }
 
+    struct SaturatingOrderedTool {
+        first: bool,
+        background_full: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl Tool for SaturatingOrderedTool {
+        fn descriptor(&self) -> ToolDescriptor {
+            descriptor(if self.first {
+                "delayed_first"
+            } else {
+                "flood_later"
+            })
+        }
+
+        async fn execute(
+            &self,
+            context: &ToolContext,
+            _input: Value,
+        ) -> Result<ToolResult, ToolError> {
+            if self.first {
+                self.background_full.notified().await;
+            }
+            let count = if self.first {
+                1
+            } else {
+                MAX_IN_FLIGHT_TOOL_OUTPUT_CHUNKS * 2
+            };
+            for index in 0..count {
+                context
+                    .output
+                    .emit(ToolOutputChunk {
+                        stream: ToolOutputStream::Stdout,
+                        content: format!("{}:{index}", self.descriptor().name),
+                    })
+                    .await?;
+                if !self.first && index + 1 == MAX_IN_FLIGHT_TOOL_OUTPUT_CHUNKS - 1 {
+                    // On the single-thread executor the next immediately-ready
+                    // emit runs before the first tool wakes. The old shared
+                    // semaphore fills here and deadlocks both tools.
+                    self.background_full.notify_one();
+                }
+            }
+            Ok(ToolResult::new("done", Value::Null))
+        }
+    }
+
     struct EmptySequentialTool {
         descriptor: ToolDescriptor,
         first: bool,
@@ -3203,6 +3250,50 @@ mod tests {
     }
 
     struct PanickingTool;
+
+    #[derive(Default)]
+    struct ExternalCleanupTool {
+        started: Notify,
+        execution_dropped: Arc<AtomicBool>,
+        cleanup_started: Notify,
+        release_cleanup: Notify,
+        cleanup_finished: AtomicBool,
+    }
+
+    #[async_trait]
+    impl Tool for ExternalCleanupTool {
+        fn descriptor(&self) -> ToolDescriptor {
+            ToolDescriptor {
+                name: "external_cleanup".to_owned(),
+                description: "externally owned effects fixture".to_owned(),
+                input_schema: json!({"type":"object"}),
+                capabilities: CapabilityManifest::new([ToolCapability::WriteFilesystem]),
+            }
+        }
+
+        async fn execute(
+            &self,
+            _context: &ToolContext,
+            _input: Value,
+        ) -> Result<ToolResult, ToolError> {
+            struct MarkDropped(Arc<AtomicBool>);
+            impl Drop for MarkDropped {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::SeqCst);
+                }
+            }
+            let _mark = MarkDropped(Arc::clone(&self.execution_dropped));
+            self.started.notify_one();
+            std::future::pending().await
+        }
+
+        async fn settle_effects(&self) {
+            assert!(self.execution_dropped.load(Ordering::SeqCst));
+            self.cleanup_started.notify_one();
+            self.release_cleanup.notified().await;
+            self.cleanup_finished.store(true, Ordering::SeqCst);
+        }
+    }
 
     #[async_trait]
     impl Tool for PanickingTool {
@@ -8653,6 +8744,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn parallel_tool_output_makes_progress_when_later_tool_saturates_buffer() {
+        let root = TempDir::new().expect("tempdir");
+        let model = Arc::new(ScriptedModel::new([
+            tool_script(
+                &[
+                    ("first-id", "delayed_first", json!({})),
+                    ("second-id", "flood_later", json!({})),
+                    ("third-id", "flood_later", json!({})),
+                ],
+                &[],
+            ),
+            stop_script("done", &[]),
+        ]));
+        let background_full = Arc::new(Notify::new());
+        let mut tools = ToolRegistry::new();
+        for first in [true, false] {
+            tools
+                .register(Arc::new(SaturatingOrderedTool {
+                    first,
+                    background_full: Arc::clone(&background_full),
+                }))
+                .expect("register tool");
+        }
+        let sink = Arc::new(RecordingSink::default());
+        let mut actor_config = config(
+            root.path(),
+            model,
+            Arc::new(tools),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        actor_config.event_sink = sink.clone();
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let mut events = handle.subscribe();
+        handle
+            .send_message("stream both tools")
+            .await
+            .expect("message");
+        let completed = timeout(
+            Duration::from_secs(2),
+            next_matching(&mut events, |kind| {
+                matches!(kind, PendingEvent::TurnFinished { .. })
+            }),
+        )
+        .await;
+        if completed.is_err() {
+            handle.interrupt().await.expect("cancel stalled regression");
+        }
+        let finished = completed.expect("later output cannot block the current tool");
+        assert!(matches!(
+            finished.kind,
+            PendingEvent::TurnFinished {
+                status: AgentTurnStatus::Completed,
+                ..
+            }
+        ));
+        let recorded = sink.events.lock().expect("events");
+        let outputs = recorded
+            .iter()
+            .filter_map(|event| match &event.kind {
+                PendingEvent::ToolOutput { id, chunk, .. } => Some((id.as_str(), chunk.as_str())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(outputs.len(), 1 + MAX_IN_FLIGHT_TOOL_OUTPUT_CHUNKS * 4);
+        assert_eq!(outputs[0], ("first-id", "delayed_first:0"));
+        for (expected_id, chunks) in ["second-id", "third-id"]
+            .into_iter()
+            .zip(outputs[1..].chunks_exact(MAX_IN_FLIGHT_TOOL_OUTPUT_CHUNKS * 2))
+        {
+            for (index, (id, chunk)) in chunks.iter().enumerate() {
+                assert_eq!(*id, expected_id);
+                assert_eq!(*chunk, format!("flood_later:{index}"));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn empty_manifest_stateful_calls_never_run_in_parallel() {
         let root = TempDir::new().expect("tempdir");
         let model = Arc::new(ScriptedModel::new([
@@ -9187,6 +9356,55 @@ mod tests {
             timeout(Duration::from_millis(50), receiver.recv())
                 .await
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn dropped_tool_future_keeps_checkpoint_open_until_external_effects_settle() {
+        let root = TempDir::new().expect("tempdir");
+        let model = Arc::new(ScriptedModel::new([tool_script(
+            &[("external-id", "external_cleanup", json!({}))],
+            &[],
+        )]));
+        let tool = Arc::new(ExternalCleanupTool::default());
+        let mut tools = ToolRegistry::new();
+        tools.register(tool.clone()).expect("register tool");
+        let checkpoints = Arc::new(RecordingCheckpoints::default());
+        let mut actor_config = config(
+            root.path(),
+            model,
+            Arc::new(tools),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        actor_config.checkpoints = checkpoints.clone();
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let mut events = handle.subscribe();
+        handle.send_message("run").await.expect("message");
+        timeout(Duration::from_secs(3), tool.started.notified())
+            .await
+            .expect("tool started");
+        assert!(handle.interrupt().await.expect("interrupt"));
+        timeout(Duration::from_secs(4), tool.cleanup_started.notified())
+            .await
+            .expect("cleanup barrier");
+        assert_eq!(checkpoints.events.lock().expect("checkpoints").len(), 1);
+        while let Ok(event) = events.receiver.try_recv() {
+            assert!(!matches!(
+                event.event,
+                EngineEvent::ToolCallFinished { .. } | EngineEvent::TurnFinished { .. }
+            ));
+        }
+        tool.release_cleanup.notify_one();
+        let _ = collect_turn(&mut events).await;
+        assert!(tool.cleanup_finished.load(Ordering::SeqCst));
+        assert!(
+            checkpoints
+                .events
+                .lock()
+                .expect("checkpoints")
+                .last()
+                .is_some_and(|event| event.ends_with(":Cancelled"))
         );
     }
 
