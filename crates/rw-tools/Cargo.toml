@@ -24,6 +24,7 @@ serde.workspace = true
 serde_json.workspace = true
 shell-words.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 tempfile = "3.23"
 tokio = { workspace = true, features = ["fs", "io-util", "process", "test-util", "time"] }
 url.workspace = true
