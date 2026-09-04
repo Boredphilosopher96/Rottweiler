@@ -1,3 +1,4 @@
+import { createStreamingTail } from "../../src/state/model"
 import { afterAll, afterEach, describe, expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
@@ -102,14 +103,14 @@ describe("M4 executable TUI performance budgets", () => {
     const base: RottweilerState = {
       ...createInitialState(),
       transcript,
-      streamingTail: {
+      streamingTail: createStreamingTail({
         turnId: "10241",
         text: "",
         thinking: "",
         citations: [],
         toolCallIds: [],
         finished: null,
-      },
+      }),
     }
     const app = createRottweilerApp(renderer, {
       initialState: base,
@@ -123,7 +124,7 @@ describe("M4 executable TUI performance budgets", () => {
     for (let warmup = 0; warmup < 10; warmup += 1) {
       app.setState({
         ...base,
-        streamingTail: { ...base.streamingTail!, text: `warmup ${warmup}\n` },
+        streamingTail: createStreamingTail({ ...base.streamingTail!, text: `warmup ${warmup}\n` }),
       })
       await setup.renderOnce()
     }
@@ -140,7 +141,7 @@ describe("M4 executable TUI performance budgets", () => {
       const started = process.cpuUsage()
       app.setState({
         ...base,
-        streamingTail: { ...base.streamingTail!, text: streamed },
+        streamingTail: createStreamingTail({ ...base.streamingTail!, text: streamed }),
       })
       await setup.renderOnce()
       const used = process.cpuUsage(started)

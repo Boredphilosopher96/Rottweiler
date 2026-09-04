@@ -1,3 +1,4 @@
+import { MAX_TAIL_TEXT_BYTES, utf8Prefix, type ToolOutputBuffer } from "./display-buffer"
 import type {
   Answer,
   AttachmentData,
@@ -23,7 +24,6 @@ import type {
   SubagentStatus as SubagentTerminalStatus,
   ToolCapability,
   ToolOutput,
-  ToolOutputStream,
   Turn,
   TurnStatus,
   UnifiedDiff,
@@ -220,6 +220,10 @@ export interface StreamingTail {
   readonly turnId: string
   readonly text: string
   readonly thinking: string
+  readonly displayBudget: {
+    readonly text: { readonly bytes: number; readonly omittedBytes: number }
+    readonly thinking: { readonly bytes: number; readonly omittedBytes: number }
+  }
   readonly citations: readonly StreamingCitation[]
   readonly toolCallIds: readonly string[]
   readonly finished: {
@@ -227,6 +231,17 @@ export interface StreamingTail {
     readonly usage: Usage
     readonly cost: Cost
   } | null
+}
+
+export function createStreamingTail(value: Omit<StreamingTail, "displayBudget">): StreamingTail {
+  const text = utf8Prefix(value.text, MAX_TAIL_TEXT_BYTES)
+  const thinking = utf8Prefix(value.thinking, MAX_TAIL_TEXT_BYTES)
+  const textBytes = Buffer.byteLength(text)
+  const thinkingBytes = Buffer.byteLength(thinking)
+  return { ...value, text, thinking, displayBudget: {
+    text: { bytes: textBytes, omittedBytes: Buffer.byteLength(value.text) - textBytes },
+    thinking: { bytes: thinkingBytes, omittedBytes: Buffer.byteLength(value.thinking) - thinkingBytes },
+  } }
 }
 
 export type ActivityTimingProjection =
@@ -252,11 +267,6 @@ export interface TurnProjection {
 
 export type ToolStatus = "running" | "awaiting_approval" | "finished"
 
-export interface ToolOutputChunkProjection {
-  readonly stream: ToolOutputStream
-  readonly chunk: string
-}
-
 export interface ToolProjection {
   readonly toolCallId: string
   readonly turnId: string
@@ -266,7 +276,7 @@ export interface ToolProjection {
   readonly capabilities: readonly ToolCapability[]
   readonly rationale: string | null
   readonly diff: UnifiedDiff | null
-  readonly chunks: readonly ToolOutputChunkProjection[]
+  readonly chunks: ToolOutputBuffer
   readonly output: ToolOutput | null
   readonly isError: boolean | null
   readonly callIndex: number

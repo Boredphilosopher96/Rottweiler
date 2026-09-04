@@ -1,3 +1,4 @@
+import { toolOutputBuffer } from "../src/state/display-buffer"
 import { describe, expect, test } from "bun:test"
 
 import {
@@ -82,7 +83,7 @@ describe("subagent state boundary", () => {
           capabilities: ["write_filesystem"],
           rationale: null,
           diff: null,
-          chunks: [],
+          chunks: toolOutputBuffer([]),
           output: null,
           isError: null,
           callIndex: 0,

@@ -8,8 +8,9 @@ import { presentTool } from "./tool-presentation"
 import { toolPlainText, toolStructuredData } from "./format"
 import { truncateToCells } from "./text"
 
+import { DISPLAY_TRUNCATION_MARKER, LIVE_OUTPUT_TRUNCATION_MARKER, type ToolOutputView } from "../state/display-buffer"
+
 const OUTPUT_WINDOW_LINES = 8
-const LIVE_OUTPUT_TRUNCATION_MARKER = "[live tool output truncated; command output continues to drain]"
 
 export type ElapsedPresentation =
   | { readonly kind: "known"; readonly milliseconds: number; readonly label: string }
@@ -149,10 +150,9 @@ export function projectToolActivity(
 ): ToolActivityPresentation {
   const presentation = presentTool(tool)
   const outcome = toolOutcome(tool, presentation.summary)
-  const liveOutput = tool.chunks.map((chunk) => chunk.chunk).join("")
-  const outputText = tool.status === "finished" ? presentation.details : liveOutput
-  const sourceTruncated = outputText.includes(LIVE_OUTPUT_TRUNCATION_MARKER) || hasDroppedOutput(tool)
-  const output = outputWindow(outputText, tool.status === "finished" ? "head" : "tail", sourceTruncated)
+  const output = tool.status === "finished"
+    ? outputWindow(presentation.details, "head", presentation.details.includes(LIVE_OUTPUT_TRUNCATION_MARKER) || hasDroppedOutput(tool))
+    : liveOutputWindow(tool.chunks.read())
   const fallbackSubject = argumentSubject(tool.args)
 
   return {
@@ -234,6 +234,18 @@ function toolOutcome(tool: ToolProjection, summary: string): ToolOutcomePresenta
 
 function isPermissionDenied(tool: ToolProjection): boolean {
   return tool.isError === true && /^permission denied for tool/i.test(toolPlainText(tool.output).trim())
+}
+
+function liveOutputWindow(view: ToolOutputView): ActivityOutputPresentation {
+  if (view.lineCount === 0) return view.sourceTruncated
+    ? { kind: "text", text: DISPLAY_TRUNCATION_MARKER, retainedLineCount: 0, visibleLineCount: 1, hiddenRetainedLineCount: 0, window: "tail", sourceTruncated: true }
+    : { kind: "none" }
+  const lines = view.tailLines.slice(-OUTPUT_WINDOW_LINES)
+  return {
+    kind: "text", text: lines.join("\n"), retainedLineCount: view.lineCount,
+    visibleLineCount: lines.length, hiddenRetainedLineCount: Math.max(0, view.lineCount - lines.length),
+    window: "tail", sourceTruncated: view.sourceTruncated,
+  }
 }
 
 function outputWindow(

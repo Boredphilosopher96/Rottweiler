@@ -1,3 +1,5 @@
+import { createStreamingTail } from "../../src/state/model"
+import { toolOutputBuffer } from "../../src/state/display-buffer"
 import { afterEach, describe, expect, test } from "bun:test"
 import {
   createTestRenderer,
@@ -190,7 +192,7 @@ function pendingTool(diff: boolean): ToolProjection {
           truncated: false,
         }
       : null,
-    chunks: [],
+    chunks: toolOutputBuffer([]),
     output: null,
     isError: null,
     callIndex: 0,
@@ -301,7 +303,7 @@ function toolsFixtureState(): RottweilerState {
     capabilities: [],
     rationale: null,
     diff: null,
-    chunks: [],
+    chunks: toolOutputBuffer([]),
     output: { type: "text", text: "Completed retained output" },
     isError: false,
     callIndex,
@@ -315,10 +317,10 @@ function toolsFixtureState(): RottweilerState {
       name: "bash",
       args: { command: "bun test test/components.test.ts" },
       status: "running",
-      chunks: [{
+      chunks: toolOutputBuffer([{
         stream: "stdout",
         chunk: Array.from({ length: 12 }, (_, index) => `component check ${index + 1} passed`).join("\n"),
-      }],
+      }]),
       output: null,
       isError: null,
       timing: { kind: "open", startedAtMs, lastObservedAtMs: startedAtMs + 39_000 },
@@ -344,14 +346,14 @@ function toolsFixtureState(): RottweilerState {
   return {
     ...createInitialState(),
     connection: { phase: "connected", attempt: 0, error: null, gap: null },
-    streamingTail: {
+    streamingTail: createStreamingTail({
       turnId: "tools-turn",
       text: "",
       thinking: "",
       citations: [],
       toolCallIds: tools.map((tool) => tool.toolCallId),
       finished: null,
-    },
+    }),
     turns: {
       "tools-turn": {
         turnId: "tools-turn",
@@ -385,34 +387,34 @@ function scenarios(): ScreenScenario[] {
       name: "03-streaming-thinking-citations",
       state: {
         ...base,
-        streamingTail: {
+        streamingTail: createStreamingTail({
           turnId: "2",
           text: "I’m updating the retained render tree without touching history…",
           thinking: "Keep the durable cursor separate from command acknowledgements.",
           citations: [{ uri: "https://example.invalid/sse", title: "SSE contract" }],
           toolCallIds: [],
           finished: null,
-        },
+        }),
       },
     },
     {
       name: "04-live-tool-output",
       state: {
         ...base,
-        streamingTail: {
+        streamingTail: createStreamingTail({
           turnId: "2",
           text: "Running focused checks.",
           thinking: "",
           citations: [],
           toolCallIds: ["live-tool"],
           finished: null,
-        },
+        }),
         tools: {
           "live-tool": {
             ...pendingTool(false),
             toolCallId: "live-tool",
             status: "running",
-            chunks: [{ stream: "stdout", chunk: "test transport ... ok\ntest reducer ..." }],
+            chunks: toolOutputBuffer([{ stream: "stdout", chunk: "test transport ... ok\ntest reducer ..." }]),
           },
         },
       },
@@ -496,14 +498,14 @@ function scenarios(): ScreenScenario[] {
       name: "16-subagent-orchestration",
       state: {
         ...base,
-        streamingTail: {
+        streamingTail: createStreamingTail({
           turnId: "2",
           text: "I’m collating three isolated reviews in deterministic order.",
           thinking: "",
           citations: [],
           toolCallIds: [],
           finished: null,
-        },
+        }),
         subagentOrder: ["explore", "tests", "review"],
         subagents: {
           explore: {

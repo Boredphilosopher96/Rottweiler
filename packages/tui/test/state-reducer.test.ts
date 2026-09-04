@@ -1,3 +1,4 @@
+import { toolOutputBuffer } from "../src/state/display-buffer"
 import { describe, expect, test } from "bun:test"
 
 import {
@@ -826,9 +827,8 @@ describe("pure TUI state reducer", () => {
       call_index: 0,
     })
     expect(state.streamingTail?.toolCallIds).toEqual(["late-glob"])
-    expect(state.tools["late-glob"]?.chunks).toEqual([
-      { stream: "stdout", chunk: "src/lib.rs" },
-    ])
+    expect(state.tools["late-glob"]?.chunks.count).toBe(0)
+    expect(state.tools["late-glob"]?.output).toEqual({ type: "text", text: "src/lib.rs" })
     expect(state.tools["late-glob"]?.status).toBe("finished")
   })
 
@@ -2294,7 +2294,7 @@ describe("pure TUI state reducer", () => {
     expect(state.tools["tool-1"]).toMatchObject({
       status: "finished",
       rationale: "fixture",
-      chunks: [{ stream: "stdout", chunk: "live" }],
+      chunks: toolOutputBuffer([]),
       output: { type: "text", text: "done" },
     })
     expect(state.questions["question-1"]).toMatchObject({ answered: true })

@@ -1,3 +1,5 @@
+import { createStreamingTail } from "../src/state/model"
+import { toolOutputBuffer } from "../src/state/display-buffer"
 import { describe, expect, test } from "bun:test"
 
 import type { ContextSnapshot, Cost, CostSnapshot, Usage } from "../src/protocol"
@@ -34,7 +36,7 @@ function tool(
     capabilities: [],
     rationale: null,
     diff: null,
-    chunks: [],
+    chunks: toolOutputBuffer([]),
     output: { type: "text", text: "done" },
     isError: false,
     callIndex,
@@ -99,14 +101,14 @@ function sessionCost(): CostSnapshot {
 function runningState(tools: readonly ToolProjection[]): RottweilerState {
   return {
     ...createInitialState(),
-    streamingTail: {
+    streamingTail: createStreamingTail({
       turnId: "turn-tools",
       text: "",
       thinking: "",
       citations: [],
       toolCallIds: tools.map((item) => item.toolCallId),
       finished: null,
-    },
+    }),
     turns: {
       "turn-tools": {
         turnId: "turn-tools",
@@ -214,7 +216,7 @@ describe("Tools workspace presentation", () => {
       status: "running",
       output: null,
       isError: null,
-      chunks: [{ stream: "stdout", chunk: Array.from({ length: 12 }, (_, index) => `live-${index + 1}`).join("\n") }],
+      chunks: toolOutputBuffer([{ stream: "stdout", chunk: Array.from({ length: 12 }, (_, index) => `live-${index + 1}`).join("\n") }]),
     })
     const complete = tool("complete", 1, {
       name: "generic_tool",
@@ -225,10 +227,10 @@ describe("Tools workspace presentation", () => {
       status: "running",
       output: null,
       isError: null,
-      chunks: [{
+      chunks: toolOutputBuffer([{
         stream: "stdout",
         chunk: "retained-1\nretained-2\n[live tool output truncated; command output continues to drain]",
-      }],
+      }]),
     })
 
     const rows = projectToolsWorkspace(runningState([live, complete, truncated]), Date.now()).rows

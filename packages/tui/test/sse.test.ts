@@ -35,7 +35,7 @@ describe("bounded SSE parser", () => {
         blocks: [{ type: "text", text: "x".repeat(96 * 1024) }],
       },
     })
-    const messages = parser.push(encoder.encode(`data: ${payload}\n\n`))
+    const messages = [...parser.push(encoder.encode(`data: ${payload}\n\n`))]
 
     expect(messages).toHaveLength(1)
     expect(messages[0]?.data).toBe(payload)
@@ -58,22 +58,46 @@ describe("bounded SSE parser", () => {
       },
     })
 
-    const messages = parser.push(encoder.encode(`data: ${payload}\n\n`))
+    const messages = [...parser.push(encoder.encode(`data: ${payload}\n\n`))]
     expect(messages).toHaveLength(1)
     expect(messages[0]?.data.length).toBe(payload.length)
   })
 
   test("flushes a final complete field and rejects unbounded input", () => {
     const parser = new SseParser({ maxLineBytes: 16, maxDataBytes: 8 })
-    expect(parser.push(encoder.encode("data: ok\n"))).toEqual([])
-    expect(parser.finish()).toEqual([{ data: "ok" }])
+    expect([...parser.push(encoder.encode("data: ok\n"))]).toEqual([])
+    expect([...parser.finish()]).toEqual([{ data: "ok" }])
 
     expect(() =>
-      new SseParser({ maxLineBytes: 4 }).push(encoder.encode("data: too long")),
+      [...new SseParser({ maxLineBytes: 4 }).push(encoder.encode("data: too long"))],
     ).toThrow(SseLimitError)
     expect(() =>
-      new SseParser({ maxDataBytes: 3 }).push(encoder.encode("data: four\n\n")),
+      [...new SseParser({ maxDataBytes: 3 }).push(encoder.encode("data: four\n\n"))],
     ).toThrow(SseLimitError)
+  })
+
+  test("one-byte fragmentation copies and allocates only linear partial-line storage", () => {
+    const parser = new SseParser()
+    const bytes = encoder.encode(`data: ${"x".repeat(128 * 1024)}\n\n`)
+    const messages = []
+    for (let index = 0; index < bytes.length; index += 1) messages.push(...parser.push(bytes.subarray(index, index + 1)))
+    expect(messages).toHaveLength(1)
+    expect(messages[0]?.data.length).toBe(128 * 1024)
+    expect(parser.storageWork.copiedBytes).toBeLessThan(bytes.length * 4)
+    expect(parser.storageWork.allocatedBytes).toBeLessThan(bytes.length * 4)
+    expect(parser.storageWork.retainedBytes).toBe(0)
+  })
+
+  test("yields a chunk's first event before parsing its later oversized event", () => {
+    const parser = new SseParser({ maxDataBytes: 3 })
+    const output = parser.push(encoder.encode("data: ok\n\ndata: oversized\n\n"))
+    expect(output.next().value).toEqual({ data: "ok" })
+    expect(() => output.next()).toThrow(SseLimitError)
+  })
+
+  test("many empty data fields cannot exhaust memory below the event-byte ceiling", () => {
+    const parser = new SseParser({ maxDataLines: 4 })
+    expect(() => [...parser.push(encoder.encode("data:\n".repeat(5)))]).toThrow(SseLimitError)
   })
 
   test("releases the reader lock even when underlying cancellation rejects", async () => {

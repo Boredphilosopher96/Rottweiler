@@ -8,6 +8,7 @@ export interface SseMessage {
 export interface SseParserOptions {
   readonly maxLineBytes?: number
   readonly maxDataBytes?: number
+  readonly maxDataLines?: number
 }
 
 // A legal user turn can contain a 5 MiB decoded image, whose base64 wire form
@@ -23,6 +24,10 @@ export class SseParser {
   readonly #decoder = new TextDecoder()
   readonly #maxLineBytes: number
   readonly #maxDataBytes: number
+  readonly #maxDataLines: number
+  #lineLength = 0
+  #copiedBytes = 0
+  #allocatedBytes = 0
   #line = new Uint8Array()
   #data: string[] = []
   #dataBytes = 0
@@ -33,51 +38,73 @@ export class SseParser {
   constructor(options: SseParserOptions = {}) {
     this.#maxLineBytes = positiveBound(options.maxLineBytes, DEFAULT_MAX_LINE_BYTES)
     this.#maxDataBytes = positiveBound(options.maxDataBytes, DEFAULT_MAX_DATA_BYTES)
+    this.#maxDataLines = positiveBound(options.maxDataLines, 1024)
   }
 
-  push(chunk: Uint8Array): SseMessage[] {
-    const messages: SseMessage[] = []
+  get storageWork(): { readonly copiedBytes: number; readonly allocatedBytes: number; readonly retainedBytes: number } {
+    return { copiedBytes: this.#copiedBytes, allocatedBytes: this.#allocatedBytes, retainedBytes: this.#line.byteLength }
+  }
+
+  *push(chunk: Uint8Array): Generator<SseMessage> {
     let offset = 0
     while (offset < chunk.length) {
       const newline = chunk.indexOf(0x0a, offset)
       const end = newline < 0 ? chunk.length : newline
       const segment = chunk.subarray(offset, end)
-      if (this.#line.length + segment.length > this.#maxLineBytes) {
+      if (this.#lineLength + segment.length > this.#maxLineBytes) {
         throw new SseLimitError("SSE line exceeds configured byte limit")
       }
       if (newline < 0) {
-        this.#line = appendBytes(this.#line, segment)
+        this.#appendLine(segment)
         break
       }
-      const line = this.#line.length === 0 ? segment : appendBytes(this.#line, segment)
-      this.#line = new Uint8Array()
-      this.#consumeLine(line, messages)
+      let line = segment
+      if (this.#lineLength > 0) {
+        this.#appendLine(segment)
+        line = this.#line.subarray(0, this.#lineLength)
+      }
+      const message = this.#consumeLine(line)
+      this.#lineLength = 0
+      if (this.#line.byteLength > 64 * 1024) this.#line = new Uint8Array()
+      if (message !== null) yield message
       offset = newline + 1
     }
-    return messages
   }
 
-  finish(): SseMessage[] {
-    const messages: SseMessage[] = []
-    if (this.#line.length > 0) {
-      this.#consumeLine(this.#line, messages)
-      this.#line = new Uint8Array()
+  *finish(): Generator<SseMessage> {
+    if (this.#lineLength > 0) {
+      const message = this.#consumeLine(this.#line.subarray(0, this.#lineLength))
+      if (message !== null) yield message
     }
-    this.#dispatch(messages)
-    return messages
+    this.#line = new Uint8Array()
+    this.#lineLength = 0
+    const message = this.#dispatch()
+    if (message !== null) yield message
   }
 
-  #consumeLine(bytes: Uint8Array, messages: SseMessage[]): void {
+  #appendLine(segment: Uint8Array): void {
+    const required = this.#lineLength + segment.length
+    if (required > this.#line.length) {
+      const capacity = Math.min(this.#maxLineBytes, Math.max(required, this.#line.length * 2, 1024))
+      const expanded = new Uint8Array(capacity)
+      expanded.set(this.#line.subarray(0, this.#lineLength))
+      this.#copiedBytes += this.#lineLength
+      this.#allocatedBytes += capacity
+      this.#line = expanded
+    }
+    this.#line.set(segment, this.#lineLength)
+    this.#lineLength = required
+    this.#copiedBytes += segment.length
+  }
+
+  #consumeLine(bytes: Uint8Array): SseMessage | null {
     const lineBytes = bytes.at(-1) === 0x0d ? bytes.subarray(0, -1) : bytes
     const line = this.#decoder.decode(lineBytes)
 
     if (line.length === 0) {
-      this.#dispatch(messages)
-      return
+      return this.#dispatch()
     }
-    if (line.startsWith(":")) {
-      return
-    }
+    if (line.startsWith(":")) return null
 
     const colon = line.indexOf(":")
     const field = colon < 0 ? line : line.slice(0, colon)
@@ -94,6 +121,9 @@ export class SseParser {
         const separatorBytes = this.#data.length === 0 ? 0 : 1
         const valueBytes = lineBytes.length - valueByteStart
         this.#dataBytes += separatorBytes + valueBytes
+        if (this.#data.length >= this.#maxDataLines) {
+          throw new SseLimitError("SSE event data exceeds configured field limit")
+        }
         if (this.#dataBytes > this.#maxDataBytes) {
           throw new SseLimitError("SSE event data exceeds configured byte limit")
         }
@@ -119,32 +149,23 @@ export class SseParser {
       default:
         break
     }
+    return null
   }
 
-  #dispatch(messages: SseMessage[]): void {
-    if (this.#data.length > 0) {
-      messages.push({
+  #dispatch(): SseMessage | null {
+    const message: SseMessage | null = this.#data.length === 0 ? null : {
         data: this.#data.join("\n"),
         ...(this.#event === undefined ? {} : { event: this.#event }),
         ...(this.#id === undefined ? {} : { id: this.#id }),
         ...(this.#retry === undefined ? {} : { retry: this.#retry }),
-      })
-    }
+      }
     this.#data = []
     this.#dataBytes = 0
     this.#event = undefined
     this.#id = undefined
     this.#retry = undefined
+    return message
   }
-}
-
-function appendBytes(prefix: Uint8Array, suffix: Uint8Array): Uint8Array<ArrayBuffer> {
-  if (prefix.length === 0) return suffix.slice()
-  if (suffix.length === 0) return prefix.slice()
-  const combined = new Uint8Array(prefix.length + suffix.length)
-  combined.set(prefix)
-  combined.set(suffix, prefix.length)
-  return combined
 }
 
 export class SseLimitError extends Error {

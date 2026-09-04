@@ -280,7 +280,7 @@ export class ComposerRenderable extends BoxRenderable {
     this.editor.setText(next)
     this.setShellMode(next.startsWith("!"))
     const cursorCharacters = start + replacement.length
-    this.editor.cursorOffset = new TextEncoder().encode(next.slice(0, cursorCharacters)).length
+    this.editor.cursorOffset = Buffer.byteLength(next.slice(0, cursorCharacters))
     this.#refreshHeight()
     return true
   }
@@ -452,9 +452,9 @@ export class ComposerRenderable extends BoxRenderable {
       this.addImage(localImage)
       return
     }
-    const bytes = new TextEncoder().encode(trimmed)
+    const bytes = Buffer.byteLength(trimmed)
     const lineCount = (trimmed.match(/\n/g)?.length ?? 0) + 1
-    if ((lineCount >= 3 || trimmed.length > 150) && bytes.length <= 1024 * 1024) {
+    if ((lineCount >= 3 || trimmed.length > 150) && bytes <= 1024 * 1024) {
       const ordinal = this.#attachments.filter((item) => item.name.startsWith("Pasted text")).length + 1
       this.addAttachment({
         name: `Pasted text ${ordinal}`,
@@ -463,7 +463,7 @@ export class ComposerRenderable extends BoxRenderable {
       })
       return
     }
-    if (bytes.length > 1024 * 1024) {
+    if (bytes > 1024 * 1024) {
       this.#options.onAttachmentError?.("Pasted text exceeds the 1 MiB message attachment limit.")
       return
     }
@@ -616,11 +616,10 @@ function estimateWrappedRows(value: string, columns: number): number {
 
 function characterIndexForByteOffset(value: string, target: number): number {
   if (target <= 0) return 0
-  const encoder = new TextEncoder()
   let bytes = 0
   let index = 0
   for (const character of value) {
-    const next = bytes + encoder.encode(character).length
+    const next = bytes + Buffer.byteLength(character)
     if (next > target) break
     bytes = next
     index += character.length
@@ -669,12 +668,12 @@ function attachmentBudgetError(
 }
 
 function composerWireBytes(content: string, attachments: readonly Attachment[]): number {
-  return new TextEncoder().encode(JSON.stringify({ content, attachments })).length
+  return Buffer.byteLength(JSON.stringify({ content, attachments }))
 }
 
 function attachmentBytes(attachment: Attachment): number | null {
   if (attachment.data.type === "text") {
-    return new TextEncoder().encode(attachment.data.content).length
+    return Buffer.byteLength(attachment.data.content)
   }
   const value = attachment.data.data
   if (

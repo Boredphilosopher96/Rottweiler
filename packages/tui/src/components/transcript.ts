@@ -1,3 +1,4 @@
+import { DISPLAY_TRUNCATION_MARKER } from "../state/display-buffer"
 import type { TranscriptClientState } from "../recycle-state"
 import {
   type BaseRenderable,
@@ -502,8 +503,7 @@ export class ToolBlockRenderable extends BoxRenderable {
       this.height = 1
       return
     }
-    const body = toolOutputContent(tool)
-    const preview = boundedToolBody(body, 8, tool.status === "running")
+    const preview = toolOutputPreview(tool)
     this.body.visible = true
     this.body.content = preview.content
     const bodyContentRows = Math.max(1, preview.content.split("\n").length)
@@ -695,10 +695,10 @@ export class ToolBlockRenderable extends BoxRenderable {
 /** Complete tool-card body content before compact transcript preview bounding. */
 export function toolOutputContent(tool: ToolProjection): string {
   let output: string
-  if (tool.status === "finished" || (bashCommand(tool) !== null && tool.chunks.length > 0)) {
+  if (tool.status === "finished" || (bashCommand(tool) !== null && tool.chunks.count > 0)) {
     output = presentTool(tool).details
   } else {
-    const live = tool.chunks.map((chunk) => chunk.chunk).join("")
+    const live = tool.chunks.read().plain
     output = live === "" ? "" : `Live output\n${live}`
   }
   const activity = tool.status === "awaiting_approval"
@@ -708,12 +708,33 @@ export function toolOutputContent(tool: ToolProjection): string {
       : output === ""
         ? "Completed with no output."
         : ""
-  const rationale = tool.rationale === null || tool.rationale.trim() === ""
-    ? ""
-    : `Why · ${truncateToCells(tool.rationale.replace(/\s+/g, " ").trim(), 160)}`
+  const rationale = toolRationale(tool)
   return [rationale, output, activity]
     .filter(Boolean)
     .join("\n")
+}
+
+/** The mounted live card reads a bounded line window; opening all output materializes the body. */
+export function toolOutputPreview(tool: ToolProjection): { readonly content: string; readonly hiddenLines: number; readonly markerFirst: boolean } {
+  const maximum = 8
+  if (tool.status !== "running") return boundedToolBody(toolOutputContent(tool), maximum, false)
+  const view = tool.chunks.read()
+  const isBash = bashCommand(tool) !== null && tool.chunks.count > 0
+  const output = isBash ? view.labeledWindow : view.plainWindow
+  const hasOutput = isBash || view.plain !== ""
+  const rationale = toolRationale(tool)
+  const prefix = [rationale, !isBash && hasOutput ? "Live output" : ""].filter(Boolean)
+  const lineCount = prefix.length + (hasOutput ? output.lineCount : 0) + 1
+  const lines = [...prefix, ...(hasOutput ? output.lines : []), "Running…"]
+  if (lineCount <= maximum) return { content: lines.join("\n"), hiddenLines: 0, markerFirst: false }
+  const retained = lines.slice(-Math.max(1, maximum - 1))
+  return { content: retained.join("\n"), hiddenLines: lineCount - retained.length, markerFirst: true }
+}
+
+function toolRationale(tool: ToolProjection): string {
+  return tool.rationale === null || tool.rationale.trim() === ""
+    ? ""
+    : `Why · ${truncateToCells(tool.rationale.replace(/\s+/g, " ").trim(), 160)}`
 }
 
 function bashCommand(tool: ToolProjection): string | null {
@@ -2004,7 +2025,7 @@ export class TranscriptRenderable extends BoxRenderable {
     const tools = tail.toolCallIds
       .map((toolCallId) => state.tools[toolCallId])
       .filter((tool): tool is ToolProjection => tool !== undefined)
-    const reasoning = presentableReasoning(tail.thinking)
+    const reasoning = presentableReasoning(tail.thinking + (tail.displayBudget.thinking.omittedBytes > 0 ? `\n${DISPLAY_TRUNCATION_MARKER}` : ""))
     const activity = tools.some((tool) => tool.status === "awaiting_approval")
       ? "Waiting for approval"
       : tools.some((tool) => tool.status === "running")
@@ -2018,7 +2039,7 @@ export class TranscriptRenderable extends BoxRenderable {
     this.streamingMarkdown.streaming = tail.finished === null
     this.streamingMarkdown.visible = tail.text.length > 0
     this.streamingMarkdown.content = terminalMarkdown(
-      tail.text,
+      tail.text + (tail.displayBudget.text.omittedBytes > 0 ? `\n${DISPLAY_TRUNCATION_MARKER}` : ""),
       Math.max(20, (this.width || this.ctx.width) - 4),
       tail.finished === null ? "streaming" : "complete",
     )
