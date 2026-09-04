@@ -1,3 +1,4 @@
+import { toolOutputBuffer } from "../src/state/display-buffer"
 import { describe, expect, test } from "bun:test"
 
 import { displayPath, presentTool, setWorkspaceRoots, toolOutputText } from "../src/render"
@@ -19,7 +20,7 @@ function finished(
     capabilities: [],
     rationale: null,
     diff: null,
-    chunks: [],
+    chunks: toolOutputBuffer([]),
     output,
     isError: false,
     callIndex: 0,
@@ -110,10 +111,10 @@ describe("typed tool presentation", () => {
       ...finished("bash", { command: "cargo test" }, null),
       status: "running",
       isError: null,
-      chunks: [
+      chunks: toolOutputBuffer([
         { stream: "stdout", chunk: "checking\n" },
         { stream: "stderr", chunk: "warning\n" },
-      ],
+      ]),
     })
     expect(streaming.details).toContain("Output\nchecking")
     expect(streaming.details).toContain("Error output\nwarning")

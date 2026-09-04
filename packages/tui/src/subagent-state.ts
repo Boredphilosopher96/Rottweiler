@@ -74,7 +74,7 @@ export function childEngineEvent(
 
 export function wireEventBytes(event: WireEngineEvent): number {
   try {
-    return new TextEncoder().encode(JSON.stringify(event)).byteLength
+    return Buffer.byteLength(JSON.stringify(event))
   } catch {
     return MAX_BUFFERED_SUBAGENT_LIVE_BYTES + 1
   }

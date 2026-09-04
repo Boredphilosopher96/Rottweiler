@@ -1,3 +1,4 @@
+import { toolOutputBuffer } from "../src/state/display-buffer"
 import { afterEach, describe, expect, test } from "bun:test"
 import { parseKeypress, type KeyEvent } from "@opentui/core"
 import { createTestRenderer, type TestRenderer } from "@opentui/core/testing"
@@ -404,7 +405,7 @@ describe("Vim TUI interaction", () => {
       capabilities: ["read_filesystem" as const],
       rationale: null,
       diff: null,
-      chunks: [],
+      chunks: toolOutputBuffer([]),
       output: { type: "text" as const, text: "vim output" },
       isError: false,
       callIndex: 0,
@@ -488,7 +489,7 @@ describe("Vim TUI interaction", () => {
             capabilities: ["execute"],
             rationale: "Run tests",
             diff: null,
-            chunks: [],
+            chunks: toolOutputBuffer([]),
             output: null,
             isError: null,
             callIndex: 0,
@@ -612,7 +613,7 @@ describe("Vim TUI interaction", () => {
           capabilities: ["execute"],
           rationale: "Run tests",
           diff: null,
-          chunks: [],
+          chunks: toolOutputBuffer([]),
           output: null,
           isError: null,
           callIndex: 0,

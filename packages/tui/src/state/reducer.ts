@@ -1,3 +1,4 @@
+import { EMPTY_TOOL_OUTPUT, MAX_TAIL_TEXT_BYTES, utf8Prefix } from "./display-buffer"
 import {
   ENGINE_EVENT_DELIVERY,
   type EngineEvent,
@@ -8,6 +9,7 @@ import { MAX_U64, durableSequenceId, isRecord, parseU64, type WireEngineEvent } 
 import type { RottweilerAction } from "./actions"
 import {
   createInitialState,
+  createStreamingTail,
   type ActivityTimingProjection,
   type BoundedCommandTextProjection,
   type CommandResultProjection,
@@ -925,18 +927,12 @@ function applyKnownEvent(
     case "text_delta":
       return {
         ...state,
-        streamingTail: updateTail(state.streamingTail, event.turn_id, (tail) => ({
-          ...tail,
-          text: tail.text + event.text,
-        })),
+        streamingTail: updateTail(state.streamingTail, event.turn_id, (tail) => appendTailText(tail, "text", event.text)),
       }
     case "thinking_delta":
       return {
         ...state,
-        streamingTail: updateTail(state.streamingTail, event.turn_id, (tail) => ({
-          ...tail,
-          thinking: tail.thinking + event.text,
-        })),
+        streamingTail: updateTail(state.streamingTail, event.turn_id, (tail) => appendTailText(tail, "thinking", event.text)),
       }
     case "citation_delta":
       return {
@@ -959,7 +955,7 @@ function applyKnownEvent(
         capabilities: [],
         rationale: null,
         diff: null,
-        chunks: [],
+        chunks: EMPTY_TOOL_OUTPUT,
         output: null,
         isError: null,
         callIndex: event.call_index,
@@ -988,7 +984,7 @@ function applyKnownEvent(
         capabilities: event.capabilities,
         rationale: event.rationale,
         diff: event.diff ?? null,
-        chunks: existing?.chunks ?? [],
+        chunks: existing?.chunks ?? EMPTY_TOOL_OUTPUT,
         output: existing?.output ?? null,
         isError: existing?.isError ?? null,
         callIndex: existing?.callIndex ?? 0,
@@ -1010,7 +1006,7 @@ function applyKnownEvent(
         capabilities: [],
         rationale: null,
         diff: null,
-        chunks: [],
+        chunks: EMPTY_TOOL_OUTPUT,
         output: null,
         isError: null,
         callIndex: 0,
@@ -1040,7 +1036,7 @@ function applyKnownEvent(
         capabilities: [],
         rationale: null,
         diff: null,
-        chunks: [],
+        chunks: EMPTY_TOOL_OUTPUT,
         output: null,
         isError: null,
         callIndex: 0,
@@ -1050,7 +1046,7 @@ function applyKnownEvent(
         ...state,
         tools: updateTool(state.tools, event.tool_call_id, {
           ...existing,
-          chunks: [...existing.chunks, { stream: event.stream, chunk: event.chunk }],
+          chunks: existing.chunks.append({ stream: event.stream, chunk: event.chunk }),
           timing: observeActivityTiming(existing.timing, event.meta.emitted_at),
         }),
         streamingTail: attachToolToTail(state.streamingTail, event.turn_id, event.tool_call_id),
@@ -1067,7 +1063,7 @@ function applyKnownEvent(
         capabilities: existing?.capabilities ?? [],
         rationale: existing?.rationale ?? null,
         diff: existing?.diff ?? null,
-        chunks: existing?.chunks ?? [],
+        chunks: EMPTY_TOOL_OUTPUT,
         output: event.output,
         isError: event.is_error,
         callIndex: event.call_index,
@@ -1902,7 +1898,6 @@ function projectTodoValue(value: unknown): readonly TodoProjection[] | null {
     return null
   }
 
-  const encoder = new TextEncoder()
   const ids = new Set<string>()
   const projected: TodoProjection[] = []
   let totalBytes = 0
@@ -1918,8 +1913,8 @@ function projectTodoValue(value: unknown): readonly TodoProjection[] | null {
     ) {
       return null
     }
-    const idBytes = encoder.encode(item.id).byteLength
-    const contentBytes = encoder.encode(item.content).byteLength
+    const idBytes = Buffer.byteLength(item.id)
+    const contentBytes = Buffer.byteLength(item.content)
     totalBytes += idBytes + contentBytes
     if (
       idBytes > MAX_TODO_ID_BYTES ||
@@ -1939,20 +1934,9 @@ function isTodoStatus(value: unknown): value is TodoProjection["status"] {
 }
 
 function boundedUtf8(value: string, maxBytes: number): string {
-  const encoder = new TextEncoder()
-  const encoded = encoder.encode(value)
-  if (encoded.byteLength <= maxBytes) return value
-  const ellipsis = encoder.encode("…")
-  if (maxBytes < ellipsis.byteLength) return ".".repeat(Math.max(0, maxBytes))
-  const prefixLimit = maxBytes - ellipsis.byteLength
-  let prefix = new TextDecoder().decode(encoded.subarray(0, prefixLimit))
-  // A slice ending within a multibyte code point decodes to U+FFFD, which can
-  // itself exceed the byte budget. Remove that replacement (or any partial
-  // surrogate) until the encoded prefix is strictly within the limit.
-  while (encoder.encode(prefix).byteLength > prefixLimit) {
-    prefix = prefix.slice(0, -1)
-  }
-  return `${prefix}…`
+  if (Buffer.byteLength(value) <= maxBytes) return value
+  if (maxBytes < 3) return ".".repeat(Math.max(0, maxBytes))
+  return `${utf8Prefix(value, maxBytes - 3)}…`
 }
 
 type UserShellStateChangedEvent = Extract<EngineEvent, { type: "user_shell_state_changed" }>
@@ -1974,7 +1958,7 @@ function projectShellEvent(
   const capturedOutput = boundedUtf8(lineBound, MAX_SHELL_OUTPUT_BYTES)
   const outputTruncated =
     rawOutput.split("\n").length > MAX_SHELL_OUTPUT_LINES ||
-    new TextEncoder().encode(lineBound).byteLength > MAX_SHELL_OUTPUT_BYTES
+    Buffer.byteLength(lineBound) > MAX_SHELL_OUTPUT_BYTES
   const shell = {
     shellId: event.shell_id,
     command: command === "" ? "Shell command" : command,
@@ -2179,6 +2163,18 @@ function boundedCommandAcks(
   return next
 }
 
+function appendTailText(tail: StreamingTail, kind: "text" | "thinking", delta: string): StreamingTail {
+  const budget = tail.displayBudget[kind]
+  const bytes = Buffer.byteLength(delta)
+  const retained = budget.omittedBytes > 0 ? ""
+    : bytes + budget.bytes <= MAX_TAIL_TEXT_BYTES ? delta : utf8Prefix(delta, MAX_TAIL_TEXT_BYTES - budget.bytes)
+  const retainedBytes = Buffer.byteLength(retained)
+  return { ...tail, [kind]: tail[kind] + retained, displayBudget: {
+    ...tail.displayBudget,
+    [kind]: { bytes: budget.bytes + retainedBytes, omittedBytes: Math.min(Number.MAX_SAFE_INTEGER, budget.omittedBytes + bytes - retainedBytes) },
+  } }
+}
+
 function updateTail(
   current: StreamingTail | null,
   turnId: string,
@@ -2187,14 +2183,14 @@ function updateTail(
   const tail =
     current?.turnId === turnId
       ? current
-      : {
+      : createStreamingTail({
           turnId,
           text: "",
           thinking: "",
           citations: [],
           toolCallIds: [],
           finished: null,
-        }
+        })
   return update(tail)
 }
 

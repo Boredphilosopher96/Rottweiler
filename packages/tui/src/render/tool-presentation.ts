@@ -217,7 +217,7 @@ function presentBash(tool: ToolProjection, data: unknown, text: string): ToolPre
           captured.stderr === "" ? "" : `Error output\n${captured.stderr}`,
         ) || "Completed with no output."
       }
-      const live = tool.chunks.map((chunk) => `${chunk.stream === "stderr" ? "Error output" : "Output"}\n${chunk.chunk.trimEnd()}`).join("\n")
+      const live = tool.chunks.read().labeled
       return live || (text === "" ? "Completed with no output." : text)
     },
   }

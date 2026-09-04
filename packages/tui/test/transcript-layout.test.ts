@@ -1,3 +1,4 @@
+import { createStreamingTail } from "../src/state/model"
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -184,14 +185,14 @@ describe("retained transcript layout", () => {
       treeSitterClient: treeSitter,
       initialState: {
         ...createInitialState(),
-        streamingTail: {
+        streamingTail: createStreamingTail({
           turnId: "1",
           text,
           thinking: "",
           citations: [],
           toolCallIds: [],
           finished: null,
-        },
+        }),
       },
     })
     renderer.renderer.root.add(app)
@@ -221,14 +222,14 @@ describe("retained transcript layout", () => {
     renderer = await createTestRenderer({ width: 70, height: 22, useThread: false })
     const initial = {
       ...createInitialState(),
-      streamingTail: {
+      streamingTail: createStreamingTail({
         turnId: "diagram",
         text: "",
         thinking: "",
         citations: [],
         toolCallIds: [],
         finished: null,
-      },
+      }),
     }
     const app = createRottweilerApp(renderer.renderer, {
       treeSitterClient: treeSitter,
@@ -257,7 +258,7 @@ describe("retained transcript layout", () => {
     for (let end = 1; end <= answer.length; end += 4) {
       app.setState({
         ...initial,
-        streamingTail: { ...initial.streamingTail, text: answer.slice(0, end) },
+        streamingTail: createStreamingTail({ ...initial.streamingTail, text: answer.slice(0, end) }),
       })
       await renderer.renderOnce()
       expect(app.transcript.streamingMarkdown).toBe(markdown)
@@ -267,7 +268,7 @@ describe("retained transcript layout", () => {
     }
     app.setState({
       ...initial,
-      streamingTail: { ...initial.streamingTail, text: answer },
+      streamingTail: createStreamingTail({ ...initial.streamingTail, text: answer }),
     })
     for (let attempt = 0; attempt < 20; attempt += 1) {
       await Bun.sleep(5)
@@ -398,14 +399,14 @@ describe("retained transcript layout", () => {
     const lines = Array.from({ length: 36 }, (_, index) => `Streaming line ${index + 1}`)
     const initial = {
       ...createInitialState(),
-      streamingTail: {
+      streamingTail: createStreamingTail({
         turnId: "follow",
         text: lines.join("\n"),
         thinking: "",
         citations: [],
         toolCallIds: [],
         finished: null,
-      },
+      }),
     }
     const app = createRottweilerApp(renderer.renderer, { initialState: initial })
     renderer.renderer.root.add(app)
@@ -413,10 +414,10 @@ describe("retained transcript layout", () => {
 
     app.setState({
       ...initial,
-      streamingTail: {
+      streamingTail: createStreamingTail({
         ...initial.streamingTail,
         text: `${initial.streamingTail.text}\nAUTO_FOLLOW_SENTINEL`,
-      },
+      }),
     })
     await renderer.flush()
     expect(renderer.captureCharFrame()).toContain("AUTO_FOLLOW_SENTINEL")
@@ -435,10 +436,10 @@ describe("retained transcript layout", () => {
     )
     app.setState({
       ...initial,
-      streamingTail: {
+      streamingTail: createStreamingTail({
         ...initial.streamingTail,
         text: `${initial.streamingTail.text}\nAUTO_FOLLOW_SENTINEL\nPRESERVE_SCROLLBACK_SENTINEL`,
-      },
+      }),
     })
     await renderer.flush()
     expect(app.transcript.scroller.scrollTop).toBeLessThanOrEqual(scrollbackTop + 1)
@@ -448,10 +449,10 @@ describe("retained transcript layout", () => {
     await renderer.flush()
     app.setState({
       ...initial,
-      streamingTail: {
+      streamingTail: createStreamingTail({
         ...initial.streamingTail,
         text: `${initial.streamingTail.text}\nAUTO_FOLLOW_SENTINEL\nPRESERVE_SCROLLBACK_SENTINEL\nFOLLOW_REENGAGED_SENTINEL`,
-      },
+      }),
     })
     await renderer.flush()
     expect(renderer.captureCharFrame()).toContain("FOLLOW_REENGAGED_SENTINEL")

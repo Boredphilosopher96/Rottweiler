@@ -1,3 +1,5 @@
+import { createStreamingTail } from "../src/state/model"
+import { toolOutputBuffer } from "../src/state/display-buffer"
 import { afterEach, describe, expect, test } from "bun:test"
 import { CliRenderEvents, CodeRenderable, DiffRenderable, StyledText, bold, fg, parseKeypress, SyntaxStyle } from "@opentui/core"
 import {
@@ -62,7 +64,7 @@ function transcriptBlockState(): RottweilerState {
     capabilities: ["read_filesystem" as const],
     rationale: null,
     diff: null,
-    chunks: [],
+    chunks: toolOutputBuffer([]),
     output: { type: "text" as const, text: "first output" },
     isError: false,
     callIndex: 0,
@@ -555,14 +557,14 @@ describe("M4 retained components", () => {
       initialState: {
         ...initial,
         tools: { ...initial.tools, [tailTool.toolCallId]: tailTool },
-        streamingTail: {
+        streamingTail: createStreamingTail({
           turnId: "2",
           text: "",
           thinking: "**Tail plan**\n\nInspect the streaming result.",
           citations: [],
           toolCallIds: [tailTool.toolCallId],
           finished: null,
-        },
+        }),
       },
     })
     renderer.root.add(app)
@@ -774,14 +776,14 @@ describe("M4 retained components", () => {
       renderer = setup.renderer
       const initial = {
         ...createInitialState(),
-        streamingTail: {
+        streamingTail: createStreamingTail({
           turnId: "1",
           text: "",
           thinking: "Inspecting the workspace",
           citations: [],
           toolCallIds: [],
           finished: null,
-        },
+        }),
       } satisfies RottweilerState
       const app = createRottweilerApp(renderer, { initialState: initial })
       renderer.root.add(app)
@@ -813,7 +815,7 @@ describe("M4 retained components", () => {
         capabilities: ["read_filesystem" as const],
         rationale: null,
         diff: null,
-        chunks: [],
+        chunks: toolOutputBuffer([]),
         output: null,
         isError: null,
         callIndex: 0,
@@ -824,7 +826,7 @@ describe("M4 retained components", () => {
       const card = new ToolBlockRenderable(renderer, kennelTheme, tool)
       expect(card.header.plainText).not.toContain("1s")
       const header = card.header.content
-      card.update({ ...tool, chunks: [{ stream: "stdout", chunk: "new output" }] })
+      card.update({ ...tool, chunks: toolOutputBuffer([{ stream: "stdout", chunk: "new output" }]) })
       expect(card.header.content).toBe(header)
       now = 5_000
       card.update(tool)
@@ -846,7 +848,7 @@ describe("M4 retained components", () => {
       capabilities: [],
       rationale: null,
       diff: null,
-      chunks: [],
+      chunks: toolOutputBuffer([]),
       output: { type: "text", text: "Path=src/main.rs" },
       isError: false,
       callIndex: 0,
@@ -880,7 +882,7 @@ describe("M4 retained components", () => {
         diff_hash: "diff",
         truncated: false,
       },
-      chunks: [],
+      chunks: toolOutputBuffer([]),
       output: { type: "text", text: "1 change applied" },
       isError: false,
       callIndex: 0,
@@ -907,7 +909,7 @@ describe("M4 retained components", () => {
       capabilities: ["write_filesystem" as const],
       rationale: "Apply the requested change",
       diff: null,
-      chunks: [],
+      chunks: toolOutputBuffer([]),
       output: null,
       isError: null,
       callIndex: 0,
@@ -957,10 +959,10 @@ describe("M4 retained components", () => {
       capabilities: ["execute" as const],
       rationale: null,
       diff: null,
-      chunks: Array.from({ length: 12 }, (_, index) => ({
+      chunks: toolOutputBuffer(Array.from({ length: 12 }, (_, index) => ({
         stream: "stdout" as const,
         chunk: `progress-${index + 1}\n`,
-      })),
+      }))),
       output: null,
       isError: null,
       callIndex: 0,
@@ -1002,10 +1004,10 @@ describe("M4 retained components", () => {
       capabilities: ["read_filesystem" as const],
       rationale: null,
       diff: null,
-      chunks: Array.from({ length: 12 }, (_, index) => ({
+      chunks: toolOutputBuffer(Array.from({ length: 12 }, (_, index) => ({
         stream: "stdout" as const,
         chunk: `line-${index + 1}\n`,
-      })),
+      }))),
       output: null,
       isError: null,
       callIndex: 0,
@@ -1014,14 +1016,14 @@ describe("M4 retained components", () => {
     const initial: RottweilerState = {
       ...createInitialState(),
       tools: { [tool.toolCallId]: tool },
-      streamingTail: {
+      streamingTail: createStreamingTail({
         turnId: tool.turnId,
         text: "",
         thinking: "",
         citations: [],
         toolCallIds: [tool.toolCallId],
         finished: null,
-      },
+      }),
     }
     const app = createRottweilerApp(renderer, { initialState: initial })
     renderer.root.add(app)
@@ -1053,7 +1055,7 @@ describe("M4 retained components", () => {
 
     const streamingTool = {
       ...tool,
-      chunks: [...tool.chunks, { stream: "stdout" as const, chunk: "line-13\n" }],
+      chunks: tool.chunks.append({ stream: "stdout", chunk: "line-13\n" }),
     }
     const streaming: RottweilerState = {
       ...initial,
@@ -1080,7 +1082,7 @@ describe("M4 retained components", () => {
     app.setState({
       ...streaming,
       tools: {},
-      streamingTail: { ...streaming.streamingTail!, toolCallIds: [] },
+      streamingTail: createStreamingTail({ ...streaming.streamingTail!, toolCallIds: [] }),
     })
     await setup.renderOnce()
     expect(app.outputViewer.visible).toBeFalse()
@@ -1100,10 +1102,10 @@ describe("M4 retained components", () => {
       capabilities: ["read_filesystem"],
       rationale: null,
       diff: null,
-      chunks: Array.from({ length: 12 }, (_, index) => ({
+      chunks: toolOutputBuffer(Array.from({ length: 12 }, (_, index) => ({
         stream: "stdout" as const,
         chunk: `selection-${index + 1}\n`,
-      })),
+      }))),
       output: null,
       isError: null,
       callIndex: 0,
@@ -1149,14 +1151,14 @@ describe("M4 retained components", () => {
     const initial: RottweilerState = {
       ...createInitialState(),
       transcript,
-      streamingTail: {
+      streamingTail: createStreamingTail({
         turnId: "10001",
         text: "first",
         thinking: "",
         citations: [],
         toolCallIds: [],
         finished: null,
-      },
+      }),
     }
     const app = createRottweilerApp(renderer, {
       initialState: initial,
@@ -1170,7 +1172,7 @@ describe("M4 retained components", () => {
     const streamingMarkdown = app.transcript.streamingMarkdown
     app.setState({
       ...initial,
-      streamingTail: { ...initial.streamingTail!, text: "first second" },
+      streamingTail: createStreamingTail({ ...initial.streamingTail!, text: "first second" }),
     })
     await setup.renderOnce()
     expect(app.transcript.streamingMarkdown).toBe(streamingMarkdown)
@@ -1538,14 +1540,14 @@ describe("M4 retained components", () => {
     renderer = setup.renderer
     const initial = {
       ...createInitialState(),
-      streamingTail: {
+      streamingTail: createStreamingTail({
         turnId: "1",
         text: "",
         thinking: "**Inspecting project**\n\nReading manifests now.",
         citations: [],
         toolCallIds: [],
         finished: null,
-      },
+      }),
     } satisfies RottweilerState
     const app = createRottweilerApp(renderer, { initialState: initial })
     renderer.root.add(app)
@@ -1592,7 +1594,7 @@ describe("M4 retained components", () => {
       capabilities: ["read_filesystem" as const],
       rationale: null,
       diff: null,
-      chunks: [],
+      chunks: toolOutputBuffer([]),
       output: null,
       isError: null,
       callIndex: 0,
@@ -1601,14 +1603,14 @@ describe("M4 retained components", () => {
     const initial: RottweilerState = {
       ...createInitialState(),
       tools: { [runningTool.toolCallId]: runningTool },
-      streamingTail: {
+      streamingTail: createStreamingTail({
         turnId: "1",
         text: "",
         thinking: "checking the workspace",
         citations: [],
         toolCallIds: [runningTool.toolCallId],
         finished: null,
-      },
+      }),
     }
     const app = createRottweilerApp(renderer, { initialState: initial })
     renderer.root.add(app)
@@ -1662,7 +1664,7 @@ describe("M4 retained components", () => {
       capabilities: ["read_filesystem" as const],
       rationale: null,
       diff: null,
-      chunks: [],
+      chunks: toolOutputBuffer([]),
       output: { type: "text" as const, text: "contents" },
       isError: false,
       callIndex: 0,
@@ -1722,7 +1724,7 @@ describe("M4 retained components", () => {
       capabilities: ["execute" as const],
       rationale: null,
       diff: null,
-      chunks: [],
+      chunks: toolOutputBuffer([]),
       output: { type: "text" as const, text: "all tests passed" },
       isError: false,
       callIndex: 0,
@@ -1745,7 +1747,7 @@ describe("M4 retained components", () => {
         diff_hash: "diff",
         truncated: false,
       },
-      chunks: [],
+      chunks: toolOutputBuffer([]),
       output: { type: "text" as const, text: "applied 1 edit\nError parsing diff: Removed line count did not match for hunk at line 3" },
       isError: false,
       callIndex: 1,
@@ -1755,14 +1757,14 @@ describe("M4 retained components", () => {
       ...createInitialState(),
       workspaceRoots: { generation: "1", effectiveFromTurn: "0", roots: ["/workspace"] },
       tools: { [bash.toolCallId]: bash, [edit.toolCallId]: edit },
-      streamingTail: {
+      streamingTail: createStreamingTail({
         turnId: "1",
         text: "",
         thinking: "",
         citations: [],
         toolCallIds: [bash.toolCallId, edit.toolCallId],
         finished: null,
-      },
+      }),
     }
     const app = createRottweilerApp(renderer, {
       initialState: initial,
@@ -1808,7 +1810,7 @@ describe("M4 retained components", () => {
         ...initial.tools,
         [bash.toolCallId]: {
           ...bash,
-          chunks: [{ stream: "stdout" as const, chunk: "checking\n" }],
+          chunks: toolOutputBuffer([{ stream: "stdout" as const, chunk: "checking\n" }]),
         },
       },
     })
@@ -1851,7 +1853,7 @@ describe("M4 retained components", () => {
         diff_hash: "diff",
         truncated: false,
       },
-      chunks: [],
+      chunks: toolOutputBuffer([]),
       output: { type: "text", text: "26 changes applied" },
       isError: false,
       callIndex: 0,
@@ -1895,7 +1897,7 @@ describe("M4 retained components", () => {
         diff_hash: "diff",
         truncated: false,
       },
-      chunks: [],
+      chunks: toolOutputBuffer([]),
       output: { type: "text", text: "26 changes applied" },
       isError: false,
       callIndex: 0,
@@ -1924,7 +1926,7 @@ describe("M4 retained components", () => {
       capabilities: ["read_filesystem" as const],
       rationale: null,
       diff: null,
-      chunks: [],
+      chunks: toolOutputBuffer([]),
       output: {
         type: "mixed" as const,
         parts: [
@@ -1963,14 +1965,14 @@ describe("M4 retained components", () => {
       initialState: {
         ...createInitialState(),
         tools: { [diagnostics.toolCallId]: diagnostics },
-        streamingTail: {
+        streamingTail: createStreamingTail({
           turnId: "1",
           text: "",
           thinking: "",
           citations: [],
           toolCallIds: [diagnostics.toolCallId],
           finished: null,
-        },
+        }),
       },
     })
     renderer.root.add(app)
@@ -2053,7 +2055,7 @@ describe("M4 retained components", () => {
             diff_hash: "diff-hash",
             truncated: false,
           },
-          chunks: [],
+          chunks: toolOutputBuffer([]),
           output: null,
           isError: null,
           callIndex: 0,
@@ -2128,7 +2130,7 @@ describe("M4 retained components", () => {
       capabilities: ["write_filesystem" as const],
       rationale: "Create the selected file",
       diff: null,
-      chunks: [],
+      chunks: toolOutputBuffer([]),
       output: null,
       isError: null,
       callIndex: 0,
@@ -2210,7 +2212,7 @@ describe("M4 retained components", () => {
       capabilities: ["execute" as const],
       rationale: "Run focused tests",
       diff: null,
-      chunks: [],
+      chunks: toolOutputBuffer([]),
       output: null,
       isError: null,
       callIndex: 0,
@@ -2311,7 +2313,7 @@ describe("M4 retained components", () => {
           capabilities: ["execute", "write_filesystem", "network"],
           rationale: "UNSANDBOXED EXECUTION: this command bypasses native isolation",
           diff: null,
-          chunks: [],
+          chunks: toolOutputBuffer([]),
           output: null,
           isError: null,
           callIndex: 0,
@@ -2354,7 +2356,7 @@ describe("M4 retained components", () => {
           capabilities: ["execute"],
           rationale: "Run tests",
           diff: null,
-          chunks: [],
+          chunks: toolOutputBuffer([]),
           output: null,
           isError: null,
           callIndex: 0,
@@ -2493,14 +2495,14 @@ describe("M4 retained components", () => {
     renderer = setup.renderer
     const initial: RottweilerState = {
       ...createInitialState(),
-      streamingTail: {
+      streamingTail: createStreamingTail({
         turnId: "1",
         text: "Coordinating the implementation.",
         thinking: "",
         citations: [],
         toolCallIds: [],
         finished: null,
-      },
+      }),
       subagentOrder: ["explore", "tests"],
       subagents: {
         explore: {
@@ -2589,7 +2591,7 @@ describe("M4 retained components", () => {
     )
     app.setState({
       ...initial,
-      streamingTail: { ...initial.streamingTail!, turnId: "2" },
+      streamingTail: createStreamingTail({ ...initial.streamingTail!, turnId: "2" }),
       subagentOrder: Object.keys(many),
       subagents: many,
     })

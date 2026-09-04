@@ -1,3 +1,5 @@
+import { toolOutputBuffer } from "../src/state/display-buffer"
+import { createStreamingTail } from "../src/state/model"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
@@ -1021,19 +1023,19 @@ function scenarioState(scenario: VisualScenario): RottweilerState {
     capabilities: ["execute"],
     rationale: "Run the focused reconnect regression suite",
     output: null,
-    chunks: [],
+    chunks: toolOutputBuffer([]),
     isError: null,
   })
   return {
     ...state,
-    streamingTail: {
+    streamingTail: createStreamingTail({
       turnId: "2",
       text: "I need permission before running the focused regression suite.",
       thinking: "The command executes workspace code, so it must cross the approval boundary.",
       citations: [],
       toolCallIds: [approval.toolCallId],
       finished: null,
-    },
+    }),
     tools: { [approval.toolCallId]: approval },
   }
 }
@@ -1205,7 +1207,7 @@ function toolsState(): RottweilerState {
     capabilities: [],
     rationale: null,
     diff: null,
-    chunks: [],
+    chunks: toolOutputBuffer([]),
     output: { type: "text", text: "Completed retained output" },
     isError: false,
     callIndex,
@@ -1227,10 +1229,10 @@ function toolsState(): RottweilerState {
       name: "bash",
       args: { command: "bun test test/components.test.ts" },
       status: "running",
-      chunks: [{
+      chunks: toolOutputBuffer([{
         stream: "stdout",
         chunk: Array.from({ length: 12 }, (_, index) => `component check ${index + 1} passed`).join("\n"),
-      }],
+      }]),
       output: null,
       isError: null,
       timing: { kind: "open", startedAtMs, lastObservedAtMs: startedAtMs + 40_000 },
@@ -1258,14 +1260,14 @@ function toolsState(): RottweilerState {
     mode: "execute",
     provider: "openai",
     model: "gpt-5",
-    streamingTail: {
+    streamingTail: createStreamingTail({
       turnId: "tools-turn",
       text: "",
       thinking: "",
       citations: [],
       toolCallIds: tools.map((tool) => tool.toolCallId),
       finished: null,
-    },
+    }),
     turns: {
       "tools-turn": {
         turnId: "tools-turn",
@@ -1293,7 +1295,7 @@ function conversationState(): RottweilerState {
     capabilities: ["write_filesystem"],
     rationale: "Track the durable cursor independently",
     output: { type: "text", text: "Updated core/cursor.rs" },
-    chunks: [],
+    chunks: toolOutputBuffer([]),
     isError: false,
   })
   const tests = tool({
@@ -1304,7 +1306,7 @@ function conversationState(): RottweilerState {
     capabilities: ["execute"],
     rationale: "Run the focused regression suite",
     output: { type: "text", text: "18 passed; 0 failed" },
-    chunks: [],
+    chunks: toolOutputBuffer([]),
     isError: false,
   })
   const read = tool({
@@ -1315,7 +1317,7 @@ function conversationState(): RottweilerState {
     capabilities: ["read_filesystem"],
     rationale: "Confirm the reconnect contract",
     output: { type: "text", text: "184 lines" },
-    chunks: [],
+    chunks: toolOutputBuffer([]),
     isError: false,
   })
   return {
@@ -1336,14 +1338,14 @@ function conversationState(): RottweilerState {
         meta: { synthetic: false, summary: false },
       },
     }],
-    streamingTail: {
+    streamingTail: createStreamingTail({
       turnId: "2",
       text: "## What changed\n\nThe stream resumes from the last **durable** sequence, not the last delivered frame.\n\n1. `cursor.rs` tracks `durable_seq` independently\n2. `sse.ts` replays from that sequence on reattach\n3. `app.ts` drops the transport-ack fast path",
       thinking: "Two acknowledgements exist here: the transport ack and\nthe durable sequence ack. The client advances its cursor\non the transport ack, so a reconnect replays from a\nsequence the UI already consumed. Keep them separate.",
       citations: [{ uri: "protocol/session-log.md", title: "Reconnect contract" }],
       toolCallIds: [edit.toolCallId, tests.toolCallId, read.toolCallId],
       finished: null,
-    },
+    }),
     tools: {
       [edit.toolCallId]: edit,
       [tests.toolCallId]: tests,

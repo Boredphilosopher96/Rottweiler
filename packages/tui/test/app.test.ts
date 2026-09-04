@@ -1,3 +1,5 @@
+import { createStreamingTail } from "../src/state/model"
+import { toolOutputBuffer } from "../src/state/display-buffer"
 import { afterEach, describe, expect, test } from "bun:test"
 import { CliRenderEvents, type Selection } from "@opentui/core"
 import { createTestRenderer, type TestRenderer } from "@opentui/core/testing"
@@ -144,7 +146,7 @@ describe("Rottweiler OpenTUI shell", () => {
       capabilities: ["read_filesystem" as const],
       rationale: null,
       diff: null,
-      chunks: [],
+      chunks: toolOutputBuffer([]),
       output: { type: "text" as const, text: "keyboard output" },
       isError: false,
       callIndex: 0,
@@ -1252,7 +1254,7 @@ describe("Rottweiler OpenTUI shell", () => {
             diff_hash: "diff",
             truncated: false,
           },
-          chunks: [],
+          chunks: toolOutputBuffer([]),
           output: null,
           isError: null,
           callIndex: 0,
@@ -1905,7 +1907,7 @@ describe("Rottweiler OpenTUI shell", () => {
               diff_hash: "diff",
               truncated: false,
             },
-            chunks: [],
+            chunks: toolOutputBuffer([]),
             output: { type: "text", text: "done" },
             isError: false,
             callIndex: 0,
@@ -9585,7 +9587,7 @@ describe("Rottweiler OpenTUI shell", () => {
         ...changed.tools,
         "tools-0": {
           ...original,
-          chunks: [...original.chunks, { stream: "stdout", chunk: "late line\n" }],
+          chunks: original.chunks.append({ stream: "stdout", chunk: "late line\n" }),
         },
       },
     })
@@ -9628,7 +9630,7 @@ describe("Rottweiler OpenTUI shell", () => {
       capabilities: [],
       rationale: null,
       diff: null,
-      chunks: [],
+      chunks: toolOutputBuffer([]),
       output: { type: "text", text: `turn ${turnId}` },
       isError: false,
       callIndex: 0,
@@ -9715,10 +9717,10 @@ function toolsAppState(): RottweilerState {
       capabilities: ["execute"],
       rationale: null,
       diff: null,
-      chunks: [{
+      chunks: toolOutputBuffer([{
         stream: "stdout",
         chunk: Array.from({ length: 8 }, (__, line) => `tools-${index}-${line + 1}`).join("\n"),
-      }],
+      }]),
       output: null,
       isError: null,
       callIndex: index,
@@ -9741,14 +9743,14 @@ function toolsAppState(): RottweilerState {
         meta: { synthetic: false, summary: false },
       },
     })),
-    streamingTail: {
+    streamingTail: createStreamingTail({
       turnId: "turn-tools",
       text: "",
       thinking: "",
       citations: [],
       toolCallIds: Object.keys(tools),
       finished: null,
-    },
+    }),
     turns: {
       "turn-tools": {
         turnId: "turn-tools",

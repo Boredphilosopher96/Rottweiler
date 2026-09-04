@@ -1,3 +1,5 @@
+import { createStreamingTail } from "../src/state/model"
+import { toolOutputBuffer } from "../src/state/display-buffer"
 import { afterEach, describe, expect, test } from "bun:test"
 import { createTestRenderer, type TestRenderer } from "@opentui/core/testing"
 import { createRottweilerApp } from "../src/app"
@@ -61,12 +63,12 @@ describe("client-owned renderer handoff", () => {
     renderer = setup.renderer
     const tool: ToolProjection = {
       toolCallId: "one", turnId: "turn", name: "read", args: { path: "one.txt" }, status: "running",
-      capabilities: ["read_filesystem"], rationale: null, diff: null, chunks: [{ stream: "stdout", chunk: "some output" }],
+      capabilities: ["read_filesystem"], rationale: null, diff: null, chunks: toolOutputBuffer([{ stream: "stdout", chunk: "some output" }]),
       output: null, isError: null, callIndex: 0, timing: { kind: "unknown" },
     }
-    const initial = { ...createInitialState(), tools: { one: tool }, streamingTail: {
+    const initial = { ...createInitialState(), tools: { one: tool }, streamingTail: createStreamingTail({
       turnId: "turn", text: "", thinking: "reasoning", citations: [], toolCallIds: ["one"], finished: null,
-    } }
+    }) }
     const original = createRottweilerApp(renderer, { initialState: initial })
     renderer.root.add(original)
     await setup.renderOnce()
