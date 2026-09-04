@@ -23,12 +23,14 @@ packages/plugin-sdk/*.bun-build
 packages/plugin-host/node_modules/
 packages/plugin-host/dist/
 packages/plugin-host/*.bun-build
-packages/plugin-docs/node_modules/
-packages/plugin-docs/dist/
-packages/plugin-docs/*.bun-build
+packages/docs-site/node_modules/
+packages/docs-site/dist/
+packages/docs-site/*.bun-build
 .rottweiler/sessions/
 .rottweiler/checkpoints/
 .rottweiler/runtime/
 **/__pycache__/
 release/update/*.key
 release/update/*.seed
+
+/ci-results/

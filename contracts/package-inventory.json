@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "packages": [
+    {"id": "docs-site", "directory": "packages/docs-site", "checks": ["check", "test", "build"]},
+    {"id": "plugin-host", "directory": "packages/plugin-host", "checks": ["typecheck", "test", "build"]},
+    {"id": "plugin-sdk", "directory": "packages/plugin-sdk", "checks": ["typecheck", "test", "build"]},
+    {"id": "tui", "directory": "packages/tui", "checks": ["typecheck", "test", "build"]}
+  ],
+  "fixtures": [
+    {"manifest": "crates/rw-core/tests/fixtures/init/typescript/apps/browser/package.json", "reason": "Pinned init acceptance fixture"},
+    {"manifest": "crates/rw-core/tests/fixtures/init/typescript/package.json", "reason": "Pinned init acceptance fixture"},
+    {"manifest": "crates/rw-core/tests/fixtures/init/typescript/packages/engine/package.json", "reason": "Pinned init acceptance fixture"},
+    {"manifest": "packages/plugin-sdk/fixtures/scaffold/package.json", "reason": "Packaged scaffold template tested by SDK conformance"}
+  ]
+}

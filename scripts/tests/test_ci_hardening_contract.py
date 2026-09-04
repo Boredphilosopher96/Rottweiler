@@ -1,4 +1,6 @@
 import re
+import json
+import yaml
 import unittest
 from pathlib import Path
 
@@ -67,16 +69,19 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertNotIn("macos-performance-build", workflow)
         self.assertNotIn("performance-linux", workflow)
         self.assertNotIn("performance-macos", workflow)
-        self.assertIn("needs: [test, security-tests]", smoke)
+        self.assertNotIn("needs:", smoke)
+        required = workflow_job(workflow, "required")
+        self.assertIn("security-tests", required)
+        self.assertIn("performance-smoke", required)
         self.assertNotIn("\n    if:", smoke)
         self.assertIn("timeout-minutes: 45", smoke)
         self.assertIn("Swatinem/rust-cache@", smoke)
         self.assertIn("ROTTWEILER_PERF_SMOKE: 1", smoke)
         self.assertIn("ROTTWEILER_PERF_SAMPLES: 100", smoke)
-        self.assertIn("bun run test:perf", smoke)
+        self.assertIn("test:perf", smoke)
         tui_smoke = workflow_job(workflow, "tui-performance-smoke")
         self.assertIn("ROTTWEILER_PERF_SMOKE: 1", tui_smoke)
-        self.assertIn("bun run test:perf", tui_smoke)
+        self.assertIn("test:perf", tui_smoke)
 
     def test_nightly_budgets_are_blocking_and_missing_runners_fail_closed(self) -> None:
         workflow = (ROOT / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
@@ -94,10 +99,10 @@ class CiHardeningContractTests(unittest.TestCase):
         )[0]
         self.assertNotIn("continue-on-error", linux_release + macos_release)
         self.assertIn(
-            "needs: [runner-contract, linux-performance-build]", linux_release
+            "needs: linux-performance-build", linux_release
         )
         self.assertNotIn("macos-performance-build", linux_release)
-        self.assertIn("needs: runner-contract", macos_release)
+        self.assertNotIn("needs: runner-contract", macos_release)
         self.assertIn(
             "runs-on: ubuntu-24.04", linux_release
         )
@@ -110,7 +115,8 @@ class CiHardeningContractTests(unittest.TestCase):
             self.assertIn("scripts/build-release.sh", release_budget)
         self.assertIn("ROTTWEILER_SELF_HOSTED_RUNNERS", runner_contract)
         self.assertIn("exit 1", runner_contract)
-        self.assertEqual(workflow.count("runner-contract"), 4)
+        self.assertEqual(workflow.count("runner-contract"), 2)
+        self.assertIn("scripts/check-runner-capacity.py", runner_contract)
         soak = workflow_job(workflow, "eight-hour-soak")
         self.assertIn(
             "needs: [runner-contract, linux-performance-build, macos-performance-build]",
@@ -217,7 +223,7 @@ class CiHardeningContractTests(unittest.TestCase):
             (
                 nightly,
                 "runner-contract",
-                ("linux-release-budget", "macos-release-budget"),
+                ("eight-hour-soak",),
             ),
             (
                 release,
@@ -321,24 +327,25 @@ class CiHardeningContractTests(unittest.TestCase):
         self,
     ) -> None:
         configuration = (ROOT / ".github/dependabot.yml").read_text(encoding="utf-8")
-        self.assertEqual(configuration.count("package-ecosystem:"), 5)
-        self.assertNotIn("interval: daily", configuration)
-        self.assertEqual(configuration.count("interval: weekly"), 2)
-        self.assertEqual(
-            configuration.count("multi-ecosystem-group: application-dependencies"),
-            4,
-        )
-        self.assertEqual(
-            configuration.count("multi-ecosystem-group: automation-dependencies"),
-            1,
-        )
-        self.assertEqual(configuration.count("open-pull-requests-limit: 1"), 5)
+        document = yaml.load(configuration, Loader=yaml.BaseLoader)
+        packages = json.loads((ROOT / "contracts/package-inventory.json").read_text())["packages"]
+        updates = document["updates"]
+        self.assertEqual(len(updates), len(packages) + 3)
+        self.assertEqual({entry["directory"] for entry in updates if entry["package-ecosystem"] == "bun"},
+                         {"/" + package["directory"] for package in packages})
+        for group in document["multi-ecosystem-groups"].values():
+            self.assertEqual(group["schedule"]["interval"], "weekly")
+            self.assertEqual(group["schedule"]["day"], "monday")
+        for entry in updates:
+            expected_group = "automation-dependencies" if entry["package-ecosystem"] == "github-actions" else "application-dependencies"
+            self.assertEqual(entry["multi-ecosystem-group"], expected_group)
+            self.assertEqual(entry["open-pull-requests-limit"], "1")
         self.assertNotIn("version-update:semver-major", configuration)
 
     def test_javascript_dependencies_do_not_use_version_specific_patches(
         self,
     ) -> None:
-        for package_name in ("tui", "plugin-sdk", "docs-site"):
+        for package_name in ("tui", "plugin-host", "plugin-sdk", "docs-site"):
             package_root = ROOT / "packages" / package_name
             manifest = (package_root / "package.json").read_text(encoding="utf-8")
             self.assertNotIn("patchedDependencies", manifest)

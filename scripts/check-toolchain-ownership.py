@@ -10,6 +10,9 @@ import sys
 import tomllib
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ci_inventory import package_manifests
+
 ROOT = Path(__file__).resolve().parents[1]
 SEMVER = r"[0-9]+\.[0-9]+\.[0-9]+"
 
@@ -61,11 +64,7 @@ def validate_repository(root: Path) -> list[str]:
     if provision_versions != [bun]:
         failures.append("scripts/provision-wsl-ci.sh must project the root Bun version exactly once")
 
-    package_paths = (
-        "packages/docs-site/package.json",
-        "packages/plugin-sdk/package.json",
-        "packages/tui/package.json",
-    )
+    package_paths = package_manifests(root)
     for relative in package_paths:
         document = json.loads((root / relative).read_text(encoding="utf-8"))
         if document.get("packageManager") != f"bun@{bun}":

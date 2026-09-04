@@ -18,6 +18,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Inspect actual protected runner capacity
+        env:
+          GH_TOKEN: ${{ secrets.ROTTWEILER_RUNNER_READ_TOKEN || github.token }}
+        run: python3 scripts/check-runner-capacity.py --repository "$GITHUB_REPOSITORY" --output runner-capacity.json
+      - name: Retain runner availability
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: runner-capacity-${{ github.run_id }}-${{ github.run_attempt }}
+          path: runner-capacity.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Fail closed when protected hardening runners are unavailable
         env:
           SELF_HOSTED_RUNNERS_ENABLED: ${{ vars.ROTTWEILER_SELF_HOSTED_RUNNERS }}
@@ -27,20 +42,45 @@ jobs:
             exit 1
           fi
 
+  fuzz-targets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      targets: ${{ steps.owner.outputs.targets }}
+      toolchain: ${{ steps.owner.outputs.toolchain }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: owner
+        run: |
+          python3 - <<'PYTHON'
+          import json, os, tomllib
+          from pathlib import Path
+          manifest = tomllib.loads(Path("fuzz/Cargo.toml").read_text())
+          toolchain = tomllib.loads(Path("fuzz/rust-toolchain.toml").read_text())["toolchain"]["channel"]
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print("targets=" + json.dumps([target["name"] for target in manifest["bin"]]), file=output)
+              print("toolchain=" + toolchain, file=output)
+          PYTHON
+
   fuzz:
+    needs: fuzz-targets
     name: Fuzz ${{ matrix.target }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        target: [config_parser, toon_decoder, plugin_rpc, event_log]
+        target: ${{ fromJSON(needs.fuzz-targets.outputs.targets) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install nightly Rust
-        run: rustup toolchain install nightly --profile minimal
+        env:
+          FUZZ_TOOLCHAIN: ${{ needs.fuzz-targets.outputs.toolchain }}
+        run: rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal
       - name: Cache pinned cargo-fuzz
         id: cargo-fuzz-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -51,7 +91,10 @@ jobs:
         if: steps.cargo-fuzz-cache.outputs.cache-hit != 'true'
         run: cargo install --locked cargo-fuzz --version 0.13.2
       - name: Run bounded sanitizer-backed campaign
-        run: cargo +nightly fuzz run "${{ matrix.target }}" -- -max_total_time=60 -rss_limit_mb=2048
+        env:
+          FUZZ_TOOLCHAIN: ${{ needs.fuzz-targets.outputs.toolchain }}
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: cargo +"$FUZZ_TOOLCHAIN" fuzz run "$FUZZ_TARGET" -- -max_total_time=60 -rss_limit_mb=2048
 
   linux-performance-build:
     name: Build isolated Linux performance binary
@@ -73,7 +116,7 @@ jobs:
           path: ${{ runner.temp }}/rottweiler-linux-performance-artifact.noindex
           if-no-files-found: error
           overwrite: true
-          retention-days: 1
+          retention-days: 14
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.14
@@ -92,7 +135,7 @@ jobs:
           path: packages/tui/dist
           if-no-files-found: error
           overwrite: true
-          retention-days: 1
+          retention-days: 14
 
   macos-performance-build:
     name: Build isolated macOS performance binary
@@ -114,7 +157,7 @@ jobs:
           path: ${{ runner.temp }}/rottweiler-macos-performance-artifact.noindex
           if-no-files-found: error
           overwrite: true
-          retention-days: 1
+          retention-days: 14
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.14
@@ -133,11 +176,11 @@ jobs:
           path: packages/tui/dist
           if-no-files-found: error
           overwrite: true
-          retention-days: 1
+          retention-days: 14
 
   linux-release-budget:
     name: Release budgets (protected Linux)
-    needs: [runner-contract, linux-performance-build]
+    needs: linux-performance-build
     # The fixed Ubuntu image is a native x86_64 lane and records its exact
     # runner-image provenance with every raw sample set.
     runs-on: ubuntu-24.04
@@ -221,7 +264,6 @@ jobs:
 
   macos-release-budget:
     name: Release budgets (fixed hosted macOS)
-    needs: runner-contract
     # The fixed native ARM64 image avoids workstation Gatekeeper/XProtect
     # provenance noise and records exact runner-image provenance in evidence.
     runs-on: macos-15

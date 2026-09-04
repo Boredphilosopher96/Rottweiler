@@ -10,7 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 rw-context = { path = "../crates/rw-context" }
-rw-ext = { path = "../crates/rw-ext" }
+rw-plugin-protocol = { path = "../crates/rw-plugin-protocol" }
 rw-store = { path = "../crates/rw-store" }
 rw-types = { path = "../crates/rw-types" }
 serde_json = "1.0"

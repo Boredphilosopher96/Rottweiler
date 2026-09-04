@@ -126,7 +126,10 @@ class M8LinuxWrapperTests(unittest.TestCase):
         self.assertIn("persist-credentials: false", security)
         self.assertIn("persist-credentials: false", performance)
         self.assertIn("persist-credentials: false", nightly_release)
-        self.assertIn("needs: [test, security-tests]", ci)
+        aggregate = ci.split("  required:", 1)[1]
+        self.assertIn("security-tests", aggregate)
+        self.assertIn("performance-smoke", aggregate)
+        self.assertIn("if: always()", aggregate)
         self.assertIn("m8_release_gate_linux.sh", nightly)
         self.assertIn("uses: ./.github/workflows/performance.yml", preflight)
         self.assertNotIn("m8_release_gate_linux.sh", release_linux)

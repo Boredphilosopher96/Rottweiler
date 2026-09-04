@@ -6,8 +6,8 @@ Authorized September 4, 2026: implement all findings, without backward compatibi
 ## Execution phases
 
 - [x] Ground: source review, live CI evidence, project contracts.
-- [ ] Sketch: compare CI ownership designs, then cross-boundary runtime contracts.
-- [ ] Agree: synthesize designs and record decisions. User authorized implementation without an additional checkpoint.
+- [x] Sketch: CI ownership designs compared; runtime contracts are designed per dependency-ordered work unit.
+- [x] Agree: synthesize designs and record decisions. User authorized implementation without an additional checkpoint.
 - [ ] Implement: CI stabilization, runtime liveness, journal/client state, scheduling, extensibility, workspace/context, qualification.
 - [ ] Reassess: replace designs that fail integration or measurement; no silent scope reduction.
 
@@ -19,20 +19,20 @@ Pending means no completion claim. Source complete needs checked-in implementati
 
 | ID | Work | Status | Evidence / remaining work |
 | --- | --- | --- | --- |
-| C01 | P1: Restore a trustworthy main branch and complete gate ownership | Pending | |
-| C02 | P1: Contract changes must compile and test every consumer | Pending | |
-| C03 | P1: Fix the platform boundary exposed by scaffold generation | Pending | |
-| C04 | P1: Protected jobs need real runner capacity and a bounded queue | Pending | |
-| C05 | P1: Terminal acceptance and soak need explicit readiness and progress evidence | Pending | |
-| C06 | P1: Make performance and artifact failures attributable without weakening budgets | Pending | |
-| C07 | P1: Dependency maintenance must reconcile configuration and lockfiles | Pending | |
-| C08 | P1: Every failed gate must leave usable evidence | Pending | |
-| A01 | P1: Ordered output has a circular wait under saturation | Pending | |
+| C01 | P1: Restore a trustworthy main branch and complete gate ownership | Source implemented; hosted pending | Always-run required aggregate, semantic workflow validation, independent package/fuzz checks. Hosted ruleset update waits for passing candidate. |
+| C02 | P1: Contract changes must compile and test every consumer | Source implemented; integration pending | Package inventory, native Bun updater coverage, compile every fuzz bin, corrected decoder owner and visual golden. Stable fuzz compile passed. |
+| C03 | P1: Fix the platform boundary exposed by scaffold generation | Focused verification passed | Pinned Bun SDK suite, packaged scaffold LF/CRLF and refusal tests; real replay CLI golden passed. WSL hosted qualification pending. |
+| C04 | P1: Protected jobs need real runner capacity and a bounded queue | Partial; capacity unavailable | Live gh reports zero runners; user instructed to stop machine discovery there. Actual admission check,14-day artifacts,hosted budgets decoupled. Queue controller and full platform qualification pending. |
+| C05 | P1: Terminal acceptance and soak need explicit readiness and progress evidence | Short macOS lifecycle verified; qualification pending | b064827: model discovery and composer readiness, platform-correct RSS, periodic soak diagnostics. Fresh combined TUI passed lifecycle and 30.788s PTY soak: 66/66 completed, 17 tool turns, 16 compactions, one forced restart, 338067456-byte peak. Eight-hour/native Linux unrun. |
+| C06 | P1: Make performance and artifact failures attributable without weakening budgets | Focused build and performance verification passed | b064827: Linux duplicate native payload removed (151570992 to 113674800 bytes), all five grammar smoke checks passed under emulation; pinned local performance suite passed with raw samples retained. Native hosted qualification and build reuse topology remain pending. |
+| C07 | P1: Dependency maintenance must reconcile configuration and lockfiles | Source implemented; hosted pending | Wasmtime47.0.4 advisory gate passes; native Bun updater and plugin-host/tooling coverage added. Hosted updater reconciliation awaits merged config. |
+| C08 | P1: Every failed gate must leave usable evidence | Partial; integration pending | Bounded gate results/uploads and atomic periodic soak diagnostics implemented. Loss-of-runner remote checkpoint/controller remains pending. |
+| A01 | P1: Ordered output has a circular wait under saturation | Full-engine regression fixed; integration pending | Delayed first tool plus two saturated later tools completes 129 ordered chunks. Cleanup output ordering regression found by global tests and repaired; five focused cancellation/output tests pass. A21 integration underway. |
 | A02 | P1: Reconnect and history paging repeatedly process the lifetime journal | Pending | |
 | A03 | P1: Storage latency still controls actor responsiveness | Pending | |
 | A04 | P1: The transcript is a recent tail, not a virtualized history | Pending | |
-| A05 | P1: Renderer recycling is normal memory control and loses client state | Pending | |
-| A06 | P1: Plugin SDK request handling can block its own replies | Pending | |
+| A05 | P1: Renderer recycling is normal memory control and loses client state | Recovery state checkpoint verified; memory qualification pending | b064827: app/component-owned client state, private bounded handoff, attachment validation, input selection and folds restored. Unsafe active interactions defer recycling. 536 TUI tests and fresh lifecycle/short soak passed; native memory ownership and long-soak deferral behavior remain to qualify. |
+| A06 | P1: Plugin SDK request handling can block its own replies | SDK checkpoint verified; host stream isolation pending | e57572f: independent bounded input pump, actual handler admission, bounded outbound/HTTP queues and shutdown. 61 SDK tests, typecheck and build passed. Host provider stream credits/isolation still need the extension runtime work. |
 | A07 | P1: Extension control is too narrow for the stated mission | Pending | |
 | A08 | P2: The runtime boundary still owns terminal presentation | Pending | |
 | A09 | P2: Command admission and retry semantics need stronger ownership | Pending | |
@@ -41,13 +41,13 @@ Pending means no completion claim. Source complete needs checked-in implementati
 | A12 | P2: Spend limits observe usage but do not reserve in-flight cost | Pending | |
 | A13 | P2: Checkpoint capture can allocate without a file-size budget | Pending | |
 | A14 | P2: Workspace intelligence lacks an aggregate cache and freshness contract | Pending | |
-| A15 | P2: The client accepts typed-looking wire data without validating its shape | Pending | |
-| A16 | P2: Client memory bounds need bytes and allocation accounting | Pending | |
+| A15 | P2: The client accepts typed-looking wire data without validating its shape | Checkpoint verified; global integration pending | b064827: Rust-schema-generated standalone validators reject malformed known events before reducer/cursor changes. Full 536-test TUI suite, typecheck and codegen passed; compiled cost included in C06. |
+| A16 | P2: Client memory bounds need bytes and allocation accounting | Implementation in progress | Bounded SSE assembly, tool-output projections and display/size allocation work underway. Aggregate history/artifact cache ownership depends on A02/A04. |
 | A17 | P2: UI interaction policy is centralized without a single state model | Pending | |
 | A18 | P2: Rich presentation has no third-party contribution contract | Pending | |
-| A19 | P1: Current performance evidence does not prove the mission | Pending | |
+| A19 | P1: Current performance evidence does not prove the mission | Partial; baseline qualification pending | True10MiB fixture and retained raw samples; measured local ceilings pass. Controlled platform baselines need recollection. |
 | A20 | P2: Performance diagnosis lacks stage-level ownership | Pending | |
-| A21 | P1: Cancelling an ordinary plugin request does not settle its effects | Pending | |
+| A21 | P1: Cancelling an ordinary plugin request does not settle its effects | Implementation in progress | Host-owned process termination and engine cleanup barriers under focused regression verification; no settled-effects claim until process quiescence is proved. |
 | A22 | P2: WASM hooks pay process and compilation costs per invocation | Pending | |
 | A23 | P2: Plugin tools lack a proper long-operation contract | Pending | |
 | A24 | P2: Plugin pushes discard the host's outcome | Pending | |

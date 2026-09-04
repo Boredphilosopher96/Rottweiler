@@ -333,6 +333,11 @@ jobs:
         run: |
           bun install --cwd packages/plugin-sdk --frozen-lockfile
           bun install --cwd packages/tui --frozen-lockfile
+      - name: Install CI Python dependencies
+        run: |
+          python3 -m venv "$RUNNER_TEMP/ci-python"
+          "$RUNNER_TEMP/ci-python/bin/pip" install -r scripts/requirements-ci.txt
+          echo "$RUNNER_TEMP/ci-python/bin" >> "$GITHUB_PATH"
       - name: Global Rust, protocol, architecture, docs, and supply-chain gates
         run: |
           cargo fmt --all -- --check
