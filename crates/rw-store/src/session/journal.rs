@@ -228,10 +228,23 @@ impl Directory {
         Ok(())
     }
 
+    fn derived_directory(&self) -> Result<File, SessionStoreError> {
+        #[cfg(unix)]
+        {
+            super::open_or_create_directory(&self.file, "derived")
+        }
+        #[cfg(not(unix))]
+        {
+            let path = self.path.join("derived");
+            super::create_checked_directory_portable(&path)?;
+            Ok(File::open(path)?)
+        }
+    }
+
     fn catalog(&self) -> Result<Vec<Segment>, SessionStoreError> {
         let mut segments = Vec::new();
         for name in self.names()? {
-            if name == "active.jsonl" || name == "writer.lock" {
+            if name == "active.jsonl" || name == "writer.lock" || name == "derived" {
                 continue;
             }
             segments.push(Segment::parse(&name)?);
@@ -333,6 +346,17 @@ pub struct JournalVerification {
 }
 
 impl SegmentedJournal {
+    /// Opens or creates the derived-index directory beneath this pinned journal.
+    ///
+    /// Index owners use an independent lock and atomic/batched publication. These
+    /// files are projections and cannot change the authoritative event prefix.
+    ///
+    /// # Errors
+    /// Rejects unsafe directory components and propagates directory creation I/O.
+    pub fn derived_directory(&self) -> Result<File, SessionStoreError> {
+        self.directory.derived_directory()
+    }
+
     /// Opens the journal, repairing only an incomplete active-tail record.
     /// Sealed historical checksums are verified on access or by `verify_all`.
     ///
@@ -561,6 +585,17 @@ impl SegmentedJournal {
 }
 
 impl JournalReadView {
+    /// Opens or creates the derived-index directory beneath this pinned journal.
+    ///
+    /// Index owners use an independent lock and atomic/batched publication. These
+    /// files are projections and cannot change the authoritative event prefix.
+    ///
+    /// # Errors
+    /// Rejects unsafe directory components and propagates directory creation I/O.
+    pub fn derived_directory(&self) -> Result<File, SessionStoreError> {
+        self.directory.derived_directory()
+    }
+
     /// Captures an existing offline journal without modifying it.
     ///
     /// A live owner must supply its own [`SegmentedJournal::read_view`]. Taking
@@ -1333,6 +1368,34 @@ mod tests {
 
     fn journal_path(root: &Path, session: &str) -> PathBuf {
         root.join("sessions").join(session).join("journal")
+    }
+
+    #[test]
+    fn derived_indexes_have_an_independent_directory_and_do_not_change_raw_identity() {
+        let root = tempdir().expect("root");
+        let mut journal = SegmentedJournal::open(root.path(), "derived").expect("journal");
+        journal.append_batch([json!("first")]).expect("append");
+        let view = journal.read_view();
+        let identity = view.prefix_identity();
+        journal
+            .derived_directory()
+            .expect("writer derived directory");
+        fs::write(
+            journal.path().join("derived/transcript.index"),
+            b"derived projection",
+        )
+        .expect("index");
+        drop(journal);
+        let offline = JournalReadView::open_existing(root.path(), "derived")
+            .expect("capture")
+            .expect("exists");
+        offline
+            .derived_directory()
+            .expect("offline derived directory without raw writer");
+        let reopened =
+            SegmentedJournal::open(root.path(), "derived").expect("independent raw ownership");
+        assert_eq!(reopened.read_view().prefix_identity(), identity);
+        assert_eq!(view.verify_all().expect("raw integrity").events, 1);
     }
 
     #[test]
