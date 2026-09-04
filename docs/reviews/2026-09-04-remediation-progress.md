@@ -39,7 +39,7 @@ Pending means no completion claim. Source complete needs checked-in implementati
 | A10 | P2: Tool scheduling is all-parallel or all-serial | Pending | |
 | A11 | P2: Context assembly repeats work on unchanged content | Pending | |
 | A12 | P2: Spend limits observe usage but do not reserve in-flight cost | Pending | |
-| A13 | P2: Checkpoint capture can allocate without a file-size budget | Pending | |
+| A13 | P2: Checkpoint capture can allocate without a file-size budget | File-content memory checkpoint verified locally | 64 KiB streamed capture/fingerprinting,64 MiB preimage limit, safe temporary cleanup and file-version checks. Nineteen checkpoint tests and store clippy pass. Aggregate quotas, bounded inventory metadata/Git output and cancellable scans remain pending. |
 | A14 | P2: Workspace intelligence lacks an aggregate cache and freshness contract | Pending | |
 | A15 | P2: The client accepts typed-looking wire data without validating its shape | Integrated verification passed | b064827: Rust-schema-generated standalone validators reject malformed known events before reducer/cursor changes. Full 536-test TUI suite, typecheck and codegen passed; compiled cost included in C06. |
 | A16 | P2: Client memory bounds need bytes and allocation accounting | Local integrated checks passed; hosted rendering regression under investigation | c2f8a0c: bounded SSE assembly, immutable tool-output buffers and display projections. 544 TUI tests, typecheck/build and combined release lifecycle/30.793s soak passed. Hosted macOS mounted-output smoke measured22.662ms vs20ms; fix underway. Aggregate history/artifact cache ownership depends on A02/A04. |
