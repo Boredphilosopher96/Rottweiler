@@ -607,3 +607,63 @@ needs a separate actor-owned persistence contract.
 
 **Revisit when.** Host-enforced per-invocation authority can prove independent
 cancellation, or a durable operation registry supplies replayable recovery.
+
+---
+
+## ADR-030: History pages contain current semantic transcript rows
+
+**Context.** The client retains a recent event-derived transcript and mounts its
+latest sixteen entries. Arbitrary raw event pages cannot reconstruct historical
+cards: tool completion and rewinds affect rows outside the page. Native viewport
+culling does not restore evicted history or bound client caches.
+
+**Decision.** Core owns a rebuildable semantic transcript projection. Store owns
+its indexed persistence and bounded transactions. Runtime admits, schedules and
+cancels read work outside the session actor and journal writer mutex. Rust owns
+page/content wire types and limits. The TUI owns formatting, measured layout,
+selection and anchors. Canonical events remain the sole authority.
+
+A page describes the current effective transcript at an exact applied journal
+prefix. Its source item IDs remain stable. Dense semantic ordinals are distinct
+from durable event sequences. Structural generation changes when rewind removes
+or reorders rows. Item revisions also change for late tool completions, diffs and
+associations; unchanged generation does not imply unchanged content. Bounded
+invalidations or an explicit cache reset prevent stale historical cards. Clients
+reject stale responses and resolve removed item anchors explicitly.
+
+Old semantic snapshots do not remain reopenable indefinitely. Raw journal
+prefixes remain available through ADR-029 for content identity, audit and export.
+This avoids retaining server descriptors, versioned row bodies or database WAL
+for the lifetime of a client view. Normal pages use indexed ordinal/item seeks
+and bounded result bytes, without scanning or counting a historical prefix.
+
+Index transactions bound changed rows, input bytes and retained checkpoints.
+Publication advances the applied prefix only after every semantic effect through
+that prefix is complete. Missing, incompatible or interrupted indexes rebuild
+from bounded journal pages. Rewind preserves command and shell history while
+removing conversation/tool rows beyond its target. Repacking affected ordinals
+can require work proportional to the affected suffix; process it in bounded
+transactions and publish the new generation only when complete. Rebuild and
+rewind costs must be measured separately from ordinary append/update/page costs.
+No extra durable write per streamed token is introduced.
+
+The app owns one charged cache for parent/child transcript pages and content.
+Sparse unloaded ranges preserve reachability without a placeholder per lifetime
+row. Pinned viewport data, an eviction policy and bounded metadata govern memory.
+Native card count and preview bytes are bounded; complete content uses a paged
+reader under the same cache. Scroll/reconnect/recycle state is a stable item plus
+an offset, never only an absolute scroll position.
+
+**Initial limitation.** Transcript pages do not recover permissions, todos,
+accepted input, active operations or other control state. Keep existing live
+replay until a complete bounded recovery snapshot replaces it. A04 by itself does
+not establish constant-cost initial session attachment or aggregate bounds for
+arbitrarily many active operations.
+
+**Validation.** Exercise real mixed 10K-item history, tool changes across page
+boundaries, rewinds, large bodies, content reads, eviction/reload and child caches.
+Verify first/middle/latest/jump reads, stale responses, removed anchors, resize,
+append while scrolled away, reconnect and renderer replacement. Measure indexed
+read/update work and rebuild work independently. Assert bytes, descriptors,
+mounted cards and per-frame traversal while preserving existing frame budgets.
+The detailed contract is in `docs/design/paged-transcript-client.md`.
