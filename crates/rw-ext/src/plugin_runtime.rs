@@ -1141,6 +1141,34 @@ async fn process_incoming_frame(frame: RpcFrame, state: &ReaderState) -> bool {
     }
 }
 
+struct HostCommandLease {
+    effect: Option<tokio::sync::OwnedSemaphorePermit>,
+    termination: Arc<RequestTermination>,
+    active: Arc<StdMutex<BTreeSet<RpcId>>>,
+    id: RpcId,
+}
+
+impl HostCommandLease {
+    fn complete(mut self) {
+        if let Ok(mut active) = self.active.lock() {
+            active.remove(&self.id);
+        }
+        self.effect.take();
+    }
+}
+
+impl Drop for HostCommandLease {
+    fn drop(&mut self) {
+        if let Some(effect) = self.effect.take() {
+            // Destruction after a panic is not an actor outcome. Keep the barrier
+            // charged permanently: queued host work may still commit later.
+            std::mem::forget(effect);
+            self.termination.begin();
+            tracing::error!("host command owner disappeared without proving settlement");
+        }
+    }
+}
+
 fn start_host_command(request: RpcRequest, state: &ReaderState) -> bool {
     if state.enforcer.check_push_method(&request.method).is_err() {
         return false;
@@ -1156,7 +1184,12 @@ fn start_host_command(request: RpcRequest, state: &ReaderState) -> bool {
     };
     active.insert(request.id.clone());
     drop(active);
-    let active = Arc::clone(&state.host_commands);
+    let lease = HostCommandLease {
+        effect: Some(effect),
+        termination: Arc::clone(&state.termination),
+        active: Arc::clone(&state.host_commands),
+        id: request.id.clone(),
+    };
     let handler = Arc::clone(&state.push_handler);
     let enforcer = Arc::clone(&state.enforcer);
     let redactor = Arc::clone(&state.redactor);
@@ -1164,7 +1197,6 @@ fn start_host_command(request: RpcRequest, state: &ReaderState) -> bool {
     let termination = Arc::clone(&state.termination);
     tokio::spawn(async move {
         // Keep this permit through the actual actor reply, even after teardown starts.
-        let _effect = effect;
         let response = handle_push_request(
             &enforcer,
             handler.as_ref(),
@@ -1172,10 +1204,8 @@ fn start_host_command(request: RpcRequest, state: &ReaderState) -> bool {
             redactor.redact(request.params.unwrap_or(Value::Null)),
         )
         .await;
-        if let Ok(mut active) = active.lock() {
-            active.remove(&request.id);
-        }
         if termination.cancellation.is_cancelled() {
+            lease.complete();
             return;
         }
         let response = match response {
@@ -1201,6 +1231,7 @@ fn start_host_command(request: RpcRequest, state: &ReaderState) -> bool {
         {
             termination.begin();
         }
+        lease.complete();
     });
     true
 }
@@ -2239,6 +2270,7 @@ fn common_plugin_limit(
 
 #[async_trait]
 impl Provider for RpcProviderAdapter {
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -3633,6 +3665,7 @@ mod tests {
 
     #[derive(Default)]
     struct DelayedActorPush {
+        panic_after_admission: bool,
         started: tokio::sync::Notify,
         release: Arc<tokio::sync::Notify>,
         committed: Arc<AtomicBool>,
@@ -3654,9 +3687,78 @@ mod tests {
                 let _ = reply.send(());
             });
             self.started.notify_one();
+            assert!(
+                !self.panic_after_admission,
+                "fixture owner panicked after actor admission"
+            );
             outcome.await.expect("actor outcome");
             Ok(Value::Null)
         }
+    }
+
+    #[tokio::test]
+    async fn panicked_host_command_cannot_release_its_settlement_barrier() {
+        let process = Arc::new(FakeProcess::default());
+        let (host_stdin, _plugin_input) = tokio::io::duplex(4096);
+        let (mut plugin_output, host_stdout) = tokio::io::duplex(4096);
+        let push = Arc::new(DelayedActorPush {
+            panic_after_admission: true,
+            ..Default::default()
+        });
+        let root = TempDir::new().expect("tempdir");
+        let client = JsonRpcPluginClient::start(
+            LaunchedPluginProcess {
+                stdin: Box::pin(host_stdin),
+                stdout: Box::pin(BufReader::new(host_stdout)),
+                stderr: Box::pin(BufReader::new(tokio::io::empty())),
+                process: process.clone(),
+                executable_identity: shell_config(&root).executable_identity().clone(),
+            },
+            Arc::new(CapabilityEnforcer::new(&manifest(), process.clone())),
+            push.clone(),
+            Arc::new(DenyPluginProviderHttpHandler),
+            Arc::new(NoopPluginBoundaryRedactor),
+            Duration::from_secs(5),
+        );
+        let frame = RpcFrame::Request(RpcRequest {
+            jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
+            id: RpcId::String("panic-after-admission".to_owned()),
+            method: METHOD_UI_NOTIFY.to_owned(),
+            params: Some(json!({"title":"fixture", "message":"fixture"})),
+        });
+        plugin_output
+            .write_all(&encode_frame(&frame, MAX_FRAME_BYTES).expect("encode"))
+            .await
+            .expect("write");
+        push.started.notified().await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while process.killed.load(Ordering::Acquire) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("panic started teardown");
+        let mut settlement = tokio::spawn(async move { client.settle_effects().await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut settlement)
+                .await
+                .is_err()
+        );
+        push.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !push.committed.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("already admitted actor work can still commit");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut settlement)
+                .await
+                .is_err()
+        );
+        settlement.abort();
+        let _ = settlement.await;
     }
 
     #[tokio::test]

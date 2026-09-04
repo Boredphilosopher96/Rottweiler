@@ -36,3 +36,10 @@ Validation on macOS with pinned Bun 1.3.14:
 
 This is local source validation. No native Linux run or hosted release/soak
 qualification was performed for this checkpoint.
+
+Adversarial follow-up: a host command lease now keeps its permit charged if the
+owner panics or disappears after admission, because task destruction does not
+prove the actor stopped. The new panic regression enqueues an independent actor
+command, panics, releases that command later, and verifies settlement stays
+pending. Active IDs remain charged through response enqueue or teardown. The
+panic and delayed-command focused tests and rw-ext all-target clippy passed.
