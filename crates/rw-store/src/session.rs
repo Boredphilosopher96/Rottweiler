@@ -1,5 +1,8 @@
 //! Crash-safe append-only session logs and the derived `SQLite` session index.
 
+/// Segmented journal storage and bounded read views.
+pub mod journal;
+
 use std::{
     collections::VecDeque,
     fs::{self, File},
@@ -2838,6 +2841,7 @@ fn read_bounded_snapshot_line<R: BufRead>(
 }
 
 #[cfg(unix)]
+#[derive(Debug)]
 struct EventFileSnapshot {
     stat: rustix::fs::Stat,
 }
@@ -2881,6 +2885,7 @@ fn verify_event_file_snapshot(
 }
 
 #[cfg(not(unix))]
+#[derive(Debug)]
 struct EventFileSnapshot {
     len: u64,
     modified: std::time::SystemTime,

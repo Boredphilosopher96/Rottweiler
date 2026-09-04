@@ -57,6 +57,7 @@ codegen-units = 1
 panic = "abort"
 
 [workspace.dependencies]
+memchr = "2.8.3"
 base64 = "0.23.0"
 blake3 = "1.8.2"
 clap = { version = "4.5", features = ["derive"] }

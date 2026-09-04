@@ -1,0 +1,71 @@
+{
+  "status": "storage foundation only; production engine still uses the old journal until the caller migration checkpoint",
+  "platform": "macOS-26.6.1-arm64-arm-64bit",
+  "rust": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "profile": "unoptimized test",
+  "commands": [
+    "CARGO_TARGET_DIR=/tmp/rw-storage-target cargo test -p rw-store",
+    "CARGO_TARGET_DIR=/tmp/rw-storage-target cargo clippy -p rw-store --lib --tests -- -D warnings",
+    "CARGO_TARGET_DIR=/tmp/rw-storage-target cargo test -p rw-store --lib journal_tail_read_scaling_metrics -- --ignored --nocapture"
+  ],
+  "results": {
+    "store_unit_tests_passed": 144,
+    "doctests_passed": 1,
+    "new_journal_regressions_passed": 10,
+    "explicit_scaling_test_passed": true,
+    "clippy": "passed"
+  },
+  "scaling": [
+    {
+      "events": 10000,
+      "total_bytes": 947780,
+      "segments": 1,
+      "tail_bytes_read": 947780,
+      "tail_records_scanned": 10000,
+      "tail_records_decoded": 100,
+      "tail_segments_read": 1,
+      "page_bytes": 9500,
+      "open_active_bytes": 947780,
+      "open_micros": 67182,
+      "capture_nanos": 13792,
+      "tail_read_micros": 25310,
+      "scope": "store only; open excludes engine projection; timings are diagnostic, not calibrated gates"
+    },
+    {
+      "events": 100000,
+      "total_bytes": 9677780,
+      "segments": 10,
+      "tail_bytes_read": 873000,
+      "tail_records_scanned": 9000,
+      "tail_records_decoded": 100,
+      "tail_segments_read": 1,
+      "page_bytes": 9700,
+      "open_active_bytes": 873000,
+      "open_micros": 64300,
+      "capture_nanos": 11250,
+      "tail_read_micros": 22325,
+      "scope": "store only; open excludes engine projection; timings are diagnostic, not calibrated gates"
+    },
+    {
+      "events": 1000000,
+      "total_bytes": 98777780,
+      "segments": 100,
+      "tail_bytes_read": 891000,
+      "tail_records_scanned": 9000,
+      "tail_records_decoded": 100,
+      "tail_segments_read": 1,
+      "page_bytes": 9900,
+      "open_active_bytes": 891000,
+      "open_micros": 45101,
+      "capture_nanos": 8625,
+      "tail_read_micros": 15957,
+      "scope": "store only; open excludes engine projection; timings are diagnostic, not calibrated gates"
+    }
+  ],
+  "limits": [
+    "Store-only capture/read/reopen work; excludes engine projection, subscription queues and writer mutex timing.",
+    "Timing samples are diagnostic on a shared macOS machine, not calibrated performance gates.",
+    "No native Linux execution, long soak, recovery-snapshot equivalence or production replay proof in this checkpoint.",
+    "Per-view segment metadata is bounded by 65536 entries; multi-reader admission remains part of the caller migration."
+  ]
+}
