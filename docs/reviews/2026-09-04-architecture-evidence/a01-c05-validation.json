@@ -1,0 +1,199 @@
+{
+  "A01": {
+    "additional_command": "cargo test -p rw-core --lib -- cancellation_waits_for_tool_cleanup ordered_output_tests parallel_tool_output_makes_progress",
+    "additional_result": {
+      "failed": 0,
+      "local_log": "/tmp/rw-a01-cancellation-regressions.log",
+      "passed": 5
+    },
+    "assertions": [
+      "Global 32-chunk bound with 31 background permits",
+      "Promoted producer escapes saturated background wait",
+      "Late-index and closed-channel output rejected",
+      "Saturated cancellation exits promptly; immediately ready cleanup output still drains",
+      "Oversized 3MiB UTF-8 chunks produce one truncation marker",
+      "Canonical output order preserved"
+    ],
+    "clippy_command": "cargo clippy -p rw-core --lib --tests -- -D warnings",
+    "clippy_result": "passed before final select branch priority correction; targeted regression passed after correction",
+    "command": "cargo test -p rw-core --lib engine::tests::parallel_tool_output_makes_progress_when_later_tool_saturates_buffer -- --exact",
+    "green": {
+      "elapsed_test_seconds": 0.01,
+      "local_log": "/tmp/rw-a01-three-tools.log",
+      "ordered_chunks": 129,
+      "result": "passed",
+      "scope": "Final regression expanded to delayed first plus two later 64-chunk producers"
+    },
+    "red": {
+      "elapsed_test_seconds": 2.01,
+      "local_log": "/tmp/rw-a01-red.log",
+      "result": "failed",
+      "scope": "Full SessionActor path; delayed first and one later tool emitting 64 chunks",
+      "signature": "later output cannot block the current tool: Elapsed(())"
+    }
+  },
+  "C05_C08": {
+    "bun_source": "https://github.com/oven-sh/bun/blob/0d9b296a/src/jsc/bindings/BunProcess.cpp#L3367",
+    "failure_evidence": [
+      "Atomic periodic progress JSON",
+      "Setup, workload, interruption and cleanup failure counters",
+      "Last accepted/completed marker and durable session/turn/request/cursor metadata",
+      "Bounded redacted terminal diagnostics; PID generations and RSS sample age/truncation",
+      "M4 raw startup/UDS samples checkpointed before assertions"
+    ],
+    "m4_assertions": [
+      "Public rw models list --refresh discovers the authenticated fixture model",
+      "Cold configured provider accepts initial PTY prompt and completes inference",
+      "Actual TUI SIGKILL and durable prompt/response redraw",
+      "Installed sibling discovery with no private TUI override",
+      "Ctrl-C reaps managed children/runtime leaves",
+      "Supervisor SIGKILL reaps engine/TUI and allows workspace relaunch"
+    ],
+    "m4_command": "python3 crates/rw-cli/tests/m4_release_gate.py --repo . --rw target/release/rw --tui packages/tui/dist/rottweiler-tui --skip-performance --skip-shell --evidence-json /tmp/rw-c05-lifecycle-catalog.json",
+    "m4_result": {
+      "elapsed_seconds": 7.779,
+      "metrics": {},
+      "phase": "complete",
+      "run_attempt": null,
+      "run_id": null,
+      "samples": {},
+      "schema_version": 1,
+      "source_sha": null,
+      "status": "pass"
+    },
+    "onboarding_red_green": {
+      "command": "/tmp/rw-tools/bun-1.3.14/bun-darwin-aarch64/bun test test/app.test.ts -t 'provider onboarding|keeps composer focus for a configured provider|unresolved session alias'",
+      "coverage": "Configured and unconfigured providers; catalog/session response arrival in both orders; real composer typing",
+      "green": {
+        "failed": 0,
+        "passed": 8
+      },
+      "red": "Cold configured provider opened picker and captured prompt as search text"
+    },
+    "python_command": "python3 -m unittest scripts/tests/test_run_soak.py scripts/tests/test_m4_fixture.py",
+    "python_result": {
+      "failed": 0,
+      "passed": 17
+    },
+    "rss_cause": "Pinned Bun returns native ru_maxrss unchanged: Darwin bytes, Linux KiB. Multiplying Darwin bytes by 1024 triggered repeated TUI memory recycles below the unchanged limit.",
+    "rss_green": {
+      "command": "/tmp/rw-tools/bun-1.3.14/bun-darwin-aarch64/bun test test/process-memory.test.ts",
+      "cwd": "packages/tui",
+      "result": "passed"
+    },
+    "rss_red": {
+      "assertion_upper_bytes": 380108800,
+      "command": "/tmp/rw-tools/bun-1.3.14/bun-darwin-aarch64/bun test test/process-memory.test.ts",
+      "cwd": "packages/tui",
+      "observed_bytes": 48653926400,
+      "result": "failed"
+    },
+    "soak_command": "python3 scripts/run-soak.py --rw target/release/rw --tui packages/tui/dist/rottweiler-tui --duration-seconds 30 --turn-seconds 0.25 --compact-every 4 --tool-every 3 --sample-seconds 0.5 --output /tmp/rw-c05-soak-final.json",
+    "soak_result": {
+      "compactions_completed": 17,
+      "durable_transcript_bytes": 448339,
+      "duration_seconds": 30.818,
+      "forced_restart_completed": true,
+      "last_accepted_marker": "SOAK_STEP_000068_DONE",
+      "last_completed_marker": "SOAK_STEP_000068_DONE",
+      "max_processes": 4,
+      "max_rss_bytes": 335790080,
+      "rss_limit_bytes": 629145600,
+      "samples": 58,
+      "status": "pass",
+      "streamed_turns_completed": 51,
+      "tool_turns_completed": 17,
+      "tui_restarts": 1,
+      "turns_accepted": 68,
+      "turns_completed": 68,
+      "turns_submitted": 68
+    },
+    "startup_red": {
+      "accepted": 0,
+      "combined_max_rss_bytes": 201555968,
+      "driver_starts": 37,
+      "short_probe_seconds": 13.28,
+      "tui_restarts": 36
+    }
+  },
+  "artifacts": {
+    "packages/tui/dist/libopentui.dylib": {
+      "bytes": 4848736,
+      "sha256": "8edd16440ad2d5ce5f607806e9bc64d20cc9498509b137ccfb9176bf4b2a4ef1"
+    },
+    "packages/tui/dist/rottweiler-tui": {
+      "bytes": 78001136,
+      "sha256": "55b3a5016371abb095d71c44df57729c21923b9b344fc842f25cbd1e423010fb"
+    },
+    "target/release/rw": {
+      "bytes": 29824176,
+      "sha256": "65338dab17bfe422443ad6603a685ade5fc59d1ec0208b879f923b4278276f08"
+    }
+  },
+  "bun": "1.3.14",
+  "bun_revision": "1.3.14+0d9b296af",
+  "combined_A05_C05_checkpoint": {
+    "artifact_sha256": {
+      "packages/tui/dist/libopentui.dylib": "8edd16440ad2d5ce5f607806e9bc64d20cc9498509b137ccfb9176bf4b2a4ef1",
+      "packages/tui/dist/rottweiler-tui": "4e29cf6fe8b2575eaf9bc5e501578266b8a56cd062efb003299faa2bfa33c321",
+      "target/release/rw": "65338dab17bfe422443ad6603a685ade5fc59d1ec0208b879f923b4278276f08"
+    },
+    "build_command": "PATH=/tmp/rw-tools/bun-1.3.14/bun-darwin-aarch64:$PATH /tmp/rw-tools/bun-1.3.14/bun-darwin-aarch64/bun run build",
+    "build_cwd": "packages/tui",
+    "build_result": "passed, including compiled smoke",
+    "limits": "Final frozen A05/C05 TUI source checkpoint only; rw release artifact predates A01/A21. No full performance, eight-hour, or native Linux qualification.",
+    "m4_command": "python3 crates/rw-cli/tests/m4_release_gate.py --repo . --rw target/release/rw --tui packages/tui/dist/rottweiler-tui --skip-performance --skip-shell --evidence-json /tmp/rw-c05-a05-m4.json",
+    "m4_result": {
+      "elapsed_seconds": 8.727,
+      "metrics": {},
+      "phase": "complete",
+      "run_attempt": null,
+      "run_id": null,
+      "samples": {},
+      "schema_version": 1,
+      "source_sha": null,
+      "status": "pass"
+    },
+    "soak_command": "python3 scripts/run-soak.py --rw target/release/rw --tui packages/tui/dist/rottweiler-tui --duration-seconds 30 --turn-seconds 0.25 --compact-every 4 --tool-every 3 --sample-seconds 0.5 --output /tmp/rw-c05-a05-soak.json",
+    "soak_result": {
+      "compactions_completed": 16,
+      "durable_transcript_bytes": 439015,
+      "duration_seconds": 30.788,
+      "forced_restart_completed": true,
+      "last_accepted_marker": "SOAK_STEP_000066_DONE",
+      "last_completed_marker": "SOAK_STEP_000066_DONE",
+      "max_processes": 4,
+      "max_rss_bytes": 338067456,
+      "rss_limit_bytes": 629145600,
+      "samples": 58,
+      "status": "pass",
+      "streamed_turns_completed": 50,
+      "tool_turns_completed": 17,
+      "tui_restarts": 1,
+      "turns_accepted": 66,
+      "turns_completed": 66,
+      "turns_submitted": 66
+    },
+    "source_manifest": "a05-c05-tui-source-sha256.json",
+    "source_manifest_sha256": "336630008c647901012af92b5de32ac4ac49cdf081fbad8d66ca4fee9787f8ec",
+    "source_unchanged_after_build": true,
+    "tui_bundle_bytes": 82849872
+  },
+  "limits": [
+    "Local macOS functional evidence, not native Linux acceptance",
+    "30-second accelerated soak, not eight-hour qualification",
+    "M4 performance and shell gates intentionally not executed by the listed command",
+    "Release rw artifact predates A01 implementation; A01 validated separately through Rust engine tests",
+    "TUI lifecycle artifact includes C05 changes with A05 changes in progress, not final combined-source qualification",
+    "Historical August 7 step-341 soak failure remains unisolated; current reproduction does not prove its cause",
+    "No performance ceiling, RSS ceiling, timeout or retry threshold was relaxed"
+  ],
+  "machine": "arm64",
+  "platform": "macOS-26.6.1-arm64-arm-64bit",
+  "python": "3.11.4",
+  "recorded_at_utc": "2026-09-04T22:46:52.166207+00:00",
+  "repository_head": "7e769adeb26723b50baa42db00d824da33b927b4",
+  "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "schema_version": 1,
+  "worktree_modified": true
+}

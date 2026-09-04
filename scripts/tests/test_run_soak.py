@@ -7,6 +7,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -154,6 +155,147 @@ class SoakHarnessTests(unittest.TestCase):
         self.assertEqual(result["rss_limit_bytes"], 600)
         self.assertEqual(result["turns_completed"], 20)
         self.assertEqual(len(result["process_rss"]), 2)
+
+    def test_any_workload_exception_preserves_last_progress_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "soak.json"
+
+            def fail_after_progress(*args: object) -> None:
+                progress = args[-1]
+                progress.checkpoint(
+                    phase="input_acceptance", turns_submitted=341, turns_accepted=340,
+                    turns_completed=340, last_accepted_marker="SOAK_STEP_000340_DONE",
+                    last_completed_marker="SOAK_STEP_000340_DONE", supervisor_pid=100,
+                    process_rss=[{"pid": 101, "parent_pid": 100, "executable": "rw", "rss_bytes": 50}],
+                )
+                checkpoint = json.loads(output.read_text())
+                self.assertEqual(checkpoint["status"], "running")
+                raise RuntimeError("input stalled: access_token=soak-private-canary")
+
+            with mock.patch.object(SOAK, "_run_soak", side_effect=fail_after_progress):
+                with self.assertRaises(SOAK.SoakFailure):
+                    SOAK.run_soak(Path("rw"), None, 10, 1, 600, progress_path=output)
+
+            result = json.loads(output.read_text())
+            self.assertEqual(result["status"], "fail")
+            self.assertEqual(result["error_type"], "RuntimeError")
+            self.assertEqual(result["phase"], "input_acceptance")
+            self.assertEqual(result["turns_completed"], 340)
+            self.assertEqual(result["turns_accepted"], 340)
+            self.assertEqual(result["turns_submitted"], 341)
+            self.assertEqual(result["supervisor_pid"], 100)
+            self.assertEqual(result["process_rss"][0]["pid"], 101)
+            self.assertIn("duration_seconds", result)
+            self.assertNotIn("soak-private-canary", output.read_text())
+            self.assertEqual(list(output.parent.glob(".soak.json.*")), [])
+
+    def test_setup_failure_and_interruption_also_write_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "soak.json"
+            with self.assertRaises(SOAK.SoakFailure):
+                SOAK.run_soak(Path(temporary) / "missing", None, 10, 1, 600, progress_path=output)
+            result = json.loads(output.read_text())
+            self.assertEqual(result["phase"], "setup")
+            self.assertEqual(result["turns_submitted"], 0)
+            with mock.patch.object(SOAK, "_run_soak", side_effect=KeyboardInterrupt):
+                with self.assertRaises(SOAK.SoakFailure):
+                    SOAK.run_soak(Path("rw"), None, 10, 1, 600, progress_path=output)
+            self.assertEqual(json.loads(output.read_text())["error_type"], "KeyboardInterrupt")
+
+    def test_failed_atomic_write_preserves_previous_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "soak.json"
+            SOAK.write_result(output, {"status": "running", "turns_completed": 5})
+            with mock.patch.object(SOAK.os, "replace", side_effect=OSError("disk unavailable")):
+                with self.assertRaises(OSError):
+                    SOAK.write_result(output, {"status": "running", "turns_completed": 6})
+            self.assertEqual(json.loads(output.read_text())["turns_completed"], 5)
+            self.assertEqual(list(output.parent.glob(".soak.json.*")), [])
+
+    def test_event_diagnostics_keep_identities_not_payloads_across_split_records(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "session-1" / "events.jsonl"
+            path.parent.mkdir()
+            raw = json.dumps({"sequence": "9", "event": {
+                "type": "text_delta", "turn_id": "2", "text": "payload-private-canary",
+                "meta": {"session_id": "session-1", "sequence_id": "9", "caused_by": "req-1"},
+            }}).encode() + b"\n"
+            probe = SOAK.EventLogProbe(Path(temporary))
+            path.write_bytes(raw[:60])
+            probe.poll()
+            self.assertNotIn("sequence_id", probe.diagnostics()[0])
+            with path.open("ab") as handle:
+                handle.write(raw[60:])
+            probe.poll()
+            result = probe.diagnostics()[0]
+            self.assertEqual(result["session_id"], "session-1")
+            self.assertEqual(result["sequence_id"], "9")
+            self.assertEqual(result["turn_id"], "2")
+            self.assertEqual(result["request_id"], "req-1")
+            self.assertNotIn("payload-private-canary", json.dumps(result))
+
+    def test_terminal_diagnostic_redacts_credentials_and_bounds_output(self) -> None:
+        value = "x" * 8000 + "\x1b[31mAuthorization: Bearer private-canary access_token=second-canary\x1b[0m"
+        result = SOAK.redact_diagnostic(value)
+        self.assertLessEqual(len(result), SOAK.MAX_DIAGNOSTIC_CHARS)
+        self.assertNotIn("private-canary", result)
+        self.assertNotIn("second-canary", result)
+        self.assertNotIn("\x1b", result)
+
+    def test_real_pty_waits_for_current_driver_and_preserves_failed_submission(self) -> None:
+        # These tiny processes exercise the harness PTY/readiness boundary, not
+        # the product. Product lifecycle acceptance still uses the built bundle.
+        for ready in (False, True):
+            with self.subTest(ready=ready), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                rw = root / "rw"
+                tui = root / "rottweiler-tui"
+                observed = root / "input.txt"
+                output = root / "soak.json"
+                tui.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(10)\n")
+                rw.write_text(
+                    f"#!{sys.executable}\n"
+                    "import os, select, subprocess, sys, time\n"
+                    f"child = subprocess.Popen([{str(tui)!r}])\n"
+                    "try:\n"
+                    f"    if {ready!r}:\n"
+                    "        print('SOAK_DRIVER_', end='', flush=True)\n"
+                    "        time.sleep(0.05)\n"
+                    "        print('READY', flush=True)\n"
+                    "    until = time.monotonic() + 1.4\n"
+                    f"    with open({str(observed)!r}, 'wb') as recorded:\n"
+                    "        while time.monotonic() < until:\n"
+                    "            if select.select([0], [], [], 0.05)[0]:\n"
+                    "                recorded.write(os.read(0, 4096))\n"
+                    "                recorded.flush()\n"
+                    "finally:\n"
+                    "    child.terminate()\n"
+                    "    child.wait()\n"
+                    "sys.exit(7)\n"
+                )
+                rw.chmod(0o700)
+                tui.chmod(0o700)
+                def fixture_descendant(rows, supervisor, executable, required=""):
+                    # macOS ps can expose only the interpreter name for scripts.
+                    # The fixture's only child is its fake TUI; retain real PIDs.
+                    if executable.name == "rottweiler-tui":
+                        return next((pid for pid, row in rows.items() if row.parent == supervisor), None)
+                    return None
+
+                with mock.patch.object(SOAK, "find_descendant", side_effect=fixture_descendant):
+                    with self.assertRaises(SOAK.SoakFailure):
+                        SOAK.run_soak(rw, None, 4, 0.1, 600 * 1024 * 1024, progress_path=output)
+                result = json.loads(output.read_text())
+                self.assertEqual(result["status"], "fail")
+                self.assertEqual(result["turns_submitted"], int(ready))
+                self.assertEqual(result["turns_accepted"], 0)
+                self.assertEqual(result["turns_completed"], 0)
+                self.assertEqual(result["driver_ready_count"], int(ready))
+                self.assertEqual("SOAK_INPUT_000001" in observed.read_text(), ready)
+                self.assertEqual(result["phase"], "input_acceptance" if ready else "driver_readiness")
+                self.assertGreater(result["samples"], 0)
+                self.assertGreater(result["supervisor_pid"], 0)
+                self.assertIsNotNone(result["process_snapshot_age_seconds"])
 
 
 if __name__ == "__main__":

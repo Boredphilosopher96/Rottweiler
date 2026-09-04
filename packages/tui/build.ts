@@ -130,11 +130,13 @@ function signDarwinArtifact(path: string, label: string): void {
 function enforceTuiBundleSize(executable: string, nativeLibrary: string): void {
   const limit = selectedReleasePlatform?.productBudgets.tuiBundleLessThanBytes
   if (limit === undefined) return
-  const bundleBytes = statSync(executable).size + statSync(nativeLibrary).size
+  const executableBytes = statSync(executable).size
+  const nativeBytes = statSync(nativeLibrary).size
+  const bundleBytes = executableBytes + nativeBytes
+  console.log(`Release TUI bundle bytes: ${bundleBytes} (executable ${executableBytes}, native ${nativeBytes}; budget <${limit})`)
   if (bundleBytes >= limit) {
     throw new Error(`release TUI bundle is ${bundleBytes} bytes; budget is <${limit}`)
   }
-  console.log(`Release TUI bundle bytes: ${bundleBytes} (budget <${limit})`)
 }
 
 const compressedTreeSitterAssets: BunPlugin = {
@@ -164,14 +166,20 @@ const compressedTreeSitterAssets: BunPlugin = {
 const nativePrelude: BunPlugin = {
   name: "rottweiler-opentui-native",
   setup(build) {
-    build.onResolve({ filter: /^rottweiler-opentui-native$/ }, () => ({
+    // The renderer's dynamic platform imports still enter Bun's static graph,
+    // even when the runtime override selects the adjacent library. Resolve
+    // them to that same sidecar instead of embedding unused native binaries.
+    build.onResolve({ filter: /^(?:rottweiler-opentui-native|@opentui\/core-(?:darwin|linux|win32)-(?:x64|arm64)(?:-musl)?)$/ }, () => ({
       path: "rottweiler-opentui-native",
       namespace: "rottweiler-native",
     }))
     build.onLoad({ filter: /.*/, namespace: "rottweiler-native" }, () => ({
       loader: "js",
-      contents: `import { dirname, join } from "node:path"; globalThis.__rottweilerOpenTuiNativeLibrary = join(dirname(process.execPath), ${JSON.stringify(selectedNativeLibrary)});`,
+      contents: `import { dirname, join } from "node:path"; const nativePath = join(dirname(process.execPath), ${JSON.stringify(selectedNativeLibrary)}); globalThis.__rottweilerOpenTuiNativeLibrary = nativePath; export default nativePath;`,
     }))
+    build.onLoad({ filter: /(?:^|[/\\])(?:libopentui\.(?:so|dylib)|opentui\.dll)$/ }, ({ path }) => {
+      throw new Error(`OpenTUI native library must remain a sidecar, not an embedded asset: ${path}`)
+    })
   },
 }
 

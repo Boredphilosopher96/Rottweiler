@@ -262,7 +262,7 @@ export class EngineHttpSseClient {
         )) {
           const value = normalizeWireEngineEvent(parseEventJson(frame.data))
           if (value === null) {
-            throw new EngineTransportError("engine event stream emitted an invalid event")
+            throw new EngineProtocolError("engine event stream emitted an invalid event")
           }
           await options.onEvent(value)
           receivedEvent = true
@@ -301,7 +301,7 @@ export class EngineHttpSseClient {
           })
           // A bounded parser rejection is deterministic for the same replay
           // cursor. Retrying would request the identical poison event forever.
-          if (error instanceof SseLimitError) {
+          if (error instanceof SseLimitError || error instanceof EngineProtocolError) {
             throw error
           }
         }
@@ -414,6 +414,13 @@ export class EngineTransportError extends Error {
   }
 }
 
+export class EngineProtocolError extends EngineTransportError {
+  constructor(message: string) {
+    super(message)
+    this.name = "EngineProtocolError"
+  }
+}
+
 class ReplayCursorAheadError extends EngineTransportError {
   constructor(status: number) {
     super("engine replay cursor is ahead of the durable log", status)
@@ -463,7 +470,7 @@ function parseEventJson(data: string): unknown {
   try {
     return JSON.parse(data)
   } catch {
-    throw new EngineTransportError("engine event stream emitted invalid JSON")
+    throw new EngineProtocolError("engine event stream emitted invalid JSON")
   }
 }
 

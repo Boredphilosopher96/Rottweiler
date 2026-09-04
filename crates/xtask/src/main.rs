@@ -129,6 +129,24 @@ fn main() -> Result<(), XtaskError> {
             write_artifact(&path, &contents)?;
         }
     }
+    let mut validator = std::process::Command::new("bun");
+    validator
+        .current_dir(&root)
+        .arg("run")
+        .arg("packages/tui/scripts/generate-event-validator.ts");
+    if check {
+        validator.arg("--check");
+    }
+    let status = validator.status().map_err(|error| {
+        XtaskError::GeneratedContract(format!(
+            "could not run engine-event validator generator: {error}"
+        ))
+    })?;
+    if !status.success() {
+        return Err(XtaskError::GeneratedContract(
+            "engine-event validator generation failed; install TUI dependencies with the pinned Bun version".to_owned(),
+        ));
+    }
     Ok(())
 }
 

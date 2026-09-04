@@ -1,5 +1,6 @@
 import { writeStartupSplash } from "./startup"
 import { enhancedKeyboardOptions } from "./keybindings"
+import { observedResidentBytes } from "./process-memory"
 import {
   registerTreeSitterParsersLazily,
   stabilizeTreeSitterClient,
@@ -250,7 +251,7 @@ async function main(): Promise<void> {
       })
     },
   })
-  const { readTuiRecycleState, writeTuiRecycleState } = await import("./recycle-state")
+  const { readTuiRecycleState, recycleTuiIfNeeded } = await import("./recycle-state")
   const recycledState = readTuiRecycleState(recycleStatePath)
   if (recycledState !== null) {
     app.restoreRecycleState(recycledState)
@@ -267,18 +268,23 @@ async function main(): Promise<void> {
   // The nightly envelope measures the engine and TUI together. Leaving roughly
   // 200 MiB for the engine keeps the combined pair comfortably below 600 MiB.
   const tuiRssRecycleBytes = 384 * 1024 * 1024
+  let nextRecycleAttemptAt = 0
   rssRecycleTimer = setInterval(() => {
-    // Bun's allocator-facing snapshot can lag native residency; getrusage is
-    // the OS-backed high-water mark and reliably observes that native growth.
-    const observedRss = Math.max(
-      process.memoryUsage.rss(),
-      process.resourceUsage().maxRSS * 1024,
-    )
+    const observedRss = observedResidentBytes()
     if (exitRequested || observedRss < tuiRssRecycleBytes) return
-    exitRequested = true
-    writeTuiRecycleState(recycleStatePath, app.recycleState())
-    process.exitCode = 75
-    renderer.destroy()
+    if (Date.now() < nextRecycleAttemptAt) return
+    nextRecycleAttemptAt = Date.now() + 10_000
+    recycleTuiIfNeeded({
+      observedBytes: observedRss,
+      thresholdBytes: tuiRssRecycleBytes,
+      path: recycleStatePath,
+      capture: () => app.recycleState(),
+      recycle: () => {
+        exitRequested = true
+        process.exitCode = 75
+        renderer.destroy()
+      },
+    })
   }, 100)
   rssRecycleTimer.unref()
   void terminalPalette.then((colors) => {

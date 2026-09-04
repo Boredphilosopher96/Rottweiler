@@ -5,6 +5,7 @@ import { createInitialState, engineEvent, reduceRottweilerState } from "../src/s
 import {
   EngineHttpSseClient,
   EngineTransportError,
+  EngineProtocolError,
   SseLimitError,
   durableSequenceId,
   type BackoffScheduler,
@@ -590,6 +591,39 @@ describe("authenticated UDS engine transport", () => {
     await waitFor(() => engine?.cancelledStreams === 1)
     expect(engine.cancelledStreams).toBe(1)
   })
+
+  for (const [name, frame] of [
+    ["known event without payload", encodeSseJson({ type: "command_acknowledged" })],
+    ["known event with malformed nested data", encodeSseJson({ type: "text_delta", meta: durableMeta("2"), turn_id: "1", text: [] })],
+    ["invalid JSON", new TextEncoder().encode("data: {broken\n\n")],
+  ] as const) {
+    test(`stops on ${name} before reduction or cursor advancement`, async () => {
+      const valid = { type: "text_delta", meta: durableMeta("1"), turn_id: "1", text: "accepted" } satisfies EngineEvent
+      engine = new AuthenticatedMockEngine([{ chunks: [encodeSseJson(valid), frame], holdOpen: true }])
+      await engine.start()
+      const client = new EngineHttpSseClient({ socketPath: engine.socketPath, bootstrapToken: engine.bootstrapToken })
+      const controller = new AbortController()
+      let state = createInitialState()
+      let reduced = 0
+      let reconnects = 0
+      await expect(client.subscribe({
+        attach,
+        signal: controller.signal,
+        getLastSeenSequence: () => state.lastSequence,
+        onReconnect() { reconnects += 1 },
+        onEvent(event) {
+          reduced += 1
+          state = reduceRottweilerState(state, engineEvent(event))
+        },
+      })).rejects.toBeInstanceOf(EngineProtocolError)
+      expect(reduced).toBe(1)
+      expect(state.lastSequence).toBe("1")
+      expect(state.streamingTail?.text).toBe("accepted")
+      expect(reconnects).toBe(0)
+      expect(engine.requests.filter((request) => request.path === "/v1/events")).toHaveLength(1)
+      await waitFor(() => engine?.cancelledStreams === 1)
+    })
+  }
 
   test("encodes the session and replay cursor in the SSE request", async () => {
     const urls: string[] = []

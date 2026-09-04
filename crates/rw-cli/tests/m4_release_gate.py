@@ -12,6 +12,7 @@ import math
 import os
 import pathlib
 import pty
+import re
 import select
 import shutil
 import signal
@@ -47,6 +48,7 @@ REPRESENTATIVE_PRICING_MODEL_COUNT = 4_000
 TERMINAL_SUBMIT = b"\r"
 _origin_request_lock = threading.Lock()
 _origin_requests = 0
+_discovery_requests = 0
 
 
 @dataclass
@@ -61,6 +63,52 @@ class Runtime:
 class PtyProcess:
     pid: int
     fd: int
+
+
+class GateEvidence:
+    """Write observations before assertions; failed gates retain partial samples."""
+
+    def __init__(self, output: pathlib.Path | None) -> None:
+        self.output = output
+        self.started = time.monotonic()
+        self.samples: dict[str, list[dict[str, int]]] = {}
+        self.result: dict[str, object] = {
+            "schema_version": 1,
+            "status": "running",
+            "phase": "setup",
+            "source_sha": os.environ.get("GITHUB_SHA"),
+            "run_id": os.environ.get("GITHUB_RUN_ID"),
+            "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
+            "samples": self.samples,
+        }
+
+    def update(self, **fields: object) -> None:
+        self.result.update(fields)
+        self.result["elapsed_seconds"] = round(time.monotonic() - self.started, 3)
+        if self.output is not None:
+            self.output.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, temporary = tempfile.mkstemp(prefix=f".{self.output.name}.", dir=self.output.parent)
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    json.dump(self.result, handle, sort_keys=True)
+                    handle.write("\n")
+                os.replace(temporary, self.output)
+            finally:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(temporary)
+
+    def sample(self, group: str, **values: int) -> None:
+        self.samples.setdefault(group, []).append(values)
+        self.update()
+
+    def failure(self, error: BaseException) -> None:
+        self.update(
+            status="fail",
+            error_type=type(error).__name__,
+            error=str(error).replace(SHELL_SECRET_VALUE, "[REDACTED]")[-8_000:],
+            fixture_discoveries=discovery_request_count(),
+            fixture_completions=origin_request_count(),
+        )
 
 
 class UnixHttpConnection:
@@ -288,6 +336,27 @@ class UnixSseStream:
 class FixtureHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
+    def do_GET(self) -> None:  # noqa: N802 - stdlib callback name
+        global _discovery_requests
+        if self.path != "/v1/models":
+            self.send_error(404)
+            return
+        if self.headers.get("Authorization") != f"Bearer {SHELL_SECRET_VALUE}":
+            self.send_error(401)
+            return
+        with _origin_request_lock:
+            _discovery_requests += 1
+        body = json.dumps(
+            {"object": "list", "data": [{"id": "gpt-5-mini", "object": "model"}]},
+            separators=(",", ":"),
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        self.wfile.flush()
+
     def do_POST(self) -> None:  # noqa: N802 - stdlib callback name
         global _origin_requests
         length = int(self.headers.get("Content-Length", "0"))
@@ -302,7 +371,7 @@ class FixtureHandler(http.server.BaseHTTPRequestHandler):
             + json.dumps(
                 {
                     "id": "m4-release-fixture",
-                    "model": "fixture-model",
+                    "model": "gpt-5-mini",
                     "choices": [
                         {
                             "index": 0,
@@ -329,9 +398,10 @@ class FixtureHandler(http.server.BaseHTTPRequestHandler):
 
 @contextlib.contextmanager
 def fixture_origin():
-    global _origin_requests
+    global _origin_requests, _discovery_requests
     with _origin_request_lock:
         _origin_requests = 0
+        _discovery_requests = 0
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FixtureHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -346,6 +416,11 @@ def fixture_origin():
 def origin_request_count() -> int:
     with _origin_request_lock:
         return _origin_requests
+
+
+def discovery_request_count() -> int:
+    with _origin_request_lock:
+        return _discovery_requests
 
 
 def write_config(home: pathlib.Path, port: int) -> None:
@@ -536,12 +611,15 @@ def spawn_wrapped_pty(
     return PtyProcess(pid, fd)
 
 
-def read_until(process: PtyProcess, marker: bytes, timeout: float = 5.0) -> bytes:
-    return read_until_all(process, (marker,), timeout)
+def read_until(
+    process: PtyProcess, marker: bytes, timeout: float = 5.0, *, phase: str = "render"
+) -> bytes:
+    return read_until_all(process, (marker,), timeout, phase=phase)
 
 
 def read_until_all(
-    process: PtyProcess, markers: tuple[bytes, ...], timeout: float = 5.0
+    process: PtyProcess, markers: tuple[bytes, ...], timeout: float = 5.0,
+    *, phase: str = "render",
 ) -> bytes:
     if not markers or any(not marker for marker in markers):
         raise ValueError("PTY markers must be non-empty")
@@ -567,9 +645,16 @@ def read_until_all(
         found, status = os.waitpid(process.pid, os.WNOHANG)
         if found == process.pid:
             child_status = f"exited with wait status {status}"
+    terminal_tail = re.sub(
+        r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))",
+        "",
+        captured.decode("utf-8", errors="replace"),
+    ).replace(SHELL_SECRET_VALUE, "[REDACTED]")[-4000:]
     raise RuntimeError(
-        f"PTY process {process.pid} did not render markers {markers!r} ({child_status}); "
-        f"tail={bytes(captured[-4000:])!r}"
+        f"phase={phase}; PTY process {process.pid} did not render markers {markers!r} "
+        f"({child_status}); fixture_discoveries={discovery_request_count()}; "
+        f"fixture_completions={origin_request_count()}; "
+        f"tail={terminal_tail!r}"
     )
 
 
@@ -738,6 +823,7 @@ def performance_gate(
     workspace: pathlib.Path,
     port: int,
     samples: int,
+    evidence: GateEvidence | None = None,
 ) -> dict[str, int]:
     # Warm the installed-artifact inode until macOS's one-time executable
     # inspection and dynamic-loader caches have settled. A single warmup can
@@ -747,10 +833,17 @@ def performance_gate(
     for index in range(-5, 0):
         one_startup_sample(rw, tui, root, workspace, port, index)
     time.sleep(0.05)
-    measurements = [
-        one_startup_sample(rw, tui, root, workspace, port, index)
-        for index in range(samples)
-    ]
+    measurements = []
+    for index in range(samples):
+        measurement = one_startup_sample(rw, tui, root, workspace, port, index)
+        measurements.append(measurement)
+        if evidence is not None:
+            evidence.sample(
+                "startup",
+                engine_ready_us=math.ceil(measurement[0] * 1000),
+                tui_process_start_us=math.ceil(measurement[1] * 1000),
+                tui_interactive_us=math.ceil(measurement[2] * 1000),
+            )
     engine = [measurement[0] for measurement in measurements]
     process_start = [measurement[1] for measurement in measurements]
     interactive = [measurement[2] for measurement in measurements]
@@ -791,6 +884,7 @@ def installed_first_launch_gate(
     workspace: pathlib.Path,
     port: int,
     samples: int,
+    evidence: GateEvidence | None = None,
 ) -> dict[str, int]:
     """Measure the first execution of freshly written installed artifacts."""
     version: list[float] = []
@@ -811,6 +905,8 @@ def installed_first_launch_gate(
             check=False,
         )
         version.append((time.perf_counter_ns() - started) / 1_000_000)
+        if evidence is not None:
+            evidence.sample("installed_first_version", elapsed_us=math.ceil(version[-1] * 1000))
         if result.returncode != 0 or not result.stdout.startswith(b"rw "):
             raise RuntimeError(
                 "freshly installed rw --version failed: "
@@ -842,6 +938,8 @@ def installed_first_launch_gate(
                 0,
             )[2]
         )
+        if evidence is not None:
+            evidence.sample("installed_first_interactive", elapsed_us=math.ceil(interactive[-1] * 1000))
 
     version_max = max(version)
     interactive_max = max(interactive)
@@ -907,6 +1005,7 @@ def socket_latency_gate(
     workspace: pathlib.Path,
     port: int,
     samples: int,
+    evidence: GateEvidence | None = None,
 ) -> dict[str, int]:
     sample_root = root / "socket-latency"
     sample_root.mkdir(mode=0o700)
@@ -999,6 +1098,8 @@ def socket_latency_gate(
             commands.send_request("POST", "/v1/command", headers, command)
             event = events.next_matching_event(request_id, event_type)
             elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000
+            if measured and evidence is not None:
+                evidence.sample("uds_query", elapsed_us=math.ceil(elapsed_ms * 1000))
             meta = event.get("meta")
             if not isinstance(meta, dict) or meta.get("client_id") != client_id:
                 raise RuntimeError(
@@ -1087,6 +1188,30 @@ def wait_for_supervisor_child(parent: int, executable: pathlib.Path) -> int:
     raise RuntimeError("PTY wrapper did not expose the supervisor child")
 
 
+def model_discovery_gate(rw: pathlib.Path, root: pathlib.Path, workspace: pathlib.Path, port: int) -> None:
+    home = root / "discovery-home"
+    write_config(home, port)
+    before = discovery_request_count()
+    result = subprocess.run(
+        [str(rw), "models", "list", "--refresh", "--output-format", "json"],
+        cwd=workspace, env=isolated_env(home), capture_output=True, text=True,
+        timeout=8, check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"fixture model discovery exited {result.returncode}: {result.stderr[-2000:]}")
+    catalog = json.loads(result.stdout)
+    available = [model["id"] for model in catalog["models"] if model["available"]]
+    provider = next((provider for provider in catalog["providers"] if provider["name"] == "fixture"), None)
+    if (
+        available != ["fixture/gpt-5-mini"]
+        or provider is None
+        or not all(provider[field] for field in ("configured", "authenticated", "reachable"))
+        or discovery_request_count() <= before
+    ):
+        raise RuntimeError("fixture discovery did not expose the authenticated configured model")
+    print("M4 provider discovery: public CLI authenticated and discovered the configured fixture model")
+
+
 def supervisor_reattach_gate(
     rw: pathlib.Path,
     tui: pathlib.Path,
@@ -1110,14 +1235,18 @@ def supervisor_reattach_gate(
     )
     closed_normally = False
     try:
-        ready = read_until(process, DRIVER_READY_MARKER, timeout=20)
+        ready = read_until(process, DRIVER_READY_MARKER, timeout=20, phase="driver_ready")
         if FIRST_PAINT_MARKER not in ready:
             raise RuntimeError("supervised TUI became driver-ready without first paint")
         first_tui = wait_for_tui_child(process.pid, tui)
         os.write(process.fd, PROMPT_MARKER.encode())
-        read_until(process, PROMPT_MARKER.encode(), timeout=8)
+        # Real echoed input is the focus assertion; driver readiness alone does
+        # not prove that a late onboarding modal left the composer in control.
+        read_until(process, PROMPT_MARKER.encode(), timeout=8, phase="initial_input_echo")
         os.write(process.fd, TERMINAL_SUBMIT)
-        first_transcript = read_until(process, RESPONSE_MARKER.encode(), timeout=8)
+        first_transcript = read_until(
+            process, RESPONSE_MARKER.encode(), timeout=8, phase="initial_turn_completion"
+        )
 
         os.kill(first_tui, signal.SIGKILL)
         second_tui = wait_for_tui_child(process.pid, tui, exclude=first_tui)
@@ -1130,6 +1259,7 @@ def supervisor_reattach_gate(
             process,
             (PROMPT_MARKER.encode(), RESPONSE_MARKER.encode()),
             timeout=8,
+            phase="supervised_replay",
         )
         print(
             "M4 supervisor reattach: actual compiled TUI was SIGKILLed and the replacement "
@@ -1700,6 +1830,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-shell", action="store_true")
     parser.add_argument("--ssh-loopback", metavar="HOST")
     parser.add_argument("--metrics-json", type=pathlib.Path)
+    parser.add_argument("--evidence-json", type=pathlib.Path)
     return parser.parse_args()
 
 
@@ -1711,8 +1842,7 @@ def opentui_native_library_name() -> str:
     return "libopentui.so"
 
 
-def main() -> int:
-    args = parse_args()
+def run_gate(args: argparse.Namespace, evidence: GateEvidence) -> int:
     if args.samples < 100 and not args.skip_performance:
         raise RuntimeError("p99 release gate requires at least 100 samples")
     if args.installed_first_samples < 3 and not args.skip_performance:
@@ -1752,6 +1882,7 @@ def main() -> int:
         workspace.mkdir(mode=0o700)
         with fixture_origin() as port:
             if not args.skip_performance:
+                evidence.update(phase="installed_first_launch")
                 metrics.update(
                     installed_first_launch_gate(
                         source_rw,
@@ -1761,16 +1892,25 @@ def main() -> int:
                         workspace,
                         port,
                         args.installed_first_samples,
+                        evidence,
                     )
                 )
-                metrics.update(performance_gate(rw, tui, root, workspace, port, args.samples))
-                metrics.update(socket_latency_gate(rw, root, workspace, port, args.samples))
+                evidence.update(phase="startup", metrics=metrics)
+                metrics.update(performance_gate(rw, tui, root, workspace, port, args.samples, evidence))
+                evidence.update(phase="uds_queries", metrics=metrics)
+                metrics.update(socket_latency_gate(rw, root, workspace, port, args.samples, evidence))
             if not args.skip_supervisor:
+                evidence.update(phase="provider_discovery", metrics=metrics)
+                model_discovery_gate(rw, root, workspace, port)
+                evidence.update(phase="supervisor_reattach", metrics=metrics)
                 supervisor_reattach_gate(rw, tui, root, workspace, port)
+                evidence.update(phase="supervisor_parent_death")
                 supervisor_parent_death_gate(rw, tui, root, workspace, port)
             if not args.skip_shell:
+                evidence.update(phase="shell_handover")
                 shell_handover_gate(rw, tui, root, workspace, port)
             if args.ssh_loopback is not None:
+                evidence.update(phase="ssh_loopback")
                 ssh_loopback_gate(rw, tui, root, workspace, port, args.ssh_loopback)
     if args.metrics_json is not None:
         metrics["tui_bundle_bytes"] = source_tui.stat().st_size + source_tui_native.stat().st_size
@@ -1784,9 +1924,29 @@ def main() -> int:
     return 0
 
 
+def main() -> int:
+    args = parse_args()
+    output = args.evidence_json
+    if output is None and args.metrics_json is not None:
+        output = args.metrics_json.with_name(f"{args.metrics_json.stem}-evidence.json")
+    evidence = GateEvidence(output)
+    try:
+        evidence.update()
+        result = run_gate(args, evidence)
+        evidence.update(status="pass", phase="complete")
+        return result
+    except BaseException as error:
+        try:
+            evidence.failure(error)
+        except OSError:
+            pass
+        raise
+
+
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as error:  # noqa: BLE001 - gate prints one actionable failure
-        print(f"M4 release gate failed: {error}", file=sys.stderr)
+        message = str(error).replace(SHELL_SECRET_VALUE, "[REDACTED]")[-8_000:]
+        print(f"M4 release gate failed: {message}", file=sys.stderr)
         raise SystemExit(1) from error

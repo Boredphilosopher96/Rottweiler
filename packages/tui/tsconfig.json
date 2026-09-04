@@ -14,5 +14,5 @@
     "target": "ES2022",
     "types": ["bun"]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "../../protocol/**/*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/generate-event-validator.ts", "../../protocol/**/*.ts"]
 }

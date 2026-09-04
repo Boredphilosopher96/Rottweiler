@@ -33,4 +33,8 @@ if [ -n "${ROTTWEILER_PERF_OUTPUT:-}" ]; then
   set -- "$@" --metrics-json "$ROTTWEILER_PERF_OUTPUT"
 fi
 
+if [ -n "${ROTTWEILER_M4_EVIDENCE_OUTPUT:-}" ]; then
+  set -- "$@" --evidence-json "$ROTTWEILER_M4_EVIDENCE_OUTPUT"
+fi
+
 exec python3 crates/rw-cli/tests/m4_release_gate.py "$@"

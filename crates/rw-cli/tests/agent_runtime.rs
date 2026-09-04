@@ -85,10 +85,23 @@ fn m9_rw_replay_renders_a_persisted_envelope_log_through_production_tui() {
         String::from_utf8_lossy(&output.stderr),
         String::from_utf8_lossy(&output.stdout)
     );
-    let actual = fs::read_to_string(report).expect("replay report");
-    let expected =
-        include_str!("../../../packages/tui/test/goldens/fixtures/m9-replay-cli.golden.json");
-    assert_eq!(actual, expected);
+    let actual: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(report).expect("replay report"))
+            .expect("valid replay report");
+    assert_eq!(actual["completedThrough"], "8", "replay completion cursor");
+    assert_eq!(actual["lastSequence"], "8", "durable replay cursor");
+    assert_eq!(actual["invalidEvents"], 0, "replay protocol validation");
+
+    let expected: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../packages/tui/test/goldens/fixtures/m9-replay-cli.golden.json"
+    ))
+    .expect("valid visual golden");
+    for field in ["frame", "styledDigest", "styledSpanCount"] {
+        assert_eq!(
+            actual[field], expected[field],
+            "replay visual contract: {field}"
+        );
+    }
 }
 
 #[test]

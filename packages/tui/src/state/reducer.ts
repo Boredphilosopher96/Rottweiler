@@ -4,7 +4,7 @@ import {
   type EngineEventDelivery,
   type ToolOutput,
 } from "../protocol"
-import { durableSequenceId, isRecord, type WireEngineEvent } from "../transport"
+import { MAX_U64, durableSequenceId, isRecord, parseU64, type WireEngineEvent } from "../transport"
 import type { RottweilerAction } from "./actions"
 import {
   createInitialState,
@@ -19,7 +19,6 @@ import {
   type ToolProjection,
 } from "./model"
 
-const MAX_U64 = 18_446_744_073_709_551_615n
 const UNKNOWN_ACTIVITY_TIMING: ActivityTimingProjection = { kind: "unknown" }
 export const MAX_SUBAGENT_TASK_BYTES = 1_024
 export const MAX_TERMINAL_SUBAGENT_HISTORY = 128
@@ -2210,14 +2209,6 @@ function attachToolToTail(
       ? tail.toolCallIds
       : [...tail.toolCallIds, toolCallId],
   }))
-}
-
-function parseU64(value: string | null): bigint | null {
-  if (value === null || !/^(0|[1-9]\d*)$/.test(value)) {
-    return null
-  }
-  const parsed = BigInt(value)
-  return parsed <= MAX_U64 ? parsed : null
 }
 
 function recordInvalid(state: RottweilerState): RottweilerState {
