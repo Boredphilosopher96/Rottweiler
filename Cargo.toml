@@ -58,6 +58,7 @@ codegen-units = 1
 panic = "abort"
 
 [workspace.dependencies]
+redb = "=4.2.0"
 memchr = "2.8.3"
 rw-operation-contract = { path = "crates/rw-operation-contract" }
 base64 = "0.23.0"

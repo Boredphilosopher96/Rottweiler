@@ -2,6 +2,9 @@
 
 /// Segmented journal storage and bounded read views.
 pub mod journal;
+/// Rebuildable, bounded semantic transcript index persistence.
+#[cfg(unix)]
+pub mod transcript_index;
 
 use std::{
     fs::{self, File},
