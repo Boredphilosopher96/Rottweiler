@@ -323,6 +323,17 @@ pub struct JournalPrefixIdentity {
     pub digest: [u8; 32],
 }
 
+impl JournalPrefixIdentity {
+    /// Identity of the empty authoritative prefix, before event zero.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            next_sequence: 0,
+            digest: *blake3::hash(b"").as_bytes(),
+        }
+    }
+}
+
 /// Work performed by a page read, independent of historical journal size.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct JournalReadMetrics {
