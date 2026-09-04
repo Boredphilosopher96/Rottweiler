@@ -205,7 +205,7 @@ class CiHardeningContractTests(unittest.TestCase):
             deployment,
         )
 
-    def test_protected_performance_consumers_fail_closed_before_queueing(self) -> None:
+    def test_hosted_performance_is_independent_of_private_runner_configuration(self) -> None:
         performance = (ROOT / ".github/workflows/performance.yml").read_text(
             encoding="utf-8"
         )
@@ -217,12 +217,11 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertNotIn("\n  push:", performance)
         self.assertNotIn("github.event_name", performance)
 
+        self.assertNotIn("runner-contract", performance)
+        self.assertNotIn("ROTTWEILER_SELF_HOSTED_RUNNERS", performance)
+        self.assertIn("needs: linux-performance-build", workflow_job(performance, "performance-linux"))
+        self.assertNotIn("    needs:", workflow_job(performance, "performance-macos"))
         cases = (
-            (
-                performance,
-                "runner-contract",
-                ("performance-linux", "performance-macos"),
-            ),
             (
                 release,
                 "runner-contract",
