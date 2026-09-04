@@ -81,7 +81,7 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
             (
                 "macos",
                 workflow_job(workflow, "performance-macos"),
-                "runner-contract",
+                None,
                 "linux-performance-build",
                 "runs-on: macos-15",
                 None,
@@ -100,9 +100,12 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
             evidence,
         ) in cases:
             with self.subTest(platform=platform):
-                self.assertIn(builder, performance)
+                if builder is None:
+                    self.assertNotIn("    needs:", performance)
+                else:
+                    self.assertIn(builder, performance)
                 self.assertNotIn(other_builder, performance)
-                self.assertIn("runner-contract", performance)
+                self.assertNotIn("runner-contract", performance)
                 self.assertIn(runner, performance)
                 if platform == "macos":
                     self.assertNotIn("actions/download-artifact@3e5f45b2", performance)
