@@ -2126,8 +2126,13 @@ fn terminate_process_group(child_id: Option<u32>) {
     }
 }
 
+/// Terminates the process group and waits until no member can execute effects.
+///
+/// # Errors
+/// Returns an error when the process group cannot be identified or inspected.
+/// Remains pending when a live member cannot be stopped.
 #[cfg(unix)]
-async fn terminate_and_wait_process_group(child_id: Option<u32>) -> Result<(), ToolError> {
+pub async fn terminate_and_wait_process_group(child_id: Option<u32>) -> Result<(), ToolError> {
     let raw_pid = child_id
         .and_then(|id| i32::try_from(id).ok())
         .and_then(rustix::process::Pid::from_raw)
@@ -2312,8 +2317,12 @@ fn macos_terminal_group_probe(
 #[cfg(not(unix))]
 fn terminate_process_group(_child_id: Option<u32>) {}
 
+/// Reports that process group settlement is unavailable on this platform.
+///
+/// # Errors
+/// Returns an unsupported-platform error.
 #[cfg(not(unix))]
-async fn terminate_and_wait_process_group(_child_id: Option<u32>) -> Result<(), ToolError> {
+pub async fn terminate_and_wait_process_group(_child_id: Option<u32>) -> Result<(), ToolError> {
     Err(ToolError::Command(
         "process-group exit barriers are unavailable on this platform".to_owned(),
     ))

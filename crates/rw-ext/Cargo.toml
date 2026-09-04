@@ -25,6 +25,7 @@ serde_json.workspace = true
 rustix.workspace = true
 semver.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 tokio = { workspace = true, features = ["time"] }
 toml.workspace = true
 wasmtime = { workspace = true, optional = true }

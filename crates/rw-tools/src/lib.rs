@@ -29,6 +29,8 @@ pub use background::{
     BackgroundProcessLimits, BackgroundProcessManager, BackgroundProcessSnapshot,
     BackgroundProcessStatus, BackgroundStatusInput, BackgroundStatusTool,
 };
+#[doc(hidden)]
+pub use bash::terminate_and_wait_process_group;
 pub use bash::{
     BashInput, BashSandboxMode, BashTool, CommandExecutor, CommandFixtureRedactor, CommandOutcome,
     CommandRequest, CommandSafety, CommandSafetyClassifier, ExecutionLease,

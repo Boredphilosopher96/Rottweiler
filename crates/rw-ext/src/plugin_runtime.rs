@@ -40,7 +40,7 @@ use thiserror::Error;
 #[cfg(test)]
 use tokio::io::BufReader;
 use tokio::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
+use tokio::sync::{Mutex, Semaphore, mpsc, oneshot, watch};
 
 use crate::plugin::{
     ApprovalRequirement, ApprovalStore, CapabilityEnforcer, ExecutableIdentity,
@@ -49,8 +49,10 @@ use crate::plugin::{
 };
 use crate::{CommandExecutionError, CommandHandler, CommandInvocation};
 
-const WRITER_QUEUE_CAPACITY: usize = 64;
+const RPC_REQUEST_CAPACITY: u16 = 64;
+const WRITER_QUEUE_CAPACITY: usize = RPC_REQUEST_CAPACITY as usize;
 const PROVIDER_EVENT_QUEUE_CAPACITY: usize = 64;
+const HOST_EFFECT_CAPACITY: u32 = RPC_REQUEST_CAPACITY as u32 + 1;
 const MAX_ABANDONED_REQUESTS: usize = 256;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_millis(DEFAULT_HANDLER_TIMEOUT_MS);
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -217,6 +219,8 @@ pub trait PluginLauncher: Send + Sync {
 }
 
 /// Host-owned handler for declared plugin-to-host push requests.
+/// The returned future must await completion of admitted effects, including any
+/// delegated actor command. Teardown drains this future before releasing callers.
 #[async_trait]
 pub trait PushHandler: Send + Sync {
     async fn handle_push(&self, method: &str, params: Value) -> Result<Value, PluginRpcError>;
@@ -369,6 +373,88 @@ struct PendingProviderStream {
 type PendingProviderStreams = Arc<StdMutex<BTreeMap<RpcId, PendingProviderStream>>>;
 type ActiveProviderHttp = Arc<StdMutex<BTreeMap<RpcId, CancellationToken>>>;
 
+type SettlementResult = Option<Result<(), PluginProcessError>>;
+
+struct RequestTermination {
+    process: Arc<dyn SupervisedPluginProcess>,
+    closed: Arc<AtomicBool>,
+    in_flight: Arc<Semaphore>,
+    active_provider_http: ActiveProviderHttp,
+    cancellation: CancellationToken,
+    host_effects: Arc<Semaphore>,
+    completion: StdMutex<Option<watch::Receiver<SettlementResult>>>,
+}
+
+impl RequestTermination {
+    fn begin(&self) {
+        let mut completion = self
+            .completion
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if completion.is_some() {
+            return;
+        }
+        self.cancellation.cancel();
+        self.closed.store(true, Ordering::Release);
+        self.in_flight.close();
+        cancel_active_provider_http(&self.active_provider_http);
+        if let Err(error) = self.process.kill_tree() {
+            tracing::warn!(%error, "initial plugin kill failed; supervisor must prove effect settlement");
+        }
+        let process = Arc::clone(&self.process);
+        let host_effects = Arc::clone(&self.host_effects);
+        let (sender, receiver) = watch::channel(None);
+        *completion = Some(receiver);
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::error!("plugin was killed without an async runtime available for reaping");
+            return;
+        };
+        runtime.spawn(async move {
+            let result = process.settle_effects().await;
+            let _host_settlement = host_effects.acquire_many(HOST_EFFECT_CAPACITY).await;
+            if let Err(error) = &result {
+                tracing::error!(%error, "plugin effects could not be settled; operation remains blocked");
+            }
+            let _ = sender.send(Some(result));
+        });
+    }
+
+    async fn wait(&self) {
+        let completion = self
+            .completion
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(mut completion) = completion else {
+            return;
+        };
+        loop {
+            let result = completion.borrow_and_update().clone();
+            match result {
+                Some(Ok(())) => return,
+                Some(Err(_)) => std::future::pending::<()>().await,
+                None => {}
+            }
+            if completion.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+}
+
+struct OrdinaryRequestGuard<'a> {
+    termination: &'a RequestTermination,
+    armed: bool,
+}
+
+impl Drop for OrdinaryRequestGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.termination.begin();
+        }
+    }
+}
+
 struct ReaderState {
     writer: mpsc::Sender<RpcFrame>,
     pending: Pending,
@@ -380,6 +466,7 @@ struct ReaderState {
     push_handler: Arc<dyn PushHandler>,
     redactor: Arc<dyn PluginBoundaryRedactor>,
     process: Arc<dyn SupervisedPluginProcess>,
+    termination: Arc<RequestTermination>,
 }
 
 /// Bounded, correlated, single-reader JSON-RPC client.
@@ -392,7 +479,8 @@ pub struct JsonRpcPluginClient {
     next_id: AtomicU64,
     timeout: Duration,
     process: Arc<dyn SupervisedPluginProcess>,
-    closed: AtomicBool,
+    closed: Arc<AtomicBool>,
+    termination: Arc<RequestTermination>,
     shutdown_complete: AtomicBool,
     shutdown_lock: Mutex<()>,
     redactor: Arc<dyn PluginBoundaryRedactor>,
@@ -403,8 +491,7 @@ impl Drop for JsonRpcPluginClient {
         if self.shutdown_complete.load(Ordering::Acquire) {
             return;
         }
-        self.closed.store(true, Ordering::Release);
-        let _ = self.process.kill_tree();
+        self.termination.begin();
     }
 }
 
@@ -422,12 +509,23 @@ impl JsonRpcPluginClient {
         let provider_streams = Arc::new(StdMutex::new(BTreeMap::new()));
         let abandoned = Arc::new(Mutex::new(BTreeSet::new()));
         let active_provider_http = Arc::new(StdMutex::new(BTreeMap::new()));
+        let closed = Arc::new(AtomicBool::new(false));
+        let in_flight = Arc::new(Semaphore::new(WRITER_QUEUE_CAPACITY));
+        let termination = Arc::new(RequestTermination {
+            process: Arc::clone(&launched.process),
+            closed: Arc::clone(&closed),
+            in_flight: Arc::clone(&in_flight),
+            active_provider_http: Arc::clone(&active_provider_http),
+            cancellation: CancellationToken::default(),
+            host_effects: Arc::new(Semaphore::new(HOST_EFFECT_CAPACITY as usize)),
+            completion: StdMutex::new(None),
+        });
         let client = Arc::new(Self {
             writer,
             pending: Arc::clone(&pending),
             provider_streams: Arc::clone(&provider_streams),
             abandoned: Arc::clone(&abandoned),
-            in_flight: Arc::new(Semaphore::new(WRITER_QUEUE_CAPACITY)),
+            in_flight,
             next_id: AtomicU64::new(1),
             timeout: if timeout.is_zero() {
                 DEFAULT_REQUEST_TIMEOUT
@@ -435,7 +533,8 @@ impl JsonRpcPluginClient {
                 timeout
             },
             process: Arc::clone(&launched.process),
-            closed: AtomicBool::new(false),
+            closed,
+            termination: Arc::clone(&termination),
             shutdown_complete: AtomicBool::new(false),
             shutdown_lock: Mutex::new(()),
             redactor: Arc::clone(&redactor),
@@ -444,7 +543,7 @@ impl JsonRpcPluginClient {
             launched.stdin,
             receiver,
             Arc::clone(&pending),
-            Arc::clone(&launched.process),
+            Arc::clone(&termination),
         ));
         tokio::spawn(reader_loop(
             launched.stdout,
@@ -459,6 +558,7 @@ impl JsonRpcPluginClient {
                 push_handler,
                 redactor,
                 process: Arc::clone(&launched.process),
+                termination,
             },
         ));
         tokio::spawn(drain_stderr(launched.stderr));
@@ -470,7 +570,8 @@ impl JsonRpcPluginClient {
     /// # Errors
     ///
     /// Returns a sanitized RPC error on cancellation, timeout, backpressure, protocol failure,
-    /// process exit, or a plugin-reported failure.
+    /// process exit, or a plugin-reported failure. Cancellation and timeout wait
+    /// for effect settlement; an unprovable cleanup remains pending.
     pub async fn request_cancellable(
         &self,
         method: &str,
@@ -492,12 +593,16 @@ impl JsonRpcPluginClient {
             return Err(rpc_error("closed", "plugin RPC client is closed"));
         }
         let permit = tokio::select! {
+            biased;
             () = cancellation.cancelled() => return Err(rpc_error("cancelled", "plugin RPC request was cancelled")),
             permit = tokio::time::timeout(self.timeout, self.in_flight.acquire()) => {
                 permit.map_err(|_| rpc_error("backpressure_timeout", "plugin RPC request limit remained saturated"))?
                     .map_err(|_| rpc_error("closed", "plugin RPC client is closed"))?
             }
         };
+        if self.closed.load(Ordering::Acquire) && !allow_closed {
+            return Err(rpc_error("closed", "plugin RPC client is closed"));
+        }
         let numeric = self.next_id.fetch_add(1, Ordering::AcqRel);
         let id = RpcId::Number(
             i64::try_from(numeric)
@@ -505,15 +610,29 @@ impl JsonRpcPluginClient {
         );
         let (sender, receiver) = oneshot::channel();
         self.pending.lock().await.insert(id.clone(), sender);
+        let mut guard = OrdinaryRequestGuard {
+            termination: &self.termination,
+            armed: true,
+        };
         let frame = RpcFrame::Request(RpcRequest {
             jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
             id: id.clone(),
             method: method.to_owned(),
             params: Some(self.redactor.redact(params)),
         });
-        match tokio::time::timeout(self.timeout, self.writer.send(frame)).await {
+        let sent = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {
+                guard.armed = false;
+                self.pending.lock().await.remove(&id);
+                return Err(rpc_error("cancelled", "plugin RPC request was cancelled"));
+            }
+            sent = tokio::time::timeout(self.timeout, self.writer.send(frame)) => sent,
+        };
+        match sent {
             Ok(Ok(())) => {}
             Ok(Err(_)) => {
+                guard.armed = false;
                 self.pending.lock().await.remove(&id);
                 return Err(rpc_error(
                     "connection_closed",
@@ -521,6 +640,7 @@ impl JsonRpcPluginClient {
                 ));
             }
             Err(_) => {
+                guard.armed = false;
                 self.pending.lock().await.remove(&id);
                 return Err(rpc_error(
                     "backpressure_timeout",
@@ -529,8 +649,11 @@ impl JsonRpcPluginClient {
             }
         }
         let result = tokio::select! {
+            biased;
             () = cancellation.cancelled() => {
-                self.abandon(id).await;
+                self.termination.begin();
+                self.termination.wait().await;
+                self.pending.lock().await.remove(&id);
                 Err(rpc_error("cancelled", "plugin RPC request was cancelled"))
             }
             response = tokio::time::timeout(self.timeout, receiver) => {
@@ -538,12 +661,16 @@ impl JsonRpcPluginClient {
                     Ok(Ok(result)) => result,
                     Ok(Err(_)) => Err(rpc_error("connection_closed", "plugin RPC connection closed")),
                     Err(_) => {
-                        self.abandon(id).await;
+                        self.termination.begin();
+                        self.termination.wait().await;
+                        self.pending.lock().await.remove(&id);
                         Err(rpc_error("timeout", "plugin RPC request timed out"))
                     }
                 }
             }
         };
+        self.termination.wait().await;
+        guard.armed = false;
         drop(permit);
         result
     }
@@ -606,20 +733,10 @@ impl JsonRpcPluginClient {
             .await
     }
 
-    async fn abandon(&self, id: RpcId) {
-        let mut pending = self.pending.lock().await;
-        let mut abandoned = self.abandoned.lock().await;
-        pending.remove(&id);
-        if abandoned.len() >= MAX_ABANDONED_REQUESTS {
-            drop(abandoned);
-            self.closed.store(true, Ordering::Release);
-            let _ = self.process.kill_tree();
-        } else {
-            abandoned.insert(id);
-        }
-    }
-
     async fn send_notification(&self, method: &str, params: Value) -> Result<(), PluginRpcError> {
+        if self.termination.cancellation.is_cancelled() {
+            return Err(rpc_error("closed", "plugin RPC client is closed"));
+        }
         let frame = RpcFrame::Notification(RpcNotification {
             jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
             method: method.to_owned(),
@@ -771,6 +888,9 @@ impl Drop for JsonRpcProviderEventStream {
 
 #[async_trait]
 impl PluginRpcClient for JsonRpcPluginClient {
+    async fn settle_effects(&self) {
+        self.termination.wait().await;
+    }
     async fn request(&self, method: &str, params: Value) -> Result<Value, PluginRpcError> {
         self.request_cancellable(method, params, &CancellationToken::default())
             .await
@@ -801,24 +921,26 @@ async fn writer_loop(
     mut stdin: PluginStdin,
     mut receiver: mpsc::Receiver<RpcFrame>,
     pending: Pending,
-    process: Arc<dyn SupervisedPluginProcess>,
+    termination: Arc<RequestTermination>,
 ) {
     while let Some(frame) = receiver.recv().await {
         let encoded = match encode_frame(&frame, MAX_FRAME_BYTES) {
             Ok(encoded) => encoded,
             Err(error) => {
+                termination.begin();
+                termination.wait().await;
                 fail_pending(&pending, rpc_error("invalid_frame", &error.to_string())).await;
-                terminate_and_reap(process.as_ref()).await;
                 return;
             }
         };
         if stdin.write_all(&encoded).await.is_err() || stdin.flush().await.is_err() {
+            termination.begin();
+            termination.wait().await;
             fail_pending(
                 &pending,
                 rpc_error("write_failed", "plugin RPC stdin failed"),
             )
             .await;
-            terminate_and_reap(process.as_ref()).await;
             return;
         }
     }
@@ -835,7 +957,8 @@ async fn reader_loop(mut stdout: PluginStdout, state: ReaderState) {
         };
         let Ok(frames) = decoder.push(&buffer[..count]) else {
             cancel_active_provider_http(&state.active_provider_http);
-            terminate_and_reap(state.process.as_ref()).await;
+            state.termination.begin();
+            state.termination.wait().await;
             fail_pending(
                 &state.pending,
                 rpc_error(
@@ -854,10 +977,18 @@ async fn reader_loop(mut stdout: PluginStdout, state: ReaderState) {
             return;
         };
         for frame in frames {
-            let continue_reading = process_incoming_frame(frame, &state).await;
+            let continue_reading = {
+                let effect = state.termination.host_effects.try_acquire();
+                if effect.is_err() {
+                    false
+                } else {
+                    process_incoming_frame(frame, &state).await
+                }
+            };
             if !continue_reading {
                 cancel_active_provider_http(&state.active_provider_http);
-                terminate_and_reap(state.process.as_ref()).await;
+                state.termination.begin();
+                state.termination.wait().await;
                 fail_pending(
                     &state.pending,
                     rpc_error(
@@ -877,7 +1008,8 @@ async fn reader_loop(mut stdout: PluginStdout, state: ReaderState) {
             }
         }
     }
-    cancel_active_provider_http(&state.active_provider_http);
+    state.termination.begin();
+    state.termination.wait().await;
     fail_pending(
         &state.pending,
         rpc_error("connection_closed", "plugin RPC connection closed"),
@@ -887,7 +1019,6 @@ async fn reader_loop(mut stdout: PluginStdout, state: ReaderState) {
         &state.provider_streams,
         &rpc_error("connection_closed", "plugin RPC connection closed"),
     );
-    terminate_and_reap(state.process.as_ref()).await;
 }
 
 fn cancel_active_provider_http(active: &ActiveProviderHttp) {
@@ -905,6 +1036,9 @@ async fn terminate_and_reap(process: &dyn SupervisedPluginProcess) {
 
 #[allow(clippy::too_many_lines)]
 async fn process_incoming_frame(frame: RpcFrame, state: &ReaderState) -> bool {
+    if state.termination.cancellation.is_cancelled() {
+        return false;
+    }
     match frame {
         RpcFrame::Success(success) => {
             let Some(id) = success.id else {
@@ -998,6 +1132,9 @@ async fn process_incoming_frame(frame: RpcFrame, state: &ReaderState) -> bool {
                 state.redactor.redact(request.params.unwrap_or(Value::Null)),
             )
             .await;
+            if state.termination.cancellation.is_cancelled() {
+                return false;
+            }
             let response_frame = match response {
                 Ok(result) => RpcFrame::Success(RpcSuccess {
                     jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
@@ -1049,6 +1186,9 @@ async fn process_incoming_frame(frame: RpcFrame, state: &ReaderState) -> bool {
 }
 
 fn start_provider_http_request(request: RpcRequest, state: &ReaderState) -> bool {
+    let Ok(effect) = Arc::clone(&state.termination.host_effects).try_acquire_owned() else {
+        return false;
+    };
     let params = request.params.unwrap_or(Value::Null);
     let Ok(capability) = serde_json::from_value::<ProviderHttpCapabilityParams>(params.clone())
     else {
@@ -1064,7 +1204,10 @@ fn start_provider_http_request(request: RpcRequest, state: &ReaderState) -> bool
     let _ = capability.request;
     let cancellation = CancellationToken::default();
     let inserted = state.active_provider_http.lock().is_ok_and(|mut active| {
-        if active.len() >= WRITER_QUEUE_CAPACITY || active.contains_key(&request.id) {
+        if state.termination.cancellation.is_cancelled()
+            || active.len() >= WRITER_QUEUE_CAPACITY
+            || active.contains_key(&request.id)
+        {
             false
         } else {
             active.insert(request.id.clone(), cancellation.clone());
@@ -1078,17 +1221,36 @@ fn start_provider_http_request(request: RpcRequest, state: &ReaderState) -> bool
     let writer = state.writer.clone();
     let active = Arc::clone(&state.active_provider_http);
     let redactor = Arc::clone(&state.redactor);
+    let termination = Arc::clone(&state.termination);
     tokio::spawn(async move {
-        stream_provider_http_response(
+        let _effect = effect;
+        let id = request.id.clone();
+        let cancel_writer = writer.clone();
+        let cancelled = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => true,
+            () = stream_provider_http_response(
             request.id,
             params,
-            cancellation,
+            cancellation.clone(),
             handler,
             writer,
-            active,
+            Arc::clone(&active),
             redactor,
-        )
-        .await;
+        ) => false,
+        };
+        if let Ok(mut active) = active.lock() {
+            active.remove(&id);
+        }
+        if cancelled && !termination.cancellation.is_cancelled() {
+            let result = provider_http_result_frame(
+                id,
+                Err(rpc_error("cancelled", "provider HTTP was cancelled")),
+            );
+            if cancel_writer.try_send(result).is_err() {
+                termination.begin();
+            }
+        }
     });
     true
 }
@@ -1152,7 +1314,12 @@ async fn stream_provider_http_response(
     if let Ok(mut active) = active.lock() {
         active.remove(&id);
     }
-    let frame = match result {
+    let frame = provider_http_result_frame(id, result);
+    let _ = writer.send(frame).await;
+}
+
+fn provider_http_result_frame(id: RpcId, result: Result<(), PluginRpcError>) -> RpcFrame {
+    match result {
         Ok(()) => RpcFrame::Success(RpcSuccess {
             jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
             id: Some(id),
@@ -1167,8 +1334,7 @@ async fn stream_provider_http_response(
                 data: Some(json!({"code":error.code})),
             },
         }),
-    };
-    let _ = writer.send(frame).await;
+    }
 }
 
 async fn stream_provider_http_body(
@@ -1738,6 +1904,9 @@ impl RpcToolAdapter {
 
 #[async_trait]
 impl Tool for RpcToolAdapter {
+    async fn settle_effects(&self) {
+        self.client.settle_effects().await;
+    }
     fn descriptor(&self) -> ToolDescriptor {
         let process_effects = self.enforcer.process_tool_effects();
         ToolDescriptor {
@@ -2204,6 +2373,14 @@ struct TestChildProcess {
 #[cfg(test)]
 #[async_trait]
 impl SupervisedPluginProcess for TestChildProcess {
+    async fn settle_effects(&self) -> Result<(), PluginProcessError> {
+        self.reap().await?;
+        rw_tools::terminate_and_wait_process_group(self.pid)
+            .await
+            .map_err(|error| PluginProcessError {
+                message: error.to_string(),
+            })
+    }
     fn mark_capability_violation(&self, _violation: &crate::plugin::CapabilityViolation) {}
     fn kill_tree(&self) -> Result<(), PluginProcessError> {
         #[cfg(unix)]
@@ -2542,6 +2719,9 @@ mod tests {
 
     #[async_trait]
     impl SupervisedPluginProcess for FakeProcess {
+        async fn settle_effects(&self) -> Result<(), PluginProcessError> {
+            self.reap().await
+        }
         fn mark_capability_violation(&self, violation: &CapabilityViolation) {
             self.violations
                 .lock()
@@ -2867,6 +3047,140 @@ mod tests {
             .expect("shell config")
             .with_cwd(root.path())
             .expect("cwd")
+    }
+
+    async fn mutating_child_client(root: &TempDir, timeout: Duration) -> Arc<JsonRpcPluginClient> {
+        let config = shell_config(root).with_argv([
+            "-c",
+            "read request; (while :; do printf child >> child-writes; /bin/sleep 0.01; done) & printf ready > ready; while :; do printf parent >> parent-writes; /bin/sleep 0.01; done",
+        ]).expect("fixture argv");
+        let mut approved = manifest();
+        approved.capabilities.tools[0]
+            .caps
+            .push(PluginToolEffect::WritesFilesystem);
+        let launched = TestDirectLauncher
+            .launch(
+                &config,
+                &PluginSandboxProfile {
+                    mode: PluginSandboxMode::Approved,
+                    capabilities: approved.capabilities.clone(),
+                    approved_roots: vec![root.path().to_path_buf()],
+                    allowed_domains: Vec::new(),
+                },
+            )
+            .await
+            .expect("fixture process");
+        let enforcer = Arc::new(CapabilityEnforcer::new(
+            &approved,
+            Arc::clone(&launched.process),
+        ));
+        JsonRpcPluginClient::start(
+            launched,
+            enforcer,
+            Arc::new(DenyPushHandler),
+            Arc::new(DenyPluginProviderHttpHandler),
+            Arc::new(NoopPluginBoundaryRedactor),
+            timeout,
+        )
+    }
+
+    async fn wait_for_mutation(root: &TempDir) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !root.path().join("ready").exists()
+                || !root.path().join("parent-writes").exists()
+                || !root.path().join("child-writes").exists()
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("plugin and child started writing");
+    }
+
+    async fn assert_conflicting_writes_are_safe(root: &TempDir) {
+        for name in ["parent-writes", "child-writes"] {
+            std::fs::write(root.path().join(name), b"subsequent mutation")
+                .expect("conflicting write");
+        }
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        for name in ["parent-writes", "child-writes"] {
+            assert_eq!(
+                std::fs::read(root.path().join(name)).expect("settled output"),
+                b"subsequent mutation"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_request_cancellation_settles_parent_and_child_effects() {
+        let root = TempDir::new().expect("tempdir");
+        let client = mutating_child_client(&root, Duration::from_secs(5)).await;
+        let cancellation = CancellationToken::default();
+        let task = {
+            let client = Arc::clone(&client);
+            let cancellation = cancellation.clone();
+            tokio::spawn(async move {
+                client
+                    .request_cancellable(METHOD_TOOL_CALL, Value::Null, &cancellation)
+                    .await
+            })
+        };
+        wait_for_mutation(&root).await;
+        cancellation.cancel();
+        let error = tokio::time::timeout(Duration::from_secs(4), task)
+            .await
+            .expect("settlement deadline")
+            .expect("request task")
+            .expect_err("cancelled request");
+        assert_eq!(error.code, "cancelled");
+        assert_eq!(
+            client
+                .request("next", Value::Null)
+                .await
+                .expect_err("closed client")
+                .code,
+            "closed"
+        );
+        assert_conflicting_writes_are_safe(&root).await;
+    }
+
+    #[tokio::test]
+    async fn dropped_hook_request_settles_parent_and_child_effects() {
+        let root = TempDir::new().expect("tempdir");
+        let client = mutating_child_client(&root, Duration::from_secs(5)).await;
+        let task = {
+            let client = Arc::clone(&client);
+            tokio::spawn(async move {
+                client
+                    .request(rw_plugin_protocol::METHOD_HOOK_INVOKE, Value::Null)
+                    .await
+            })
+        };
+        wait_for_mutation(&root).await;
+        task.abort();
+        assert!(task.await.expect_err("dropped caller").is_cancelled());
+        tokio::time::timeout(Duration::from_secs(4), client.settle_effects())
+            .await
+            .expect("drop settlement");
+        assert_conflicting_writes_are_safe(&root).await;
+    }
+
+    #[tokio::test]
+    async fn ordinary_request_timeout_settles_parent_and_child_effects() {
+        let root = TempDir::new().expect("tempdir");
+        let client = mutating_child_client(&root, Duration::from_millis(200)).await;
+        let task = {
+            let client = Arc::clone(&client);
+            tokio::spawn(async move { client.request(METHOD_TOOL_CALL, Value::Null).await })
+        };
+        wait_for_mutation(&root).await;
+        let error = tokio::time::timeout(Duration::from_secs(4), task)
+            .await
+            .expect("settlement deadline")
+            .expect("request task")
+            .expect_err("timed out request");
+        assert_eq!(error.code, "timeout");
+        assert_conflicting_writes_are_safe(&root).await;
     }
 
     #[test]
@@ -3245,6 +3559,199 @@ mod tests {
         assert!(process.killed.load(Ordering::Acquire) >= 1);
     }
 
+    #[derive(Default)]
+    struct DelayedActorPush {
+        started: tokio::sync::Notify,
+        release: Arc<tokio::sync::Notify>,
+        committed: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl PushHandler for DelayedActorPush {
+        async fn handle_push(
+            &self,
+            _method: &str,
+            _params: Value,
+        ) -> Result<Value, PluginRpcError> {
+            let release = Arc::clone(&self.release);
+            let committed = Arc::clone(&self.committed);
+            let (reply, outcome) = oneshot::channel();
+            tokio::spawn(async move {
+                release.notified().await;
+                committed.store(true, Ordering::Release);
+                let _ = reply.send(());
+            });
+            self.started.notify_one();
+            outcome.await.expect("actor outcome");
+            Ok(Value::Null)
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_cancellation_drains_admitted_host_push_before_reporting_settlement() {
+        let process = Arc::new(FakeProcess::default());
+        let (host_stdin, plugin_input) = tokio::io::duplex(4096);
+        let (mut plugin_output, host_stdout) = tokio::io::duplex(4096);
+        let push = Arc::new(DelayedActorPush::default());
+        let root = TempDir::new().expect("tempdir");
+        let client = JsonRpcPluginClient::start(
+            LaunchedPluginProcess {
+                stdin: Box::pin(host_stdin),
+                stdout: Box::pin(BufReader::new(host_stdout)),
+                stderr: Box::pin(BufReader::new(tokio::io::empty())),
+                process: process.clone(),
+                executable_identity: shell_config(&root).executable_identity().clone(),
+            },
+            Arc::new(CapabilityEnforcer::new(&manifest(), process)),
+            push.clone(),
+            Arc::new(DenyPluginProviderHttpHandler),
+            Arc::new(NoopPluginBoundaryRedactor),
+            Duration::from_secs(5),
+        );
+        let cancellation = CancellationToken::default();
+        let mut task = {
+            let client = Arc::clone(&client);
+            let cancellation = cancellation.clone();
+            tokio::spawn(async move {
+                client
+                    .request_cancellable(METHOD_TOOL_CALL, Value::Null, &cancellation)
+                    .await
+            })
+        };
+        let mut input = BufReader::new(plugin_input);
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(2), input.read_line(&mut line))
+            .await
+            .expect("request deadline")
+            .expect("request frame");
+        let frame = RpcFrame::Request(RpcRequest {
+            jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
+            id: RpcId::String("admitted-actor-command".to_owned()),
+            method: rw_plugin_protocol::METHOD_UI_NOTIFY.to_owned(),
+            params: Some(json!({"title":"fixture", "message":"fixture"})),
+        });
+        plugin_output
+            .write_all(&encode_frame(&frame, MAX_FRAME_BYTES).expect("push frame"))
+            .await
+            .expect("plugin push");
+        tokio::time::timeout(Duration::from_secs(2), push.started.notified())
+            .await
+            .expect("push admitted");
+        cancellation.cancel();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut task)
+                .await
+                .is_err()
+        );
+        assert!(!push.committed.load(Ordering::Acquire));
+        push.release.notify_one();
+        let failure = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("settlement deadline")
+            .expect("request task")
+            .expect_err("cancelled");
+        assert_eq!(failure.code, "cancelled");
+        assert!(push.committed.load(Ordering::Acquire));
+    }
+
+    #[derive(Default)]
+    struct IgnoringCancellationHttp {
+        started: tokio::sync::Notify,
+        dropped: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl PluginProviderHttpHandler for IgnoringCancellationHttp {
+        async fn request(
+            &self,
+            _params: Value,
+            _cancellation: &CancellationToken,
+        ) -> Result<PluginHttpStreamResponse, PluginRpcError> {
+            struct MarkDropped(Arc<AtomicBool>);
+            impl Drop for MarkDropped {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::Release);
+                }
+            }
+            let _dropped = MarkDropped(Arc::clone(&self.dropped));
+            self.started.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_cancellation_drops_host_http_even_when_handler_ignores_token() {
+        let process = Arc::new(FakeProcess::default());
+        let (host_stdin, plugin_input) = tokio::io::duplex(4096);
+        let (mut plugin_output, host_stdout) = tokio::io::duplex(4096);
+        let http = Arc::new(IgnoringCancellationHttp::default());
+        let mut approved = manifest();
+        approved.capabilities.providers[0].credential_references = vec!["fixture-token".to_owned()];
+        let root = TempDir::new().expect("tempdir");
+        let client = JsonRpcPluginClient::start(
+            LaunchedPluginProcess {
+                stdin: Box::pin(host_stdin),
+                stdout: Box::pin(BufReader::new(host_stdout)),
+                stderr: Box::pin(BufReader::new(tokio::io::empty())),
+                process: process.clone(),
+                executable_identity: shell_config(&root).executable_identity().clone(),
+            },
+            Arc::new(CapabilityEnforcer::new(&approved, process)),
+            Arc::new(DenyPushHandler),
+            http.clone(),
+            Arc::new(NoopPluginBoundaryRedactor),
+            Duration::from_secs(5),
+        );
+        let cancellation = CancellationToken::default();
+        let task = {
+            let client = Arc::clone(&client);
+            let cancellation = cancellation.clone();
+            tokio::spawn(async move {
+                client
+                    .request_cancellable(METHOD_TOOL_CALL, Value::Null, &cancellation)
+                    .await
+            })
+        };
+        let mut input = BufReader::new(plugin_input);
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(2), input.read_line(&mut line))
+            .await
+            .expect("request deadline")
+            .expect("request frame");
+        let frame = RpcFrame::Request(RpcRequest {
+            jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
+            id: RpcId::String("http-owned-effect".to_owned()),
+            method: METHOD_PROVIDER_HTTP.to_owned(),
+            params: Some(json!({
+                "alias": "fixture/model", "credential_reference": "fixture-token",
+                "request": {"url": "https://example.test", "method": "GET", "credential_header": "Authorization"}
+            })),
+        });
+        plugin_output
+            .write_all(&encode_frame(&frame, MAX_FRAME_BYTES).expect("HTTP frame"))
+            .await
+            .expect("plugin HTTP request");
+        tokio::time::timeout(Duration::from_secs(2), http.started.notified())
+            .await
+            .expect("HTTP started");
+        cancellation.cancel();
+        let failure = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("settlement deadline")
+            .expect("request task")
+            .expect_err("cancelled");
+        assert_eq!(failure.code, "cancelled");
+        assert!(http.dropped.load(Ordering::Acquire));
+        assert!(
+            client
+                .termination
+                .active_provider_http
+                .lock()
+                .expect("HTTP state")
+                .is_empty()
+        );
+    }
+
     #[tokio::test]
     async fn reader_exit_cancels_and_drains_active_provider_http() {
         let process = Arc::new(FakeProcess::default());
@@ -3261,7 +3768,17 @@ mod tests {
                 cancellation.clone(),
             );
         let enforcer = Arc::new(CapabilityEnforcer::new(&manifest(), process.clone()));
+        let termination = Arc::new(RequestTermination {
+            process: process.clone(),
+            closed: Arc::new(AtomicBool::new(false)),
+            in_flight: Arc::new(Semaphore::new(WRITER_QUEUE_CAPACITY)),
+            active_provider_http: Arc::clone(&active_provider_http),
+            cancellation: CancellationToken::default(),
+            host_effects: Arc::new(Semaphore::new(HOST_EFFECT_CAPACITY as usize)),
+            completion: StdMutex::new(None),
+        });
         let state = ReaderState {
+            termination,
             writer,
             pending: Arc::new(Mutex::new(BTreeMap::new())),
             provider_streams: Arc::new(StdMutex::new(BTreeMap::new())),

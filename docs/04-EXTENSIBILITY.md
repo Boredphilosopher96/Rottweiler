@@ -96,7 +96,7 @@ private limit after a plugin has been accepted.
 
 ### Hook catalog
 
-Hooks are request/response (can modify/block); events are fire-and-forget. Hook timeout default 5s, configurable; on timeout the engine proceeds per hook's declared `fail-open`/`fail-closed` bit.
+Hooks are request/response (can modify/block); events are fire-and-forget. Hook timeout default 5s, configurable; on timeout the engine proceeds per hook's declared `fail-open`/`fail-closed` bit. Before applying that policy, the host waits for any cancelled hook effects to settle. An ordinary native-plugin request that times out, is cancelled after admission, or loses its caller future closes the shared plugin process: new requests and pushes are rejected, admitted host commands are drained, host HTTP futures are cancelled, and the supervised child is reaped with a process-group exit barrier. Tools and hooks retain their checkpoint/continuation barrier outside the cancellable invocation future. An unproven cleanup stays pending with a diagnostic; sending a kill signal is not settlement. Other in-flight calls to the same plugin fail with that process. The process supervisor must provide a containment boundary for descendants; the current macOS process-group proof does not cover a child that deliberately escapes into another session.
 
 **One dispatcher, two adapters:** the engine-internal **hook dispatcher** owns registration, ordering, and fail-open/closed semantics. Built-ins such as `[toolchain]` formatters/linters and permission supplements consume it directly; the RPC bridge exposes that same dispatcher to out-of-process plugins. Both paths use the identical interface (dogfooding rule), and the conformance suite rejects a second hook mechanism.
 

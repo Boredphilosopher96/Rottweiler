@@ -973,6 +973,10 @@ pub trait Tool: Send + Sync {
     }
 
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError>;
+
+    /// Waits for externally owned effects after an execution future is dropped.
+    /// A supervisor must keep this pending if termination cannot be proven.
+    async fn settle_effects(&self) {}
 }
 
 #[derive(Clone)]
@@ -992,6 +996,9 @@ struct GuardedTool {
 
 #[async_trait]
 impl Tool for GuardedTool {
+    async fn settle_effects(&self) {
+        self.inner.settle_effects().await;
+    }
     fn descriptor(&self) -> ToolDescriptor {
         self.descriptor.clone()
     }

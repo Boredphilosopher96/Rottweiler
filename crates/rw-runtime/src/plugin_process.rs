@@ -255,6 +255,13 @@ impl Drop for PluginChild {
 
 #[async_trait]
 impl SupervisedPluginProcess for PluginChild {
+    async fn settle_effects(&self) -> Result<(), PluginProcessError> {
+        self.wait_for_exit().await?;
+        rw_tools::terminate_and_wait_process_group(self.process_group)
+            .await
+            .map_err(|failure| error(&failure.to_string()))
+    }
+
     fn mark_capability_violation(&self, violation: &CapabilityViolation) {
         if let Ok(mut value) = self.violation.lock() {
             *value = Some(violation.to_string().chars().take(512).collect());
@@ -288,6 +295,21 @@ impl SupervisedPluginProcess for PluginChild {
     }
 
     async fn wait(&self) -> Result<Option<i32>, PluginProcessError> {
+        let status = self.wait_for_exit().await?;
+        if let Some(violation) = self
+            .violation
+            .lock()
+            .map_err(|_| error("plugin violation lock was poisoned"))?
+            .clone()
+        {
+            return Err(error(&violation));
+        }
+        Ok(status)
+    }
+}
+
+impl PluginChild {
+    async fn wait_for_exit(&self) -> Result<Option<i32>, PluginProcessError> {
         loop {
             let status = self
                 .child
@@ -296,14 +318,6 @@ impl SupervisedPluginProcess for PluginChild {
                 .try_wait()
                 .map_err(|error| process_error(&error))?;
             if let Some(status) = status {
-                if let Some(violation) = self
-                    .violation
-                    .lock()
-                    .map_err(|_| error("plugin violation lock was poisoned"))?
-                    .clone()
-                {
-                    return Err(error(&violation));
-                }
                 return Ok(status.code());
             }
             tokio::time::sleep(Duration::from_millis(10)).await;

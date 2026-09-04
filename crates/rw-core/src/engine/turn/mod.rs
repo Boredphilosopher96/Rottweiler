@@ -1799,6 +1799,7 @@ struct BoundedOutputChunk {
     id: String,
     chunk: ToolOutputChunk,
     permit: OwnedSemaphorePermit,
+    background_permit: Option<OwnedSemaphorePermit>,
 }
 
 struct OrderedOutputCoordinator {
@@ -1806,6 +1807,8 @@ struct OrderedOutputCoordinator {
     signals: mpsc::UnboundedSender<TurnSignal>,
     state: Mutex<OrderedOutputState>,
     permits: Arc<Semaphore>,
+    background_permits: Arc<Semaphore>,
+    advanced: Notify,
     redactor: Arc<dyn SecretRedactor>,
 }
 
@@ -1823,6 +1826,8 @@ impl OrderedOutputCoordinator {
                 buffered: BTreeMap::new(),
             }),
             permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT_TOOL_OUTPUT_CHUNKS)),
+            background_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT_TOOL_OUTPUT_CHUNKS - 1)),
+            advanced: Notify::new(),
             redactor,
         }
     }
@@ -1833,53 +1838,95 @@ impl OrderedOutputCoordinator {
         id: &str,
         mut chunk: ToolOutputChunk,
     ) -> Result<(), ToolError> {
-        let permit = Arc::clone(&self.permits)
-            .acquire_owned()
-            .await
-            .map_err(|_| ToolError::Output("tool output channel is closed".to_owned()))?;
-        chunk.content = self.redactor.redact(&chunk.content);
-        let bounded = BoundedOutputChunk {
-            id: id.to_owned(),
-            chunk,
-            permit,
-        };
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if index == state.current {
-            drop(state);
-            self.send_chunk(bounded);
-        } else {
-            state.buffered.entry(index).or_default().push(bounded);
-        }
-        Ok(())
-    }
-
-    fn advance(&self, next: usize) {
-        let buffered = {
+        let closed = || ToolError::Output("tool output channel is closed".to_owned());
+        loop {
+            let advanced = self.advanced.notified();
+            tokio::pin!(advanced);
+            advanced.as_mut().enable();
+            let current = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .current;
+            if index < current {
+                return Err(ToolError::Output(
+                    "tool output stream has already completed".to_owned(),
+                ));
+            }
+            // Later tools may occupy at most 31 of the 32 global slots. The
+            // current tool can always emit, even when every later tool blocks.
+            let background_permit = if index > current {
+                Some(tokio::select! {
+                    biased;
+                    () = self.signals.closed() => return Err(closed()),
+                    () = &mut advanced => continue,
+                    permit = Arc::clone(&self.background_permits).acquire_owned() =>
+                        permit.map_err(|_| closed())?,
+                })
+            } else {
+                None
+            };
+            let permit = tokio::select! {
+                biased;
+                () = self.signals.closed() => return Err(closed()),
+                () = &mut advanced => continue,
+                permit = Arc::clone(&self.permits).acquire_owned() =>
+                    permit.map_err(|_| closed())?,
+            };
             let mut state = self
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state.current = next;
-            state.buffered.remove(&next).unwrap_or_default()
-        };
-        for chunk in buffered {
-            self.send_chunk(chunk);
+            if index < state.current {
+                return Err(ToolError::Output(
+                    "tool output stream has already completed".to_owned(),
+                ));
+            }
+            chunk.content = self.redactor.redact(&chunk.content);
+            let bounded = BoundedOutputChunk {
+                id: id.to_owned(),
+                chunk,
+                permit,
+                background_permit,
+            };
+            if index == state.current {
+                // Enqueue under the same lock as advance so a promoted tool
+                // cannot overtake a chunk that already passed the index check.
+                return self.send_chunk(bounded);
+            }
+            state.buffered.entry(index).or_default().push(bounded);
+            return Ok(());
         }
     }
 
-    fn send_chunk(&self, bounded: BoundedOutputChunk) {
-        let _ = self.signals.send(TurnSignal::ToolOutput {
-            event: PendingEvent::ToolOutput {
-                turn: self.turn,
-                id: bounded.id,
-                stream: format!("{:?}", bounded.chunk.stream).to_ascii_lowercase(),
-                chunk: bounded.chunk.content,
-            },
-            _permit: bounded.permit,
-        });
+    fn advance(&self, next: usize) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.current = next;
+        for chunk in state.buffered.remove(&next).unwrap_or_default() {
+            let _ = self.send_chunk(chunk);
+        }
+        drop(state);
+        // A promoted producer must leave the background semaphore wait queue;
+        // later buffered tools may retain all its permits until it finishes.
+        self.advanced.notify_waiters();
+    }
+
+    fn send_chunk(&self, bounded: BoundedOutputChunk) -> Result<(), ToolError> {
+        drop(bounded.background_permit);
+        self.signals
+            .send(TurnSignal::ToolOutput {
+                event: PendingEvent::ToolOutput {
+                    turn: self.turn,
+                    id: bounded.id,
+                    stream: format!("{:?}", bounded.chunk.stream).to_ascii_lowercase(),
+                    chunk: bounded.chunk.content,
+                },
+                _permit: bounded.permit,
+            })
+            .map_err(|_| ToolError::Output("tool output channel is closed".to_owned()))
     }
 }
 
@@ -1888,7 +1935,152 @@ struct OrderedOutputSink {
     id: String,
     coordinator: Arc<OrderedOutputCoordinator>,
     open: Arc<AtomicBool>,
+    cancellation: CancellationToken,
     totals: Mutex<(usize, usize, bool)>,
+}
+
+#[cfg(test)]
+mod ordered_output_tests {
+    #![allow(clippy::expect_used)]
+
+    use super::*;
+    use rw_types::ToolOutputStream;
+
+    fn chunk(content: impl Into<String>) -> ToolOutputChunk {
+        ToolOutputChunk {
+            stream: ToolOutputStream::Stdout,
+            content: content.into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn promotion_bypasses_saturated_background_capacity_without_exceeding_global_bound() {
+        let (signals, mut receiver) = mpsc::unbounded_channel();
+        let coordinator = OrderedOutputCoordinator::new(1, signals, Arc::new(NoopSecretRedactor));
+        for index in 0..MAX_IN_FLIGHT_TOOL_OUTPUT_CHUNKS - 1 {
+            coordinator
+                .emit(2, "later", chunk(index.to_string()))
+                .await
+                .expect("buffer later");
+        }
+        let promoted = coordinator.emit(1, "promoted", chunk("next"));
+        tokio::pin!(promoted);
+        assert!(futures_util::poll!(&mut promoted).is_pending());
+        coordinator
+            .emit(0, "first", chunk("current"))
+            .await
+            .expect("reserved slot");
+        assert_eq!(coordinator.permits.available_permits(), 0);
+        assert_eq!(receiver.len(), 1);
+        {
+            let blocked = coordinator.emit(0, "first", chunk("extra"));
+            tokio::pin!(blocked);
+            assert!(futures_util::poll!(&mut blocked).is_pending());
+        }
+        drop(receiver.recv().await.expect("first chunk"));
+        coordinator.advance(1);
+        tokio::time::timeout(Duration::from_secs(1), &mut promoted)
+            .await
+            .expect("promotion must wake background waiter")
+            .expect("promoted emit");
+        assert!(
+            matches!(receiver.recv().await, Some(TurnSignal::ToolOutput {
+            event: PendingEvent::ToolOutput { id, .. }, ..
+        }) if id == "promoted")
+        );
+        coordinator.advance(2);
+        for index in 0..MAX_IN_FLIGHT_TOOL_OUTPUT_CHUNKS - 1 {
+            assert!(
+                matches!(receiver.recv().await, Some(TurnSignal::ToolOutput {
+                event: PendingEvent::ToolOutput { id, chunk, .. }, ..
+            }) if id == "later" && chunk == index.to_string())
+            );
+        }
+        assert_eq!(
+            coordinator.permits.available_permits(),
+            MAX_IN_FLIGHT_TOOL_OUTPUT_CHUNKS
+        );
+        assert_eq!(
+            coordinator.background_permits.available_permits(),
+            MAX_IN_FLIGHT_TOOL_OUTPUT_CHUNKS - 1
+        );
+        assert!(coordinator.emit(0, "late", chunk("stale")).await.is_err());
+        drop(receiver);
+        assert!(coordinator.emit(2, "closed", chunk("gone")).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cancellation_releases_blocked_output_without_waiting_for_promotion() {
+        let (signals, _receiver) = mpsc::unbounded_channel();
+        let coordinator = Arc::new(OrderedOutputCoordinator::new(
+            1,
+            signals,
+            Arc::new(NoopSecretRedactor),
+        ));
+        for _ in 0..MAX_IN_FLIGHT_TOOL_OUTPUT_CHUNKS - 1 {
+            coordinator
+                .emit(2, "later", chunk("buffered"))
+                .await
+                .expect("buffer later");
+        }
+        let cancellation = CancellationToken::default();
+        let sink = OrderedOutputSink {
+            index: 1,
+            id: "cancelled".to_owned(),
+            coordinator: Arc::clone(&coordinator),
+            open: Arc::new(AtomicBool::new(true)),
+            cancellation: cancellation.clone(),
+            totals: Mutex::new((0, 0, false)),
+        };
+        let waiting = sink.emit(chunk("blocked"));
+        tokio::pin!(waiting);
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+        cancellation.cancel();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), waiting)
+                .await
+                .expect("cancel output wait"),
+            Err(ToolError::Cancelled)
+        ));
+        assert_eq!(coordinator.permits.available_permits(), 1);
+        assert!(
+            !coordinator
+                .state
+                .lock()
+                .expect("state")
+                .buffered
+                .contains_key(&1)
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_chunks_preserve_the_live_output_byte_ceiling() {
+        let (signals, mut receiver) = mpsc::unbounded_channel();
+        let sink = OrderedOutputSink {
+            index: 0,
+            id: "large".to_owned(),
+            coordinator: Arc::new(OrderedOutputCoordinator::new(
+                1,
+                signals,
+                Arc::new(NoopSecretRedactor),
+            )),
+            open: Arc::new(AtomicBool::new(true)),
+            cancellation: CancellationToken::default(),
+            totals: Mutex::new((0, 0, false)),
+        };
+        sink.emit(chunk("界".repeat(MAX_LIVE_TOOL_OUTPUT_BYTES)))
+            .await
+            .expect("truncate oversized chunk");
+        assert!(
+            matches!(receiver.recv().await, Some(TurnSignal::ToolOutput {
+            event: PendingEvent::ToolOutput { chunk, .. }, ..
+        }) if chunk.starts_with("[live tool output truncated;") && chunk.len() < 100)
+        );
+        sink.emit(chunk("discarded after truncation"))
+            .await
+            .expect("keep draining");
+        assert!(receiver.try_recv().is_err());
+    }
 }
 
 /// Serializes durable child lifecycle records by provider tool-call index.
@@ -2109,7 +2301,11 @@ impl ToolOutputSink for OrderedOutputSink {
                 chunk
             }
         };
-        self.coordinator.emit(self.index, &self.id, chunk).await
+        tokio::select! {
+            biased;
+            result = self.coordinator.emit(self.index, &self.id, chunk) => result,
+            () = self.cancellation.cancelled() => Err(ToolError::Cancelled),
+        }
     }
 }
 
@@ -2700,12 +2896,14 @@ async fn dispatch_hook(
     payload: Value,
     cancellation: &CancellationToken,
 ) -> Result<HookDispatchResult, AgentLoopError> {
-    tokio::select! {
+    let result = tokio::select! {
         () = cancellation.cancelled() => Err(AgentLoopError::Extension(
             format!("{} hook dispatch cancelled", hook_event_name(event)),
         )),
         result = dispatcher.dispatch(event, payload) => Ok(result),
-    }
+    };
+    dispatcher.settle_effects(event).await;
+    result
 }
 
 async fn dispatch_tool_hook_effect(
@@ -2716,12 +2914,14 @@ async fn dispatch_tool_hook_effect(
     effect: HookEffect,
     cancellation: &CancellationToken,
 ) -> Result<HookDispatchResult, AgentLoopError> {
-    tokio::select! {
+    let result = tokio::select! {
         () = cancellation.cancelled() => Err(AgentLoopError::Extension(
             format!("{} hook dispatch cancelled", hook_event_name(event)),
         )),
         result = dispatcher.dispatch_tool_effect(event, payload, tool_name, effect) => Ok(result),
-    }
+    };
+    dispatcher.settle_effects(event).await;
+    result
 }
 
 fn hook_rejection(status: &HookDispatchStatus, redactor: &dyn SecretRedactor) -> Option<String> {
@@ -3410,6 +3610,7 @@ async fn execute_prepared_tool(
         id: call.id.clone(),
         coordinator: Arc::clone(&runtime.coordinator),
         open: output_open.clone(),
+        cancellation: cancellation.clone(),
         totals: Mutex::new((0, 0, false)),
     });
     let subagent_events: Arc<dyn SubagentEventSink> = Arc::new(ActorSubagentEventSink {
@@ -3492,6 +3693,7 @@ async fn execute_prepared_tool(
             None => Err(ToolError::Cancelled),
         }
     };
+    tool.settle_effects().await;
     output_open.store(false, Ordering::Release);
     let tool_cancelled = matches!(&result, Err(ToolError::Cancelled));
     let (output, is_error) = match result {

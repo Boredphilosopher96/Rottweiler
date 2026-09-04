@@ -241,6 +241,9 @@ impl HookError {
 #[async_trait]
 pub trait HookHandler: Send + Sync {
     async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError>;
+
+    /// Waits for effects owned outside a cancelled invocation future.
+    async fn settle_effects(&self) {}
 }
 
 /// One recorded handler failure.
@@ -334,21 +337,25 @@ async fn invoke_registered_hook(
         payload,
         cancellation: &cancellation,
     };
-    let invoked = AssertUnwindSafe(registered.handler.invoke(invocation)).catch_unwind();
-    tokio::pin!(invoked);
-    tokio::select! {
-        result = &mut invoked => result.unwrap_or_else(|_| {
-            Err(HookError::new("panic", "hook implementation panicked"))
-        }),
-        () = tokio::time::sleep(registered.registration.timeout()) => {
-            cancellation.cancel();
-            let _ = tokio::time::timeout(HOOK_CANCELLATION_GRACE, &mut invoked).await;
-            Err(HookError::new(
-                "timeout",
-                "hook invocation exceeded its configured deadline",
-            ))
+    let result = {
+        let invoked = AssertUnwindSafe(registered.handler.invoke(invocation)).catch_unwind();
+        tokio::pin!(invoked);
+        tokio::select! {
+            result = &mut invoked => result.unwrap_or_else(|_| {
+                Err(HookError::new("panic", "hook implementation panicked"))
+            }),
+            () = tokio::time::sleep(registered.registration.timeout()) => {
+                cancellation.cancel();
+                let _ = tokio::time::timeout(HOOK_CANCELLATION_GRACE, &mut invoked).await;
+                Err(HookError::new(
+                    "timeout",
+                    "hook invocation exceeded its configured deadline",
+                ))
+            }
         }
-    }
+    };
+    registered.handler.settle_effects().await;
+    result
 }
 
 /// Deterministic request/response hook dispatcher.
@@ -362,6 +369,15 @@ pub struct HookDispatcher {
 }
 
 impl HookDispatcher {
+    /// Joins external cleanup after a caller drops a dispatch future.
+    pub async fn settle_effects(&self, event: HookEvent) {
+        if let Some(hooks) = self.hooks.get(&event) {
+            for hook in hooks {
+                hook.handler.settle_effects().await;
+            }
+        }
+    }
+
     #[must_use]
     pub fn new() -> Self {
         Self::default()
