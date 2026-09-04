@@ -9,8 +9,10 @@ import subprocess
 import sys
 
 REQUIRED = {
-    "darwin-arm64": {"self-hosted", "macOS", "ARM64", "soak"},
-    "linux-x86_64": {"self-hosted", "Linux", "X64", "soak"},
+    platform: set(settings["runner_labels"])
+    for platform, settings in json.loads(
+        (Path(__file__).resolve().parents[1] / "contracts/soak-platforms.json").read_text()
+    ).items()
 }
 
 
@@ -29,17 +31,21 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--platform", choices=sorted(REQUIRED))
     args = parser.parse_args()
     result = {"schema_version": 1, "status": "infrastructure_unavailable", "platforms": {}}
     try:
         pages = json.loads(subprocess.check_output(
             ["gh", "api", "--paginate", "--slurp", f"repos/{args.repository}/actions/runners?per_page=100"],
             stderr=subprocess.PIPE,
+            timeout=60,
         ))
         result["platforms"] = capacity([runner for page in pages for runner in page["runners"]])
+        if args.platform:
+            result["platforms"] = {args.platform: result["platforms"][args.platform]}
         if all(value["state"] == "ready" for value in result["platforms"].values()):
             result["status"] = "ready"
-    except (subprocess.CalledProcessError, ValueError, KeyError) as error:
+    except (subprocess.SubprocessError, ValueError, KeyError) as error:
         result["error"] = f"runner inventory unavailable ({type(error).__name__}); repository administration read permission is required"
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, sort_keys=True) + "\n")

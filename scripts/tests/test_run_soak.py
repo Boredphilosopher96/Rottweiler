@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -20,6 +22,19 @@ SPEC.loader.exec_module(SOAK)
 
 
 class SoakHarnessTests(unittest.TestCase):
+    def test_ci_checkpoints_are_remote_metadata_without_terminal_or_transcript_data(self) -> None:
+        stderr = io.StringIO()
+        with mock.patch.dict(SOAK.os.environ, {"GITHUB_ACTIONS": "true", "ROTTWEILER_CANDIDATE_SHA": "a" * 40}), contextlib.redirect_stderr(stderr):
+            progress = SOAK.SoakProgress()
+            progress.checkpoint(turns_completed=12, terminal_tail="private terminal", durable_sessions=["private message"])
+            progress.checkpoint(turns_completed=13)
+        records = stderr.getvalue().splitlines()
+        self.assertEqual(len(records), 1)
+        record = json.loads(records[0])
+        self.assertEqual(record["turns_completed"], 12)
+        self.assertEqual(record["source_sha"], "a" * 40)
+        self.assertNotIn("private", stderr.getvalue())
+
     def test_release_workflow_uses_only_public_rw_and_sibling_discovery(self) -> None:
         release = (MODULE_PATH.parents[1] / ".github/workflows/release.yml").read_text(
             encoding="utf-8"

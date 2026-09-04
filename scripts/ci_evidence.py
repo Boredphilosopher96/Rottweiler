@@ -64,9 +64,11 @@ def write_result(path: Path, result: dict) -> None:
 
 def observe(command: list[str], gate: str, output: Path) -> int:
     started = time.monotonic()
+    checkout = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False)
     result = {
         "schema_version": 1, "gate": gate, "status": "running",
-        "source_sha": os.environ.get("GITHUB_SHA", "local-working-tree"),
+        "source_sha": checkout.stdout.strip() if checkout.returncode == 0 else None,
+        "workflow_sha": os.environ.get("GITHUB_SHA"),
         "run_id": os.environ.get("GITHUB_RUN_ID"),
         "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
         "runner_os": os.environ.get("RUNNER_OS", sys.platform),

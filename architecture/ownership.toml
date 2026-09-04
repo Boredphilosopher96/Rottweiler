@@ -863,3 +863,8 @@ reason = "rw-core owns provider projection filtering and merge semantics."
 id = "package-inventory"
 path = "contracts/package-inventory.json"
 symbols = ["packages", "fixtures"]
+
+[[owner]]
+id = "soak-platforms"
+path = "contracts/soak-platforms.json"
+symbols = ["runner_labels", "build_job", "artifact_prefix"]

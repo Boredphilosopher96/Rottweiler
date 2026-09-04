@@ -144,7 +144,7 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
             "  macos-release-budget:", 1
         )[0]
         macos = nightly.split("  macos-release-budget:", 1)[1].split(
-            "  eight-hour-soak:", 1
+            "  macos-soak-dispatch:", 1
         )[0]
 
         self.assertIn("scripts/prepare-linux-performance-binary.sh", linux_builder)

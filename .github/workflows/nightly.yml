@@ -100,6 +100,9 @@ jobs:
     name: Build isolated Linux performance binary
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      engine_artifact: linux-performance-rw-${{ github.run_id }}-${{ github.run_attempt }}
+      tui_artifact: linux-soak-tui-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -109,10 +112,12 @@ jobs:
       - run: rustup override set 1.97.1
       - name: Build performance binary outside the workspace
         run: scripts/prepare-linux-performance-binary.sh
+      - name: Bind Linux engine artifact identity
+        run: python3 scripts/artifact_bundle.py create "$RUNNER_TEMP/rottweiler-linux-performance-artifact.noindex" --source-sha "$GITHUB_SHA" --platform linux-x86_64
       - name: Upload isolated Linux performance binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: linux-performance-rw-${{ github.run_id }}
+          name: linux-performance-rw-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/rottweiler-linux-performance-artifact.noindex
           if-no-files-found: error
           overwrite: true
@@ -129,9 +134,11 @@ jobs:
         run: |
           cd packages/tui/dist
           sha256sum rottweiler-tui > rottweiler-tui.sha256
+      - name: Bind Linux TUI artifact identity
+        run: python3 scripts/artifact_bundle.py create packages/tui/dist --source-sha "$GITHUB_SHA" --platform linux-x86_64
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: linux-soak-tui-${{ github.run_id }}
+          name: linux-soak-tui-${{ github.run_id }}-${{ github.run_attempt }}
           path: packages/tui/dist
           if-no-files-found: error
           overwrite: true
@@ -141,6 +148,9 @@ jobs:
     name: Build isolated macOS performance binary
     runs-on: macos-15
     timeout-minutes: 30
+    outputs:
+      engine_artifact: macos-performance-rw-${{ github.run_id }}-${{ github.run_attempt }}
+      tui_artifact: macos-soak-tui-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -150,10 +160,12 @@ jobs:
       - run: rustup override set 1.97.1
       - name: Build performance binary outside the workspace
         run: scripts/prepare-macos-performance-binary.sh
+      - name: Bind macOS engine artifact identity
+        run: python3 scripts/artifact_bundle.py create "$RUNNER_TEMP/rottweiler-macos-performance-artifact.noindex" --source-sha "$GITHUB_SHA" --platform darwin-arm64
       - name: Upload isolated macOS performance binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: macos-performance-rw-${{ github.run_id }}
+          name: macos-performance-rw-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/rottweiler-macos-performance-artifact.noindex
           if-no-files-found: error
           overwrite: true
@@ -170,9 +182,11 @@ jobs:
         run: |
           cd packages/tui/dist
           shasum -a 256 rottweiler-tui > rottweiler-tui.sha256
+      - name: Bind macOS TUI artifact identity
+        run: python3 scripts/artifact_bundle.py create packages/tui/dist --source-sha "$GITHUB_SHA" --platform darwin-arm64
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: macos-soak-tui-${{ github.run_id }}
+          name: macos-soak-tui-${{ github.run_id }}-${{ github.run_attempt }}
           path: packages/tui/dist
           if-no-files-found: error
           overwrite: true
@@ -195,7 +209,7 @@ jobs:
       - name: Download isolated Linux performance binary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: linux-performance-rw-${{ github.run_id }}
+          name: ${{ needs.linux-performance-build.outputs.engine_artifact }}
           path: ${{ runner.temp }}/rottweiler-linux-performance-download.noindex
       - name: Verify isolated Linux performance binary
         shell: bash
@@ -336,107 +350,83 @@ jobs:
             "$RUNNER_TEMP/rottweiler-macos-performance-artifact.noindex" \
             "$RUNNER_TEMP/rottweiler-macos-performance-build.noindex"
 
-  eight-hour-soak:
-    name: Eight-hour supervised soak (${{ matrix.platform }})
-    if: vars.ROTTWEILER_SELF_HOSTED_RUNNERS == 'true'
-    needs: [runner-contract, linux-performance-build, macos-performance-build]
-    runs-on: ${{ fromJSON(matrix.runner) }}
-    timeout-minutes: 510
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: darwin-arm64
-            runner: '["self-hosted","macOS","ARM64","soak"]'
-            artifact: macos-performance-rw-${{ github.run_id }}
-            tui_artifact: macos-soak-tui-${{ github.run_id }}
-          - platform: linux-x86_64
-            runner: '["self-hosted","Linux","X64","soak"]'
-            artifact: linux-performance-rw-${{ github.run_id }}
-            tui_artifact: linux-soak-tui-${{ github.run_id }}
-    env:
-      ROTTWEILER_CREDENTIAL_BACKEND: file
+  macos-soak-dispatch:
+    name: Dispatch darwin-arm64 soak
+    needs: macos-performance-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Download isolated performance binary
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: ${{ matrix.artifact }}
-          path: ${{ runner.temp }}/rottweiler-soak-binary.noindex
-      - name: Verify isolated performance binary
-        shell: bash
+      - name: Install CI Python dependencies
         run: |
-          set -euo pipefail
-          cd "$RUNNER_TEMP/rottweiler-soak-binary.noindex"
-          python3 - <<'PY'
-          import hashlib
-          from pathlib import Path
-
-          expected = Path("rw.sha256").read_text(encoding="utf-8").split()[0]
-          actual = hashlib.sha256(Path("rw").read_bytes()).hexdigest()
-          if actual != expected:
-              raise SystemExit(f"rw checksum mismatch: expected {expected}, got {actual}")
-          PY
-          chmod 700 rw
-      - name: Download hosted soak TUI
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: ${{ matrix.tui_artifact }}
-          path: packages/tui/dist
-      - name: Verify hosted soak TUI
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd packages/tui/dist
-          python3 - <<'PY'
-          import hashlib
-          from pathlib import Path
-
-          expected = Path("rottweiler-tui.sha256").read_text(encoding="utf-8").split()[0]
-          actual = hashlib.sha256(Path("rottweiler-tui").read_bytes()).hexdigest()
-          if actual != expected:
-              raise SystemExit(f"TUI checksum mismatch: expected {expected}, got {actual}")
-          PY
-          chmod 700 rottweiler-tui
-      - name: Run the real supervisor, engine, and OpenTUI for eight hours
+          python3 -m venv "$RUNNER_TEMP/ci-python"
+          "$RUNNER_TEMP/ci-python/bin/pip" install -r scripts/requirements-ci.txt
+          echo "$RUNNER_TEMP/ci-python/bin" >> "$GITHUB_PATH"
+      - name: Check platform runner admission
+        env:
+          GH_TOKEN: ${{ secrets.ROTTWEILER_RUNNER_READ_TOKEN || github.token }}
+        run: python3 scripts/check-runner-capacity.py --repository "$GITHUB_REPOSITORY" --platform darwin-arm64 --output runner-capacity.json
+      - name: Dispatch independently bounded worker
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: >-
-          python3 scripts/run-soak.py
-          --rw "$RUNNER_TEMP/rottweiler-soak-binary.noindex/rw"
-          --tui packages/tui/dist/rottweiler-tui
-          --duration-seconds 28800
-          --output soak-result.json
-      - name: Enforce the checked-in 10 percent regression baseline
-        run: >-
-          python3 scripts/check-perf-baseline.py
-          --baseline benchmarks/performance-baseline.json
-          --platform "${{ matrix.platform }}"
-          --suite soak
-          --measurement soak-result.json
-          --output soak-baseline-result.json
-      - name: Retain soak measurements
+          python3 scripts/soak_dispatch.py dispatch --repository "$GITHUB_REPOSITORY"
+          --platform darwin-arm64 --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"
+          --sha "$GITHUB_SHA" --output soak-dispatch.json
+      - name: Retain queue evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: soak-${{ matrix.platform }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: soak-dispatch-darwin-arm64-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            soak-result.json
-            soak-baseline-result.json
+            runner-capacity.json
+            soak-dispatch.json
           if-no-files-found: error
           retention-days: 30
-      - name: Reclaim persistent runner workspace
-        if: always()
-        shell: bash
+
+  linux-soak-dispatch:
+    name: Dispatch linux-x86_64 soak
+    needs: linux-performance-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install CI Python dependencies
         run: |
-          rm -rf \
-            "$GITHUB_WORKSPACE/target" \
-            "$GITHUB_WORKSPACE/dist" \
-            "$GITHUB_WORKSPACE/soak-result.json" \
-            "$GITHUB_WORKSPACE/soak-baseline-result.json" \
-            "$GITHUB_WORKSPACE/packages/tui/dist" \
-            "$GITHUB_WORKSPACE/packages/tui/node_modules" \
-            "$RUNNER_TEMP/rottweiler-soak-binary.noindex"
+          python3 -m venv "$RUNNER_TEMP/ci-python"
+          "$RUNNER_TEMP/ci-python/bin/pip" install -r scripts/requirements-ci.txt
+          echo "$RUNNER_TEMP/ci-python/bin" >> "$GITHUB_PATH"
+      - name: Check platform runner admission
+        env:
+          GH_TOKEN: ${{ secrets.ROTTWEILER_RUNNER_READ_TOKEN || github.token }}
+        run: python3 scripts/check-runner-capacity.py --repository "$GITHUB_REPOSITORY" --platform linux-x86_64 --output runner-capacity.json
+      - name: Dispatch independently bounded worker
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 scripts/soak_dispatch.py dispatch --repository "$GITHUB_REPOSITORY"
+          --platform linux-x86_64 --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"
+          --sha "$GITHUB_SHA" --output soak-dispatch.json
+      - name: Retain queue evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: soak-dispatch-linux-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            runner-capacity.json
+            soak-dispatch.json
+          if-no-files-found: error
+          retention-days: 30
 
   wsl2-acceptance:
     name: WSL2 release, sandbox, doctor, and DrvFS acceptance
