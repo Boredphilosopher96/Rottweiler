@@ -92,20 +92,31 @@ def write_report(path: Path, report: dict) -> None:
 
 
 def watch_worker(api: GitHub, child_id: int, output: Path, *, clock=time.monotonic,
-                 sleep=time.sleep, queue_seconds=QUEUE_SECONDS) -> int:
+                 sleep=time.sleep, queue_seconds=QUEUE_SECONDS,
+                 workload_names: tuple[str, ...] = ("Eight-hour workload",)) -> int:
     report = {"schema_version": 1, "worker_run_id": child_id,
               "status": "queued", "qualification": "not_exercised"}
     write_report(output, report)
     started = clock()
     api.deadline = started + queue_seconds
+    observed_starts: set[str] = set()
     try:
         while clock() - started < queue_seconds:
             run = api.request(f"actions/runs/{child_id}")
             jobs = api.pages(f"actions/runs/{child_id}/jobs", "jobs")
-            workload = [job for job in jobs if job["name"] == "Eight-hour workload"]
-            if len(workload) > 1:
-                raise ValueError("ambiguous worker workload")
-            if workload and workload[0]["status"] == "in_progress":
+            for name in workload_names:
+                workload = [job for job in jobs if job["name"] == name]
+                if len(workload) > 1:
+                    raise ValueError("ambiguous worker workload")
+                if workload and workload[0]["status"] == "in_progress":
+                    observed_starts.add(name)
+                elif workload and workload[0]["status"] == "completed" and name not in observed_starts:
+                    report.update(status="workload_ended_before_observed_start", workload=name,
+                                  workload_conclusion=workload[0].get("conclusion"),
+                                  observed_starts=sorted(observed_starts))
+                    raise ValueError("native workload ended before its start was observed")
+            report["observed_starts"] = sorted(observed_starts)
+            if observed_starts == set(workload_names):
                 report.update(status="started", qualification="pending",
                               queue_seconds=round(clock() - started, 3))
                 write_report(output, report)
@@ -190,14 +201,18 @@ def dispatch(api: GitHub, platform: str, run_id: int, attempt: int, sha: str, ou
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["dispatch", "validate", "watch"])
+    parser.add_argument("command", choices=["dispatch", "validate", "watch", "watch-release"])
     parser.add_argument("--repository", required=True)
-    parser.add_argument("--platform", choices=sorted(PLATFORMS), required=True)
-    parser.add_argument("--run-id", type=int, required=True)
-    parser.add_argument("--attempt", type=int, required=True)
-    parser.add_argument("--sha", required=True)
+    parser.add_argument("--platform", choices=sorted(PLATFORMS))
+    parser.add_argument("--run-id", type=int)
+    parser.add_argument("--attempt", type=int)
+    parser.add_argument("--sha")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if args.command in ("dispatch", "validate") and any(
+        value is None for value in (args.platform, args.run_id, args.attempt, args.sha)
+    ):
+        parser.error("candidate commands require platform, run-id, attempt and sha")
     api = GitHub(args.repository)
     if args.command == "validate":
         names = validate_candidate(api, args.platform, args.run_id, args.attempt, args.sha)
@@ -211,6 +226,9 @@ def main() -> int:
     def interrupted(_signal, _frame):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, interrupted)
+    if args.command == "watch-release":
+        names = tuple(f"Exact-tag eight-hour soak ({platform})" for platform in PLATFORMS)
+        return watch_worker(api, int(os.environ["GITHUB_RUN_ID"]), args.output, workload_names=names)
     if args.command == "watch":
         # The token belongs to this worker workflow, so cancellation cannot be
         # redirected through a caller-supplied run id.

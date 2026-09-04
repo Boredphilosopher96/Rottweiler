@@ -83,9 +83,23 @@ Soaks emit a metadata-only checkpoint to the streamed GitHub job log each minute
 as well as atomic local reports. This preserves another observation path if a
 runner disappears before artifact upload; it does not replace hosted fault
 injection for loss-of-runner retention. No terminal or transcript content is
-included in those heartbeat records. v1 release soak queue ownership and
-cross-platform qualification aggregation still need the corresponding release
-integration; nightly dispatch alone does not satisfy release qualification.
+included in those heartbeat records.
+
+Signed releases check actual native capacity before builds. Their two exact-tag
+soaks share a hosted queue watcher and both must start within fifteen minutes.
+A signed release is one atomic qualification: if either platform cannot start,
+the watcher retains its evidence and requests cancellation of that release run,
+including its other platform. It never cancels another workflow. v1 admission
+requires both the watcher and the complete soak matrix to succeed; pre-v1 skips
+both and makes no protected-soak claim.
+
+Protected soaks execute only in a fresh workflow run. GitHub's failed-job rerun
+can otherwise reuse a successful watcher while placing the failed native job
+back in the queue. Job admission rejects those retries and qualification gives
+an explicit fresh-dispatch instruction. Nightly dispatch can create a new worker
+for the same verified candidate. Signed release supports a fresh manual dispatch
+at the exact version tag, validated as `refs/tags/v<version>`, without moving or
+recreating a tag. Eight-hour results are never substituted with dispatch success.
 
 Dependabot's native Bun ecosystem maintains `bun.lock`; see the
 [GitHub options reference](https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference).

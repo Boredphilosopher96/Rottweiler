@@ -1,6 +1,7 @@
 name: Signed release
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - "v*"
@@ -36,7 +37,7 @@ jobs:
         run: |
           set -euo pipefail
           version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
-          test "$GITHUB_REF_NAME" = "v$version"
+          test "$GITHUB_REF" = "refs/tags/v$version"
           python3 scripts/check-release-readiness.py \
             --release-version "$version" \
             --output release-readiness.json
@@ -106,6 +107,20 @@ jobs:
           fi
           printf 'major=%s\nqualification=%s\npreflight_run_id=%s\n' \
             "$major" "$qualification" "$preflight_run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Verify actual native capacity for v1 qualification
+        if: steps.release.outputs.major != '0'
+        env:
+          GH_TOKEN: ${{ secrets.ROTTWEILER_RUNNER_READ_TOKEN || github.token }}
+        run: python3 scripts/check-runner-capacity.py --repository "$GITHUB_REPOSITORY" --output runner-capacity.json
+      - name: Retain native capacity outcome
+        if: ${{ always() && steps.release.outputs.major != '0' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-runner-capacity-${{ github.run_id }}-${{ github.run_attempt }}
+          path: runner-capacity.json
+          if-no-files-found: warn
+          retention-days: 90
 
   build-linux:
     name: Build linux-x86_64
@@ -503,9 +518,48 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
 
+  release-soak-queue:
+    name: Bound exact-tag soak queues
+    if: needs.runner-contract.outputs.release_major != '0' && github.run_attempt == 1
+    needs: [runner-contract, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
+        with:
+          persist-credentials: false
+      - name: Watch until both native workloads start
+        id: watch
+        timeout-minutes: 16
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 scripts/soak_dispatch.py watch-release --repository "$GITHUB_REPOSITORY"
+          --output queue-result.json
+      - name: Retain queue outcome
+        timeout-minutes: 2
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-soak-queue-${{ github.run_id }}-${{ github.run_attempt }}
+          path: queue-result.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Cancel this incomplete release qualification after retaining evidence
+        if: ${{ always() && steps.watch.outcome != 'success' }}
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/force-cancel"
+
   release-soak:
     name: Exact-tag eight-hour soak (${{ matrix.platform }})
-    if: needs.runner-contract.outputs.release_major != '0'
+    if: needs.runner-contract.outputs.release_major != '0' && github.run_attempt == 1
     needs: [runner-contract, build-linux, build-macos]
     runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 510
@@ -519,6 +573,7 @@ jobs:
             runner: '["self-hosted","Linux","X64","soak"]'
     env:
       ROTTWEILER_CREDENTIAL_BACKEND: file
+      ROTTWEILER_CANDIDATE_SHA: ${{ github.sha }}
       ROTTWEILER_UPDATE_ROOT_VERSION: ${{ vars.ROTTWEILER_UPDATE_ROOT_VERSION }}
       ROTTWEILER_UPDATE_ROOT_THRESHOLD: ${{ vars.ROTTWEILER_UPDATE_ROOT_THRESHOLD }}
       ROTTWEILER_UPDATE_ROOT_KEYS_JSON: ${{ vars.ROTTWEILER_UPDATE_ROOT_KEYS_JSON }}
@@ -553,6 +608,7 @@ jobs:
           printf 'ROTTWEILER_SOAK_ROOT=%s\n' "$root" >> "$GITHUB_ENV"
           printf 'ROTTWEILER_SOAK_RW=%s\n' "$root/installed/current/bin/rw" >> "$GITHUB_ENV"
       - run: >-
+          python3 scripts/ci_evidence.py --gate release-soak --output soak-gate.json --
           python3 scripts/run-soak.py
           --rw "$ROTTWEILER_SOAK_RW"
           --duration-seconds 28800
@@ -571,6 +627,7 @@ jobs:
           name: release-soak-${{ matrix.platform }}-${{ github.ref_name }}-${{ github.run_attempt }}
           path: |
             soak-result.json
+            soak-gate.json
             soak-baseline-result.json
           if-no-files-found: error
           retention-days: 90
@@ -652,7 +709,7 @@ jobs:
   qualification-gate:
     name: Admit exact tag for its release tier
     if: ${{ always() }}
-    needs: [runner-contract, release-gate, release-terminal-bench, release-soak, wsl2-acceptance, release-linux-security]
+    needs: [runner-contract, release-gate, release-terminal-bench, release-soak, release-soak-queue, wsl2-acceptance, release-linux-security]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -666,10 +723,15 @@ jobs:
           RELEASE_GATE_RESULT: ${{ needs.release-gate.result }}
           TERMINAL_BENCH_RESULT: ${{ needs.release-terminal-bench.result }}
           RELEASE_SOAK_RESULT: ${{ needs.release-soak.result }}
+          RELEASE_SOAK_QUEUE_RESULT: ${{ needs.release-soak-queue.result }}
           WSL2_RESULT: ${{ needs.wsl2-acceptance.result }}
           LINUX_SECURITY_RESULT: ${{ needs.release-linux-security.result }}
         run: |
           set -euo pipefail
+          if [ "$RELEASE_MAJOR" != 0 ] && [ "$GITHUB_RUN_ATTEMPT" != 1 ]; then
+            echo 'Protected release qualification requires a fresh workflow dispatch at the exact version tag; rerunning jobs does not recreate its queue watcher.' >&2
+            exit 1
+          fi
           for result in \
             "$RELEASE_GATE_RESULT" \
             "$TERMINAL_BENCH_RESULT" \
@@ -681,6 +743,7 @@ jobs:
             0)
               test "$QUALIFICATION" = pre-v1
               test "$RELEASE_SOAK_RESULT" = skipped
+              test "$RELEASE_SOAK_QUEUE_RESULT" = skipped
               protected_soak=not_claimed_for_pre_v1
               terminal_bench=not_claimed_for_pre_v1
               dogfood=not_claimed_for_pre_v1
@@ -690,6 +753,7 @@ jobs:
             *)
               test "$QUALIFICATION" = v1
               test "$RELEASE_SOAK_RESULT" = success
+              test "$RELEASE_SOAK_QUEUE_RESULT" = success
               protected_soak=passed
               terminal_bench=passed
               dogfood=passed
