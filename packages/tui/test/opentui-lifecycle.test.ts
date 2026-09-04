@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test"
 
-import { CodeRenderable, type TreeSitterClient } from "@opentui/core"
+import { CodeRenderable, TreeSitterClient } from "@opentui/core"
 import { createTestRenderer } from "@opentui/core/testing"
 
 import { createSyntaxStyle, nordTheme } from "../src/theme"
@@ -33,6 +33,33 @@ function controlledHighlighter(): ControlledHighlighter {
 afterEach(() => mock.restore())
 
 describe("OpenTUI highlighting lifecycle", () => {
+  test("literal prose needs no worker while Markdown syntax and code still use the highlighter", async () => {
+    const client = new TreeSitterClient({ dataPath: "/tmp/unused-literal-prose-parser" }, { autoStartWorker: false })
+    const highlighting = spyOn(client, "highlightOnce").mockResolvedValue({ highlights: [] })
+    const stable = stabilizeTreeSitterClient(client)
+    const setup = await createTestRenderer({ width: 40, height: 8, useThread: false })
+    const syntaxStyle = createSyntaxStyle(nordTheme)
+    try {
+      const prose = new CodeRenderable(setup.renderer, {
+        content: "Result 39", filetype: "markdown", syntaxStyle, treeSitterClient: stable, drawUnstyledText: true,
+      })
+      setup.renderer.root.add(prose)
+      await setup.renderOnce()
+      await prose.highlightingDone
+      expect(setup.captureCharFrame()).toContain("Result 39")
+      expect(highlighting).not.toHaveBeenCalled()
+      for (const content of ["**bold**", "[link](url)", "    indented", "line\nnext", "&amp;", "# heading", "a_b"]) {
+        await stable.highlightOnce(content, "markdown")
+      }
+      await stable.highlightOnce("answer", "typescript")
+      expect(highlighting).toHaveBeenCalledTimes(8)
+    } finally {
+      setup.renderer.destroy()
+      syntaxStyle.destroy()
+      await client.destroy()
+    }
+  })
+
   test("registers fenced-code grammars on first use instead of at startup", async () => {
     const registered: string[] = []
     const buffers = new Map<number, { filetype: string }>()

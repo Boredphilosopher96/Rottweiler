@@ -1,6 +1,6 @@
 import { createStreamingTail } from "../src/state/model"
 import { toolOutputBuffer } from "../src/state/display-buffer"
-import { afterEach, describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, spyOn, test } from "bun:test"
 import { CliRenderEvents, type Selection } from "@opentui/core"
 import { createTestRenderer, type TestRenderer } from "@opentui/core/testing"
 import { homedir } from "node:os"
@@ -9490,6 +9490,43 @@ describe("Rottweiler OpenTUI shell", () => {
       text: "Historical answer rendered through the retained tree.",
     })
     expect(commands).toEqual([])
+  })
+
+  test("defers hidden Tools binding and preserves its selection and current output on return", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 24, useThread: false })
+    renderer = setup.renderer
+    const initial = toolsAppState()
+    const app = createRottweilerApp(renderer, { initialState: initial })
+    renderer.root.add(app)
+    await setup.renderOnce()
+    const updates = spyOn(app.toolsWorkspace, "update")
+    try {
+      const original = initial.tools["tools-0"]
+      if (original === undefined) throw new Error("fixture tool missing")
+      const latest = { ...initial, tools: { ...initial.tools, "tools-0": {
+        ...original, chunks: original.chunks.append({ stream: "stdout", chunk: "\nnewest retained output" }),
+      } } }
+      app.setState(latest)
+      await setup.renderOnce()
+      expect(updates).not.toHaveBeenCalled()
+      app.showToolsView()
+      await setup.renderOnce()
+      expect(updates).toHaveBeenCalledTimes(1)
+      const row = app.toolsWorkspace.rowForKey("tool:tools-0")
+      expect(row).toBeDefined()
+      expect(row?.output.plainText).toContain("newest retained output")
+      app.toolsWorkspace.selectNextBlock()
+      app.toolsWorkspace.toggleSelectedBlock()
+      const selected = app.toolsWorkspace.captureClientState()
+      app.showConversationView()
+      updates.mockClear()
+      app.setState({ ...latest })
+      await setup.renderOnce()
+      expect(updates).not.toHaveBeenCalled()
+      app.showToolsView()
+      await setup.renderOnce()
+      expect(app.toolsWorkspace.captureClientState()).toEqual(selected)
+    } finally { updates.mockRestore() }
   })
 
   test("projects Tools elapsed labels from an injected presentation clock", async () => {

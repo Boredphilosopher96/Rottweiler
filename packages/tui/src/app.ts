@@ -1062,7 +1062,10 @@ export class RottweilerApp extends BoxRenderable {
     this.setState(this.#state)
     if (composerState !== null) this.#restoreComposerState(composerState)
     if (transcriptClientState !== null) this.transcript.restoreClientState(transcriptClientState)
-    if (toolsClientState !== null) this.toolsWorkspace.restoreClientState(toolsClientState)
+    if (toolsClientState !== null) {
+      this.#updateToolsWorkspace(this.#presentedState(), true)
+      this.toolsWorkspace.restoreClientState(toolsClientState)
+    }
     this.transcript.setScrollOffset(scrollTop)
     this.toolsWorkspace.activityScroller.scrollTo(toolsScrollTop)
 
@@ -1809,6 +1812,9 @@ export class RottweilerApp extends BoxRenderable {
     const state = this.#pendingClientState
     if (state === null) return
     const transcriptReady = state.scrollTop === 0 || this.#presentedState().transcript.length > 0
+    if (state.tools.expanded.length > 0 || state.tools.selectedId !== null || state.toolsScrollTop > 0) {
+      this.#updateToolsWorkspace(this.#presentedState(), true)
+    }
     const toolsReady = state.toolsScrollTop === 0 || this.toolsWorkspace.mountedRowCount > 0
     const transcriptBlocksReady = this.transcript.restoreClientState(state.transcript)
     const toolsBlocksReady = this.toolsWorkspace.restoreClientState(state.tools)
@@ -2627,7 +2633,11 @@ export class RottweilerApp extends BoxRenderable {
     this.subagentTray.setPresentationEnabled(!this.contextPanel.visible)
   }
 
-  #updateToolsWorkspace(state: RottweilerState): void {
+  #updateToolsWorkspace(state: RottweilerState, restoreHidden = false): void {
+    if (this.#primaryView !== "tools" && !restoreHidden) {
+      this.#clearToolsElapsedTimer()
+      return
+    }
     const model = projectToolsWorkspace(state, this.#options.nowMs())
     this.toolsWorkspace.update(model)
     this.#syncToolsElapsedTimer(model)
