@@ -388,6 +388,8 @@ pub trait CommandExecutor: Send + Sync {
         false
     }
 
+    /// Returns only after the command's effects have settled. The caller must
+    /// retain this future through cancellation; `BashTool` owns foreground calls.
     async fn run(
         &self,
         request: CommandRequest,
@@ -1490,18 +1492,17 @@ impl CommandExecutor for TokioCommandExecutor {
         #[cfg(target_os = "linux")]
         drop(guarded.helper_pin.take());
         let child_id = child.id();
-        let mut launch_gate = child
-            .stdin
-            .take()
-            .ok_or_else(|| ToolError::Command("command launch gate was not created".to_owned()))?;
+        let Some(mut launch_gate) = child.stdin.take() else {
+            settle_command_child(&mut child, child_id).await;
+            return Err(ToolError::Command(
+                "command launch gate was not created".to_owned(),
+            ));
+        };
         let mut watchdog =
             match spawn_parent_death_watchdog(child_id, self.execution_lease.as_deref()).await {
                 Ok(watchdog) => watchdog,
                 Err(error) => {
-                    terminate_process_group(child_id);
-                    let _ = child.start_kill();
-                    let _ = child.wait().await;
-                    terminate_and_wait_process_group(child_id).await?;
+                    settle_command_child(&mut child, child_id).await;
                     return Err(error);
                 }
             };
@@ -1517,20 +1518,14 @@ impl CommandExecutor for TokioCommandExecutor {
         let launch_result = tokio::select! {
             biased;
             () = cancellation.cancelled() => {
-                terminate_process_group(child_id);
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-                terminate_and_wait_process_group(child_id).await?;
+                settle_command_child(&mut child, child_id).await;
                 watchdog.disarm().await?;
                 return Err(ToolError::Cancelled);
             }
             result = launch_gate.write_all(b"armed\n") => result,
         };
         if let Err(error) = launch_result {
-            terminate_process_group(child_id);
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-            terminate_and_wait_process_group(child_id).await?;
+            settle_command_child(&mut child, child_id).await;
             let _ = watchdog.disarm().await;
             return Err(ToolError::Command(format!(
                 "could not release guarded command: {error}"
@@ -1538,14 +1533,13 @@ impl CommandExecutor for TokioCommandExecutor {
         }
         let _ = launch_gate.shutdown().await;
         drop(launch_gate);
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| ToolError::Command("stdout pipe was not created".to_owned()))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| ToolError::Command("stderr pipe was not created".to_owned()))?;
+        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+            settle_command_child(&mut child, child_id).await;
+            watchdog.disarm().await?;
+            return Err(ToolError::Command(
+                "command output pipes were not created".to_owned(),
+            ));
+        };
         let stdout_task = tokio::spawn(copy_stream(
             stdout,
             ToolOutputStream::Stdout,
@@ -1556,36 +1550,45 @@ impl CommandExecutor for TokioCommandExecutor {
         let status = tokio::select! {
             biased;
             watchdog_status = watchdog.wait_unexpected() => {
-                terminate_process_group(child_id);
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-                terminate_and_wait_process_group(child_id).await?;
-                finish_output_task(stdout_task).await?;
-                finish_output_task(stderr_task).await?;
+                settle_command_child(&mut child, child_id).await;
+                let _ = watchdog.disarm().await;
+                finish_command_output(stdout_task, stderr_task).await?;
                 return Err(ToolError::Command(format!(
                     "command watchdog exited before command completion: {watchdog_status}"
                 )));
             }
             () = cancellation.cancelled() => {
-                terminate_process_group(child_id);
-                let _ = child.start_kill();
-                let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
-                terminate_and_wait_process_group(child_id).await?;
-                watchdog.disarm().await?;
-                finish_output_task(stdout_task).await?;
-                finish_output_task(stderr_task).await?;
+                settle_command_child(&mut child, child_id).await;
+                let watchdog_result = watchdog.disarm().await;
+                let output_result = finish_command_output(stdout_task, stderr_task).await;
+                watchdog_result?;
+                output_result?;
                 return Err(ToolError::Cancelled);
             }
             status = child.wait() => status,
         };
-        terminate_and_wait_process_group(child_id).await?;
-        watchdog.disarm().await?;
-        finish_output_task(stdout_task).await?;
-        finish_output_task(stderr_task).await?;
+        settle_command_child(&mut child, child_id).await;
+        let watchdog_result = watchdog.disarm().await;
+        let output_result = finish_command_output(stdout_task, stderr_task).await;
+        watchdog_result?;
+        output_result?;
         let status = status.map_err(|error| ToolError::Command(error.to_string()))?;
         Ok(CommandOutcome {
             exit_code: status.code().unwrap_or(-1),
         })
+    }
+}
+
+async fn settle_command_child(child: &mut Child, child_id: Option<u32>) {
+    terminate_process_group(child_id);
+    let _ = child.start_kill();
+    if let Err(error) = child.wait().await {
+        tracing::error!(%error, "command child could not be reaped; effect settlement remains blocked");
+        std::future::pending::<()>().await;
+    }
+    if let Err(error) = terminate_and_wait_process_group(child_id).await {
+        tracing::error!(%error, "command group exit could not be proven; effect settlement remains blocked");
+        std::future::pending::<()>().await;
     }
 }
 
@@ -1973,12 +1976,16 @@ impl ParentDeathWatchdog {
     }
 
     async fn disarm(&mut self) -> Result<(), ToolError> {
-        if let Some(mut control) = self.control.take() {
-            control.write_all(b"done\n").await.map_err(|error| {
-                ToolError::Command(format!("could not disarm watchdog: {error}"))
-            })?;
+        let control_result = if let Some(mut control) = self.control.take() {
+            let result = control
+                .write_all(b"done\n")
+                .await
+                .map_err(|error| ToolError::Command(format!("could not disarm watchdog: {error}")));
             let _ = control.shutdown().await;
-        }
+            result
+        } else {
+            Ok(())
+        };
         let result = match tokio::time::timeout(Duration::from_secs(2), self.child.wait()).await {
             Ok(Ok(status)) if status.success() => Ok(()),
             Ok(Ok(status)) => Err(ToolError::Command(format!(
@@ -1996,7 +2003,7 @@ impl ParentDeathWatchdog {
             }
         };
         let _ = (&mut self.stderr_task).await;
-        result
+        control_result.and(result)
     }
 }
 
@@ -2104,6 +2111,14 @@ async fn emit_output_batch(
         .await
 }
 
+async fn finish_command_output(
+    stdout: tokio::task::JoinHandle<Result<(), ToolError>>,
+    stderr: tokio::task::JoinHandle<Result<(), ToolError>>,
+) -> Result<(), ToolError> {
+    let (stdout, stderr) = tokio::join!(finish_output_task(stdout), finish_output_task(stderr));
+    stdout.and(stderr)
+}
+
 async fn finish_output_task(
     mut task: tokio::task::JoinHandle<Result<(), ToolError>>,
 ) -> Result<(), ToolError> {
@@ -2111,7 +2126,11 @@ async fn finish_output_task(
         result = &mut task => result.map_err(|error| ToolError::Output(error.to_string()))?,
         () = sleep(Duration::from_secs(2)) => {
             task.abort();
-            Ok(())
+            match task.await {
+                Ok(result) => result,
+                Err(error) if error.is_cancelled() => Ok(()),
+                Err(error) => Err(ToolError::Output(error.to_string())),
+            }
         }
     }
 }
@@ -2328,9 +2347,69 @@ pub async fn terminate_and_wait_process_group(_child_id: Option<u32>) -> Result<
     ))
 }
 
+#[derive(Default)]
+struct ForegroundCommands {
+    calls: Mutex<Vec<Arc<ForegroundCommand>>>,
+}
+
+struct ForegroundCommand {
+    cancellation: CancellationToken,
+    abandoned: std::sync::atomic::AtomicBool,
+    completion: tokio::sync::watch::Receiver<bool>,
+}
+
+struct ForegroundCaller {
+    command: Arc<ForegroundCommand>,
+    armed: bool,
+}
+
+impl Drop for ForegroundCaller {
+    fn drop(&mut self) {
+        if self.armed {
+            self.command
+                .abandoned
+                .store(true, std::sync::atomic::Ordering::Release);
+            self.command.cancellation.cancel();
+        }
+    }
+}
+
+impl ForegroundCommands {
+    async fn settle_abandoned(&self) {
+        loop {
+            let abandoned = {
+                let calls = self
+                    .calls
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                calls
+                    .iter()
+                    .filter(|call| call.abandoned.load(std::sync::atomic::Ordering::Acquire))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
+            if abandoned.is_empty() {
+                return;
+            }
+            for command in abandoned {
+                let mut completion = command.completion.clone();
+                while !*completion.borrow_and_update() {
+                    if completion.changed().await.is_err() {
+                        tracing::error!(
+                            "foreground command task exited without proving effect settlement"
+                        );
+                        std::future::pending::<()>().await;
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct BashTool {
     executor: Arc<dyn CommandExecutor>,
+    foreground: Arc<ForegroundCommands>,
     limits: ToolLimits,
     safety: Arc<CommandSafetyClassifier>,
     background: Option<Arc<BackgroundProcessManager>>,
@@ -2341,6 +2420,7 @@ impl BashTool {
     pub fn new(executor: Arc<dyn CommandExecutor>, limits: ToolLimits) -> Self {
         Self {
             executor,
+            foreground: Arc::new(ForegroundCommands::default()),
             limits,
             safety: Arc::new(CommandSafetyClassifier::default()),
             background: None,
@@ -2358,10 +2438,57 @@ impl BashTool {
         self.safety = safety;
         self
     }
+
+    async fn run_foreground(
+        &self,
+        request: CommandRequest,
+        cancellation: CancellationToken,
+        output: Arc<dyn ToolOutputSink>,
+    ) -> Result<CommandOutcome, ToolError> {
+        self.foreground.settle_abandoned().await;
+        cancellation.check()?;
+        let (completed, completion) = tokio::sync::watch::channel(false);
+        let command = Arc::new(ForegroundCommand {
+            cancellation: cancellation.clone(),
+            abandoned: std::sync::atomic::AtomicBool::new(false),
+            completion,
+        });
+        self.foreground
+            .calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(Arc::clone(&command));
+        let mut caller = ForegroundCaller {
+            command,
+            armed: true,
+        };
+        let executor = Arc::clone(&self.executor);
+        let foreground = Arc::clone(&self.foreground);
+        let finished_command = Arc::clone(&caller.command);
+        let task = tokio::spawn(async move {
+            let result = executor.run(request, cancellation, output).await;
+            foreground
+                .calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retain(|call| !Arc::ptr_eq(call, &finished_command));
+            completed.send_replace(true);
+            result
+        });
+        let result = task.await.map_err(|error| {
+            ToolError::Command(format!("foreground command task failed: {error}"))
+        })?;
+        caller.armed = false;
+        result
+    }
 }
 
 #[async_trait]
 impl Tool for BashTool {
+    async fn settle_effects(&self) {
+        self.foreground.settle_abandoned().await;
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "bash".to_owned(),
@@ -2486,8 +2613,7 @@ impl Tool for BashTool {
             ));
         }
         let outcome = self
-            .executor
-            .run(request, context.cancellation.clone(), capture.clone())
+            .run_foreground(request, context.cancellation.clone(), capture.clone())
             .await?;
         context.cancellation.check()?;
         let captured = capture.finish()?;
@@ -3366,6 +3492,13 @@ sys.exit(92)
             .execute(&context, json!({"command": "ignored"}))
             .await
             .expect("command result");
+        assert!(
+            tool.foreground
+                .calls
+                .lock()
+                .expect("foreground tracking")
+                .is_empty()
+        );
         assert_eq!(result.data["exit_code"], 7);
         assert!(result.truncated);
         assert!(result.content.contains("89"));
@@ -3561,6 +3694,152 @@ sys.exit(92)
         ));
     }
 
+    #[derive(Default)]
+    struct DelayedNativeCleanup {
+        started: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        finished: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait]
+    impl CommandExecutor for DelayedNativeCleanup {
+        async fn run(
+            &self,
+            request: CommandRequest,
+            cancellation: CancellationToken,
+            output: Arc<dyn ToolOutputSink>,
+        ) -> Result<CommandOutcome, ToolError> {
+            let native_cancellation = CancellationToken::default();
+            let executor = TokioCommandExecutor::default();
+            let command = executor.run(request, native_cancellation.clone(), output);
+            tokio::pin!(command);
+            tokio::select! {
+                result = &mut command => result,
+                () = cancellation.cancelled() => {
+                    self.started.notify_one();
+                    self.release.notified().await;
+                    native_cancellation.cancel();
+                    let result = command.await;
+                    self.finished.store(true, std::sync::atomic::Ordering::Release);
+                    result
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn foreground_cleanup_and_recording_survive_caller_drop() {
+        let _lifecycle = crate::acquire_process_lifecycle_test_gate().await;
+        let root = tempdir().expect("workspace");
+        let fixtures = tempdir().expect("recordings");
+        let writes = root.path().join("writes");
+        let cancellation = CancellationToken::default();
+        let context = ToolContext::new(root.path())
+            .expect("context")
+            .with_cancellation(cancellation.clone());
+        let cleanup = Arc::new(DelayedNativeCleanup::default());
+        let recording =
+            RecordingCommandExecutor::new(cleanup.clone(), fixtures.path(), root.path())
+                .expect("recording executor");
+        let tool = Arc::new(BashTool::new(Arc::new(recording), ToolLimits::default()));
+        let mut task = {
+            let tool = Arc::clone(&tool);
+            tokio::spawn(async move {
+                tool.execute(&context, json!({"command": "while :; do printf running >> writes; /bin/sleep 0.01; done"})).await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !writes.exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("native command started");
+        cancellation.cancel();
+        tokio::time::timeout(Duration::from_secs(3), cleanup.started.notified())
+            .await
+            .expect("cleanup started");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), &mut task)
+                .await
+                .is_err()
+        );
+        task.abort();
+        assert!(task.await.expect_err("caller dropped").is_cancelled());
+        let premature = tokio::time::timeout(Duration::from_millis(50), tool.settle_effects())
+            .await
+            .is_ok();
+        cleanup.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(3), tool.settle_effects())
+            .await
+            .expect("settlement");
+        assert!(
+            !premature,
+            "Bash released its settlement barrier while native cleanup was still pending"
+        );
+        assert!(cleanup.finished.load(std::sync::atomic::Ordering::Acquire));
+        let occurrences = load_command_occurrences(&fixtures.path().join(COMMAND_REPLAY_FILE))
+            .expect("recording");
+        assert_eq!(occurrences.len(), 1);
+        assert!(matches!(
+            occurrences[0].terminal,
+            RecordedCommandTerminal::Cancelled
+        ));
+        std::fs::write(&writes, b"next mutation").expect("conflicting write");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            std::fs::read(writes).expect("settled file"),
+            b"next mutation"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropped_foreground_call_cancels_native_parent_and_descendant_before_settlement() {
+        let _lifecycle = crate::acquire_process_lifecycle_test_gate().await;
+        let root = tempdir().expect("workspace");
+        let lease_path = root.path().join("execution.lock");
+        let executor = TokioCommandExecutor::with_execution_lease(Arc::new(
+            ExecutionLease::acquire(&lease_path).expect("execution lease"),
+        ));
+        let tool = Arc::new(BashTool::new(Arc::new(executor), ToolLimits::default()));
+        let context = ToolContext::new(root.path()).expect("context");
+        let task = {
+            let tool = Arc::clone(&tool);
+            tokio::spawn(async move {
+                tool.execute(&context, json!({"command": "(while :; do printf child >> child-writes; /bin/sleep 0.01; done) & while :; do printf parent >> parent-writes; /bin/sleep 0.01; done"})).await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !root.path().join("parent-writes").exists()
+                || !root.path().join("child-writes").exists()
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("native parent and child started");
+        task.abort();
+        assert!(task.await.expect_err("caller dropped").is_cancelled());
+        tokio::time::timeout(Duration::from_secs(3), tool.settle_effects())
+            .await
+            .expect("native settlement");
+        for file in ["parent-writes", "child-writes"] {
+            std::fs::write(root.path().join(file), b"next mutation").expect("conflicting write");
+        }
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        for file in ["parent-writes", "child-writes"] {
+            assert_eq!(
+                std::fs::read(root.path().join(file)).expect("settled file"),
+                b"next mutation"
+            );
+        }
+        drop(tool);
+        let _recovered = ExecutionLease::acquire_for(&lease_path, Duration::from_secs(1))
+            .expect("watchdog released execution lease after settlement");
+    }
+
     struct BlockingExecutor;
 
     #[async_trait]
@@ -3594,6 +3873,31 @@ sys.exit(92)
             task.await.expect("join"),
             Err(ToolError::Cancelled)
         ));
+    }
+
+    #[tokio::test]
+    async fn stdout_failure_still_awaits_stderr_settlement() {
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (release, released) = tokio::sync::oneshot::channel();
+        let stdout = tokio::spawn(async { Err(ToolError::Output("stdout failed".to_owned())) });
+        let stderr_finished = Arc::clone(&finished);
+        let stderr = tokio::spawn(async move {
+            released.await.expect("release stderr");
+            stderr_finished.store(true, std::sync::atomic::Ordering::Release);
+            Ok(())
+        });
+        let mut drain = tokio::spawn(finish_command_output(stdout, stderr));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut drain)
+                .await
+                .is_err()
+        );
+        release.send(()).expect("release stderr");
+        assert!(matches!(
+            drain.await.expect("drain task"),
+            Err(ToolError::Output(_))
+        ));
+        assert!(finished.load(std::sync::atomic::Ordering::Acquire));
     }
 
     #[tokio::test(start_paused = true)]
