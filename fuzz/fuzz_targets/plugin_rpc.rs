@@ -9,7 +9,7 @@ fuzz_target!(|data: &[u8]| {
     if data.len() > MAX_INPUT_BYTES {
         return;
     }
-    let mut decoder = rw_ext::FrameDecoder::new(MAX_FRAME_BYTES);
+    let mut decoder = rw_plugin_protocol::FrameDecoder::new(MAX_FRAME_BYTES);
     for chunk in data.chunks(31) {
         let _ = decoder.push(chunk);
     }

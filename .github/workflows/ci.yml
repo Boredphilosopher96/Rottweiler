@@ -13,6 +13,112 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  contracts:
+    name: CI contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install CI Python dependencies
+        run: |
+          python3 -m venv "$RUNNER_TEMP/ci-python"
+          "$RUNNER_TEMP/ci-python/bin/pip" install -r scripts/requirements-ci.txt
+          echo "$RUNNER_TEMP/ci-python/bin" >> "$GITHUB_PATH"
+      - name: Validate executable workflow expressions
+        run: python3 scripts/ci_evidence.py --gate workflows --output ci-results/workflows.json -- scripts/check-workflows.sh
+      - run: python3 scripts/ci_evidence.py --gate python-contracts --output ci-results/python.json -- python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+      - name: Retain gate evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-${{ github.job }}-linux-core-${{ github.run_attempt }}
+          path: ci-results/
+          if-no-files-found: warn
+          retention-days: 30
+
+  package-inventory:
+    name: Package inventory
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      packages: ${{ steps.inventory.outputs.packages }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install CI Python dependencies
+        run: |
+          python3 -m venv "$RUNNER_TEMP/ci-python"
+          "$RUNNER_TEMP/ci-python/bin/pip" install -r scripts/requirements-ci.txt
+          echo "$RUNNER_TEMP/ci-python/bin" >> "$GITHUB_PATH"
+      - id: inventory
+        run: |
+          python3 scripts/ci_evidence.py --gate inventory --output ci-results/inventory.json -- python3 scripts/ci_inventory.py check
+          echo "packages=$(python3 scripts/ci_inventory.py matrix)" >> "$GITHUB_OUTPUT"
+      - name: Retain inventory evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-inventory-${{ github.run_attempt }}
+          path: ci-results/
+          if-no-files-found: warn
+          retention-days: 30
+
+  packages:
+    name: Package ${{ matrix.package }} (${{ matrix.os }})
+    needs: package-inventory
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-latest]
+        package: ${{ fromJSON(needs.package-inventory.outputs.packages) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+      - run: python3 scripts/ci_evidence.py --gate package --output ci-results/package.json -- python3 scripts/ci_inventory.py package "${{ matrix.package }}"
+      - name: Retain gate evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-${{ github.job }}-${{ matrix.os }}-${{ matrix.package }}-${{ github.run_attempt }}
+          path: ci-results/
+          if-no-files-found: warn
+          retention-days: 30
+
+  fuzz-compile:
+    name: Compile every fuzz target
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.97.1 --profile minimal
+      - run: rustup override set 1.97.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: "fuzz -> target"
+      - run: python3 scripts/ci_evidence.py --gate fuzz-compile --output ci-results/fuzz.json -- cargo check --locked --manifest-path fuzz/Cargo.toml --bins
+      - name: Retain gate evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-${{ github.job }}-linux-core-${{ github.run_attempt }}
+          path: ci-results/
+          if-no-files-found: warn
+          retention-days: 30
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -41,15 +147,11 @@ jobs:
         with:
           bun-version: 1.3.14
 
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-      - name: Install integration test dependencies
-        shell: bash
-        run: |
-          bun install --cwd packages/plugin-sdk --frozen-lockfile
-          bun install --cwd packages/tui --frozen-lockfile
-          bun install --cwd packages/docs-site --frozen-lockfile
-      - run: cargo test --locked --workspace --all-features
+      - name: Frozen integration dependencies
+        run: python3 scripts/ci_evidence.py --gate frozen-install --output ci-results/install.json -- python3 scripts/ci_inventory.py install plugin-sdk tui
+      - run: python3 scripts/ci_evidence.py --gate fmt --output ci-results/fmt.json -- cargo fmt --all -- --check
+      - run: python3 scripts/ci_evidence.py --gate clippy --output ci-results/clippy.json -- cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - run: python3 scripts/ci_evidence.py --gate rust-tests --output ci-results/rust-tests.json -- cargo test --locked --workspace --all-features
       - run: cargo run --locked --quiet -p xtask -- codegen --check
       - run: cargo run --locked --quiet -p rw-plugin-protocol --bin rw-plugin-protocol-codegen -- --check
       - run: python3 scripts/release_contract.py generate-rust --check
@@ -62,24 +164,11 @@ jobs:
       - name: Capability-eval adapter contract
         run: |
           python3 -m py_compile evals/harbor/rottweiler_agent.py
-          python3 -m unittest discover -s scripts/tests -p 'test_*.py'
           bash -n scripts/run-terminal-bench.sh
           test "$(grep -c '^terminal-bench/[a-z0-9-][a-z0-9-]*$' evals/terminal-bench-20.txt)" -eq 20
       - run: cargo doc --locked --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
-      - run: bun run typecheck
-        working-directory: packages/plugin-sdk
-      - run: bun test
-        working-directory: packages/plugin-sdk
-      - run: bun run build
-        working-directory: packages/plugin-sdk
-      - run: bun run check
-        working-directory: packages/docs-site
-      - run: bun run test
-        working-directory: packages/docs-site
-      - run: bun run build
-        working-directory: packages/docs-site
       - name: Packed TypeScript plugin scaffold conformance
         shell: bash
         run: |
@@ -93,12 +182,14 @@ jobs:
           bun run --cwd "$root/plugin" typecheck
           bun test --cwd "$root/plugin"
           bun run --cwd "$root/plugin" build
-      - run: bun run test
-        working-directory: packages/tui
-      - run: bun run typecheck
-        working-directory: packages/tui
-      - run: bun run build
-        working-directory: packages/tui
+      - name: Retain gate evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-${{ github.job }}-${{ matrix.os }}-core-${{ github.run_attempt }}
+          path: ci-results/
+          if-no-files-found: warn
+          retention-days: 30
 
   security-tests:
     name: M5 Linux sandbox security acceptance
@@ -108,16 +199,23 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: crates/rw-sandbox/tests/linux_security_gate.sh
+      - run: python3 scripts/ci_evidence.py --gate sandbox --output ci-results/sandbox.json -- crates/rw-sandbox/tests/linux_security_gate.sh
       - name: M8 production-composition functional acceptance
-        run: crates/rw-cli/tests/m8_release_gate_linux.sh
+        run: python3 scripts/ci_evidence.py --gate m8-functional --output ci-results/m8.json -- crates/rw-cli/tests/m8_release_gate_linux.sh
         env:
           ROTTWEILER_M8_FUNCTIONAL_ONLY: 1
           ROTTWEILER_M8_PERF_SAMPLES: 1
+      - name: Retain gate evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-${{ github.job }}-linux-core-${{ github.run_attempt }}
+          path: ci-results/
+          if-no-files-found: warn
+          retention-days: 30
 
   performance-smoke:
     name: Per-PR performance smoke
-    needs: [test, security-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -138,10 +236,20 @@ jobs:
       - run: bun install --frozen-lockfile
         working-directory: packages/tui
       - name: Enforce headless absolute budgets with a bounded smoke sample
-        run: crates/rw-cli/tests/perf_gate.sh
+        run: python3 scripts/ci_evidence.py --gate headless-smoke --output ci-results/headless.json -- crates/rw-cli/tests/perf_gate.sh
         env:
           ROTTWEILER_PERF_SMOKE: 1
           ROTTWEILER_PERF_SAMPLES: 100
+          ROTTWEILER_PERF_OUTPUT: ci-results/headless-metrics.json
+      - name: Retain gate evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-${{ github.job }}-linux-core-${{ github.run_attempt }}
+          path: ci-results/
+          if-no-files-found: warn
+          retention-days: 30
+
   tui-performance-smoke:
     name: Per-PR TUI performance smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -163,8 +271,17 @@ jobs:
       - run: bun install --frozen-lockfile
         working-directory: packages/tui
       - name: Enforce TUI transport and render-loop budgets
-        run: bun run test:perf
-        working-directory: packages/tui
+        env:
+          ROTTWEILER_PERF_OUTPUT: ${{ github.workspace }}/ci-results/tui-metrics.json
+        run: python3 scripts/ci_evidence.py --gate tui-smoke --output ci-results/tui.json -- bun run --cwd packages/tui test:perf
+      - name: Retain gate evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-${{ github.job }}-${{ matrix.os }}-core-${{ github.run_attempt }}
+          path: ci-results/
+          if-no-files-found: warn
+          retention-days: 30
 
   m4-ssh-loopback:
     name: M4 SSH loopback contract
@@ -176,6 +293,7 @@ jobs:
       ROTTWEILER_M4_SKIP_SUPERVISOR: 1
       ROTTWEILER_M4_SKIP_SHELL: 1
       ROTTWEILER_M4_SSH_LOOPBACK_HOST: rottweiler-ci
+      ROTTWEILER_M4_EVIDENCE_OUTPUT: ci-results/m4-acceptance.json
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -209,7 +327,15 @@ jobs:
           sudo install -d -m 755 /run/sshd
           sudo service ssh restart
           ssh rottweiler-ci true
-      - run: crates/rw-cli/tests/m4_release_gate.sh
+      - run: python3 scripts/ci_evidence.py --gate ssh-acceptance --output ci-results/ssh.json -- crates/rw-cli/tests/m4_release_gate.sh
+      - name: Retain gate evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-${{ github.job }}-linux-core-${{ github.run_attempt }}
+          path: ci-results/
+          if-no-files-found: warn
+          retention-days: 30
 
   supply-chain:
     name: Supply chain
@@ -236,5 +362,42 @@ jobs:
         run: |
           cargo install --locked cargo-audit --version 0.22.2
           cargo install --locked cargo-deny --version 0.20.2
-      - run: cargo deny check
-      - run: cargo audit
+      - run: python3 scripts/ci_evidence.py --gate supply-chain --output ci-results/deny.json -- cargo deny check
+      - run: python3 scripts/ci_evidence.py --gate audit --output ci-results/audit.json -- cargo audit
+      - name: Retain gate evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-${{ github.job }}-linux-core-${{ github.run_attempt }}
+          path: ci-results/
+          if-no-files-found: warn
+          retention-days: 30
+
+
+  required:
+    name: CI required
+    if: always()
+    needs: [contracts, package-inventory, packages, fuzz-compile, test, security-tests, performance-smoke, tui-performance-smoke, m4-ssh-loopback, supply-chain]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install CI Python dependencies
+        run: |
+          python3 -m venv "$RUNNER_TEMP/ci-python"
+          "$RUNNER_TEMP/ci-python/bin/pip" install -r scripts/requirements-ci.txt
+          echo "$RUNNER_TEMP/ci-python/bin" >> "$GITHUB_PATH"
+      - name: Require every gate to succeed
+        env:
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci_evidence.py --gate required --output ci-results/required.json -- python3 scripts/ci_inventory.py required
+      - name: Retain gate evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-${{ github.job }}-linux-core-${{ github.run_attempt }}
+          path: ci-results/
+          if-no-files-found: warn
+          retention-days: 30

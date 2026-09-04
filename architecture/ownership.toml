@@ -858,3 +858,8 @@ owner = "model-catalog-source"
 path = "crates/rw-runtime/src/session_runtime.rs"
 pattern = '''fn\s+merge_catalog_provider\b'''
 reason = "rw-core owns provider projection filtering and merge semantics."
+
+[[owner]]
+id = "package-inventory"
+path = "contracts/package-inventory.json"
+symbols = ["packages", "fixtures"]

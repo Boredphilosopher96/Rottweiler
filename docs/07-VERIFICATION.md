@@ -340,6 +340,33 @@ one-time fixture or a single development run.
 
 ## 6. CI pipeline summary
 
+Ordinary CI has one stable `CI required` aggregate. Workflow YAML owns its
+mandatory dependencies; `scripts/ci_inventory.py` checks that every job is
+included and path filtering cannot suppress a result. Missing, failed, skipped
+or cancelled prerequisites fail the aggregate. Package checks run independently
+on both platforms, using the real-package inventory in
+`contracts/package-inventory.json`. Frozen installation precedes checks, local
+package dependencies are prepared in dependency order, and every excluded fuzz
+binary compiles in PR CI. Scheduled fuzzing derives targets from Cargo and its
+compiler from `fuzz/rust-toolchain.toml`.
+
+`scripts/ci_evidence.py` preserves command exit status and writes bounded partial
+and final diagnostics with source/run/lock identity. CI uploads those results
+on failure. Long soaks periodically replace an atomic progress checkpoint and
+retain counters and process generations on setup, workload or interruption
+errors. Runner loss can still prevent upload; a local checkpoint alone is not
+remote durable evidence.
+
+Private soak admission checks actual runner registration, required labels,
+online status and idle capacity. It reports absent/offline/busy separately. A
+readable runner inventory requires repository administration-read permission;
+`ROTTWEILER_RUNNER_READ_TOKEN` may supply it when the workflow token cannot.
+This is an availability observation, not a reservation or queue deadline.
+Hosted native performance does not depend on private soak availability.
+Candidate artifacts remain available fourteen days. Missing private runners
+leave soak qualification incomplete.
+
+
 Per-PR: fmt · clippy `-D warnings` · unit+integration (replay, network-denied) · client and plugin protocol codegen checks (`rw-types` and `rw-plugin-protocol` → committed projections) · semantic ownership, toolchain ownership, dependency-direction, and guarded-network-boundary checks · `bun test` + typecheck in `packages/tui` · TUI goldens · security tests · perf smoke (startup + latency) · `cargo deny`/`audit` · docs build.
 Weekly/manual risk evidence: `cargo llvm-cov` records workspace line coverage
 without imposing an unreviewed percentage, while bounded `cargo-mutants`

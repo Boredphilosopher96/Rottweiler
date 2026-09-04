@@ -20,9 +20,16 @@ class ToolchainOwnershipTests(unittest.TestCase):
     def fixture(self, root: Path) -> None:
         (root / ".github/workflows").mkdir(parents=True)
         (root / "scripts").mkdir()
+        (root / "contracts").mkdir()
+        (root / "contracts/package-inventory.json").write_text(json.dumps({
+            "schema_version": 1, "packages": [
+                {"id": name, "directory": "packages/" + name, "checks": ["test"]}
+                for name in ("docs-site", "plugin-host", "plugin-sdk", "tui")
+            ], "fixtures": [],
+        }))
         (root / "crates/rw-cli/tests").mkdir(parents=True)
         (root / "crates/rw-sandbox/tests").mkdir(parents=True)
-        for package in ("docs-site", "plugin-sdk", "tui"):
+        for package in ("docs-site", "plugin-host", "plugin-sdk", "tui"):
             directory = root / "packages" / package
             directory.mkdir(parents=True)
             (directory / "package.json").write_text(
