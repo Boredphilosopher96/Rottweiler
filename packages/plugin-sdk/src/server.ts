@@ -113,31 +113,37 @@ const byteLength = (value: string): number => new TextEncoder().encode(value).by
 class BoundedByteQueue implements AsyncIterable<Uint8Array> {
   readonly #items: Uint8Array[] = []
   readonly #readers: Array<(result: IteratorResult<Uint8Array>) => void> = []
-  readonly #writers: Array<() => void> = []
+  #bytes = 0
   #done = false
   #error: Error | undefined
 
-  constructor(private readonly capacity = 64, private readonly onCancel?: () => void) {}
+  constructor(private readonly capacity: number, private readonly maxBytes: number, private readonly onCancel: () => void) {}
 
-  async push(item: Uint8Array): Promise<void> {
-    while (!this.#done && this.#items.length >= this.capacity) {
-      await new Promise<void>((resolve) => this.#writers.push(resolve))
-    }
+  push(item: Uint8Array): void {
     if (this.#done) return
     const reader = this.#readers.shift()
     if (reader !== undefined) reader({ done: false, value: item })
-    else this.#items.push(item)
+    else {
+      if (this.#items.length >= this.capacity || this.#bytes + item.byteLength > this.maxBytes) {
+        this.fail(new SafeRpcError(-32005, "provider HTTP response buffer exceeded"))
+        this.onCancel()
+        return
+      }
+      this.#items.push(item)
+      this.#bytes += item.byteLength
+    }
   }
 
   finish(): void {
     if (this.#done) return
     this.#done = true
     for (const reader of this.#readers.splice(0)) reader({ done: true, value: undefined })
-    for (const writer of this.#writers.splice(0)) writer()
   }
 
   fail(error: Error): void {
-    this.#error = error
+    this.#error ??= error
+    this.#items.length = 0
+    this.#bytes = 0
     this.finish()
   }
 
@@ -146,8 +152,10 @@ class BoundedByteQueue implements AsyncIterable<Uint8Array> {
       while (true) {
         if (this.#items.length > 0) {
           const item = this.#items.shift()
-          this.#writers.shift()?.()
-          if (item !== undefined) yield item
+          if (item !== undefined) {
+            this.#bytes -= item.byteLength
+            yield item
+          }
           continue
         }
         if (this.#done) {
@@ -168,6 +176,7 @@ class BoundedByteQueue implements AsyncIterable<Uint8Array> {
 }
 
 interface PendingProviderHttp {
+  readonly cleanup: () => void
   readonly body: BoundedByteQueue
   readonly resolve: (response: ProviderHttpResponse) => void
   readonly reject: (error: Error) => void
@@ -471,8 +480,10 @@ export class PluginServer {
   #nextProviderHttpId = 1
   #initialized = false
   #shuttingDown = false
+  #shutdownPromise: Promise<void> | undefined
   readonly #providerCalls = new Map<RpcId, AbortController>()
-  readonly #providerTasks = new Set<Promise<void>>()
+  readonly #handlerTasks = new Set<Promise<void>>()
+  #activeInvocations = 0
   readonly #providerHttp = new Map<RpcId, PendingProviderHttp>()
 
   constructor(
@@ -488,7 +499,10 @@ export class PluginServer {
     }
     this.#handlerTimeoutMs = handlerTimeoutMs
     this.#pushCapabilities = new Set(definition.manifest.capabilities.push ?? [])
-    this.#writer = new BoundedJsonWriter(transport.output, maxLineBytes)
+    this.#writer = new BoundedJsonWriter(transport.output, maxLineBytes, {
+      writeTimeoutMs: handlerTimeoutMs,
+      onFailure: () => this.#lifetime.abort(),
+    })
   }
 
   async serve(
@@ -497,45 +511,59 @@ export class PluginServer {
     signal?: AbortSignal,
   ): Promise<void> {
     const iterator = readBoundedLines(input, maxLineBytes)[Symbol.asyncIterator]()
-    const abortLifetime = () => this.#lifetime.abort()
+    const abortLifetime = () => {
+      this.#writer.abort(new SafeRpcError(-32800, "plugin transport cancelled"))
+      this.#lifetime.abort()
+    }
     signal?.addEventListener("abort", abortLifetime, { once: true })
-    if (signal?.aborted === true) this.#lifetime.abort()
-    let wakeAbort: (() => void) | undefined
-    const aborted = new Promise<"aborted">((resolve) => {
-      wakeAbort = () => resolve("aborted")
-      signal?.addEventListener("abort", wakeAbort, { once: true })
-    })
+    if (signal?.aborted === true) abortLifetime()
     try {
-      while (!this.#shuttingDown && signal?.aborted !== true) {
-        const next = await Promise.race([iterator.next(), aborted])
-        if (next === "aborted" || next.done) break
-        await this.handleLine(next.value)
+      while (!this.#shuttingDown && !this.#lifetime.signal.aborted) {
+        let cancelRead!: () => void
+        const interrupted = new Promise<undefined>((resolve) => {
+          cancelRead = () => resolve(undefined)
+          this.#lifetime.signal.addEventListener("abort", cancelRead, { once: true })
+        })
+        let next: IteratorResult<string> | undefined
+        try {
+          next = await Promise.race([iterator.next(), interrupted])
+        } finally {
+          this.#lifetime.signal.removeEventListener("abort", cancelRead)
+        }
+        if (next === undefined || next.done) break
+        await this.#routeLine(next.value, true)
       }
+    } catch (error) {
+      if (signal?.aborted !== true) throw error
     } finally {
-      if (wakeAbort !== undefined) signal?.removeEventListener("abort", wakeAbort)
       signal?.removeEventListener("abort", abortLifetime)
-      void iterator.return?.(undefined)
-      if (!this.#shuttingDown) await this.shutdown()
-      await this.#writer.drain()
+      void iterator.return?.(undefined).catch(() => undefined)
+      if (signal?.aborted === true) this.#writer.abort(new SafeRpcError(-32800, "plugin transport cancelled"))
+      await this.shutdown()
+      if (signal?.aborted !== true) await this.#writer.drain()
     }
   }
 
   async handleLine(line: string): Promise<void> {
+    await this.#routeLine(line, false)
+  }
+
+  async #routeLine(line: string, concurrent: boolean): Promise<void> {
     let message: unknown
     try {
       message = JSON.parse(line)
     } catch {
-      await this.#failure(null, -32700, "parse error")
+      await this.#controlReply(this.#failure(null, -32700, "parse error"), concurrent)
       return
     }
     if (message === null || typeof message !== "object" || Array.isArray(message)) {
-      await this.#failure(null, -32600, "invalid request")
+      await this.#controlReply(this.#failure(null, -32600, "invalid request"), concurrent)
       return
     }
     const candidate = message as Record<string, unknown>
     const id = typeof candidate.id === "string" || typeof candidate.id === "number" ? candidate.id : undefined
     if (own(candidate, "id") && id === undefined) {
-      await this.#failure(null, -32600, "invalid request")
+      await this.#controlReply(this.#failure(null, -32600, "invalid request"), concurrent)
       return
     }
     if (candidate.jsonrpc === "2.0" && typeof candidate.method !== "string" && id !== undefined) {
@@ -543,13 +571,13 @@ export class PluginServer {
       return
     }
     if (candidate.jsonrpc !== "2.0" || typeof candidate.method !== "string") {
-      await this.#failure(id ?? null, -32600, "invalid request")
+      await this.#controlReply(this.#failure(id ?? null, -32600, "invalid request"), concurrent)
       return
     }
     const isNotification = !own(candidate, "id")
     if (candidate.method === RPC_METHODS.providerHttpEvent && isNotification) {
       try {
-        await this.#handleProviderHttpEvent(candidate.params)
+        this.#handleProviderHttpEvent(candidate.params)
       } catch {
         this.#debug("notification provider/http_event failed")
         this.#lifetime.abort()
@@ -564,18 +592,41 @@ export class PluginServer {
       }
       return
     }
-    if (candidate.method === RPC_METHODS.providerComplete && id !== undefined) {
-      const task = this.#handleProvider(id, candidate.params)
-      this.#providerTasks.add(task)
-      void task.finally(() => this.#providerTasks.delete(task))
+    const lifecycle = candidate.method === RPC_METHODS.initialize
+      || candidate.method === RPC_METHODS.shutdown || candidate.method === RPC_METHODS.exit
+    if (lifecycle) {
+      await this.#handleRequest(candidate.method, candidate.params, id)
       return
     }
+    if (this.#shuttingDown || this.#lifetime.signal.aborted
+      || this.#handlerTasks.size >= 64 || this.#activeInvocations >= 64) {
+      if (id !== undefined) await this.#controlReply(this.#failure(id, -32005, "plugin handler admission denied"), concurrent)
+      return
+    }
+    const provider = candidate.method === RPC_METHODS.providerComplete && id !== undefined
+    const task = provider
+      ? this.#handleProvider(id, candidate.params)
+      : this.#handleRequest(candidate.method, candidate.params, id)
+    this.#handlerTasks.add(task)
+    void task.then(() => this.#handlerTasks.delete(task), () => {
+      this.#handlerTasks.delete(task)
+      this.#writer.abort(new Error("JSON-RPC response write failed"))
+    })
+    if (!concurrent && !provider) await task
+  }
+
+  async #controlReply(reply: Promise<void>, concurrent: boolean): Promise<void> {
+    if (concurrent) void reply.catch(() => undefined)
+    else await reply
+  }
+
+  async #handleRequest(method: string, params: unknown, id: RpcId | undefined): Promise<void> {
     try {
-      const result = await this.#dispatch(candidate.method, candidate.params)
-      if (!isNotification && id !== undefined) await this.#success(id, result)
+      const result = await this.#dispatch(method, params)
+      if (id !== undefined) await this.#success(id, result)
     } catch (error) {
-      if (isNotification) {
-        this.#debug(`notification ${candidate.method} failed`)
+      if (id === undefined) {
+        this.#debug(`notification ${method} failed`)
       } else if (error instanceof SafeRpcError) {
         await this.#failure(id ?? null, error.code, error.safeMessage, error.safeData)
       } else {
@@ -585,33 +636,42 @@ export class PluginServer {
     }
   }
 
-  async shutdown(): Promise<void> {
-    if (this.#shuttingDown) return
+  shutdown(): Promise<void> {
+    this.#shutdownPromise ??= this.#finishShutdown()
+    return this.#shutdownPromise
+  }
+
+  async #finishShutdown(): Promise<void> {
     this.#shuttingDown = true
     this.#lifetime.abort()
     for (const pending of this.#providerHttp.values()) {
       const error = new SafeRpcError(-32800, "plugin shutdown cancelled provider HTTP")
+      pending.cleanup()
       pending.body.fail(error)
       pending.reject(error)
     }
     this.#providerHttp.clear()
-    const handler = this.definition.handlers.shutdown
-    if (handler === undefined) {
-      await Promise.allSettled(this.#providerTasks)
-      return
-    }
     let timeout: ReturnType<typeof setTimeout> | undefined
-    await Promise.race([
-      Promise.resolve().then(() => handler(this.#lifetime.signal)).catch(() => this.#debug("shutdown handler failed")),
-      new Promise<void>((resolve) => {
-        timeout = setTimeout(() => {
-          this.#debug("shutdown handler timed out")
-          resolve()
-        }, this.#handlerTimeoutMs)
-      }),
-    ])
-    if (timeout !== undefined) clearTimeout(timeout)
-    await Promise.allSettled(this.#providerTasks)
+    const deadline = new Promise<void>((resolve) => {
+      timeout = setTimeout(() => {
+        this.#debug("shutdown timed out")
+        this.#writer.abort(new SafeRpcError(-32800, "plugin shutdown timed out"))
+        resolve()
+      }, this.#handlerTimeoutMs)
+    })
+    try {
+      const handler = this.definition.handlers.shutdown
+      if (handler !== undefined) {
+        await Promise.race([
+          Promise.resolve().then(() => handler(this.#lifetime.signal)).catch(() => this.#debug("shutdown handler failed")),
+          deadline,
+        ])
+      }
+      await Promise.allSettled(this.#handlerTasks)
+      await Promise.race([this.#writer.drain().catch(() => undefined), deadline])
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout)
+    }
   }
 
   async #dispatch(method: string, rawParams: unknown): Promise<JsonValue> {
@@ -740,29 +800,42 @@ export class PluginServer {
     this.#lifetime.signal.addEventListener("abort", cancel, { once: true })
     if (this.#lifetime.signal.aborted) call.abort()
     this.#providerCalls.set(id, call)
-    let sawFinished = false
+    let rejectCancelled!: (error: Error) => void
+    const cancelled = new Promise<never>((_resolve, reject) => { rejectCancelled = reject })
+    const abort = () => rejectCancelled(new SafeRpcError(-32800, "plugin request cancelled"))
+    call.signal.addEventListener("abort", abort, { once: true })
+    if (call.signal.aborted) abort()
+    const providerHandler = handler
     try {
-      const events = await handler(params, this.#context(call.signal, params.alias))
-      if (events === null || typeof events !== "object" || !(Symbol.asyncIterator in events)) {
-        throw new SafeRpcError(-32603, "provider must return an async event stream")
-      }
-      for await (const event of events) {
-        if (call.signal.aborted) throw new SafeRpcError(-32800, "plugin request cancelled")
-        this.#validateProviderEvent(event, sawFinished)
-        if (event.type === "finished") sawFinished = true
-        await this.#writer.write({
-          jsonrpc: "2.0",
-          method: RPC_METHODS.providerEvent,
-          params: { request_id: id, event } as unknown as JsonValue,
-        })
-      }
-      if (!sawFinished) throw new SafeRpcError(-32603, "provider stream ended before finished")
+      await Promise.race([
+        this.#invoke(async () => {
+          if (call.signal.aborted) throw new SafeRpcError(-32800, "plugin request cancelled")
+          const events = await providerHandler(params, this.#context(call.signal, params.alias))
+          if (events === null || typeof events !== "object" || !(Symbol.asyncIterator in events)) {
+            throw new SafeRpcError(-32603, "provider must return an async event stream")
+          }
+          let sawFinished = false
+          for await (const event of events) {
+            if (call.signal.aborted) throw new SafeRpcError(-32800, "plugin request cancelled")
+            this.#validateProviderEvent(event, sawFinished)
+            if (event.type === "finished") sawFinished = true
+            await this.#writer.write({
+              jsonrpc: "2.0",
+              method: RPC_METHODS.providerEvent,
+              params: { request_id: id, event } as unknown as JsonValue,
+            })
+          }
+          if (!sawFinished) throw new SafeRpcError(-32603, "provider stream ended before finished")
+        }),
+        cancelled,
+      ])
       await this.#success(id, null)
     } catch (error) {
       if (error instanceof SafeRpcError) await this.#failure(id, error.code, error.safeMessage, error.safeData)
       else await this.#failure(id, -32603, "plugin provider failed")
     } finally {
       this.#providerCalls.delete(id)
+      call.signal.removeEventListener("abort", abort)
       this.#lifetime.signal.removeEventListener("abort", cancel)
     }
   }
@@ -883,6 +956,7 @@ export class PluginServer {
       throw new SafeRpcError(-32602, "provider HTTP request body exceeds the limit")
     }
     if (signal.aborted) throw new SafeRpcError(-32800, "plugin request cancelled")
+    if (this.#providerHttp.size >= 64) throw new SafeRpcError(-32005, "provider HTTP admission denied")
     const id = `plugin-http-${this.#nextProviderHttpId}`
     this.#nextProviderHttpId += 1
     let resolveResponse!: (response: ProviderHttpResponse) => void
@@ -891,10 +965,12 @@ export class PluginServer {
       resolveResponse = resolve
       rejectResponse = reject
     })
+    void response.catch(() => undefined)
     const cancel = () => {
       const pending = this.#providerHttp.get(id)
       if (pending === undefined) return
       this.#providerHttp.delete(id)
+      pending.cleanup()
       pending.body.fail(new SafeRpcError(-32800, "provider HTTP request cancelled"))
       pending.reject(new SafeRpcError(-32800, "provider HTTP request cancelled"))
       void this.#writer.write({
@@ -903,8 +979,9 @@ export class PluginServer {
         params: { request_id: id },
       }).catch(() => this.#debug("notification provider/http_cancel failed"))
     }
-    const queue = new BoundedByteQueue(64, cancel)
+    const queue = new BoundedByteQueue(64, 4 * 1024 * 1024, cancel)
     this.#providerHttp.set(id, {
+      cleanup: () => signal.removeEventListener("abort", cancel),
       body: queue,
       resolve: resolveResponse,
       reject: rejectResponse,
@@ -937,7 +1014,7 @@ export class PluginServer {
     }
   }
 
-  async #handleProviderHttpEvent(raw: unknown): Promise<void> {
+  #handleProviderHttpEvent(raw: unknown): void {
     const params = object(raw, "provider/http_event params")
     requireRpcKeys(params, "provider/http_event params", ["request_id", "event"])
     const requestId = params.request_id
@@ -969,7 +1046,7 @@ export class PluginServer {
       if (!pending.sawHead || pending.sawFinished || typeof event.data_base64 !== "string") {
         throw new SafeRpcError(-32603, "provider HTTP body event is invalid")
       }
-      await pending.body.push(new Uint8Array(Buffer.from(event.data_base64, "base64")))
+      pending.body.push(new Uint8Array(Buffer.from(event.data_base64, "base64")))
       return
     }
     if (type === "finished") {
@@ -988,6 +1065,7 @@ export class PluginServer {
     const pending = this.#providerHttp.get(id)
     if (pending === undefined) return
     this.#providerHttp.delete(id)
+    pending.cleanup()
     if (own(message, "error")) {
       let safeData: JsonValue | undefined
       if (message.error !== null && typeof message.error === "object" && !Array.isArray(message.error)) {
@@ -1068,13 +1146,18 @@ export class PluginServer {
     }, this.#handlerTimeoutMs)
     try {
       return await Promise.race([
-        Promise.resolve().then(() => invoke(this.#context(call.signal, providerAlias))),
+        this.#invoke(() => invoke(this.#context(call.signal, providerAlias))),
         cancelled,
       ])
     } finally {
       if (timer !== undefined) clearTimeout(timer)
       this.#lifetime.signal.removeEventListener("abort", cancel)
     }
+  }
+
+  #invoke<T>(invoke: () => T | Promise<T>): Promise<T> {
+    this.#activeInvocations += 1
+    return Promise.resolve().then(invoke).finally(() => { this.#activeInvocations -= 1 })
   }
 
   #success(id: RpcId, result: JsonValue): Promise<void> {

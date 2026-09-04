@@ -28,6 +28,13 @@ before `context.push` will emit them. Every handler receives an `AbortSignal`;
 the SDK cancels it on shutdown, request cancellation, and—except for provider
 streams—after the bounded generated default handler timeout.
 
+`serve()` keeps reading replies and cancellation while handlers run. Handlers
+may overlap, so keep mutable plugin state scoped to a request or synchronize it
+explicitly. Admission and output queues are bounded; a busy response rejects
+new work, while an output overflow or stalled pipe closes the connection.
+Always await pushes and respect the handler signal. A handler that ignores
+cancellation continues to occupy its admission slot until it actually settles.
+
 `scaffoldTypeScriptPlugin(path, options)` is the deterministic API used by
 `rw plugin scaffold --lang ts`. The package also exposes the
 `rottweiler-plugin-scaffold` convenience executable.

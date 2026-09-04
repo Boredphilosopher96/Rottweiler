@@ -67,6 +67,20 @@ the handler's signal and closes the async iterator. Provider streams have bounde
 write deadlines but deliberately have no five-second whole-call deadline. Other handlers retain
 the default five-second deadline.
 
+The SDK input pump routes correlated HTTP replies and cancellation independently
+of application handlers. Ordinary handlers can run concurrently, including a
+catalog handler awaiting host-mediated HTTP. The SDK admits at most 64 handler
+invocations; timed-out invocations keep their slot until the underlying handler
+settles. New requests beyond that limit receive `-32005` (busy).
+
+The SDK's output FIFO includes the active write in its 16 MiB and 256-frame
+limits. Overflow, write failure, or a write deadline closes the connection and
+settles pending writers. The server uses its configured handler timeout as the
+write deadline. Host HTTP requests have separate bounded admission and body
+queues; an overflowing body is cancelled without blocking the input pump.
+These are local admission policies, owned by the SDK server and transport;
+generated protocol limits continue to own individual wire-value bounds.
+
 Host requests use the generated default deadline and a separately enforced bounded in-flight/writer limit.
 Cancellation removes correlation state atomically; late responses to cancelled/timed-out IDs are
 ignored up to the bounded abandoned-ID limit. Fatal errors close admission, kill the complete
