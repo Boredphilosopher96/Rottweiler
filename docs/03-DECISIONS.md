@@ -66,6 +66,9 @@ Format: context → decision → rationale → revisit-when. The implementing ag
 
 ## ADR-006: Session store = JSONL event log + SQLite index, checkpoints = content-addressed blobs
 
+**Status.** Physical event layout and read-integrity policy superseded by ADR-029.
+SQLite search projections and content-addressed workspace checkpoints remain in force.
+
 **Decision.** As stated. Not "everything in SQLite," not git-based checkpoints.
 **Rationale.** JSONL is append-only-crash-safe, human-inspectable, trivially exportable, and the natural shape of an event-sourced session. SQLite does what it's good at (list/search). Shadow-git for checkpoints was rejected: interferes with user repos, slow on large trees; content-addressed blobs of *touched files only* are O(changes).
 
@@ -483,3 +486,73 @@ needs a separate actor-owned persistence contract.
 
 **Revisit when.** Host-enforced per-invocation authority can prove independent
 cancellation, or a durable operation registry supplies replayable recovery.
+
+---
+
+## ADR-029: Session journals use immutable segments and bounded replay views
+
+**Context.** A single lifetime JSONL file makes cursor reads proportional to session
+age: the current implementation reads and hashes the entire journal under the
+writer mutex before decoding a suffix. History pages retain bounded results but
+scan the complete journal. The core sink then returns the whole gap in one vector
+and each subscriber retains it. These costs conflict with bounded memory,
+responsive interruption and independent read/write progress.
+
+**Decision.** Store the authoritative logical event stream in bounded JSONL
+segments: immutable sealed segments plus one active append segment. Preserve
+versioned envelopes, contiguous sequences, durable-before-visible publication and
+interrupted-tail recovery. Sparse sequence indexes and the segment catalog are
+rebuildable projections. A reader owns a view pinned to a committed durable tail;
+rotation and later appends cannot change that view. Cursor reads and subscriptions
+page through it with explicit byte/event bounds and a bounded descriptor count.
+Remove the whole-gap sink interface and migrate all callers; do not retain a
+compatibility path for the lifetime-file layout.
+
+The store owns physical layout, safe descriptor opening, writer exclusion,
+checksums, indexes and opaque checkpoint storage. Core owns event identity,
+subscription ordering and the recovery projection. Runtime supplies blocking I/O
+execution and composes recovery with extension, accounting and workspace services.
+The existing SQLite listing/search index remains a derived projection. Workspace
+checkpoints remain separate from journal recovery snapshots.
+
+**Read integrity.** Normal reads validate the referenced/pinned segment identities,
+checksums, record/schema/sequence bounds and the snapshot's prefix identity. Unsafe
+paths, symlinks, unexpected links, changed opened descriptors and inconsistent
+indexes fail closed. Corruption in unrelated unread historical segments is detected
+when those segments are accessed or by an explicit full-integrity verification API
+and CLI. A tail read no longer rehashes unrelated historical bytes. This is an
+explicit change to ADR-006's implementation-level whole-file validation behavior;
+normal reads must not claim to have verified the entire lifetime journal. Full
+verification streams all segments with bounded memory and reports its verified
+sequence/byte coverage.
+
+**Recovery snapshots.** Snapshots are derived state bound to an exact durable
+journal prefix, with a projection version, session identity, content checksum and
+byte bound. Reject incompatible, corrupt, future or mismatched snapshots and
+rebuild from authoritative events. Checkpoint live recovery state separately from
+lifetime transcript/history: serializing an unbounded conversation or accounting
+vector does not establish bounded cold recovery. Historical context, rewind and
+inspection use journal cursors and paged projections (A04); the live snapshot owns
+only the bounded state needed to resume safely. Measure ordinary checkpoint-based
+open separately from an explicit rebuild after missing/corrupt metadata.
+
+**Durability and performance.** Appended events are synchronized before acknowledgement.
+Segment seal, index and catalog publication have tested crash ordering; derived
+index publication must not add one extra fsync per token. A reader's blocking I/O
+and decoding run outside the writer mutex. Reader admission, page memory and open
+descriptors are bounded. Append scheduling and batching remain the separate A03
+workstream and must preserve the same acknowledgement contract.
+
+**Validation.** Test rotation during reads, crashes at publication boundaries,
+partial final records, cursor-ahead rejection, corrupt indexes/segments/snapshots,
+unsafe descriptors, prefix validation and full verification. Preserve targeted
+acknowledgement ordering across replay and live delivery, including broadcast lag.
+Use 10K/100K/1M-event fixtures to report bytes read, retained raw-event memory,
+writer-lock hold time, append/interrupt latency and cold-open/rebuild work. Keep
+full-replay versus snapshot-plus-tail equivalence tests for interrupted operations,
+compaction, rewind, mode changes and accounting.
+
+**Revisit when.** A platform filesystem offers a verifiable immutable-object
+primitive that makes stronger whole-history integrity checks inexpensive, or
+measured workloads justify a different bounded segment/page size. Change those
+policies through explicit validation rather than restoring whole-gap reads.
