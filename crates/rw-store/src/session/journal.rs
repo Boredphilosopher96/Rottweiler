@@ -682,16 +682,38 @@ impl JournalReadView {
     /// # Errors
     /// Rejects future watermarks, mismatched identities and corrupt boundary data.
     pub fn at_prefix(&self, identity: JournalPrefixIdentity) -> Result<Self, SessionStoreError> {
-        let next = identity.next_sequence;
+        let prefix = self.prefix_at(identity.next_sequence)?;
+        if prefix.identity != identity {
+            return Err(SessionStoreError::CorruptEvent(
+                "journal prefix identity mismatch",
+            ));
+        }
+        Ok(prefix)
+    }
+
+    /// Captures the exact prefix ending at a validated event cursor.
+    /// `None` denotes the empty prefix. Only the boundary segment payload is read.
+    ///
+    /// # Errors
+    /// Rejects future cursors, overflow and corrupt or unsafe boundary segments.
+    pub fn prefix_through(&self, through: Option<SequenceId>) -> Result<Self, SessionStoreError> {
+        let next = through
+            .map(|through| {
+                through
+                    .0
+                    .checked_add(1)
+                    .ok_or(SessionStoreError::SequenceOverflow)
+            })
+            .transpose()?
+            .unwrap_or(0);
+        self.prefix_at(next)
+    }
+
+    fn prefix_at(&self, next: u64) -> Result<Self, SessionStoreError> {
         if next > self.next_sequence {
             return Err(SessionStoreError::EventPageCursorAhead);
         }
         if next == 0 {
-            if identity.digest != *blake3::hash(b"").as_bytes() {
-                return Err(SessionStoreError::CorruptEvent(
-                    "journal prefix identity mismatch",
-                ));
-            }
             return Ok(Self {
                 directory: Arc::clone(&self.directory),
                 segments: Arc::new(Vec::new()),
@@ -699,7 +721,7 @@ impl JournalReadView {
                 active_segment: None,
                 next_sequence: 0,
                 total_bytes: 0,
-                identity,
+                identity: JournalPrefixIdentity::empty(),
             });
         }
         let index = self.segments.partition_point(|segment| segment.next < next);
@@ -744,11 +766,10 @@ impl JournalReadView {
             .fold(blake3::hash(b""), |identity, segment| {
                 segment.extend_identity(identity)
             });
-        if prefix.extend_identity(prior).as_bytes() != &identity.digest {
-            return Err(SessionStoreError::CorruptEvent(
-                "journal prefix identity mismatch",
-            ));
-        }
+        let identity = JournalPrefixIdentity {
+            next_sequence: next,
+            digest: *prefix.extend_identity(prior).as_bytes(),
+        };
         let total_bytes = segments.iter().map(|segment| segment.bytes).sum::<u64>() + prefix.bytes;
         Ok(Self {
             directory: Arc::clone(&self.directory),
@@ -1503,5 +1524,35 @@ mod tests {
             view.page::<Value>(Some(SequenceId(0)), page_limits(1))
                 .is_err()
         );
+    }
+    #[test]
+    fn cursor_prefix_matches_captured_identity_after_growth_and_rotation() {
+        let root = tempdir().expect("root");
+        let mut journal = SegmentedJournal::open(root.path(), "cursor-prefix").expect("journal");
+        journal
+            .append_batch([json!({"payload": "x".repeat(1024 * 1024)})])
+            .expect("first");
+        let first = journal.read_view();
+        journal
+            .append_batch([json!({"payload": "second"})])
+            .expect("rotate");
+        let grown = journal.read_view();
+        let prefix = grown
+            .prefix_through(Some(SequenceId(0)))
+            .expect("cursor prefix");
+        assert_eq!(prefix.prefix_identity(), first.prefix_identity());
+        assert_eq!(prefix.last_sequence(), Some(SequenceId(0)));
+        assert_eq!(
+            grown.prefix_through(None).expect("empty").prefix_identity(),
+            JournalPrefixIdentity::empty()
+        );
+        assert!(matches!(
+            grown.prefix_through(Some(SequenceId(2))),
+            Err(SessionStoreError::EventPageCursorAhead)
+        ));
+        assert!(matches!(
+            grown.prefix_through(Some(SequenceId(u64::MAX))),
+            Err(SessionStoreError::SequenceOverflow)
+        ));
     }
 }
