@@ -138,6 +138,63 @@ class SoakDispatchTests(unittest.TestCase):
 
 
 class QueueOwnershipTests(unittest.TestCase):
+    def test_terminal_native_job_is_reported_without_waiting_for_own_run_to_end(self):
+        api = FakeGitHub()
+        api.pages = lambda path, field: [{"name": "Eight-hour workload", "status": "completed", "conclusion": "skipped"}]
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "queue.json"
+            code = MODULE.watch_worker(api, 900, output, clock=lambda: 0,
+                sleep=lambda seconds: self.fail("terminal native job must not wait"), queue_seconds=30)
+            report = json.loads(output.read_text())
+        self.assertEqual(code, 1)
+        self.assertEqual(report["status"], "workload_ended_before_observed_start")
+        self.assertEqual(report["workload_conclusion"], "skipped")
+
+    def test_release_requires_both_platform_starts_and_remembers_earlier_start(self):
+        names = ("Exact-tag eight-hour soak (darwin-arm64)", "Exact-tag eight-hour soak (linux-x86_64)")
+        for linux_starts in (False, True):
+            with self.subTest(linux_starts=linux_starts), tempfile.TemporaryDirectory() as directory:
+                now = [0.0]
+                api = FakeGitHub()
+                api.pages = lambda path, field: [
+                    {"name": names[0], "status": "in_progress" if now[0] == 0 else "completed"},
+                    {"name": names[1], "status": "in_progress" if linux_starts and now[0] > 0 else "queued"},
+                ]
+                output = Path(directory) / "queue.json"
+                code = MODULE.watch_worker(api, 900, output, clock=lambda: now[0],
+                    sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+                    queue_seconds=30, workload_names=names)
+                report = json.loads(output.read_text())
+                self.assertEqual(code, 0 if linux_starts else 1)
+                self.assertEqual(report["observed_starts"], sorted(names if linux_starts else names[:1]))
+                self.assertEqual(report.get("cancel_required", False), not linux_starts)
+
+    def test_release_watcher_owns_current_run_and_qualification_requires_its_success(self):
+        from unittest.mock import patch
+        import yaml
+        argv = ["soak_dispatch.py", "watch-release", "--repository", "owner/repo", "--output", "queue.json"]
+        api = FakeGitHub()
+        with patch("sys.argv", argv), patch.dict(MODULE.os.environ, {"GITHUB_RUN_ID": "900"}), \
+                patch.object(MODULE, "GitHub", return_value=api), patch.object(MODULE.signal, "signal"), \
+                patch.object(MODULE, "watch_worker", return_value=0) as watch:
+            self.assertEqual(MODULE.main(), 0)
+        self.assertEqual(watch.call_args.args, (api, 900, Path("queue.json")))
+        workflow = yaml.load((MODULE.ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
+        jobs = workflow["jobs"]
+        queue = jobs["release-soak-queue"]
+        self.assertEqual(queue["needs"], jobs["release-soak"]["needs"])
+        self.assertEqual(queue["if"], jobs["release-soak"]["if"])
+        self.assertIn("github.run_attempt == 1", queue["if"])
+        self.assertIn('test "$GITHUB_REF" = "refs/tags/v$version"', jobs["runner-contract"]["steps"][1]["run"])
+        self.assertIn("release-soak-queue", jobs["qualification-gate"]["needs"])
+        gate = jobs["qualification-gate"]["steps"][0]["run"]
+        self.assertIn('test "$RELEASE_SOAK_QUEUE_RESULT" = success', gate)
+        self.assertIn('test "$RELEASE_SOAK_QUEUE_RESULT" = skipped', gate)
+        steps = queue["steps"]
+        self.assertLess(sum(int(step["timeout-minutes"]) for step in steps), int(queue["timeout-minutes"]))
+        self.assertIn('"repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/force-cancel"', steps[-1]["run"])
+        self.assertTrue(steps[-2]["uses"].startswith("actions/upload-artifact@"))
+
     def test_pagination_shares_one_deadline_and_never_launches_after_expiry(self):
         from unittest.mock import patch
         import subprocess
@@ -190,6 +247,8 @@ class QueueOwnershipTests(unittest.TestCase):
         import yaml
         workflow = yaml.load((MODULE.ROOT / ".github/workflows/protected-soak.yml").read_text(), Loader=yaml.BaseLoader)
         job = workflow["jobs"]["queue-watch"]
+        self.assertEqual(job["if"], "github.run_attempt == 1")
+        self.assertEqual(workflow["jobs"]["soak"]["if"], "github.run_attempt == 1")
         steps = job["steps"]
         cleanup = [step for step in steps if "/force-cancel" in step.get("run", "")]
         self.assertEqual(len(cleanup), 1)

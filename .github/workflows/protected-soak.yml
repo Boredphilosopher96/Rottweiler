@@ -69,6 +69,7 @@ jobs:
 
   queue-watch:
     name: Bound worker queue
+    if: github.run_attempt == 1
     needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -112,6 +113,7 @@ jobs:
 
   soak:
     name: Eight-hour workload
+    if: github.run_attempt == 1
     needs: validate
     runs-on: ${{ fromJSON(needs.validate.outputs.runner) }}
     timeout-minutes: 510
@@ -205,4 +207,9 @@ jobs:
           VALIDATE_RESULT: ${{ needs.validate.result }}
           SOAK_RESULT: ${{ needs.soak.result }}
           QUEUE_RESULT: ${{ needs.queue-watch.result }}
-        run: test "$VALIDATE_RESULT" = success && test "$QUEUE_RESULT" = success && test "$SOAK_RESULT" = success
+        run: |
+          if [ "$GITHUB_RUN_ATTEMPT" != 1 ]; then
+            echo 'Dispatch a fresh protected soak worker; rerunning jobs does not recreate its queue watcher.' >&2
+            exit 1
+          fi
+          test "$VALIDATE_RESULT" = success && test "$QUEUE_RESULT" = success && test "$SOAK_RESULT" = success
