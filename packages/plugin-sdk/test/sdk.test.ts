@@ -88,9 +88,14 @@ function harness(definition = fixtureDefinition()): {
 } {
   const messages: JsonValue[] = []
   const errors: string[] = []
+  let server!: PluginServer
   const output: RpcOutput = {
     write(line) {
-      messages.push(JSON.parse(decoder.decode(line)) as JsonValue)
+      const frame = JSON.parse(decoder.decode(line)) as Record<string, JsonValue>
+      messages.push(frame)
+      if (typeof frame.id === "string" && frame.id.startsWith("plugin-push-")) {
+        queueMicrotask(() => { void server.handleLine(JSON.stringify({ jsonrpc: "2.0", id: frame.id, result: null })) })
+      }
     },
   }
   const transport: ServerTransport = {
@@ -98,7 +103,8 @@ function harness(definition = fixtureDefinition()): {
     output,
     error: { write: (message) => errors.push(message) },
   }
-  return { server: new PluginServer(definition, transport), messages, errors }
+  server = new PluginServer(definition, transport)
+  return { server, messages, errors }
 }
 
 async function request(server: PluginServer, id: number, method: string, params?: JsonValue): Promise<void> {

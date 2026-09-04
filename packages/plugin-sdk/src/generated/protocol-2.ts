@@ -149,6 +149,10 @@ export interface ProviderModelsResponse {
   readonly models: readonly ProviderModel[]
 }
 
+export interface InjectMessageResult {
+  readonly disposition: "started" | "queued" | "command"
+}
+
 export interface ToolCallParams {
   readonly name: string
   readonly input: JsonObject

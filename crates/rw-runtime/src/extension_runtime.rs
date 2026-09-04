@@ -2009,9 +2009,21 @@ impl PushHandler for SessionPluginPushHandler {
                     .inject_message(content)
                     .await
                     .map_err(|error| plugin_push_error("push_failed", &error.to_string()))?;
-                Ok(
-                    serde_json::json!({"disposition":format!("{disposition:?}").to_ascii_lowercase()}),
-                )
+                let disposition = match disposition {
+                    rw_core::MessageDisposition::Started => {
+                        rw_plugin_protocol::InjectionDisposition::Started
+                    }
+                    rw_core::MessageDisposition::Queued => {
+                        rw_plugin_protocol::InjectionDisposition::Queued
+                    }
+                    rw_core::MessageDisposition::Command => {
+                        rw_plugin_protocol::InjectionDisposition::Command
+                    }
+                };
+                serde_json::to_value(rw_plugin_protocol::InjectMessageResult { disposition })
+                    .map_err(|_| {
+                        plugin_push_error("push_failed", "cannot encode injection disposition")
+                    })
             }
             METHOD_SESSION_SET_STATUS => {
                 capability

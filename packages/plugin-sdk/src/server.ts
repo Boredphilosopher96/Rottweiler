@@ -8,6 +8,7 @@ import {
   type HookDecision,
   type HookInvokeParams,
   type HookName,
+  type InjectMessageResult,
   type JsonObject,
   type JsonValue,
   type PluginManifest,
@@ -43,7 +44,7 @@ export class SafeRpcError extends Error {
 }
 
 export interface PushApi {
-  injectMessage(sessionId: string, content: string): Promise<void>
+  injectMessage(sessionId: string, content: string): Promise<InjectMessageResult>
   setStatus(sessionId: string, status: string): Promise<void>
   notify(title: string, message: string, sessionId?: string): Promise<void>
 }
@@ -485,6 +486,11 @@ export class PluginServer {
   readonly #handlerTasks = new Set<Promise<void>>()
   #activeInvocations = 0
   readonly #providerHttp = new Map<RpcId, PendingProviderHttp>()
+  readonly #hostCommands = new Map<RpcId, {
+    resolve(value: JsonValue): void
+    reject(error: Error): void
+    cleanup(): void
+  }>()
 
   constructor(
     private readonly definition: PluginDefinition,
@@ -567,7 +573,7 @@ export class PluginServer {
       return
     }
     if (candidate.jsonrpc === "2.0" && typeof candidate.method !== "string" && id !== undefined) {
-      this.#handleProviderHttpResponse(id, candidate)
+      if (!this.#handleHostCommandResponse(id, candidate)) this.#handleProviderHttpResponse(id, candidate)
       return
     }
     if (candidate.jsonrpc !== "2.0" || typeof candidate.method !== "string") {
@@ -651,6 +657,11 @@ export class PluginServer {
       pending.reject(error)
     }
     this.#providerHttp.clear()
+    for (const pending of this.#hostCommands.values()) {
+      pending.cleanup()
+      pending.reject(new SafeRpcError(-32800, "plugin disconnected; host command outcome unknown"))
+    }
+    this.#hostCommands.clear()
     let timeout: ReturnType<typeof setTimeout> | undefined
     const deadline = new Promise<void>((resolve) => {
       timeout = setTimeout(() => {
@@ -915,14 +926,58 @@ export class PluginServer {
     this.transport.error?.write(`[rottweiler-plugin:${this.definition.manifest.name}] ${safe}\n`)
   }
 
-  #push(method: PluginPushMethod, params: JsonValue, signal: AbortSignal): Promise<void> {
-    if (!this.#pushCapabilities.has(method)) {
-      throw new SafeRpcError(-32003, "push method is not declared")
-    }
+  async #push(method: PluginPushMethod, params: JsonValue, signal: AbortSignal): Promise<JsonValue> {
+    if (!this.#pushCapabilities.has(method)) throw new SafeRpcError(-32003, "push method is not declared")
     if (signal.aborted) throw new SafeRpcError(-32800, "plugin request cancelled")
-    const id = `plugin-push-${this.#nextPushId}`
-    this.#nextPushId += 1
-    return this.#writer.write({ jsonrpc: "2.0", id, method, params })
+    if (this.#hostCommands.size >= 64) throw new SafeRpcError(-32005, "host command admission denied")
+    const id = `plugin-push-${this.#nextPushId++}`
+    let resolve!: (value: JsonValue) => void
+    let reject!: (error: Error) => void
+    const result = new Promise<JsonValue>((yes, no) => { resolve = yes; reject = no })
+    void result.catch(() => undefined)
+    const fail = (error: Error) => {
+      const pending = this.#hostCommands.get(id)
+      if (pending === undefined) return
+      this.#hostCommands.delete(id)
+      pending.cleanup()
+      pending.reject(error)
+    }
+    const cancel = () => fail(new SafeRpcError(-32800, "host command cancelled; outcome unknown"))
+    const timer = setTimeout(() => fail(new SafeRpcError(-32004, "host command deadline exceeded; outcome unknown")), this.#handlerTimeoutMs)
+    this.#hostCommands.set(id, {
+      resolve, reject,
+      cleanup: () => { clearTimeout(timer); signal.removeEventListener("abort", cancel) },
+    })
+    signal.addEventListener("abort", cancel, { once: true })
+    try {
+      await this.#writer.write({ jsonrpc: "2.0", id, method, params })
+      return await result
+    } catch (error) {
+      fail(error instanceof Error ? error : new Error("host command transport failed"))
+      throw error
+    }
+  }
+
+  #handleHostCommandResponse(id: RpcId, message: Record<string, unknown>): boolean {
+    const pending = this.#hostCommands.get(id)
+    if (pending === undefined) return false
+    this.#hostCommands.delete(id)
+    pending.cleanup()
+    try {
+      if (own(message, "error")) {
+        const error = object(message.error, "host command error")
+        pending.reject(new SafeRpcError(
+          typeof error.code === "number" ? error.code : -32603,
+          typeof error.message === "string" ? error.message : "host command rejected",
+        ))
+      } else if (own(message, "result")) {
+        // JSON.parse established JSON values; the command validates its result shape.
+        pending.resolve(message.result as JsonValue)
+      } else pending.reject(new SafeRpcError(-32603, "invalid host command response"))
+    } catch {
+      pending.reject(new SafeRpcError(-32603, "invalid host command response"))
+    }
+    return true
   }
 
   async #providerHttpRequest(
@@ -1096,25 +1151,34 @@ export class PluginServer {
         ),
       },
       push: {
-        injectMessage: (sessionId, content) => {
+        injectMessage: async (sessionId, content) => {
           requireText(sessionId, "session id", PROTOCOL_LIMITS.maxNameBytes)
           requireText(content, "injected message", PROTOCOL_LIMITS.maxHookPayloadBytes)
-          return this.#push(RPC_METHODS.injectMessage, { session_id: sessionId, content }, signal)
+          const result = object(await this.#push(RPC_METHODS.injectMessage, { session_id: sessionId, content }, signal), "injection result")
+          requireRpcKeys(result, "injection result", ["disposition"])
+          const disposition = result.disposition
+          if (disposition !== "started" && disposition !== "queued" && disposition !== "command") {
+            throw new SafeRpcError(-32603, "invalid injection disposition")
+          }
+          return { disposition }
         },
-        setStatus: (sessionId, status) => {
+        setStatus: async (sessionId, status) => {
           requireText(sessionId, "session id", PROTOCOL_LIMITS.maxNameBytes)
           requireText(status, "status", PROTOCOL_LIMITS.maxRpcMessageBytes)
-          return this.#push(RPC_METHODS.setStatus, { session_id: sessionId, status }, signal)
+          if (await this.#push(RPC_METHODS.setStatus, { session_id: sessionId, status }, signal) !== null) {
+            throw new SafeRpcError(-32603, "invalid status result")
+          }
         },
-        notify: (title, message, sessionId) => {
+        notify: async (title, message, sessionId) => {
           requireText(title, "notification title", PROTOCOL_LIMITS.maxNameBytes)
           requireText(message, "notification message", PROTOCOL_LIMITS.maxRpcMessageBytes)
           if (sessionId !== undefined) requireText(sessionId, "session id", PROTOCOL_LIMITS.maxNameBytes)
-          return this.#push(RPC_METHODS.notify, {
+          const result = await this.#push(RPC_METHODS.notify, {
             title,
             message,
             ...(sessionId === undefined ? {} : { session_id: sessionId }),
           }, signal)
+          if (result !== null) throw new SafeRpcError(-32603, "invalid notification result")
         },
       },
       debug: (label) => this.#debug(label),
