@@ -57,35 +57,40 @@ export async function runCompiledTreeSitterSmoke(reportPath: string): Promise<vo
       height: 26,
     })
     setup.renderer.root.add(markdown)
-    for (let attempt = 0; attempt < 30; attempt += 1) {
+    let frame = ""
+    let codeColors: string[] = []
+    let ready = false
+    const deadline = performance.now() + 10_000
+    do {
       await Bun.sleep(10)
       await setup.renderOnce()
-    }
-    const frame = setup.captureCharFrame()
-    const codeColors = setup.captureSpans().lines
-      .flatMap((line) => line.spans)
-      .filter((span) => span.text.includes("const") || span.text.includes("42"))
-      .map((span) => span.fg.toInts().join(","))
-    if (
-      !frame.includes("Embedded result") ||
-      !frame.includes("complete") ||
-      !frame.includes("const answer = 42") ||
-      !frame.includes("printf") ||
-      !frame.includes("fn answer") ||
-      !frame.includes("local answer = 42") ||
-      !frame.includes("@echo ready") ||
-      frame.includes("## Embedded result") ||
-      frame.includes("**complete**") ||
-      frame.includes("```typescript") ||
-      frame.includes("```bash") ||
-      frame.includes("```rust") ||
-      frame.includes("```lua") ||
-      frame.includes("```make") ||
-      new Set(codeColors).size < 2
-    ) {
+      frame = setup.captureCharFrame()
+      codeColors = setup.captureSpans().lines
+        .flatMap((line) => line.spans)
+        .filter((span) => span.text.includes("const") || span.text.includes("42"))
+        .map((span) => span.fg.toInts().join(","))
+      ready = !(
+        !frame.includes("Embedded result") ||
+        !frame.includes("complete") ||
+        !frame.includes("const answer = 42") ||
+        !frame.includes("printf") ||
+        !frame.includes("fn answer") ||
+        !frame.includes("local answer = 42") ||
+        !frame.includes("@echo ready") ||
+        frame.includes("## Embedded result") ||
+        frame.includes("**complete**") ||
+        frame.includes("```typescript") ||
+        frame.includes("```bash") ||
+        frame.includes("```rust") ||
+        frame.includes("```lua") ||
+        frame.includes("```make") ||
+        new Set(codeColors).size < 2
+      )
+    } while (!ready && performance.now() < deadline)
+    await writeFile(reportPath, JSON.stringify({ frame, codeColors }), { flag: "wx", mode: 0o600 })
+    if (!ready) {
       throw new Error("embedded Tree-sitter runtime did not render concealed highlighted Markdown")
     }
-    await writeFile(reportPath, JSON.stringify({ frame, codeColors }), { flag: "wx", mode: 0o600 })
   } finally {
     setup.renderer.destroy()
     syntax.destroy()

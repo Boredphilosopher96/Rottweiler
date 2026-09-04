@@ -1,3 +1,4 @@
+import type { ClientBlockState } from "../recycle-state"
 import {
   BoxRenderable,
   ScrollBoxRenderable,
@@ -31,6 +32,7 @@ export class ToolActivityRowRenderable extends BoxRenderable {
   #selected = false
   #theme: RottweilerTheme
   #availableWidth = 20
+  #headerSignature = ""
   #onOpenToolOutput: (toolCallId: string) => void
 
   constructor(
@@ -156,6 +158,9 @@ export class ToolActivityRowRenderable extends BoxRenderable {
         : this.#model.status === null
           ? "complete"
           : `exit ${this.#model.status}`
+      const signature = JSON.stringify([fold, name, this.#model.command, status, this.#availableWidth, this.#model.active])
+      if (signature === this.#headerSignature) return
+      this.#headerSignature = signature
       const content = alignedHeader(
         fold,
         name,
@@ -168,6 +173,9 @@ export class ToolActivityRowRenderable extends BoxRenderable {
       return
     }
     const outcome = compactOutcome(this.#model, this.#availableWidth)
+    const signature = JSON.stringify([fold, this.#model.name, this.#model.subject, outcome.label, outcome.show, this.#availableWidth, this.#model.outcome.kind])
+    if (signature === this.#headerSignature) return
+    this.#headerSignature = signature
     const content = alignedHeader(
       fold,
       this.#model.name.replaceAll("_", "-"),
@@ -362,6 +370,21 @@ export class ToolsWorkspaceRenderable extends BoxRenderable {
     return this.#selectedRowKey
   }
 
+  captureClientState(): ClientBlockState {
+    return {
+      selectedId: this.#selectedRowKey,
+      expanded: [...this.#rows].map(([id, row]) => ({ id, expanded: row.expanded })),
+    }
+  }
+
+  restoreClientState(state: ClientBlockState): boolean {
+    for (const item of state.expanded) this.#rows.get(item.id)?.expand(item.expanded)
+    this.#selectedRowKey = state.selectedId !== null && this.#rows.has(state.selectedId) ? state.selectedId : null
+    this.#syncSelection()
+    return state.expanded.every((item) => this.#rows.has(item.id))
+      && (state.selectedId === null || this.#selectedRowKey === state.selectedId)
+  }
+
   rowForKey(key: string): ToolActivityRowRenderable | undefined {
     return this.#rows.get(key)
   }
@@ -375,7 +398,6 @@ export class ToolsWorkspaceRenderable extends BoxRenderable {
       this.#rows.delete(key)
       row.destroyRecursively()
     }
-    const availableWidth = this.#activityContentWidth()
     for (const rowModel of model.rows) {
       let row = this.#rows.get(rowModel.key)
       if (row === undefined) {
@@ -387,8 +409,6 @@ export class ToolsWorkspaceRenderable extends BoxRenderable {
         )
         this.#rows.set(rowModel.key, row)
         this.activityScroller.add(row)
-      } else {
-        row.update(rowModel, availableWidth)
       }
     }
     const currentOrder = this.activityScroller.getChildren().map((row) => row.id)
@@ -477,18 +497,9 @@ export class ToolsWorkspaceRenderable extends BoxRenderable {
     this.activityScroller.height = Math.max(1, this.#terminalHeight - fixedRows)
 
     const availableWidth = Math.max(12, activityWidth - 4)
-    for (const [key, row] of this.#rows) {
-      const model = this.#model?.rows.find((candidate) => candidate.key === key)
-      if (model !== undefined) row.update(model, availableWidth)
+    for (const model of this.#model?.rows ?? []) {
+      this.#rows.get(model.key)?.update(model, availableWidth)
     }
-  }
-
-  #activityContentWidth(): number {
-    const railVisible = this.#terminalWidth >= 100 && this.#terminalHeight >= 12
-    const activityWidth = railVisible
-      ? Math.max(1, this.#terminalWidth - 36)
-      : this.#terminalWidth
-    return Math.max(12, activityWidth - 4)
   }
 
   #updateText(): void {

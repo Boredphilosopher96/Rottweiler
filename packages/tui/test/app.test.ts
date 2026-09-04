@@ -292,18 +292,17 @@ describe("Rottweiler OpenTUI shell", () => {
     }))
     const app = createRottweilerApp(renderer)
     renderer.root.add(app)
-    app.restoreRecycleState({ schemaVersion: 1, draft: "unfinished prompt", scrollTop: 5 })
+    app.composer.value = "unfinished prompt"
+    const saved = app.recycleState()
+    if (saved === null) throw new Error("expected a restorable draft")
+    app.restoreRecycleState({ ...saved, scrollTop: 5 })
     app.setState({ ...app.state, transcript })
     await setup.renderOnce()
     app.applyPendingRecycleScroll()
 
     expect(app.composer.value).toBe("unfinished prompt")
     expect(app.transcript.scroller.scrollTop).toBe(5)
-    expect(app.recycleState()).toEqual({
-      schemaVersion: 1,
-      draft: "unfinished prompt",
-      scrollTop: 5,
-    })
+    expect(app.recycleState()).toMatchObject({ composer: { content: "unfinished prompt" }, scrollTop: 5 })
   })
 
   test("does not clear a newer selection when an older clipboard write finishes", async () => {
@@ -5800,7 +5799,12 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.picker.visible).toBeFalse()
   })
 
-  test("does not offer provider onboarding when a provider is ready", async () => {
+  test.each([
+    { discovered: false, catalogFirst: false },
+    { discovered: false, catalogFirst: true },
+    { discovered: true, catalogFirst: false },
+    { discovered: true, catalogFirst: true },
+  ])("keeps composer focus for a configured provider across asynchronous projections (%p)", async ({ discovered, catalogFirst }) => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
@@ -5811,26 +5815,35 @@ describe("Rottweiler OpenTUI shell", () => {
     })
     renderer.root.add(app)
 
-    app.handleEvent({
+    const sessions = {
       type: "sessions_listed",
       meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: "ready-sessions", emitted_at: "2026-01-01T00:00:00Z" },
       sessions: [],
-    })
-    app.handleEvent({
+    } satisfies EngineEvent
+    const catalog = {
       type: "models_listed",
       meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: "ready-models", emitted_at: "2026-01-01T00:00:01Z" },
       models: [],
+      aliases: [],
+      cached: !discovered,
+      truncated: false,
       providers: [{
         name: "openai",
         auth_kind: "api_key",
-        next_action: "select_models",
+        next_action: discovered ? "select_models" : "configure",
         configured: true,
-        authenticated: true,
-        reachable: true,
-        model_count: 1,
+        authenticated: discovered,
+        reachable: discovered,
+        model_count: discovered ? 1 : 0,
       }],
-    })
+    } satisfies EngineEvent
+    for (const event of catalogFirst ? [catalog, sessions] : [sessions, catalog]) {
+      app.handleEvent(event)
+      await Promise.resolve()
+    }
     expect(app.picker.visible).toBeFalse()
+    await setup.mockInput.typeText("composer owns this")
+    expect(app.composer.value).toBe("composer owns this")
   })
 
   test("does not revive an unresolved session alias after an empty catalog", async () => {

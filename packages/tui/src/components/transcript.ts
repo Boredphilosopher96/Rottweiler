@@ -1,3 +1,4 @@
+import type { TranscriptClientState } from "../recycle-state"
 import {
   type BaseRenderable,
   BoxRenderable,
@@ -288,6 +289,7 @@ export class ToolBlockRenderable extends BoxRenderable {
   readonly #bodyContainer: BoxRenderable
   #commandSignature = ""
   #diffSignature = ""
+  #headerSignature = ""
   #collapsed: boolean
   #tool: ToolProjection
   #theme: RottweilerTheme
@@ -479,7 +481,11 @@ export class ToolBlockRenderable extends BoxRenderable {
     const name = `${toolName}${subject === "" ? "" : "  "}`
     const prefix = `${this.#collapsed ? "▸" : "⌄"} ${name}${subject}`
     const spacing = " ".repeat(Math.max(2, rowWidth - prefix.length - outcome.length))
-    this.header.content = t`${fg(this.#theme.textMuted)(`${this.#collapsed ? "▸" : "⌄"} `)}${fg(this.#theme.secondary)(name)}${subject === "" ? "" : fg(this.#theme.text)(subject)}${spacing}${fg(statusColor)(outcome)}`
+    const headerSignature = JSON.stringify([this.#collapsed, name, subject, spacing, outcome])
+    if (headerSignature !== this.#headerSignature) {
+      this.#headerSignature = headerSignature
+      this.header.content = t`${fg(this.#theme.textMuted)(`${this.#collapsed ? "▸" : "⌄"} `)}${fg(this.#theme.secondary)(name)}${subject === "" ? "" : fg(this.#theme.text)(subject)}${spacing}${fg(statusColor)(outcome)}`
+    }
     this.header.fg = this.#theme.text
     if (this.#commandContainer !== null) this.#commandContainer.visible = !this.#collapsed
     if (this.#diffContainer !== null) this.#diffContainer.visible = !this.#collapsed
@@ -667,6 +673,10 @@ export class ToolBlockRenderable extends BoxRenderable {
     this.insertBefore(container, this.#bodyContainer)
   }
 
+  get expanded(): boolean {
+    return !this.#collapsed
+  }
+
   toggle(): void {
     this.#userSetExpansion = true
     this.#collapsed = !this.#collapsed
@@ -684,15 +694,13 @@ export class ToolBlockRenderable extends BoxRenderable {
 
 /** Complete tool-card body content before compact transcript preview bounding. */
 export function toolOutputContent(tool: ToolProjection): string {
-  const live = tool.chunks.map((chunk) => chunk.chunk).join("")
-  const presentation = presentTool(tool)
-  const output = tool.status === "finished"
-    ? presentation.details
-    : bashCommand(tool) !== null && tool.chunks.length > 0
-      ? presentation.details
-    : live === ""
-      ? ""
-      : `Live output\n${live}`
+  let output: string
+  if (tool.status === "finished" || (bashCommand(tool) !== null && tool.chunks.length > 0)) {
+    output = presentTool(tool).details
+  } else {
+    const live = tool.chunks.map((chunk) => chunk.chunk).join("")
+    output = live === "" ? "" : `Live output\n${live}`
+  }
   const activity = tool.status === "awaiting_approval"
     ? "Awaiting approval…"
     : tool.status === "running"
@@ -1707,6 +1715,32 @@ export class TranscriptRenderable extends BoxRenderable {
 
   get selectedBlockId(): string | null {
     return this.#selectedBlockId
+  }
+
+  captureClientState(): TranscriptClientState {
+    return {
+      blocks: {
+        selectedId: this.#selectedBlockId,
+        expanded: this.#blocksInVisualOrder().map((block) => ({ id: block.blockId, expanded: block.expanded })),
+      },
+      tools: [...this.#toolExpansion].map(([id, expanded]) => ({ id, expanded })),
+      reasoning: [...this.#reasoningExpansion].map(([id, expanded]) => ({ id, expanded })),
+    }
+  }
+
+  restoreClientState(state: TranscriptClientState): boolean {
+    for (const item of state.tools) this.#toolExpansion.set(item.id, item.expanded)
+    for (const item of state.reasoning) this.#reasoningExpansion.set(item.id, item.expanded)
+    this.#reconcileHistory()
+    const blocks = new Map(this.#blocksInVisualOrder().map((block) => [block.blockId, block]))
+    for (const item of state.blocks.expanded) {
+      const block = blocks.get(item.id)
+      if (block !== undefined && block.expanded !== item.expanded) block.toggle()
+    }
+    this.#selectedBlockId = state.blocks.selectedId
+    this.#syncBlockSelection()
+    return state.blocks.expanded.every((item) => blocks.has(item.id))
+      && (state.blocks.selectedId === null || this.#selectedBlockId === state.blocks.selectedId)
   }
 
   selectNextBlock(): void {

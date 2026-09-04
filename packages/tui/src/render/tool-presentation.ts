@@ -206,18 +206,20 @@ function presentLocations(tool: ToolProjection, data: unknown): ToolPresentation
 function presentBash(tool: ToolProjection, data: unknown, text: string): ToolPresentation {
   const payload = record(data)
   const exitCode = integer(payload?.exit_code)
-  const captured = parseBashResult(text)
-  const live = tool.chunks.map((chunk) => `${chunk.stream === "stderr" ? "Error output" : "Output"}\n${chunk.chunk.trimEnd()}`).join("\n")
-  const details = captured === null
-    ? live || (text === "" ? "Completed with no output." : text)
-    : joinLines(
-        captured.stdout === "" ? "" : `Output\n${captured.stdout}`,
-        captured.stderr === "" ? "" : `Error output\n${captured.stderr}`,
-      ) || "Completed with no output."
   return {
     subject: "",
     summary: exitCode === null || exitCode === 0 ? "Completed" : `exit ${exitCode}`,
-    details,
+    get details() {
+      const captured = parseBashResult(text)
+      if (captured !== null) {
+        return joinLines(
+          captured.stdout === "" ? "" : `Output\n${captured.stdout}`,
+          captured.stderr === "" ? "" : `Error output\n${captured.stderr}`,
+        ) || "Completed with no output."
+      }
+      const live = tool.chunks.map((chunk) => `${chunk.stream === "stderr" ? "Error output" : "Output"}\n${chunk.chunk.trimEnd()}`).join("\n")
+      return live || (text === "" ? "Completed with no output." : text)
+    },
   }
 }
 

@@ -823,6 +823,9 @@ describe("M4 retained components", () => {
       renderer = setup.renderer
       const card = new ToolBlockRenderable(renderer, kennelTheme, tool)
       expect(card.header.plainText).not.toContain("1s")
+      const header = card.header.content
+      card.update({ ...tool, chunks: [{ stream: "stdout", chunk: "new output" }] })
+      expect(card.header.content).toBe(header)
       now = 5_000
       card.update(tool)
       expect(card.header.plainText).toEndWith(" · 4s")
@@ -3227,6 +3230,11 @@ describe("M4 retained components", () => {
     expect(firstRow).toBeDefined()
     expect(secondRow).toBeDefined()
     expect(firstRow?.expanded).toBeTrue()
+    const firstHeader = firstRow?.header.content
+    const secondHeader = secondRow?.header.content
+    workspace.update(toolsWorkspaceModel([{ ...liveFirst }, { ...liveSecond }]))
+    expect(firstRow?.header.content).toBe(firstHeader)
+    expect(secondRow?.header.content).toBe(secondHeader)
 
     workspace.selectNextBlock()
     workspace.selectNextBlock()

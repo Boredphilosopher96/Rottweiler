@@ -5,12 +5,22 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { afterEach, describe, expect, test } from "bun:test"
 
 import {
+  type AppClientState,
+  MAX_RECYCLE_STATE_BYTES,
   parseTuiRecycleState,
   readTuiRecycleState,
   writeTuiRecycleState,
 } from "../src/recycle-state"
 
 const roots: string[] = []
+const clientState: AppClientState = {
+  schemaVersion: 2, sessionId: "session-local",
+  composer: { content: "unfinished prompt", attachments: [], cursorOffset: 3, selection: { start: 1, end: 3 } },
+  subagentDrafts: [], primaryView: "conversation", scrollTop: 37, toolsScrollTop: 0,
+  inputMode: "standard", focus: "composer", theme: "kennel", picker: null,
+  tools: { selectedId: null, expanded: [] },
+  transcript: { blocks: { selectedId: null, expanded: [] }, tools: [], reasoning: [] },
+}
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { force: true, recursive: true })))
@@ -22,7 +32,7 @@ describe("TUI recycle state", () => {
     roots.push(root)
     await chmod(root, 0o700)
     const path = join(root, "state.json")
-    const state = { schemaVersion: 1 as const, draft: "unfinished prompt", scrollTop: 37 }
+    const state = clientState
 
     expect(writeTuiRecycleState(path, state)).toBe(true)
     expect(JSON.parse(await readFile(path, "utf8"))).toEqual(state)
@@ -31,7 +41,7 @@ describe("TUI recycle state", () => {
   })
 
   test("rejects malformed and permission-broad handoffs", async () => {
-    expect(parseTuiRecycleState({ schemaVersion: 1, draft: "x", scrollTop: -1 })).toBeNull()
+    expect(parseTuiRecycleState({ ...clientState, scrollTop: -1 })).toBeNull()
     const root = await mkdtemp(join(tmpdir(), "rw-tui-recycle-"))
     roots.push(root)
     await chmod(root, 0o700)
@@ -43,10 +53,21 @@ describe("TUI recycle state", () => {
     const unsafeParent = join(root, "unsafe")
     await mkdir(unsafeParent, { mode: 0o755 })
     await chmod(unsafeParent, 0o755)
-    expect(writeTuiRecycleState(join(unsafeParent, "state.json"), {
-      schemaVersion: 1,
-      draft: "x",
-      scrollTop: 1,
-    })).toBe(false)
+    expect(writeTuiRecycleState(join(unsafeParent, "state.json"), clientState)).toBe(false)
   })
+  test("rejects secret routes, invalid editing offsets, malformed attachments and over-cap state", () => {
+    expect(parseTuiRecycleState({ ...clientState, picker: {
+      kind: "providerApiKey", anchored: false, query: "sk-secret", selectedId: null, scrollOffset: 0,
+      modelProviderFilter: null, onboarding: false, themeBeforePreview: null,
+    } })).toBeNull()
+    expect(parseTuiRecycleState({ ...clientState, composer: { ...clientState.composer, cursorOffset: 999 } })).toBeNull()
+    expect(parseTuiRecycleState({ ...clientState, composer: { ...clientState.composer, attachments: [{}] } })).toBeNull()
+    expect(parseTuiRecycleState({ ...clientState, composer: {
+      ...clientState.composer, content: "x".repeat(MAX_RECYCLE_STATE_BYTES),
+    } }) === null).toBe(true)
+    expect(parseTuiRecycleState({ ...clientState, tools: {
+      selectedId: null, expanded: Array.from({ length: 4097 }, () => ({ id: "x", expanded: false })),
+    } })).toBeNull()
+  })
+
 })

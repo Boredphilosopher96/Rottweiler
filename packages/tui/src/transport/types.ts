@@ -1,4 +1,14 @@
 import type { ClientCommand, EngineEvent } from "../protocol"
+import { ENGINE_EVENT_DELIVERY, PROTOCOL_VERSION } from "../protocol"
+import validateEngineEvent from "../../../../protocol/engine-event-validator.js"
+
+export const MAX_U64 = 18_446_744_073_709_551_615n
+
+export function parseU64(value: string | null): bigint | null {
+  if (value === null || value.length > 20 || !/^(0|[1-9]\d*)$/.test(value)) return null
+  const parsed = BigInt(value)
+  return parsed <= MAX_U64 ? parsed : null
+}
 
 export interface UnknownEngineEvent {
   readonly type: string
@@ -25,7 +35,12 @@ export interface TransportConnectionUpdate {
 }
 
 export function isWireEngineEvent(value: unknown): value is WireEngineEvent {
-  return isRecord(value) && typeof value.type === "string"
+  if (!isRecord(value) || typeof value.type !== "string") return false
+  if (!Object.hasOwn(ENGINE_EVENT_DELIVERY, value.type)) return true
+  if (!validateEngineEvent(value)) return false
+  if (ENGINE_EVENT_DELIVERY[value.type] === "transient") return true
+  if (!("meta" in value) || value.meta.protocol_version !== PROTOCOL_VERSION) return false
+  return ENGINE_EVENT_DELIVERY[value.type] !== "durable" || parseU64(durableSequenceId(value)) !== null
 }
 
 export function normalizeWireEngineEvent(value: unknown): WireEngineEvent | null {
@@ -49,6 +64,8 @@ export function isSessionForkedEvent(event: WireEngineEvent): event is SessionFo
 }
 
 export function durableSequenceId(event: WireEngineEvent): string | null {
+  const deliveries: Readonly<Record<string, string>> = ENGINE_EVENT_DELIVERY
+  if (Object.hasOwn(deliveries, event.type) && deliveries[event.type] !== "durable") return null
   if (!("meta" in event) || !isRecord(event.meta)) {
     return null
   }

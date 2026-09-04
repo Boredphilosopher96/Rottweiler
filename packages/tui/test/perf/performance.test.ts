@@ -19,6 +19,21 @@ import {
 import { PROTOCOL_VERSION } from "../../src/protocol"
 
 const emittedMetrics: Record<string, number> = {}
+const rawSamples: Record<string, { clock: string; warmup: number; trialsMs: number[][] }> = {}
+
+function samplesFor(name: string, clock = "process_cpu", warmup = 10): number[] {
+  const samples: number[] = []
+  const record = rawSamples[name] ??= { clock, warmup, trialsMs: [] }
+  record.trialsMs.push(samples)
+  return samples
+}
+
+function writeReport(output: string, report: unknown): void {
+  mkdirSync(dirname(output), { recursive: true })
+  const temporary = join(dirname(output), `.${crypto.randomUUID()}.tmp`)
+  writeFileSync(temporary, `${JSON.stringify(report)}\n`, { encoding: "utf8", mode: 0o600 })
+  renameSync(temporary, output)
+}
 
 afterAll(() => {
   const output = process.env.ROTTWEILER_PERF_OUTPUT
@@ -31,15 +46,15 @@ afterAll(() => {
     "tui_tools_workspace_frame_p95_us",
     "tui_vim_echo_best_p99_us",
   ]
+  writeReport(`${output}.samples.json`, {
+    schema_version: 1,
+    bun_version: Bun.version,
+    platform: process.platform,
+    arch: process.arch,
+    samples: rawSamples,
+  })
+  writeReport(output, { schema_version: 1, metrics: emittedMetrics })
   expect(Object.keys(emittedMetrics).sort()).toEqual(expected)
-  mkdirSync(dirname(output), { recursive: true })
-  const temporary = join(dirname(output), `.${crypto.randomUUID()}.tmp`)
-  writeFileSync(
-    temporary,
-    `${JSON.stringify({ schema_version: 1, metrics: emittedMetrics })}\n`,
-    { encoding: "utf8", mode: 0o600 },
-  )
-  renameSync(temporary, output)
 })
 
 describe("M4 executable TUI performance budgets", () => {
@@ -60,7 +75,7 @@ describe("M4 executable TUI performance budgets", () => {
 
   test("retained transcript streaming frame compute stays inside p95/p99.9 budgets", async () => {
     // Perf files share a Bun process with the component suite. Collect before
-    // allocating the 10MB fixture so unrelated suite garbage cannot become a
+    // allocating the 10MiB fixture so unrelated suite garbage cannot become a
     // frame-compute outlier while preserving the production budget itself.
     Bun.gc(true)
     const setup = await createTestRenderer({
@@ -73,21 +88,22 @@ describe("M4 executable TUI performance budgets", () => {
     const mockTreeSitter = new MockTreeSitterClient({ autoResolveTimeout: 0 })
     mockTreeSitter.setMockResult({ highlights: [] })
     treeSitter = mockTreeSitter
-    const payload = "x".repeat(1_020)
-    const transcript = Array.from({ length: 400 }, (_, index) => ({
+    const payload = "x".repeat(1_018)
+    const transcript = Array.from({ length: 10_240 }, (_, index) => ({
       sequenceId: String(index + 1),
       agentTurn: String(index + 1),
       turn: {
         role: "assistant" as const,
-        blocks: [{ type: "text" as const, text: `${index} ${payload}` }],
+        blocks: [{ type: "text" as const, text: `${String(index).padStart(5, "0")} ${payload}` }],
         meta: { synthetic: false, summary: false },
       },
     }))
+    expect(transcript.reduce((bytes, entry) => bytes + entry.turn.blocks.reduce((sum, block) => sum + Buffer.byteLength(block.text), 0), 0)).toBe(10 * 1_024 * 1_024)
     const base: RottweilerState = {
       ...createInitialState(),
       transcript,
       streamingTail: {
-        turnId: "10001",
+        turnId: "10241",
         text: "",
         thinking: "",
         citations: [],
@@ -113,7 +129,7 @@ describe("M4 executable TUI performance budgets", () => {
     }
     Bun.gc(true)
 
-    const samples: number[] = []
+    const samples = samplesFor("retained_transcript")
     let streamed = ""
     for (let line = 0; line < 200; line += 1) {
       streamed += `line ${line} streamed without re-laying out history\n`
@@ -171,7 +187,7 @@ describe("M4 executable TUI performance budgets", () => {
       app.composer.value = ""
       await setup.renderOnce()
       Bun.gc(true)
-      const samples: number[] = []
+      const samples = samplesFor("composer_input", inputLatencyClock(), 5)
       for (const key of input) {
         const elapsed = startInputLatencySample()
         setup.mockInput.pressKey(key)
@@ -252,7 +268,7 @@ describe("M4 executable TUI performance budgets", () => {
     expect(app.transcript.streamingCard.visible).toBeTrue()
     Bun.gc(true)
 
-    const samples: number[] = []
+    const samples = samplesFor("mounted_tool_output")
     const chunk = "output-line 0123456789abcdef\n".repeat(293).slice(0, 8 * 1_024)
     for (let index = 0; index < 120; index += 1) {
       const started = process.cpuUsage()
@@ -316,7 +332,7 @@ describe("M4 executable TUI performance budgets", () => {
       app.toolsWorkspace.mountedRowKeys.map((key) => [key, app.toolsWorkspace.rowForKey(key)]),
     )
 
-    const samples: number[] = []
+    const samples = samplesFor("tools_workspace")
     const chunk = "tools-output-line 0123456789abcdef\n".repeat(240).slice(0, 8 * 1_024)
     for (let index = 0; index < 120; index += 1) {
       const started = process.cpuUsage()
@@ -384,7 +400,7 @@ describe("M4 executable TUI performance budgets", () => {
       app.composer.value = ""
       await setup.renderOnce()
       Bun.gc(true)
-      const samples: number[] = []
+      const samples = samplesFor("vim_input", inputLatencyClock(), 5)
       for (const key of input) {
         const elapsed = startInputLatencySample()
         setup.mockInput.pressKey(key)

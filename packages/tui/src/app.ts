@@ -158,6 +158,12 @@ import {
   isSessionForkedEvent,
   type WireEngineEvent,
 } from "./transport"
+import {
+  isRestorablePicker,
+  parseTuiRecycleState,
+  type AppClientState,
+  type ClientComposerState,
+} from "./recycle-state"
 import { stabilizeTreeSitterClient } from "./tree-sitter-client"
 import {
   boundedUiText,
@@ -239,11 +245,7 @@ export interface TerminalHandoverAdapter {
   resume(): void
 }
 
-export interface TuiRecycleState {
-  readonly schemaVersion: 1
-  readonly draft: string
-  readonly scrollTop: number
-}
+export type { AppClientState } from "./recycle-state"
 
 type BudgetSettingKey =
   | "budget.session_cost_cap_micros_usd"
@@ -500,7 +502,7 @@ export class RottweilerApp extends BoxRenderable {
   #composerNotice: string | null = null
   #pendingExport: PendingExport | null = null
   #lastComposerValue = ""
-  #pendingRecycleScrollTop: number | null = null
+  #pendingClientState: AppClientState | null = null
   #keybindings: CompiledKeybindings
   #inputMode: InputMode
   #vimFocus: VimFocus = "composer"
@@ -555,6 +557,7 @@ export class RottweilerApp extends BoxRenderable {
     })
   }
   #onGlobalKey = (key: KeyEvent) => {
+    this.#pendingClientState = null
     const focusOwner = this.#visibleFocusOwner()
     const plainEscape = keyStrokeFromEvent(key) === "escape"
     if (!plainEscape && this.#interruptEscapeArmed) this.#clearInterruptEscape()
@@ -813,8 +816,10 @@ export class RottweilerApp extends BoxRenderable {
       return
     }
     this.#deferredTheme = null
-    const draft = rebuilding ? this.composer.value : ""
-    const attachments = rebuilding ? [...this.composer.attachments] : []
+    const composerState = rebuilding ? this.#captureComposerState() : null
+    const transcriptClientState = rebuilding ? this.transcript.captureClientState() : null
+    const toolsClientState = rebuilding ? this.toolsWorkspace.captureClientState() : null
+    const toolsScrollTop = rebuilding ? this.toolsWorkspace.activityScroller.scrollTop : 0
     const scrollTop = rebuilding ? this.transcript.scroller.scrollTop : 0
     const pickerWasVisible = rebuilding && this.#pickerVisible()
     const pickerKind = this.#pickerController.kind
@@ -1055,9 +1060,11 @@ export class RottweilerApp extends BoxRenderable {
     this.add(this.settingsBrowser)
     this.add(this.themeBrowser)
     this.setState(this.#state)
-    this.composer.value = draft
-    for (const attachment of attachments) this.composer.addAttachment(attachment)
+    if (composerState !== null) this.#restoreComposerState(composerState)
+    if (transcriptClientState !== null) this.transcript.restoreClientState(transcriptClientState)
+    if (toolsClientState !== null) this.toolsWorkspace.restoreClientState(toolsClientState)
     this.transcript.setScrollOffset(scrollTop)
+    this.toolsWorkspace.activityScroller.scrollTo(toolsScrollTop)
 
     if (pickerWasVisible && pickerKind !== null) {
       this.#pickerController.query = pickerQuery
@@ -1660,11 +1667,12 @@ export class RottweilerApp extends BoxRenderable {
       !this.#providerOnboardingModelsResponseReceived ||
       !this.#providerOnboardingSessionsResponseReceived
     ) return
-    const ready = state.providers.some(
-      (provider) => provider.configured && provider.authenticated && provider.reachable,
-    )
+    // A cold catalog has not checked credentials or reachability. Only offer
+    // setup automatically when no provider is configured; explicit discovery
+    // and inference still report missing credentials and unavailable models.
+    const configured = state.providers.some((provider) => provider.configured)
     if (
-      !ready &&
+      !configured &&
       state.model === null &&
       !this.#providerOnboardingOffered &&
       !state.replay.active &&
@@ -1683,31 +1691,143 @@ export class RottweilerApp extends BoxRenderable {
     this.#bindStateToComponents(state)
   }
 
-  /** Snapshot process-local UI state before the supervisor recycles this renderer. */
-  recycleState(): TuiRecycleState {
+  #captureComposerState(): ClientComposerState {
     return {
-      schemaVersion: 1,
-      draft: this.composer.value,
-      scrollTop: Math.max(0, this.transcript.scroller.scrollTop),
+      content: this.composer.value,
+      attachments: [...this.composer.attachments],
+      cursorOffset: this.composer.editor.cursorOffset,
+      selection: this.composer.editor.getSelection(),
     }
   }
 
-  /** Restore the non-durable UI state that cannot be replayed from the engine. */
-  restoreRecycleState(state: TuiRecycleState): void {
-    this.composer.restoreDraft(state.draft, [])
-    this.#parentComposerDraft = { content: state.draft, attachments: [] }
-    this.#lastComposerValue = state.draft
-    this.#pendingRecycleScrollTop = state.scrollTop
+  #restoreComposerState(state: ClientComposerState): void {
+    this.composer.restoreDraft(state.content, state.attachments)
+    this.composer.editor.cursorOffset = state.cursorOffset
+    if (state.selection !== null) this.composer.editor.setSelection(state.selection.start, state.selection.end)
   }
 
-  /** Apply a restored offset after OpenTUI has laid out the replayed transcript. */
+  #clientPickerSurface() {
+    switch (this.#pickerController.kind) {
+      case "palette": return this.commandPalette
+      case "mcp": return this.mcpBrowser
+      case "settings": return this.settingsBrowser
+      case "themes": return this.themeBrowser
+      default: return null
+    }
+  }
+
+  /** Return no handoff while an interaction needs its current process or cannot fit the private cap. */
+  recycleState(): AppClientState | null {
+    const kind = this.#pickerController.kind
+    if (this.#activeSubagentId !== null || this.#composerSubmissionsInFlight > 0
+      || this.#terminalSuspended || this.#state.shell.active || this.#state.replay.active
+      || this.#providerAuthActionInFlight || this.#providerApiKeyPending !== null
+      || this.#state.providerAuth.pending !== null || this.#mcpDraftName !== null
+      || this.#pendingRewindIntent !== null || this.#pendingExport !== null
+      || this.#reviewOpen || this.outputViewer.visible || this.interactionPanel.visible
+      || (kind !== null && !isRestorablePicker(kind))) return null
+    const surface = this.#clientPickerSurface()
+    const selected = surface?.selectedId ?? this.picker.select.getSelectedOption()?.value
+    return parseTuiRecycleState({
+      schemaVersion: 2,
+      sessionId: this.#sessionId,
+      composer: this.#captureComposerState(),
+      subagentDrafts: [...this.#subagentComposerDrafts].map(([id, draft]) => ({ id, draft })),
+      primaryView: this.#primaryView,
+      scrollTop: Math.max(0, this.transcript.scroller.scrollTop),
+      toolsScrollTop: Math.max(0, this.toolsWorkspace.activityScroller.scrollTop),
+      transcript: this.transcript.captureClientState(),
+      tools: this.toolsWorkspace.captureClientState(),
+      inputMode: this.#inputMode,
+      focus: this.#vimFocus === "picker" ? this.#vimFocusBeforePicker : this.#vimFocus,
+      theme: this.#theme.name,
+      picker: kind === null ? null : {
+        kind,
+        anchored: this.#pickerController.anchored,
+        query: surface?.input.value ?? (this.#pickerController.anchored ? this.#pickerController.query : this.picker.input.value),
+        selectedId: typeof selected === "string" ? selected : null,
+        scrollOffset: surface?.scrollOffset ?? 0,
+        modelProviderFilter: this.#modelProviderFilter,
+        onboarding: this.#providerPickerOnboarding,
+        themeBeforePreview: this.#themeBeforePreview?.name ?? null,
+      },
+    })
+  }
+
+  /** Rebuild view bindings from client-owned data; projection responses remain engine-owned. */
+  restoreRecycleState(state: AppClientState): void {
+    if (state.sessionId !== this.#sessionId) return
+    this.#providerOnboardingOffered = true
+    const theme = this.#resolvedTheme(themeByName(state.theme) ?? kennelTheme)
+    if (theme.name !== this.#theme.name) this.#createThemedSurface(theme)
+    this.#restoreComposerState(state.composer)
+    this.#parentComposerDraft = { content: state.composer.content, attachments: state.composer.attachments }
+    this.#subagentComposerDrafts = new Map(state.subagentDrafts.map(({ id, draft }) => [id, draft]))
+    this.#lastComposerValue = state.composer.content
+    this.#inputMode = state.inputMode
+    this.#vimFocus = state.focus
+    this.#vimFocusBeforePicker = state.focus
+    this.#setPrimaryView(state.primaryView)
+    const picker = state.picker
+    if (picker !== null) {
+      switch (picker.kind) {
+        case "palette": this.openCommandPicker(); break
+        case "keyboardHelp": this.openKeyboardHelpPicker(); break
+        case "commands": this.#requestCommands(); break
+        case "attachments": this.openAttachmentPicker(); break
+        case "mcp": this.openMcpPicker(); break
+        case "modes": this.openModePicker(); break
+        case "models": this.openModelPicker(picker.modelProviderFilter); break
+        case "providers": this.openProviderPicker(picker.onboarding); break
+        case "permissions": this.openPermissionPicker(); break
+        case "permissionMode": this.openPermissionModePicker(); break
+        case "trust": this.openTrustPicker(); break
+        case "queuedMessages": this.openQueuedMessagesPicker(); break
+        case "workspaceRoots": this.openWorkspaceRootsPicker(); break
+        case "budgets": this.openBudgetPicker(); break
+        case "sessions": this.openSessionPicker(); break
+        case "settings": this.openSettingsPicker(); break
+        case "agents": this.openSubagentPicker(); break
+        case "timeline": this.openTimelinePicker(); break
+        case "themes": this.openThemePicker(); break
+      }
+      this.#pickerController.begin(picker.kind, picker.anchored, picker.query)
+      const surface = this.#clientPickerSurface()
+      if (surface !== null) surface.input.value = picker.query
+      else this.picker.input.value = picker.query
+      this.#themeBeforePreview = picker.themeBeforePreview === null
+        ? null : this.#resolvedTheme(themeByName(picker.themeBeforePreview) ?? kennelTheme)
+      this.#pickerController.refresh()
+    }
+    this.#pendingClientState = state
+    this.setState(this.#state)
+    this.#focusForInputMode()
+  }
+
+  /** Apply viewport/selection only after replay and OpenTUI layout have supplied their rows. */
   applyPendingRecycleScroll(): void {
-    if (
-      this.#pendingRecycleScrollTop === null ||
-      (this.#pendingRecycleScrollTop > 0 && this.#presentedState().transcript.length === 0)
-    ) return
-    this.transcript.setScrollOffset(this.#pendingRecycleScrollTop)
-    this.#pendingRecycleScrollTop = null
+    const state = this.#pendingClientState
+    if (state === null) return
+    const transcriptReady = state.scrollTop === 0 || this.#presentedState().transcript.length > 0
+    const toolsReady = state.toolsScrollTop === 0 || this.toolsWorkspace.mountedRowCount > 0
+    const transcriptBlocksReady = this.transcript.restoreClientState(state.transcript)
+    const toolsBlocksReady = this.toolsWorkspace.restoreClientState(state.tools)
+    if (transcriptReady) this.transcript.setScrollOffset(state.scrollTop)
+    if (toolsReady) this.toolsWorkspace.activityScroller.scrollTo(state.toolsScrollTop)
+    let pickerReady = true
+    if (state.picker !== null && this.#pickerController.kind === state.picker.kind) {
+      const surface = this.#clientPickerSurface()
+      if (surface !== null) {
+        if (state.picker.selectedId !== null) surface.selectById(state.picker.selectedId)
+        pickerReady = state.picker.selectedId === null || surface.selectedId === state.picker.selectedId
+        surface.restoreViewport(state.picker.scrollOffset)
+      } else {
+        const index = this.picker.select.options.findIndex((item) => item.value === state.picker?.selectedId)
+        if (index >= 0) this.picker.select.setSelectedIndex(index)
+        pickerReady = state.picker.selectedId === null || index >= 0
+      }
+    }
+    if (transcriptReady && toolsReady && transcriptBlocksReady && toolsBlocksReady && pickerReady) this.#pendingClientState = null
   }
 
   #modelSupportsVision(state: RottweilerState): boolean {
@@ -2588,6 +2708,7 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   closePicker(): void {
+    this.#pendingClientState = null
     if (this.mcpBrowser.visible) this.mcpBrowser.close()
     if (this.settingsBrowser.visible) this.settingsBrowser.close()
     if (this.themeBrowser.visible) this.themeBrowser.close()
