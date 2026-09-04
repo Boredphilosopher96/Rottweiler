@@ -52,7 +52,7 @@ use crate::{CommandExecutionError, CommandHandler, CommandInvocation};
 const RPC_REQUEST_CAPACITY: u16 = 64;
 const WRITER_QUEUE_CAPACITY: usize = RPC_REQUEST_CAPACITY as usize;
 const PROVIDER_EVENT_QUEUE_CAPACITY: usize = 64;
-const HOST_EFFECT_CAPACITY: u32 = RPC_REQUEST_CAPACITY as u32 + 1;
+const HOST_EFFECT_CAPACITY: u32 = RPC_REQUEST_CAPACITY as u32 * 2;
 const MAX_ABANDONED_REQUESTS: usize = 256;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_millis(DEFAULT_HANDLER_TIMEOUT_MS);
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -464,6 +464,7 @@ struct ReaderState {
     abandoned: Arc<Mutex<BTreeSet<RpcId>>>,
     enforcer: Arc<CapabilityEnforcer>,
     push_handler: Arc<dyn PushHandler>,
+    host_commands: Arc<StdMutex<BTreeSet<RpcId>>>,
     redactor: Arc<dyn PluginBoundaryRedactor>,
     process: Arc<dyn SupervisedPluginProcess>,
     termination: Arc<RequestTermination>,
@@ -556,6 +557,7 @@ impl JsonRpcPluginClient {
                 abandoned,
                 enforcer,
                 push_handler,
+                host_commands: Arc::new(StdMutex::new(BTreeSet::new())),
                 redactor,
                 process: Arc::clone(&launched.process),
                 termination,
@@ -669,6 +671,12 @@ impl JsonRpcPluginClient {
                 }
             }
         };
+        if result
+            .as_ref()
+            .is_err_and(|error| matches!(error.code.as_str(), "-32004" | "-32800"))
+        {
+            self.termination.begin();
+        }
         self.termination.wait().await;
         guard.armed = false;
         drop(permit);
@@ -969,14 +977,7 @@ async fn reader_loop(mut stdout: PluginStdout, state: ReaderState) {
             return;
         };
         for frame in frames {
-            let continue_reading = {
-                let effect = state.termination.host_effects.try_acquire();
-                if effect.is_err() {
-                    false
-                } else {
-                    process_incoming_frame(frame, &state).await
-                }
-            };
+            let continue_reading = process_incoming_frame(frame, &state).await;
             if !continue_reading {
                 cancel_active_provider_http(&state.active_provider_http);
                 state.termination.begin();
@@ -1117,36 +1118,7 @@ async fn process_incoming_frame(frame: RpcFrame, state: &ReaderState) -> bool {
             if request.method == METHOD_PROVIDER_HTTP {
                 return start_provider_http_request(request, state);
             }
-            let response = handle_push_request(
-                &state.enforcer,
-                state.push_handler.as_ref(),
-                &request.method,
-                state.redactor.redact(request.params.unwrap_or(Value::Null)),
-            )
-            .await;
-            if state.termination.cancellation.is_cancelled() {
-                return false;
-            }
-            let response_frame = match response {
-                Ok(result) => RpcFrame::Success(RpcSuccess {
-                    jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
-                    id: Some(request.id),
-                    result,
-                }),
-                Err(error) => RpcFrame::Failure(RpcFailure {
-                    jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
-                    id: Some(request.id),
-                    error: rw_plugin_protocol::RpcErrorObject {
-                        code: -32000,
-                        message: error.message,
-                        data: Some(json!({"code":error.code})),
-                    },
-                }),
-            };
-            tokio::time::timeout(DEFAULT_REQUEST_TIMEOUT, state.writer.send(response_frame))
-                .await
-                .is_ok_and(|result| result.is_ok())
-                && !state.enforcer.violated()
+            start_host_command(request, state)
         }
         RpcFrame::Notification(notification) => {
             if notification.method == METHOD_PROVIDER_HTTP_CANCEL {
@@ -1163,18 +1135,74 @@ async fn process_incoming_frame(frame: RpcFrame, state: &ReaderState) -> bool {
                 )
                 .await;
             }
-            let _ = handle_push_request(
-                &state.enforcer,
-                state.push_handler.as_ref(),
-                &notification.method,
-                state
-                    .redactor
-                    .redact(notification.params.unwrap_or(Value::Null)),
-            )
-            .await;
-            !state.enforcer.violated()
+            // Mutating host capabilities require a correlated outcome.
+            false
         }
     }
+}
+
+fn start_host_command(request: RpcRequest, state: &ReaderState) -> bool {
+    if state.enforcer.check_push_method(&request.method).is_err() {
+        return false;
+    }
+    let Ok(mut active) = state.host_commands.lock() else {
+        return false;
+    };
+    if active.len() >= usize::from(RPC_REQUEST_CAPACITY) || active.contains(&request.id) {
+        return false;
+    }
+    let Ok(effect) = Arc::clone(&state.termination.host_effects).try_acquire_owned() else {
+        return false;
+    };
+    active.insert(request.id.clone());
+    drop(active);
+    let active = Arc::clone(&state.host_commands);
+    let handler = Arc::clone(&state.push_handler);
+    let enforcer = Arc::clone(&state.enforcer);
+    let redactor = Arc::clone(&state.redactor);
+    let writer = state.writer.clone();
+    let termination = Arc::clone(&state.termination);
+    tokio::spawn(async move {
+        // Keep this permit through the actual actor reply, even after teardown starts.
+        let _effect = effect;
+        let response = handle_push_request(
+            &enforcer,
+            handler.as_ref(),
+            &request.method,
+            redactor.redact(request.params.unwrap_or(Value::Null)),
+        )
+        .await;
+        if let Ok(mut active) = active.lock() {
+            active.remove(&request.id);
+        }
+        if termination.cancellation.is_cancelled() {
+            return;
+        }
+        let response = match response {
+            Ok(result) => RpcFrame::Success(RpcSuccess {
+                jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
+                id: Some(request.id),
+                result: redactor.redact(result),
+            }),
+            Err(error) => RpcFrame::Failure(RpcFailure {
+                jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
+                id: Some(request.id),
+                error: rw_plugin_protocol::RpcErrorObject {
+                    code: -32000,
+                    message: error.message,
+                    data: Some(json!({"code":error.code})),
+                },
+            }),
+        };
+        if !tokio::time::timeout(DEFAULT_REQUEST_TIMEOUT, writer.send(response))
+            .await
+            .is_ok_and(|result| result.is_ok())
+            || enforcer.violated()
+        {
+            termination.begin();
+        }
+    });
+    true
 }
 
 fn start_provider_http_request(request: RpcRequest, state: &ReaderState) -> bool {
@@ -1447,9 +1475,7 @@ async fn handle_push_request(
         .check_push_method(method)
         .map_err(|error| rpc_error("capability_violation", &error.to_string()))?;
     validate_push_params(method, &params)?;
-    tokio::time::timeout(DEFAULT_REQUEST_TIMEOUT, handler.handle_push(method, params))
-        .await
-        .map_err(|_| rpc_error("push_timeout", "plugin push handler timed out"))?
+    handler.handle_push(method, params).await
 }
 
 fn validate_push_params(method: &str, params: &Value) -> Result<(), PluginRpcError> {
@@ -3634,6 +3660,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn ordinary_cancellation_drains_admitted_host_push_before_reporting_settlement() {
         let process = Arc::new(FakeProcess::default());
         let (host_stdin, plugin_input) = tokio::io::duplex(4096);
@@ -3683,11 +3710,50 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), push.started.notified())
             .await
             .expect("push admitted");
+        // A delayed actor command must not block unrelated response correlation.
+        let ping = {
+            let client = Arc::clone(&client);
+            tokio::spawn(async move { client.request("ping", Value::Null).await })
+        };
+        line.clear();
+        tokio::time::timeout(Duration::from_secs(1), input.read_line(&mut line))
+            .await
+            .expect("ping write deadline")
+            .expect("ping request");
+        let ping_request: RpcFrame = serde_json::from_str(line.trim()).expect("ping frame");
+        let RpcFrame::Request(ping_request) = ping_request else {
+            panic!("expected request")
+        };
+        plugin_output
+            .write_all(
+                &encode_frame(
+                    &RpcFrame::Success(RpcSuccess {
+                        jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
+                        id: Some(ping_request.id),
+                        result: json!("pong"),
+                    }),
+                    MAX_FRAME_BYTES,
+                )
+                .expect("ping response"),
+            )
+            .await
+            .expect("write ping response");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), ping)
+                .await
+                .expect("reader remained live")
+                .expect("ping task")
+                .expect("ping result"),
+            json!("pong")
+        );
         cancellation.cancel();
         assert!(
-            tokio::time::timeout(Duration::from_millis(50), &mut task)
-                .await
-                .is_err()
+            tokio::time::timeout(
+                DEFAULT_REQUEST_TIMEOUT + Duration::from_millis(100),
+                &mut task
+            )
+            .await
+            .is_err()
         );
         assert!(!push.committed.load(Ordering::Acquire));
         push.release.notify_one();
@@ -3833,6 +3899,7 @@ mod tests {
             abandoned: Arc::new(Mutex::new(BTreeSet::new())),
             enforcer,
             push_handler: Arc::new(DenyPushHandler),
+            host_commands: Arc::new(StdMutex::new(BTreeSet::new())),
             redactor: Arc::new(NoopPluginBoundaryRedactor),
             process: process.clone(),
         };

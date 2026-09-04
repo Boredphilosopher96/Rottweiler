@@ -94,3 +94,18 @@ from `rw-plugin-protocol` and its generated `PROTOCOL_LIMITS` and schema project
 boundary clamps bounded catalog values, and the SDK rejects values outside the same generated
 ranges. A malformed catalog fails discovery for that provider only and does not terminate startup
 or the session.
+
+## Correlated host commands
+
+`push.injectMessage`, `push.setStatus`, and `push.notify` await the correlated
+host response. Injection returns `{ disposition: "started" | "queued" | "command" }`;
+status and notification commands resolve only after the host applies them.
+Capability, session, and parameter failures reject the promise. Pending host
+commands are limited to 64 per plugin process. Active request IDs must be unique;
+a duplicate active ID is a terminal protocol violation.
+
+A local deadline, cancellation, or disconnect rejects with **outcome unknown**:
+it does not undo an admitted host command, and retrying it may duplicate a
+mutation. The host retains ownership until the actor replies, including during
+process teardown. Commands require request IDs; these methods are not
+fire-and-forget notifications.

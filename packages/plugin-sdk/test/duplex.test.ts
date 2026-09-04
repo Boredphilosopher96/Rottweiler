@@ -277,3 +277,60 @@ describe("bounded outbound lifecycle", () => {
     await expect(server.serve(input)).rejects.toThrow("JSON-RPC output write timed out")
   })
 })
+
+describe("correlated host command outcomes", () => {
+  function commandDefinition(): PluginDefinition {
+    const base = fixture()
+    return {
+      manifest: { ...base.manifest, capabilities: {
+        ...base.manifest.capabilities, push: ["session/inject_message"],
+      } },
+      handlers: { ...base.handlers, tools: { hang: async (_params, context) => {
+        const result = await context.push.injectMessage("session", "next")
+        return { content: result.disposition, data: null }
+      } } },
+    }
+  }
+
+  test("awaits queued injection disposition while the reader services unrelated requests", async () => {
+    const { frames, send, serving } = harness(commandDefinition())
+    send({ jsonrpc: "2.0", id: 2, method: "tool/call", params: { name: "hang", input: {} } })
+    await until(() => frames.some(frame => frame.method === "session/inject_message"))
+    expect(frames.some(frame => frame.id === 2)).toBe(false)
+    const command = frames.find(frame => frame.method === "session/inject_message")
+    if (command?.id === undefined) throw new Error("missing command id")
+    send({ jsonrpc: "2.0", id: 3, method: "unknown" })
+    await until(() => frames.some(frame => frame.id === 3))
+    send({ jsonrpc: "2.0", id: command.id, result: { disposition: "queued" } })
+    await until(() => frames.some(frame => frame.id === 2))
+    expect(frames.find(frame => frame.id === 2)?.result).toEqual({ content: "queued", data: null })
+    send(stop)
+    await serving
+  })
+
+  test("host rejection reaches the caller and malformed outcomes cannot strand a promise", async () => {
+    for (const outcome of [{ error: { code: -32003, message: "wrong session" } }, { error: null }]) {
+      const { frames, send, serving } = harness(commandDefinition())
+      send({ jsonrpc: "2.0", id: 2, method: "tool/call", params: { name: "hang", input: {} } })
+      await until(() => frames.some(frame => frame.method === "session/inject_message"))
+      const command = frames.find(frame => frame.method === "session/inject_message")
+      if (command?.id === undefined) throw new Error("missing command id")
+      send({ jsonrpc: "2.0", id: command.id, ...outcome })
+      await until(() => frames.some(frame => frame.id === 2))
+      expect(frames.find(frame => frame.id === 2)?.error).toMatchObject({
+        code: outcome.error === null ? -32603 : -32003,
+      })
+      send(stop)
+      await serving
+    }
+  })
+
+  test("disconnect rejects a pending host outcome", async () => {
+    const { frames, send, serving } = harness(commandDefinition())
+    send({ jsonrpc: "2.0", id: 2, method: "tool/call", params: { name: "hang", input: {} } })
+    await until(() => frames.some(frame => frame.method === "session/inject_message"))
+    send(stop)
+    await serving
+    expect(frames.find(frame => frame.id === 2)?.error).toMatchObject({ code: -32800 })
+  })
+})

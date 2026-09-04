@@ -817,6 +817,20 @@ pub struct InitializeParams {
     pub capabilities: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InjectionDisposition {
+    Started,
+    Queued,
+    Command,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct InjectMessageResult {
+    pub disposition: InjectionDisposition,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolCallParams {
