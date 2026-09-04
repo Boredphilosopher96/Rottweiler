@@ -561,6 +561,71 @@ impl SegmentedJournal {
 }
 
 impl JournalReadView {
+    /// Captures an existing offline journal without modifying it.
+    ///
+    /// A live owner must supply its own [`SegmentedJournal::read_view`]. Taking
+    /// the ownership lock prevents mistaking written but unsynchronized active
+    /// records for an acknowledged tail. The lock is released after capture.
+    ///
+    /// # Errors
+    /// Rejects a live writer, unsafe files, corrupt complete records, or an
+    /// interrupted tail which must first be recovered by the writer.
+    pub fn open_existing(root: &Path, session_id: &str) -> Result<Option<Self>, SessionStoreError> {
+        let directory = match Directory::open(root, session_id, false) {
+            Ok(directory) => Arc::new(directory),
+            Err(SessionStoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        let ownership = directory.file("writer.lock", false, false)?;
+        super::lock_writer(&ownership)?;
+        let segments = Arc::new(directory.catalog()?);
+        let active = Arc::new(directory.file("active.jsonl", false, false)?);
+        let bytes = super::read_opened_file_bounded(&active, MAX_SEGMENT_BYTES as u64)?;
+        if !bytes.is_empty() && bytes.last() != Some(&b'\n') {
+            return Err(SessionStoreError::CorruptEvent(
+                "active journal tail requires writer recovery",
+            ));
+        }
+        let first = segments.last().map_or(0, |segment| segment.next);
+        let records = super::parse_events_bounded_from_sequence::<serde_json::Value>(
+            &bytes,
+            usize::MAX,
+            first,
+        )?;
+        let next_sequence = first
+            .checked_add(records.len() as u64)
+            .ok_or(SessionStoreError::SequenceOverflow)?;
+        let active_segment = (!bytes.is_empty()).then(|| Segment {
+            first,
+            next: next_sequence,
+            bytes: bytes.len() as u64,
+            digest: blake3::hash(&bytes),
+            name: "active.jsonl".to_owned(),
+        });
+        let total_bytes =
+            segments.iter().map(|segment| segment.bytes).sum::<u64>() + bytes.len() as u64;
+        let digest = segments
+            .iter()
+            .chain(active_segment.iter())
+            .fold(blake3::hash(b""), |identity, segment| {
+                segment.extend_identity(identity)
+            });
+        Ok(Some(Self {
+            directory,
+            segments,
+            active,
+            active_segment,
+            next_sequence,
+            total_bytes,
+            identity: JournalPrefixIdentity {
+                next_sequence,
+                digest: *digest.as_bytes(),
+            },
+        }))
+    }
+
     /// Identity of this captured prefix, stable across rotation and reopening.
     #[must_use]
     pub const fn prefix_identity(&self) -> JournalPrefixIdentity {
@@ -1076,6 +1141,36 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn offline_views_capture_only_unowned_journals_and_release_ownership_before_reading() {
+        let root = tempdir().expect("root");
+        assert!(
+            JournalReadView::open_existing(root.path(), "absent")
+                .expect("absent")
+                .is_none()
+        );
+        let mut journal = SegmentedJournal::open(root.path(), "offline").expect("journal");
+        journal.append_batch([json!("first")]).expect("append");
+        let identity = journal.read_view().prefix_identity();
+        assert!(JournalReadView::open_existing(root.path(), "offline").is_err());
+        drop(journal);
+        let view = JournalReadView::open_existing(root.path(), "offline")
+            .expect("capture")
+            .expect("exists");
+        assert_eq!(view.prefix_identity(), identity);
+        let mut reopened =
+            SegmentedJournal::open(root.path(), "offline").expect("capture releases ownership");
+        reopened.append_batch([json!("second")]).expect("append");
+        assert_eq!(view.verify_all().expect("verify offline view").events, 1);
+        assert_eq!(
+            view.page::<Value>(None, page_limits(10))
+                .expect("page")
+                .events
+                .len(),
+            1
+        );
     }
 
     #[test]
