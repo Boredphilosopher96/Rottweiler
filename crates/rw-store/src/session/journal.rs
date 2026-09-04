@@ -626,6 +626,95 @@ impl JournalReadView {
         }))
     }
 
+    /// Reopens an exact historical prefix without retaining a server-side cursor.
+    ///
+    /// The boundary segment is read and verified. Earlier segment identities are
+    /// included in the chain; their payloads remain subject to on-access or full
+    /// integrity verification. This also reconstructs prefixes originally captured
+    /// inside an active segment which has since grown or been sealed.
+    ///
+    /// # Errors
+    /// Rejects future watermarks, mismatched identities and corrupt boundary data.
+    pub fn at_prefix(&self, identity: JournalPrefixIdentity) -> Result<Self, SessionStoreError> {
+        let next = identity.next_sequence;
+        if next > self.next_sequence {
+            return Err(SessionStoreError::EventPageCursorAhead);
+        }
+        if next == 0 {
+            if identity.digest != *blake3::hash(b"").as_bytes() {
+                return Err(SessionStoreError::CorruptEvent(
+                    "journal prefix identity mismatch",
+                ));
+            }
+            return Ok(Self {
+                directory: Arc::clone(&self.directory),
+                segments: Arc::new(Vec::new()),
+                active: Arc::clone(&self.active),
+                active_segment: None,
+                next_sequence: 0,
+                total_bytes: 0,
+                identity,
+            });
+        }
+        let index = self.segments.partition_point(|segment| segment.next < next);
+        let (boundary, active) = if let Some(segment) = self.segments.get(index) {
+            (segment, false)
+        } else {
+            (
+                self.active_segment
+                    .as_ref()
+                    .ok_or(SessionStoreError::CorruptEvent(
+                        "missing journal prefix boundary",
+                    ))?,
+                true,
+            )
+        };
+        let boundary_file = self.segment_file(boundary, active)?;
+        let bytes = Self::read_segment_bytes(&boundary_file, boundary, active)?;
+        let count = next
+            .checked_sub(boundary.first)
+            .and_then(|count| usize::try_from(count).ok())
+            .ok_or(SessionStoreError::CorruptEvent(
+                "invalid journal prefix boundary",
+            ))?;
+        let mut delimiters = memchr::memchr_iter(b'\n', &bytes);
+        let prefix_bytes = count
+            .checked_sub(1)
+            .and_then(|index| delimiters.nth(index))
+            .map(|offset| offset + 1)
+            .ok_or(SessionStoreError::CorruptEvent(
+                "missing journal prefix records",
+            ))?;
+        let prefix = Segment {
+            first: boundary.first,
+            next,
+            bytes: prefix_bytes as u64,
+            digest: blake3::hash(&bytes[..prefix_bytes]),
+            name: boundary.name.clone(),
+        };
+        let segments = Arc::new(self.segments[..index].to_vec());
+        let prior = segments
+            .iter()
+            .fold(blake3::hash(b""), |identity, segment| {
+                segment.extend_identity(identity)
+            });
+        if prefix.extend_identity(prior).as_bytes() != &identity.digest {
+            return Err(SessionStoreError::CorruptEvent(
+                "journal prefix identity mismatch",
+            ));
+        }
+        let total_bytes = segments.iter().map(|segment| segment.bytes).sum::<u64>() + prefix.bytes;
+        Ok(Self {
+            directory: Arc::clone(&self.directory),
+            segments,
+            active: boundary_file,
+            active_segment: Some(prefix),
+            next_sequence: next,
+            total_bytes,
+            identity,
+        })
+    }
+
     /// Identity of this captured prefix, stable across rotation and reopening.
     #[must_use]
     pub const fn prefix_identity(&self) -> JournalPrefixIdentity {
@@ -642,13 +731,31 @@ impl JournalReadView {
         }
     }
 
-    fn segment_bytes(&self, segment: &Segment, active: bool) -> Result<Vec<u8>, SessionStoreError> {
-        let file = if active {
-            Arc::clone(&self.active)
+    fn segment_file(
+        &self,
+        segment: &Segment,
+        active: bool,
+    ) -> Result<Arc<File>, SessionStoreError> {
+        if active {
+            Ok(Arc::clone(&self.active))
         } else {
-            Arc::new(self.directory.file(&segment.name, false, false)?)
-        };
-        let before = super::event_file_snapshot(&file)?;
+            self.directory
+                .file(&segment.name, false, false)
+                .map(Arc::new)
+        }
+    }
+
+    fn segment_bytes(&self, segment: &Segment, active: bool) -> Result<Vec<u8>, SessionStoreError> {
+        let file = self.segment_file(segment, active)?;
+        Self::read_segment_bytes(&file, segment, active)
+    }
+
+    fn read_segment_bytes(
+        file: &File,
+        segment: &Segment,
+        active: bool,
+    ) -> Result<Vec<u8>, SessionStoreError> {
+        let before = super::event_file_snapshot(file)?;
         if before.len() < segment.bytes || (!active && before.len() != segment.bytes) {
             return Err(SessionStoreError::CorruptEvent(
                 "pinned journal segment length changed",
@@ -674,9 +781,9 @@ impl JournalReadView {
             ));
         }
         if active {
-            super::event_file_snapshot(&file)?;
+            super::event_file_snapshot(file)?;
         } else {
-            super::verify_event_file_snapshot(&file, &before)?;
+            super::verify_event_file_snapshot(file, &before)?;
         }
         Ok(bytes)
     }
@@ -1171,6 +1278,61 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn historical_prefix_reopens_after_growth_rotation_and_writer_restart() {
+        let root = tempdir().expect("root");
+        let mut journal = SegmentedJournal::open(root.path(), "historical").expect("journal");
+        let empty = journal.read_view().prefix_identity();
+        journal.append_batch([json!("first")]).expect("first");
+        let first = journal.read_view().prefix_identity();
+        journal.append_batch([json!("second")]).expect("second");
+        let second = journal.read_view().prefix_identity();
+        journal
+            .append_batch([json!("x".repeat(SEGMENT_TARGET_BYTES))])
+            .expect("rotate");
+        let third = journal.read_view().prefix_identity();
+        journal
+            .append_batch([json!("fourth")])
+            .expect("rotate again");
+        drop(journal);
+        let view = JournalReadView::open_existing(root.path(), "historical")
+            .expect("offline")
+            .expect("exists");
+        for identity in [empty, first, second, third, view.prefix_identity()] {
+            let prefix = view.at_prefix(identity).expect("historical prefix");
+            assert_eq!(prefix.prefix_identity(), identity);
+            assert_eq!(
+                prefix.verify_all().expect("verify").events,
+                identity.next_sequence
+            );
+            assert_eq!(
+                prefix
+                    .page::<Value>(None, page_limits(10))
+                    .expect("page")
+                    .events
+                    .len() as u64,
+                identity.next_sequence
+            );
+        }
+        let mut changed = first;
+        changed.digest[0] ^= 1;
+        assert!(view.at_prefix(changed).is_err());
+        changed.next_sequence = 5;
+        assert!(matches!(
+            view.at_prefix(changed),
+            Err(SessionStoreError::EventPageCursorAhead)
+        ));
+        let first_segment = journal_path(root.path(), "historical").join(&view.segments[0].name);
+        let mut bytes = fs::read(&first_segment).expect("read");
+        bytes[0] ^= 1;
+        fs::write(first_segment, bytes).expect("corrupt boundary");
+        assert!(view.at_prefix(first).is_err());
+    }
+
+    fn journal_path(root: &Path, session: &str) -> PathBuf {
+        root.join("sessions").join(session).join("journal")
     }
 
     #[test]
