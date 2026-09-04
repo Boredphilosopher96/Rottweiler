@@ -2270,7 +2270,6 @@ fn common_plugin_limit(
 
 #[async_trait]
 impl Provider for RpcProviderAdapter {
-
     fn name(&self) -> &str {
         &self.name
     }
