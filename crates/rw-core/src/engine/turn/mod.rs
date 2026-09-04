@@ -3832,10 +3832,6 @@ async fn execute_tool_calls(
             .await,
         );
     }
-    let may_run_in_parallel = prepared.iter().all(|call| match call {
-        PreparedToolCall::Execute { read_only, .. } => *read_only,
-        PreparedToolCall::Complete(_) => true,
-    });
     let coordinator = Arc::new(OrderedOutputCoordinator::new(
         turn,
         signals.clone(),
@@ -3868,106 +3864,78 @@ async fn execute_tool_calls(
     };
     let total = prepared.len();
     let mut ordered = Vec::with_capacity(total);
-    if !may_run_in_parallel {
-        for call in prepared {
-            let (mut execution, _ran) = if cancellation.is_cancelled() {
-                match call {
-                    PreparedToolCall::Execute { call, .. } => (
-                        failed_execution(call, "tool execution cancelled before start"),
-                        false,
-                    ),
-                    PreparedToolCall::Complete(execution) => (execution, false),
-                }
-            } else {
-                execute_prepared_tool(
-                    call,
-                    context.clone(),
-                    cancellation.clone(),
-                    execution_runtime.clone(),
-                )
-                .await
-            };
-            redact_tool_output(&mut execution.output, config.secret_redactor.as_ref());
-            emit_plan_submission(
-                &execution,
-                mode,
-                signals,
-                config.secret_redactor.as_ref(),
-                &config.tools,
-            );
-            send_event(
-                signals,
-                PendingEvent::ToolCallFinished {
-                    turn,
-                    id: execution.call.id.clone(),
-                    output: execution.output.clone(),
-                    is_error: execution.is_error,
-                    index: execution.call.index,
-                },
-            );
-            coordinator.advance(ordered.len().saturating_add(1));
-            subagents.advance_after_tool(execution.call.index);
-            ordered.push(execution);
-        }
-        return ordered;
-    }
-
-    let (completed_tx, mut completed_rx) = mpsc::unbounded_channel();
-    let mut completed = (0..total).map(|_| None).collect::<Vec<_>>();
-    for (index, call) in prepared.into_iter().enumerate() {
-        match call {
-            PreparedToolCall::Complete(execution) => {
-                completed[index] = Some((execution, false));
-            }
-            call @ PreparedToolCall::Execute { .. } => {
-                let fallback = call.call().clone();
-                let context = context.clone();
-                let cancellation = cancellation.clone();
-                let execution_runtime = execution_runtime.clone();
-                let completed_tx = completed_tx.clone();
-                let _task = tokio::spawn(async move {
-                    let result = AssertUnwindSafe(execute_prepared_tool(
-                        call,
-                        context,
-                        cancellation,
-                        execution_runtime,
-                    ))
-                    .catch_unwind()
-                    .await
-                    .unwrap_or_else(|_| {
-                        (
-                            failed_execution(fallback, "tool implementation panicked"),
-                            true,
-                        )
-                    });
-                    let _ = completed_tx.send((index, result));
-                });
-            }
-        }
-    }
-    drop(completed_tx);
+    let mut prepared = prepared.into_iter().peekable();
+    let mut running = futures_util::stream::FuturesUnordered::new();
+    let mut completed = BTreeMap::new();
     let mut next = 0;
+    let mut launched = 0;
+    let mut mutation_running = false;
     while next < total {
-        if completed[next].is_none() {
-            let Some((index, execution)) = completed_rx.recv().await else {
-                let call = PendingToolCall {
-                    id: format!("missing-{next}"),
-                    name: "unknown".to_owned(),
-                    arguments: None,
-                    index: next,
-                };
-                completed[next] = Some((
-                    failed_execution(call, "tool task ended without a result"),
-                    true,
-                ));
-                continue;
+        // Limit the whole ordered window, including completed later results.
+        // Refilling solely by active task count would retain an unbounded tail
+        // while the first call waits or produces output.
+        while !mutation_running && launched - next < MAX_TOOL_EXECUTION_WINDOW {
+            let Some(front) = prepared.peek() else {
+                break;
             };
-            completed[index] = Some(execution);
-            continue;
+            let mutation = matches!(
+                front,
+                PreparedToolCall::Execute {
+                    read_only: false,
+                    ..
+                }
+            );
+            if mutation && launched != next {
+                break;
+            }
+            let Some(call) = prepared.next() else {
+                break;
+            };
+            let index = launched;
+            launched += 1;
+            match call {
+                PreparedToolCall::Complete(execution) => {
+                    completed.insert(index, (execution, false));
+                }
+                PreparedToolCall::Execute { call, .. } if cancellation.is_cancelled() => {
+                    completed.insert(
+                        index,
+                        (
+                            failed_execution(call, "tool execution cancelled before start"),
+                            false,
+                        ),
+                    );
+                }
+                call @ PreparedToolCall::Execute { .. } => {
+                    let fallback = call.call().clone();
+                    let context = context.clone();
+                    let cancellation = cancellation.clone();
+                    let runtime = execution_runtime.clone();
+                    let task = tokio::spawn(async move {
+                        execute_prepared_tool(call, context, cancellation, runtime).await
+                    });
+                    running.push(async move {
+                        let execution = match task.await {
+                            Ok((execution, _ran)) => execution,
+                            Err(_) => {
+                                failed_execution(fallback, "tool task ended without a result")
+                            }
+                        };
+                        (index, execution, mutation)
+                    });
+                    mutation_running = mutation;
+                }
+            }
         }
-        let Some((mut execution, _ran)) = completed[next].take() else {
+        let Some((mut execution, was_mutation)) = completed.remove(&next) else {
+            if let Some((index, execution, mutation)) = running.next().await {
+                completed.insert(index, (execution, mutation));
+            }
             continue;
         };
+        if was_mutation {
+            mutation_running = false;
+        }
         redact_tool_output(&mut execution.output, config.secret_redactor.as_ref());
         emit_plan_submission(
             &execution,

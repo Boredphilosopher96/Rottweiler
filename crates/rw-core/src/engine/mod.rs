@@ -163,6 +163,7 @@ const TEXT_DELTA_COALESCE_WINDOW: Duration = Duration::from_millis(2);
 const MAX_LIVE_TOOL_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_LIVE_TOOL_OUTPUT_CHUNKS: usize = 1024;
 const MAX_IN_FLIGHT_TOOL_OUTPUT_CHUNKS: usize = 32;
+const MAX_TOOL_EXECUTION_WINDOW: usize = 16;
 const MAX_CAPTURED_SHELL_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_APPROVAL_DIFF_BYTES: usize = 256 * 1024;
 const MAX_COMMAND_TOOL_FRAME_BYTES: usize = 256 * 1024;
@@ -3071,6 +3072,40 @@ mod tests {
                 self.release_first.notify_one();
             }
             Ok(ToolResult::new(&self.descriptor.name, Value::Null))
+        }
+    }
+
+    struct OrderedWindowProbe {
+        started: AtomicUsize,
+        window_filled: Notify,
+        exceeded_window: Notify,
+    }
+
+    #[async_trait]
+    impl Tool for OrderedWindowProbe {
+        fn descriptor(&self) -> ToolDescriptor {
+            descriptor("window_probe")
+        }
+
+        async fn execute(
+            &self,
+            context: &ToolContext,
+            input: Value,
+        ) -> Result<ToolResult, ToolError> {
+            let started = self.started.fetch_add(1, Ordering::SeqCst) + 1;
+            if started == MAX_TOOL_EXECUTION_WINDOW {
+                self.window_filled.notify_one();
+            } else if started > MAX_TOOL_EXECUTION_WINDOW {
+                self.exceeded_window.notify_one();
+            }
+            if input["index"] == 0 {
+                context.cancellation.cancelled().await;
+                return Err(ToolError::Cancelled);
+            }
+            Ok(ToolResult::new(
+                "completed behind the first call",
+                Value::Null,
+            ))
         }
     }
 
@@ -8741,6 +8776,130 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(indices, vec![0, 1]);
+    }
+
+    #[tokio::test]
+    async fn ordered_tool_window_bounds_completed_tail_and_cancels_unstarted_calls() {
+        let root = TempDir::new().expect("tempdir");
+        let count = MAX_TOOL_EXECUTION_WINDOW * 3;
+        let calls = (0..count)
+            .map(|index| (format!("call-{index}"), json!({"index": index})))
+            .collect::<Vec<_>>();
+        let script_calls = calls
+            .iter()
+            .map(|(id, args)| (id.as_str(), "window_probe", args.clone()))
+            .collect::<Vec<_>>();
+        let model = Arc::new(ScriptedModel::new([tool_script(&script_calls, &[])]));
+        let probe = Arc::new(OrderedWindowProbe {
+            started: AtomicUsize::new(0),
+            window_filled: Notify::new(),
+            exceeded_window: Notify::new(),
+        });
+        let mut tools = ToolRegistry::new();
+        tools.register(probe.clone()).expect("probe tool");
+        let handle = SessionActor::spawn(config(
+            root.path(),
+            model,
+            Arc::new(tools),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        ))
+        .expect("actor");
+        let mut events = handle.subscribe();
+        handle.send_message("fill window").await.expect("message");
+        tokio::time::timeout(Duration::from_secs(2), probe.window_filled.notified())
+            .await
+            .expect("first execution window started");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), probe.exceeded_window.notified())
+                .await
+                .is_err(),
+            "completed later results must remain charged to the ordered window"
+        );
+        handle.interrupt().await.expect("interrupt");
+        let events = collect_turn(&mut events).await;
+        assert_eq!(
+            probe.started.load(Ordering::SeqCst),
+            MAX_TOOL_EXECUTION_WINDOW
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| { matches!(event.kind, PendingEvent::ToolCallFinished { .. }) })
+                .count(),
+            count
+        );
+    }
+
+    #[tokio::test]
+    async fn mixed_tools_parallelize_read_runs_between_mutation_barriers() {
+        let root = TempDir::new().expect("tempdir");
+        let names = ["read_one", "read_two", "write", "read_three", "read_four"];
+        let calls = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| (format!("call-{index}"), *name, json!({})))
+            .collect::<Vec<_>>();
+        let script_calls = calls
+            .iter()
+            .map(|(id, name, args)| (id.as_str(), *name, args.clone()))
+            .collect::<Vec<_>>();
+        let model = Arc::new(ScriptedModel::new([
+            tool_script(&script_calls, &[]),
+            stop_script("done", &[]),
+        ]));
+        let completion_order = Arc::new(Mutex::new(Vec::new()));
+        let first_run = Arc::new(Notify::new());
+        let last_run = Arc::new(Notify::new());
+        let mut tools = ToolRegistry::new();
+        for (index, name) in names.into_iter().enumerate() {
+            let mut tool_descriptor = descriptor(name);
+            if index == 2 {
+                tool_descriptor.capabilities =
+                    CapabilityManifest::new([ToolCapability::WriteFilesystem]);
+            }
+            tools
+                .register(Arc::new(ReverseCompletionTool {
+                    descriptor: tool_descriptor,
+                    first: index == 0 || index == 3,
+                    release_first: if index < 3 {
+                        first_run.clone()
+                    } else {
+                        last_run.clone()
+                    },
+                    completion_order: completion_order.clone(),
+                }))
+                .expect("register mixed tool");
+        }
+        let handle = SessionActor::spawn(config(
+            root.path(),
+            model,
+            Arc::new(tools),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        ))
+        .expect("actor");
+        let mut events = handle.subscribe();
+        handle
+            .send_message("run mixed tools")
+            .await
+            .expect("message");
+        let events = collect_turn(&mut events).await;
+        assert_eq!(
+            completion_order
+                .lock()
+                .expect("completion order")
+                .as_slice(),
+            &["read_two", "read_one", "write", "read_four", "read_three"],
+        );
+        let indices = events
+            .iter()
+            .filter_map(|event| match event.kind {
+                PendingEvent::ToolCallFinished { index, .. } => Some(index),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(indices, vec![0, 1, 2, 3, 4]);
     }
 
     #[tokio::test]
