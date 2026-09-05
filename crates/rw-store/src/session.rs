@@ -6,6 +6,8 @@ mod error;
 mod event_log;
 #[cfg(unix)]
 mod exclusive_lock;
+#[cfg(unix)]
+pub(crate) use exclusive_lock::ExclusiveFileLock;
 mod index;
 /// Segmented journal storage and bounded read views.
 pub mod journal;

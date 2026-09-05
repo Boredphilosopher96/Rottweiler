@@ -7,6 +7,7 @@ pub mod credentials;
 pub mod memory;
 pub mod session;
 pub mod trust;
+pub mod workflow;
 
 pub use memory::{MemoryEntry, MemoryError, ProjectMemoryStore};
 pub use session::{

@@ -19,6 +19,7 @@ pub mod release_contract {
     include!("generated/release_contract.rs");
 }
 pub mod update_contract;
+pub mod workflow;
 
 pub use error::Error;
 
