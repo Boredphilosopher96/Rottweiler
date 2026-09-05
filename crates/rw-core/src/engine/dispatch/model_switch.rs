@@ -6,7 +6,6 @@ use crate::engine::session::PreparedModelSwitch;
 use crate::engine::session::SessionActorConfig;
 use crate::engine::turn::emit_batch;
 use rw_types::ModelContextTransfer;
-use rw_types::Role;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -61,10 +60,7 @@ pub(super) async fn request_model_selection(
         provider: provider.clone(),
         thinking,
     };
-    let has_prior_context = state
-        .conversation
-        .iter()
-        .any(|turn| turn.role != Role::System);
+    let has_prior_context = state.has_conversation_context();
     if has_prior_context && (state.model_alias != model.0 || state.provider != provider) {
         let question_id = QuestionId(format!("model-switch-{}", state.next_question));
         state.next_question = state.next_question.saturating_add(1);

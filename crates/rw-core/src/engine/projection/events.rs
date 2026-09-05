@@ -207,7 +207,7 @@ pub(in crate::engine) fn recovered_pending_event(
             turn: parse_turn_id(turn_id)?,
             tool_call_id: tool_call_id.clone(),
             invocation_id: invocation_id.clone(),
-            decision: *decision,
+            decision: decision.clone(),
         },
         EngineEvent::ToolApprovalNeeded {
             turn_id,

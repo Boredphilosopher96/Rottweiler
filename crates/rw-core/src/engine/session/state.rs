@@ -394,6 +394,8 @@ fn resolved_model(conversation: &[Turn]) -> Option<String> {
     })
 }
 impl ActorState {
+    pub(in crate::engine) fn has_conversation_context(&self) -> bool { self.conversation_turns > self.system_turns }
+
     pub(in crate::engine) fn conversation_summary(&self) -> super::ConversationSummary {
         super::ConversationSummary {
             turns: self.conversation_turns,

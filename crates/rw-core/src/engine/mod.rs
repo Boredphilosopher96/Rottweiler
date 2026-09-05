@@ -85,7 +85,6 @@ pub use commands::{
     SessionCommandContext, SessionCommandOutput, WorkspaceRootController, WorkspaceRootRequest,
     WorkspaceRuntimeGeneration, builtin_command_registry,
 };
-use projection::approved_plan_context_item;
 pub use projection::{
     ContextSurgeryAction, InterruptedToolRepair, RecoveredQuestion, RecoveredUserShell,
     SessionProjectionError, SessionProjector, SessionRecoveredState, project_session_events,

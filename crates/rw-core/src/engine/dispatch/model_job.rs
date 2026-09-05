@@ -8,7 +8,7 @@ use rw_tools::CancellationToken;
 use rw_types::extension_control::{ExtensionControl, ExtensionControlOutcome};
 use rw_types::extension_invocation::ExtensionInvocationId;
 use rw_types::{
-    AttachmentData, ClientCommand, ClientId, CommandOutcome, ModeId, ModelContextTransfer, Role,
+    AttachmentData, ClientCommand, ClientId, CommandOutcome, ModeId, ModelContextTransfer,
 };
 use std::sync::Arc;
 use tokio::sync::{broadcast, oneshot};
@@ -54,10 +54,7 @@ pub(super) fn protocol_alias(command: &ClientCommand, state: &ActorState) -> Opt
         ClientCommand::SwitchModel {
             model, provider, ..
         } => {
-            let needs_choice = state
-                .conversation
-                .iter()
-                .any(|turn| turn.role != Role::System)
+            let needs_choice = state.has_conversation_context()
                 && (state.model_alias != model.0 || state.provider != *provider);
             (!needs_choice).then(|| model.0.clone())
         }

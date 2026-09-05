@@ -5,7 +5,7 @@ use super::fixtures::{
     support::{config, next_matching, protocol_meta},
 };
 use crate::engine::{
-    AgentLoopError, builtin_hook_dispatcher, pending_event::PendingEvent, session::SessionActor,
+    AgentLoopError, builtin_hook_dispatcher, pending_event::PendingEvent,
 };
 use crate::ui::{BoundUiCommand, UiRegistry};
 use rw_ext::{CommandDescriptor, CommandRegistry};
