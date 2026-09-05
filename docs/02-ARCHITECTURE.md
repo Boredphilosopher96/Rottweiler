@@ -179,6 +179,24 @@ and waiting callers share one allocation lease: 64 MiB for ordinary results and
 that exceeds its reservation returns `control_result_limit`; its effects have
 settled, so the caller must inspect session state before further actions.
 
+Mutation request IDs identify operations across authenticated connections and host
+restarts. Clients generate a fresh globally unique request ID for each operation
+and retain it for correlated retries. The host fingerprints command content without
+the connection's client ID, authorizes the workspace on receipt access, and commits
+admission before dispatch. It commits the correlated outcome before delivery.
+Completed receipts survive memory-cache eviction; replay rebinds connection metadata
+and preserves durable source identity. The private SQLite receipt authority is
+separate from the session journal, so it cannot alter transcript action preconditions.
+
+A crash between admission and proven completion returns `operation_indeterminate`;
+that receipt never authorizes automatic reexecution. Completed outcomes, including
+rejections, are immutable. Session creation, conversation/configuration mutations,
+approvals, rewind/review, export, and child continuation use this durable policy.
+Read queries run again; connection attachment, interruption, authentication, and
+development-plugin attachment have connection/session lifetimes. Fork uses its
+explicit operation ID and specialized storage-recovery journal. These classes are
+exhaustively defined in the host command policy.
+
 Interrupt admission uses the committed driver lease and exact active turn under
 one short control lock. Cancellation and its connection acknowledgement do not
 wait for journal I/O or the actor command queue. The actor publishes lease changes

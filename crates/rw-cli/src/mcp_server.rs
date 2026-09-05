@@ -58,6 +58,7 @@ struct CliMcpBridge {
     bound: BoundClient,
     workspace: String,
     request_sequence: AtomicU64,
+    request_namespace: String,
 }
 
 impl CliMcpBridge {
@@ -66,7 +67,7 @@ impl CliMcpBridge {
         CommandMeta {
             protocol_version: PROTOCOL_VERSION,
             client_id: self.bound.client_id.clone(),
-            request_id: RequestId(format!("mcp-{sequence}")),
+            request_id: RequestId(format!("mcp-{}-{sequence}", self.request_namespace)),
         }
     }
 
@@ -302,6 +303,8 @@ pub(crate) async fn run_stdio(options: StdioServerOptions) -> Result<()> {
         .map_err(|_| miette!("MCP workspace authority could not initialize"))?;
     let permissions = PermissionGate::for_headless_mode(PermissionModeDescriptor::AutoSafe)
         .with_workspace_roots(&options.workspace_roots);
+    let mut request_entropy = [0_u8; 16];
+    getrandom::fill(&mut request_entropy).into_diagnostic()?;
     let bridge = Arc::new(CliMcpBridge {
         host,
         registry,
@@ -312,6 +315,7 @@ pub(crate) async fn run_stdio(options: StdioServerOptions) -> Result<()> {
         },
         workspace: workspace.to_string_lossy().into_owned(),
         request_sequence: AtomicU64::new(1),
+        request_namespace: format!("{:032x}", u128::from_le_bytes(request_entropy)),
     });
     let server = RottweilerMcpServerFactory::new(bridge.clone(), move || {
         McpServerAuthority::new(allowed_tools.clone(), std::iter::empty())
