@@ -11,6 +11,8 @@ mod journal_io;
 /// Bounded canonical recovery checkpoints and source-reference index storage.
 #[cfg(unix)]
 pub mod recovery_index;
+/// Provider-call budget admission contracts and durable reservations.
+pub mod reservations;
 mod sqlite_schema;
 mod sqlite_snapshot;
 /// Rebuildable, bounded semantic transcript index persistence.

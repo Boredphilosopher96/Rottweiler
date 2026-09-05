@@ -10,6 +10,7 @@ mod mcp;
 mod model_catalog;
 mod orchestration;
 mod permission;
+pub mod provider_admission;
 mod provider_factory;
 mod subscription_credentials;
 #[cfg(unix)]

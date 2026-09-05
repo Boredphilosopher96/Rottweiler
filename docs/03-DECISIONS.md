@@ -796,3 +796,17 @@ work and decoded data before serialization. The reply reservation bounds encoded
 buffers, not arbitrary query implementations or client caches. Mutation cache
 ownership, historical projection catch-up, and viewport/cache limits are
 separate obligations; direct replies alone do not close A04 or A09.
+
+## ADR-036: Reserve provider work at the shared accounting root
+
+**Status:** Accepted; implementation and production adoption in progress.
+
+**Context:** Checking completed usage before a request allows concurrent sessions or engine processes to spend the same remaining budget. Cancellation and process failure can also leave provider billing ambiguous.
+
+**Decision:** Each logical provider call has a host-owned durable identity, a distinct retry attempt, session/turn ownership, accounting attribution, an injected UTC time, and final input/output bounds. An accounting-root transaction admits its charge against durable usage plus all retained reservations. The engine persists the started transition before invoking the provider. All database work runs outside the engine actor and stays owned if its caller disappears.
+
+A terminal provider result replaces the estimate with normalized actual usage and cost. It does not release the charge. The transaction which records the corresponding durable turn accounting fact transfers terminal-known reservations into accounted usage, matching session, turn, and attribution. An ordinary turn cannot settle a title or compaction reservation. Dropping a permit never refunds it. Proven unstarted cancellation may release a reservation; ambiguous started calls remain charged through restart until authoritative reconciliation.
+
+Known USD, credit, and subscription-token bounds remain distinct. Unknown pricing or provider behavior is explicitly best-effort. It must not become a zero-price assumption or a strict-cap claim. Admission queues, retained reservations, and plan/actual metadata have fixed bounds. A retry obtains a distinct attempt identity.
+
+**Validation required:** Two independent engine processes competing for one remainder; cancellation during admission/start/terminal writes; crashes; ambiguous failures; exact and conflicting retries; actual usage corrections; mixed billing units; and attribution-specific accounting transfer. No A12 completion claim is made by the interface alone.
