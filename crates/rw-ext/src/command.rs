@@ -11,6 +11,7 @@ pub struct CommandDescriptor {
     description: String,
     argument_hint: Option<String>,
     source: CommandSource,
+    host_tools: Arc<[String]>,
 }
 
 impl CommandDescriptor {
@@ -22,7 +23,15 @@ impl CommandDescriptor {
             description: description.into(),
             argument_hint: None,
             source: CommandSource::Builtin,
+            host_tools: Arc::from([]),
         }
+    }
+
+    /// Exact host tools this command may request through its invocation capability.
+    #[must_use]
+    pub fn with_host_tools(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.host_tools = names.into_iter().collect();
+        self
     }
 
     /// Adds the concise argument hint shown alongside the command.
@@ -293,6 +302,7 @@ impl<Context, Output> CommandRegistry<Context, Output> {
                 name: name.to_owned(),
             })?;
         Ok(BoundCommand {
+            host_tools: Arc::clone(&registered.descriptor.host_tools),
             handler: Arc::clone(&registered.handler),
             invocation: CommandInvocation {
                 origin: None,
@@ -305,10 +315,15 @@ impl<Context, Output> CommandRegistry<Context, Output> {
 
 /// One admitted command bound to its actual implementation, never a later name lookup.
 pub struct BoundCommand<Context, Output> {
+    host_tools: Arc<[String]>,
     handler: Arc<dyn CommandHandler<Context, Output>>,
     invocation: CommandInvocation,
 }
 impl<Context, Output> BoundCommand<Context, Output> {
+    #[must_use]
+    pub fn host_tools(&self) -> Arc<[String]> {
+        Arc::clone(&self.host_tools)
+    }
     #[must_use]
     pub fn with_origin(
         mut self,

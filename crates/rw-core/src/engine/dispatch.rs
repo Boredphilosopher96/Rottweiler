@@ -127,6 +127,21 @@ pub(super) async fn handle_actor_command(
         ActorCommand::PluginContextRead { request, respond } => {
             let _ = respond.send(plugin_control::read_context(state, config, &request));
         }
+        ActorCommand::PluginToolCall { request, respond } => {
+            crate::engine::turn::plugin_tool::start(
+                request,
+                respond,
+                state,
+                StartTurnRuntime {
+                    config,
+                    tool_context,
+                    signals: turn_signals,
+                    events,
+                    active_turn,
+                },
+            )
+            .await;
+        }
         ActorCommand::PluginControl {
             origin,
             control,

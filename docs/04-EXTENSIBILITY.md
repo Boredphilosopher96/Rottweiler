@@ -360,3 +360,19 @@ encoded line limit is not a claim about arbitrary JSON heap amplification.
 An active extension command can request `session.control({ action: "navigate", target })`. A target is either `{ kind: "session", session_id }` or `{ kind: "transcript", sequence }`. The host validates the target, retains at most one navigation request with the command, and emits `SessionNavigationRequested` only after successful handler settlement under the same driver and runtime generation. Background pushes cannot navigate. The built-in `/goto session <id>` and `/goto sequence <number>` commands use the same control owner.
 
 Navigation is a connection-scoped request to the initiating client. It grants no authority over the destination session and is neither journaled nor replayed. Clients use their ordinary session open and bounded transcript read paths. Transcript navigation rejects future sequences; a discarded source resolves to the nearest surviving row at or before the requested sequence and exposes that replacement to the client.
+
+### Invocation-bound host tools
+
+A command declares exact host tool names in `allowed_tools` and requests them
+through `session/tool_call` with its host-minted invocation identity. The host
+binds that request to the currently admitted command, its driver, mode and
+runtime generation. A missing, foreign or retired origin has no tool authority.
+One command may have one outstanding host tool call. The actor continues serving
+status, state and interaction responses while the tool runs.
+
+Host tools use the session's ordinary mode restrictions, permission gates,
+pre/post hooks, mutation checkpoints and effect-settlement barrier. They create
+canonical tool-only turns with host invocation identities; they do not fabricate
+provider messages. The callback receives its outcome after canonical tool and
+turn completion. Output exceeding the callback byte limit is explicitly absent;
+its complete output remains in the canonical tool event.

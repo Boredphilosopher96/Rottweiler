@@ -332,6 +332,9 @@ pub(in crate::engine) async fn handle_turn_signal(
             )
             .await?;
         }
+        TurnSignal::PluginToolComplete { turn, result } => {
+            super::plugin_tool::finish(turn, result, state, config, events, active_turn).await?;
+        }
         TurnSignal::Complete(outcome) => {
             if state.running.as_ref().map(|running| running.id) != Some(outcome.turn) {
                 return Ok(());
@@ -437,6 +440,10 @@ pub(in crate::engine) struct CompactionProgress {
 }
 
 pub(in crate::engine) enum TurnSignal {
+    PluginToolComplete {
+        turn: u64,
+        result: Result<super::tool_requests::ToolExecution, AgentLoopError>,
+    },
     Todo(super::todos::TodoRequest),
     EffectsUnsettled {
         message: String,

@@ -291,14 +291,26 @@ pub(super) async fn validate_control_origin(
     method: &str,
     params: &Value,
 ) -> Result<(), PluginRpcError> {
-    if method != rw_plugin_protocol::METHOD_SESSION_CONTROL {
-        return Ok(());
-    }
-    let request: rw_types::extension_invocation::ExtensionControlRequest =
-        serde_json::from_value(params.clone())
-            .map_err(|_| rpc_error("invalid_params", "invalid session control request"))?;
-    let Some(origin) = request.origin else {
-        return Ok(());
+    let origin = match method {
+        rw_plugin_protocol::METHOD_SESSION_CONTROL => {
+            let request: rw_types::extension_invocation::ExtensionControlRequest =
+                serde_json::from_value(params.clone())
+                    .map_err(|_| rpc_error("invalid_params", "invalid session control request"))?;
+            let Some(origin) = request.origin else {
+                return Ok(());
+            };
+            origin
+        }
+        rw_plugin_protocol::METHOD_SESSION_TOOL_CALL => {
+            let request: rw_types::extension_tools::ExtensionToolCall =
+                serde_json::from_value(params.clone())
+                    .map_err(|_| rpc_error("invalid_params", "invalid session tool request"))?;
+            request
+                .validate()
+                .map_err(|message| rpc_error("invalid_params", message))?;
+            request.origin
+        }
+        _ => return Ok(()),
     };
     if pending
         .lock()

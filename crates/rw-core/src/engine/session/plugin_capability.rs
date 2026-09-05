@@ -55,6 +55,25 @@ impl fmt::Debug for PluginSessionCapability {
 }
 
 impl PluginSessionCapability {
+    /// Execute one declared host tool under the active command's immutable authority.
+    /// # Errors
+    /// Rejects invalid input, stale invocation, exhausted admission, policy or failed effect proof.
+    pub async fn call_tool(
+        &self,
+        request: rw_types::extension_tools::ExtensionToolCall,
+    ) -> Result<rw_types::extension_tools::ExtensionToolOutcome, AgentLoopError> {
+        request
+            .validate()
+            .map_err(|error| AgentLoopError::InvalidConfiguration(error.into()))?;
+        let (respond, receive) = oneshot::channel();
+        self.commands
+            .try_send(ActorCommand::PluginToolCall { request, respond })
+            .map_err(|_| {
+                AgentLoopError::InvalidConfiguration("host tool admission unavailable".into())
+            })?;
+        receive.await.map_err(|_| AgentLoopError::Closed)?
+    }
+
     /// Read one revision-bound page of prompt inventory metadata.
     /// # Errors
     /// Rejects invalid cursors, exhausted actor admission or closure.

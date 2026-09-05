@@ -133,7 +133,7 @@ pub(super) struct PendingToolCall {
     pub(super) index: usize,
 }
 
-pub(super) struct ToolExecution {
+pub(in crate::engine) struct ToolExecution {
     pub(super) presentation: Option<rw_tools::ToolPresentationPlan>,
     pub(super) unsettled: bool,
     pub(super) call: PendingToolCall,

@@ -319,7 +319,7 @@ function validateManifest(manifest: PluginManifest): void {
   requireUnique(push, "push")
   const validPush = new Set<PluginPushMethod>([
     RPC_METHODS.injectMessage, RPC_METHODS.setStatus, RPC_METHODS.notify, RPC_METHODS.publishPanel,
-    RPC_METHODS.sessionQuery, RPC_METHODS.contextRead, RPC_METHODS.sessionControl, RPC_METHODS.stateRead, RPC_METHODS.stateCommit, RPC_METHODS.eventRead,
+    RPC_METHODS.sessionQuery, RPC_METHODS.contextRead, RPC_METHODS.sessionControl, RPC_METHODS.sessionToolCall, RPC_METHODS.stateRead, RPC_METHODS.stateCommit, RPC_METHODS.eventRead,
   ])
   if (push.some((method) => !validPush.has(method))) throw new Error("unknown push capability")
 

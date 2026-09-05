@@ -374,7 +374,7 @@ pub(super) async fn run_actor(
                     command_descriptors: &command_descriptors, mode_registry: &mode_registry,
                 }).await;
             }
-            result = crate::engine::dispatch::command_job::wait(&mut state.pending_command) => {
+            result = crate::engine::dispatch::command_job::wait(&mut state.pending_command), if state.pending_plugin_tool.is_none() => {
                 crate::engine::dispatch::command_job::finish(result, crate::engine::dispatch::DispatchContext {
                     state: &mut state, config: &mut config, tool_context: &mut tool_context,
                     turn_signals: &turn_signals, events: &events, active_turn: &active_turn,

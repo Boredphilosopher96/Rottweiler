@@ -1,10 +1,12 @@
 import { RPC_METHODS, type JsonValue, type PluginPushMethod } from "./generated/protocol-3"
 import type {
   ExtensionInvocationId, ExtensionSessionSnapshot, ExtensionContextRead, ExtensionContextPage, ExtensionControl, ExtensionControlOutcome,
-  ExtensionStateCommitOutcome,
+  ExtensionStateCommitOutcome, ExtensionToolOutcome,
   ExtensionStateSnapshot,
   ExtensionStateTransaction,
 } from "./generated/extension-contract"
+import validateToolCall from "./generated/extension-tool-call-validator.js"
+import validateToolOutcome from "./generated/extension-tool-outcome-validator.js"
 import validateContextRead from "./generated/extension-context-read-validator.js"
 import validateContextPage from "./generated/extension-context-page-validator.js"
 import validateControl from "./generated/extension-control-validator.js"
@@ -17,6 +19,7 @@ import validateTransaction from "./generated/extension-state-transaction-validat
 /** Namespace and session identities are selected by the attached host. */
 export interface HostSessionApi {
   query(): Promise<ExtensionSessionSnapshot>
+  callTool(name: string, input: JsonValue): Promise<ExtensionToolOutcome>
   readContext(request: ExtensionContextRead): Promise<ExtensionContextPage>
   control(operation: ExtensionControl): Promise<ExtensionControlOutcome>
 }
@@ -39,6 +42,13 @@ export function hostStateContext(request: HostRequest, origin: ExtensionInvocati
 } {
   return {
     session: {
+      callTool: async (name, input) => {
+        const params = { origin, name, input }
+        if (!validateToolCall(params)) throw new Error("host tool requires an active command and bounded input")
+        const result = await request(RPC_METHODS.sessionToolCall, params)
+        if (!validateToolOutcome(result)) throw new Error("invalid host tool outcome")
+        return result
+      },
       readContext: async params => {
         if (!validateContextRead(params)) throw new Error("invalid context read")
         const result = await request(RPC_METHODS.contextRead, params)

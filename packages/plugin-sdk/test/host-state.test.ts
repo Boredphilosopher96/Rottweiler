@@ -87,3 +87,21 @@ test("context paging admits a complete namespaced tool identity", async () => {
     .rejects.toThrow("invalid context read")
   expect(calls).toHaveLength(1)
 })
+
+test("tool callbacks require an invocation and preserve canonical output identity", async () => {
+  let calls = 0
+  const absent = hostStateContext(async () => { calls++; return null }, null).session
+  await expect(absent.callTool("read", {})).rejects.toThrow("active command")
+  expect(calls).toBe(0)
+  const origin = "ab".repeat(16)
+  const reply = { turn_id: "1", invocation_id: "turn-1:extension-0", is_error: false, output: { type: "text", text: "value" } }
+  const session = hostStateContext(async (method, params) => {
+    expect(method).toBe(RPC_METHODS.sessionToolCall)
+    expect(params).toEqual({ origin, name: "read", input: { path: "a" } })
+    calls++
+    return reply
+  }, origin).session
+  expect(await session.callTool("read", { path: "a" })).toEqual(reply)
+  const invalid = hostStateContext(async () => ({turn_id: reply.turn_id, invocation_id: reply.invocation_id, is_error: false}), origin).session
+  await expect(invalid.callTool("read", {})).rejects.toThrow("invalid host tool outcome")
+})

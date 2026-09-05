@@ -29,6 +29,7 @@ mod permissions;
 mod persistence;
 mod plan;
 mod plugin_capability;
+mod plugin_tools;
 mod protocol_control;
 mod provider_usage;
 mod questions;

@@ -107,6 +107,7 @@ async fn sdk_command_controls_state_and_panel_reenter_the_live_actor() {
     )
     .expect("private storage");
     let workspace = workspace.canonicalize().expect("workspace identity");
+    std::fs::write(workspace.join("broker.txt"), "broker owned bytes").expect("broker input");
     configure_plugin(root.path(), &storage, &workspace, "command-session").await;
     let runtime =
         compose_fixture_session(&storage, &workspace, "command-session-actor", false).await;

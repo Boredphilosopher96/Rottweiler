@@ -89,6 +89,12 @@ pub(in crate::engine) enum ActorCommand {
             Result<rw_types::extension_control::ExtensionContextPage, AgentLoopError>,
         >,
     },
+    PluginToolCall {
+        request: rw_types::extension_tools::ExtensionToolCall,
+        respond: oneshot::Sender<
+            Result<rw_types::extension_tools::ExtensionToolOutcome, AgentLoopError>,
+        >,
+    },
     PluginControl {
         origin: Option<rw_types::extension_invocation::ExtensionInvocationId>,
         control: rw_types::extension_control::ExtensionControl,
@@ -153,6 +159,8 @@ pub(in crate::engine) enum ProtocolCompletion {
 
 #[allow(clippy::struct_excessive_bools)]
 pub(in crate::engine) struct ActorState {
+    pub(in crate::engine) pending_plugin_tool:
+        Option<crate::engine::turn::plugin_tool::PendingPluginTool>,
     pub(in crate::engine) pending_model_preparation:
         Option<crate::engine::dispatch::model_job::PendingPreparation>,
     pub(in crate::engine) pending_command:
@@ -291,6 +299,7 @@ impl ActorState {
             queued_positions,
             running: None,
             pending_command: None,
+            pending_plugin_tool: None,
             pending_model_preparation: None,
             pending_approvals: BTreeMap::new(),
             next_turn: recovered

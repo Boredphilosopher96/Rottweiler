@@ -39,6 +39,7 @@ impl CommandReply {
 
 pub(in crate::engine) struct PendingCommand {
     origin: rw_types::extension_invocation::ExtensionInvocationId,
+    host_tools: Arc<[String]>,
     receive: oneshot::Receiver<Execution>,
     owner: Arc<SessionActorConfig>,
     mode: ModeId,
@@ -87,6 +88,7 @@ pub(super) async fn start(
     };
     let bound = bound.with_origin(origin.clone());
     let name = bound.name().to_owned();
+    let host_tools = bound.host_tools();
     let mut snapshot = super::command_snapshot::capture(context.state, context.config);
     let owner = Arc::clone(context.config);
     let next_turn = context.state.next_turn;
@@ -100,7 +102,16 @@ pub(super) async fn start(
         };
         (result, Some(bound))
     };
-    admit(meta, observed_turn, reply, name, origin, operation, context);
+    admit(
+        meta,
+        observed_turn,
+        reply,
+        name,
+        origin,
+        host_tools,
+        operation,
+        context,
+    );
 }
 
 fn invocation_id() -> Result<rw_types::extension_invocation::ExtensionInvocationId, AgentLoopError>
@@ -138,6 +149,7 @@ pub(super) fn start_development(
         reply,
         "plugin-development".into(),
         origin,
+        Arc::from([]),
         operation,
         context,
     );
@@ -150,6 +162,7 @@ fn admit(
     reply: CommandReply,
     name: String,
     origin: rw_types::extension_invocation::ExtensionInvocationId,
+    host_tools: Arc<[String]>,
     operation: impl std::future::Future<Output = (Execution, Option<BoundUiCommand>)> + Send + 'static,
     context: DispatchContext<'_>,
 ) {
@@ -199,6 +212,7 @@ fn admit(
             drop(task);
             context.state.pending_command = Some(PendingCommand {
                 origin,
+                host_tools,
                 receive,
                 owner: Arc::clone(context.config),
                 mode: context.state.mode_id.clone(),
@@ -340,11 +354,14 @@ pub(super) fn admit_while_pending(command: &rw_types::ClientCommand) -> bool {
 }
 
 impl PendingCommand {
+    pub(in crate::engine) fn host_tools(&self) -> Arc<[String]> {
+        Arc::clone(&self.host_tools)
+    }
     pub(super) fn meta(&self) -> &CommandMeta {
         &self.meta
     }
 
-    pub(super) fn allows(
+    pub(in crate::engine) fn allows(
         &self,
         origin: &rw_types::extension_invocation::ExtensionInvocationId,
         config: &Arc<SessionActorConfig>,

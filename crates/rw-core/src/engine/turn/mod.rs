@@ -6,6 +6,7 @@ mod context;
 mod hooks;
 mod journal_events;
 mod ordered_output;
+pub(in crate::engine) mod plugin_tool;
 mod progress;
 mod provider_calls;
 mod provider_messages;

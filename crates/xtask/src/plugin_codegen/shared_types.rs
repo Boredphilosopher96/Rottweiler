@@ -74,6 +74,8 @@ pub(super) fn generate(root: &Path, check: bool) -> Result<(), String> {
     extension.visit::<ExtensionControl>();
     extension.visit::<rw_types::extension_invocation::ExtensionControlRequest>();
     extension.visit::<ExtensionControlOutcome>();
+    extension.visit::<rw_types::extension_tools::ExtensionToolCall>();
+    extension.visit::<rw_types::extension_tools::ExtensionToolOutcome>();
     extension.visit::<ExtensionEventKind>();
     extension.visit::<ExtensionEventNotice>();
     extension.visit::<ExtensionEventOutcome>();
@@ -94,6 +96,14 @@ pub(super) fn generate(root: &Path, check: bool) -> Result<(), String> {
 fn generate_schemas(root: &Path, check: bool) -> Result<(), String> {
     for (name, schema) in [
         ("tool-response", schema::<rw_tools::ToolResult>()),
+        (
+            "extension-tool-call",
+            schema::<rw_types::extension_tools::ExtensionToolCall>(),
+        ),
+        (
+            "extension-tool-outcome",
+            schema::<rw_types::extension_tools::ExtensionToolOutcome>(),
+        ),
         (
             "ui-panel-update",
             schema::<rw_types::extension_ui::UiPanelUpdate>(),

@@ -455,7 +455,8 @@ impl PluginSessionRuntime {
                 &declaration.name,
                 &declaration.description,
                 declaration.argument_hint.as_deref(),
-            );
+            )
+            .with_host_tools(declaration.allowed_tools.clone());
             self.commands.push((
                 descriptor,
                 Arc::new(PluginSessionCommand {
@@ -641,6 +642,19 @@ impl PushHandler for SessionPluginPushHandler {
     ) -> std::result::Result<serde_json::Value, PluginRpcError> {
         let capability = self.bound(&params)?;
         match method {
+            rw_plugin_protocol::METHOD_SESSION_TOOL_CALL => {
+                let request: rw_types::extension_tools::ExtensionToolCall =
+                    serde_json::from_value(params).map_err(|_| {
+                        plugin_push_error("invalid_push", "invalid host tool request")
+                    })?;
+                let result = capability
+                    .call_tool(request)
+                    .await
+                    .map_err(|error| plugin_push_error("host_tool_failed", &error.to_string()))?;
+                serde_json::to_value(result).map_err(|_| {
+                    plugin_push_error("host_tool_failed", "host tool result encoding failed")
+                })
+            }
             rw_plugin_protocol::METHOD_UI_PUBLISH_PANEL => {
                 let update: rw_types::extension_ui::UiPanelUpdate = serde_json::from_value(params)
                     .map_err(|_| plugin_push_error("invalid_push", "invalid panel update"))?;
