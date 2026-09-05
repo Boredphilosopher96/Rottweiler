@@ -5780,7 +5780,9 @@
       },
       "additionalProperties": false,
       "required": [
-        "mutations"
+        "expected_revision",
+        "mutations",
+        "acknowledged"
       ]
     },
     "ExtensionStateMutation": {

@@ -27,6 +27,24 @@ export type ExtensionStateMutation = { "action": "set", key: string, value: Json
 
 export type ExtensionStateTransaction = { expected_revision: SequenceId | null, mutations: Array<ExtensionStateMutation>, acknowledged: ExtensionDeliveryCursor | null, };
 
+export type UiAction = { id: string, label: string, command: string, arguments: JsonValue, };
+
+export type UiContribution = { "surface": "tool", id: string, tool_name: string, title: string, fields: Array<UiField>, actions: Array<UiAction>, } | { "surface": "panel", id: string, title: string, fields: Array<UiField>, actions: Array<UiAction>, };
+
+export type UiField = { "kind": "text", id: string, label: string, path: Array<UiSelectorStep>, } | { "kind": "badge", id: string, label: string, path: Array<UiSelectorStep>, } | { "kind": "list", id: string, label: string, path: Array<UiSelectorStep>, max_items: number, } | { "kind": "table", id: string, label: string, path: Array<UiSelectorStep>, columns: Array<UiTableColumn>, max_rows: number, };
+
+export type UiProjectedField = { "kind": "text", id: string, value: string | null, } | { "kind": "badge", id: string, value: string | null, } | { "kind": "list", id: string, values: Array<string>, } | { "kind": "table", id: string, rows: Array<Array<string>>, };
+
+export type UiProjectedFields = { fields: Array<UiProjectedField>,
+/**
+ * At least one source value was truncated by a declared or aggregate bound.
+ */
+truncated: boolean, };
+
+export type UiSelectorStep = { "step": "field", name: string, } | { "step": "index", index: number, };
+
+export type UiTableColumn = { label: string, path: Array<UiSelectorStep>, };
+
 export type ProgressAmount = { completed: number, total: number, };
 
 export type SessionId = string;
