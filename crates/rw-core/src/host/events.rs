@@ -1,7 +1,7 @@
 use super::{
-    Arc, BoundClient, ClientId, EngineEvent, EngineHost, HOST_EVENT_CAPACITY,
-    HOST_EVENT_STALL_TIMEOUT, HostError, HostEvent, HostEventBudget, ProviderAuthSubscriptionGuard,
-    SequenceId, SessionId, join_all, mpsc, replay_completed,
+    Arc, BoundClient, ClientId, ClientSubscriptionLease, EngineEvent, EngineHost,
+    HOST_EVENT_CAPACITY, HOST_EVENT_STALL_TIMEOUT, HostError, HostEvent, HostEventBudget,
+    ProviderAuthSubscriptionGuard, SequenceId, SessionId, join_all, mpsc, replay_completed,
 };
 
 impl EngineHost {
@@ -42,12 +42,13 @@ impl EngineHost {
         let event_budget = self.event_budget.clone();
         let provider_auth = Arc::clone(&self.provider_auth);
         let client_events = Arc::clone(&self.client_events);
+        let lease = Arc::new(lease);
         tokio::spawn(async move {
             let mut subscription = ProviderAuthSubscriptionGuard {
                 client_id: bound.client_id.clone(),
                 subscription_id,
                 receiver: host_events,
-                _lease: lease,
+                _lease: Arc::clone(&lease),
                 channel,
                 registry: client_events,
                 pending: provider_auth,
@@ -58,6 +59,7 @@ impl EngineHost {
                     && !send_encoded(
                         &send,
                         &event_budget,
+                        &lease,
                         &replay_completed(
                             &bound.client_id,
                             &session.descriptor().session_id,
@@ -73,13 +75,13 @@ impl EngineHost {
                     tokio::select! {
                         () = send.closed() => return,
                         host = subscription.receiver.recv() => match host {
-                            Some(event) => if send.send(Ok(event)).await.is_err() { return; },
+                            Some(event) => if send.send(Ok(event.for_subscription(&lease))).await.is_err() { return; },
                             None => return,
                         },
                         event = session_events.recv() => match event {
                             Ok(event) => {
                                 if !matches!(event, EngineEvent::CommandAcknowledged { .. })
-                                    && !send_encoded(&send, &event_budget, &event).await
+                                    && !send_encoded(&send, &event_budget, &lease, &event).await
                                 {
                                     return;
                                 }
@@ -87,7 +89,7 @@ impl EngineHost {
                                     && event.meta().map(|meta| meta.sequence_id) == captured_tail
                                 {
                                     replay_complete = true;
-                                    if !send_encoded(&send, &event_budget, &replay_completed(
+                                    if !send_encoded(&send, &event_budget, &lease, &replay_completed(
                                         &bound.client_id,
                                         &session.descriptor().session_id,
                                         captured_tail,
@@ -109,7 +111,7 @@ impl EngineHost {
                     tokio::select! {
                         () = send.closed() => return,
                         event = subscription.receiver.recv() => match event {
-                            Some(event) => if send.send(Ok(event)).await.is_err() { return; },
+                            Some(event) => if send.send(Ok(event.for_subscription(&lease))).await.is_err() { return; },
                             None => return,
                         },
                     }
@@ -170,9 +172,13 @@ impl EngineHost {
 async fn send_encoded(
     send: &mpsc::Sender<Result<HostEvent, HostError>>,
     budget: &HostEventBudget,
+    lease: &Arc<ClientSubscriptionLease>,
     event: &EngineEvent,
 ) -> bool {
-    let encoded = budget.encode(event).await;
+    let encoded = budget
+        .encode(event)
+        .await
+        .map(|event| event.for_subscription(lease));
     let valid = encoded.is_ok();
     send.send(encoded).await.is_ok() && valid
 }

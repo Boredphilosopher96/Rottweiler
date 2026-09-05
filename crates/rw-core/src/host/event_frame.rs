@@ -1,5 +1,5 @@
 //! Shared event encoding with byte ownership through the final transport frame.
-use super::{Arc, EngineEvent, HostError, SequenceId};
+use super::{Arc, ClientSubscriptionLease, EngineEvent, HostError, SequenceId};
 use bytes::Bytes;
 use rw_types::allocation::{AllocationPlan, PrepareAllocation};
 use std::io::{self, Write};
@@ -13,6 +13,27 @@ const MAX_EVENT_BYTES: usize = 16 * 1024 * 1024;
 pub struct HostEvent {
     pub json: Bytes,
     pub sequence: Option<SequenceId>,
+}
+
+impl HostEvent {
+    pub(super) fn for_subscription(self, lease: &Arc<ClientSubscriptionLease>) -> Self {
+        Self {
+            sequence: self.sequence,
+            json: Bytes::from_owner(SubscriptionBytes {
+                json: self.json,
+                _lease: Arc::clone(lease),
+            }),
+        }
+    }
+}
+struct SubscriptionBytes {
+    json: Bytes,
+    _lease: Arc<ClientSubscriptionLease>,
+}
+impl AsRef<[u8]> for SubscriptionBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.json
+    }
 }
 
 /// Host-wide owner for event encoding and all retained transport payloads.

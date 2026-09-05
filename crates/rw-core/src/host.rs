@@ -306,7 +306,7 @@ struct ProviderAuthSubscriptionGuard {
     client_id: ClientId,
     subscription_id: ClientEventSubscriptionId,
     receiver: mpsc::Receiver<HostEvent>,
-    _lease: ClientSubscriptionLease,
+    _lease: Arc<ClientSubscriptionLease>,
     channel: Arc<ClientEventChannel>,
     registry: Arc<Mutex<ClientEventRegistry>>,
     pending: Arc<PendingProviderAuths>,
