@@ -125,12 +125,14 @@ fn storage(error: impl Into<redb::Error>) -> RecoveryIndexError {
 pub enum RecoveryProjection {
     Conversation,
     Tasks,
+    Subagents,
 }
 impl RecoveryProjection {
     const fn directory_name(self) -> &'static str {
         match self {
             Self::Conversation => "recovery",
             Self::Tasks => "tasks",
+            Self::Subagents => "subagents",
         }
     }
 }

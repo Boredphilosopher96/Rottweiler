@@ -27,6 +27,8 @@ pub use read::{
 };
 mod pages;
 mod state;
+mod subagents;
+pub use subagents::{SubagentBinding, SubagentLifecycleIndex, SubagentLifecycleView};
 mod window;
 pub use pages::ConversationPage;
 mod workspace;

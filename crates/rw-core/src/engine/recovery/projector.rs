@@ -206,7 +206,7 @@ pub(super) struct BatchRows {
     pub(super) read: RecoveryReadView,
     pub(super) changes: BTreeMap<RecoveryKey, RecoveryMutation>,
     undo: BTreeMap<RecoveryKey, Option<RecoveryMutation>>,
-    lookups: BTreeMap<(u8, Vec<u8>), RecoveryLookup>,
+    pub(super) lookups: BTreeMap<(u8, Vec<u8>), RecoveryLookup>,
     lookup_undo: BTreeMap<(u8, Vec<u8>), Option<RecoveryLookup>>,
 }
 impl BatchRows {
@@ -219,15 +219,15 @@ impl BatchRows {
             lookup_undo: BTreeMap::new(),
         }
     }
-    fn begin_event(&mut self) {
+    pub(super) fn begin_event(&mut self) {
         self.undo.clear();
         self.lookup_undo.clear();
     }
-    fn commit_event(&mut self) {
+    pub(super) fn commit_event(&mut self) {
         self.undo.clear();
         self.lookup_undo.clear();
     }
-    fn rollback_event(&mut self) {
+    pub(super) fn rollback_event(&mut self) {
         for (key, value) in std::mem::take(&mut self.lookup_undo) {
             if let Some(value) = value {
                 self.lookups.insert(key, value);
@@ -259,6 +259,48 @@ impl BatchRows {
         row.map(|row| serde_json::from_slice(&row.payload).map_err(RecoveryError::from))
             .transpose()
     }
+    pub(super) fn delete(&mut self, key: RecoveryKey) {
+        self.undo
+            .entry(key)
+            .or_insert_with(|| self.changes.get(&key).cloned());
+        self.changes.insert(key, RecoveryMutation::Delete(key));
+    }
+
+    /// Resolve the latest row in the transaction's bounded mutation overlay.
+    pub(super) fn last_before(
+        &self,
+        namespace: u8,
+        scope: u64,
+        before: u64,
+    ) -> Result<Option<RecoveryRow>, RecoveryError> {
+        let pending = self
+            .changes
+            .range(key(namespace, scope, 0)..key(namespace, scope, before))
+            .rev()
+            .find_map(|(_, change)| match change {
+                RecoveryMutation::Put(row) => Some(row.clone()),
+                RecoveryMutation::Delete(_) => None,
+            });
+        let mut end = before;
+        loop {
+            let persisted = self.read.last_before(namespace, scope, end)?;
+            let Some(row) = persisted else {
+                return Ok(pending);
+            };
+            if pending
+                .as_ref()
+                .is_some_and(|pending| pending.key.ordinal >= row.key.ordinal)
+            {
+                return Ok(pending);
+            }
+            match self.changes.get(&row.key) {
+                Some(RecoveryMutation::Delete(_)) => end = row.key.ordinal,
+                Some(RecoveryMutation::Put(row)) => return Ok(Some(row.clone())),
+                None => return Ok(Some(row)),
+            }
+        }
+    }
+
     pub(super) fn put(
         &mut self,
         key: RecoveryKey,
@@ -313,7 +355,7 @@ impl BatchRows {
         );
         Ok(())
     }
-    fn fits(&self, head_bytes: usize) -> bool {
+    pub(super) fn fits(&self, head_bytes: usize) -> bool {
         let lookup_bytes = self
             .lookups
             .values()
