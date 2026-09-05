@@ -317,13 +317,7 @@ impl EngineHost {
                 let (session_catalog, selected, resolved) = if let Some(session_id) = &session_id {
                     let session = self.ready_session(session_id).await?;
                     let snapshot = session.handle().snapshot().await.map_err(HostError::from)?;
-                    let resolved = snapshot.conversation.iter().rev().find_map(|turn| {
-                        turn.meta
-                            .model
-                            .as_ref()
-                            .filter(|model| model.contains('/'))
-                            .cloned()
-                    });
+                    let resolved = snapshot.resolved_model;
                     (
                         session.model_catalog(),
                         Some(snapshot.model_alias),

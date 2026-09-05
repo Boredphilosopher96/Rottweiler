@@ -466,9 +466,9 @@ async fn messages_queued_during_manual_compaction_resume_in_fifo_order() {
         .expect("compaction completion");
     collect_turn(&mut events).await;
 
-    let snapshot = handle.snapshot().await.expect("conversation snapshot");
-    let queued = snapshot
-        .conversation
+    let prompt = handle.dump_prompt(None).await.expect("compacted prompt");
+    let queued = prompt
+        .turns
         .iter()
         .filter_map(|turn| {
             if turn.role != Role::User {

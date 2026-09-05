@@ -154,8 +154,8 @@ async fn ask_user_is_persisted_and_answered_only_through_client_command() {
             .pending_questions
             .is_empty()
     );
-    let snapshot = handle.snapshot().await.expect("snapshot");
-    assert!(snapshot.conversation.iter().any(|turn| {
+    let recovered = project_session_events(&answered_log).expect("answered tool context");
+    assert!(recovered.conversation.iter().any(|turn| {
         turn.blocks.iter().any(|block| {
             matches!(
                 block,

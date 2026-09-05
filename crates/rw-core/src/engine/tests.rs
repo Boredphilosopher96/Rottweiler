@@ -33,6 +33,7 @@ mod recovery;
 mod redaction;
 mod rewind;
 mod shell;
+mod snapshots;
 mod startup;
 mod subagents;
 mod subscription;

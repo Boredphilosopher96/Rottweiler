@@ -222,12 +222,7 @@ impl EngineHost {
         snapshot: crate::SessionSnapshot,
     ) -> Option<bool> {
         let selected = Some(snapshot.model_alias.as_str());
-        let resolved = snapshot.conversation.iter().rev().find_map(|turn| {
-            turn.meta
-                .model
-                .as_deref()
-                .filter(|model| model.contains('/'))
-        });
+        let resolved = snapshot.resolved_model.as_deref();
         // Authentication is a provider-scoped action. Refreshing the global
         // catalog here would resolve unrelated credentials (and can trigger
         // unrelated credential loading), so readiness must use the live

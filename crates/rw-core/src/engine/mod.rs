@@ -504,7 +504,8 @@ pub enum MessageDisposition {
 /// Read-only actor state for tests and future persistence adapters.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionSnapshot {
-    pub conversation: Vec<Turn>,
+    pub conversation_turns: u64,
+    pub resolved_model: Option<String>,
     pub queued_messages: Vec<String>,
     pub running: bool,
     pub completed_turns: u64,

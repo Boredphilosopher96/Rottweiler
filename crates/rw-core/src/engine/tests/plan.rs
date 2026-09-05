@@ -147,7 +147,11 @@ async fn plan_submission_requires_review_and_pins_approved_artifact() {
     assert_eq!(snapshot.mode, SessionMode::Execute);
     assert_eq!(snapshot.approved_plan, Some(artifact.clone()));
     assert!(snapshot.pending_plan.is_none());
-    assert!(snapshot.conversation.last().is_some_and(|turn| matches!(
+    let context = handle
+        .dump_prompt(None)
+        .await
+        .expect("approved plan context");
+    assert!(context.turns.last().is_some_and(|turn| matches!(
         turn.blocks.as_slice(),
         [Block::Text { text }] if text.contains("Approved plan artifact")
     )));

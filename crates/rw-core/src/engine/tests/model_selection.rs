@@ -167,12 +167,16 @@ async fn model_switch_context_choices_are_explicit_and_reach_the_provider_bounda
         .await
         .expect("summary switch snapshot");
     assert_eq!(summary_snapshot.model_alias, "slow");
-    assert!(summary_snapshot.conversation.iter().any(|turn| {
+    let summary_context = summary_handle
+        .dump_prompt(None)
+        .await
+        .expect("summary context");
+    assert!(summary_context.turns.iter().any(|turn| {
             turn.meta.summary
                 && matches!(turn.blocks.as_slice(), [Block::Text { text }] if text == "durable handoff summary")
         }));
-    let compacted = serde_json::to_string(&summary_snapshot.conversation)
-        .expect("serialize compacted conversation");
+    let compacted =
+        serde_json::to_string(&summary_context.turns).expect("serialize compacted conversation");
     assert!(!compacted.contains("original user context"));
     assert!(!compacted.contains("original assistant context"));
     let mut summary_events = summary_handle.subscribe().expect("subscription");
@@ -225,10 +229,10 @@ async fn model_switch_context_choices_are_explicit_and_reach_the_provider_bounda
     assert_eq!(full_model.operations(), ["prepare:slow"]);
     assert_eq!(
         full_handle
-            .snapshot()
+            .dump_prompt(None)
             .await
-            .expect("full snapshot")
-            .conversation,
+            .expect("full context")
+            .turns,
         original
     );
     let mut full_events = full_handle.subscribe().expect("subscription");
@@ -274,10 +278,10 @@ async fn model_switch_context_choices_are_explicit_and_reach_the_provider_bounda
     assert_eq!(fresh_model.operations(), ["prepare:slow"]);
     assert_eq!(
         fresh_handle
-            .snapshot()
+            .dump_prompt(None)
             .await
-            .expect("fresh snapshot")
-            .conversation,
+            .expect("fresh context")
+            .turns,
         vec![original[0].clone()]
     );
     let mut fresh_events = fresh_handle.subscribe().expect("subscription");
@@ -390,5 +394,12 @@ async fn pending_model_switch_question_recovers_and_can_be_answered() {
     .await;
     let snapshot = handle.snapshot().await.expect("recovered switch snapshot");
     assert_eq!(snapshot.model_alias, "slow");
-    assert_eq!(snapshot.conversation, original);
+    assert_eq!(
+        handle
+            .dump_prompt(None)
+            .await
+            .expect("preserved context")
+            .turns,
+        original
+    );
 }

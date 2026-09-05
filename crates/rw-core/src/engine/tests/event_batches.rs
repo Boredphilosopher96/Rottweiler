@@ -184,9 +184,9 @@ async fn successful_single_delta_batches_delta_commit_and_finish() {
     handle.send_message("run").await.expect("message");
     let observed = collect_turn(&mut events).await;
     let snapshot = handle.snapshot().await.expect("snapshot");
-    assert_eq!(snapshot.conversation.len(), 2);
+    assert_eq!(snapshot.conversation_turns, 2);
     assert!(matches!(
-        &snapshot.conversation[0],
+        &handle.dump_prompt(None).await.expect("committed user context").turns[0],
         Turn {
             role: Role::User,
             blocks,

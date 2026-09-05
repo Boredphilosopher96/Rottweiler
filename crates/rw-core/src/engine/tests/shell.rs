@@ -119,7 +119,8 @@ async fn shell_gate_and_model_alias_are_durable_and_fail_closed() {
         .expect("trusted broker shell end");
     let ended = handle.snapshot().await.expect("ended shell");
     assert!(ended.active_shell.is_none());
-    let shell_context = ended.conversation.last().expect("shell model context");
+    let prompt = handle.dump_prompt(None).await.expect("shell prompt");
+    let shell_context = prompt.turns.last().expect("shell model context");
     assert!(matches!(
         shell_context.blocks.as_slice(),
         [Block::Text { text }]

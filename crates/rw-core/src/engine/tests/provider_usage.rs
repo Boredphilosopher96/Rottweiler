@@ -71,8 +71,8 @@ async fn provider_error_preserves_partial_output_and_emits_failed_terminal() {
             ..
         })
     ));
-    let snapshot = handle.snapshot().await.expect("snapshot");
-    assert!(snapshot.conversation.iter().any(|turn| {
+    let context = handle.dump_prompt(None).await.expect("partial context");
+    assert!(context.turns.iter().any(|turn| {
         turn.blocks
             .iter()
             .any(|block| matches!(block, Block::Text { text } if text == "partial"))

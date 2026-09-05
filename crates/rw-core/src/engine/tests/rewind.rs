@@ -85,8 +85,7 @@ async fn rewind_applies_then_persists_then_acknowledges_and_never_acks_failed_ap
             .snapshot()
             .await
             .expect("snapshot")
-            .conversation
-            .len(),
+            .conversation_turns,
         2
     );
 
@@ -97,8 +96,7 @@ async fn rewind_applies_then_persists_then_acknowledges_and_never_acks_failed_ap
             .snapshot()
             .await
             .expect("snapshot")
-            .conversation
-            .len(),
+            .conversation_turns,
         4
     );
     order.lock().expect("rewind order").clear();
@@ -112,8 +110,7 @@ async fn rewind_applies_then_persists_then_acknowledges_and_never_acks_failed_ap
             .snapshot()
             .await
             .expect("snapshot")
-            .conversation
-            .len(),
+            .conversation_turns,
         2
     );
     assert_eq!(
