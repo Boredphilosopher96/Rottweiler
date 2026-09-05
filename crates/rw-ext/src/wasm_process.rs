@@ -110,7 +110,7 @@ impl WasmProcessHook {
             let hook = declaration.name;
             let id = format!("wasm:{}:{}", self.generation.manifest.name, hook.as_str());
             dispatcher.register_shared(
-                crate::plugin_hook_registration(*declaration, id),
+                crate::plugin_hook_registration(*declaration, id, crate::HookEffect::ReadOnly),
                 Arc::clone(&shared),
             )?;
         }

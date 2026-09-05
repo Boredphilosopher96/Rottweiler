@@ -453,6 +453,11 @@ impl HookDispatcher {
                 && registration.failure_policy() != HookFailurePolicy::FailClosed)
             || (registration.class() == HookClass::Observer
                 && registration.effect() != HookEffect::ReadOnly)
+            || (registration.effect() == HookEffect::WorkspaceMutating
+                && !matches!(
+                    registration.event(),
+                    HookEvent::PreTool | HookEvent::PostTool
+                ))
             || registration.timeout().is_zero()
             || registration.timeout() > Duration::from_mins(10)
         {

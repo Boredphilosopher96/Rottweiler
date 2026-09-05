@@ -21,6 +21,7 @@ async fn typescript_tool_hook_event_push_and_provider_cross_rust_host() {
             crate::plugin_hook_registration(
                 tool_host.manifest().capabilities.hooks[0],
                 "typescript:pre-tool",
+                crate::HookEffect::ReadOnly,
             ),
             hook,
         )

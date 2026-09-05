@@ -356,3 +356,6 @@ mod tests;
 
 #[cfg(all(test, target_os = "macos"))]
 mod native_tests;
+
+#[cfg(test)]
+mod hook_grants_tests;

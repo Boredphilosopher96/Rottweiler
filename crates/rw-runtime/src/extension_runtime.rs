@@ -370,12 +370,36 @@ impl PluginSessionRuntime {
                     .map_err(|error| miette!(error.to_string()))?,
             ));
         }
+        let effects = endpoint.metadata().process_tool_effects();
+        let hook_effect =
+            if effects.contains(&rw_plugin_protocol::PluginToolEffect::WritesFilesystem) {
+                rw_ext::HookEffect::WorkspaceMutating
+            } else {
+                rw_ext::HookEffect::ReadOnly
+            };
         for declaration in &manifest.capabilities.hooks {
             self.hooks.push((
                 plugin_hook_registration(
                     *declaration,
                     format!("plugin:{}:{}", config.name, declaration.name.as_str()),
-                ),
+                    hook_effect,
+                )
+                .with_required_capabilities(effects.iter().map(|effect| {
+                    match effect {
+                        rw_plugin_protocol::PluginToolEffect::ReadsFilesystem => {
+                            rw_types::ToolCapability::ReadFilesystem
+                        }
+                        rw_plugin_protocol::PluginToolEffect::WritesFilesystem => {
+                            rw_types::ToolCapability::WriteFilesystem
+                        }
+                        rw_plugin_protocol::PluginToolEffect::Network => {
+                            rw_types::ToolCapability::Network
+                        }
+                        rw_plugin_protocol::PluginToolEffect::Execute => {
+                            rw_types::ToolCapability::Execute
+                        }
+                    }
+                })),
                 Arc::new(RpcHookHandler::new(endpoint.clone())),
             ));
         }

@@ -41,9 +41,11 @@ use rw_plugin_protocol::{
 pub fn plugin_hook_registration(
     declaration: PluginHookCapability,
     id: impl Into<String>,
+    effect: crate::HookEffect,
 ) -> crate::HookRegistration {
     crate::HookRegistration::new(id, declaration.name, declaration.class)
         .with_failure_policy(declaration.failure_policy)
+        .with_effect(effect)
 }
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]

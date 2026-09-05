@@ -357,6 +357,8 @@ fn registration_rejects_invalid_classes_policies_effects_ids_and_duplicates() {
             .with_failure_policy(HookFailurePolicy::FailOpen),
         HookRegistration::new("x", HookEvent::PreTool, HookClass::Observer)
             .with_effect(HookEffect::WorkspaceMutating),
+        HookRegistration::new("x", HookEvent::SessionStart, HookClass::Policy)
+            .with_effect(HookEffect::WorkspaceMutating),
         HookRegistration::new("bad\nid", HookEvent::PreTool, HookClass::Observer),
         HookRegistration::new("x", HookEvent::PreTool, HookClass::Observer)
             .with_timeout(Duration::ZERO),
