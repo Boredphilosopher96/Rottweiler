@@ -1,4 +1,4 @@
-//! Admission precedes copying SQLite text or decoding accounting values.
+//! Admission precedes copying `SQLite` text or decoding accounting values.
 use super::{TurnAccountingEntry, UtcDayKey, UtcTimestamp, validate_accounting_entry};
 use crate::session::SessionStoreError;
 use rusqlite::{Row, Rows, types::Type};

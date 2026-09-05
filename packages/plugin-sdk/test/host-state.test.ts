@@ -81,7 +81,7 @@ test("context paging admits a complete namespaced tool identity", async () => {
       estimated_tokens: "42", state: { pinned: false, evicted: false, summarized: false, pruned: false } }],
   } satisfies ExtensionContextPage
   const calls: JsonValue[] = []
-  const session = hostStateContext(async (_, params) => { calls.push(params); return page }).session
+  const session = hostStateContext(async (_, params) => { calls.push(params); return page }, null).session
   expect(await session.readContext({ expected_sequence: "4", after_item_id: itemId })).toEqual(page)
   await expect(session.readContext({ expected_sequence: "4", after_item_id: `${itemId}x` }))
     .rejects.toThrow("invalid context read")
