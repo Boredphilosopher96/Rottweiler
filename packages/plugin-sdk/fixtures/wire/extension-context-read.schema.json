@@ -16,7 +16,11 @@
     "after_item_id": {
       "anyOf": [
         {
-          "$ref": "#/$defs/ContextItemId"
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "x-rw-max-utf8-bytes": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
         },
         {
           "type": "null"
@@ -33,10 +37,6 @@
   "$defs": {
     "SequenceId": {
       "description": "Monotonic per-session sequence encoded as a decimal string on the wire.",
-      "type": "string"
-    },
-    "ContextItemId": {
-      "description": "Stable identifier of one assembled context item.",
       "type": "string"
     }
   }

@@ -38,7 +38,11 @@
         "next_after_item_id": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ContextItemId"
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "x-rw-max-utf8-bytes": 256,
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
             },
             {
               "type": "null"
@@ -70,7 +74,11 @@
       "type": "object",
       "properties": {
         "item_id": {
-          "$ref": "#/$defs/ContextItemId"
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "x-rw-max-utf8-bytes": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
         },
         "kind": {
           "$ref": "#/$defs/ContextItemKind"
@@ -94,10 +102,6 @@
         "state"
       ]
     },
-    "ContextItemId": {
-      "description": "Stable identifier of one assembled context item.",
-      "type": "string"
-    },
     "ContextItemKind": {
       "description": "Semantic class of one assembled prompt item.",
       "type": "string",
@@ -119,7 +123,8 @@
         "extension",
         "conversation",
         "user_pin",
-        "client_queue"
+        "client_queue",
+        "tool_registry"
       ]
     },
     "ContextItemState": {
