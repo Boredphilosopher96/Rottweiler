@@ -1,7 +1,10 @@
 //! Owned canonical index operations; raw repair writers never invent a mode registry.
 use super::super::durable_session::DurableEventSink;
 use crate::journal_service::{JournalPublication, JournalReadLease};
-use rw_core::{AgentLoopError, ExtensionStateView, recovery::CanonicalRecovery};
+use rw_core::{
+    AgentLoopError, ExtensionStateView,
+    recovery::{CanonicalHistory, CanonicalRecovery, RecoveryError},
+};
 use rw_ext::ModeRegistry;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
@@ -46,12 +49,12 @@ impl CanonicalSession {
         jobs.active += 1;
         Ok(Operation(Arc::clone(self)))
     }
-    async fn extension_state(
+    async fn read<T: Send + 'static>(
         self: Arc<Self>,
         mut lease: JournalReadLease,
         publication: Arc<JournalPublication>,
-        plugin: String,
-    ) -> Result<ExtensionStateView, AgentLoopError> {
+        query: impl FnOnce(&CanonicalHistory) -> Result<T, RecoveryError> + Send + 'static,
+    ) -> Result<T, AgentLoopError> {
         let operation = self.admit()?;
         let (result, _lease) = tokio::task::spawn_blocking(move || {
             let result = (|| {
@@ -78,13 +81,12 @@ impl CanonicalSession {
                     .map_err(persistence)?
                     .has_more
                 {}
-                recovery
+                let history = recovery
                     .snapshot()
                     .map_err(persistence)?
                     .bind_source(&lease.view)
-                    .map_err(persistence)?
-                    .extension_state(&plugin)
-                    .map_err(persistence)
+                    .map_err(persistence)?;
+                query(&history).map_err(persistence)
             })();
             drop(operation);
             (result, lease)
@@ -145,47 +147,24 @@ impl DurableEventSink {
         if self.canonical.get().is_some() {
             return Err(persistence("canonical owner is already bound"));
         }
-        let lease = self
-            .journal_service
-            .capture(&self.session_id)
-            .map_err(persistence)?;
         let storage_root = self.storage_root.clone();
         let session_id = self.session_id.clone();
-        let owner = tokio::task::spawn_blocking(move || {
-            let inherited = super::super::session_metadata::load_session_metadata_any(
-                &storage_root,
-                &session_id,
-            )
-            .map_err(persistence)?
-            .inherited_journal_through;
-            let mut recovery =
-                CanonicalRecovery::open(&lease.view, &modes, inherited).map_err(persistence)?;
-            while recovery
-                .advance(&lease.view, &modes)
-                .map_err(persistence)?
-                .has_more
-            {}
-            Ok::<_, AgentLoopError>(Arc::new(CanonicalSession {
-                recovery: Mutex::new(Some(recovery)),
-                inherited_journal_through: inherited,
-                modes,
-                jobs: Mutex::new(Jobs::default()),
-                changed: Notify::new(),
-            }))
+        let inherited = tokio::task::spawn_blocking(move || {
+            super::super::session_metadata::load_session_metadata_any(&storage_root, &session_id)
+                .map(|metadata| metadata.inherited_journal_through)
+                .map_err(persistence)
         })
         .await
-        .map_err(|error| persistence(format!("canonical binding failed: {error}")))??;
-        self.canonical
-            .set(owner)
-            .map_err(|_| persistence("canonical owner was concurrently bound"))
+        .map_err(|error| persistence(format!("canonical metadata read failed: {error}")))??;
+        self.configure_canonical(modes, inherited)?;
+        // Publish the owner before starting index I/O so close can prove its completion.
+        self.read_canonical(|_| Ok(())).await
     }
-    pub(super) async fn read_extension_state(
+
+    pub(in crate::session_runtime) async fn read_canonical<T: Send + 'static>(
         &self,
-        plugin: &str,
-    ) -> Result<ExtensionStateView, AgentLoopError> {
-        if plugin.is_empty() || plugin.len() > 128 {
-            return Err(persistence("invalid extension namespace identity"));
-        }
+        query: impl FnOnce(&CanonicalHistory) -> Result<T, RecoveryError> + Send + 'static,
+    ) -> Result<T, AgentLoopError> {
         let owner = self
             .canonical
             .get()
@@ -195,11 +174,19 @@ impl DurableEventSink {
             .capture(&self.session_id)
             .map_err(persistence)?;
         Arc::clone(owner)
-            .extension_state(
-                lease,
-                Arc::clone(&self.registration.publisher),
-                plugin.to_owned(),
-            )
+            .read(lease, Arc::clone(&self.registration.publisher), query)
+            .await
+    }
+
+    pub(super) async fn read_extension_state(
+        &self,
+        plugin: &str,
+    ) -> Result<ExtensionStateView, AgentLoopError> {
+        if plugin.is_empty() || plugin.len() > 128 {
+            return Err(persistence("invalid extension namespace identity"));
+        }
+        let plugin = plugin.to_owned();
+        self.read_canonical(move |history| history.extension_state(&plugin))
             .await
     }
 }

@@ -43,7 +43,27 @@ pub struct RecoveryControlPayloads {
     pub source_bytes: u64,
 }
 
+/// Cold actor input contains live controls and the interrupted turn only.
+/// Lifetime conversation and completed-turn records remain indexed.
+pub struct RecoveryBootstrap {
+    pub head: super::RecoveryHead,
+    pub controls: RecoveryControlPayloads,
+    pub interrupted: Option<super::InterruptedTurnInputs>,
+}
+
 impl CanonicalHistory {
+    /// Read the bounded live input required to recover an actor.
+    ///
+    /// # Errors
+    /// Rejects invalid selectors or control/interrupted-turn admission overflow.
+    pub fn bootstrap(&self) -> Result<RecoveryBootstrap, RecoveryError> {
+        Ok(RecoveryBootstrap {
+            head: self.head.clone(),
+            controls: self.control_payloads(MAX_CONTROL_SOURCE_BYTES)?,
+            interrupted: self.interrupted_inputs()?,
+        })
+    }
+
     /// Resolve only the currently referenced control events, with aggregate admission.
     /// Each source page remains separately bounded by the journal line/page limits.
     ///

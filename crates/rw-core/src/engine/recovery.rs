@@ -6,7 +6,8 @@ mod accounting;
 pub use accounting::{MAX_ACCOUNTING_PAGE_BYTES, RecoveryAccountingPage};
 mod control;
 pub use control::{
-    MAX_CONTROL_SOURCE_BYTES, RecoveredMessage, RecoveredModelSelection, RecoveryControlPayloads,
+    MAX_CONTROL_SOURCE_BYTES, RecoveredMessage, RecoveredModelSelection, RecoveryBootstrap,
+    RecoveryControlPayloads,
 };
 mod encoding;
 mod extension;

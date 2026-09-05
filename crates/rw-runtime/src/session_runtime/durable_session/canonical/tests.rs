@@ -127,3 +127,32 @@ async fn abandoned_canonical_query_retains_worker_until_actual_completion() {
         Some(SequenceId(0))
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn canonical_bootstrap_shares_committed_prefix_and_releases_index_snapshot() {
+    let root = tempfile::tempdir().expect("root");
+    let current = sink(root.path());
+    commit_session_events(Arc::clone(&current), vec![state_event(0)])
+        .await
+        .expect("commit");
+    let bootstrap = current
+        .read_canonical(rw_core::recovery::CanonicalHistory::bootstrap)
+        .await
+        .expect("bootstrap");
+    assert_eq!(bootstrap.head.next_sequence, 1);
+    assert!(bootstrap.interrupted.is_none());
+    commit_session_events(Arc::clone(&current), vec![state_event(1)])
+        .await
+        .expect("next commit");
+    assert_eq!(
+        current
+            .read_canonical(|history| Ok(history.head().next_sequence))
+            .await
+            .expect("head"),
+        2
+    );
+    assert_eq!(
+        bootstrap.head.next_sequence, 1,
+        "returned controls do not pin an index transaction"
+    );
+}
