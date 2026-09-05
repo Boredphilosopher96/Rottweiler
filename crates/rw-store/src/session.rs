@@ -8,6 +8,9 @@ mod index;
 /// Segmented journal storage and bounded read views.
 pub mod journal;
 mod journal_io;
+/// Bounded canonical recovery checkpoints and source-reference index storage.
+#[cfg(unix)]
+pub mod recovery_index;
 mod sqlite_schema;
 mod sqlite_snapshot;
 /// Rebuildable, bounded semantic transcript index persistence.
