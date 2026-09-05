@@ -34,7 +34,8 @@ fn attachment_validation_is_bounded_provider_neutral_and_vision_gated() {
     };
     let prepared = prepare_user_message("inspect KNOWN_CANARY", &[text], "fast", &AliasVisionModel)
         .expect("text attachment")
-        .redact(&CanarySecretRedactor);
+        .redact(&CanarySecretRedactor)
+        .expect("bounded redacted attachment");
     assert_eq!(prepared.stored_attachments.len(), 1);
     assert_eq!(prepared.stored_attachments[0].content_hash.len(), 64);
     assert_eq!(
@@ -70,7 +71,8 @@ fn attachment_validation_is_bounded_provider_neutral_and_vision_gated() {
     );
     let prepared = prepare_user_message("inspect", &[image], "slow", &AliasVisionModel)
         .expect("vision attachment")
-        .redact(&CanarySecretRedactor);
+        .redact(&CanarySecretRedactor)
+        .expect("bounded redacted attachment");
     assert!(matches!(
         &prepared.attachment_blocks[0],
         Block::Image {
@@ -151,4 +153,53 @@ async fn first_image_message_prepares_lazy_model_before_vision_validation() {
         CommandOutcome::Accepted {}
     );
     assert!(model.prepared.load(Ordering::Acquire));
+}
+
+#[test]
+fn accepted_attachment_source_reconstructs_the_redacted_prepared_message() {
+    let input = Attachment {
+        name: "notes.txt".into(),
+        source_path: Some("docs/notes.txt".into()),
+        media_type: "text/plain".into(),
+        data: AttachmentData::Text {
+            content: "KNOWN_CANARY retained source".into(),
+        },
+    };
+    let prepared = prepare_user_message("inspect", &[input], "fast", &AliasVisionModel)
+        .expect("prepare")
+        .redact(&CanarySecretRedactor)
+        .expect("redact");
+    let encoded = serde_json::to_value(&prepared.stored_attachments).expect("source");
+    assert!(!encoded.to_string().contains("KNOWN_CANARY"));
+    let stored: Vec<rw_types::StoredAttachment> =
+        serde_json::from_value(encoded).expect("read durable source");
+    let restored = crate::engine::dispatch::recover_user_message(&prepared.content, &stored)
+        .expect("recover without provider or filesystem");
+    assert_eq!(
+        restored.turn(restored.content.clone()),
+        prepared.turn(prepared.content.clone())
+    );
+    assert_eq!(restored.stored_attachments, prepared.stored_attachments);
+    let mut invalid = restored.stored_attachments;
+    invalid[0].data = AttachmentData::Text {
+        content: "different body".into(),
+    };
+    assert!(crate::engine::dispatch::recover_user_message("inspect", &invalid).is_err());
+}
+
+#[test]
+fn accepted_attachment_source_requires_its_body() {
+    let input = Attachment {
+        name: "notes.txt".into(),
+        source_path: None,
+        media_type: "text/plain".into(),
+        data: AttachmentData::Text {
+            content: "source".into(),
+        },
+    };
+    let prepared =
+        prepare_user_message("inspect", &[input], "fast", &AliasVisionModel).expect("prepare");
+    let mut value = serde_json::to_value(&prepared.stored_attachments[0]).expect("source");
+    value.as_object_mut().expect("object").remove("data");
+    assert!(serde_json::from_value::<rw_types::StoredAttachment>(value).is_err());
 }

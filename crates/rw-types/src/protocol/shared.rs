@@ -239,10 +239,11 @@ pub struct Attachment {
     pub data: AttachmentData,
 }
 
-/// Durable content-addressed attachment metadata persisted in the event log.
+/// Durable attachment content and its identity, independent of mutable local paths.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 #[serde(deny_unknown_fields)]
 pub struct StoredAttachment {
+    pub data: AttachmentData,
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]

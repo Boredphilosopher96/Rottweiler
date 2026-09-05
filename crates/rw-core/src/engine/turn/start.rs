@@ -130,7 +130,7 @@ pub(super) fn prepare_turn_start(
         .into_iter()
         .map(|(content, attachments)| {
             prepare_user_message(&content, &attachments, &model_alias, config.model.as_ref())
-                .map(|message| message.redact(config.secret_redactor.as_ref()))
+                .and_then(|message| message.redact(config.secret_redactor.as_ref()))
                 .map_err(AgentLoopError::InvalidConfiguration)
         })
         .collect::<Result<Vec<_>, _>>()?;

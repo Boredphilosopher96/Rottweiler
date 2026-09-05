@@ -12,12 +12,20 @@ use rw_types::attachment_contract::MAX_TOTAL_ATTACHMENT_BYTES;
 use std::path::Component;
 use std::path::Path;
 
-#[allow(clippy::too_many_lines)]
 pub(in crate::engine) fn prepare_user_message(
     content: &str,
     attachments: &[Attachment],
     model_alias: &str,
     model: &dyn ModelDriver,
+) -> Result<PreparedUserMessage, String> {
+    prepare_with_vision(content, attachments, model.supports_vision(model_alias))
+}
+
+#[allow(clippy::too_many_lines)]
+fn prepare_with_vision(
+    content: &str,
+    attachments: &[Attachment],
+    supports_vision: bool,
 ) -> Result<PreparedUserMessage, String> {
     if attachments.len() > MAX_ATTACHMENTS_PER_MESSAGE {
         return Err(format!(
@@ -80,10 +88,8 @@ pub(in crate::engine) fn prepare_user_message(
                     "image/png" | "image/jpeg" | "image/gif" | "image/webp"
                 ) =>
             {
-                if !model.supports_vision(model_alias) {
-                    return Err(format!(
-                        "model alias {model_alias:?} does not support image attachments"
-                    ));
+                if !supports_vision {
+                    return Err("selected model does not support image attachments".to_owned());
                 }
                 let decoded_len = canonical_base64_decoded_len(data).ok_or_else(|| {
                     format!(
@@ -121,6 +127,7 @@ pub(in crate::engine) fn prepare_user_message(
             ));
         }
         stored_attachments.push(StoredAttachment {
+            data: attachment.data.clone(),
             name: attachment.name.clone(),
             source_path: attachment.source_path.clone(),
             media_type: attachment.media_type.clone(),
@@ -170,4 +177,49 @@ pub(super) fn canonical_base64_decoded_len(data: &str) -> Option<usize> {
         .checked_div(4)?
         .checked_mul(3)?
         .checked_sub(padding)
+}
+
+/// Validate and reconstruct the accepted source content without consulting a
+/// provider, filesystem path, or changed model catalog.
+pub(in crate::engine) fn recover_user_message(
+    content: &str,
+    stored: &[StoredAttachment],
+) -> Result<PreparedUserMessage, String> {
+    let attachments = stored
+        .iter()
+        .map(|attachment| Attachment {
+            name: attachment.name.clone(),
+            source_path: attachment.source_path.clone(),
+            media_type: attachment.media_type.clone(),
+            data: attachment.data.clone(),
+        })
+        .collect::<Vec<_>>();
+    let prepared = prepare_with_vision(content, &attachments, true)?;
+    if prepared.stored_attachments != stored {
+        return Err("stored attachment identity does not match its content".to_owned());
+    }
+    Ok(prepared)
+}
+
+pub(in crate::engine) fn redact_prepared_message(
+    message: PreparedUserMessage,
+    redactor: &dyn crate::engine::SecretRedactor,
+) -> Result<PreparedUserMessage, String> {
+    let content = redactor.redact(&message.content);
+    let attachments = message
+        .stored_attachments
+        .into_iter()
+        .map(|attachment| Attachment {
+            name: redactor.redact(&attachment.name),
+            source_path: attachment.source_path.map(|path| redactor.redact(&path)),
+            media_type: attachment.media_type,
+            data: match attachment.data {
+                AttachmentData::Text { content } => AttachmentData::Text {
+                    content: redactor.redact(&content),
+                },
+                image @ AttachmentData::InlineBase64 { .. } => image,
+            },
+        })
+        .collect::<Vec<_>>();
+    prepare_with_vision(&content, &attachments, true)
 }

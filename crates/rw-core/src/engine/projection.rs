@@ -93,6 +93,8 @@ struct ActiveToolStart {
 /// A persisted event log cannot be projected safely.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum SessionProjectionError {
+    #[error("invalid durable attachment: {0}")]
+    InvalidAttachment(String),
     #[error("invalid plan: {0}")]
     InvalidPlan(&'static str),
     #[error("invalid durable question payload: {0}")]
@@ -209,7 +211,7 @@ pub struct SessionProjector {
     title: Option<String>,
     conversation_agent_turns: Vec<u64>,
     queued: VecDeque<(u64, String)>,
-    uncommitted_users: BTreeMap<u64, Vec<String>>,
+    uncommitted_users: BTreeMap<u64, Vec<PreparedUserMessage>>,
     completed_turns: u64,
     active_turn: Option<u64>,
     turn_ends: BTreeMap<u64, usize>,
@@ -411,17 +413,21 @@ impl SessionProjector {
                     }
                 }
                 PendingEvent::QueuedMessagesCleared => queued.clear(),
-                PendingEvent::UserMessageAccepted { turn, content, .. } => {
+                PendingEvent::UserMessageAccepted {
+                    turn,
+                    content,
+                    attachments,
+                } => {
+                    let message =
+                        crate::engine::dispatch::recover_user_message(content, attachments)
+                            .map_err(SessionProjectionError::InvalidAttachment)?;
                     if let Some(position) = queued
                         .iter()
                         .position(|(_, queued_content)| queued_content == content)
                     {
                         queued.remove(position);
                     }
-                    uncommitted_users
-                        .entry(*turn)
-                        .or_default()
-                        .push(content.clone());
+                    uncommitted_users.entry(*turn).or_default().push(message);
                 }
                 PendingEvent::SessionTitleUpdated {
                     title: updated,
@@ -957,12 +963,8 @@ impl SessionProjector {
             rewind_archives: _,
         } = self;
         for messages in uncommitted_users.into_values() {
-            for content in messages {
-                conversation.push(Turn {
-                    role: Role::User,
-                    blocks: vec![Block::Text { text: content }],
-                    meta: TurnMeta::default(),
-                });
+            for message in messages {
+                conversation.push(message.turn(message.content.clone()));
             }
         }
         if let Some(interrupted_turn) = active_turn {

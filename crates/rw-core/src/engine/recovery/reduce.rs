@@ -212,7 +212,13 @@ pub(super) fn reduce(
             }
         }
         PendingEvent::QueuedMessagesCleared => head.control.queued.clear(),
-        PendingEvent::UserMessageAccepted { turn, content, .. } => {
+        PendingEvent::UserMessageAccepted {
+            turn,
+            content,
+            attachments,
+        } => {
+            crate::engine::dispatch::recover_user_message(&content, &attachments)
+                .map_err(crate::engine::SessionProjectionError::InvalidAttachment)?;
             let digest = *blake3::hash(content.as_bytes()).as_bytes();
             if let Some(index) = head
                 .control

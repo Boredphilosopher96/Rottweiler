@@ -156,7 +156,7 @@ const MAX_PERMISSION_PATTERN_BYTES: usize = 2 * 1024;
 const MAX_PERMISSION_ID_BYTES: usize = 192;
 const MAX_PERMISSION_LABEL_BYTES: usize = 512;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct PreparedUserMessage {
     content: String,
     stored_attachments: Vec<StoredAttachment>,
@@ -177,20 +177,8 @@ impl PreparedUserMessage {
         }
     }
 
-    fn redact(mut self, redactor: &dyn SecretRedactor) -> Self {
-        self.content = redactor.redact(&self.content);
-        for attachment in &mut self.stored_attachments {
-            attachment.name = redactor.redact(&attachment.name);
-            if let Some(source_path) = &mut attachment.source_path {
-                *source_path = redactor.redact(source_path);
-            }
-        }
-        for block in &mut self.attachment_blocks {
-            if let Block::Text { text } = block {
-                *text = redactor.redact(text);
-            }
-        }
-        self
+    fn redact(self, redactor: &dyn SecretRedactor) -> Result<Self, String> {
+        dispatch::redact_prepared_message(self, redactor)
     }
 }
 

@@ -100,3 +100,6 @@ mod citation_tests;
 
 #[cfg(test)]
 mod repair_tests;
+
+#[cfg(test)]
+mod input_tests;

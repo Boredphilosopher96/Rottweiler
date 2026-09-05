@@ -456,3 +456,5 @@ pub(super) async fn handle_actor_command(
 
 #[cfg(test)]
 pub(super) use permissions::permission_state;
+
+pub(in crate::engine) use message_input::{recover_user_message, redact_prepared_message};

@@ -166,6 +166,8 @@ impl CanonicalHistory {
             else {
                 return Err(RecoveryError::Invalid("accepted message source selector"));
             };
+            crate::engine::dispatch::recover_user_message(&content, &attachments)
+                .map_err(crate::engine::SessionProjectionError::InvalidAttachment)?;
             if turn != accepted.agent_turn {
                 return Err(RecoveryError::Invalid("accepted message source identity"));
             }
