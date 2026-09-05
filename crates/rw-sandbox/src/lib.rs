@@ -18,7 +18,7 @@ mod directory_reads;
 #[cfg(target_os = "linux")]
 mod preparation;
 #[cfg(target_os = "linux")]
-pub use preparation::PreparationFilesystem;
+pub use preparation::{PreparationExecutable, PreparationFilesystem};
 
 mod proxy;
 pub use proxy::{EgressPin, ProxyDenials, ProxyLifecycle, SupervisedEgressProxy, UpstreamProxy};

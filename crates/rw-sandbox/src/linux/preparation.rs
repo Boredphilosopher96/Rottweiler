@@ -26,6 +26,10 @@ pub(super) fn run(
     helper_pin: Option<u32>,
 ) -> Result<std::convert::Infallible, SandboxError> {
     layout.validate()?;
+    if Path::new(program) != layout.executable.path() {
+        return Err(SandboxError::UntrustedHelper);
+    }
+    let executable = layout.executable.snapshot_approved()?;
     if policy.network != NetworkPolicy::Deny || policy.read_roots.is_some() {
         return Err(SandboxError::MalformedHelper);
     }
@@ -86,13 +90,6 @@ pub(super) fn run(
         None,
     )
     .map_err(sandbox_backend)?;
-    view.directory(Path::new("host"))?;
-    view.bind_tree(
-        Path::new(program),
-        Path::new("host/source-host"),
-        &layout.credentials,
-        true,
-    )?;
     nix::unistd::fchdir(&view.root).map_err(sandbox_backend)?;
     nix::unistd::chroot(".").map_err(sandbox_backend)?;
     std::env::set_current_dir("/").map_err(sandbox_backend)?;
@@ -105,11 +102,11 @@ pub(super) fn run(
     writable.push(PathBuf::from("/dev/null"));
     let projected =
         SandboxPolicy::new(writable, NetworkPolicy::Deny)?.with_read_roots([Path::new("/")])?;
-    install_landlock(&projected, &OsString::from("/host/source-host"))?;
+    let executable_path = fd_path(&executable).into_os_string();
+    install_landlock(&projected, &executable_path)?;
     install_network_floor(false)?;
     lock_mount_authority()?;
-    let mut command =
-        command_without_helper_pin(&OsString::from("/host/source-host"), &args, helper_pin)?;
+    let mut command = command_without_helper_pin(&executable_path, &args, helper_pin)?;
     command
         .current_dir("/plugin")
         .env("HOME", "/scratch")
@@ -240,14 +237,18 @@ impl View {
                 .map_err(sandbox_backend)?;
         }
         let target = self.target(relative);
-        mount_bind(fd_path(source), &target).map_err(sandbox_backend)?;
+        mount_bind(fd_path(source), &target).map_err(|error| {
+            SandboxError::Backend(format!("source preparation bind mount: {error}"))
+        })?;
         if readonly {
             mount_remount(
                 target,
                 MountFlags::BIND | MountFlags::RDONLY | MountFlags::NOSUID,
                 "",
             )
-            .map_err(sandbox_backend)?;
+            .map_err(|error| {
+                SandboxError::Backend(format!("source preparation read-only remount: {error}"))
+            })?;
         }
         Ok(())
     }

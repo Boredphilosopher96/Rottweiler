@@ -202,11 +202,21 @@ impl SourcePreparations {
             let mount = directory.path().join("view");
             std::fs::create_dir(&work).map_err(|error| miette!(error.to_string()))?;
             std::fs::create_dir(&mount).map_err(|error| miette!(error.to_string()))?;
+            let identity = request.config.executable_identity();
+            let executable = rw_tools::PreparationExecutable::from_identity(
+                identity.canonical_path.clone(),
+                identity.device,
+                identity.inode,
+                identity.length,
+                identity.content_blake3.clone(),
+            )
+            .map_err(|error| miette!(error.to_string()))?;
             let filesystem = rw_tools::PreparationFilesystem::new(
                 request.config.cwd(),
                 &work,
                 &mount,
                 request.output_root.as_deref(),
+                executable,
             )
             .map_err(|error| miette!(error.to_string()))?;
             ownership.view_directory = Some(directory);

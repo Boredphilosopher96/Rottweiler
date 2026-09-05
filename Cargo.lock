@@ -2974,6 +2974,7 @@ name = "rw-sandbox"
 version = "0.1.4"
 dependencies = [
  "base64 0.23.1",
+ "blake3",
  "landlock",
  "libc",
  "nix 0.31.3",

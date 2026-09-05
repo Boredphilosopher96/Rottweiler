@@ -879,7 +879,13 @@ view before executing the compiler. Directory synthesis is limited to branches
 that contain an excluded path: 512 view nodes and 8,192 inspected entries. It does
 not copy an entire installed package or recursively grant host ancestors.
 
-The helper pins directory identities before mounting. Source and runtime mounts
+The helper pins directory identities before mounting. The preparation layout
+carries the approved compiler path, device, inode, length, and BLAKE3 digest.
+The helper verifies that identity while copying the opened no-follow file into
+an executable memfd, then seals the snapshot against writes and size changes.
+It executes that descriptor inside the view. Later changes to the original inode
+cannot change the compiler bytes. Snapshot bytes are bounded by the existing
+256 MiB executable limit and the two-helper execution admission. Source and runtime mounts
 are read-only. Landlock restricts writes to declared output and work directories
 plus `/dev/null`. Network access is denied without an egress relay. The helper
 removes capabilities and mount-changing syscall authority before compiler exec;

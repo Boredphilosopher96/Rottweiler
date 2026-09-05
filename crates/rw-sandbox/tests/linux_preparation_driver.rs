@@ -3,8 +3,8 @@
 #[cfg(target_os = "linux")]
 mod linux {
     use rw_sandbox::{
-        PreparationFilesystem, SandboxPolicy, SandboxSupport, maybe_run_helper, probe,
-        shell_launch_plan,
+        PreparationExecutable, PreparationFilesystem, SandboxPolicy, SandboxSupport,
+        maybe_run_helper, probe, shell_launch_plan,
     };
     use std::{ffi::OsString, fs, path::Path, process::Command};
     pub(super) fn run() {
@@ -18,11 +18,13 @@ mod linux {
         let root = std::path::PathBuf::from(
             std::env::var_os("RW_PREPARATION_DRIVER_CHILD").expect("root"),
         );
+        let shell = fs::canonicalize("/bin/sh").expect("shell path");
         let layout = PreparationFilesystem::new(
             &root.join("code"),
             &root.join("work"),
             &root.join("mount"),
             Some(&root.join("output")),
+            PreparationExecutable::capture(&shell).expect("shell identity"),
         )
         .expect("declared view");
         let policy = SandboxPolicy::for_preparation(layout).expect("preparation policy");
@@ -48,14 +50,14 @@ mod linux {
     "#;
         let args = [OsString::from("-c"), OsString::from(script)];
         let helper = std::env::current_exe().expect("helper");
-        let plan = shell_launch_plan(&policy, &helper, Path::new("/bin/sh"), &args)
-            .expect("view launch plan");
+        let plan = shell_launch_plan(&policy, &helper, &shell, &args).expect("view launch plan");
         let status = Command::new(&plan.program)
             .args(&plan.args)
             .status()
             .expect("sandbox process");
         assert!(status.success(), "source view failed: {status}");
         compiler(&root, &helper);
+        replacement_is_rejected(&root, &helper);
     }
     fn fixture() {
         let capability = probe();
@@ -92,6 +94,50 @@ mod linux {
             b"prepared"
         );
     }
+    fn replacement_is_rejected(root: &Path, helper: &Path) {
+        use std::io::{Seek as _, Write as _};
+        let program = root.join("approved-host");
+        fs::copy("/bin/true", &program).expect("fixture program");
+        let identity = PreparationExecutable::capture(&program).expect("approved program");
+        let mount = root.join("replacement-view");
+        fs::create_dir(&mount).expect("replacement mount");
+        let layout = PreparationFilesystem::new(
+            &root.join("code"),
+            &root.join("work"),
+            &mount,
+            None,
+            identity,
+        )
+        .expect("pinned layout");
+        let policy = SandboxPolicy::for_preparation(layout).expect("policy");
+        let previous = root.join("previous-host");
+        fs::rename(&program, &previous).expect("retain approved inode");
+        fs::copy("/bin/true", &program).expect("replace executable inode");
+        let rejected = || {
+            let plan = shell_launch_plan(&policy, helper, &program, &[]).expect("launch plan");
+            let output = Command::new(&plan.program)
+                .args(&plan.args)
+                .output()
+                .expect("rejected launch");
+            assert!(!output.status.success(), "substituted executable ran");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("UntrustedHelper"),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        rejected();
+        fs::rename(&previous, &program).expect("restore approved inode");
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .open(&program)
+            .expect("fixture writable program");
+        file.seek(std::io::SeekFrom::Start(0)).expect("first byte");
+        file.write_all(b"!").expect("change approved content");
+        file.sync_all().expect("flush changed byte");
+        rejected();
+        println!("production executable replacement and content changes rejected");
+    }
     fn compiler(root: &Path, helper: &Path) {
         if let Some(host) = std::env::var_os("ROTTWEILER_PREPARATION_TEST_HOST") {
             let mut reports = Vec::new();
@@ -103,6 +149,7 @@ mod linux {
                     &root.join("work"),
                     &mount,
                     Some(&root.join("output")),
+                    PreparationExecutable::capture(Path::new(&host)).expect("host identity"),
                 )
                 .expect("compiler view");
                 let policy = SandboxPolicy::for_preparation(layout).expect("compiler policy");

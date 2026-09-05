@@ -151,7 +151,7 @@ The local fixture's Rust toolchain is 1.97.1 and its Bun version is 1.3.14.
 
 Current-view verification passed the 12 focused macOS source tests, all 20 macOS
 sandbox tests, and strict runtime/sandbox Clippy across all targets and features
-on both macOS and native arm64 Linux. Linux passed all 19 sandbox unit tests,
+on both macOS and native arm64 Linux. Linux passed all 20 sandbox unit tests,
 16 existing egress integration tests, both helper acceptance drivers, and the
 production runtime source-preparation driver. The disposable Rust container
 needed `iproute2` and Python installed before the existing egress canaries could
@@ -162,3 +162,28 @@ container killed GNU `ld` with signal 9. Its seven preparation ownership tests
 are verified on macOS; no Linux unit-runtime execution is claimed. The smaller
 production Linux runtime integration executable did link and pass. Formatting,
 source ownership, and whitespace checks also passed.
+
+Independent review found that `8216590` reopened the source-host path in the
+helper after the launcher had validated it. The follow-up carries the approved
+compiler identity into the view and hashes the pinned, no-follow descriptor
+while copying its bytes into a sealed executable memfd. The native helper
+regression replaces the executable with
+identical bytes on a different inode, then restores the original inode and alters
+its bytes. Both changes are rejected before compiler exec. Temporarily replacing
+the identity check with the previous unchecked open made the regression fail with
+`substituted executable ran`; restoring the check passed. A second regression
+mutates the original inode after
+snapshot creation, proves the snapshot refuses writes and truncation, and executes
+the unchanged snapshot successfully. The production host path accepts user-writable
+files, so installation trust alone was insufficient to exclude this race.
+
+The native kernel rejected bind mounts and Landlock path rules for this anonymous
+memfd. The
+helper executes its sealed descriptor through `/proc/self/fd` and closes that
+descriptor on exec. Source files remain protected by the existing view rules;
+memfd immutability comes from kernel seals. This matches the kernel's distinction
+for [files outside a user-visible filesystem](https://docs.kernel.org/6.13/userspace-api/landlock.html#special-filesystems).
+The snapshot is at most 256 MiB per executing preparation helper, bounded by the
+two-helper admission. No activation performance improvement is claimed from this
+additional copy; unused-plugin activation and measured snapshot reuse remain
+separate work.

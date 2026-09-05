@@ -65,9 +65,6 @@ pub use rw_intel::{
     Language, Location, LspConfig, LspProcessHandle, LspProcessSpawner, LspServerConfig, Position,
     Range, RenameResult, SpawnedLspProcess, SymbolIndex, WorkspaceUriMapper,
 };
-#[cfg(target_os = "linux")]
-#[doc(hidden)]
-pub use rw_sandbox::PreparationFilesystem;
 #[doc(hidden)]
 pub use rw_sandbox::{
     EgressDecision, EgressPin, EgressPolicy, NetworkPolicy, SandboxError, SandboxPolicy,
@@ -75,6 +72,9 @@ pub use rw_sandbox::{
     maybe_run_helper as maybe_run_sandbox_helper, normalize_egress_domain, probe as probe_sandbox,
     probe_policy_egress, shell_launch_plan,
 };
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub use rw_sandbox::{PreparationExecutable, PreparationFilesystem};
 pub use rw_types::{DiffArtifact, TouchedFile, TouchedFileStatus};
 pub use search::{GlobInput, GlobTool, GrepInput, GrepTool, LsInput, LsTool};
 pub use symbols::{SymbolsInput, SymbolsTool, WorkspaceIndexPool, WorkspaceSymbolIndex};

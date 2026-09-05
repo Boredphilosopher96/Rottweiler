@@ -1,5 +1,8 @@
 //! Declared roots and path projection for the Linux source compiler view.
 
+mod executable;
+pub use executable::PreparationExecutable;
+
 use crate::SandboxError;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -14,6 +17,7 @@ use std::{
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreparationFilesystem {
+    pub(crate) executable: PreparationExecutable,
     pub(crate) code: Root,
     pub(crate) work: Root,
     pub(crate) mount: Root,
@@ -55,6 +59,7 @@ impl PreparationFilesystem {
         work: &Path,
         mount: &Path,
         output: Option<&Path>,
+        executable: PreparationExecutable,
     ) -> Result<Self, SandboxError> {
         let homes = crate::linux::linux_homes();
         let credentials = homes
@@ -62,6 +67,7 @@ impl PreparationFilesystem {
             .flat_map(|home| crate::linux::sensitive_linux_roots(home))
             .collect();
         let layout = Self {
+            executable,
             code: Root::new(code)?,
             work: Root::new(work)?,
             mount: Root::new(mount)?,
@@ -73,6 +79,7 @@ impl PreparationFilesystem {
         Ok(layout)
     }
     pub(crate) fn validate(&self) -> Result<(), SandboxError> {
+        self.executable.validate()?;
         if self.homes.len() > 8 || self.credentials.len() > 1024 {
             return Err(SandboxError::MalformedHelper);
         }
