@@ -701,7 +701,7 @@ fn malformed_skill_does_not_suppress_other_artifact_kinds() {
     );
     write(
         &root.join("hooks.toml"),
-        "[[hook]]\nevent = \"turn_end\"\nmatcher = \"*\"\nrun = \"true\"",
+        "[[hook]]\nevent = \"turn_end\"\nclass = \"policy\"\nmatcher = \"*\"\nrun = \"true\"\nfailure_policy = \"fail-closed\"\n",
     );
     let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(project, home));
     assert!(catalog.command("check").is_some());
@@ -876,19 +876,7 @@ fn declarative_hooks_parse_defaults_options_and_dispatch_order_without_execution
     write(
         &home.join(".agents/hooks.toml"),
         &format!(
-            "[[hook]]\n\
-                 id = \"late\"\n\
-                 event = \"post_tool\"\n\
-                 matcher = \"edit(*.rs)\"\n\
-                 run = \"cargo fmt --check {{file}}\"\n\
-                 priority = 10\n\
-                 timeout_ms = 250\n\
-                 failure-policy = \"fail-closed\"\n\n\
-                 [[hook]]\n\
-                 event = \"session_start\"\n\
-                 matcher = \"*\"\n\
-                 run = \"touch {}\"\n\
-                 priority = -5\n",
+            "[[hook]]\nid = \"late\"\nevent = \"post_tool\"\nclass = \"transform\"\nmatcher = \"edit(*.rs)\"\nrun = \"cargo fmt --check {{file}}\"\npriority = 10\ntimeout_ms = 250\nfailure_policy = \"fail-closed\"\n\n[[hook]]\nevent = \"session_start\"\nclass = \"policy\"\nmatcher = \"*\"\nrun = \"touch {}\"\npriority = -5\n\nfailure_policy = \"fail-closed\"\n",
             marker.display()
         ),
     );
@@ -901,7 +889,7 @@ fn declarative_hooks_parse_defaults_options_and_dispatch_order_without_execution
     assert_eq!(hooks[0].registration().timeout().as_millis(), 5_000);
     assert_eq!(
         hooks[0].registration().failure_policy(),
-        HookFailurePolicy::FailOpen
+        HookFailurePolicy::FailClosed
     );
     assert_eq!(hooks[1].id(), "late");
     assert_eq!(hooks[1].matcher(), "edit(*.rs)");
@@ -930,19 +918,19 @@ fn hook_ids_follow_adr_precedence_and_untrusted_project_stays_inert() {
     let home = fixture.path().join("home");
     write(
         &project.join(".agents/hooks.toml"),
-        "[[hook]]\nid = \"shared\"\nevent = \"pre_tool\"\nmatcher = \"bash(*)\"\nrun = \"project-command\"\n",
+        "[[hook]]\nid = \"shared\"\nevent = \"pre_tool\"\nclass = \"policy\"\nmatcher = \"bash(*)\"\nrun = \"project-command\"\n\nfailure_policy = \"fail-closed\"\n",
     );
     write(
         &project.join(".rottweiler/hooks.toml"),
-        "[[hook]]\nid = \"shared\"\nevent = \"pre_tool\"\nmatcher = \"bash(*)\"\nrun = \"project-rottweiler-command\"\n",
+        "[[hook]]\nid = \"shared\"\nevent = \"pre_tool\"\nclass = \"policy\"\nmatcher = \"bash(*)\"\nrun = \"project-rottweiler-command\"\n\nfailure_policy = \"fail-closed\"\n",
     );
     write(
         &home.join(".agents/hooks.toml"),
-        "[[hook]]\nid = \"shared\"\nevent = \"pre_tool\"\nmatcher = \"bash(*)\"\nrun = \"user-command\"\n",
+        "[[hook]]\nid = \"shared\"\nevent = \"pre_tool\"\nclass = \"policy\"\nmatcher = \"bash(*)\"\nrun = \"user-command\"\n\nfailure_policy = \"fail-closed\"\n",
     );
     write(
         &home.join(".rottweiler/hooks.toml"),
-        "[[hook]]\nid = \"shared\"\nevent = \"pre_tool\"\nmatcher = \"bash(*)\"\nrun = \"user-rottweiler-command\"\n",
+        "[[hook]]\nid = \"shared\"\nevent = \"pre_tool\"\nclass = \"policy\"\nmatcher = \"bash(*)\"\nrun = \"user-rottweiler-command\"\n\nfailure_policy = \"fail-closed\"\n",
     );
 
     let trusted = ExtensionCatalog::discover(
@@ -992,12 +980,12 @@ fn hooks_toml_mutation_fails_closed_before_command_load() {
     let path = home.join(".agents/hooks.toml");
     write(
         &path,
-        "[[hook]]\nid = \"check\"\nevent = \"turn_end\"\nmatcher = \"*\"\nrun = \"original\"\n",
+        "[[hook]]\nid = \"check\"\nevent = \"turn_end\"\nclass = \"policy\"\nmatcher = \"*\"\nrun = \"original\"\n\nfailure_policy = \"fail-closed\"\n",
     );
     let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
     fs::write(
         &path,
-        "[[hook]]\nid = \"check\"\nevent = \"turn_end\"\nmatcher = \"*\"\nrun = \"changed\"\n",
+        "[[hook]]\nid = \"check\"\nevent = \"turn_end\"\nclass = \"policy\"\nmatcher = \"*\"\nrun = \"changed\"\n\nfailure_policy = \"fail-closed\"\n",
     )
     .expect("mutate");
 
@@ -1015,7 +1003,7 @@ fn invalid_hook_schema_event_and_multiline_commands_are_rejected() {
     let path = home.join(".agents/hooks.toml");
     write(
         &path,
-        "[[hook]]\nevent = \"not_real\"\nmatcher = \"*\"\nrun = \"echo ok\"\n",
+        "[[hook]]\nevent = \"not_real\"\nclass = \"policy\"\nmatcher = \"*\"\nrun = \"echo ok\"\n\nfailure_policy = \"fail-closed\"\n",
     );
     let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
     assert!(catalog.shell_hooks().is_empty());
@@ -1027,7 +1015,7 @@ fn invalid_hook_schema_event_and_multiline_commands_are_rejected() {
 
     write(
         &path,
-        "[[hook]]\nevent = \"post_tool\"\nmatcher = \"*\"\nrun = \"first\\nsecond\"\n",
+        "[[hook]]\nevent = \"post_tool\"\nclass = \"transform\"\nmatcher = \"*\"\nrun = \"first\\nsecond\"\n\nfailure_policy = \"fail-closed\"\n",
     );
     let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
     assert!(catalog.shell_hooks().is_empty());
@@ -1036,6 +1024,30 @@ fn invalid_hook_schema_event_and_multiline_commands_are_rejected() {
             .message()
             .contains("invalid hook #1")
     );
+}
+
+#[test]
+fn hook_declarations_require_class_and_exact_failure_policy_field() {
+    let fixture = TempDir::new().expect("fixture");
+    let project = fixture.path().join("project");
+    let home = fixture.path().join("home");
+    let path = home.join(".agents/hooks.toml");
+    let declaration = "[[hook]]\nevent = \"pre_tool\"\nmatcher = \"*\"\nrun = \"true\"\n";
+    for fields in [
+        "failure_policy = \"fail-closed\"\n",
+        "class = \"policy\"\n",
+        "class = \"policy\"\nfailure-policy = \"fail-closed\"\n",
+    ] {
+        write(&path, &format!("{declaration}{fields}"));
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
+        assert!(catalog.shell_hooks().is_empty());
+        assert!(
+            catalog
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.message().contains("invalid hook #1"))
+        );
+    }
 }
 
 #[test]

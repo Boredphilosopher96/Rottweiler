@@ -119,13 +119,17 @@ async fn matching_hook_execute_capability_is_authorized_before_tool_or_hook_runs
         let mut hooks = builtin_hook_dispatcher().expect("hooks");
         hooks
             .register(
-                HookRegistration::new("fixture.execute-post", HookEvent::PostTool)
-                    .with_applicable_tools(["write_fixture"])
-                    .with_required_capabilities([ToolCapability::Execute]),
+                HookRegistration::new(
+                    "fixture.execute-post",
+                    HookEvent::PostTool,
+                    rw_types::hook_contract::HookClass::Transform,
+                )
+                .with_applicable_tools(["write_fixture"])
+                .with_required_capabilities([ToolCapability::Execute]),
                 FixedHook {
                     label: "execute-post",
                     calls: Arc::clone(&hook_calls),
-                    result: Ok(HookDirective::Continue),
+                    result: Ok(HookDirective::Continue {}),
                 },
             )
             .expect("hook");

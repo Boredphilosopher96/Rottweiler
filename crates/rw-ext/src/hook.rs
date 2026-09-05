@@ -5,30 +5,22 @@ use async_trait::async_trait;
 use futures_util::FutureExt;
 use rw_tools::CancellationToken;
 use rw_types::ToolCapability;
-use serde_json::Value;
 use thiserror::Error;
+use tokio::time::Instant;
 
-const HOOK_CANCELLATION_GRACE: Duration = Duration::from_secs(2);
+const HOOK_PHASE_TIMEOUT: Duration = Duration::from_millis(HOOK_PHASE_TIMEOUT_MS);
+const HOOK_SETTLEMENT_TIMEOUT: Duration = Duration::from_millis(HOOK_SETTLEMENT_TIMEOUT_MS);
 
-/// Stable catalog of request/response hook points.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum HookEvent {
-    SessionStart,
-    SessionEnd,
-    UserPromptSubmit,
-    PreTool,
-    PostTool,
-    PreCompact,
-    TurnEnd,
-    PermissionCheck,
-}
-
-/// Whether a handler failure permits dispatch to continue.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum HookFailurePolicy {
-    FailOpen,
-    FailClosed,
-}
+use rw_types::hook_contract::{
+    HOOK_PHASE_TIMEOUT_MS, HOOK_SETTLEMENT_TIMEOUT_MS, MAX_HOOK_DIAGNOSTIC_BYTES,
+    MAX_HOOKS_PER_EVENT,
+};
+pub use rw_types::hook_contract::{
+    HookClass, HookDirective, HookEvent, HookFailurePolicy, HookInput, HookPermissionDecision,
+    HookTransform,
+};
+mod settlement;
+use settlement::HookRuntime;
 
 /// Filesystem effect declared by a hook before it becomes eligible to run.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -38,12 +30,13 @@ pub enum HookEffect {
     WorkspaceMutating,
 }
 
-/// Public registration metadata shared by in-process and future RPC hooks.
+/// Public registration metadata shared by in-process and RPC hooks.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HookRegistration {
     id: String,
     event: HookEvent,
     priority: i32,
+    class: HookClass,
     failure_policy: HookFailurePolicy,
     timeout: Duration,
     effect: HookEffect,
@@ -55,17 +48,27 @@ impl HookRegistration {
     /// Creates a registration. Lower priorities run first; equal priorities are
     /// ordered by ID.
     #[must_use]
-    pub fn new(id: impl Into<String>, event: HookEvent) -> Self {
+    pub fn new(id: impl Into<String>, event: HookEvent, class: HookClass) -> Self {
         Self {
             id: id.into(),
             event,
             priority: 0,
-            failure_policy: HookFailurePolicy::FailOpen,
+            class,
+            failure_policy: if class == HookClass::Observer {
+                HookFailurePolicy::FailOpen
+            } else {
+                HookFailurePolicy::FailClosed
+            },
             timeout: Duration::from_secs(5),
             effect: HookEffect::ReadOnly,
             applicable_tools: Vec::new(),
             required_capabilities: Vec::new(),
         }
+    }
+
+    #[must_use]
+    pub const fn class(&self) -> HookClass {
+        self.class
     }
 
     /// Sets the deterministic ordering priority.
@@ -179,34 +182,25 @@ impl HookRegistration {
 /// payload observed by the next hook.
 #[derive(Clone, Copy)]
 pub struct HookInvocation<'a> {
-    event: HookEvent,
-    payload: &'a Value,
+    input: &'a HookInput,
     cancellation: &'a CancellationToken,
 }
 
 impl HookInvocation<'_> {
     #[must_use]
     pub const fn event(&self) -> HookEvent {
-        self.event
+        self.input.event()
     }
 
     #[must_use]
-    pub const fn payload(&self) -> &Value {
-        self.payload
+    pub const fn input(&self) -> &HookInput {
+        self.input
     }
 
     #[must_use]
     pub const fn cancellation(&self) -> &CancellationToken {
         self.cancellation
     }
-}
-
-/// A hook's requested effect on the dispatch pipeline.
-#[derive(Clone, Debug, PartialEq)]
-pub enum HookDirective {
-    Continue,
-    Replace(Value),
-    Block { message: String },
 }
 
 /// A handler-reported failure, including timeout errors produced by bridges.
@@ -221,8 +215,8 @@ impl HookError {
     #[must_use]
     pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
-            code: code.into(),
-            message: message.into(),
+            code: bounded_diagnostic(code.into()),
+            message: bounded_diagnostic(message.into()),
         }
     }
 
@@ -242,7 +236,8 @@ impl HookError {
 pub trait HookHandler: Send + Sync {
     async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError>;
 
-    /// Waits for effects owned outside a cancelled invocation future.
+    /// Waits for every effect that can outlive the cancellable invocation future.
+    /// The dispatcher drops that future on cancellation before requesting this proof.
     async fn settle_effects(&self) -> Result<(), HookError>;
 }
 
@@ -282,15 +277,21 @@ pub enum HookDispatchStatus {
 /// Full deterministic result, including failures that were allowed open.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HookDispatchResult {
-    payload: Value,
+    input: HookInput,
+    permission: Option<HookPermissionDecision>,
     status: HookDispatchStatus,
     failures: Vec<HookFailure>,
 }
 
 impl HookDispatchResult {
     #[must_use]
-    pub const fn payload(&self) -> &Value {
-        &self.payload
+    pub const fn input(&self) -> &HookInput {
+        &self.input
+    }
+
+    #[must_use]
+    pub const fn permission(&self) -> Option<HookPermissionDecision> {
+        self.permission
     }
 
     #[must_use]
@@ -316,6 +317,10 @@ pub enum HookRegistrationError {
     InvalidId,
     #[error("hook applicable tool names must use canonical lowercase snake_case")]
     InvalidToolName,
+    #[error("hook class, effect and failure policy do not form a valid registration")]
+    InvalidClass,
+    #[error("hook count exceeds the phase limit")]
+    Capacity,
     #[error("hook `{id}` is already registered for {event:?}")]
     Duplicate { event: HookEvent, id: String },
 }
@@ -324,43 +329,65 @@ pub enum HookRegistrationError {
 struct RegisteredHook {
     registration: HookRegistration,
     handler: Arc<dyn HookHandler>,
+    runtime: Arc<HookRuntime>,
 }
 
 async fn invoke_registered_hook(
     registered: &RegisteredHook,
-    event: HookEvent,
-    payload: &Value,
+    input: &HookInput,
+    deadline: Instant,
+    settlement_deadline: Instant,
 ) -> Result<HookDirective, HookError> {
-    let cancellation = CancellationToken::default();
-    let invocation = HookInvocation {
-        event,
-        payload,
-        cancellation: &cancellation,
-    };
-    let result = {
-        let invoked = AssertUnwindSafe(registered.handler.invoke(invocation)).catch_unwind();
+    let invocation_deadline = deadline.min(Instant::now() + registered.registration.timeout());
+    let mut owner = registered
+        .runtime
+        .admit(Arc::clone(&registered.handler), invocation_deadline)
+        .await?;
+    let (result, cleanup_deadline) = {
+        let invocation = HookInvocation {
+            input,
+            cancellation: &owner.cancellation,
+        };
+        let invoked =
+            AssertUnwindSafe(async { registered.handler.invoke(invocation).await }).catch_unwind();
         tokio::pin!(invoked);
         tokio::select! {
-            result = &mut invoked => result.unwrap_or_else(|_| {
-                Err(HookError::new("panic", "hook implementation panicked"))
-            }),
-            () = tokio::time::sleep(registered.registration.timeout()) => {
-                cancellation.cancel();
-                let _ = tokio::time::timeout(HOOK_CANCELLATION_GRACE, &mut invoked).await;
-                Err(HookError::new(
-                    "timeout",
-                    "hook invocation exceeded its configured deadline",
-                ))
+            result = &mut invoked => (
+                result.unwrap_or_else(|_| Err(HookError::new("panic", "hook implementation panicked"))),
+                settlement_deadline.min(Instant::now() + HOOK_SETTLEMENT_TIMEOUT),
+            ),
+            () = tokio::time::sleep_until(invocation_deadline) => {
+                let cleanup_deadline = settlement_deadline.min(Instant::now() + HOOK_SETTLEMENT_TIMEOUT);
+                owner.cancellation.cancel();
+                (Err(HookError::new("timeout", "hook invocation deadline elapsed")), cleanup_deadline)
             }
         }
     };
-    registered.handler.settle_effects().await?;
-    result
+    let cleanup = owner.finish().ok_or_else(|| {
+        HookError::new(
+            "effects_unsettled",
+            "hook invocation has no settlement owner",
+        )
+    })?;
+    match tokio::time::timeout_at(cleanup_deadline, cleanup).await {
+        Ok(Ok(())) => result,
+        Ok(Err(error)) => {
+            registered.runtime.close_admission();
+            Err(error)
+        }
+        Err(_) => {
+            registered.runtime.close_admission();
+            Err(HookError::new(
+                "effects_unsettled",
+                "hook effect settlement deadline elapsed",
+            ))
+        }
+    }
 }
 
 /// Deterministic request/response hook dispatcher.
 ///
-/// Hooks execute serially by `(priority, id)`. This makes the observable
+/// Hooks execute serially by `(class, priority, id)`. This makes the observable
 /// pipeline independent of extension discovery order and asynchronous runtime
 /// scheduling.
 #[derive(Clone, Default)]
@@ -374,10 +401,11 @@ impl HookDispatcher {
     /// # Errors
     /// Returns the first failed effect proof after checking every registered handler.
     pub async fn settle_effects(&self, event: HookEvent) -> Result<(), HookError> {
+        let deadline = Instant::now() + HOOK_SETTLEMENT_TIMEOUT;
         let mut failure = None;
         if let Some(hooks) = self.hooks.get(&event) {
             for hook in hooks {
-                if let Err(error) = hook.handler.settle_effects().await {
+                if let Err(error) = hook.runtime.settle(deadline).await {
                     failure.get_or_insert(error);
                 }
             }
@@ -419,6 +447,17 @@ impl HookDispatcher {
         handler: Arc<dyn HookHandler>,
     ) -> Result<(), HookRegistrationError> {
         validate_id(registration.id())?;
+        if (registration.class() == HookClass::Transform
+            && !registration.event().accepts_transform())
+            || (registration.class() == HookClass::Policy
+                && registration.failure_policy() != HookFailurePolicy::FailClosed)
+            || (registration.class() == HookClass::Observer
+                && registration.effect() != HookEffect::ReadOnly)
+            || registration.timeout().is_zero()
+            || registration.timeout() > Duration::from_mins(10)
+        {
+            return Err(HookRegistrationError::InvalidClass);
+        }
         if registration.applicable_tools().iter().any(|name| {
             name.is_empty()
                 || !name
@@ -438,31 +477,26 @@ impl HookDispatcher {
                 id: registration.id,
             });
         }
+        if event_hooks.len() >= MAX_HOOKS_PER_EVENT {
+            return Err(HookRegistrationError::Capacity);
+        }
         event_hooks.push(RegisteredHook {
             registration,
             handler,
+            runtime: Arc::new(HookRuntime::default()),
         });
         event_hooks.sort_by(|left, right| {
             left.registration
-                .priority()
-                .cmp(&right.registration.priority())
+                .class()
+                .cmp(&right.registration.class())
+                .then_with(|| {
+                    left.registration
+                        .priority()
+                        .cmp(&right.registration.priority())
+                })
                 .then_with(|| left.registration.id().cmp(right.registration.id()))
         });
         Ok(())
-    }
-
-    /// Removes and reports whether an exact `(event, id)` registration existed.
-    pub fn unregister(&mut self, event: HookEvent, id: &str) -> bool {
-        let Some(event_hooks) = self.hooks.get_mut(&event) else {
-            return false;
-        };
-        let original_len = event_hooks.len();
-        event_hooks.retain(|registered| registered.registration.id() != id);
-        let removed = event_hooks.len() != original_len;
-        if event_hooks.is_empty() {
-            self.hooks.remove(&event);
-        }
-        removed
     }
 
     /// Returns registrations in their exact execution order.
@@ -509,86 +543,191 @@ impl HookDispatcher {
         capabilities
     }
 
-    /// Runs only one effect class for an exact tool name. This lets the engine
-    /// execute read-only pre-tool guards before opening a checkpoint while
-    /// deferring workspace-mutating hooks until after it begins.
+    /// Dispatches one filesystem-effect phase for the input's tool.
+    ///
+    /// # Errors
+    /// Rejects oversized input and returns an error if physical effects cannot settle.
     pub async fn dispatch_tool_effect(
         &self,
-        event: HookEvent,
-        payload: Value,
-        tool_name: &str,
+        input: HookInput,
         effect: HookEffect,
-    ) -> HookDispatchResult {
-        self.dispatch_selected(event, payload, |registration| {
-            registration.effect() == effect && registration.applies_to_tool(tool_name)
-        })
-        .await
+    ) -> Result<HookDispatchResult, HookError> {
+        self.dispatch_selected(input, Some(effect)).await
     }
 
-    /// Runs the event pipeline serially and applies its failure policies.
-    pub async fn dispatch(&self, event: HookEvent, payload: Value) -> HookDispatchResult {
-        self.dispatch_selected(event, payload, |_| true).await
+    /// Executes transforms, policies and observers under one fixed phase deadline.
+    ///
+    /// # Errors
+    /// Rejects oversized input and returns an error if physical effects cannot settle.
+    pub async fn dispatch(&self, input: HookInput) -> Result<HookDispatchResult, HookError> {
+        self.dispatch_selected(input, None).await
     }
 
     async fn dispatch_selected(
         &self,
-        event: HookEvent,
-        mut payload: Value,
-        selected: impl Fn(&HookRegistration) -> bool,
-    ) -> HookDispatchResult {
-        let mut failures = Vec::new();
-        let Some(event_hooks) = self.hooks.get(&event) else {
-            return HookDispatchResult {
-                payload,
-                status: HookDispatchStatus::Completed,
-                failures,
-            };
+        input: HookInput,
+        effect: Option<HookEffect>,
+    ) -> Result<HookDispatchResult, HookError> {
+        let event = input.event();
+        let mut result = HookDispatchResult {
+            input,
+            permission: None,
+            status: HookDispatchStatus::Completed,
+            failures: Vec::new(),
         };
-
-        for registered in event_hooks
+        let Some(hooks) = self.hooks.get(&event) else {
+            return Ok(result);
+        };
+        let budget = hooks
             .iter()
-            .filter(|registered| selected(&registered.registration))
-        {
-            let invoked = invoke_registered_hook(registered, event, &payload).await;
-            match invoked {
-                Ok(HookDirective::Continue) => {}
-                Ok(HookDirective::Replace(replacement)) => payload = replacement,
-                Ok(HookDirective::Block { message }) => {
-                    return HookDispatchResult {
-                        payload,
-                        status: HookDispatchStatus::Blocked {
-                            hook_id: registered.registration.id.clone(),
-                            message,
-                        },
-                        failures,
-                    };
+            .filter(|hook| effect.is_none_or(|effect| effect == hook.registration.effect()))
+            .map(|hook| hook.registration.timeout())
+            .max()
+            .unwrap_or(HOOK_PHASE_TIMEOUT);
+        let deadline = Instant::now() + budget;
+        let settlement_deadline = deadline + HOOK_SETTLEMENT_TIMEOUT;
+        let mut input_checked = false;
+        for registered in hooks {
+            let registration = &registered.registration;
+            if effect.is_some_and(|effect| effect != registration.effect())
+                || result
+                    .input
+                    .tool_name()
+                    .is_some_and(|name| !registration.applies_to_tool(name))
+            {
+                continue;
+            }
+            if !input_checked {
+                check_size(&result.input)?;
+                input_checked = true;
+            }
+            let invoked = if Instant::now() >= deadline {
+                Err(HookError::new(
+                    "phase_timeout",
+                    "aggregate hook phase deadline elapsed",
+                ))
+            } else {
+                invoke_registered_hook(registered, &result.input, deadline, settlement_deadline)
+                    .await
+            };
+            let outcome = invoked.and_then(|directive| {
+                apply_directive(registration.class(), &mut result, directive)
+            });
+            if let Err(error) = outcome {
+                if error.code() == "effects_unsettled" {
+                    return Err(error);
                 }
-                Err(error) => {
-                    let policy = registered.registration.failure_policy();
-                    failures.push(HookFailure {
-                        hook_id: registered.registration.id.clone(),
-                        policy,
-                        error,
-                    });
-                    if policy == HookFailurePolicy::FailClosed {
-                        return HookDispatchResult {
-                            payload,
-                            status: HookDispatchStatus::FailedClosed {
-                                hook_id: registered.registration.id.clone(),
-                            },
-                            failures,
-                        };
-                    }
+                let policy = registration.failure_policy();
+                let failed_closed = policy == HookFailurePolicy::FailClosed
+                    || (error.code() == "phase_timeout"
+                        && registration.class() != HookClass::Observer);
+                result.failures.push(HookFailure {
+                    hook_id: registration.id.clone(),
+                    policy,
+                    error,
+                });
+                if failed_closed {
+                    result.status = HookDispatchStatus::FailedClosed {
+                        hook_id: registration.id.clone(),
+                    };
+                    return Ok(result);
                 }
             }
+            if matches!(result.status, HookDispatchStatus::Blocked { .. }) {
+                if let HookDispatchStatus::Blocked { hook_id, .. } = &mut result.status {
+                    hook_id.clone_from(&registration.id);
+                }
+                return Ok(result);
+            }
         }
+        Ok(result)
+    }
+}
 
-        HookDispatchResult {
-            payload,
-            status: HookDispatchStatus::Completed,
-            failures,
+fn apply_directive(
+    class: HookClass,
+    result: &mut HookDispatchResult,
+    directive: HookDirective,
+) -> Result<(), HookError> {
+    check_size(&directive)?;
+    match directive {
+        HookDirective::Continue {} => Ok(()),
+        HookDirective::Transform { change } if class == HookClass::Transform => {
+            let mut candidate = result.input.clone();
+            candidate
+                .apply(change)
+                .map_err(|message| HookError::new("invalid_directive", message))?;
+            check_size(&candidate)?;
+            result.input = candidate;
+            Ok(())
+        }
+        HookDirective::Permission { value }
+            if class == HookClass::Policy && result.input.event() == HookEvent::PermissionCheck =>
+        {
+            result.permission = Some(
+                result
+                    .permission
+                    .map_or(value, |earlier| earlier.max(value)),
+            );
+            if value == HookPermissionDecision::Deny {
+                result.status = HookDispatchStatus::Blocked {
+                    hook_id: String::new(),
+                    message: "permission hook denied the invocation".to_owned(),
+                };
+            }
+            Ok(())
+        }
+        HookDirective::Block { message } if class == HookClass::Policy => {
+            if message.is_empty()
+                || message.len() > MAX_HOOK_DIAGNOSTIC_BYTES
+                || message
+                    .chars()
+                    .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+            {
+                return Err(HookError::new(
+                    "invalid_directive",
+                    "hook block message is invalid",
+                ));
+            }
+            result.status = HookDispatchStatus::Blocked {
+                hook_id: String::new(),
+                message,
+            };
+            Ok(())
+        }
+        _ => Err(HookError::new(
+            "invalid_directive",
+            "hook decision is not legal for its phase and class",
+        )),
+    }
+}
+
+fn check_size(value: &impl serde::Serialize) -> Result<(), HookError> {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len())
+                .filter(|bytes| *bytes <= rw_plugin_protocol::MAX_HOOK_PAYLOAD_BYTES)
+                .ok_or_else(|| std::io::Error::other("hook payload exceeds its byte limit"))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
         }
     }
+    serde_json::to_writer(Counter(0), value)
+        .map_err(|_| HookError::new("payload_limit", "hook payload exceeds its byte limit"))
+}
+
+fn bounded_diagnostic(mut value: String) -> String {
+    let mut end = value.len().min(MAX_HOOK_DIAGNOSTIC_BYTES);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
+    value
 }
 
 fn validate_id(id: &str) -> Result<(), HookRegistrationError> {
@@ -600,308 +739,4 @@ fn validate_id(id: &str) -> Result<(), HookRegistrationError> {
 }
 
 #[cfg(test)]
-mod tests {
-    #![allow(clippy::expect_used)]
-
-    use std::sync::{
-        Mutex,
-        atomic::{AtomicBool, Ordering},
-    };
-
-    use async_trait::async_trait;
-    use serde_json::json;
-
-    use super::*;
-
-    struct Record {
-        calls: Arc<Mutex<Vec<String>>>,
-        directive: Result<HookDirective, HookError>,
-    }
-
-    struct NeverReturns;
-
-    struct CleanupOnCancellation(Arc<AtomicBool>);
-
-    #[async_trait]
-    impl HookHandler for NeverReturns {
-        async fn settle_effects(&self) -> std::result::Result<(), crate::HookError> {
-            Ok(())
-        }
-
-        async fn invoke(
-            &self,
-            _invocation: HookInvocation<'_>,
-        ) -> Result<HookDirective, HookError> {
-            std::future::pending().await
-        }
-    }
-
-    #[async_trait]
-    impl HookHandler for CleanupOnCancellation {
-        async fn settle_effects(&self) -> std::result::Result<(), crate::HookError> {
-            Ok(())
-        }
-
-        async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError> {
-            invocation.cancellation().cancelled().await;
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            self.0.store(true, Ordering::SeqCst);
-            Ok(HookDirective::Continue)
-        }
-    }
-
-    #[async_trait]
-    impl HookHandler for Record {
-        async fn settle_effects(&self) -> std::result::Result<(), crate::HookError> {
-            Ok(())
-        }
-
-        async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError> {
-            self.calls
-                .lock()
-                .expect("test calls lock")
-                .push(invocation.payload().to_string());
-            self.directive.clone()
-        }
-    }
-
-    fn record(
-        calls: &Arc<Mutex<Vec<String>>>,
-        directive: Result<HookDirective, HookError>,
-    ) -> Record {
-        Record {
-            calls: Arc::clone(calls),
-            directive,
-        }
-    }
-
-    #[tokio::test]
-    async fn per_registration_timeout_uses_the_declared_failure_policy() {
-        for (policy, completed) in [
-            (HookFailurePolicy::FailOpen, true),
-            (HookFailurePolicy::FailClosed, false),
-        ] {
-            let mut dispatcher = HookDispatcher::new();
-            dispatcher
-                .register(
-                    HookRegistration::new("timeout", HookEvent::PreTool)
-                        .with_timeout(Duration::from_millis(1))
-                        .with_failure_policy(policy),
-                    NeverReturns,
-                )
-                .expect("timeout hook");
-            let result = dispatcher.dispatch(HookEvent::PreTool, Value::Null).await;
-            assert_eq!(result.completed(), completed);
-            assert_eq!(result.failures().len(), 1);
-            assert_eq!(result.failures()[0].error().code(), "timeout");
-        }
-    }
-
-    #[tokio::test]
-    async fn timeout_cancels_and_awaits_handler_cleanup_before_returning() {
-        let cleaned = Arc::new(AtomicBool::new(false));
-        let mut dispatcher = HookDispatcher::new();
-        dispatcher
-            .register(
-                HookRegistration::new("cleanup", HookEvent::PreTool)
-                    .with_timeout(Duration::from_millis(1))
-                    .with_failure_policy(HookFailurePolicy::FailClosed),
-                CleanupOnCancellation(Arc::clone(&cleaned)),
-            )
-            .expect("cleanup hook");
-        let result = dispatcher.dispatch(HookEvent::PreTool, Value::Null).await;
-        assert!(!result.completed());
-        assert!(cleaned.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test]
-    async fn ordering_is_priority_then_id_and_replacements_form_a_pipeline() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let mut dispatcher = HookDispatcher::new();
-        dispatcher
-            .register(
-                HookRegistration::new("z-last", HookEvent::PreTool).with_priority(10),
-                record(&calls, Ok(HookDirective::Continue)),
-            )
-            .expect("valid hook");
-        dispatcher
-            .register(
-                HookRegistration::new("b-second", HookEvent::PreTool),
-                record(&calls, Ok(HookDirective::Replace(json!({ "step": 2 })))),
-            )
-            .expect("valid hook");
-        dispatcher
-            .register(
-                HookRegistration::new("a-first", HookEvent::PreTool),
-                record(&calls, Ok(HookDirective::Replace(json!({ "step": 1 })))),
-            )
-            .expect("valid hook");
-
-        let order: Vec<_> = dispatcher
-            .registrations(HookEvent::PreTool)
-            .map(HookRegistration::id)
-            .collect();
-        assert_eq!(order, ["a-first", "b-second", "z-last"]);
-
-        let result = dispatcher
-            .dispatch(HookEvent::PreTool, json!({ "step": 0 }))
-            .await;
-        assert!(result.completed());
-        assert_eq!(result.payload(), &json!({ "step": 2 }));
-        assert_eq!(
-            *calls.lock().expect("test calls lock"),
-            [r#"{"step":0}"#, r#"{"step":1}"#, r#"{"step":2}"#]
-        );
-    }
-
-    #[tokio::test]
-    async fn fail_open_records_failure_and_continues_with_unchanged_payload() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let mut dispatcher = HookDispatcher::new();
-        dispatcher
-            .register(
-                HookRegistration::new("broken", HookEvent::PostTool)
-                    .with_failure_policy(HookFailurePolicy::FailOpen),
-                record(&calls, Err(HookError::new("timeout", "too slow"))),
-            )
-            .expect("valid hook");
-        dispatcher
-            .register(
-                HookRegistration::new("recover", HookEvent::PostTool).with_priority(1),
-                record(&calls, Ok(HookDirective::Replace(json!("recovered")))),
-            )
-            .expect("valid hook");
-
-        let result = dispatcher
-            .dispatch(HookEvent::PostTool, json!("original"))
-            .await;
-        assert!(result.completed());
-        assert_eq!(result.payload(), &json!("recovered"));
-        assert_eq!(result.failures().len(), 1);
-        assert_eq!(result.failures()[0].hook_id(), "broken");
-        assert_eq!(result.failures()[0].policy(), HookFailurePolicy::FailOpen);
-        assert_eq!(result.failures()[0].error().code(), "timeout");
-        assert_eq!(calls.lock().expect("test calls lock").len(), 2);
-    }
-
-    #[tokio::test]
-    async fn fail_closed_records_failure_and_stops_later_hooks() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let mut dispatcher = HookDispatcher::new();
-        dispatcher
-            .register(
-                HookRegistration::new("closed", HookEvent::PermissionCheck)
-                    .with_failure_policy(HookFailurePolicy::FailClosed),
-                record(&calls, Err(HookError::new("offline", "policy unavailable"))),
-            )
-            .expect("valid hook");
-        dispatcher
-            .register(
-                HookRegistration::new("never", HookEvent::PermissionCheck).with_priority(1),
-                record(&calls, Ok(HookDirective::Continue)),
-            )
-            .expect("valid hook");
-
-        let result = dispatcher
-            .dispatch(HookEvent::PermissionCheck, json!(42))
-            .await;
-        assert_eq!(
-            result.status(),
-            &HookDispatchStatus::FailedClosed {
-                hook_id: "closed".to_owned()
-            }
-        );
-        assert_eq!(result.payload(), &json!(42));
-        assert_eq!(result.failures().len(), 1);
-        assert_eq!(result.failures()[0].policy(), HookFailurePolicy::FailClosed);
-        assert_eq!(calls.lock().expect("test calls lock").len(), 1);
-    }
-
-    #[tokio::test]
-    async fn explicit_block_stops_regardless_of_failure_policy() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let mut dispatcher = HookDispatcher::new();
-        dispatcher
-            .register(
-                HookRegistration::new("deny", HookEvent::UserPromptSubmit)
-                    .with_failure_policy(HookFailurePolicy::FailOpen),
-                record(
-                    &calls,
-                    Ok(HookDirective::Block {
-                        message: "org policy".to_owned(),
-                    }),
-                ),
-            )
-            .expect("valid hook");
-        dispatcher
-            .register(
-                HookRegistration::new("never", HookEvent::UserPromptSubmit).with_priority(1),
-                record(&calls, Ok(HookDirective::Continue)),
-            )
-            .expect("valid hook");
-
-        let result = dispatcher
-            .dispatch(HookEvent::UserPromptSubmit, json!({ "prompt": "secret" }))
-            .await;
-        assert_eq!(
-            result.status(),
-            &HookDispatchStatus::Blocked {
-                hook_id: "deny".to_owned(),
-                message: "org policy".to_owned()
-            }
-        );
-        assert!(result.failures().is_empty());
-        assert_eq!(calls.lock().expect("test calls lock").len(), 1);
-    }
-
-    #[tokio::test]
-    async fn registrations_are_event_scoped_and_empty_dispatch_is_identity() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let mut dispatcher = HookDispatcher::new();
-        dispatcher
-            .register(
-                HookRegistration::new("shared-id", HookEvent::SessionStart),
-                record(&calls, Ok(HookDirective::Continue)),
-            )
-            .expect("valid hook");
-        dispatcher
-            .register(
-                HookRegistration::new("shared-id", HookEvent::SessionEnd),
-                record(&calls, Ok(HookDirective::Continue)),
-            )
-            .expect("same ID is valid for a different event");
-        assert_eq!(
-            dispatcher.register(
-                HookRegistration::new("shared-id", HookEvent::SessionStart),
-                record(&calls, Ok(HookDirective::Continue))
-            ),
-            Err(HookRegistrationError::Duplicate {
-                event: HookEvent::SessionStart,
-                id: "shared-id".to_owned()
-            })
-        );
-
-        let payload = json!({ "unchanged": true });
-        let result = dispatcher
-            .dispatch(HookEvent::TurnEnd, payload.clone())
-            .await;
-        assert!(result.completed());
-        assert_eq!(result.payload(), &payload);
-        assert!(dispatcher.unregister(HookEvent::SessionStart, "shared-id"));
-        assert!(!dispatcher.unregister(HookEvent::SessionStart, "shared-id"));
-        assert_eq!(dispatcher.registrations(HookEvent::SessionEnd).len(), 1);
-    }
-
-    #[test]
-    fn invalid_ids_are_rejected() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let mut dispatcher = HookDispatcher::new();
-        assert_eq!(
-            dispatcher.register(
-                HookRegistration::new("bad\nid", HookEvent::PreCompact),
-                record(&calls, Ok(HookDirective::Continue))
-            ),
-            Err(HookRegistrationError::InvalidId)
-        );
-    }
-}
+mod tests;

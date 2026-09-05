@@ -12,7 +12,7 @@ export const plugin = definePlugin({
         schema: { type: "object", required: ["text"], properties: { text: { type: "string" } } },
         caps: [],
       }],
-      hooks: [{ name: "pre_tool", failure_policy: "fail-closed" }],
+      hooks: [{ name: "pre_tool", class: "policy", failure_policy: "fail-closed" }],
     },
   },
   handlers: {
@@ -23,8 +23,8 @@ export const plugin = definePlugin({
     hooks: {
       pre_tool: ({ payload }) =>
         payload.name === "bash"
-          ? { decision: "deny", message: "conformance policy denies bash" }
-          : { decision: "allow" },
+          ? { decision: "block", message: "conformance policy denies bash" }
+          : { decision: "continue" },
     },
   },
 })

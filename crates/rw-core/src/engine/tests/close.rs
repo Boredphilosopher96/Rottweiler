@@ -251,7 +251,7 @@ impl HookHandler for FailedHookProof {
     async fn invoke(&self, _: HookInvocation<'_>) -> Result<HookDirective, HookError> {
         self.invoked.store(true, Ordering::Release);
         self.entered.notify_one();
-        Ok(HookDirective::Continue)
+        Ok(HookDirective::Continue {})
     }
     async fn settle_effects(&self) -> Result<(), HookError> {
         if self.invoked.load(Ordering::Acquire) {
@@ -280,7 +280,12 @@ async fn failed_hook_proof_never_finishes_tool_or_checkpoint() {
         let mut hooks = HookDispatcher::new();
         hooks
             .register_shared(
-                HookRegistration::new("failed-proof", event).with_effect(effect),
+                HookRegistration::new(
+                    "failed-proof",
+                    event,
+                    rw_types::hook_contract::HookClass::Policy,
+                )
+                .with_effect(effect),
                 hook.clone(),
             )
             .expect("hook");

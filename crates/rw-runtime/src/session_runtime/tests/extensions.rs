@@ -269,7 +269,7 @@ async fn declarative_pre_tool_hook_matches_and_blocks_through_shared_executor() 
     std::fs::create_dir_all(hooks.parent().expect("hooks root")).expect("hooks root");
     std::fs::write(
             hooks,
-            "[[hook]]\nid = \"deny-rust-edit\"\nevent = \"pre_tool\"\nmatcher = \"edit(*.rs)\"\nrun = \"fixture-lint {file}\"\nfailure_policy = \"fail-closed\"\n",
+            "[[hook]]\nid = \"deny-rust-edit\"\nevent = \"pre_tool\"\nclass = \"policy\"\nmatcher = \"edit(*.rs)\"\nrun = \"fixture-lint {file}\"\nfailure_policy = \"fail-closed\"\n",
         )
         .expect("hooks");
     std::fs::write(project.join("lib.rs"), "fn main() {}\n").expect("source");
@@ -289,20 +289,14 @@ async fn declarative_pre_tool_hook_matches_and_blocks_through_shared_executor() 
     )
     .expect("dispatcher");
     let ignored = dispatcher
-        .dispatch(
-            HookEvent::PreTool,
-            serde_json::json!({"name":"edit","arguments":{"path":"README.md"}}),
-        )
-        .await;
+        .dispatch(serde_json::from_value::<rw_ext::HookInput>(serde_json::json!({"hook":"pre_tool","payload":serde_json::json!({"id":"call","name":"edit","arguments":{"path":"README.md"}})})).expect("typed hook fixture"))
+        .await.expect("settled hook");
     assert!(ignored.completed());
     assert!(executor.calls.lock().expect("calls").is_empty());
 
     let blocked = dispatcher
-        .dispatch(
-            HookEvent::PreTool,
-            serde_json::json!({"name":"edit","arguments":{"path":"lib.rs"}}),
-        )
-        .await;
+        .dispatch(serde_json::from_value::<rw_ext::HookInput>(serde_json::json!({"hook":"pre_tool","payload":serde_json::json!({"id":"call","name":"edit","arguments":{"path":"lib.rs"}})})).expect("typed hook fixture"))
+        .await.expect("settled hook");
     assert!(matches!(
         blocked.status(),
         rw_ext::HookDispatchStatus::Blocked { hook_id, message }
@@ -323,7 +317,7 @@ fn root_recomposition_reuses_the_validated_wasm_generation() {
                 "name":"retained-hook",
                 "version":"1.0.0",
                 "protocol":3,
-                "capabilities":{"hooks":[{"name":"post_tool","failure_policy":"fail-open"}]}
+                "capabilities":{"hooks":[{"name":"post_tool", "class": "transform","failure_policy":"fail-open"}]}
             }"#,
     )
     .expect("manifest");
@@ -371,7 +365,7 @@ fn declarative_lifecycle_shell_hooks_must_declare_read_only_effect() {
     std::fs::create_dir_all(hooks_path.parent().expect("hooks root")).expect("hooks root");
     std::fs::write(
         &hooks_path,
-        "[[hook]]\nevent = \"pre_compact\"\nmatcher = \"*\"\nrun = \"fixture-shell\"\n",
+        "[[hook]]\nevent = \"pre_compact\"\nclass = \"policy\"\nmatcher = \"*\"\nrun = \"fixture-shell\"\n\nfailure_policy = \"fail-closed\"\n",
     )
     .expect("mutating lifecycle hook");
     let executor = Arc::new(FixtureToolchainExecutor::default());
@@ -387,7 +381,7 @@ fn declarative_lifecycle_shell_hooks_must_declare_read_only_effect() {
 
     std::fs::write(
             hooks_path,
-            "[[hook]]\nevent = \"pre_compact\"\nmatcher = \"*\"\neffect = \"read-only\"\nrun = \"fixture-shell\"\n",
+            "[[hook]]\nevent = \"pre_compact\"\nclass = \"policy\"\nmatcher = \"*\"\neffect = \"read-only\"\nrun = \"fixture-shell\"\n\nfailure_policy = \"fail-closed\"\n",
         )
         .expect("read-only lifecycle hook");
     let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
@@ -413,7 +407,7 @@ async fn read_only_shell_hooks_cannot_write_workspace_for_tool_or_lifecycle_even
     std::fs::write(
             hooks_path,
             format!(
-                "[[hook]]\nid = \"readonly-tool\"\nevent = \"pre_tool\"\nmatcher = \"edit(*)\"\neffect = \"read-only\"\nfailure_policy = \"fail-closed\"\nrun = \"printf changed > {}\"\n\n[[hook]]\nid = \"readonly-lifecycle\"\nevent = \"pre_compact\"\nmatcher = \"*\"\neffect = \"read-only\"\nfailure_policy = \"fail-closed\"\nrun = \"printf changed > {}\"\n",
+                "[[hook]]\nid = \"readonly-tool\"\nevent = \"pre_tool\"\nclass = \"policy\"\nmatcher = \"edit(*)\"\neffect = \"read-only\"\nfailure_policy = \"fail-closed\"\nrun = \"printf changed > {}\"\n\n[[hook]]\nid = \"readonly-lifecycle\"\nevent = \"pre_compact\"\nclass = \"policy\"\nmatcher = \"*\"\neffect = \"read-only\"\nfailure_policy = \"fail-closed\"\nrun = \"printf changed > {}\"\n",
                 shell_words::quote(&target.to_string_lossy()),
                 shell_words::quote(&lifecycle.to_string_lossy())
             ),
@@ -439,15 +433,21 @@ async fn read_only_shell_hooks_cannot_write_workspace_for_tool_or_lifecycle_even
     register_declarative_hooks(&mut dispatcher, &catalog, &runtime).expect("hooks register");
 
     let tool_result = dispatcher
-        .dispatch(
-            HookEvent::PreTool,
-            serde_json::json!({"id":"edit","name":"edit","arguments":{"path":"target.txt"}}),
-        )
-        .await;
+        .dispatch(serde_json::from_value::<rw_ext::HookInput>(serde_json::json!({"hook":"pre_tool","payload":serde_json::json!({"id":"edit","name":"edit","arguments":{"path":"target.txt"}})})).expect("typed hook fixture"))
+        .await.expect("settled hook");
     assert!(!tool_result.completed());
     let lifecycle_result = dispatcher
-        .dispatch(HookEvent::PreCompact, serde_json::json!({"turn":1}))
-        .await;
+        .dispatch(rw_ext::HookInput::PreCompact(
+            rw_types::hook_contract::HookCompactionInput {
+                reason: rw_types::CompactionReason::Manual,
+                conversation_turns: 1,
+                injected_context: vec![],
+                replacement_prompt: None,
+                suppress_auto_continue: false,
+            },
+        ))
+        .await
+        .expect("settled hook");
     assert!(!lifecycle_result.completed());
     assert_eq!(
         std::fs::read_to_string(target).expect("unchanged target"),

@@ -897,7 +897,7 @@ async fn built_in_git_status_safe_list_binds_bare_git_and_rejects_workspace_path
             request("git status", vec![ToolCapability::ReadFilesystem]),
             ToolBehavior::Shell,
             &approver,
-            Some(PermissionOutcome::Denied),
+            Some(HookPermissionDecision::Deny),
             SessionMode::Execute,
         )
         .await,
@@ -965,7 +965,7 @@ async fn plan_and_discuss_deny_mutation_even_under_yolo() {
                 ),
                 ToolBehavior::Shell,
                 &Decision(ApprovalDecision::AllowOnce),
-                Some(PermissionOutcome::Allowed),
+                Some(HookPermissionDecision::Allow),
                 mode,
             )
             .await,
@@ -1182,4 +1182,55 @@ async fn runtime_yolo_survives_child_workspace_forks_and_never_prompts_for_subag
         0,
         "YOLO subagent control must not enter the interactive approval channel"
     );
+}
+
+#[tokio::test]
+async fn hook_ask_requires_fresh_approval_for_allowed_and_remembered_requests() {
+    let approver = CountingDeny(AtomicUsize::new(0));
+    let allowed = PermissionGate::new(PermissionDecision::Allow);
+    assert_eq!(
+        allowed
+            .authorize_with_override(
+                request("echo policy", vec![ToolCapability::Execute]),
+                &approver,
+                Some(HookPermissionDecision::Ask)
+            )
+            .await,
+        PermissionOutcome::Denied
+    );
+    assert_eq!(approver.0.load(Ordering::SeqCst), 1);
+    let remembered = PermissionGate::new(PermissionDecision::Ask);
+    assert_eq!(
+        remembered
+            .authorize_with_override(
+                request("echo policy", vec![ToolCapability::Execute]),
+                &Decision(ApprovalDecision::AllowSession),
+                None
+            )
+            .await,
+        PermissionOutcome::Allowed
+    );
+    assert_eq!(
+        remembered
+            .authorize_with_override(
+                request("echo policy", vec![ToolCapability::Execute]),
+                &approver,
+                Some(HookPermissionDecision::Ask)
+            )
+            .await,
+        PermissionOutcome::Denied
+    );
+    assert_eq!(approver.0.load(Ordering::SeqCst), 2);
+    let denied = PermissionGate::new(PermissionDecision::Deny);
+    assert_eq!(
+        denied
+            .authorize_with_override(
+                request("echo policy", vec![ToolCapability::Execute]),
+                &approver,
+                Some(HookPermissionDecision::Allow)
+            )
+            .await,
+        PermissionOutcome::Denied
+    );
+    assert_eq!(approver.0.load(Ordering::SeqCst), 2);
 }

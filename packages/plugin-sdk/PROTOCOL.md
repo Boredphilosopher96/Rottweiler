@@ -149,3 +149,24 @@ it does not undo an admitted host command, and retrying it may duplicate a
 mutation. The host retains ownership until the actor replies, including during
 process teardown. Commands require request IDs; these methods are not
 fire-and-forget notifications.
+
+## Hooks
+
+A hook declaration requires `name`, `class`, and `failure_policy`. Classes run in
+this order: `transform`, `policy`, `observer`; priority and ID order each class.
+Policy hooks require `fail-closed`. Observers return `continue` and cannot mutate
+workspace state. Transform handlers receive the phase-specific input type and
+return a transformation for that phase. Invocation identity is immutable.
+
+`hook/invoke` carries a tagged `HookInput`. `HookDirective` permits `continue`,
+`transform`, `permission`, and `block`. Permission results are `allow`, `ask`, or
+`deny`; the strictest decision wins. An `ask` result requires fresh approval.
+The generated hook schemas require every declared input field, including nullable
+values. They reject unknown envelope fields and unknown variants. Tool arguments
+and structured tool results retain the JSON shapes defined by their tool schemas.
+
+Cancellation aborts the handler signal. A tool, hook, command, or provider call
+retains its invocation until that handler and its awaited cleanup settle. The SDK
+does not send an early cancellation response or release admission while the
+handler can still perform effects. The host terminates and reaps an uncooperative
+plugin at its operation deadline before continuing conflicting work.

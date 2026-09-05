@@ -1,3 +1,4 @@
+use rw_types::hook_contract::{HookClass, HookInput};
 mod redaction;
 pub use redaction::NoopSecretRedactor;
 pub use redaction::SecretRedactor;
@@ -651,13 +652,9 @@ impl HookHandler for ValidateToolHook {
         &self,
         invocation: HookInvocation<'_>,
     ) -> Result<HookDirective, rw_ext::HookError> {
-        let valid = invocation
-            .payload()
-            .get("name")
-            .and_then(Value::as_str)
-            .is_some_and(|name| !name.trim().is_empty());
+        let valid = matches!(invocation.input(), HookInput::PreTool(input) if !input.name.trim().is_empty());
         if valid {
-            Ok(HookDirective::Continue)
+            Ok(HookDirective::Continue {})
         } else {
             Ok(HookDirective::Block {
                 message: "tool name must not be empty".to_owned(),
@@ -675,7 +672,7 @@ pub fn builtin_hook_dispatcher() -> Result<HookDispatcher, AgentLoopError> {
     let mut dispatcher = HookDispatcher::new();
     dispatcher
         .register(
-            HookRegistration::new("core.validate-tool", HookEvent::PreTool)
+            HookRegistration::new("core.validate-tool", HookEvent::PreTool, HookClass::Policy)
                 .with_priority(i32::MIN)
                 .with_failure_policy(HookFailurePolicy::FailClosed),
             ValidateToolHook,

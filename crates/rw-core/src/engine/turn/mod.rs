@@ -1,3 +1,7 @@
+use rw_types::hook_contract::{
+    HookCompactionInput, HookInput, HookPermissionDecision, HookPermissionInput, HookPromptInput,
+    HookToolInput, HookToolResultInput, HookTurnInput,
+};
 mod title;
 pub(super) use title::normalize_manual_session_title;
 use title::{normalize_generated_session_title, start_session_title_generation};
@@ -2800,16 +2804,16 @@ fn mark_unsettled(
 
 async fn dispatch_hook(
     dispatcher: &HookDispatcher,
-    event: HookEvent,
-    payload: Value,
+    input: HookInput,
     cancellation: &CancellationToken,
     signals: &mpsc::UnboundedSender<TurnSignal>,
 ) -> Result<HookDispatchResult, AgentLoopError> {
+    let event = input.event();
     let result = tokio::select! {
         () = cancellation.cancelled() => Err(AgentLoopError::Extension(
             format!("{} hook dispatch cancelled", hook_event_name(event)),
         )),
-        result = dispatcher.dispatch(event, payload) => Ok(result),
+        result = dispatcher.dispatch(input) => result.map_err(|error| if error.code() == "effects_unsettled" { AgentLoopError::EffectsUnsettled(error.to_string()) } else { AgentLoopError::Extension(error.to_string()) }),
     };
     if let Err(error) = dispatcher.settle_effects(event).await {
         mark_unsettled(signals, cancellation, error.to_string());
@@ -2820,18 +2824,17 @@ async fn dispatch_hook(
 
 async fn dispatch_tool_hook_effect(
     dispatcher: &HookDispatcher,
-    event: HookEvent,
-    payload: Value,
-    tool_name: &str,
+    input: HookInput,
     effect: HookEffect,
     cancellation: &CancellationToken,
     signals: &mpsc::UnboundedSender<TurnSignal>,
 ) -> Result<HookDispatchResult, AgentLoopError> {
+    let event = input.event();
     let result = tokio::select! {
         () = cancellation.cancelled() => Err(AgentLoopError::Extension(
             format!("{} hook dispatch cancelled", hook_event_name(event)),
         )),
-        result = dispatcher.dispatch_tool_effect(event, payload, tool_name, effect) => Ok(result),
+        result = dispatcher.dispatch_tool_effect(input, effect) => result.map_err(|error| if error.code() == "effects_unsettled" { AgentLoopError::EffectsUnsettled(error.to_string()) } else { AgentLoopError::Extension(error.to_string()) }),
     };
     if let Err(error) = dispatcher.settle_effects(event).await {
         mark_unsettled(signals, cancellation, error.to_string());
@@ -2854,15 +2857,12 @@ fn hook_rejection(status: &HookDispatchStatus, redactor: &dyn SecretRedactor) ->
 
 fn permission_hook_override(
     status: &HookDispatchStatus,
-    payload: &Value,
-) -> Option<PermissionOutcome> {
-    if !matches!(status, HookDispatchStatus::Completed) {
-        return Some(PermissionOutcome::Denied);
-    }
-    match payload.get("decision").and_then(Value::as_str) {
-        Some("allow") => Some(PermissionOutcome::Allowed),
-        Some("deny") => Some(PermissionOutcome::Denied),
-        _ => None,
+    decision: Option<HookPermissionDecision>,
+) -> Option<HookPermissionDecision> {
+    if matches!(status, HookDispatchStatus::Completed) {
+        decision
+    } else {
+        Some(HookPermissionDecision::Deny)
     }
 }
 
@@ -2995,12 +2995,11 @@ async fn authorize_tool_call(
     }
     let permission_hook = dispatch_hook(
         &config.hooks,
-        HookEvent::PermissionCheck,
-        json!({
-            "id": displayed.id,
-            "name": displayed.tool_name,
-            "arguments": displayed.arguments,
-            "capabilities": displayed.capabilities,
+        HookInput::PermissionCheck(HookPermissionInput {
+            id: displayed.id.clone(),
+            name: displayed.tool_name.clone(),
+            arguments: displayed.arguments.clone(),
+            capabilities: displayed.capabilities.clone(),
         }),
         cancellation,
         signals,
@@ -3023,7 +3022,7 @@ async fn authorize_tool_call(
             request,
             semantics,
             &redacting_approver,
-            permission_hook_override(permission_hook.status(), permission_hook.payload()),
+            permission_hook_override(permission_hook.status(), permission_hook.permission()),
             mode,
         )
         .await;
@@ -3133,13 +3132,11 @@ async fn prepare_tool_call(
     let original_arguments = arguments.clone();
     let pre_tool = match dispatch_tool_hook_effect(
         &config.hooks,
-        HookEvent::PreTool,
-        json!({
-            "id": call.id,
-            "name": call.name,
-            "arguments": displayed_arguments,
+        HookInput::PreTool(HookToolInput {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            arguments: displayed_arguments.clone(),
         }),
-        &call.name,
         HookEffect::ReadOnly,
         cancellation,
         signals,
@@ -3162,24 +3159,11 @@ async fn prepare_tool_call(
     if let Some(message) = hook_rejection(pre_tool.status(), config.secret_redactor.as_ref()) {
         return PreparedToolCall::Complete(failed_execution(call, message));
     }
-    let Some(name) = pre_tool.payload().get("name").and_then(Value::as_str) else {
-        return PreparedToolCall::Complete(failed_execution(
-            call,
-            "pre_tool hook returned an invalid tool name",
-        ));
+    let HookInput::PreTool(input) = pre_tool.input() else {
+        unreachable!("dispatcher preserves hook phase")
     };
-    if name.trim().is_empty() {
-        return PreparedToolCall::Complete(failed_execution(
-            call,
-            "pre_tool hook returned an empty tool name",
-        ));
-    }
-    call.name = name.to_owned();
-    let hook_arguments = pre_tool
-        .payload()
-        .get("arguments")
-        .cloned()
-        .unwrap_or(Value::Null);
+    call.name = input.name.clone();
+    let hook_arguments = input.arguments.clone();
     let arguments = if hook_arguments
         == redacted_json(original_arguments.clone(), config.secret_redactor.as_ref())
     {
@@ -3422,13 +3406,11 @@ async fn run_deferred_mutating_pre_hook(
     let displayed_arguments = redacted_json(arguments.clone(), runtime.secret_redactor.as_ref());
     let result = dispatch_tool_hook_effect(
         &runtime.hooks,
-        HookEvent::PreTool,
-        json!({
-            "id": call.id,
-            "name": call.name,
-            "arguments": displayed_arguments,
+        HookInput::PreTool(HookToolInput {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            arguments: displayed_arguments.clone(),
         }),
-        &call.name,
         HookEffect::WorkspaceMutating,
         cancellation,
         &runtime.signals,
@@ -3447,10 +3429,10 @@ async fn run_deferred_mutating_pre_hook(
     if let Some(message) = hook_rejection(result.status(), runtime.secret_redactor.as_ref()) {
         return Err(ToolError::Command(message));
     }
-    let returned_name = result.payload().get("name").and_then(Value::as_str);
-    let returned_arguments = result.payload().get("arguments");
-    if returned_name != Some(call.name.as_str()) || returned_arguments != Some(&displayed_arguments)
-    {
+    let HookInput::PreTool(input) = result.input() else {
+        unreachable!("dispatcher preserves hook phase")
+    };
+    if input.name != call.name || input.arguments != displayed_arguments {
         return Err(ToolError::Command(
             "workspace-mutating pre_tool hooks cannot rewrite an authorized invocation".to_owned(),
         ));
@@ -3728,13 +3710,12 @@ async fn apply_post_tool_hook(
     );
     let post_tool = match dispatch_hook(
         hooks,
-        HookEvent::PostTool,
-        json!({
-            "id": execution.call.id,
-            "name": execution.call.name,
-            "arguments": displayed_arguments,
-            "output": execution.output,
-            "is_error": execution.is_error,
+        HookInput::PostTool(HookToolResultInput {
+            id: execution.call.id.clone(),
+            name: execution.call.name.clone(),
+            arguments: displayed_arguments,
+            output: execution.output.clone(),
+            is_error: execution.is_error,
         }),
         cancellation,
         signals,
@@ -3762,20 +3743,11 @@ async fn apply_post_tool_hook(
         execution.is_error = true;
         return execution;
     }
-    if let Some(output) = post_tool.payload().get("output") {
-        match serde_json::from_value(output.clone()) {
-            Ok(output) => execution.output = output,
-            Err(error) => {
-                execution.output = ToolOutput::Text {
-                    text: format!("post_tool hook returned invalid output: {error}"),
-                };
-                execution.is_error = true;
-            }
-        }
-    }
-    if let Some(is_error) = post_tool.payload().get("is_error").and_then(Value::as_bool) {
-        execution.is_error = is_error;
-    }
+    let HookInput::PostTool(input) = post_tool.input() else {
+        unreachable!("dispatcher preserves hook phase")
+    };
+    execution.output = input.output.clone();
+    execution.is_error = input.is_error;
     execution
 }
 
@@ -4155,10 +4127,14 @@ async fn execute_compaction(
 ) -> Result<CompactionExecution, AgentLoopError> {
     let hook_result = dispatch_hook(
         &config.hooks,
-        HookEvent::PreCompact,
-        json!({
-            "reason": format!("{reason:?}"),
-            "conversation_turns": conversation.len(),
+        HookInput::PreCompact(HookCompactionInput {
+            reason: reason.clone(),
+            conversation_turns: u32::try_from(conversation.len()).map_err(|_| {
+                AgentLoopError::Extension("conversation exceeds hook turn-count limit".to_owned())
+            })?,
+            injected_context: Vec::new(),
+            replacement_prompt: None,
+            suppress_auto_continue: false,
         }),
         cancellation,
         signals,
@@ -4175,30 +4151,21 @@ async fn execute_compaction(
             "pre_compact hook blocked compaction".to_owned(),
         ));
     }
+    let HookInput::PreCompact(input) = hook_result.input() else {
+        unreachable!("dispatcher preserves hook phase")
+    };
     let hook = PreCompactHook {
-        injected_context: hook_result
-            .payload()
-            .get("injected_context")
-            .and_then(Value::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(|value| config.secret_redactor.redact(value))
-                    .collect()
-            })
-            .unwrap_or_default(),
-        replacement_prompt: hook_result
-            .payload()
-            .get("replacement_prompt")
-            .and_then(Value::as_str)
+        injected_context: input
+            .injected_context
+            .iter()
+            .map(|value| config.secret_redactor.redact(value))
+            .collect(),
+        replacement_prompt: input
+            .replacement_prompt
+            .as_ref()
             .map(|value| config.secret_redactor.redact(value)),
     };
-    let automatic_continue = !hook_result
-        .payload()
-        .get("suppress_auto_continue")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let automatic_continue = !input.suppress_auto_continue;
     let mut latest = BTreeMap::<String, &ContextSurgeryAction>::new();
     for action in surgery {
         latest.insert(action.item_id.0.clone(), action);
@@ -4841,8 +4808,9 @@ async fn run_turn(
     for message in messages {
         let Ok(hook) = dispatch_hook(
             &config.hooks,
-            HookEvent::UserPromptSubmit,
-            json!({ "content": message.content }),
+            HookInput::UserPromptSubmit(HookPromptInput {
+                content: message.content.clone(),
+            }),
             &cancellation,
             &signals,
         )
@@ -4881,12 +4849,10 @@ async fn run_turn(
                 budgeter,
             };
         }
-        let content = config.secret_redactor.redact(
-            hook.payload()
-                .get("content")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-        );
+        let HookInput::UserPromptSubmit(input) = hook.input() else {
+            unreachable!("dispatcher preserves hook phase")
+        };
+        let content = config.secret_redactor.redact(&input.content);
         let user_turn = message.turn(content);
         conversation.push(user_turn.clone());
         if persist_event(
@@ -5706,8 +5672,10 @@ async fn run_turn(
 
     let hook = dispatch_hook(
         &config.hooks,
-        HookEvent::TurnEnd,
-        json!({ "turn": turn, "status": format!("{status:?}") }),
+        HookInput::TurnEnd(HookTurnInput {
+            turn,
+            status: status.into(),
+        }),
         &cancellation,
         &signals,
     )

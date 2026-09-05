@@ -229,8 +229,14 @@ async fn nested_instruction_guard_blocks_first_mutation_then_allows_replay_retry
         "arguments": {"path": "src/deep/file.rs", "old": "fixture", "new": "changed"}
     });
     let first = dispatcher
-        .dispatch(HookEvent::PreTool, mutation.clone())
-        .await;
+        .dispatch(
+            serde_json::from_value::<rw_ext::HookInput>(
+                serde_json::json!({"hook":"pre_tool","payload":mutation.clone()}),
+            )
+            .expect("typed hook fixture"),
+        )
+        .await
+        .expect("settled hook");
     assert!(matches!(
         first.status(),
         rw_ext::HookDispatchStatus::Blocked { hook_id, .. }
@@ -250,7 +256,15 @@ async fn nested_instruction_guard_blocks_first_mutation_then_allows_replay_retry
     wrapper
         .augment(&mut request)
         .expect("committed blocked mutation activates guidance");
-    let retry = dispatcher.dispatch(HookEvent::PreTool, mutation).await;
+    let retry = dispatcher
+        .dispatch(
+            serde_json::from_value::<rw_ext::HookInput>(
+                serde_json::json!({"hook":"pre_tool","payload":mutation}),
+            )
+            .expect("typed hook fixture"),
+        )
+        .await
+        .expect("settled hook");
     assert!(retry.completed());
 
     let replay = NestedInstructionsModel {
@@ -274,11 +288,7 @@ async fn nested_instruction_guard_blocks_first_mutation_then_allows_replay_retry
     .expect("replay guard");
     assert!(
             replay_dispatcher
-                .dispatch(
-                    HookEvent::PreTool,
-                    serde_json::json!({"id":"replay","name":"multi_edit","arguments":{"path":"src/deep/file.rs","edits":[]}}),
-                )
-                .await
+                .dispatch(serde_json::from_value::<rw_ext::HookInput>(serde_json::json!({"hook":"pre_tool","payload":{"id":"replay","name":"multi_edit","arguments":{"path":"src/deep/file.rs","edits":[]}}})).expect("typed hook fixture")).await.expect("settled hook")
                 .completed()
         );
 
@@ -308,11 +318,7 @@ async fn nested_guard_handles_parallel_results_no_layer_and_added_roots() {
 
     assert!(
             dispatcher
-                .dispatch(
-                    HookEvent::PreTool,
-                    serde_json::json!({"id":"plain","name":"write","arguments":{"path":"plain/file.rs","content":"safe"}}),
-                )
-                .await
+                .dispatch(serde_json::from_value::<rw_ext::HookInput>(serde_json::json!({"hook":"pre_tool","payload":{"id":"plain","name":"write","arguments":{"path":"plain/file.rs","content":"safe"}}})).expect("typed hook fixture")).await.expect("settled hook")
                 .completed()
         );
 
@@ -321,22 +327,15 @@ async fn nested_guard_handles_parallel_results_no_layer_and_added_roots() {
         .expect("roots")
         .push(added.path().to_path_buf());
     let blocked = dispatcher
-            .dispatch(
-                HookEvent::PreTool,
-                serde_json::json!({"id":"parallel-edit","name":"edit","arguments":{"path":"@root/1/pkg/file.ts","old":"x","new":"y"}}),
-            )
-            .await;
+            .dispatch(serde_json::from_value::<rw_ext::HookInput>(serde_json::json!({"hook":"pre_tool","payload":serde_json::json!({"id":"parallel-edit","name":"edit","arguments":{"path":"@root/1/pkg/file.ts","old":"x","new":"y"}})})).expect("typed hook fixture"))
+            .await.expect("settled hook");
     assert!(matches!(
         blocked.status(),
         rw_ext::HookDispatchStatus::Blocked { .. }
     ));
     assert!(
             dispatcher
-                .dispatch(
-                    HookEvent::PreTool,
-                    serde_json::json!({"id":"parallel-read","name":"read","arguments":{"path":"@root/1/pkg/file.ts"}}),
-                )
-                .await
+                .dispatch(serde_json::from_value::<rw_ext::HookInput>(serde_json::json!({"hook":"pre_tool","payload":{"id":"parallel-read","name":"read","arguments":{"path":"@root/1/pkg/file.ts"}}})).expect("typed hook fixture")).await.expect("settled hook")
                 .completed()
         );
 }

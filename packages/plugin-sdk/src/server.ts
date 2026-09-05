@@ -1,3 +1,6 @@
+import { invokeHook, type HookHandlers } from "./hooks"
+import validateHookInput from "./generated/hook-input-validator.js"
+import validateHookDirective from "./generated/hook-directive-validator.js"
 import { ToolProgressReporter } from "./tool-progress"
 import { StreamCredit } from "./stream-credit"
 import {
@@ -7,9 +10,7 @@ import {
   RPC_METHODS,
   type CommandExecuteParams,
   type EventPublishParams,
-  type HookDecision,
-  type HookInvokeParams,
-  type HookName,
+  type HookInput,
   type InjectMessageResult,
   type JsonObject,
   type JsonValue,
@@ -74,10 +75,6 @@ export type CommandHandler = (
   params: CommandExecuteParams,
   context: HandlerContext,
 ) => JsonValue | Promise<JsonValue>
-export type HookHandler = (
-  params: HookInvokeParams,
-  context: HandlerContext,
-) => HookDecision | Promise<HookDecision>
 export type EventHandler = (params: EventPublishParams, context: HandlerContext) => void | Promise<void>
 export type ProviderHandler = (
   params: ProviderCompleteParams,
@@ -91,7 +88,7 @@ export type ProviderModelsHandler = (
 export interface PluginHandlers {
   readonly tools?: Readonly<Record<string, ToolHandler>>
   readonly commands?: Readonly<Record<string, CommandHandler>>
-  readonly hooks?: Partial<Readonly<Record<HookName, HookHandler>>>
+  readonly hooks?: HookHandlers
   readonly events?: Readonly<Record<string, EventHandler>>
   readonly providers?: Readonly<Record<string, ProviderHandler>>
   readonly providerModels?: Readonly<Record<string, ProviderModelsHandler>>
@@ -350,7 +347,10 @@ function validateManifest(manifest: PluginManifest): void {
       "pre_compact", "turn_end", "permission_check",
     ])
     if (!validHooks.has(hookName)) throw new Error(`unknown hook capability ${hookName}`)
-    requireKeys(hook, `hook ${hookName}`, ["name", "failure_policy"])
+    requireKeys(hook, `hook ${hookName}`, ["name", "class", "failure_policy"])
+    if (!["transform", "policy", "observer"].includes(hook.class)) throw new Error(`hook ${hookName} has an invalid class`)
+    if (hook.class === "policy" && hook.failure_policy !== "fail-closed") throw new Error(`policy hook ${hookName} must fail closed`)
+    if (hook.class === "transform" && !["pre_tool", "post_tool", "user_prompt_submit", "pre_compact"].includes(hookName)) throw new Error(`hook ${hookName} cannot transform input`)
     if (hook.failure_policy !== "fail-open" && hook.failure_policy !== "fail-closed") {
       throw new Error(`hook ${hook.name} has an invalid failure policy`)
     }
@@ -765,9 +765,19 @@ export class PluginServer {
     }
     if (method === RPC_METHODS.hookInvoke) {
       const params = this.#hookParams(rawParams)
-      const handler = this.definition.handlers.hooks?.[params.hook]
-      if (handler === undefined) throw new SafeRpcError(-32601, "hook is not declared")
-      return this.#runHandler((context) => handler(params, context)) as Promise<JsonValue>
+      const handlers = this.definition.handlers.hooks
+      const declaration = this.definition.manifest.capabilities.hooks?.find(entry => entry.name === params.hook)
+      if (handlers?.[params.hook] === undefined || declaration === undefined) throw new SafeRpcError(-32601, "hook is not declared")
+      return this.#runHandler(async context => {
+        const result = await invokeHook(handlers, params, context)
+        if (!validateHookDirective(result)) throw new SafeRpcError(-32603, "invalid hook directive")
+        if ((result.decision === "transform" && (declaration.class !== "transform" || result.change.hook !== params.hook))
+          || (result.decision === "permission" && (declaration.class !== "policy" || params.hook !== "permission_check"))
+          || (result.decision === "block" && declaration.class !== "policy")) {
+          throw new SafeRpcError(-32603, "hook directive exceeds its declared class")
+        }
+        return result
+      })
     }
     if (method === RPC_METHODS.eventPublish) {
       const params = this.#eventParams(rawParams)
@@ -798,14 +808,6 @@ export class PluginServer {
     const expire = () => { timedOut = true; call.abort() }
     let totalTimer: ReturnType<typeof setTimeout> | undefined
     let idleTimer: ReturnType<typeof setTimeout> | undefined
-    const cancelled = new Promise<never>((_resolve, reject) => {
-      call.signal.addEventListener("abort", () => reject(new SafeRpcError(
-        timedOut ? -32004 : -32800,
-        timedOut ? "plugin tool deadline exceeded" : "plugin tool cancelled",
-      )), { once: true })
-    })
-    // Early parameter failures still abort the local scope in finally.
-    void cancelled.catch(() => undefined)
     this.#lifetime.signal.addEventListener("abort", cancel, { once: true })
     try {
       if (!this.#initialized) throw new SafeRpcError(-32002, "plugin is not initialized")
@@ -826,22 +828,21 @@ export class PluginServer {
         }, "progress"), renewIdle, cancel,
       )
       const progress = reporter
-      const result = await Promise.race([
-        this.#invoke(() => {
+      const result = await this.#invoke(() => {
           if (this.#lifetime.signal.aborted) call.abort()
           if (call.signal.aborted) throw new SafeRpcError(-32800, "plugin tool cancelled")
           return handler(params, { ...this.#context(call.signal), progress: update => {
             if (call.signal.aborted) throw new SafeRpcError(-32800, "plugin tool cancelled")
             progress.report(update)
           } })
-        }), cancelled,
-      ])
+        })
       await reporter.finish()
-      if (call.signal.aborted) throw new SafeRpcError(timedOut ? -32004 : -32800, "plugin tool cancelled")
+      call.signal.throwIfAborted()
       await this.#success(id, result as unknown as JsonValue)
     } catch (error) {
       await reporter?.finish()
-      if (error instanceof SafeRpcError) await this.#failure(id, error.code, error.safeMessage, error.safeData)
+      if (call.signal.aborted) await this.#failure(id, timedOut ? -32004 : -32800, timedOut ? "plugin tool deadline exceeded" : "plugin tool cancelled")
+      else if (error instanceof SafeRpcError) await this.#failure(id, error.code, error.safeMessage, error.safeData)
       else await this.#failure(id, -32603, "plugin tool failed")
     } finally {
       call.abort()
@@ -965,14 +966,9 @@ export class PluginServer {
     }
   }
 
-  #hookParams(raw: unknown): HookInvokeParams {
-    const value = object(raw)
-    requireRpcKeys(value, "hook/invoke params", ["hook", "payload"])
-    const hook = string(value.hook, "hook") as HookName
-    return {
-      hook,
-      payload: object(value.payload, "hook payload"),
-    }
+  #hookParams(raw: unknown): HookInput {
+    if (byteLength(JSON.stringify(raw)) > PROTOCOL_LIMITS.maxHookPayloadBytes || !validateHookInput(raw)) throw new SafeRpcError(-32602, "invalid hook input")
+    return raw
   }
 
   #eventParams(raw: unknown): EventPublishParams {
@@ -1268,23 +1264,20 @@ export class PluginServer {
     this.#lifetime.signal.addEventListener("abort", cancel, { once: true })
     if (this.#lifetime.signal.aborted) call.abort()
     let timer: ReturnType<typeof setTimeout> | undefined
-    const cancelled = new Promise<never>((_resolve, reject) => {
-      call.signal.addEventListener("abort", () => {
-        reject(new SafeRpcError(
-          timedOut ? -32004 : -32800,
-          timedOut ? "plugin handler timed out" : "plugin request cancelled",
-        ))
-      }, { once: true })
-    })
     timer = setTimeout(() => {
       timedOut = true
       call.abort()
     }, this.#handlerTimeoutMs)
     try {
-      return await Promise.race([
-        this.#invoke(() => invoke(this.#context(call.signal, providerAlias))),
-        cancelled,
-      ])
+      const result = await this.#invoke(() => invoke(this.#context(call.signal, providerAlias)))
+      call.signal.throwIfAborted()
+      return result
+    } catch (error) {
+      if (call.signal.aborted) throw new SafeRpcError(
+        timedOut ? -32004 : -32800,
+        timedOut ? "plugin handler timed out" : "plugin request cancelled",
+      )
+      throw error
     } finally {
       if (timer !== undefined) clearTimeout(timer)
       this.#lifetime.signal.removeEventListener("abort", cancel)

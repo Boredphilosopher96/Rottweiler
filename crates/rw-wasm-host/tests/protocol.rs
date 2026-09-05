@@ -2,10 +2,9 @@
 
 use std::path::Path;
 
-use rw_ext::{HookDispatcher, HookEvent, WasmHookLimits, WasmProcessHook, WasmWorkerPool};
+use rw_ext::{HookDispatcher, WasmHookLimits, WasmProcessHook, WasmWorkerPool};
 use rw_plugin_protocol::{
-    PROTOCOL_VERSION, PluginCapabilities, PluginHook, PluginHookCapability,
-    PluginHookFailurePolicy, PluginManifest,
+    HookFailurePolicy, PROTOCOL_VERSION, PluginCapabilities, PluginHookCapability, PluginManifest,
 };
 
 fn manifest() -> PluginManifest {
@@ -15,8 +14,9 @@ fn manifest() -> PluginManifest {
         protocol: PROTOCOL_VERSION,
         capabilities: PluginCapabilities {
             hooks: vec![PluginHookCapability {
-                name: PluginHook::PreTool,
-                failure_policy: PluginHookFailurePolicy::FailOpen,
+                name: rw_plugin_protocol::HookEvent::PreTool,
+                class: rw_types::hook_contract::HookClass::Transform,
+                failure_policy: HookFailurePolicy::FailOpen,
             }],
             ..PluginCapabilities::default()
         },
@@ -71,7 +71,7 @@ async fn helper_reuses_compilation_with_fresh_invocations() {
         pool.clone(),
         Path::new(env!("CARGO_BIN_EXE_rottweiler-wasm-host")).to_owned(),
         manifest(),
-        component(r#"{"directive":"replace","payload":{"safe":true}}"#),
+        component(r#"{"decision":"transform","change":{"hook":"pre_tool","name":"read","arguments":{"safe":true}}}"#),
         WasmHookLimits::default(),
     )
     .expect("proxy");
@@ -80,9 +80,19 @@ async fn helper_reuses_compilation_with_fresh_invocations() {
     hook.register_hooks(&mut dispatcher).expect("registered");
     for _ in 0..10 {
         let result = dispatcher
-            .dispatch(HookEvent::PreTool, serde_json::json!({"tool":"read"}))
-            .await;
-        assert_eq!(result.payload(), &serde_json::json!({"safe":true}));
+            .dispatch(rw_ext::HookInput::PreTool(
+                rw_types::hook_contract::HookToolInput {
+                    id: "call".to_owned(),
+                    name: "read".to_owned(),
+                    arguments: serde_json::json!({}),
+                },
+            ))
+            .await
+            .expect("settled hook");
+        let rw_ext::HookInput::PreTool(input) = result.input() else {
+            panic!("pre_tool phase")
+        };
+        assert_eq!(input.arguments, serde_json::json!({"safe":true}));
         assert!(result.failures().is_empty());
     }
     assert_eq!(pool.stats().process_starts, 1);
@@ -108,7 +118,7 @@ async fn helper_rejects_malformed_components_and_recovers() {
         pool.clone(),
         helper,
         manifest(),
-        component(r#"{"directive":"continue"}"#),
+        component(r#"{"decision":"continue"}"#),
         WasmHookLimits::default(),
     )
     .expect("valid proxy");
@@ -121,7 +131,7 @@ async fn helper_rejects_malformed_components_and_recovers() {
 async fn cache_is_bounded_and_manifest_and_limits_are_part_of_identity() {
     let pool = WasmWorkerPool::with_worker_limit(2).expect("capacity");
     let helper = Path::new(env!("CARGO_BIN_EXE_rottweiler-wasm-host")).to_owned();
-    let bytes = component(r#"{"directive":"continue"}"#);
+    let bytes = component(r#"{"decision":"continue"}"#);
     let first = WasmProcessHook::new(
         pool.clone(),
         helper.clone(),
@@ -170,7 +180,7 @@ async fn guest_trap_retires_its_worker_and_allows_a_fresh_generation() {
         pool.clone(),
         helper,
         manifest(),
-        component(r#"{"directive":"continue"}"#),
+        component(r#"{"decision":"continue"}"#),
         WasmHookLimits {
             fuel: 1,
             ..WasmHookLimits::default()
@@ -181,8 +191,15 @@ async fn guest_trap_retires_its_worker_and_allows_a_fresh_generation() {
     hook.register_hooks(&mut dispatcher).expect("registered");
     for _ in 0..2 {
         let result = dispatcher
-            .dispatch(HookEvent::PreTool, serde_json::json!({}))
-            .await;
+            .dispatch(rw_ext::HookInput::PreTool(
+                rw_types::hook_contract::HookToolInput {
+                    id: "call".to_owned(),
+                    name: "read".to_owned(),
+                    arguments: serde_json::json!({}),
+                },
+            ))
+            .await
+            .expect("settled hook");
         assert_eq!(result.failures().len(), 1);
     }
     assert_eq!(pool.stats().process_starts, 2);
@@ -202,7 +219,7 @@ async fn worker_capacity_measurement() {
             pool.clone(),
             helper.clone(),
             manifest(),
-            component(r#"{"directive":"continue"}"#),
+            component(r#"{"decision":"continue"}"#),
             WasmHookLimits::default(),
         )
         .expect("proxy");
@@ -218,8 +235,15 @@ async fn worker_capacity_measurement() {
         for _ in 0..32 {
             let started = Instant::now();
             let result = dispatcher
-                .dispatch(HookEvent::PreTool, serde_json::json!({}))
-                .await;
+                .dispatch(rw_ext::HookInput::PreTool(
+                    rw_types::hook_contract::HookToolInput {
+                        id: "call".to_owned(),
+                        name: "read".to_owned(),
+                        arguments: serde_json::json!({}),
+                    },
+                ))
+                .await
+                .expect("settled hook");
             warm_us.push(started.elapsed().as_micros());
             assert!(result.failures().is_empty());
         }
@@ -231,8 +255,15 @@ async fn worker_capacity_measurement() {
                 let dispatcher = dispatcher.clone();
                 jobs.push(tokio::spawn(async move {
                     dispatcher
-                        .dispatch(HookEvent::PreTool, serde_json::json!({}))
+                        .dispatch(rw_ext::HookInput::PreTool(
+                            rw_types::hook_contract::HookToolInput {
+                                id: "call".to_owned(),
+                                name: "read".to_owned(),
+                                arguments: serde_json::json!({}),
+                            },
+                        ))
                         .await
+                        .expect("settled hook")
                 }));
             }
             for job in jobs {

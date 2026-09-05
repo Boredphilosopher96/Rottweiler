@@ -6,6 +6,7 @@ use rw_ext::HookDirective;
 use rw_ext::HookError;
 use rw_ext::HookHandler;
 use rw_ext::HookInvocation;
+use rw_types::hook_contract::{HookInput, HookPermissionDecision, HookTransform};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -38,7 +39,7 @@ impl HookHandler for MutatingPreHook {
         }
         std::fs::write(&self.sibling, "mutated by pre hook")
             .map_err(|error| HookError::new("fixture_write", error.to_string()))?;
-        Ok(HookDirective::Continue)
+        Ok(HookDirective::Continue {})
     }
 }
 
@@ -61,9 +62,15 @@ impl HookHandler for MarkPostToolFailed {
     }
 
     async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError> {
-        let mut payload = invocation.payload().clone();
-        payload["is_error"] = Value::Bool(true);
-        Ok(HookDirective::Replace(payload))
+        let HookInput::PostTool(input) = invocation.input() else {
+            panic!("post_tool input required")
+        };
+        Ok(HookDirective::Transform {
+            change: HookTransform::PostTool {
+                output: input.output.clone(),
+                is_error: true,
+            },
+        })
     }
 }
 
@@ -76,7 +83,7 @@ impl HookHandler for SiblingFormatterPostHook {
     async fn invoke(&self, _invocation: HookInvocation<'_>) -> Result<HookDirective, HookError> {
         std::fs::write(&self.sibling, "formatted sibling")
             .map_err(|error| HookError::new("formatter_write", error.to_string()))?;
-        Ok(HookDirective::Continue)
+        Ok(HookDirective::Continue {})
     }
 }
 
@@ -107,11 +114,11 @@ impl HookHandler for PayloadCaptureHook {
     }
 
     async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError> {
-        self.payloads
-            .lock()
-            .expect("captured hook payloads")
-            .push((self.label, invocation.payload().clone()));
-        Ok(HookDirective::Continue)
+        self.payloads.lock().expect("captured hook payloads").push((
+            self.label,
+            serde_json::to_value(invocation.input()).expect("hook JSON")["payload"].clone(),
+        ));
+        Ok(HookDirective::Continue {})
     }
 }
 
@@ -132,9 +139,10 @@ impl HookHandler for PermissionAllowHook {
     }
 
     async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError> {
-        let mut payload = invocation.payload().clone();
-        payload["decision"] = Value::String("allow".to_owned());
-        Ok(HookDirective::Replace(payload))
+        assert!(matches!(invocation.input(), HookInput::PermissionCheck(_)));
+        Ok(HookDirective::Permission {
+            value: HookPermissionDecision::Allow,
+        })
     }
 }
 
@@ -156,9 +164,15 @@ impl HookHandler for RewriteArgumentsHook {
     }
 
     async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError> {
-        let mut payload = invocation.payload().clone();
-        payload["arguments"] = self.0.clone();
-        Ok(HookDirective::Replace(payload))
+        let HookInput::PreTool(input) = invocation.input() else {
+            panic!("pre_tool input required")
+        };
+        Ok(HookDirective::Transform {
+            change: HookTransform::PreTool {
+                name: input.name.clone(),
+                arguments: self.0.clone(),
+            },
+        })
     }
 }
 
@@ -169,8 +183,11 @@ impl HookHandler for RewriteUserPromptHook {
     }
 
     async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError> {
-        let mut payload = invocation.payload().clone();
-        payload["content"] = Value::String(self.0.to_owned());
-        Ok(HookDirective::Replace(payload))
+        assert!(matches!(invocation.input(), HookInput::UserPromptSubmit(_)));
+        Ok(HookDirective::Transform {
+            change: HookTransform::UserPromptSubmit {
+                content: self.0.to_owned(),
+            },
+        })
     }
 }

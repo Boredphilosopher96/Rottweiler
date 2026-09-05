@@ -19,8 +19,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use super::*;
 use crate::plugin::{ApprovalStoreError, CapabilityViolation};
 use rw_plugin_protocol::{
-    PluginCommandCapability, PluginHookCapability, PluginHookFailurePolicy,
-    PluginProviderCapability, PluginPush, PluginToolCapability, PluginToolEffect,
+    HookFailurePolicy, PluginCommandCapability, PluginHookCapability, PluginProviderCapability,
+    PluginPush, PluginToolCapability, PluginToolEffect,
 };
 
 fn manifest() -> PluginManifest {
@@ -42,8 +42,9 @@ fn manifest() -> PluginManifest {
                 allowed_tools: Vec::new(),
             }],
             hooks: vec![PluginHookCapability {
-                name: rw_plugin_protocol::PluginHook::PreTool,
-                failure_policy: PluginHookFailurePolicy::FailOpen,
+                name: rw_plugin_protocol::HookEvent::PreTool,
+                class: rw_types::hook_contract::HookClass::Transform,
+                failure_policy: HookFailurePolicy::FailOpen,
             }],
             providers: vec![PluginProviderCapability {
                 alias_prefix: "fixture/".to_owned(),

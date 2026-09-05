@@ -18,6 +18,7 @@ use rw_ext::HookHandler;
 use rw_ext::HookInvocation;
 use rw_tools::BashSandboxMode;
 use rw_tools::CommandRequest;
+use rw_types::hook_contract::{HookClass, HookInput, HookTransform};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -58,11 +59,11 @@ impl DeclarativeHookMatcher {
         })
     }
 
-    pub(super) fn matches(&self, payload: &serde_json::Value) -> bool {
+    pub(super) fn matches(&self, payload: &HookInput) -> bool {
         match self {
             Self::Any => true,
             Self::Tool { name, arguments } => {
-                payload.get("name").and_then(serde_json::Value::as_str) == Some(name)
+                payload.tool_name() == Some(name)
                     && hook_argument_text(payload)
                         .as_deref()
                         .is_some_and(|value| arguments.is_match(value))
@@ -71,8 +72,17 @@ impl DeclarativeHookMatcher {
     }
 }
 
-pub(super) fn hook_argument_text(payload: &serde_json::Value) -> Option<String> {
-    let arguments = payload.get("arguments")?;
+fn hook_arguments(input: &HookInput) -> Option<&serde_json::Value> {
+    match input {
+        HookInput::PreTool(input) => Some(&input.arguments),
+        HookInput::PostTool(input) => Some(&input.arguments),
+        HookInput::PermissionCheck(input) => Some(&input.arguments),
+        _ => None,
+    }
+}
+
+pub(super) fn hook_argument_text(payload: &HookInput) -> Option<String> {
+    let arguments = hook_arguments(payload)?;
     arguments
         .get("path")
         .or_else(|| arguments.get("command"))
@@ -99,9 +109,7 @@ impl DeclarativeShellHookHandler {
             .load_command()
             .map_err(|error| HookError::new("declarative_hook_changed", error.to_string()))?;
         if command.contains("{file}") {
-            let virtual_path = invocation
-                .payload()
-                .get("arguments")
+            let virtual_path = hook_arguments(invocation.input())
                 .and_then(|arguments| arguments.get("path"))
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| {
@@ -159,8 +167,8 @@ impl HookHandler for DeclarativeShellHookHandler {
         &self,
         invocation: HookInvocation<'_>,
     ) -> std::result::Result<HookDirective, HookError> {
-        if !self.matcher.matches(invocation.payload()) {
-            return Ok(HookDirective::Continue);
+        if !self.matcher.matches(invocation.input()) {
+            return Ok(HookDirective::Continue {});
         }
         let boundary = self.runtime.current();
         let read_only = self.hook.registration().effect() == HookEffect::ReadOnly;
@@ -176,12 +184,7 @@ impl HookHandler for DeclarativeShellHookHandler {
             .await
             .map_err(|error| HookError::new("declarative_hook_command", error.to_string()))?;
         let (stdout, stderr) = capture.finish();
-        if outcome.exit_code != 0
-            && matches!(
-                invocation.event(),
-                HookEvent::PreTool | HookEvent::PreCompact
-            )
-        {
+        if outcome.exit_code != 0 && self.hook.registration().class() == HookClass::Policy {
             let message = if !stderr.trim().is_empty() {
                 stderr
             } else if !stdout.trim().is_empty() {
@@ -191,7 +194,8 @@ impl HookHandler for DeclarativeShellHookHandler {
             };
             return Ok(HookDirective::Block { message });
         }
-        if invocation.event() == HookEvent::PostTool
+        if let HookInput::PostTool(input) = invocation.input()
+            && self.hook.registration().class() == HookClass::Transform
             && (outcome.exit_code != 0 || !stdout.is_empty() || !stderr.is_empty())
         {
             let result = HookCommandResult {
@@ -199,17 +203,15 @@ impl HookHandler for DeclarativeShellHookHandler {
                 stdout,
                 stderr,
             };
-            let mut replacement = invocation.payload().clone();
+            let mut output = input.output.clone();
             let diagnostics = result.render(&format!("hook {}", self.hook.id()));
-            append_post_tool_diagnostics(
-                &mut replacement,
-                "Declarative hook diagnostics",
-                &diagnostics,
-            )?;
-            if outcome.exit_code != 0 {
-                replacement["is_error"] = serde_json::Value::Bool(true);
-            }
-            return Ok(HookDirective::Replace(replacement));
+            append_post_tool_diagnostics(&mut output, "Declarative hook diagnostics", &diagnostics);
+            return Ok(HookDirective::Transform {
+                change: HookTransform::PostTool {
+                    output,
+                    is_error: input.is_error || outcome.exit_code != 0,
+                },
+            });
         }
         if outcome.exit_code != 0 {
             return Err(HookError::new(
@@ -217,7 +219,7 @@ impl HookHandler for DeclarativeShellHookHandler {
                 format!("hook {} exited with {}", self.hook.id(), outcome.exit_code),
             ));
         }
-        Ok(HookDirective::Continue)
+        Ok(HookDirective::Continue {})
     }
 }
 
@@ -227,6 +229,13 @@ pub(super) fn register_declarative_hooks(
     runtime: &Arc<ToolchainRuntime>,
 ) -> Result<()> {
     for hook in catalog.shell_hooks() {
+        if hook.registration().class() == HookClass::Transform
+            && hook.registration().event() != HookEvent::PostTool
+        {
+            return Err(miette!(
+                "declarative transform hooks require the post_tool event"
+            ));
+        }
         if hook.registration().effect() == HookEffect::WorkspaceMutating
             && !matches!(
                 hook.registration().event(),

@@ -24,12 +24,23 @@
       "default": "./dist/scaffold.js"
     },
     "./protocol.json": "./fixtures/wire/protocol-3.json",
-    "./protocol.schema.json": "./fixtures/wire/protocol-3.schema.json"
+    "./protocol.schema.json": "./fixtures/wire/protocol-3.schema.json",
+    "./hook-input.schema.json": "./fixtures/wire/hook-input.schema.json",
+    "./hook-directive.schema.json": "./fixtures/wire/hook-directive.schema.json"
   },
   "bin": {
     "rottweiler-plugin-scaffold": "./dist/bin/scaffold.js"
   },
-  "files": ["dist", "fixtures/scaffold", "fixtures/wire/protocol-3.json", "fixtures/wire/protocol-3.schema.json", "PROTOCOL.md", "README.md"],
+  "files": [
+    "dist",
+    "fixtures/scaffold",
+    "fixtures/wire/protocol-3.json",
+    "fixtures/wire/protocol-3.schema.json",
+    "PROTOCOL.md",
+    "README.md",
+    "fixtures/wire/hook-input.schema.json",
+    "fixtures/wire/hook-directive.schema.json"
+  ],
   "scripts": {
     "build": "bun run build.ts",
     "prepack": "bun run build",

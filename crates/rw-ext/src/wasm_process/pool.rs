@@ -289,7 +289,7 @@ impl WasmWorkerPool {
                         &generation.component,
                     )
                     .await?;
-                if loaded != WasmHostResponse::Valid {
+                if loaded != (WasmHostResponse::Valid {}) {
                     return Ok(loaded);
                 }
                 worker.digest = Some(generation.digest);
@@ -299,7 +299,7 @@ impl WasmWorkerPool {
                     .exchange(&WasmHostRequest::Invoke { event, input }, &[])
                     .await
             } else {
-                Ok(WasmHostResponse::Valid)
+                Ok(WasmHostResponse::Valid {})
             }
         };
         let outcome = tokio::select! {

@@ -331,7 +331,11 @@ async fn registered_user_prompt_hook_keeps_rewrite_on_the_separate_commit_path()
     let mut hooks = builtin_hook_dispatcher().expect("hooks");
     hooks
         .register(
-            HookRegistration::new("fixture.rewrite-user", HookEvent::UserPromptSubmit),
+            HookRegistration::new(
+                "fixture.rewrite-user",
+                HookEvent::UserPromptSubmit,
+                rw_types::hook_contract::HookClass::Transform,
+            ),
             RewriteUserPromptHook("rewritten by hook"),
         )
         .expect("user prompt hook");

@@ -7,7 +7,7 @@ use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 use async_trait::async_trait;
 use rw_plugin_protocol::PluginManifest;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{
@@ -35,10 +35,8 @@ pub enum WasmHostRequest {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WasmHostResponse {
-    Valid,
-    Continue,
-    Replace { payload: Value },
-    Block { message: String },
+    Valid {},
+    Directive { directive: HookDirective },
     Error { message: String },
 }
 
@@ -133,9 +131,9 @@ impl WasmProcessHook {
             )
             .await?;
         match response {
-            WasmHostResponse::Valid => Ok(()),
+            WasmHostResponse::Valid {} => Ok(()),
             WasmHostResponse::Error { message } => Err(WasmHookHostError::Compile { message }),
-            _ => Err(WasmHookHostError::Execution {
+            WasmHostResponse::Directive { .. } => Err(WasmHookHostError::Execution {
                 message: "WASM helper returned an unexpected validation response".to_owned(),
             }),
         }
@@ -155,19 +153,15 @@ impl HookHandler for WasmProcessHook {
         if invocation.cancellation().is_cancelled() {
             return Err(HookError::new("cancelled", "WASM hook was cancelled"));
         }
-        let input = encode_input(invocation.payload(), self.generation.limits.max_input_bytes)
+        let input = encode_input(invocation.input(), self.generation.limits.max_input_bytes)
             .map_err(|error| HookError::new("wasm_input", error.to_string()))?;
-        let event = rw_plugin_protocol::PluginHook::from(invocation.event())
-            .as_str()
-            .to_owned();
+        let event = invocation.event().as_str().to_owned();
         tokio::select! {
             result = self.pool.request(Arc::clone(&self.generation), Some((event, input)), WASM_HOST_REQUEST_TIMEOUT) => {
                 match result.map_err(|error| HookError::new("wasm_hook", error.to_string()))? {
-                    WasmHostResponse::Continue => Ok(HookDirective::Continue),
-                    WasmHostResponse::Replace { payload } => Ok(HookDirective::Replace(payload)),
-                    WasmHostResponse::Block { message } => Ok(HookDirective::Block { message }),
+                    WasmHostResponse::Directive { directive } => Ok(directive),
                     WasmHostResponse::Error { message } => Err(HookError::new("wasm_hook", message)),
-                    WasmHostResponse::Valid => Err(HookError::new("wasm_hook", "WASM helper returned an unexpected invocation response")),
+                    WasmHostResponse::Valid {} => Err(HookError::new("wasm_hook", "WASM helper returned an unexpected invocation response")),
                 }
             }
             () = invocation.cancellation().cancelled() => {

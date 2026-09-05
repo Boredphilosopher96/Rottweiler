@@ -2,7 +2,7 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use ts_rs::TS;
 
 use crate::{CompactionReason, ToolCapability, ToolOutput, TurnStatus};
@@ -49,6 +49,15 @@ impl HookEvent {
             Self::UserPromptSubmit | Self::PreTool | Self::PostTool | Self::PreCompact
         )
     }
+}
+
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, JsonSchema, TS,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum HookFailurePolicy {
+    FailOpen,
+    FailClosed,
 }
 
 /// Class order ensures policy observes the transformed input.
@@ -98,7 +107,7 @@ pub struct HookPromptInput {
 pub struct HookToolInput {
     pub id: String,
     pub name: String,
-    pub arguments: Map<String, Value>,
+    pub arguments: Value,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, JsonSchema, TS)]
@@ -106,7 +115,7 @@ pub struct HookToolInput {
 pub struct HookToolResultInput {
     pub id: String,
     pub name: String,
-    pub arguments: Map<String, Value>,
+    pub arguments: Value,
     pub output: ToolOutput,
     pub is_error: bool,
 }
@@ -116,7 +125,7 @@ pub struct HookToolResultInput {
 pub struct HookPermissionInput {
     pub id: String,
     pub name: String,
-    pub arguments: Map<String, Value>,
+    pub arguments: Value,
     pub capabilities: Vec<ToolCapability>,
 }
 
@@ -128,6 +137,7 @@ pub struct HookCompactionInput {
     pub injected_context: Vec<String>,
     #[serde(deserialize_with = "Option::deserialize")]
     pub replacement_prompt: Option<String>,
+    pub suppress_auto_continue: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, JsonSchema, TS)]
@@ -159,7 +169,7 @@ pub enum HookTransform {
     },
     PreTool {
         name: String,
-        arguments: Map<String, Value>,
+        arguments: Value,
     },
     PostTool {
         output: ToolOutput,
@@ -169,6 +179,7 @@ pub enum HookTransform {
         injected_context: Vec<String>,
         #[serde(deserialize_with = "Option::deserialize")]
         replacement_prompt: Option<String>,
+        suppress_auto_continue: bool,
     },
 }
 
@@ -235,10 +246,12 @@ impl HookInput {
                 HookTransform::PreCompact {
                     injected_context,
                     replacement_prompt,
+                    suppress_auto_continue,
                 },
             ) => {
                 input.injected_context = injected_context;
                 input.replacement_prompt = replacement_prompt;
+                input.suppress_auto_continue = suppress_auto_continue;
             }
             _ => return Err("hook transform does not match its phase"),
         }

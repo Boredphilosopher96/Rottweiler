@@ -32,9 +32,9 @@ pub use discovery::{
     UninventoriedProjectRoot,
 };
 pub use hook::{
-    HookDirective, HookDispatchResult, HookDispatchStatus, HookDispatcher, HookEffect, HookError,
-    HookEvent, HookFailure, HookFailurePolicy, HookHandler, HookInvocation, HookRegistration,
-    HookRegistrationError,
+    HookClass, HookDirective, HookDispatchResult, HookDispatchStatus, HookDispatcher, HookEffect,
+    HookError, HookEvent, HookFailure, HookFailurePolicy, HookHandler, HookInput, HookInvocation,
+    HookPermissionDecision, HookRegistration, HookRegistrationError, HookTransform,
 };
 pub use mode::{
     ModeDefinition, ModeRegistry, ModeRegistryError, ModeSource, compose_mode_registry,

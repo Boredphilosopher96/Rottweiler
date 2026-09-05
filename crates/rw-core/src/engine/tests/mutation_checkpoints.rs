@@ -106,9 +106,13 @@ async fn mutating_post_hook_widens_scope_and_failed_result_finishes_failed_check
     let mut hooks = builtin_hook_dispatcher().expect("hooks");
     hooks
         .register(
-            HookRegistration::new("fixture.mutating-post", HookEvent::PostTool)
-                .with_effect(HookEffect::WorkspaceMutating)
-                .with_applicable_tools(["read_fixture"]),
+            HookRegistration::new(
+                "fixture.mutating-post",
+                HookEvent::PostTool,
+                rw_types::hook_contract::HookClass::Transform,
+            )
+            .with_effect(HookEffect::WorkspaceMutating)
+            .with_applicable_tools(["read_fixture"]),
             MarkPostToolFailed,
         )
         .expect("post hook");
@@ -158,9 +162,13 @@ async fn mutating_formatter_post_hook_sibling_change_is_byte_restored_by_rewind(
     let mut hooks = builtin_hook_dispatcher().expect("hooks");
     hooks
         .register(
-            HookRegistration::new("fixture.formatter", HookEvent::PostTool)
-                .with_effect(HookEffect::WorkspaceMutating)
-                .with_applicable_tools(["read_fixture"]),
+            HookRegistration::new(
+                "fixture.formatter",
+                HookEvent::PostTool,
+                rw_types::hook_contract::HookClass::Transform,
+            )
+            .with_effect(HookEffect::WorkspaceMutating)
+            .with_applicable_tools(["read_fixture"]),
             SiblingFormatterPostHook {
                 sibling: sibling.clone(),
             },
@@ -220,9 +228,13 @@ async fn workspace_mutating_pre_hook_runs_only_after_opaque_checkpoint_begin() {
     let mut hooks = builtin_hook_dispatcher().expect("hooks");
     hooks
         .register(
-            HookRegistration::new("fixture.mutating-pre", HookEvent::PreTool)
-                .with_effect(HookEffect::WorkspaceMutating)
-                .with_applicable_tools(["read_fixture"]),
+            HookRegistration::new(
+                "fixture.mutating-pre",
+                HookEvent::PreTool,
+                rw_types::hook_contract::HookClass::Policy,
+            )
+            .with_effect(HookEffect::WorkspaceMutating)
+            .with_applicable_tools(["read_fixture"]),
             MutatingPreHook {
                 checkpoints: Arc::clone(&ordering),
                 sibling: sibling.clone(),

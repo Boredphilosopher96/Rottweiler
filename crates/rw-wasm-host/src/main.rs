@@ -3,8 +3,8 @@
 use std::{io::Write as _, process::ExitCode};
 
 use rw_ext::{
-    HookDirective, MAX_WASM_HOST_HEADER_BYTES, MAX_WASM_HOST_RESPONSE_BYTES, WasmHookHost,
-    WasmHostRequest, WasmHostResponse,
+    MAX_WASM_HOST_HEADER_BYTES, MAX_WASM_HOST_RESPONSE_BYTES, WasmHookHost, WasmHostRequest,
+    WasmHostResponse,
 };
 use tokio::io::AsyncReadExt;
 
@@ -51,7 +51,7 @@ async fn run() -> Result<(), String> {
                 match WasmHookHost::from_bytes(*manifest, &component, limits) {
                     Ok(compiled) => {
                         host = Some(compiled);
-                        WasmHostResponse::Valid
+                        WasmHostResponse::Valid {}
                     }
                     Err(error) => WasmHostResponse::Error {
                         message: error.to_string(),
@@ -66,9 +66,7 @@ async fn run() -> Result<(), String> {
                     return Err("WASM worker has no compiled generation".to_owned());
                 };
                 match compiled.invoke_json(&event, &input).await {
-                    Ok(HookDirective::Continue) => WasmHostResponse::Continue,
-                    Ok(HookDirective::Replace(payload)) => WasmHostResponse::Replace { payload },
-                    Ok(HookDirective::Block { message }) => WasmHostResponse::Block { message },
+                    Ok(directive) => WasmHostResponse::Directive { directive },
                     Err(error) => WasmHostResponse::Error {
                         message: error.to_string(),
                     },

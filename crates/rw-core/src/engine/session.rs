@@ -1,5 +1,6 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
+use rw_types::hook_contract::{HookInput, HookSessionInput};
 
 /// Dependencies and guardrails for one headless session actor.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1310,16 +1311,22 @@ async fn dispatch_lifecycle_hook(
     config: &SessionActorConfig,
     events: &broadcast::Sender<RoutedEvent>,
 ) -> bool {
-    let result = config
-        .hooks
-        .dispatch(
-            event,
-            json!({
-                "session_id": config.session_id.0,
-                "workspace": config.workspace_root,
-            }),
-        )
-        .await;
+    let input = HookSessionInput {
+        session_id: config.session_id.0.clone(),
+        workspace: config.workspace_root.to_string_lossy().into_owned(),
+    };
+    let input = match event {
+        HookEvent::SessionStart => HookInput::SessionStart(input),
+        HookEvent::SessionEnd => HookInput::SessionEnd(input),
+        _ => unreachable!("lifecycle dispatcher accepts session events"),
+    };
+    let result = match config.hooks.dispatch(input).await {
+        Ok(result) => result,
+        Err(error) => {
+            state.unsettled = Some(error.to_string());
+            return false;
+        }
+    };
     for failure in result.failures() {
         if emit(
             state,

@@ -349,47 +349,17 @@ pub struct PluginCommandCapability {
     pub allowed_tools: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PluginHook {
-    SessionStart,
-    SessionEnd,
-    UserPromptSubmit,
-    PreTool,
-    PostTool,
-    PreCompact,
-    TurnEnd,
-    PermissionCheck,
-}
-
-impl PluginHook {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::SessionStart => "session_start",
-            Self::SessionEnd => "session_end",
-            Self::UserPromptSubmit => "user_prompt_submit",
-            Self::PreTool => "pre_tool",
-            Self::PostTool => "post_tool",
-            Self::PreCompact => "pre_compact",
-            Self::TurnEnd => "turn_end",
-            Self::PermissionCheck => "permission_check",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum PluginHookFailurePolicy {
-    FailOpen,
-    FailClosed,
-}
+pub use rw_types::hook_contract::{
+    HookClass, HookDirective, HookEvent, HookFailurePolicy, HookInput, HookPermissionDecision,
+    HookTransform,
+};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginHookCapability {
-    pub name: PluginHook,
-    pub failure_policy: PluginHookFailurePolicy,
+    pub class: HookClass,
+    pub name: HookEvent,
+    pub failure_policy: HookFailurePolicy,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -520,11 +490,35 @@ impl PluginManifest {
     }
 }
 
+impl PluginHookCapability {
+    fn validate(self) -> Result<(), ManifestError> {
+        if (self.class == HookClass::Transform && !self.name.accepts_transform())
+            || (self.class == HookClass::Policy
+                && self.failure_policy != HookFailurePolicy::FailClosed)
+        {
+            return Err(ManifestError::InvalidField {
+                field: "hooks",
+                reason: "invalid hook class, phase, or failure policy",
+            });
+        }
+        Ok(())
+    }
+}
+
 impl PluginCapabilities {
+    fn validate_hooks(&self) -> Result<(), ManifestError> {
+        validate_count("hooks", self.hooks.len())?;
+        validate_unique("hook", self.hooks.iter().map(|hook| hook.name.as_str()))?;
+        self.hooks
+            .iter()
+            .copied()
+            .try_for_each(PluginHookCapability::validate)
+    }
+
     fn validate(&self) -> Result<(), ManifestError> {
         validate_count("tools", self.tools.len())?;
         validate_count("commands", self.commands.len())?;
-        validate_count("hooks", self.hooks.len())?;
+        self.validate_hooks()?;
         validate_count("providers", self.providers.len())?;
         validate_count("event_subscriptions", self.event_subscriptions.len())?;
         validate_count("push", self.push.len())?;
@@ -588,7 +582,6 @@ impl PluginCapabilities {
                 NameKind::Tool,
             )?;
         }
-        validate_unique("hook", self.hooks.iter().map(|hook| hook.name.as_str()))?;
 
         let mut prefixes = BTreeSet::new();
         for provider in &self.providers {
@@ -875,13 +868,6 @@ pub struct ToolProgressParams {
 pub struct CommandExecuteParams {
     pub name: String,
     pub arguments: String,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct HookInvokeParams {
-    pub hook: PluginHook,
-    pub payload: Value,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

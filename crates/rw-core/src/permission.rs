@@ -1,3 +1,4 @@
+use rw_types::hook_contract::HookPermissionDecision;
 use std::{
     collections::BTreeSet,
     fmt,
@@ -510,9 +511,9 @@ impl PermissionGate {
         &self,
         request: PermissionRequest,
         approver: &dyn PermissionApprover,
-        ask_override: Option<PermissionOutcome>,
+        hook_decision: Option<HookPermissionDecision>,
     ) -> PermissionOutcome {
-        self.authorize_in_mode(request, approver, ask_override, SessionMode::Execute)
+        self.authorize_in_mode(request, approver, hook_decision, SessionMode::Execute)
             .await
     }
 
@@ -541,10 +542,10 @@ impl PermissionGate {
         &self,
         request: PermissionRequest,
         approver: &dyn PermissionApprover,
-        ask_override: Option<PermissionOutcome>,
+        hook_decision: Option<HookPermissionDecision>,
         mode: SessionMode,
     ) -> PermissionOutcome {
-        self.authorize_in_mode_with_semantics(request, approver, ask_override, mode, None)
+        self.authorize_in_mode_with_semantics(request, approver, hook_decision, mode, None)
             .await
     }
 
@@ -556,13 +557,13 @@ impl PermissionGate {
         request: PermissionRequest,
         semantics: &ToolInvocationSemantics,
         approver: &dyn PermissionApprover,
-        ask_override: Option<PermissionOutcome>,
+        hook_decision: Option<HookPermissionDecision>,
         mode: SessionMode,
     ) -> PermissionOutcome {
         self.authorize_in_mode_with_semantics(
             request,
             approver,
-            ask_override,
+            hook_decision,
             mode,
             Some(semantics),
         )
@@ -573,7 +574,7 @@ impl PermissionGate {
         &self,
         request: PermissionRequest,
         approver: &dyn PermissionApprover,
-        ask_override: Option<PermissionOutcome>,
+        hook_decision: Option<HookPermissionDecision>,
         mode: SessionMode,
         semantics: Option<&ToolInvocationSemantics>,
     ) -> PermissionOutcome {
@@ -604,15 +605,23 @@ impl PermissionGate {
         {
             return PermissionOutcome::Denied;
         }
-        if ask_override == Some(PermissionOutcome::Denied) {
+        if hook_decision == Some(HookPermissionDecision::Deny) {
             return PermissionOutcome::Denied;
         }
-        match self.decision_for(&request, semantics, behavior) {
+        let decision = self.decision_for(&request, semantics, behavior);
+        let decision = if decision == PermissionDecision::Allow
+            && hook_decision == Some(HookPermissionDecision::Ask)
+        {
+            PermissionDecision::Ask
+        } else {
+            decision
+        };
+        match decision {
             PermissionDecision::Allow => PermissionOutcome::Allowed,
             PermissionDecision::Deny => PermissionOutcome::Denied,
             PermissionDecision::Ask => {
-                if let Some(outcome) = ask_override {
-                    return outcome;
+                if hook_decision == Some(HookPermissionDecision::Allow) {
+                    return PermissionOutcome::Allowed;
                 }
                 let rememberable = rememberable_request(&request, behavior);
                 let (key, generation, remembered) = {
@@ -630,7 +639,7 @@ impl PermissionGate {
                                 .is_some_and(|store| store.contains(&key).unwrap_or(false)));
                     (key, memory.generation, remembered)
                 };
-                if remembered {
+                if remembered && hook_decision != Some(HookPermissionDecision::Ask) {
                     return PermissionOutcome::Allowed;
                 }
                 match approver.decide(request).await {

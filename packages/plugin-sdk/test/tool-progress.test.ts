@@ -44,18 +44,19 @@ test("typed progress renews idle only and leaves control responsive until total 
   const server = new PluginServer(definePlugin({
     manifest: { name: "progress", version: "1", protocol: 3, capabilities: {
       tools: [{ name: "work", description: "work", schema: {}, caps: [] }],
-      hooks: [{ name: "pre_tool", failure_policy: "fail-closed" }],
+      hooks: [{ name: "pre_tool", class: "policy", failure_policy: "fail-closed" }],
     } },
     handlers: {
-      tools: { work: (_params, context) => new Promise<never>(() => {
+      tools: { work: (_params, context) => new Promise<{ content: string; data: null }>(resolve => {
         context.progress({ message: "started" })
         reporter = setInterval(() => context.progress({ message: "working" }), 100)
         context.signal.addEventListener("abort", () => {
           observedAbort = true
           clearInterval(reporter)
+          resolve({ content: "settled", data: null })
         }, { once: true })
       }) },
-      hooks: { pre_tool: () => ({ decision: "allow" }) },
+      hooks: { pre_tool: () => ({ decision: "continue" }) },
     },
   }), { input: (async function* () {})(), output: { write(bytes) {
     frames.push(JSON.parse(new TextDecoder().decode(bytes)))
@@ -65,8 +66,8 @@ test("typed progress renews idle only and leaves control responsive until total 
   const started = performance.now()
   const tool = send(2, "tool/call", { name: "work", input: {}, lifetime })
   await Bun.sleep(100)
-  await send(3, "hook/invoke", { hook: "pre_tool", payload: {} })
-  expect(frames.find(frame => frame.id === 3)).toMatchObject({ result: { decision: "allow" } })
+  await send(3, "hook/invoke", { hook: "pre_tool", payload: { id: "call", name: "bash", arguments: {} } })
+  expect(frames.find(frame => frame.id === 3)).toMatchObject({ result: { decision: "continue" } })
   expect(frames.some(frame => frame.id === 2)).toBe(false)
   await tool
   const elapsed = performance.now() - started

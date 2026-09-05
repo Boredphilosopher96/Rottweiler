@@ -117,7 +117,7 @@ async fn secrets_never_reach_durable_tool_events_or_hook_payloads() {
     ] {
         hooks
             .register(
-                HookRegistration::new(id, event),
+                HookRegistration::new(id, event, rw_types::hook_contract::HookClass::Policy),
                 PayloadCaptureHook {
                     label,
                     payloads: payloads.clone(),
@@ -213,8 +213,12 @@ async fn hook_failure_and_block_messages_are_redacted_before_events() {
     let mut hooks = builtin_hook_dispatcher().expect("hooks");
     hooks
         .register(
-            HookRegistration::new("fixture.secret-failure", HookEvent::PermissionCheck)
-                .with_failure_policy(HookFailurePolicy::FailOpen),
+            HookRegistration::new(
+                "fixture.secret-failure",
+                HookEvent::PermissionCheck,
+                rw_types::hook_contract::HookClass::Observer,
+            )
+            .with_failure_policy(HookFailurePolicy::FailOpen),
             FixedHook {
                 label: "failure",
                 calls: calls.clone(),
@@ -224,7 +228,11 @@ async fn hook_failure_and_block_messages_are_redacted_before_events() {
         .expect("failure hook");
     hooks
         .register(
-            HookRegistration::new("fixture.secret-block", HookEvent::PreTool),
+            HookRegistration::new(
+                "fixture.secret-block",
+                HookEvent::PreTool,
+                rw_types::hook_contract::HookClass::Policy,
+            ),
             FixedHook {
                 label: "block",
                 calls,
@@ -288,7 +296,11 @@ async fn user_secrets_are_redacted_before_hooks_events_and_provider_context() {
     let mut hooks = builtin_hook_dispatcher().expect("hooks");
     hooks
         .register(
-            HookRegistration::new("fixture.capture-user", HookEvent::UserPromptSubmit),
+            HookRegistration::new(
+                "fixture.capture-user",
+                HookEvent::UserPromptSubmit,
+                rw_types::hook_contract::HookClass::Observer,
+            ),
             PayloadCaptureHook {
                 label: "user_prompt_submit",
                 payloads: payloads.clone(),

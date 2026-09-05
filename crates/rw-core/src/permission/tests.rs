@@ -130,7 +130,7 @@ async fn authorize_with_behavior_in_mode(
     request: PermissionRequest,
     behavior: ToolBehavior,
     approver: &dyn PermissionApprover,
-    ask_override: Option<PermissionOutcome>,
+    ask_override: Option<HookPermissionDecision>,
     mode: SessionMode,
 ) -> PermissionOutcome {
     gate.authorize_registered_in_mode(

@@ -52,7 +52,11 @@ async fn pre_tool_rewrite_is_the_exact_invocation_presented_for_approval() {
     let mut hooks = builtin_hook_dispatcher().expect("hooks");
     hooks
         .register(
-            HookRegistration::new("fixture.rewrite", HookEvent::PreTool),
+            HookRegistration::new(
+                "fixture.rewrite",
+                HookEvent::PreTool,
+                rw_types::hook_contract::HookClass::Transform,
+            ),
             RewriteArgumentsHook(json!({"path": "rewritten"})),
         )
         .expect("rewrite hook");
@@ -126,9 +130,13 @@ async fn hook_order_and_fail_open_closed_are_enforced_by_the_turn_loop() {
     let mut hooks = builtin_hook_dispatcher().expect("hooks");
     hooks
         .register(
-            HookRegistration::new("fixture.open", HookEvent::PreTool)
-                .with_priority(-10)
-                .with_failure_policy(HookFailurePolicy::FailOpen),
+            HookRegistration::new(
+                "fixture.open",
+                HookEvent::PreTool,
+                rw_types::hook_contract::HookClass::Transform,
+            )
+            .with_priority(-10)
+            .with_failure_policy(HookFailurePolicy::FailOpen),
             FixedHook {
                 label: "open",
                 calls: calls.clone(),
@@ -138,19 +146,27 @@ async fn hook_order_and_fail_open_closed_are_enforced_by_the_turn_loop() {
         .expect("open hook");
     hooks
         .register(
-            HookRegistration::new("fixture.middle", HookEvent::PreTool),
+            HookRegistration::new(
+                "fixture.middle",
+                HookEvent::PreTool,
+                rw_types::hook_contract::HookClass::Transform,
+            ),
             FixedHook {
                 label: "middle",
                 calls: calls.clone(),
-                result: Ok(HookDirective::Continue),
+                result: Ok(HookDirective::Continue {}),
             },
         )
         .expect("middle hook");
     hooks
         .register(
-            HookRegistration::new("fixture.closed", HookEvent::PreTool)
-                .with_priority(10)
-                .with_failure_policy(HookFailurePolicy::FailClosed),
+            HookRegistration::new(
+                "fixture.closed",
+                HookEvent::PreTool,
+                rw_types::hook_contract::HookClass::Policy,
+            )
+            .with_priority(10)
+            .with_failure_policy(HookFailurePolicy::FailClosed),
             FixedHook {
                 label: "closed",
                 calls: calls.clone(),
@@ -202,11 +218,12 @@ async fn session_lifecycle_hooks_run_on_start_and_actor_shutdown() {
     ] {
         hooks
             .register(
-                HookRegistration::new(id, event).with_failure_policy(HookFailurePolicy::FailClosed),
+                HookRegistration::new(id, event, rw_types::hook_contract::HookClass::Policy)
+                    .with_failure_policy(HookFailurePolicy::FailClosed),
                 FixedHook {
                     label,
                     calls: calls.clone(),
-                    result: Ok(HookDirective::Continue),
+                    result: Ok(HookDirective::Continue {}),
                 },
             )
             .expect("lifecycle hook");
@@ -244,8 +261,12 @@ async fn interrupt_cancels_a_hung_session_hook_without_waiting_for_its_deadline(
     let mut hooks = builtin_hook_dispatcher().expect("hooks");
     hooks
         .register(
-            HookRegistration::new("fixture.never", HookEvent::UserPromptSubmit)
-                .with_failure_policy(HookFailurePolicy::FailClosed),
+            HookRegistration::new(
+                "fixture.never",
+                HookEvent::UserPromptSubmit,
+                rw_types::hook_contract::HookClass::Policy,
+            )
+            .with_failure_policy(HookFailurePolicy::FailClosed),
             NeverHook,
         )
         .expect("hung hook");

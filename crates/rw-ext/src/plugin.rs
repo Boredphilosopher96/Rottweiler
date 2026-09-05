@@ -15,13 +15,13 @@ use std::sync::{
 
 use async_trait::async_trait;
 use futures_util::Stream;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
 use thiserror::Error;
 
-use crate::{HookDirective, HookError, HookEvent, HookHandler, HookInvocation};
+use crate::{HookDirective, HookError, HookHandler, HookInvocation};
 
 #[cfg(test)]
 use rw_plugin_protocol::{
@@ -31,50 +31,10 @@ use rw_plugin_protocol::{
     METHOD_TOOL_CALL, METHOD_UI_NOTIFY, PROTOCOL_VERSION, PluginProviderCapability,
 };
 use rw_plugin_protocol::{
-    HookInvokeParams, MAX_CAPABILITIES_PER_KIND, MAX_HOOK_PAYLOAD_BYTES, MAX_NAME_BYTES,
-    MAX_RPC_MESSAGE_BYTES, METHOD_HOOK_INVOKE, ManifestError, PluginCapabilities, PluginHook,
-    PluginHookCapability, PluginHookFailurePolicy, PluginManifest, PluginPush,
-    PluginToolCapability, PluginToolEffect,
+    HookEvent, MAX_CAPABILITIES_PER_KIND, MAX_NAME_BYTES, MAX_RPC_MESSAGE_BYTES,
+    METHOD_HOOK_INVOKE, ManifestError, PluginCapabilities, PluginHookCapability, PluginManifest,
+    PluginPush, PluginToolCapability, PluginToolEffect,
 };
-
-impl From<PluginHookFailurePolicy> for crate::HookFailurePolicy {
-    fn from(policy: PluginHookFailurePolicy) -> Self {
-        match policy {
-            PluginHookFailurePolicy::FailOpen => Self::FailOpen,
-            PluginHookFailurePolicy::FailClosed => Self::FailClosed,
-        }
-    }
-}
-
-impl From<PluginHook> for HookEvent {
-    fn from(hook: PluginHook) -> Self {
-        match hook {
-            PluginHook::SessionStart => Self::SessionStart,
-            PluginHook::SessionEnd => Self::SessionEnd,
-            PluginHook::UserPromptSubmit => Self::UserPromptSubmit,
-            PluginHook::PreTool => Self::PreTool,
-            PluginHook::PostTool => Self::PostTool,
-            PluginHook::PreCompact => Self::PreCompact,
-            PluginHook::TurnEnd => Self::TurnEnd,
-            PluginHook::PermissionCheck => Self::PermissionCheck,
-        }
-    }
-}
-
-impl From<HookEvent> for PluginHook {
-    fn from(event: HookEvent) -> Self {
-        match event {
-            HookEvent::SessionStart => Self::SessionStart,
-            HookEvent::SessionEnd => Self::SessionEnd,
-            HookEvent::UserPromptSubmit => Self::UserPromptSubmit,
-            HookEvent::PreTool => Self::PreTool,
-            HookEvent::PostTool => Self::PostTool,
-            HookEvent::PreCompact => Self::PreCompact,
-            HookEvent::TurnEnd => Self::TurnEnd,
-            HookEvent::PermissionCheck => Self::PermissionCheck,
-        }
-    }
-}
 
 /// Converts a protocol hook declaration into rw-ext's runtime registration.
 #[must_use]
@@ -82,8 +42,8 @@ pub fn plugin_hook_registration(
     declaration: PluginHookCapability,
     id: impl Into<String>,
 ) -> crate::HookRegistration {
-    crate::HookRegistration::new(id, declaration.name.into())
-        .with_failure_policy(declaration.failure_policy.into())
+    crate::HookRegistration::new(id, declaration.name, declaration.class)
+        .with_failure_policy(declaration.failure_policy)
 }
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -800,7 +760,7 @@ impl CapabilityEnforcer {
     /// # Errors
     ///
     /// Returns a violation when the hook was not declared.
-    pub fn check_hook(&self, hook: PluginHook) -> Result<(), CapabilityEnforcementError> {
+    pub fn check_hook(&self, hook: HookEvent) -> Result<(), CapabilityEnforcementError> {
         self.check(
             CapabilityKind::Hook,
             hook.as_str(),
@@ -1042,21 +1002,6 @@ impl RpcHookHandler {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(tag = "decision", rename_all = "snake_case", deny_unknown_fields)]
-pub enum RpcHookResponse {
-    Allow {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        payload: Option<Value>,
-    },
-    Deny {
-        message: String,
-    },
-    Replace {
-        payload: Value,
-    },
-}
-
 #[async_trait]
 impl HookHandler for RpcHookHandler {
     async fn settle_effects(&self) -> std::result::Result<(), crate::HookError> {
@@ -1066,7 +1011,7 @@ impl HookHandler for RpcHookHandler {
             .map_err(|error| HookError::new("effects_unsettled", error.to_string()))
     }
     async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError> {
-        let hook = PluginHook::from(invocation.event());
+        let hook = invocation.event();
         let connection = self
             .endpoint
             .connect(invocation.cancellation())
@@ -1080,11 +1025,7 @@ impl HookHandler for RpcHookHandler {
             .client()
             .request_cancellable(
                 METHOD_HOOK_INVOKE,
-                serde_json::to_value(HookInvokeParams {
-                    hook,
-                    payload: invocation.payload().clone(),
-                })
-                .map_err(|error| {
+                serde_json::to_value(invocation.input()).map_err(|error| {
                     HookError::new("invalid_request", format!("hook request failed: {error}"))
                 })?,
                 invocation.cancellation(),
@@ -1103,44 +1044,8 @@ impl HookHandler for RpcHookHandler {
                     HookError::new(error.code, error.message)
                 }
             })?;
-        let mut result = result;
-        if let Value::Object(object) = &mut result
-            && !object.contains_key("decision")
-            && let Some(action) = object.remove("action")
-        {
-            object.insert("decision".to_owned(), action);
-        }
-        let response: RpcHookResponse = serde_json::from_value(result)
-            .map_err(|error| HookError::new("invalid_response", error.to_string()))?;
-        match response {
-            RpcHookResponse::Allow { payload: None } => Ok(HookDirective::Continue),
-            RpcHookResponse::Allow {
-                payload: Some(payload),
-            }
-            | RpcHookResponse::Replace { payload }
-                if serde_json::to_vec(&payload)
-                    .is_ok_and(|bytes| bytes.len() <= MAX_HOOK_PAYLOAD_BYTES) =>
-            {
-                Ok(HookDirective::Replace(payload))
-            }
-            RpcHookResponse::Allow { payload: Some(_) } | RpcHookResponse::Replace { .. } => {
-                Err(HookError::new(
-                    "invalid_response",
-                    "hook replacement payload exceeds the limit",
-                ))
-            }
-            RpcHookResponse::Deny { message }
-                if !message.is_empty()
-                    && message.len() <= MAX_RPC_MESSAGE_BYTES
-                    && !message.chars().any(char::is_control) =>
-            {
-                Ok(HookDirective::Block { message })
-            }
-            RpcHookResponse::Deny { .. } => Err(HookError::new(
-                "invalid_response",
-                "hook denial message is invalid",
-            )),
-        }
+        serde_json::from_value::<HookDirective>(result)
+            .map_err(|error| HookError::new("invalid_response", error.to_string()))
     }
 }
 
@@ -1170,8 +1075,9 @@ mod tests {
                     caps: vec![PluginToolEffect::ReadsFilesystem],
                 }],
                 hooks: vec![PluginHookCapability {
-                    name: PluginHook::PreTool,
-                    failure_policy: PluginHookFailurePolicy::FailClosed,
+                    name: HookEvent::PreTool,
+                    class: rw_types::hook_contract::HookClass::Transform,
+                    failure_policy: rw_plugin_protocol::HookFailurePolicy::FailClosed,
                 }],
                 providers: vec![PluginProviderCapability {
                     alias_prefix: "custom/".to_owned(),
@@ -1242,7 +1148,7 @@ mod tests {
                     "argument_hint": "<name>",
                     "allowed_tools": ["hello"]
                 }],
-                "hooks": [{"name":"pre_tool","failure_policy":"fail-closed"}],
+                "hooks": [{"name":"pre_tool", "class": "policy","failure_policy":"fail-closed"}],
                 "providers": [{"alias-prefix":"fixture/"}],
                 "event_subscriptions": ["TurnFinished"]
             }
@@ -1252,7 +1158,7 @@ mod tests {
         assert_eq!(manifest.capabilities.tools[0].caps.len(), 2);
         assert_eq!(
             manifest.capabilities.hooks[0].failure_policy,
-            PluginHookFailurePolicy::FailClosed
+            rw_plugin_protocol::HookFailurePolicy::FailClosed
         );
     }
 
@@ -1466,7 +1372,7 @@ mod tests {
         async fn request(&self, method: &str, params: Value) -> Result<Value, PluginRpcError> {
             assert_eq!(method, METHOD_HOOK_INVOKE);
             assert_eq!(params["hook"], "pre_tool");
-            Ok(json!({"decision":"deny","message":"blocked by plugin"}))
+            Ok(json!({"decision":"block","message":"blocked by plugin"}))
         }
     }
 
@@ -1480,13 +1386,24 @@ mod tests {
         let mut dispatcher = HookDispatcher::new();
         dispatcher
             .register(
-                HookRegistration::new("plugin:pre-tool", HookEvent::PreTool),
+                HookRegistration::new(
+                    "plugin:pre-tool",
+                    HookEvent::PreTool,
+                    rw_types::hook_contract::HookClass::Policy,
+                ),
                 handler,
             )
             .expect("hook registration");
         let result = dispatcher
-            .dispatch(HookEvent::PreTool, json!({"name":"write"}))
-            .await;
+            .dispatch(crate::HookInput::PreTool(
+                rw_types::hook_contract::HookToolInput {
+                    id: "call".to_owned(),
+                    name: "write".to_owned(),
+                    arguments: json!({}),
+                },
+            ))
+            .await
+            .expect("settled hook");
         assert_eq!(
             result.status(),
             &HookDispatchStatus::Blocked {

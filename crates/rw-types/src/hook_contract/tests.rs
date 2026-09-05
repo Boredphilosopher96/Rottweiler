@@ -9,7 +9,7 @@ use crate::ToolOutput;
 fn hook_inputs_require_the_matching_complete_payload() {
     for input in [
         json!({"hook":"pre_tool","payload":{"id":"call","name":"read"}}),
-        json!({"hook":"pre_tool","payload":{"id":"call","name":"read","arguments":[]}}),
+        json!({"hook":"pre_tool","payload":{"id":"call","name":"read","arguments":[],"extra":true}}),
         json!({"hook":"user_prompt_submit","payload":{"content":"hello","role":"system"}}),
         json!({"hook":"session_start","payload":{"content":"hello"}}),
         json!({"hook":"pre_compact","payload":{"reason":"manual","conversation_turns":2,"injected_context":[]}}),
@@ -42,7 +42,7 @@ fn transformations_preserve_identity_and_reject_cross_phase_changes() {
     let mut input = HookInput::PreTool(HookToolInput {
         id: "call".to_owned(),
         name: "read".to_owned(),
-        arguments: serde_json::Map::new(),
+        arguments: json!({}),
     });
     let before = input.clone();
     assert!(
@@ -57,7 +57,7 @@ fn transformations_preserve_identity_and_reject_cross_phase_changes() {
         input
             .apply(HookTransform::PreTool {
                 name: "read;write".to_owned(),
-                arguments: serde_json::Map::new()
+                arguments: json!({})
             })
             .is_err()
     );
@@ -66,7 +66,7 @@ fn transformations_preserve_identity_and_reject_cross_phase_changes() {
         input
             .apply(HookTransform::PreTool {
                 name: "search".to_owned(),
-                arguments: serde_json::Map::new()
+                arguments: json!({})
             })
             .is_ok()
     );
@@ -82,7 +82,7 @@ fn post_tool_transforms_cannot_erase_execution_failure() {
     let mut input = HookInput::PostTool(HookToolResultInput {
         id: "call".to_owned(),
         name: "write".to_owned(),
-        arguments: serde_json::Map::new(),
+        arguments: json!({}),
         output: ToolOutput::Text {
             text: "failed".to_owned(),
         },

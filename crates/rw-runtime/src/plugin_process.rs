@@ -687,7 +687,7 @@ mod tests {
                     "name":"conformance-policy-tool", "version":"1.0.0", "protocol":3,
                     "capabilities": {
                         "tools":[{"name":"fixture_echo","description":"Echo bounded fixture input","schema":{"type":"object","required":["text"],"properties":{"text":{"type":"string"}}},"caps":[]}],
-                        "hooks":[{"name":"pre_tool","failure_policy":"fail-closed"}]
+                        "hooks":[{"name":"pre_tool", "class": "policy","failure_policy":"fail-closed"}]
                     }
                 }),
             ),

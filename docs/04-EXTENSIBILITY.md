@@ -27,7 +27,7 @@ Discovery order (ADR-014), first match by name wins: `.agents/` (project) → `.
 | Agents | `agents/*.md` | frontmatter: `name`, `description`, `model`, `tools`, `permission-mode`, `max-turns`; body = system prompt |
 | Modes | `modes/*.toml` | tool filter + permission overlay + prompt fragment (built-in discuss/plan/execute live in this format, embedded) |
 | Workflows | `workflows/*.toml` | DAG of steps: `agent`/`command` refs, `parallel = true`, `on-fail`, artifact passing between steps |
-| Shell hooks | `hooks.toml` | one-liner hooks without writing a plugin: `[[hook]] event = "post_tool" matcher = "edit(*.rs)" run = "cargo fmt --check {file}"` — the command's exit code/stdout map onto the hook response (nonzero on a `pre_*` hook = deny with stderr as message). Registered on the same internal dispatcher; trust-gated at project level; this is what Claude Code settings-hooks import onto |
+| Shell hooks | `hooks.toml` | one-liner hooks without writing a plugin: `[[hook]] event = "post_tool" class = "transform" failure_policy = "fail-closed" matcher = "edit(*.rs)" run = "cargo fmt --check {file}"` — the command's exit code/stdout map onto the hook response (nonzero for a policy hook blocks with its diagnostic). Registered on the same internal dispatcher; trust-gated at project level; this is what Claude Code settings-hooks import onto |
 | Toolchain | `toolchain.toml` (or `[toolchain]` in config) | per-language/glob `formatter` and `linters`, plus one workspace `test` command; after edit/write, the matching formatter and linters run on the touched file. After every otherwise-successful turn, the test command runs once and its failure is appended to durable context. Sugar over the public hook API (dogfooding rule) |
 | Themes/keybindings | `themes/*.toml`, `keybindings.toml` | TUI only |
 
@@ -72,7 +72,7 @@ Plugin returns a manifest on `initialize`:
     "tools": [ { "name": "...", "description": "...", "schema": {...}, "caps": ["reads-fs"] } ],
     "commands": [ ... ],
     "hooks": [
-      { "name": "pre_tool", "failure_policy": "fail-closed" },
+      { "name": "pre_tool", "class": "policy", "failure_policy": "fail-closed" },
       { "name": "post_tool", "failure_policy": "fail-open" },
       { "name": "session_start", "failure_policy": "fail-open" }
     ],
@@ -109,19 +109,41 @@ SDK completion closes pending progress and awaits its current physical write
 before sending the final outcome. Tool timeout, cancellation and caller drop
 retain the same native-process settlement barrier as other effectful requests.
 
-Hooks are request/response (can modify/block); events are fire-and-forget. Hook timeout default 5s, configurable; on timeout the engine proceeds per hook's declared `fail-open`/`fail-closed` bit. Before applying that policy, the host waits for any cancelled hook effects to settle. An ordinary native-plugin request that times out, is cancelled after admission, or loses its caller future closes the shared plugin process: new requests and pushes are rejected, admitted host commands are drained, host HTTP futures are cancelled, and the supervised child is reaped with a process-group exit barrier. Tools and hooks retain their checkpoint/continuation barrier outside the cancellable invocation future. An unproven cleanup stays pending with a diagnostic; sending a kill signal is not settlement. Other in-flight calls to the same plugin fail with that process. The process supervisor must provide a containment boundary for descendants; the current macOS process-group proof does not cover a child that deliberately escapes into another session.
+Hooks receive a tagged `HookInput` and return a `HookDirective`. `rw-types` owns
+these types; the plugin contract generator produces TypeScript declarations and
+JSON schemas, and standalone validators check SDK boundaries without runtime AJV.
+Every hook declares its class: `transform`, `policy`, or `observer`. The dispatcher
+orders classes in that order, then priority, then ID. Policies observe transformed
+input. Observers can return only `continue` and cannot declare workspace writes.
+Policy handlers must fail closed.
 
-**One dispatcher, two adapters:** the engine-internal **hook dispatcher** owns registration, ordering, and fail-open/closed semantics. Built-ins such as `[toolchain]` formatters/linters and permission supplements consume it directly; the RPC bridge exposes that same dispatcher to out-of-process plugins. Both paths use the identical interface (dogfooding rule), and the conformance suite rejects a second hook mechanism.
+A phase admits at most 128 hooks. It has one aggregate execution deadline equal
+to its largest declared invocation timeout, with a five-second default and a
+ten-minute ceiling. Handler count cannot multiply that budget. Native RPC hooks
+use five seconds. A separate two-second allowance bounds settlement. Timeout,
+cancellation, panic, and caller drop retain the invocation's admission permit
+through effect settlement. A failed or unproven settlement closes admission and
+fails the operation regardless of its declared failure policy. Killing a process
+without proving its effects settled cannot complete a hook.
 
-| Hook | Can do |
+Transformations expose only mutable fields. Tool call identity, session identity,
+turn identity, and permission capabilities are immutable. A post-tool transform
+cannot clear a tool failure. Permission policies fold `allow < ask < deny`; denial
+stops dispatch. An `ask` decision requires fresh approval, including when a
+remembered approval or ordinary allow rule exists. Hook approval cannot override
+an explicit deny rule or mode restriction. Rewritten tool arguments are authorized
+again before execution. Workspace-mutating pre-tool hooks run inside the tool's
+checkpoint and cannot rewrite the authorized invocation.
+
+| Hook | Mutable fields and policy |
 |---|---|
-| `session_start` / `session_end` | inject context, load state |
-| `user_prompt_submit` | rewrite/augment/block the prompt |
-| `pre_tool` | allow / deny (with message) / rewrite args — org policy lives here |
-| `post_tool` | rewrite result, append diagnostics (e.g. run linter after edit) |
-| `pre_compact` | inject context strings or replace the summary prompt (the ADR-010 contract, verbatim) |
-| `turn_end` | trigger side effects (notifications, CI) |
-| `permission_check` | supplemental decision for `ask`-tier requests (enables auto-approvers) |
+| `session_start` / `session_end` | Observe lifecycle or block; session identity and workspace are immutable |
+| `user_prompt_submit` | Transform prompt content or block submission |
+| `pre_tool` | Transform tool name/arguments or block execution |
+| `post_tool` | Transform typed output and preserve or set its failure flag |
+| `pre_compact` | Supply context, summary prompt, and continuation policy |
+| `turn_end` | Observe completion or block successful completion |
+| `permission_check` | Supply `allow`, `ask`, or `deny` without changing the request |
 
 Plugins can also *push*: `session/inject_message`, `session/set_status`, `ui/notify` — enough to build things like pi's live extensions (todo watchers, budget guards, custom status widgets).
 
@@ -234,7 +256,7 @@ world hook-extension {
 }
 ```
 
-The return value is a bounded JSON directive: `continue`, `replace` with a typed JSON payload, `block` with a user-facing message, or `error`. The component declares hooks through the same `PluginManifest` used by Tier 2 and is registered on the same `HookDispatcher`; ordering, deadlines, cancellation, and fail-open/fail-closed behavior therefore do not fork.
+The return value is a bounded `HookDirective`: `continue`, a phase-specific `transform`, `permission`, or `block`. The component declares hooks through the same `PluginManifest` used by Tier 2 and is registered on the same `HookDispatcher`; ordering, deadlines, cancellation, and fail-open/fail-closed behavior therefore do not fork.
 
 The public `rw` binary does not link Wasmtime. It communicates with the private helper through an application-owned bounded worker pool and a typed, length-prefixed load/call protocol. A cache miss transfers the exact signature-verified component bytes; warm calls reuse compiled code; malformed or oversized frames fail closed. There are no host imports and no WASI. Every call uses a fresh store with bounded component and serialized-input bytes, per-memory size, memory/table/instance counts, and fuel. Queue wait, loading, and invocation share one fixed deadline. Cancelled, timed-out, malformed, or trapped workers are retired; their slots remain charged until the process is reaped. Each factory shares at most two workers across sessions and admits at most 32 requests. Each worker retains one compiled generation; the two-worker default is provisional pending controlled capacity measurements. Explicit factory shutdown closes admission and drains workers. Fuel periodically yields from the async Wasmtime call so dispatcher cancellation stops guest execution rather than merely abandoning a blocking worker. Enabled components are also bounded by count and aggregate installed bytes. The owned-string result is checked immediately after canonical lifting; its unavoidable pre-check allocation remains bounded by the store's linear-memory ceiling. This first production slice intentionally rejects tool, command, provider, event-subscription, and push capabilities: those remain RPC plugins until component interfaces can preserve their streaming and permission contracts.
 

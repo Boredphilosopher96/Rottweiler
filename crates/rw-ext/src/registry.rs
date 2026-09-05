@@ -1095,12 +1095,11 @@ mod tests {
 
     use super::*;
     use rw_plugin_protocol::{
-        PROTOCOL_VERSION, PluginCapabilities, PluginHook, PluginHookCapability,
-        PluginHookFailurePolicy,
+        HookEvent, HookFailurePolicy, PROTOCOL_VERSION, PluginCapabilities, PluginHookCapability,
     };
 
     fn valid_component() -> Vec<u8> {
-        let output = r#"{"directive":"continue"}"#;
+        let output = r#"{"decision":"continue"}"#;
         wat::parse_str(format!(
             r#"(component
               (type $hook (func (param "event" string) (param "payload-json" string) (result string)))
@@ -1148,8 +1147,9 @@ mod tests {
                 protocol: PROTOCOL_VERSION,
                 capabilities: PluginCapabilities {
                     hooks: vec![PluginHookCapability {
-                        name: PluginHook::PostTool,
-                        failure_policy: PluginHookFailurePolicy::FailOpen,
+                        name: HookEvent::PostTool,
+                        class: rw_types::hook_contract::HookClass::Transform,
+                        failure_policy: HookFailurePolicy::FailOpen,
                     }],
                     ..PluginCapabilities::default()
                 },

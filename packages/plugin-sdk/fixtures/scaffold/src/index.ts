@@ -13,8 +13,8 @@ export const plugin = definePlugin({
     hooks: {
       pre_tool: ({ payload }) =>
         payload.name === "bash"
-          ? { decision: "deny", message: "This plugin blocks shell execution" }
-          : { decision: "allow" },
+          ? { decision: "block", message: "This plugin blocks shell execution" }
+          : { decision: "continue" },
     },
   },
 })

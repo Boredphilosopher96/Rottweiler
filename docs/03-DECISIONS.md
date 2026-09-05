@@ -428,7 +428,7 @@ The store owns physical layout, safe descriptor opening, writer exclusion,
 checksums, indexes and opaque checkpoint storage. Core owns event identity,
 subscription ordering and the recovery projection. Runtime supplies blocking I/O
 execution and composes recovery with extension, accounting and workspace services.
-The existing SQLite listing/search index remains a derived projection. Workspace
+The SQLite listing/search index is a derived projection. Workspace
 checkpoints remain separate from journal recovery snapshots.
 
 **Read integrity.** Normal reads validate the referenced/pinned segment identities,
@@ -436,9 +436,8 @@ checksums, record/schema/sequence bounds and the snapshot's prefix identity. Uns
 paths, symlinks, unexpected links, changed opened descriptors and inconsistent
 indexes fail closed. Corruption in unrelated unread historical segments is detected
 when those segments are accessed or by an explicit full-integrity verification API
-and CLI. A tail read no longer rehashes unrelated historical bytes. This is an
-explicit change to ADR-006's implementation-level whole-file validation behavior;
-normal reads must not claim to have verified the entire lifetime journal. Full
+and CLI. A tail read verifies only the bytes it reads; normal reads do not
+verify the entire lifetime journal. Full
 verification streams all segments with bounded memory and reports its verified
 sequence/byte coverage.
 
@@ -499,8 +498,8 @@ with a partial reconstruction that could discard unknown authority.
 Segment seal, index and catalog publication have tested crash ordering; derived
 index publication must not add one extra fsync per token. A reader's blocking I/O
 and decoding run outside the writer mutex. Reader admission, page memory and open
-descriptors are bounded. Append scheduling and batching remain the separate A03
-workstream and must preserve the same acknowledgement contract.
+descriptors are bounded. Append scheduling and batching preserve the same
+acknowledgement contract.
 
 **Validation.** Test rotation during reads, crashes at publication boundaries,
 partial final records, cursor-ahead rejection, corrupt indexes/segments/snapshots,

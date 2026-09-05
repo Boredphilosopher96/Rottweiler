@@ -2,7 +2,7 @@ use std::{path::Path, time::Duration};
 
 use toml::{Table, Value};
 
-use crate::{HookEffect, HookEvent, HookFailurePolicy, HookRegistration};
+use crate::{HookClass, HookEffect, HookEvent, HookFailurePolicy, HookRegistration};
 use rw_types::ToolCapability;
 
 use super::{
@@ -130,7 +130,7 @@ fn parse_hook(
         "priority",
         "timeout_ms",
         "failure_policy",
-        "failure-policy",
+        "class",
         "effect",
     ];
     if let Some(unknown) = table
@@ -185,6 +185,7 @@ fn parse_hook(
             ),
         ));
     }
+    let class = parse_class(path, index, table)?;
     let failure_policy = parse_failure_policy(path, index, table)?;
     let effect = parse_effect(path, index, table)?;
     let applicable_tools = matcher
@@ -192,7 +193,7 @@ fn parse_hook(
         .and_then(|(name, pattern)| pattern.ends_with(')').then_some(name))
         .into_iter()
         .map(str::to_owned);
-    let registration = HookRegistration::new(id, event)
+    let registration = HookRegistration::new(id, event, class)
         .with_priority(priority)
         .with_timeout(Duration::from_millis(timeout_ms))
         .with_failure_policy(failure_policy)
@@ -213,6 +214,23 @@ fn parse_hook(
             command: command.to_owned(),
         },
     })
+}
+
+fn parse_class(
+    path: &Path,
+    index: usize,
+    table: &Table,
+) -> Result<HookClass, ExtensionDiscoveryError> {
+    match required_string(path, index, table, "class")? {
+        "transform" => Ok(HookClass::Transform),
+        "policy" => Ok(HookClass::Policy),
+        "observer" => Ok(HookClass::Observer),
+        _ => Err(invalid_hook(
+            path,
+            index,
+            "`class` must be transform, policy, or observer",
+        )),
+    }
 }
 
 fn parse_effect(
@@ -273,21 +291,10 @@ fn parse_failure_policy(
     index: usize,
     table: &Table,
 ) -> Result<HookFailurePolicy, ExtensionDiscoveryError> {
-    if table.contains_key("failure_policy") && table.contains_key("failure-policy") {
-        return Err(invalid_hook(
-            path,
-            index,
-            "use only one of `failure_policy` or `failure-policy`",
-        ));
-    }
-    let value = table
-        .get("failure_policy")
-        .or_else(|| table.get("failure-policy"));
-    match value {
-        None => Ok(HookFailurePolicy::FailOpen),
-        Some(Value::String(value)) if value == "fail-open" => Ok(HookFailurePolicy::FailOpen),
-        Some(Value::String(value)) if value == "fail-closed" => Ok(HookFailurePolicy::FailClosed),
-        Some(_) => Err(invalid_hook(
+    match required_string(path, index, table, "failure_policy")? {
+        "fail-open" => Ok(HookFailurePolicy::FailOpen),
+        "fail-closed" => Ok(HookFailurePolicy::FailClosed),
+        _ => Err(invalid_hook(
             path,
             index,
             "failure policy must be `fail-open` or `fail-closed`",

@@ -33,7 +33,9 @@ function fixture(): PluginDefinition {
       },
     },
     handlers: {
-      tools: { hang: () => new Promise<never>(() => {}) },
+      tools: { hang: (_params, context) => new Promise<{ content: string; data: null }>(resolve => {
+        context.signal.addEventListener("abort", () => resolve({ content: "settled", data: null }), { once: true })
+      }) },
       providers: { "probe/": async function* () { yield { type: "finished", reason: "stop" } } },
       providerModels: { "probe/": async (_params, context) => {
         const response = await context.providerHttp.request("probe-key", httpRequest)
@@ -122,21 +124,34 @@ describe("production SDK duplex serve", () => {
     expect(frames.find((frame) => frame.id === 999)?.result).toBeNull()
   })
 
-  test("timed-out uncooperative handlers keep occupying admission slots", async () => {
+  test("timed-out uncooperative handlers keep occupying admission slots without reporting completion", async () => {
     let invoked = 0
+    let cancelled = 0
+    const release = Promise.withResolvers<{ content: string; data: null }>()
     const definition = fixture()
     const { frames, send, serving } = harness({ ...definition, handlers: {
       ...definition.handlers,
-      tools: { hang: () => { invoked += 1; return new Promise<never>(() => {}) } },
-    } }, 20)
-    for (let id = 10; id < 74; id += 1) send({ jsonrpc: "2.0", id, method: "tool/call", params: { name: "hang", input: {}, lifetime: { total_ms: 20, idle_ms: 20 } } })
-    await until(() => frames.filter((frame) => typeof frame.id === "number" && frame.id >= 10).length === 64)
-    send({ jsonrpc: "2.0", id: 74, method: "tool/call", params: { name: "hang", input: {}, lifetime: { total_ms: 20, idle_ms: 20 } } })
-    await until(() => frames.some((frame) => frame.id === 74))
-    send(stop)
-    await serving
-    expect(invoked).toBe(64)
-    expect(frames.find((frame) => frame.id === 74)?.error).toMatchObject({ code: -32005 })
+      tools: { hang: (_params, context) => {
+        invoked += 1
+        context.signal.addEventListener("abort", () => { cancelled += 1 }, { once: true })
+        return release.promise
+      } },
+    } }, 2000)
+    try {
+      for (let id = 10; id < 74; id += 1) send({ jsonrpc: "2.0", id, method: "tool/call", params: { name: "hang", input: {}, lifetime: { total_ms: 20, idle_ms: 20 } } })
+      await until(() => cancelled === 64)
+      expect(frames.filter(frame => typeof frame.id === "number" && frame.id >= 10)).toHaveLength(0)
+      send({ jsonrpc: "2.0", id: 74, method: "tool/call", params: { name: "hang", input: {}, lifetime: { total_ms: 20, idle_ms: 20 } } })
+      await until(() => frames.some(frame => frame.id === 74))
+      expect(invoked).toBe(64)
+      expect(frames.find(frame => frame.id === 74)?.error).toMatchObject({ code: -32005 })
+      release.resolve({ content: "settled", data: null })
+      await until(() => frames.filter(frame => typeof frame.id === "number" && frame.id >= 10).length === 65)
+      send(stop)
+      await serving
+    } finally {
+      release.resolve({ content: "settled", data: null })
+    }
   })
 
   test("provider cancellation retains ownership through ignored abort and iterator cleanup", async () => {
@@ -203,7 +218,8 @@ describe("production SDK duplex serve", () => {
       ...definition.handlers,
       providerModels: { "probe/": async (_params, context) => {
         await context.providerHttp.request("probe-key", httpRequest)
-        return new Promise<never>(() => {})
+        await new Promise<void>(resolve => context.signal.addEventListener("abort", () => resolve(), { once: true }))
+        return { models: [] }
       } },
     } })
     send(models)

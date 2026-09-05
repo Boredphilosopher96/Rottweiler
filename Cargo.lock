@@ -2915,6 +2915,7 @@ version = "0.1.4"
 dependencies = [
  "blake3",
  "rw-operation-contract",
+ "rw-types",
  "schemars",
  "serde",
  "serde_json",
@@ -3077,6 +3078,7 @@ version = "0.1.4"
 dependencies = [
  "rw-ext",
  "rw-plugin-protocol",
+ "rw-types",
  "serde_json",
  "tokio",
  "wat",

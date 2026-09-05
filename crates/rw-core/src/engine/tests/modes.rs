@@ -462,8 +462,12 @@ async fn seeded_plan_mode_property_keeps_complete_workspace_byte_identical() {
             if hook_allow {
                 hooks
                     .register(
-                        HookRegistration::new("test.allow-permission", HookEvent::PermissionCheck)
-                            .with_priority(i32::MAX),
+                        HookRegistration::new(
+                            "test.allow-permission",
+                            HookEvent::PermissionCheck,
+                            rw_types::hook_contract::HookClass::Policy,
+                        )
+                        .with_priority(i32::MAX),
                         PermissionAllowHook,
                     )
                     .expect("permission allow hook");

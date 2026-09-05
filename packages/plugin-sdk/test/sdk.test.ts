@@ -51,7 +51,7 @@ function fixtureDefinition(secret = "handler-secret"): PluginDefinition {
       capabilities: {
         tools: [{ name: "echo", description: "echo", schema: { type: "object" }, caps: [] }],
         commands: [{ name: "fixture", description: "fixture command" }],
-        hooks: [{ name: "pre_tool", failure_policy: "fail-closed" }],
+        hooks: [{ name: "pre_tool", class: "policy", failure_policy: "fail-closed" }],
         providers: [{ "alias-prefix": "fixture/" }],
         event_subscriptions: ["TurnFinished"],
         push: ["ui/notify", "session/set_status"],
@@ -66,7 +66,7 @@ function fixtureDefinition(secret = "handler-secret"): PluginDefinition {
         },
       },
       commands: { fixture: ({ arguments: args }) => ({ arguments: args }) },
-      hooks: { pre_tool: () => ({ decision: "deny", message: "fixture deny" }) },
+      hooks: { pre_tool: () => ({ decision: "block", message: "fixture deny" }) },
       providers: {
         "fixture/": async function* ({ alias }) {
           yield { type: "message_start", model: alias }
@@ -181,7 +181,7 @@ describe("wire protocol", () => {
       name: "fixture", arguments: "hello",
     })
     await request(server, 4, RPC_METHODS.hookInvoke, {
-      hook: "pre_tool", payload: { name: "bash" },
+      hook: "pre_tool", payload: { id: "call", name: "bash", arguments: {} },
     })
     await request(server, 5, RPC_METHODS.providerComplete, {
       alias: "fixture/model", request: providerRequest,
@@ -208,33 +208,35 @@ describe("wire protocol", () => {
     expect(messages[10]).toEqual({ jsonrpc: "2.0", id: 6, result: null })
   })
 
-  test("runs the pre_tool deny and custom-tool conformance plugin over stdio", () => {
-    const lines = [
+  test("runs the pre_tool policy and custom-tool conformance plugin over stdio", async () => {
+    const requests = [
       { jsonrpc: "2.0", id: 1, method: "initialize", params: initializeParams },
-      {
-        jsonrpc: "2.0", id: 2, method: "tool/call",
-        params: { lifetime: { total_ms: 300000, idle_ms: 90000 }, name: "fixture_echo", input: { text: "hello" } },
-      },
-      {
-        jsonrpc: "2.0", id: 3, method: "hook/invoke",
-        params: { hook: "pre_tool", payload: { name: "bash" } },
-      },
+      { jsonrpc: "2.0", id: 2, method: "tool/call", params: { lifetime: { total_ms: 300000, idle_ms: 90000 }, name: "fixture_echo", input: { text: "hello" } } },
+      { jsonrpc: "2.0", id: 3, method: "hook/invoke", params: { hook: "pre_tool", payload: { id: "call", name: "bash", arguments: {} } } },
       { jsonrpc: "2.0", id: 4, method: "shutdown" },
-    ].map((line) => JSON.stringify(line)).join("\n") + "\n"
-    const child = Bun.spawnSync(
-      ["bun", join(import.meta.dir, "../fixtures/conformance/pre-tool-deny-custom-tool.ts")],
-      { stdin: encoder.encode(lines), stdout: "pipe", stderr: "pipe", timeout: 5_000, maxBuffer: 1024 * 1024 },
-    )
-    expect(child.exitCode).toBe(0)
-    expect(child.stderr.toString()).toBe("")
-    const responses = child.stdout.toString().trim().split("\n").map((line) => JSON.parse(line) as JsonValue)
-    expect(responses[1]).toEqual({
-      jsonrpc: "2.0", id: 2, result: { content: "hello", data: { text: "hello" } },
+    ]
+    const child = Bun.spawn([process.execPath, join(import.meta.dir, "../fixtures/conformance/pre-tool-deny-custom-tool.ts")], {
+      stdin: "pipe", stdout: "pipe", stderr: "pipe", timeout: 5000,
     })
-    expect(responses[2]).toEqual({
-      jsonrpc: "2.0", id: 3,
-      result: { decision: "deny", message: "conformance policy denies bash" },
-    })
+    const reader = readBoundedLines(readableStreamBytes(child.stdout))[Symbol.asyncIterator]()
+    const responses: unknown[] = []
+    try {
+      for (const frame of requests) {
+        child.stdin.write(`${JSON.stringify(frame)}\n`)
+        await child.stdin.flush()
+        const response = await reader.next()
+        if (response.done) throw new Error("plugin closed before responding")
+        responses.push(JSON.parse(response.value))
+      }
+      child.stdin.end()
+      expect(await child.exited).toBe(0)
+      expect(await new Response(child.stderr).text()).toBe("")
+      expect(responses[1]).toEqual({ jsonrpc: "2.0", id: 2, result: { content: "hello", data: { text: "hello" } } })
+      expect(responses[2]).toEqual({ jsonrpc: "2.0", id: 3, result: { decision: "block", message: "conformance policy denies bash" } })
+    } finally {
+      child.kill()
+      await child.exited
+    }
   })
 
   test("runs event and incrementally streamed provider conformance plugins over stdio", async () => {
@@ -461,37 +463,57 @@ describe("wire protocol", () => {
     expect(shutdowns).toBe(1)
   })
 
-  test("hard-bounds hung handlers and aborts their context signal", async () => {
+  test("tool cancellation retains ownership until an uncooperative handler settles", async () => {
     let observedAbort = false
+    const completion = Promise.withResolvers<{ content: string; data: null }>()
     const definition = definePlugin({
-      manifest: {
-        name: "hung-handler", version: "1", protocol: 3,
-        capabilities: {
-          tools: [{ name: "hang", description: "hang", schema: {}, caps: [] }],
-        },
-      },
-      handlers: {
-        tools: {
-          hang: (_params, { signal }) => new Promise<never>(() => {
-            signal.addEventListener("abort", () => { observedAbort = true }, { once: true })
-          }),
-        },
-      },
+      manifest: { name: "retained-tool", version: "1", protocol: 3, capabilities: {
+        tools: [{ name: "hang", description: "hang", schema: {}, caps: [] }],
+      } },
+      handlers: { tools: { hang: (_params, { signal }) => {
+        signal.addEventListener("abort", () => { observedAbort = true }, { once: true })
+        return completion.promise
+      } } },
     })
-    const messages: JsonValue[] = []
-    const transport: ServerTransport = {
-      input: (async function* () {})(),
-      output: { write: (line) => { messages.push(JSON.parse(decoder.decode(line)) as JsonValue) } },
-    }
-    const server = new PluginServer(definition, transport, 4096, 20)
+    const { server, messages } = harness(definition)
     await request(server, 1, RPC_METHODS.initialize, initializeParams)
-    const started = performance.now()
-    await request(server, 2, RPC_METHODS.toolCall, { lifetime: { total_ms: 20, idle_ms: 20 }, name: "hang", input: {} })
-    expect(performance.now() - started).toBeLessThan(250)
-    expect(observedAbort).toBe(true)
-    expect(messages.at(-1)).toEqual({
-      jsonrpc: "2.0", id: 2, error: { code: -32004, message: "plugin tool deadline exceeded" },
+    let finished = false
+    const pending = request(server, 2, RPC_METHODS.toolCall, {
+      lifetime: { total_ms: 20, idle_ms: 20 }, name: "hang", input: {},
+    }).then(() => { finished = true })
+    await waitFor(() => observedAbort)
+    expect(finished).toBe(false)
+    expect(messages).toHaveLength(1)
+    completion.resolve({ content: "settled", data: null })
+    await pending
+    expect(messages.at(-1)).toEqual({ jsonrpc: "2.0", id: 2,
+      error: { code: -32004, message: "plugin tool deadline exceeded" },
     })
+  })
+
+  test("hook timeout retains its handler until cleanup returns", async () => {
+    let observedAbort = false
+    const completion = Promise.withResolvers<void>()
+    const messages: unknown[] = []
+    const server = new PluginServer(definePlugin({
+      manifest: { name: "retained-hook", version: "1", protocol: 3, capabilities: {
+        hooks: [{ name: "pre_tool", class: "observer", failure_policy: "fail-open" }],
+      } },
+      handlers: { hooks: { pre_tool: async (_input, { signal }) => {
+        signal.addEventListener("abort", () => { observedAbort = true }, { once: true })
+        await completion.promise
+        return { decision: "continue" }
+      } } },
+    }), { input: (async function* () {})(), output: { write: bytes => { messages.push(JSON.parse(decoder.decode(bytes))) } } }, 4096, 20)
+    await request(server, 1, RPC_METHODS.initialize, initializeParams)
+    let finished = false
+    const pending = request(server, 2, RPC_METHODS.hookInvoke, { hook: "pre_tool", payload: { id: "call", name: "bash", arguments: {} } }).then(() => { finished = true })
+    await waitFor(() => observedAbort)
+    expect(finished).toBe(false)
+    expect(messages).toHaveLength(1)
+    completion.resolve()
+    await pending
+    expect(messages.at(-1)).toEqual({ jsonrpc: "2.0", id: 2, error: { code: -32004, message: "plugin handler timed out" } })
   })
 
   test("cancels an in-flight handler during shutdown", async () => {
@@ -501,8 +523,8 @@ describe("wire protocol", () => {
         name: "abort-handler", version: "1", protocol: 3,
         capabilities: { tools: [{ name: "hang", description: "hang", schema: {}, caps: [] }] },
       },
-      handlers: { tools: { hang: (_params, { signal }) => new Promise<never>(() => {
-        signal.addEventListener("abort", () => { observedAbort = true }, { once: true })
+      handlers: { tools: { hang: (_params, { signal }) => new Promise<{ content: string; data: null }>(resolve => {
+        signal.addEventListener("abort", () => { observedAbort = true; resolve({ content: "settled", data: null }) }, { once: true })
       }) } },
     })
     const { server, messages } = harness(definition)

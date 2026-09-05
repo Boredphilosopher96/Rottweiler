@@ -8,7 +8,6 @@ use super::CommandSafetyClassifier;
 use super::ExecutionLease;
 use super::FixtureCodeIntelligence;
 use super::FixtureToolchainExecutor;
-use super::HookEvent;
 use super::HookFailurePolicy;
 use super::RuntimeServiceDescriptor;
 use super::RuntimeServiceKind;
@@ -104,20 +103,28 @@ async fn toolchain_post_hook_formats_multi_edit_then_appends_linter_diagnostics(
     .expect("toolchain hooks");
     let result = hooks
         .dispatch(
-            HookEvent::PostTool,
-            serde_json::json!({
-                "id": "call",
-                "name": "multi_edit",
-                "arguments": {"path": "src/lib.rs", "edits": []},
-                "output": {"type": "text", "text": "multi edit complete"},
-                "is_error": false,
-            }),
+            serde_json::from_value::<rw_ext::HookInput>(
+                serde_json::json!({"hook":"post_tool","payload":{
+                    "id": "call",
+                    "name": "multi_edit",
+                    "arguments": {"path": "src/lib.rs", "edits": []},
+                    "output": {"type": "text", "text": "multi edit complete"},
+                    "is_error": false,
+                }}),
+            )
+            .expect("typed post_tool fixture"),
         )
-        .await;
+        .await
+        .expect("settled hook");
     assert!(result.completed());
-    assert_eq!(result.payload()["is_error"], true);
-    let output: ToolOutput =
-        serde_json::from_value(result.payload()["output"].clone()).expect("tool output");
+    let rw_ext::HookInput::PostTool(input) = result.input() else {
+        panic!("post_tool phase")
+    };
+    assert!(input.is_error);
+    let output: ToolOutput = match result.input() {
+        rw_ext::HookInput::PostTool(input) => input.output.clone(),
+        _ => panic!("post_tool phase"),
+    };
     assert!(matches!(
         output,
         ToolOutput::Text { text }
@@ -157,11 +164,14 @@ async fn toolchain_test_runs_only_after_successful_turns_and_blocks_on_failure()
     .expect("toolchain hooks");
 
     let skipped = hooks
-        .dispatch(
-            HookEvent::TurnEnd,
-            serde_json::json!({"turn": 1, "status": "Failed"}),
-        )
-        .await;
+        .dispatch(rw_ext::HookInput::TurnEnd(
+            rw_types::hook_contract::HookTurnInput {
+                turn: 1,
+                status: rw_types::TurnStatus::Failed,
+            },
+        ))
+        .await
+        .expect("settled hook");
     assert!(skipped.completed());
     assert!(
         executor
@@ -172,11 +182,14 @@ async fn toolchain_test_runs_only_after_successful_turns_and_blocks_on_failure()
     );
 
     let failed = hooks
-        .dispatch(
-            HookEvent::TurnEnd,
-            serde_json::json!({"turn": 2, "status": "Completed"}),
-        )
-        .await;
+        .dispatch(rw_ext::HookInput::TurnEnd(
+            rw_types::hook_contract::HookTurnInput {
+                turn: 2,
+                status: rw_types::TurnStatus::Completed,
+            },
+        ))
+        .await
+        .expect("settled hook");
     assert!(matches!(
         failed.status(),
         rw_ext::HookDispatchStatus::Blocked { hook_id, message }
@@ -266,16 +279,15 @@ async fn production_toolchain_runs_sandboxed_rustfmt_and_offline_clippy() {
         .expect("production toolchain hooks");
     let result = hooks
             .dispatch(
-                HookEvent::PostTool,
-                serde_json::json!({
+                serde_json::from_value::<rw_ext::HookInput>(serde_json::json!({"hook":"post_tool","payload":{
                     "id": "real-toolchain-call",
                     "name": "edit",
                     "arguments": {"path": "crate/src/lib.rs", "old": "value:&Vec<u8>", "new": "value: &[u8]"},
                     "output": {"type": "text", "text": "edit complete"},
                     "is_error": false,
-                }),
+                }})).expect("typed post_tool fixture"),
             )
-            .await;
+            .await.expect("settled hook");
 
     let sandbox = probe_sandbox();
     if sandbox.support != SandboxSupport::Enforced {
@@ -286,9 +298,14 @@ async fn production_toolchain_runs_sandboxed_rustfmt_and_offline_clippy() {
             "an unavailable sandbox must fail closed before rustfmt mutates the workspace"
         );
         if result.completed() {
-            assert_eq!(result.payload()["is_error"], true);
-            let output: ToolOutput = serde_json::from_value(result.payload()["output"].clone())
-                .expect("tool output with sandbox diagnostics");
+            let rw_ext::HookInput::PostTool(input) = result.input() else {
+                panic!("post_tool phase")
+            };
+            assert!(input.is_error);
+            let output: ToolOutput = match result.input() {
+                rw_ext::HookInput::PostTool(input) => input.output.clone(),
+                _ => panic!("post_tool phase"),
+            };
             let ToolOutput::Text { text } = output else {
                 panic!("sandbox refusal diagnostics must append to text output")
             };
@@ -314,9 +331,14 @@ async fn production_toolchain_runs_sandboxed_rustfmt_and_offline_clippy() {
         std::fs::read_to_string(root.path().join("crate/src/lib.rs")).expect("formatted source"),
         "pub fn bad(value: &Vec<u8>) -> usize {\n    value.len()\n}\n"
     );
-    assert_eq!(result.payload()["is_error"], true);
-    let output: ToolOutput = serde_json::from_value(result.payload()["output"].clone())
-        .expect("tool output with diagnostics");
+    let rw_ext::HookInput::PostTool(input) = result.input() else {
+        panic!("post_tool phase")
+    };
+    assert!(input.is_error);
+    let output: ToolOutput = match result.input() {
+        rw_ext::HookInput::PostTool(input) => input.output.clone(),
+        _ => panic!("post_tool phase"),
+    };
     let ToolOutput::Text { text } = output else {
         panic!("toolchain diagnostics must append to text output")
     };
@@ -346,19 +368,24 @@ async fn post_multi_edit_hook_appends_lsp_diagnostics_without_running_a_build() 
     .expect("runtime hooks");
     let result = hooks
         .dispatch(
-            HookEvent::PostTool,
-            serde_json::json!({
-                "id": "call",
-                "name": "multi_edit",
-                "arguments": {"path": "src/lib.rs", "edits": []},
-                "output": {"type": "text", "text": "multi edit complete"},
-                "is_error": false,
-            }),
+            serde_json::from_value::<rw_ext::HookInput>(
+                serde_json::json!({"hook":"post_tool","payload":{
+                    "id": "call",
+                    "name": "multi_edit",
+                    "arguments": {"path": "src/lib.rs", "edits": []},
+                    "output": {"type": "text", "text": "multi edit complete"},
+                    "is_error": false,
+                }}),
+            )
+            .expect("typed post_tool fixture"),
         )
-        .await;
+        .await
+        .expect("settled hook");
     assert!(result.completed());
-    let output: ToolOutput =
-        serde_json::from_value(result.payload()["output"].clone()).expect("tool output");
+    let output: ToolOutput = match result.input() {
+        rw_ext::HookInput::PostTool(input) => input.output.clone(),
+        _ => panic!("post_tool phase"),
+    };
     assert!(matches!(
         output,
         ToolOutput::Text { text }

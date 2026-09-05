@@ -8,7 +8,6 @@ use rw_core::RuntimeServiceKind;
 use rw_core::ToolOutputStream;
 use rw_ext::HookDirective;
 use rw_ext::HookError;
-use rw_ext::HookEvent;
 use rw_ext::HookHandler;
 use rw_ext::HookInvocation;
 use rw_tools::BashSandboxMode;
@@ -24,6 +23,7 @@ use rw_tools::ToolRegistry;
 use rw_types::ToolOutput;
 use rw_types::ToolOutputPart;
 use rw_types::config::ToolchainConfig;
+use rw_types::hook_contract::{HookInput, HookTransform};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
@@ -279,14 +279,9 @@ impl HookHandler for ToolchainTestHook {
         &self,
         invocation: HookInvocation<'_>,
     ) -> std::result::Result<HookDirective, HookError> {
-        if invocation.event() != HookEvent::TurnEnd
-            || invocation
-                .payload()
-                .get("status")
-                .and_then(serde_json::Value::as_str)
-                != Some("Completed")
+        if !matches!(invocation.input(), HookInput::TurnEnd(input) if input.status == rw_types::TurnStatus::Completed)
         {
-            return Ok(HookDirective::Continue);
+            return Ok(HookDirective::Continue {});
         }
         let boundary = self.runtime.current();
         let cwd = boundary.workspace_roots.first().ok_or_else(|| {
@@ -313,7 +308,7 @@ impl HookHandler for ToolchainTestHook {
             .await
             .map_err(|error| HookError::new("toolchain_test", error.to_string()))?;
         if outcome.exit_code == 0 {
-            return Ok(HookDirective::Continue);
+            return Ok(HookDirective::Continue {});
         }
         let (stdout, stderr) = capture.finish();
         Ok(HookDirective::Block {
@@ -459,19 +454,14 @@ impl HookHandler for ToolchainHook {
         &self,
         invocation: HookInvocation<'_>,
     ) -> std::result::Result<HookDirective, HookError> {
-        if invocation.event() != HookEvent::PostTool {
-            return Ok(HookDirective::Continue);
-        }
-        let payload = invocation.payload();
-        let Some(tool_name) = payload.get("name").and_then(serde_json::Value::as_str) else {
-            return Ok(HookDirective::Continue);
+        let HookInput::PostTool(payload) = invocation.input() else {
+            return Ok(HookDirective::Continue {});
         };
-        let arguments = payload
-            .get("arguments")
-            .ok_or_else(|| HookError::new("tool_semantics", "tool arguments are missing"))?;
+        let tool_name = &payload.name;
+        let arguments = &payload.arguments;
         let Some(virtual_path) = registered_file_mutation_path(&self.tools, tool_name, arguments)?
         else {
-            return Ok(HookDirective::Continue);
+            return Ok(HookDirective::Continue {});
         };
         let boundary = self.runtime.current();
         let Some((file, cwd)) = resolve_toolchain_file(&boundary.workspace_roots, &virtual_path)
@@ -521,15 +511,17 @@ impl HookHandler for ToolchainHook {
             }
         }
         if diagnostics.is_empty() {
-            return Ok(HookDirective::Continue);
+            return Ok(HookDirective::Continue {});
         }
-        let mut replacement = payload.clone();
+        let mut output = payload.output.clone();
         let diagnostics = diagnostics.join("\n\n");
-        append_post_tool_diagnostics(&mut replacement, "Toolchain diagnostics", &diagnostics)?;
-        if failed {
-            replacement["is_error"] = serde_json::Value::Bool(true);
-        }
-        Ok(HookDirective::Replace(replacement))
+        append_post_tool_diagnostics(&mut output, "Toolchain diagnostics", &diagnostics);
+        Ok(HookDirective::Transform {
+            change: HookTransform::PostTool {
+                output,
+                is_error: payload.is_error || failed,
+            },
+        })
     }
 }
 
@@ -549,30 +541,25 @@ impl HookHandler for LspDiagnosticsHook {
         &self,
         invocation: HookInvocation<'_>,
     ) -> std::result::Result<HookDirective, HookError> {
-        if invocation.event() != HookEvent::PostTool {
-            return Ok(HookDirective::Continue);
-        }
-        let payload = invocation.payload();
-        let Some(tool_name) = payload.get("name").and_then(serde_json::Value::as_str) else {
-            return Ok(HookDirective::Continue);
+        let HookInput::PostTool(payload) = invocation.input() else {
+            return Ok(HookDirective::Continue {});
         };
-        let arguments = payload
-            .get("arguments")
-            .ok_or_else(|| HookError::new("tool_semantics", "tool arguments are missing"))?;
+        let tool_name = &payload.name;
+        let arguments = &payload.arguments;
         let Some(virtual_path) = registered_file_mutation_path(&self.tools, tool_name, arguments)?
         else {
-            return Ok(HookDirective::Continue);
+            return Ok(HookDirective::Continue {});
         };
         let boundary = self.runtime.current();
         let Some((file, _cwd)) = resolve_toolchain_file(&boundary.workspace_roots, &virtual_path)
         else {
-            return Ok(HookDirective::Continue);
+            return Ok(HookDirective::Continue {});
         };
         let metadata = tokio::fs::metadata(&file)
             .await
             .map_err(|error| HookError::new("lsp_diagnostics_read", error.to_string()))?;
         if metadata.len() > 2 * 1024 * 1024 {
-            return Ok(HookDirective::Continue);
+            return Ok(HookDirective::Continue {});
         }
         let source = tokio::fs::read_to_string(&file)
             .await
@@ -583,7 +570,7 @@ impl HookHandler for LspDiagnosticsHook {
             .await
             .items;
         if diagnostics.is_empty() {
-            return Ok(HookDirective::Continue);
+            return Ok(HookDirective::Continue {});
         }
         let mut rendered = String::new();
         for diagnostic in diagnostics {
@@ -606,11 +593,16 @@ impl HookHandler for LspDiagnosticsHook {
             rendered.push_str(&line);
         }
         if rendered.is_empty() {
-            return Ok(HookDirective::Continue);
+            return Ok(HookDirective::Continue {});
         }
-        let mut replacement = payload.clone();
-        append_post_tool_diagnostics(&mut replacement, "LSP diagnostics (untrusted)", &rendered)?;
-        Ok(HookDirective::Replace(replacement))
+        let mut output = payload.output.clone();
+        append_post_tool_diagnostics(&mut output, "LSP diagnostics (untrusted)", &rendered);
+        Ok(HookDirective::Transform {
+            change: HookTransform::PostTool {
+                output,
+                is_error: payload.is_error,
+            },
+        })
     }
 }
 
@@ -709,17 +701,17 @@ pub(super) fn resolve_toolchain_file(
 }
 
 pub(super) fn append_post_tool_diagnostics(
-    payload: &mut serde_json::Value,
+    output: &mut ToolOutput,
     heading: &str,
     diagnostics: &str,
-) -> std::result::Result<(), HookError> {
-    let output = payload
-        .get("output")
-        .cloned()
-        .ok_or_else(|| HookError::new("toolchain_output", "post-tool output is missing"))?;
-    let output = serde_json::from_value::<ToolOutput>(output)
-        .map_err(|error| HookError::new("toolchain_output", error.to_string()))?;
-    let output = match output {
+) {
+    let owned = std::mem::replace(
+        output,
+        ToolOutput::Text {
+            text: String::new(),
+        },
+    );
+    *output = match owned {
         ToolOutput::Text { mut text } => {
             text.push_str("\n\n");
             text.push_str(heading);
@@ -742,7 +734,4 @@ pub(super) fn append_post_tool_diagnostics(
             ToolOutput::Mixed { parts }
         }
     };
-    payload["output"] = serde_json::to_value(output)
-        .map_err(|error| HookError::new("toolchain_output", error.to_string()))?;
-    Ok(())
 }

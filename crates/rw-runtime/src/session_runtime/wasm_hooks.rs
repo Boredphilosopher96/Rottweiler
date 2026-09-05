@@ -23,6 +23,7 @@ use rw_tools::ToolBehavior;
 use rw_tools::ToolRegistry;
 use rw_types::ToolCapability;
 use rw_types::config::ToolchainConfig;
+use rw_types::hook_contract::HookClass;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -237,13 +238,17 @@ pub(super) fn compose_runtime_hooks(
             .collect::<Vec<_>>();
         hooks
             .register(
-                HookRegistration::new("builtin.toolchain", HookEvent::PostTool)
-                    .with_priority(100)
-                    .with_failure_policy(HookFailurePolicy::FailClosed)
-                    .with_effect(HookEffect::WorkspaceMutating)
-                    .with_applicable_tools(applicable_tools)
-                    .with_required_capabilities([ToolCapability::Execute])
-                    .with_timeout(std::time::Duration::from_mins(2)),
+                HookRegistration::new(
+                    "builtin.toolchain",
+                    HookEvent::PostTool,
+                    HookClass::Transform,
+                )
+                .with_priority(100)
+                .with_failure_policy(HookFailurePolicy::FailClosed)
+                .with_effect(HookEffect::WorkspaceMutating)
+                .with_applicable_tools(applicable_tools)
+                .with_required_capabilities([ToolCapability::Execute])
+                .with_timeout(std::time::Duration::from_mins(2)),
                 ToolchainHook::compile(config, Arc::clone(&runtime), Arc::clone(&tools))?,
             )
             .map_err(|error| miette!("toolchain hook could not register: {error}"))?;
@@ -251,12 +256,16 @@ pub(super) fn compose_runtime_hooks(
     if let Some(command) = config.test.clone() {
         hooks
             .register(
-                HookRegistration::new("builtin.toolchain_test", HookEvent::TurnEnd)
-                    .with_priority(100)
-                    .with_failure_policy(HookFailurePolicy::FailClosed)
-                    .with_effect(HookEffect::WorkspaceMutating)
-                    .with_required_capabilities([ToolCapability::Execute])
-                    .with_timeout(std::time::Duration::from_mins(10)),
+                HookRegistration::new(
+                    "builtin.toolchain_test",
+                    HookEvent::TurnEnd,
+                    HookClass::Policy,
+                )
+                .with_priority(100)
+                .with_failure_policy(HookFailurePolicy::FailClosed)
+                .with_effect(HookEffect::WorkspaceMutating)
+                .with_required_capabilities([ToolCapability::Execute])
+                .with_timeout(std::time::Duration::from_mins(10)),
                 ToolchainTestHook {
                     command,
                     runtime: Arc::clone(&runtime),
@@ -272,12 +281,16 @@ pub(super) fn compose_runtime_hooks(
             .collect::<Vec<_>>();
         hooks
             .register(
-                HookRegistration::new("builtin.lsp_diagnostics", HookEvent::PostTool)
-                    .with_priority(200)
-                    .with_failure_policy(HookFailurePolicy::FailOpen)
-                    .with_applicable_tools(applicable_tools)
-                    .with_required_capabilities([ToolCapability::Execute])
-                    .with_timeout(std::time::Duration::from_secs(15)),
+                HookRegistration::new(
+                    "builtin.lsp_diagnostics",
+                    HookEvent::PostTool,
+                    HookClass::Transform,
+                )
+                .with_priority(200)
+                .with_failure_policy(HookFailurePolicy::FailOpen)
+                .with_applicable_tools(applicable_tools)
+                .with_required_capabilities([ToolCapability::Execute])
+                .with_timeout(std::time::Duration::from_secs(15)),
                 LspDiagnosticsHook {
                     intelligence,
                     runtime,

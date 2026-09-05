@@ -80,20 +80,12 @@ export interface CommandDeclaration {
   readonly allowed_tools?: readonly string[]
 }
 
-export type HookName =
-  | "session_start"
-  | "session_end"
-  | "user_prompt_submit"
-  | "pre_tool"
-  | "post_tool"
-  | "pre_compact"
-  | "turn_end"
-  | "permission_check"
-
-export type HookFailurePolicy = "fail-open" | "fail-closed"
+import type { HookEvent, HookClass, HookFailurePolicy } from "./hook-contract"
+export type { HookEvent, HookClass, HookFailurePolicy, HookInput, HookDirective, HookTransform, HookPermissionDecision } from "./hook-contract"
 
 export interface HookDeclaration {
-  readonly name: HookName
+  readonly name: HookEvent
+  readonly class: HookClass
   readonly failure_policy: HookFailurePolicy
 }
 
@@ -195,16 +187,6 @@ export interface CommandExecuteParams {
   readonly name: string
   readonly arguments: string
 }
-
-export interface HookInvokeParams {
-  readonly hook: HookName
-  readonly payload: JsonObject
-}
-
-export type HookDecision =
-  | { readonly decision: "allow"; readonly payload?: JsonValue }
-  | { readonly decision: "deny"; readonly message: string }
-  | { readonly decision: "replace"; readonly payload: JsonValue }
 
 export type ProviderRole = "system" | "user" | "assistant" | "tool"
 

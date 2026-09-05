@@ -27,8 +27,15 @@ async fn typescript_tool_hook_event_push_and_provider_cross_rust_host() {
         .expect("register RPC hook");
     assert!(matches!(
         dispatcher
-            .dispatch(crate::HookEvent::PreTool, json!({"name":"bash"}))
+            .dispatch(crate::HookInput::PreTool(
+                rw_types::hook_contract::HookToolInput {
+                    id: "call".to_owned(),
+                    name: "bash".to_owned(),
+                    arguments: json!({})
+                }
+            ))
             .await
+            .expect("settled hook")
             .status(),
         crate::HookDispatchStatus::Blocked { .. }
     ));

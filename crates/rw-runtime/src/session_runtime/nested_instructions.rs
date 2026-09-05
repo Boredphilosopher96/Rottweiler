@@ -23,6 +23,7 @@ use rw_types::Block;
 use rw_types::Role;
 use rw_types::Turn;
 use rw_types::config::ThinkingLevel;
+use rw_types::hook_contract::{HookClass, HookInput};
 use std::collections::BTreeSet;
 use std::path::Component;
 use std::path::Path;
@@ -239,23 +240,18 @@ impl HookHandler for NestedInstructionsPreToolGuard {
         &self,
         invocation: HookInvocation<'_>,
     ) -> std::result::Result<HookDirective, HookError> {
-        if invocation.event() != HookEvent::PreTool {
-            return Ok(HookDirective::Continue);
-        }
-        let payload = invocation.payload();
-        let Some(tool_name) = payload.get("name").and_then(serde_json::Value::as_str) else {
-            return Ok(HookDirective::Continue);
+        let HookInput::PreTool(payload) = invocation.input() else {
+            return Ok(HookDirective::Continue {});
         };
-        let arguments = payload
-            .get("arguments")
-            .ok_or_else(|| HookError::new("tool_semantics", "tool arguments are missing"))?;
+        let tool_name = &payload.name;
+        let arguments = &payload.arguments;
         let semantics = self
             .tools
             .invocation_semantics(tool_name, arguments)
             .map_err(|error| HookError::new("tool_semantics", error.to_string()))?
             .ok_or_else(|| HookError::new("tool_semantics", "tool is not registered"))?;
         if semantics.behavior != ToolBehavior::FileMutation {
-            return Ok(HookDirective::Continue);
+            return Ok(HookDirective::Continue {});
         }
         let roots = self
             .workspace_roots
@@ -302,7 +298,7 @@ impl HookHandler for NestedInstructionsPreToolGuard {
             .filter(|source| !active.contains(source))
             .collect::<Vec<_>>();
         if unseen.is_empty() {
-            return Ok(HookDirective::Continue);
+            return Ok(HookDirective::Continue {});
         }
         Ok(HookDirective::Block {
             message: format!(
@@ -330,11 +326,15 @@ pub(super) fn register_nested_instruction_guard(
         .collect::<Vec<_>>();
     dispatcher
         .register(
-            HookRegistration::new("builtin.nested_instructions", HookEvent::PreTool)
-                .with_priority(i32::MIN.saturating_add(1))
-                .with_failure_policy(HookFailurePolicy::FailClosed)
-                .with_applicable_tools(applicable_tools)
-                .with_timeout(std::time::Duration::from_secs(5)),
+            HookRegistration::new(
+                "builtin.nested_instructions",
+                HookEvent::PreTool,
+                HookClass::Policy,
+            )
+            .with_priority(i32::MIN.saturating_add(1))
+            .with_failure_policy(HookFailurePolicy::FailClosed)
+            .with_applicable_tools(applicable_tools)
+            .with_timeout(std::time::Duration::from_secs(5)),
             NestedInstructionsPreToolGuard {
                 tools,
                 workspace_roots,

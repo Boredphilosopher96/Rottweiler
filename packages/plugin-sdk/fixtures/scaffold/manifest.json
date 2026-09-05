@@ -22,7 +22,7 @@
     ],
     "hooks": [
       {
-        "name": "pre_tool",
+        "name": "pre_tool", "class": "policy",
         "failure_policy": "fail-closed"
       }
     ]

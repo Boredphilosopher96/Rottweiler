@@ -1,4 +1,5 @@
 //! Explicit actor closure retains failed generations instead of releasing their resources.
+use rw_types::hook_contract::{HookInput, HookSessionInput};
 
 use std::{future::pending, sync::Arc, time::Duration};
 
@@ -160,7 +161,14 @@ async fn cleanup(
     if failure.is_some() {
         return failure.map_or(Ok(()), Err);
     }
-    let hooks = config.hooks.dispatch(HookEvent::SessionEnd, serde_json::json!({"session_id": config.session_id.0, "workspace": config.workspace_root})).await;
+    let hooks = config
+        .hooks
+        .dispatch(HookInput::SessionEnd(HookSessionInput {
+            session_id: config.session_id.0.clone(),
+            workspace: config.workspace_root.to_string_lossy().into_owned(),
+        }))
+        .await
+        .map_err(|error| error.to_string())?;
     for hook in hooks.failures() {
         if let Err(error) = persist_event(
             signals,
