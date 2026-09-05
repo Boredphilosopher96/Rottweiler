@@ -627,9 +627,37 @@ pattern = '''\b(?:enum\s+RemotePermissionMode|fn\s+as_cli_value)\b'''
 reason = "Remote command construction renders the protocol-owned mode spelling."
 
 [[shadow]]
-id = "duplicate-signer-update-wire-contract"
+id = "duplicate-signer-update-wire-contract-entrypoint"
 owner = "signed-update-wire-contract"
 path = "crates/xtask/src/main.rs"
+pattern = '''(?:\bstruct\s+(?:RootPayload|RootMetadata|ReleasePayload|ReleaseMetadata|ReleaseTarget|SignedEnvelope|MetadataSignature|RootChainDocument|RootChainEntry)\b|\bconst\s+(?:UPDATE_SCHEMA_VERSION|UPDATE_SIGNATURE_DOMAIN|UPDATE_ROOT_ROLE|UPDATE_RELEASE_ROLE|MAX_UPDATE_ENVELOPE_BYTES|MAX_UPDATE_PAYLOAD_BYTES|MAX_UPDATE_SIGNATURES|MAX_UPDATE_KEYS|MAX_UPDATE_TARGETS|MAX_UPDATE_RELEASE_NOTES_BYTES|MAX_UPDATE_ROOT_CHAIN_ENTRIES|MAX_UPDATE_SELECTOR_BYTES|MAX_UPDATE_ARTIFACT_BYTES|MAX_UPDATE_SPEC_BYTES|MAX_RELEASE_NOTES_BYTES)\b|\bfn\s+signature_message\b|rottweiler-update-metadata-v1)'''
+reason = "xtask imports signed wire DTOs and framing while owning private-key loading and signing."
+
+[[shadow]]
+id = "duplicate-signer-update-wire-contract-codegen"
+owner = "signed-update-wire-contract"
+path = "crates/xtask/src/codegen.rs"
+pattern = '''(?:\bstruct\s+(?:RootPayload|RootMetadata|ReleasePayload|ReleaseMetadata|ReleaseTarget|SignedEnvelope|MetadataSignature|RootChainDocument|RootChainEntry)\b|\bconst\s+(?:UPDATE_SCHEMA_VERSION|UPDATE_SIGNATURE_DOMAIN|UPDATE_ROOT_ROLE|UPDATE_RELEASE_ROLE|MAX_UPDATE_ENVELOPE_BYTES|MAX_UPDATE_PAYLOAD_BYTES|MAX_UPDATE_SIGNATURES|MAX_UPDATE_KEYS|MAX_UPDATE_TARGETS|MAX_UPDATE_RELEASE_NOTES_BYTES|MAX_UPDATE_ROOT_CHAIN_ENTRIES|MAX_UPDATE_SELECTOR_BYTES|MAX_UPDATE_ARTIFACT_BYTES|MAX_UPDATE_SPEC_BYTES|MAX_RELEASE_NOTES_BYTES)\b|\bfn\s+signature_message\b|rottweiler-update-metadata-v1)'''
+reason = "xtask imports signed wire DTOs and framing while owning private-key loading and signing."
+
+[[shadow]]
+id = "duplicate-signer-update-wire-contract-commands"
+owner = "signed-update-wire-contract"
+path = "crates/xtask/src/signing/mod.rs"
+pattern = '''(?:\bstruct\s+(?:RootPayload|RootMetadata|ReleasePayload|ReleaseMetadata|ReleaseTarget|SignedEnvelope|MetadataSignature|RootChainDocument|RootChainEntry)\b|\bconst\s+(?:UPDATE_SCHEMA_VERSION|UPDATE_SIGNATURE_DOMAIN|UPDATE_ROOT_ROLE|UPDATE_RELEASE_ROLE|MAX_UPDATE_ENVELOPE_BYTES|MAX_UPDATE_PAYLOAD_BYTES|MAX_UPDATE_SIGNATURES|MAX_UPDATE_KEYS|MAX_UPDATE_TARGETS|MAX_UPDATE_RELEASE_NOTES_BYTES|MAX_UPDATE_ROOT_CHAIN_ENTRIES|MAX_UPDATE_SELECTOR_BYTES|MAX_UPDATE_ARTIFACT_BYTES|MAX_UPDATE_SPEC_BYTES|MAX_RELEASE_NOTES_BYTES)\b|\bfn\s+signature_message\b|rottweiler-update-metadata-v1)'''
+reason = "xtask imports signed wire DTOs and framing while owning private-key loading and signing."
+
+[[shadow]]
+id = "duplicate-signer-update-wire-contract-trust"
+owner = "signed-update-wire-contract"
+path = "crates/xtask/src/signing/trust.rs"
+pattern = '''(?:\bstruct\s+(?:RootPayload|RootMetadata|ReleasePayload|ReleaseMetadata|ReleaseTarget|SignedEnvelope|MetadataSignature|RootChainDocument|RootChainEntry)\b|\bconst\s+(?:UPDATE_SCHEMA_VERSION|UPDATE_SIGNATURE_DOMAIN|UPDATE_ROOT_ROLE|UPDATE_RELEASE_ROLE|MAX_UPDATE_ENVELOPE_BYTES|MAX_UPDATE_PAYLOAD_BYTES|MAX_UPDATE_SIGNATURES|MAX_UPDATE_KEYS|MAX_UPDATE_TARGETS|MAX_UPDATE_RELEASE_NOTES_BYTES|MAX_UPDATE_ROOT_CHAIN_ENTRIES|MAX_UPDATE_SELECTOR_BYTES|MAX_UPDATE_ARTIFACT_BYTES|MAX_UPDATE_SPEC_BYTES|MAX_RELEASE_NOTES_BYTES)\b|\bfn\s+signature_message\b|rottweiler-update-metadata-v1)'''
+reason = "xtask imports signed wire DTOs and framing while owning private-key loading and signing."
+
+[[shadow]]
+id = "duplicate-signer-update-wire-contract-artifacts"
+owner = "signed-update-wire-contract"
+path = "crates/xtask/src/signing/artifacts.rs"
 pattern = '''(?:\bstruct\s+(?:RootPayload|RootMetadata|ReleasePayload|ReleaseMetadata|ReleaseTarget|SignedEnvelope|MetadataSignature|RootChainDocument|RootChainEntry)\b|\bconst\s+(?:UPDATE_SCHEMA_VERSION|UPDATE_SIGNATURE_DOMAIN|UPDATE_ROOT_ROLE|UPDATE_RELEASE_ROLE|MAX_UPDATE_ENVELOPE_BYTES|MAX_UPDATE_PAYLOAD_BYTES|MAX_UPDATE_SIGNATURES|MAX_UPDATE_KEYS|MAX_UPDATE_TARGETS|MAX_UPDATE_RELEASE_NOTES_BYTES|MAX_UPDATE_ROOT_CHAIN_ENTRIES|MAX_UPDATE_SELECTOR_BYTES|MAX_UPDATE_ARTIFACT_BYTES|MAX_UPDATE_SPEC_BYTES|MAX_RELEASE_NOTES_BYTES)\b|\bfn\s+signature_message\b|rottweiler-update-metadata-v1)'''
 reason = "xtask imports signed wire DTOs and framing while owning private-key loading and signing."
 

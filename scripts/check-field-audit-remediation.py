@@ -43,9 +43,9 @@ def main() -> int:
         "installed_first_launch_gate",
         "installed_first_version_max_us",
         "installed_first_interactive_max_us",
-        "REPRESENTATIVE_PRICING_MODEL_COUNT = 4_000",
         "supervisor_parent_death_gate",
     )
+    require_contains("scripts/m4_gate_support.py", "REPRESENTATIVE_PRICING_MODEL_COUNT = 4_000")
     require_contains(
         "packages/tui/test/perf/performance.test.ts",
         "tui_tool_output_frame_p95_us",
