@@ -5,14 +5,14 @@ use thiserror::Error;
 /// Session log/index failure without transcript contents in diagnostics.
 #[derive(Debug, Error)]
 pub enum SessionStoreError {
-    /// An existing database table does not match the current admitted schema.
-    #[error("unsupported SQLite schema for {table}; explicit current-schema recovery is required")]
+    /// A database table does not match its admitted schema.
+    #[error("SQLite table {table} does not match its schema")]
     UnsupportedSqliteSchema {
         /// Table whose authoritative or derived layout requires explicit recovery.
         table: &'static str,
     },
     /// A session uses the unsupported lifetime-file journal layout.
-    #[error("unsupported legacy session journal layout; events.jsonl is not a segmented journal")]
+    #[error("invalid session journal layout: unexpected events.jsonl file")]
     UnsupportedJournalLayout,
     /// Session ids are path components and must use the restricted alphabet.
     #[error("session id is empty, too long, or contains unsafe characters")]

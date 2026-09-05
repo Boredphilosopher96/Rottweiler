@@ -1,5 +1,4 @@
 use super::durable_session::{DurableEventSink, HostedSessionProjection, load_session_events};
-use super::session_metadata::SessionMetadata;
 use miette::{IntoDiagnostic, Result, miette};
 use rw_core::{AccountingAttribution, EngineEvent, SequenceId};
 use rw_store::session::{
@@ -16,18 +15,8 @@ pub(super) fn inherited_accounting_through(
     storage_root: &Path,
     session_id: &str,
 ) -> Result<Option<SequenceId>> {
-    let path = storage_root
-        .join("sessions")
-        .join(session_id)
-        .join("metadata.json");
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).into_diagnostic(),
-    };
-    let metadata: SessionMetadata = serde_json::from_slice(&bytes)
-        .map_err(|error| miette!("session metadata is corrupt: {error}"))?;
-    Ok(metadata.inherited_accounting_through)
+    super::session_metadata::load_session_metadata_any(storage_root, session_id)
+        .map(|metadata| metadata.inherited_accounting_through)
 }
 
 pub(super) fn refresh_session_index(storage_root: &Path) -> Result<()> {

@@ -505,18 +505,18 @@ fn unsafe_segment_descriptors_and_pinned_active_mutation_fail_closed() {
     );
 }
 #[test]
-fn unsupported_lifetime_layout_is_rejected_without_creating_an_empty_journal() {
+fn unexpected_session_file_is_rejected_without_creating_an_empty_journal() {
     let root = tempdir().expect("root");
-    let session = root.path().join("sessions/legacy");
+    let session = root.path().join("sessions/invalid-layout");
     fs::create_dir_all(&session).expect("session");
     let original = b"{\"schema_version\":1,\"sequence\":\"0\",\"event\":{}}\n";
-    fs::write(session.join("events.jsonl"), original).expect("old layout");
+    fs::write(session.join("events.jsonl"), original).expect("unexpected file");
     assert!(matches!(
-        SegmentedJournal::open(root.path(), "legacy"),
+        SegmentedJournal::open(root.path(), "invalid-layout"),
         Err(SessionStoreError::UnsupportedJournalLayout)
     ));
     assert!(matches!(
-        JournalReadView::open_existing(root.path(), "legacy"),
+        JournalReadView::open_existing(root.path(), "invalid-layout"),
         Err(SessionStoreError::UnsupportedJournalLayout)
     ));
     assert!(!session.join("journal").exists());

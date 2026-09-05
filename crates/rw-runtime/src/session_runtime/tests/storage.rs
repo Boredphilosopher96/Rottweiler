@@ -124,6 +124,10 @@ fn session_metadata_reads_are_bounded_descriptor_stable_and_single_link() {
     .expect("bounded metadata read");
     assert_eq!(metadata.session_id, "metadata-bounds");
     assert_eq!(descriptor_bytes, expected_bytes);
+    assert_eq!(
+        inherited_accounting_through(root.path(), "metadata-bounds").expect("accounting boundary"),
+        None
+    );
 
     let alias = root.path().join("metadata-hardlink.json");
     std::fs::hard_link(&path, &alias).expect("hard link fixture");
@@ -135,6 +139,7 @@ fn session_metadata_reads_are_bounded_descriptor_stable_and_single_link() {
         )
         .is_err()
     );
+    assert!(inherited_accounting_through(root.path(), "metadata-bounds").is_err());
     std::fs::remove_file(alias).expect("remove hard link");
     std::fs::OpenOptions::new()
         .write(true)
@@ -149,6 +154,7 @@ fn session_metadata_reads_are_bounded_descriptor_stable_and_single_link() {
         )
         .is_err()
     );
+    assert!(inherited_accounting_through(root.path(), "metadata-bounds").is_err());
 }
 
 #[cfg(unix)]
@@ -462,7 +468,7 @@ fn fork_storage_starts_empty_review_and_skips_inherited_accounting() {
         child_metadata.workspace_roots,
         vec![workspace.clone(), added.clone()]
     );
-    assert_eq!(child_metadata.initial_context_workspace_root_count, Some(1));
+    assert_eq!(child_metadata.initial_context_workspace_root_count, 1);
     assert_eq!(child_metadata.fork_at_turn, Some(2));
     assert_eq!(
         load_session_workspace_roots(

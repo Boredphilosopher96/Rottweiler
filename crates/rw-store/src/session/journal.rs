@@ -122,7 +122,7 @@ impl JournalRoot {
     /// Tests for a segmented session without reading payloads or taking its writer lock.
     ///
     /// # Errors
-    /// Rejects unsupported legacy layouts and unsafe directory components.
+    /// Rejects invalid journal layouts and unsafe directory components.
     pub fn contains_session(&self, session_id: &str) -> Result<bool, SessionStoreError> {
         match Directory::open_at(self, session_id, false) {
             Ok(_) => Ok(true),

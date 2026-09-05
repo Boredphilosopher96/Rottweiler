@@ -5,11 +5,11 @@ fn unsupported_accounting_schema_rejects_without_changing_rows_or_bytes() {
     let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
     let path = root.path().join("index.sqlite");
     let connection = rusqlite::Connection::open(&path)
-        .unwrap_or_else(|error| panic!("legacy index must open: {error}"));
+        .unwrap_or_else(|error| panic!("fixture index must open: {error}"));
     connection
         .execute_batch(
-            "CREATE TABLE legacy_marker(value TEXT NOT NULL); \
-                 INSERT INTO legacy_marker(value) VALUES ('preserved'); \
+            "CREATE TABLE fixture_marker(value TEXT NOT NULL); \
+                 INSERT INTO fixture_marker(value) VALUES ('preserved'); \
                  CREATE TABLE turn_accounting( \
                    session_id TEXT NOT NULL, turn_id TEXT NOT NULL, \
                    sequence_id TEXT NOT NULL, emitted_at_utc TEXT NOT NULL, \
@@ -19,12 +19,12 @@ fn unsupported_accounting_schema_rejects_without_changing_rows_or_bytes() {
                  INSERT INTO turn_accounting( \
                    session_id,turn_id,sequence_id,emitted_at_utc,utc_day,cost_json \
                  ) VALUES ( \
-                   'legacy-accounting','1','0','2026-01-01T00:00:00.000Z', \
+                   'fixture-accounting','1','0','2026-01-01T00:00:00.000Z', \
                    '2026-01-01', \
                    '{\"kind\":\"monetary\",\"amount_micros\":\"5\",\"currency\":\"USD\"}' \
                  );",
         )
-        .unwrap_or_else(|error| panic!("legacy schema must create: {error}"));
+        .unwrap_or_else(|error| panic!("fixture schema must create: {error}"));
     drop(connection);
 
     let before = std::fs::read(&path).unwrap_or_default();
@@ -48,7 +48,7 @@ fn unsupported_accounting_schema_rejects_without_changing_rows_or_bytes() {
         .unwrap_or_default();
     assert_eq!(rows, 1);
     let marker: String = connection
-        .query_row("SELECT value FROM legacy_marker", [], |row| row.get(0))
+        .query_row("SELECT value FROM fixture_marker", [], |row| row.get(0))
         .unwrap_or_default();
     assert_eq!(marker, "preserved");
 }

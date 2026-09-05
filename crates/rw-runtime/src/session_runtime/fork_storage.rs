@@ -6,6 +6,7 @@ use super::checkpoint_journal::open_checkpoint_stores;
 use super::checkpoint_journal::persist_private_json;
 use super::session_metadata::SESSION_METADATA_VERSION;
 use super::session_metadata::SessionMetadata;
+use super::session_metadata::encode_session_metadata;
 use super::session_metadata::ensure_real_directory;
 use super::session_metadata::load_session_metadata;
 #[cfg(not(unix))]
@@ -261,17 +262,13 @@ pub(super) fn persist_forked_session_metadata(
         initial_session_context: parent.initial_session_context.clone(),
         workspace_generation,
         workspace_roots: workspace_roots.to_vec(),
-        initial_context_workspace_root_count: Some(
-            parent
-                .initial_context_workspace_root_count
-                .unwrap_or_else(|| parent.workspace_roots.len().max(1)),
-        ),
+        initial_context_workspace_root_count: parent.initial_context_workspace_root_count,
         inherited_accounting_through,
         fork_parent_session_id: Some(parent.session_id.clone()),
         fork_at_turn: Some(fork_at_turn),
         fork_operation_id: fork_operation_id.map(str::to_owned),
     };
-    let bytes = serde_json::to_vec(&metadata).into_diagnostic()?;
+    let bytes = encode_session_metadata(&metadata)?;
     let path = directory.join("metadata.json");
     #[cfg(unix)]
     {

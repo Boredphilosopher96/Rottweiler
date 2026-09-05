@@ -1,4 +1,6 @@
+mod encoding;
 use super::MAX_WORKSPACE_ROOTS;
+pub(super) use encoding::encode as encode_session_metadata;
 use miette::{IntoDiagnostic, Result, miette};
 use rw_types::{SequenceId, SessionId, Turn};
 use serde::{Deserialize, Serialize};
@@ -17,25 +19,41 @@ pub(super) const MAX_SESSION_METADATA_BYTES: u64 = 8 * 1024 * 1024;
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SessionMetadata {
+    #[serde(deserialize_with = "deserialize_version")]
     pub(super) version: u16,
     pub(super) session_id: String,
     pub workspace: PathBuf,
     pub model_alias: String,
     pub(super) initial_session_context: Vec<Turn>,
-    #[serde(default)]
     pub workspace_generation: u64,
-    #[serde(default)]
     pub workspace_roots: Vec<PathBuf>,
-    #[serde(default)]
-    pub(super) initial_context_workspace_root_count: Option<usize>,
-    #[serde(default)]
+    pub(super) initial_context_workspace_root_count: usize,
+    #[serde(deserialize_with = "deserialize_optional_value")]
     pub(crate) inherited_accounting_through: Option<SequenceId>,
-    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_optional_value")]
     pub(super) fork_parent_session_id: Option<String>,
-    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_optional_value")]
     pub(crate) fork_at_turn: Option<u64>,
-    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_optional_value")]
     pub(super) fork_operation_id: Option<String>,
+}
+
+fn deserialize_version<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<u16, D::Error> {
+    let value = u16::deserialize(deserializer)?;
+    if value != SESSION_METADATA_VERSION {
+        return Err(serde::de::Error::custom(
+            "invalid session metadata schema version",
+        ));
+    }
+    Ok(value)
+}
+
+fn deserialize_optional_value<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error> {
+    Option::<T>::deserialize(deserializer)
 }
 
 pub(super) fn validate_session_id(value: &str) -> Result<()> {
@@ -63,13 +81,13 @@ pub(super) fn persist_session_metadata(
         initial_session_context: initial_session_context.to_vec(),
         workspace_generation: 0,
         workspace_roots: workspace_roots.to_vec(),
-        initial_context_workspace_root_count: Some(workspace_roots.len()),
+        initial_context_workspace_root_count: workspace_roots.len(),
         inherited_accounting_through: None,
         fork_parent_session_id: None,
         fork_at_turn: None,
         fork_operation_id: None,
     };
-    let bytes = serde_json::to_vec(&metadata).into_diagnostic()?;
+    let bytes = encode_session_metadata(&metadata)?;
     let path = directory.join("metadata.json");
     #[cfg(unix)]
     {
@@ -155,13 +173,18 @@ pub(crate) fn load_session_metadata_any_bounded(
             "session metadata identity does not match this session and canonical workspace"
         ));
     }
-    if metadata.workspace_roots.len() > MAX_WORKSPACE_ROOTS
+    if metadata.workspace_roots.is_empty()
+        || metadata.workspace_roots.len() > MAX_WORKSPACE_ROOTS
+        || metadata.workspace_roots.first() != Some(&metadata.workspace)
         || metadata
-            .initial_context_workspace_root_count
-            .is_some_and(|count| count > MAX_WORKSPACE_ROOTS)
+            .workspace_roots
+            .iter()
+            .any(|root| !root.is_absolute())
+        || metadata.initial_context_workspace_root_count == 0
+        || metadata.initial_context_workspace_root_count > metadata.workspace_roots.len()
     {
         return Err(miette!(
-            "session metadata exceeds the supported workspace root maximum"
+            "session metadata has an invalid workspace-root mapping"
         ));
     }
     Ok((metadata, byte_count))
@@ -425,3 +448,6 @@ pub fn new_session_id() -> Result<String> {
     }
     Ok(id)
 }
+
+#[cfg(test)]
+mod tests;

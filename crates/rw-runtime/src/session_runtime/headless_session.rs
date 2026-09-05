@@ -261,9 +261,7 @@ pub async fn run(options: RunOptions) -> Result<()> {
     let (mut initial_context, persisted_model_alias) = if resuming {
         let metadata = load_session_metadata(&storage_root, &session_id, &workspace)?;
         let mut context = metadata.initial_session_context;
-        let recorded_count = metadata
-            .initial_context_workspace_root_count
-            .unwrap_or_else(|| metadata.workspace_roots.len().max(1));
+        let recorded_count = metadata.initial_context_workspace_root_count;
         for root in workspace_roots.iter().skip(recorded_count) {
             if let Some(instructions) = rw_core::load_root_project_instructions(root)
                 .map_err(|error| miette!("project instructions could not load: {error}"))?

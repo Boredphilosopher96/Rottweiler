@@ -85,10 +85,10 @@ fn sqlite_index_lists_updates_and_searches_transcripts() {
 }
 
 #[test]
-fn read_only_listing_rejects_a_pre_turn_count_index() {
+fn read_only_listing_rejects_a_index_missing_the_turn_count_column() {
     let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
     let connection = rusqlite::Connection::open(root.path().join("index.sqlite"))
-        .unwrap_or_else(|error| panic!("legacy index must open: {error}"));
+        .unwrap_or_else(|error| panic!("fixture index must open: {error}"));
     connection
         .execute_batch(
             "CREATE TABLE sessions(
@@ -100,10 +100,10 @@ fn read_only_listing_rejects_a_pre_turn_count_index() {
                    projected_sequence TEXT
                  );
                  INSERT INTO sessions VALUES(
-                   'legacy-session','Legacy session',10,0,'legacy transcript','0'
+                   'fixture-session','Fixture session',10,0,'fixture transcript','0'
                  );",
         )
-        .unwrap_or_else(|error| panic!("legacy schema must write: {error}"));
+        .unwrap_or_else(|error| panic!("fixture schema must write: {error}"));
     drop(connection);
 
     let before = std::fs::read(root.path().join("index.sqlite")).unwrap_or_default();
@@ -118,17 +118,17 @@ fn read_only_listing_rejects_a_pre_turn_count_index() {
 }
 
 #[test]
-fn opening_an_unsupported_index_rejects_without_backfill_or_mutation() {
+fn opening_an_unsupported_index_rejects_without_mutating_database_bytes() {
     let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
-    let mut log = SessionEventLog::open(root.path(), "legacy-session")
-        .unwrap_or_else(|error| panic!("legacy event log must open: {error}"));
+    let mut log = SessionEventLog::open(root.path(), "fixture-session")
+        .unwrap_or_else(|error| panic!("fixture event log must open: {error}"));
     for _ in 0..3 {
         log.append(serde_json::json!({"type": "user_message_accepted"}))
-            .unwrap_or_else(|error| panic!("legacy turn must append: {error}"));
+            .unwrap_or_else(|error| panic!("fixture turn must append: {error}"));
     }
     drop(log);
     let connection = rusqlite::Connection::open(root.path().join("index.sqlite"))
-        .unwrap_or_else(|error| panic!("legacy index must open: {error}"));
+        .unwrap_or_else(|error| panic!("fixture index must open: {error}"));
     connection
         .execute_batch(
             "CREATE TABLE sessions(
@@ -140,10 +140,10 @@ fn opening_an_unsupported_index_rejects_without_backfill_or_mutation() {
                    projected_sequence TEXT
                  );
                  INSERT INTO sessions VALUES(
-                   'legacy-session','Legacy session',10,0,'legacy transcript','2'
+                   'fixture-session','Fixture session',10,0,'fixture transcript','2'
                  );",
         )
-        .unwrap_or_else(|error| panic!("legacy schema must write: {error}"));
+        .unwrap_or_else(|error| panic!("fixture schema must write: {error}"));
     drop(connection);
 
     let before = std::fs::read(root.path().join("index.sqlite")).unwrap_or_default();

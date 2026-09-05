@@ -120,7 +120,9 @@ fn additional_turn_uniqueness_is_rejected_even_with_current_columns() {
         "PRIMARY KEY(session_id,sequence_id)",
         "PRIMARY KEY(session_id,sequence_id), UNIQUE(session_id,turn_id)",
     );
-    connection.execute_batch(&schema).expect("old constraint");
+    connection
+        .execute_batch(&schema)
+        .expect("unexpected constraint");
     drop(connection);
     let before = std::fs::read(&path).expect("before");
     assert!(matches!(
@@ -133,13 +135,13 @@ fn additional_turn_uniqueness_is_rejected_even_with_current_columns() {
 }
 
 #[test]
-fn separately_created_legacy_unique_index_is_rejected() {
+fn separately_created_fixture_unique_index_is_rejected() {
     let root = tempdir().expect("root");
     AccountingLedger::open(root.path()).expect("ledger");
     let connection = Connection::open(root.path().join("index.sqlite")).expect("db");
     connection
         .execute_batch("CREATE UNIQUE INDEX old_turn_key ON turn_accounting(session_id,turn_id);")
-        .expect("old constraint");
+        .expect("unexpected constraint");
     drop(connection);
     assert!(matches!(
         AccountingLedger::open(root.path()),
