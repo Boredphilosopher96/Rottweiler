@@ -102,6 +102,16 @@ impl<T> HistoryRead<T> {
         }
     }
 }
+impl<T> HistoryRead<HistoryRead<T>> {
+    /// Combine nested materializations while retaining both existing allowances.
+    #[must_use]
+    pub fn flatten(self) -> HistoryRead<T> {
+        HistoryRead {
+            value: self.value.value,
+            owner: Box::new((self.owner, self.value.owner)),
+        }
+    }
+}
 impl<T> Deref for HistoryRead<T> {
     type Target = T;
     fn deref(&self) -> &T {

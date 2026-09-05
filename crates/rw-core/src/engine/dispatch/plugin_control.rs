@@ -175,8 +175,7 @@ pub(super) async fn control(
             {
                 return Err(invalid("unknown provider route"));
             }
-            let needs_choice = state.conversation_summary().turns
-                > state.conversation_summary().system_turns
+            let needs_choice = state.has_conversation_context()
                 && (state.model_alias != model.0 || state.provider != provider);
             if !needs_choice && !prepared {
                 return Ok(None);

@@ -21,7 +21,6 @@ use crate::engine::session::ProtocolCompletion;
 use crate::engine::turn::build_cost_snapshot;
 use crate::engine::turn::emit;
 use crate::engine::turn::emit_batch;
-use crate::engine::wire_turn_id;
 use rw_types::ClientCommand;
 use rw_types::ClientRole;
 use rw_types::CommandMeta;

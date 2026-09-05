@@ -1,8 +1,8 @@
 #![cfg(test)]
 
 use crate::engine::AgentLoopError;
-use crate::engine::SessionActor;
 use crate::engine::MessageDisposition;
+use crate::engine::SessionActor;
 use crate::engine::builtin_hook_dispatcher;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::projection::SessionRecoveredState;

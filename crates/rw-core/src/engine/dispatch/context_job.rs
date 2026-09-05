@@ -88,16 +88,12 @@ pub(in crate::engine) fn start(
         Target::Plugin { request, .. } => Some(request.clone()),
         _ => None,
     };
-    let active_turn = state
-        .running
-        .as_ref()
-        .map(|turn| crate::engine::wire_turn_id(turn.id));
     let (send, receive) = oneshot::channel();
     let spawned = state.tasks.spawn(
         Arc::clone(config),
         rw_tools::CancellationToken::default(),
         async move {
-            let result = read(owner, tasks, requested_turn, dump, plugin, active_turn).await;
+            let result = read(owner, tasks, requested_turn, dump, plugin).await;
             let _ = send.send(result);
         },
     );
@@ -123,21 +119,31 @@ async fn read(
     requested_turn: Option<TurnId>,
     dump: bool,
     plugin: Option<rw_types::extension_control::ExtensionContextRead>,
-    active_turn: Option<TurnId>,
 ) -> ReadResult {
     if let Some(turn) = requested_turn {
         return historical_prompt(config, tasks, turn).await;
     }
     let view = config.history.capture_history().await?;
     let bootstrap = view.bootstrap().await?;
-    let queued: VecDeque<_> = bootstrap
-        .controls
-        .queued_messages
-        .iter()
-        .map(|(_, message)| message.content.clone())
-        .collect();
-    let current =
-        history_context::assemble_view(Arc::clone(&config), &tasks, view, queued, dump).await?;
+    let active_turn = bootstrap
+        .head
+        .control
+        .active
+        .as_ref()
+        .map(|active| crate::engine::wire_turn_id(active.turn));
+    let current = bootstrap
+        .map_async(|bootstrap| async {
+            let queued: VecDeque<_> = bootstrap
+                .controls
+                .queued_messages
+                .into_iter()
+                .map(|(_, message)| message.content)
+                .collect();
+            history_context::assemble_view(Arc::clone(&config), &tasks, view, queued, dump).await
+        })
+        .await
+        .try_map(|result| result)?
+        .flatten();
     let result = tasks
         .spawn_blocking(
             Arc::clone(&config),
@@ -164,7 +170,7 @@ async fn read(
                         )))
                     }
                 });
-                output.map(|output| output.retain(bootstrap))
+                output
             },
         )?
         .await

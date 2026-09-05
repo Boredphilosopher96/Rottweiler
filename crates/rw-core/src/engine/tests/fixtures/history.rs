@@ -34,7 +34,13 @@ impl SessionHistory for UnboundHistory {
     }
 }
 
-pub(crate) async fn spawn(mut config: SessionActorConfig) -> Result<SessionHandle, AgentLoopError> {
+pub(crate) async fn spawn(config: SessionActorConfig) -> Result<SessionHandle, AgentLoopError> {
+    SessionActor::spawn(bind(config).await?)
+}
+
+pub(crate) async fn bind(
+    mut config: SessionActorConfig,
+) -> Result<SessionActorConfig, AgentLoopError> {
     let root = Arc::new(tempfile::tempdir().map_err(failure)?);
     let mut log = SegmentedJournal::open(root.path(), &config.session_id.0).map_err(failure)?;
     let source = config.event_sink.capture_read_view()?;
@@ -79,7 +85,7 @@ pub(crate) async fn spawn(mut config: SessionActorConfig) -> Result<SessionHandl
     });
     config.history = authority.clone();
     config.event_sink = authority;
-    SessionActor::spawn(config)
+    Ok(config)
 }
 
 fn failure(error: impl std::fmt::Display) -> AgentLoopError {
