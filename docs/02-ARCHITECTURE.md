@@ -298,7 +298,7 @@ ids cross JSON as decimal strings so JavaScript clients never lose precision.
 
 Historical `rw stats` is deliberately outside the live engine/provider path. It
 copies the reconciled accounting database plus committed WAL through the same
-descriptor-stable, size-capped read-only snapshot boundary as session search,
+descriptor-stable, size-capped read-only snapshot boundary,
 then scans authoritative event logs under aggregate session/byte/event limits
 for tool-use counts and durable parent→child relationships. A session-scoped
 query includes that session's descendants; descendant accounting is relabeled
@@ -408,7 +408,18 @@ resolve(alias) → [candidate models] → adapter → provider
   are rejected before writes. Explicit search rebuild
   replaces only its derived tables in one transaction; accounting and independent
   authoritative tables survive. An unreadable database is never deleted as a
-  search-repair shortcut.
+  search-repair shortcut. Search projection retains bounded listing metadata and
+  an exact journal-prefix digest. Message text and tool-result fields are separate
+  source-qualified FTS documents; terms can match across documents in one session.
+  Queries are plain whitespace-separated terms, all required, with punctuation
+  interpreted by SQLite's tokenizer inside each field. Rewind deletes documents
+  by their agent-turn identity in the same transaction as the source watermark.
+  Catch-up reads at most 128 events and 16 MiB per page; incomplete projections
+  stay out of search/list results until their captured source is covered.
+  Live SQLite read transactions use a 1 MiB page cache and disabled memory mapping,
+  so search does not copy the lifetime database or retain transcript bodies.
+  Read-only handles cannot write stored rows; SQLite may maintain its ephemeral
+  WAL/read-mark coordination files.
 - Accounting facts and their time-prefix aggregates commit in one writer transaction.
   Session and global aggregates use a 49-level binary time index with exact u128
   sums; as-of and trailing-window reads visit a fixed number of nodes and convert

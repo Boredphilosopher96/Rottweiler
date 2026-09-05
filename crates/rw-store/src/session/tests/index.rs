@@ -237,7 +237,7 @@ fn derived_index_rebuild_replaces_stale_rows() {
 }
 
 #[test]
-fn read_only_search_never_creates_or_mutates_index_artifacts() {
+fn read_only_search_preserves_stored_rows_and_does_not_create_a_missing_index() {
     let absent = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
     assert!(SessionIndex::search_read_only(absent.path(), "needle", 10).is_err());
     assert!(
@@ -268,10 +268,6 @@ fn read_only_search_never_creates_or_mutates_index_artifacts() {
         .unwrap_or_else(|error| panic!("seed index: {error}"));
     let index_path = root.path().join("index.sqlite");
     let before = std::fs::read(&index_path).unwrap_or_else(|error| panic!("read index: {error}"));
-    let wal_path = root.path().join("index.sqlite-wal");
-    let shm_path = root.path().join("index.sqlite-shm");
-    let wal_before = std::fs::read(&wal_path).ok();
-    let shm_before = std::fs::read(&shm_path).ok();
     let found = SessionIndex::search_read_only(root.path(), "needle", 10)
         .unwrap_or_else(|error| panic!("read-only search: {error}"));
     assert_eq!(found, vec![projection.summary]);
@@ -284,12 +280,10 @@ fn read_only_search_never_creates_or_mutates_index_artifacts() {
         std::fs::read(&index_path).unwrap_or_else(|error| panic!("reread index: {error}")),
         before
     );
-    assert_eq!(std::fs::read(&wal_path).ok(), wal_before);
-    assert_eq!(std::fs::read(&shm_path).ok(), shm_before);
 }
 
 #[test]
-fn read_only_search_sees_committed_wal_rows_without_mutating_artifacts() {
+fn read_only_search_sees_committed_wal_rows_without_writing_data() {
     let root = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
     SessionIndex::open(root.path()).unwrap_or_else(|error| panic!("seed index: {error}"));
     let writer = rusqlite::Connection::open(root.path().join("index.sqlite"))
@@ -317,11 +311,9 @@ fn read_only_search_sees_committed_wal_rows_without_mutating_artifacts() {
 
     let index_path = root.path().join("index.sqlite");
     let wal_path = root.path().join("index.sqlite-wal");
-    let shm_path = root.path().join("index.sqlite-shm");
     let before = [
         std::fs::read(&index_path).unwrap_or_else(|error| panic!("main db: {error}")),
         std::fs::read(&wal_path).unwrap_or_else(|error| panic!("WAL: {error}")),
-        std::fs::read(&shm_path).unwrap_or_else(|error| panic!("SHM: {error}")),
     ];
     assert!(
         !before[1].is_empty(),
@@ -335,7 +327,6 @@ fn read_only_search_sees_committed_wal_rows_without_mutating_artifacts() {
         [
             std::fs::read(&index_path).unwrap_or_else(|error| panic!("main db after: {error}")),
             std::fs::read(&wal_path).unwrap_or_else(|error| panic!("WAL after: {error}")),
-            std::fs::read(&shm_path).unwrap_or_else(|error| panic!("SHM after: {error}")),
         ],
         before
     );
@@ -343,45 +334,26 @@ fn read_only_search_sees_committed_wal_rows_without_mutating_artifacts() {
 }
 
 #[test]
-fn read_only_search_rejects_an_oversized_sparse_main_index_before_copying() {
-    let root = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    SessionIndex::open(root.path()).unwrap_or_else(|error| panic!("seed index: {error}"));
-    let index_path = root.path().join("index.sqlite");
+fn read_only_search_does_not_copy_large_sparse_database_extents() {
+    let root = tempdir().expect("root");
+    let index = SessionIndex::open(root.path()).expect("index");
+    let projection = projection(summary("large", "needle", 1), 1);
+    index.upsert(&projection).expect("projection");
+    let path = root.path().join("index.sqlite");
     OpenOptions::new()
         .write(true)
-        .open(&index_path)
-        .and_then(|file| file.set_len(MAX_SEARCH_INDEX_BYTES + 1))
-        .unwrap_or_else(|error| panic!("make sparse oversized index: {error}"));
-
-    assert!(matches!(
-        SessionIndex::search_read_only(root.path(), "needle", 10),
-        Err(SessionStoreError::SessionIndexSnapshotTooLarge {
-            component: "index.sqlite",
-            max_bytes: MAX_SEARCH_INDEX_BYTES,
-        })
-    ));
-}
-
-#[test]
-fn read_only_search_rejects_an_oversized_sparse_wal_before_copying() {
-    let root = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    SessionIndex::open(root.path()).unwrap_or_else(|error| panic!("seed index: {error}"));
-    let wal_path = root.path().join("index.sqlite-wal");
-    OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&wal_path)
-        .and_then(|file| file.set_len(MAX_SEARCH_INDEX_WAL_BYTES + 1))
-        .unwrap_or_else(|error| panic!("make sparse oversized WAL: {error}"));
-
-    assert!(matches!(
-        SessionIndex::search_read_only(root.path(), "needle", 10),
-        Err(SessionStoreError::SessionIndexSnapshotTooLarge {
-            component: "index.sqlite-wal",
-            max_bytes: MAX_SEARCH_INDEX_WAL_BYTES,
-        })
-    ));
+        .open(&path)
+        .expect("file")
+        .set_len(512 * 1024 * 1024)
+        .expect("sparse extent");
+    assert_eq!(
+        SessionIndex::search_read_only(root.path(), "needle", 10).expect("indexed read"),
+        vec![projection.summary]
+    );
+    assert_eq!(
+        std::fs::metadata(path).expect("file").len(),
+        512 * 1024 * 1024
+    );
 }
 
 #[cfg(unix)]

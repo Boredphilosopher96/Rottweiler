@@ -69,13 +69,7 @@ async fn citation_overflow_stops_announcements_and_waits_for_provider_effects() 
     tokio::time::timeout(std::time::Duration::from_secs(3), model.settling.notified())
         .await
         .expect("provider settlement started");
-    assert!(
-        actor
-            .snapshot()
-            .await
-            .expect("responsive snapshot")
-            .running
-    );
+    assert!(actor.snapshot().await.expect("responsive snapshot").running);
     model.released.store(true, Ordering::Release);
     model.release.notify_waiters();
     let events = collect_turn(&mut subscription).await;

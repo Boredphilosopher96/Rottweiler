@@ -1,12 +1,12 @@
 //! Rebuildable session listing and full-text search; accounting authority is preserved.
 use super::{
     SessionStoreError,
+    index_read::read_index,
     journal::JournalPrefixIdentity,
     journal_io::validate_session_id,
     sqlite_schema::{self, configure_connection, ensure_accounting_schema},
-    sqlite_snapshot::{read_only_index_snapshot, same_file_identity, validate_read_only_index},
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension as _, params};
+use rusqlite::{Connection, OptionalExtension as _, params};
 use rw_types::SequenceId;
 use std::{
     fs,
@@ -240,31 +240,11 @@ impl SessionIndex {
         if limit > 1_001 {
             return Err(SessionStoreError::SearchLimitTooLarge);
         }
-        let path = root.join("index.sqlite");
-        let before = validate_read_only_index(&path)?;
-        let canonical_root = fs::canonicalize(root)?;
-        let canonical_path = fs::canonicalize(&path)?;
-        if canonical_path.parent() != Some(canonical_root.as_path()) {
-            return Err(SessionStoreError::UnsafeSessionIndex);
-        }
-        let snapshot = read_only_index_snapshot(&canonical_root, &before)?;
-        let snapshot_path = fs::canonicalize(snapshot.path().join("index.sqlite"))?;
-        let connection = Connection::open_with_flags(
-            snapshot_path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )?;
-        let after = validate_read_only_index(&path)?;
-        if !same_file_identity(&before, &after) {
-            return Err(SessionStoreError::UnsafeSessionIndex);
-        }
-        sqlite_schema::validate_sessions(&connection)?;
-        query_search(&connection, query, limit)
+        read_index(root, |connection| query_search(connection, query, limit))
     }
 
-    /// Lists newest sessions from a private read-only snapshot of an existing
-    /// index. The live database and WAL are never modified by this query.
+    /// Lists newest sessions using a live SQLite read transaction.
+    /// SQLite may maintain its transient WAL coordination files; stored rows are read-only.
     ///
     /// # Errors
     ///
@@ -278,32 +258,14 @@ impl SessionIndex {
             return Err(SessionStoreError::SearchLimitTooLarge);
         }
         let limit = i64::try_from(limit).map_err(|_| SessionStoreError::LimitOverflow)?;
-        let path = root.join("index.sqlite");
-        let before = validate_read_only_index(&path)?;
-        let canonical_root = fs::canonicalize(root)?;
-        let canonical_path = fs::canonicalize(&path)?;
-        if canonical_path.parent() != Some(canonical_root.as_path()) {
-            return Err(SessionStoreError::UnsafeSessionIndex);
-        }
-        let snapshot = read_only_index_snapshot(&canonical_root, &before)?;
-        let snapshot_path = fs::canonicalize(snapshot.path().join("index.sqlite"))?;
-        let connection = Connection::open_with_flags(
-            snapshot_path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )?;
-        let after = validate_read_only_index(&path)?;
-        if !same_file_identity(&before, &after) {
-            return Err(SessionStoreError::UnsafeSessionIndex);
-        }
-        sqlite_schema::validate_sessions(&connection)?;
-        let mut statement = connection.prepare(
-            "SELECT id,title,updated_unix_ms,cost_micros,turn_count FROM sessions \
-             WHERE search_complete=1 ORDER BY updated_unix_ms DESC,id ASC LIMIT ?1",
-        )?;
-        let rows = statement.query_map([limit], summary_from_row)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        read_index(root, |connection| {
+            sqlite_schema::validate_sessions(connection)?;
+            let mut statement = connection.prepare(
+                "SELECT id,title,updated_unix_ms,cost_micros,turn_count FROM sessions WHERE search_complete=1 ORDER BY updated_unix_ms DESC,id ASC LIMIT ?1",
+            )?;
+            let rows = statement.query_map([limit], summary_from_row)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        })
     }
 
     /// Returns one projection by id.
