@@ -957,3 +957,96 @@ fn provider_correlation_size_does_not_expand_semantic_tool_rows() {
         journal.read_view().prefix_identity()
     );
 }
+
+#[test]
+fn turn_summaries_preserve_exact_actuals_without_receipt_duplication_and_obey_rewind() {
+    let root = tempdir().expect("root");
+    let mut journal = SegmentedJournal::open(root.path(), "semantic").expect("journal");
+    let usage = rw_types::Usage {
+        input_tokens: u64::MAX,
+        output_tokens: 17,
+        cache_read_tokens: 13,
+        cache_write_tokens: 11,
+        reasoning_tokens: 7,
+    };
+    let cost = rw_types::Cost::Monetary {
+        amount_micros: u64::MAX,
+        currency: "USD".into(),
+    };
+    journal
+        .append_batch([
+            EngineEvent::ProviderCallAccounted {
+                meta: meta(0),
+                call: rw_types::ProviderCallIdentity {
+                    session_id: SessionId("semantic".into()),
+                    turn_id: TurnId("1".into()),
+                    attribution: rw_types::AccountingAttribution::Main,
+                    call_id: "provider-call".into(),
+                    attempt: 0,
+                },
+                actuals: rw_types::ProviderCallActuals {
+                    usage: usage.clone(),
+                    cost: cost.clone(),
+                },
+            },
+            EngineEvent::TurnFinished {
+                meta: meta(1),
+                turn_id: TurnId("1".into()),
+                status: rw_types::TurnStatus::Interrupted,
+                usage: usage.clone(),
+                cost: cost.clone(),
+            },
+            EngineEvent::TurnFinished {
+                meta: meta(2),
+                turn_id: TurnId("2".into()),
+                status: rw_types::TurnStatus::Completed,
+                usage: usage.clone(),
+                cost: cost.clone(),
+            },
+        ])
+        .expect("canonical actuals");
+    let view = journal.read_view();
+    let mut projector = TranscriptProjector::open(&view).expect("projector");
+    assert!(
+        !projector
+            .advance(&view)
+            .expect("project summaries")
+            .has_more
+    );
+    let page = projector
+        .index()
+        .page(0, 1, 4096)
+        .expect("one summary page");
+    assert_eq!(page.rows.len(), 1);
+    assert_eq!(page.rows[0].source, SequenceId(1));
+    assert_eq!(
+        decode(&page.rows[0]).expect("summary"),
+        TranscriptContent::TurnSummary {
+            turn_id: TurnId("1".into()),
+            status: rw_types::TurnStatus::Interrupted,
+            usage,
+            cost,
+        }
+    );
+    assert_eq!(projector.index().head().expect("head").total_rows, 2);
+    journal
+        .append_batch([EngineEvent::ConversationRewound {
+            meta: meta(3),
+            to_agent_turn: 1,
+            operation_id: "summary-rewind".into(),
+            unrestorable_paths: vec![],
+        }])
+        .expect("rewind");
+    let view = journal.read_view();
+    for _ in 0..10 {
+        if !projector.advance(&view).expect("bounded rewind").has_more {
+            break;
+        }
+    }
+    let page = projector
+        .index()
+        .page(0, 64, 4096)
+        .expect("rewound summary");
+    assert_eq!(page.rows.len(), 1);
+    assert_eq!(page.rows[0].source, SequenceId(1));
+}

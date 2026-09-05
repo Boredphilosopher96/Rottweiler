@@ -1,5 +1,5 @@
 import validateCommandReply from "../../../../protocol/command-reply-validator.js"
-import { ENGINE_EVENT_DELIVERY, MAX_COMMAND_REPLY_BYTES, PROTOCOL_VERSION } from "../protocol"
+import { CLIENT_COMMAND_EXECUTION, ENGINE_EVENT_DELIVERY, MAX_COMMAND_REPLY_BYTES, PROTOCOL_VERSION } from "../protocol"
 import { boundedJson } from "./json"
 import type { ClientCommand, CommandReply } from "../protocol"
 import {
@@ -126,6 +126,10 @@ export class EngineHttpSseClient {
     const reply: unknown = await boundedJson(response, MAX_COMMAND_REPLY_BYTES)
     if (!validateCommandReply(reply)) {
       throw new EngineTransportError("engine returned an invalid command reply")
+    }
+    const expectedReply = CLIENT_COMMAND_EXECUTION[command.type] === "read" ? "read" : "command"
+    if (reply.type !== expectedReply) {
+      throw new EngineTransportError("engine reply class does not match the command")
     }
     if (reply.type === "read" && reply.events.some(event =>
       ENGINE_EVENT_DELIVERY[event.type] !== "connection" || !("meta" in event) || event.meta.protocol_version !== PROTOCOL_VERSION

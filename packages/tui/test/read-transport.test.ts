@@ -23,6 +23,13 @@ function clientFor(reply: unknown): EngineHttpSseClient {
 }
 
 describe("direct query reply boundary", () => {
+  test("reply discriminator follows the source-owned command execution class", async () => {
+    await expect(clientFor({ type: "command", outcome: { type: "accepted" } }).postCommand(query))
+      .rejects.toThrow("reply class")
+    const control = { type: "interrupt", meta: query.meta, session_id: "session" } satisfies ClientCommand
+    await expect(clientFor({ type: "read", outcome: { type: "accepted" }, events: [] }).postCommand(control))
+      .rejects.toThrow("reply class")
+  })
   test("accepts correlated typed query data without an SSE acknowledgement", async () => {
     const reply = { type: "read", outcome: { type: "accepted" }, events: [listed] } satisfies CommandReply
     expect(await clientFor(reply).postCommand(query)).toEqual(reply)

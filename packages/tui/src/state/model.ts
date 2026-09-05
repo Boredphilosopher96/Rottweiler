@@ -540,6 +540,7 @@ export interface PluginNotificationProjection {
 export interface RottweilerState {
   readonly connection: ConnectionProjection
   readonly replay: ReplayProjection
+  readonly historyReady: { readonly sessionId: string; readonly through: string | null } | null
   readonly lastSequence: string | null
   readonly transcript: readonly TranscriptEntry[]
   /** Kept separate so streaming deltas never replace or re-layout transcript history. */
@@ -604,6 +605,7 @@ export function createInitialState(): RottweilerState {
       gap: null,
     },
     replay: { active: false, sessionId: null, completedThrough: null },
+    historyReady: null,
     lastSequence: null,
     transcript: [],
     streamingTail: null,

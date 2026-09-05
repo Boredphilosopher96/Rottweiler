@@ -146,6 +146,9 @@ fn generate_typescript() -> Result<String, XtaskError> {
     output.push_str("export const PROTOCOL_VERSION = ");
     output.push_str(&rw_types::PROTOCOL_VERSION.to_string());
     output.push_str(" as const;\n\n");
+    output.push_str("export const TRANSCRIPT_PROJECTION_VERSION = ");
+    output.push_str(&rw_types::transcript::TRANSCRIPT_PROJECTION_VERSION.to_string());
+    output.push_str(" as const;\n\n");
     for (name, value) in [
         ("MAX_ATTACHMENTS_PER_MESSAGE", MAX_ATTACHMENTS_PER_MESSAGE),
         ("MAX_TEXT_ATTACHMENT_BYTES", MAX_TEXT_ATTACHMENT_BYTES),
@@ -314,6 +317,7 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(rw_types::transcript::TranscriptContent);
 
     output.push_str(&generate_engine_event_delivery()?);
+    output.push_str(&generate_command_execution()?);
     Ok(output
         .trim_end()
         .lines()
@@ -321,6 +325,43 @@ fn generate_typescript() -> Result<String, XtaskError> {
         .collect::<Vec<_>>()
         .join("\n")
         + "\n")
+}
+
+fn generate_command_execution() -> Result<String, XtaskError> {
+    let schema = serde_json::to_value(schema_for!(ClientCommand))?;
+    let variants = schema
+        .get("oneOf")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| XtaskError::GeneratedContract("ClientCommand has no variants".into()))?;
+    let read_tags = serde_json::to_value(ClientCommand::read_type_tags())?;
+    let mut reads: BTreeSet<&str> = read_tags
+        .as_array()
+        .ok_or_else(|| XtaskError::GeneratedContract("read tags must be an array".into()))?
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    let mut classes = BTreeMap::new();
+    for variant in variants {
+        let tag = variant
+            .pointer("/properties/type/const")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| XtaskError::GeneratedContract("command tag missing".into()))?;
+        classes.insert(tag, if reads.remove(tag) { "read" } else { "control" });
+    }
+    if !reads.is_empty() {
+        return Err(XtaskError::GeneratedContract(
+            "read classification has unknown command tags".into(),
+        ));
+    }
+    let mut output = String::from("\nexport const CLIENT_COMMAND_EXECUTION = {\n");
+    for (tag, class) in classes {
+        use std::fmt::Write as _;
+        let _ = writeln!(output, "  {tag}: \"{class}\",");
+    }
+    output.push_str(
+        "} as const satisfies Record<ClientCommand[\"type\"], \"read\" | \"control\">;\n",
+    );
+    Ok(output)
 }
 
 fn generate_engine_event_delivery() -> Result<String, XtaskError> {

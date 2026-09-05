@@ -633,6 +633,11 @@ cancels read work outside the session actor and journal writer mutex. Rust owns
 page/content wire types and limits. The TUI owns formatting, measured layout,
 selection and anchors. Canonical events remain the sole authority.
 
+Projection version 2 includes a first-class turn-summary row sourced only from
+`TurnFinished`, retaining turn identity, status, usage and cost exactly. Provider
+call receipts remain audit/accounting facts and do not create display rows.
+Summaries use the same ordinal, page-byte and rewind rules as every other row.
+
 A page describes the current effective transcript at an exact applied journal
 prefix. Its source item IDs remain stable. Dense semantic ordinals are distinct
 from durable event sequences. Structural generation changes when rewind removes

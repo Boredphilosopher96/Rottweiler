@@ -210,6 +210,37 @@
       ]
     },
     {
+      "description": "Paged historical content is available; no durable replay cursor is implied.",
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "through_sequence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "type": {
+          "type": "string",
+          "const": "session_history_ready"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
       "type": "object",
       "properties": {
         "meta": {
@@ -2824,6 +2855,34 @@
         {
           "type": "object",
           "properties": {
+            "turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "status": {
+              "$ref": "#/$defs/TurnStatus"
+            },
+            "usage": {
+              "$ref": "#/$defs/Usage"
+            },
+            "cost": {
+              "$ref": "#/$defs/Cost"
+            },
+            "type": {
+              "type": "string",
+              "const": "turn_summary"
+            }
+          },
+          "required": [
+            "type",
+            "turn_id",
+            "status",
+            "usage",
+            "cost"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
             "role": {
               "$ref": "#/$defs/Role"
             },
@@ -2985,6 +3044,139 @@
             "session_id",
             "task",
             "status"
+          ]
+        }
+      ]
+    },
+    "TurnStatus": {
+      "description": "Terminal state of an agent turn.",
+      "type": "string",
+      "enum": [
+        "completed",
+        "interrupted",
+        "failed",
+        "max_turns",
+        "doom_loop",
+        "budget_exceeded"
+      ]
+    },
+    "Usage": {
+      "description": "Provider-reported token accounting normalized by the router.",
+      "type": "object",
+      "properties": {
+        "input_tokens": {
+          "type": "string"
+        },
+        "output_tokens": {
+          "type": "string"
+        },
+        "cache_read_tokens": {
+          "type": "string"
+        },
+        "cache_write_tokens": {
+          "type": "string"
+        },
+        "reasoning_tokens": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens"
+      ]
+    },
+    "Cost": {
+      "description": "Provider-neutral billing/quota disposition for a completed turn. A missing\nprice is never represented as a zero-dollar API charge.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "amount_micros": {
+              "type": "string"
+            },
+            "currency": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "monetary"
+            }
+          },
+          "required": [
+            "kind",
+            "amount_micros",
+            "currency"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "credits_micros": {
+              "type": "string"
+            },
+            "nominal_amount_micros": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "currency": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "ai_credits"
+            }
+          },
+          "required": [
+            "kind",
+            "credits_micros"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "used": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "unit": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "subscription_quota"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "unavailable"
+            }
+          },
+          "required": [
+            "kind",
+            "reason"
           ]
         }
       ]
@@ -3912,127 +4104,6 @@
         "compaction",
         "subagent",
         "title"
-      ]
-    },
-    "Usage": {
-      "description": "Provider-reported token accounting normalized by the router.",
-      "type": "object",
-      "properties": {
-        "input_tokens": {
-          "type": "string"
-        },
-        "output_tokens": {
-          "type": "string"
-        },
-        "cache_read_tokens": {
-          "type": "string"
-        },
-        "cache_write_tokens": {
-          "type": "string"
-        },
-        "reasoning_tokens": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "input_tokens",
-        "output_tokens",
-        "cache_read_tokens",
-        "cache_write_tokens",
-        "reasoning_tokens"
-      ]
-    },
-    "Cost": {
-      "description": "Provider-neutral billing/quota disposition for a completed turn. A missing\nprice is never represented as a zero-dollar API charge.",
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": {
-            "amount_micros": {
-              "type": "string"
-            },
-            "currency": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string",
-              "const": "monetary"
-            }
-          },
-          "required": [
-            "kind",
-            "amount_micros",
-            "currency"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "credits_micros": {
-              "type": "string"
-            },
-            "nominal_amount_micros": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "currency": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "kind": {
-              "type": "string",
-              "const": "ai_credits"
-            }
-          },
-          "required": [
-            "kind",
-            "credits_micros"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "used": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "unit": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "kind": {
-              "type": "string",
-              "const": "subscription_quota"
-            }
-          },
-          "required": [
-            "kind"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "reason": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string",
-              "const": "unavailable"
-            }
-          },
-          "required": [
-            "kind",
-            "reason"
-          ]
-        }
       ]
     },
     "SessionReview": {
@@ -5817,18 +5888,6 @@
       "required": [
         "usage",
         "cost"
-      ]
-    },
-    "TurnStatus": {
-      "description": "Terminal state of an agent turn.",
-      "type": "string",
-      "enum": [
-        "completed",
-        "interrupted",
-        "failed",
-        "max_turns",
-        "doom_loop",
-        "budget_exceeded"
       ]
     },
     "BudgetLevel": {

@@ -1,3 +1,5 @@
+import { CLIENT_COMMAND_EXECUTION } from "./protocol"
+import type { HistoryReader } from "./history/reader"
 import { chmod, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises"
 import { basename, dirname, isAbsolute, join } from "node:path"
 
@@ -153,6 +155,24 @@ export class EngineRuntimeError extends Error {
  * synchronous; durable cursor persistence is coalesced in the background.
  */
 export class TuiEngineRuntime {
+  readonly historyReader: HistoryReader = {
+    page: async (sessionId, read, signal) => {
+      const reply = await this.#readHistory({ type: "read_transcript", meta: this.#meta(), session_id: sessionId, read }, signal)
+      const event = reply.events[0]
+      if (reply.events.length !== 1 || event?.type !== "transcript_page_ready") {
+        throw new EngineRuntimeError("transcript page reply is missing its result")
+      }
+      return event.result
+    },
+    content: async (sessionId, read, signal) => {
+      const reply = await this.#readHistory({ type: "read_transcript_content", meta: this.#meta(), session_id: sessionId, read }, signal)
+      const event = reply.events[0]
+      if (reply.events.length !== 1 || event?.type !== "transcript_content_ready") {
+        throw new EngineRuntimeError("transcript content reply is missing its result")
+      }
+      return event.page
+    },
+  }
   readonly #config: EngineRuntimeConfig
   readonly #client: RuntimeEngineClient
   readonly #requestId: () => string
@@ -578,7 +598,7 @@ export class TuiEngineRuntime {
             const previousGap = bound.state.connection.gap
             const previousSequence = bound.state.lastSequence
             bound.handleEvent(event)
-            if (event.type === "session_replay_completed") finishInitialReplayBatch()
+            if (event.type === "session_replay_completed" || event.type === "session_history_ready") finishInitialReplayBatch()
             const nextGap = bound.state.connection.gap
             if (nextGap === null) {
               this.#recoveringSequenceGap = false
@@ -732,6 +752,25 @@ export class TuiEngineRuntime {
       for (const event of reply.events) this.#requiredApp().handleEvent(event)
     }
     return reply?.outcome ?? null
+  }
+
+  async #readHistory(
+    command: Extract<ClientCommand, { type: "read_transcript" | "read_transcript_content" }>,
+    signal: AbortSignal,
+  ): Promise<Extract<CommandReply, { type: "read" }>> {
+    await this.#ready
+    if (!this.#driverReady || this.#subscriptionController === null) {
+      throw new EngineRuntimeError("history connection is unavailable")
+    }
+    const generation = this.#sessionGeneration
+    const lifetime = AbortSignal.any([signal, this.#subscriptionController.signal])
+    lifetime.throwIfAborted()
+    const reply = await this.#client.postCommand(command, lifetime)
+    lifetime.throwIfAborted()
+    if (generation !== this.#sessionGeneration) throw new DOMException("session changed", "AbortError")
+    if (reply?.type !== "read") throw new EngineRuntimeError("history read has no typed reply")
+    if (reply.outcome.type === "rejected") throw new EngineRuntimeError(reply.outcome.error.message)
+    return reply
   }
 
   #meta() {
@@ -1108,8 +1147,7 @@ function commandSessionId(command: ClientCommand): string | null {
 }
 
 function isReplayReadOnlyCommand(command: ClientCommand): boolean {
-  const type: string = command.type
-  return type === "list_sessions" || type === "search_sessions"
+  return CLIENT_COMMAND_EXECUTION[command.type] === "read"
 }
 
 function eventBelongsToSession(event: WireEngineEvent, sessionId: string): boolean {

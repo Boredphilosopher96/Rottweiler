@@ -376,6 +376,12 @@ function applyKnownEvent(
         promptDump: event.dump,
         commandAcks: responseAck(state, event.meta.request_id, event.type, event.session_id),
       }
+    case "session_history_ready":
+      return {
+        ...state,
+        historyReady: { sessionId: event.session_id, through: event.through_sequence ?? null },
+        connection: { ...state.connection, phase: state.connection.gap === null ? "connected" : state.connection.phase, error: null },
+      }
     case "session_replay_completed":
       return {
         ...state,

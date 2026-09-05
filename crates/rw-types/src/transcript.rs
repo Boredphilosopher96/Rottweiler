@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 /// Version of the rebuildable semantic transcript projection.
-pub const TRANSCRIPT_PROJECTION_VERSION: u32 = 1;
+pub const TRANSCRIPT_PROJECTION_VERSION: u32 = 2;
 /// Maximum retained text bytes across previews in one semantic item.
 pub const TRANSCRIPT_PREVIEW_TEXT_BYTES: usize = 4 * 1024;
 /// Maximum inline conversation block descriptors in one semantic item.
@@ -98,6 +98,12 @@ pub enum TranscriptSubagentStatus {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case")]
 pub enum TranscriptContent {
+    TurnSummary {
+        turn_id: crate::TurnId,
+        status: crate::TurnStatus,
+        usage: crate::Usage,
+        cost: crate::Cost,
+    },
     Conversation {
         role: Role,
         blocks: Vec<TranscriptConversationBlock>,

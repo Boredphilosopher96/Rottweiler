@@ -84,6 +84,12 @@ pub enum EngineEvent {
         session_id: SessionId,
         dump: PromptDump,
     },
+    /// Paged historical content is available; no durable replay cursor is implied.
+    SessionHistoryReady {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        through_sequence: Option<SequenceId>,
+    },
     SessionReplayCompleted {
         meta: CommandAckMeta,
         session_id: SessionId,
@@ -695,6 +701,7 @@ impl EngineEvent {
             | Self::SessionReviewUpdated { .. }
             | Self::PromptDumpReady { .. }
             | Self::SessionReplayCompleted { .. }
+            | Self::SessionHistoryReady { .. }
             | Self::SessionForked { .. }
             | Self::SessionExported { .. }
             | Self::SessionsListed { .. }
@@ -789,6 +796,7 @@ impl EngineEvent {
             | Self::SessionReviewUpdated { .. }
             | Self::PromptDumpReady { .. }
             | Self::SessionReplayCompleted { .. }
+            | Self::SessionHistoryReady { .. }
             | Self::SessionForked { .. }
             | Self::SessionExported { .. }
             | Self::SessionsListed { .. }

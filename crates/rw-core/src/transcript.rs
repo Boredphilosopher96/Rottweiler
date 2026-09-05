@@ -165,12 +165,39 @@ struct ProjectedRow {
     binding: Option<String>,
 }
 
+fn project_turn_summary(
+    event: &EngineEvent,
+) -> Result<Option<ProjectedRow>, TranscriptProjectionError> {
+    let EngineEvent::TurnFinished {
+        turn_id,
+        status,
+        usage,
+        cost,
+        ..
+    } = event
+    else {
+        return Err(TranscriptProjectionError::Invalid("turn summary source"));
+    };
+    Ok(Some(ProjectedRow {
+        prior: None,
+        agent_turn: Some(turn_number(turn_id)?),
+        binding: None,
+        content: TranscriptContent::TurnSummary {
+            turn_id: turn_id.clone(),
+            status: status.clone(),
+            usage: usage.clone(),
+            cost: cost.clone(),
+        },
+    }))
+}
+
 fn project_content(
     event: &EngineEvent,
     state: &TranscriptProjectionState,
     rows: &impl TranscriptRowLookup,
 ) -> Result<Option<ProjectedRow>, TranscriptProjectionError> {
     match event {
+        EngineEvent::TurnFinished { .. } => project_turn_summary(event),
         EngineEvent::ConversationTurnCommitted { .. } => project_conversation(event),
         EngineEvent::ToolCallStarted { .. } => project_tool_start(event, rows),
         EngineEvent::ToolCallFinished { .. } | EngineEvent::ToolDiffReady { .. } => {

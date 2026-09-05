@@ -582,30 +582,47 @@ pub enum CommandExecution {
     Read,
     Control,
 }
-impl ClientCommand {
-    #[must_use]
-    pub fn execution(&self) -> CommandExecution {
-        match self {
-            Self::ReadTranscript { .. }
-            | Self::ReadTranscriptContent { .. }
-            | Self::ListSessions { .. }
-            | Self::SearchSessions { .. }
-            | Self::ListCommands { .. }
-            | Self::ListModes { .. }
-            | Self::ListModels { .. }
-            | Self::ListSettings { .. }
-            | Self::ListMcpServers { .. }
-            | Self::ListRuntimeServices { .. }
-            | Self::SearchWorkspaceFiles { .. }
-            | Self::PreviewWorkspaceFile { .. }
-            | Self::GetWorkspaceStatus { .. }
-            | Self::GetWorkspaceDiff { .. }
-            | Self::ListSubagents { .. }
-            | Self::ReplaySubagent { .. } => CommandExecution::Read,
-            _ => CommandExecution::Control,
+// One variant list owns native classification and its generated wire projection.
+macro_rules! read_commands {
+    ($($variant:ident),+ $(,)?) => {
+        impl ClientCommand {
+            /// Classify execution without decoding or serializing the command again.
+            #[must_use]
+            pub const fn execution(&self) -> CommandExecution {
+                match self {
+                    $(Self::$variant { .. })|+ => CommandExecution::Read,
+                    _ => CommandExecution::Control,
+                }
+            }
+
+            /// Source-owned read tags for schema/code generation.
+            pub fn read_type_tags() -> impl Serialize {
+                #[derive(Serialize)]
+                #[serde(rename_all = "snake_case")]
+                enum Tag { $($variant),+ }
+                [$(Tag::$variant),+]
+            }
         }
-    }
+    };
 }
+read_commands!(
+    ReadTranscript,
+    ReadTranscriptContent,
+    ListSessions,
+    SearchSessions,
+    ListCommands,
+    ListModes,
+    ListModels,
+    ListSettings,
+    ListMcpServers,
+    ListRuntimeServices,
+    SearchWorkspaceFiles,
+    PreviewWorkspaceFile,
+    GetWorkspaceStatus,
+    GetWorkspaceDiff,
+    ListSubagents,
+    ReplaySubagent,
+);
 
 /// Direct response on the authenticated command channel. Read data never enters SSE or mutation dedupe.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
