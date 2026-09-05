@@ -70,7 +70,7 @@ test("native insertion refuses before allocating an over-budget draft, including
   const errors: string[] = []
   const composer = new ComposerRenderable(setup.renderer, kennelTheme, {
     drafts: owner, editor: { compose: async () => null },
-    imagePaste: { readImage: async () => null, readPath: async () => null },
+    imagePaste: { readImage: async () => null, preparePath: () => null },
     onSubmit: () => true, onFileMention: () => {}, onAttachmentError: error => errors.push(error),
   })
   setup.renderer.root.add(composer)
@@ -119,7 +119,7 @@ test("destroying a composer does not release its pending submission allocation e
   let finish!: (accepted: boolean) => void
   const composer = new ComposerRenderable(setup.renderer, kennelTheme, {
     drafts: owner, editor: { compose: async () => null },
-    imagePaste: { readImage: async () => null, readPath: async () => null },
+    imagePaste: { readImage: async () => null, preparePath: () => null },
     onSubmit: () => new Promise<boolean>(resolve => { finish = resolve }), onFileMention: () => {},
   })
   setup.renderer.root.add(composer)
@@ -143,5 +143,26 @@ test("closing a child retires its rollback destination but holds pending bytes u
   expect(owner.usage.bytes).toBeGreaterThan(0)
   expect(pending.settle(false)).toBeNull()
   expect(owner.get("child:a").content).toBe("")
+  expect(owner.usage.bytes).toBe(0)
+})
+
+test("input read reservations retain capacity across clear and reserve attachment slots", () => {
+  const owner = new ComposerDraftStore(4096, 8)
+  owner.set("parent", draft("typed"))
+  const read = owner.reserveDraft("parent", 2048, 1)!
+  expect(read).not.toBeNull()
+  expect(owner.reserveDraft("child", 100, 0)).toBeNull()
+  expect(owner.submit("parent")).toBeNull()
+  expect(owner.set("parent", { content: "too many", attachments: Array.from({ length: 40 }, () => attachment) })).toBe(false)
+  expect(owner.set("parent", draft("new text"))).toBe(true)
+  const restored = read.finish({ content: "", attachments: [attachment] }).settle(false)!
+  expect(restored.content).toBe("new text")
+  expect(restored.attachments).toEqual([attachment])
+  expect(owner.usage.pending).toBe(0)
+  const pending = owner.reserveDraft("parent", 2000, 0)!
+  owner.clear()
+  expect(owner.usage.bytes).toBe(2012)
+  expect(owner.reserveDraft("parent", 500, 0)).toBeNull()
+  pending.cancel()
   expect(owner.usage.bytes).toBe(0)
 })

@@ -29,7 +29,11 @@ export interface DraftTextReservation {
   finish(text: string): DraftSubmission
   cancel(): void
 }
-interface TextRead { readonly scope: string; readonly maximumTextBytes: number; readonly bytes: number; active: boolean }
+export interface DraftReadReservation {
+  finish(draft: ComposerDraft): DraftSubmission
+  cancel(): void
+}
+interface DraftRead { readonly scope: string; readonly bytes: number; readonly attachmentSlots: number; active: boolean }
 export interface DraftSubmission {
   readonly draft: ComposerDraft
   /** Settlement consumes this reservation exactly once, independently of the active scope. */
@@ -40,7 +44,7 @@ export interface DraftSubmission {
 export class ComposerDraftStore {
   readonly #drafts = new Map<string, Entry>()
   readonly #pending = new Set<Submission>()
-  readonly #reads = new Set<TextRead>()
+  readonly #reads = new Set<DraftRead>()
   #bytes = 0
   constructor(readonly maximumBytes = MAX_CLIENT_DRAFT_BYTES, readonly maximumDrafts = MAX_CLIENT_DRAFTS) {
     if (!Number.isSafeInteger(maximumBytes) || maximumBytes <= 0 || !Number.isSafeInteger(maximumDrafts) || maximumDrafts <= 0) {
@@ -75,7 +79,9 @@ export class ComposerDraftStore {
     for (const item of this.#pending) {
       if (item.active && item.scope === scope) return count <= MAX_ATTACHMENTS_PER_MESSAGE
     }
-    return count <= MAX_ATTACHMENTS_PER_DRAFT
+    let reserved = 0
+    for (const read of this.#reads) if (read.active && read.scope === scope) reserved += read.attachmentSlots
+    return count + reserved <= MAX_ATTACHMENTS_PER_DRAFT
   }
   remove(scope: string): void {
     for (const read of this.#reads) if (read.scope === scope) read.active = false
@@ -104,32 +110,47 @@ export class ComposerDraftStore {
   /** Reserve chunk storage, final joining and editable copies before reading source bodies. */
   reserveText(scope: string, maximumTextBytes: number): DraftTextReservation | null {
     if (!Number.isSafeInteger(maximumTextBytes) || maximumTextBytes < 0) return null
-    const bytes = 512 + scope.length * 2 + maximumTextBytes * 10
-    if (!Number.isSafeInteger(bytes) || this.#bytes + bytes > this.maximumBytes
+    const reservation = this.reserveDraft(scope, 512 + maximumTextBytes * 10, 0)
+    return reservation === null ? null : {
+      cancel: () => reservation.cancel(),
+      finish: text => {
+        if (Buffer.byteLength(text) > maximumTextBytes) throw new Error("source text exceeds its reservation")
+        return reservation.finish({ content: text, attachments: [] })
+      },
+    }
+  }
+
+  /** One accepted input read owns eventual draft capacity until its operation settles. */
+  reserveDraft(scope: string, maximumBytes: number, attachmentSlots: number): DraftReadReservation | null {
+    const bytes = maximumBytes + scope.length * 2
+    if (!Number.isSafeInteger(bytes) || bytes <= 0 || !Number.isSafeInteger(attachmentSlots)
+      || attachmentSlots < 0 || attachmentSlots > MAX_ATTACHMENTS_PER_DRAFT
+      || this.get(scope).attachments.length + attachmentSlots > MAX_ATTACHMENTS_PER_DRAFT
+      || this.#bytes + bytes > this.maximumBytes
       || this.#drafts.size + this.#pending.size + this.#reads.size >= this.maximumDrafts
       || this.#reads.size > 0 || this.#pending.size > 0) return null
-    const read: TextRead = { scope, maximumTextBytes, bytes, active: true }
+    const read: DraftRead = { scope, bytes, attachmentSlots, active: true }
     this.#reads.add(read)
     this.#bytes += bytes
     let live = true
+    const release = () => {
+      live = false
+      this.#reads.delete(read)
+      this.#bytes -= bytes
+    }
     return {
-      cancel: () => {
-        if (!live) return
-        live = false
-        this.#reads.delete(read)
-        this.#bytes -= bytes
-      },
-      finish: text => {
-        if (!live) throw new Error("text read reservation has settled")
-        if (Buffer.byteLength(text) > maximumTextBytes) throw new Error("source text exceeds its reservation")
-        live = false
-        this.#reads.delete(read)
-        this.#bytes -= bytes
-        const draft = { content: text, attachments: [] }
+      cancel: () => { if (live) release() },
+      finish: draft => {
+        if (!live) throw new Error("input read reservation has settled")
+        const retained = composerDraftBytes(draft) + scope.length * 2
+        if (retained > bytes || draft.attachments.length > attachmentSlots) {
+          throw new Error("input exceeds its draft reservation")
+        }
+        release()
         const submission: Submission = { scope, active: read.active,
-          entry: { draft, bytes: ENTRY_BYTES + scope.length * 2 + text.length * 6 } }
+          entry: { draft: snapshot(draft), bytes: retained } }
         this.#pending.add(submission)
-        this.#bytes += submission.entry.bytes
+        this.#bytes += retained
         return this.#submission(submission)
       },
     }

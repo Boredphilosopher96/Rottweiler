@@ -15,7 +15,7 @@ import {
   MAX_TOTAL_ATTACHMENT_BYTES,
   type Attachment,
 } from "../protocol"
-import type { ClipboardImage, EditorAdapter, ImagePasteAdapter } from "../platform"
+import { MAX_EDITOR_BYTES, type ClipboardImage, type EditorAdapter, type ImagePasteAdapter } from "../platform"
 import type { RottweilerTheme } from "../theme"
 import { ComposerEditorRenderable } from "./composer-editor"
 import { jsonEncodedBytes } from "../json-size"
@@ -41,6 +41,7 @@ export interface ComposerOptions {
   readonly onInput?: (value: string) => void
   readonly onSubmitted?: () => void
   readonly onSubmissionSettled?: () => void
+  readonly onInputSettled?: () => void
   readonly onHeightChange?: (height: number) => void
 }
 
@@ -414,70 +415,74 @@ export class ComposerRenderable extends BoxRenderable {
   }
 
   async pasteImage(): Promise<boolean> {
-    if (!this.#imagePasteAvailable) return false
-    const current = this.#inputOwner()
-    let image: ClipboardImage | null
-    try { image = await this.#options.imagePaste.readImage() }
-    catch (error) { if (current()) throw error; return false }
-    if (!current() || image === null) {
+    return this.#readImage(() => this.#options.imagePaste.readImage())
+  }
+
+  async #readImage(read: () => Promise<ClipboardImage | null>): Promise<boolean> {
+    if (!this.#imagePasteAvailable) {
+      this.#options.onAttachmentError?.("The selected model does not support image input. Choose a vision-capable model first.")
       return false
     }
-    return this.addImage(image)
+    const current = this.#inputOwner()
+    // Base64 storage plus bounded image metadata is reserved before native/file I/O.
+    const reservation = this.#drafts.reserveDraft(this.#scope(), 32_768 + 8 * Math.ceil(MAX_IMAGE_ATTACHMENT_BYTES / 3), 1)
+    if (reservation === null) {
+      this.#options.onAttachmentError?.("Another input is still loading, or the draft has no space for an image.")
+      return false
+    }
+    try {
+      const image = await read()
+      if (!current()) return false
+      if (image === null) {
+        this.#options.onAttachmentError?.("The clipboard or selected path does not contain a supported image.")
+        return false
+      }
+      const attachment: Attachment = { name: image.name, media_type: image.mediaType, data: { type: "inline_base64", data: image.base64 } }
+      const bytes = attachmentBytes(attachment)
+      if (bytes === null || bytes > MAX_IMAGE_ATTACHMENT_BYTES) throw new Error("Image input exceeds its 5 MiB limit.")
+      const restored = reservation.finish({ content: "", attachments: [attachment] }).settle(false)
+      if (restored === null) return false
+      this.#attachments = [...restored.attachments]
+      this.#refreshAttachments()
+      return true
+    } catch (error) {
+      if (current()) this.#options.onAttachmentError?.(error instanceof Error ? error.message : "Image input failed.")
+      return false
+    } finally {
+      reservation.cancel()
+      if (!this.isDestroyed) this.#options.onInputSettled?.()
+    }
   }
 
   async #paste(event: PasteEvent): Promise<void> {
     if (!this.editor.focused) return
-    const current = this.#inputOwner()
-    let text: string
-    try {
-      text = new TextDecoder("utf-8", { fatal: true }).decode(event.bytes)
-    } catch {
-      event.preventDefault()
-      this.#options.onAttachmentError?.("The pasted content is not valid UTF-8 text.")
-      return
-    }
     event.preventDefault()
-    const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n")
-    const trimmed = normalized.trim()
-    if (trimmed.length === 0) {
-      const pasted = await this.pasteImage()
-      if (!current()) return
-      if (!pasted) {
-        this.#options.onAttachmentError?.("The clipboard does not contain a supported image.")
-      }
-      return
-    }
-    let localImage: ClipboardImage | null
-    try {
-      localImage = await this.#options.imagePaste.readPath(trimmed)
-    } catch (error) {
-      if (!current()) return
-      this.#options.onAttachmentError?.(
-        error instanceof Error ? error.message : "That image path could not be attached safely.",
-      )
-      return
-    }
-    if (!current()) return
-    if (localImage !== null) {
-      this.addImage(localImage)
-      return
-    }
-    const bytes = Buffer.byteLength(trimmed)
-    const lineCount = (trimmed.match(/\n/g)?.length ?? 0) + 1
-    if ((lineCount >= 3 || trimmed.length > 150) && bytes <= 1024 * 1024) {
-      const ordinal = this.#attachments.filter((item) => item.name.startsWith("Pasted text")).length + 1
-      this.addAttachment({
-        name: `Pasted text ${ordinal}`,
-        media_type: "text/plain",
-        data: { type: "text", content: trimmed },
-      })
-      return
-    }
-    if (bytes > 1024 * 1024) {
+    if (event.bytes.length > MAX_TEXT_ATTACHMENT_BYTES) {
       this.#options.onAttachmentError?.("Pasted text exceeds the 1 MiB message attachment limit.")
       return
     }
-    this.editor.insertText(normalized)
+    let text: string
+    try { text = new TextDecoder("utf-8", { fatal: true }).decode(event.bytes) }
+    catch { this.#options.onAttachmentError?.("The pasted content is not valid UTF-8 text."); return }
+    const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n")
+    const trimmed = normalized.trim()
+    if (trimmed.length === 0) { await this.pasteImage(); return }
+    let imageRead: (() => Promise<ClipboardImage | null>) | null
+    try { imageRead = this.#options.imagePaste.preparePath(trimmed) }
+    catch (error) {
+      this.#options.onAttachmentError?.(error instanceof Error ? error.message : "That image path is invalid.")
+      return
+    }
+    if (imageRead !== null) { await this.#readImage(imageRead); return }
+    const firstNewline = trimmed.indexOf("\n")
+    const hasThreeLines = firstNewline >= 0 && trimmed.indexOf("\n", firstNewline + 1) >= 0
+    if (hasThreeLines || trimmed.length > 150) {
+      const ordinal = this.#attachments.filter((item) => item.name.startsWith("Pasted text")).length + 1
+      this.addAttachment({ name: `Pasted text ${ordinal}`, media_type: "text/plain", data: { type: "text", content: trimmed } })
+    } else {
+      // Text paste is one synchronous editor operation at its initiating selection.
+      this.editor.insertText(normalized)
+    }
   }
 
   #inputOwner(): () => boolean {
@@ -490,19 +495,32 @@ export class ComposerRenderable extends BoxRenderable {
   async openExternalEditor(): Promise<void> {
     if (this.#editorRequest !== null) return
     const current = this.#inputOwner()
+    if (Buffer.byteLength(this.editor.plainText) > MAX_EDITOR_BYTES) {
+      this.#options.onAttachmentError?.("External editor content exceeds its 2 MiB limit.")
+      return
+    }
+    const reservation = this.#drafts.reserveText(this.#scope(), MAX_EDITOR_BYTES)
+    if (reservation === null) {
+      this.#options.onAttachmentError?.("Another input is still loading, or the draft has no space for the external editor.")
+      return
+    }
     const request = {}
     this.#editorRequest = request
     const content = this.editor.plainText
-    let result: string | null
-    try { result = await this.#options.editor.compose(content) }
-    catch (error) { if (current()) throw error; return }
-    finally { if (this.#editorRequest === request) this.#editorRequest = null }
-    if (!current()) return
-    if (result !== null) {
-      if (!this.#admitDraft(result, this.#attachments)) return
-      this.editor.replaceText(result)
-      this.setShellMode(result.startsWith("!"))
-      this.editor.focus()
+    try {
+      const result = await this.#options.editor.compose(content)
+      if (!current() || result === null) return
+      if (Buffer.byteLength(result) > MAX_EDITOR_BYTES) throw new Error("External editor content exceeds its 2 MiB limit.")
+      if (this.editor.plainText === content) this.#drafts.set(this.#scope(), { content: "", attachments: this.#attachments })
+      const restored = reservation.finish(result).settle(false)
+      if (restored !== null) {
+        this.restoreDraft(restored.content, restored.attachments)
+      }
+    } catch (error) { if (current()) throw error }
+    finally {
+      reservation.cancel()
+      if (this.#editorRequest === request) this.#editorRequest = null
+      if (!this.isDestroyed) this.#options.onInputSettled?.()
     }
   }
 

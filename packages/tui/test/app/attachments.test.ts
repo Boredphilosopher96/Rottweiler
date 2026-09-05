@@ -284,7 +284,7 @@ describe("Rottweiler attachments", () => {
     let accept = false
     const app = createRottweilerApp(renderer, {
       historyReader: emptyHistoryReader,
-      imagePaste: { readImage: async () => null, readPath: async () => null },
+      imagePaste: { readImage: async () => null, preparePath: () => null },
       onCommand(command) {
         commands.push(command)
         return accept ? { type: "accepted" } : {
@@ -315,11 +315,12 @@ describe("Rottweiler attachments", () => {
       historyReader: emptyHistoryReader,
       imagePaste: {
         readImage: async () => null,
-        readPath: async () => { throw new Error("That image path could not be read safely.") },
+        preparePath: () => async () => { throw new Error("That image path could not be read safely.") },
       },
     })
     renderer.root.add(app)
     app.composer.focus()
+    app.composer.setImagePasteAvailable(true)
     await setup.mockInput.pasteBracketedText("/Users/private/screen shot.png")
     await Bun.sleep(0)
     expect(app.composer.value).toBe("")
@@ -339,7 +340,7 @@ describe("Rottweiler attachments", () => {
           mediaType: "image/png",
           base64: "iVBORw0KGgo=",
         }),
-        readPath: async () => null,
+        preparePath: () => null,
       },
     })
     renderer.root.add(app)
@@ -375,7 +376,7 @@ describe("Rottweiler attachments", () => {
           reads += 1
           return { name: "hidden.png", mediaType: "image/png", base64: "aW1hZ2U=" }
         },
-        readPath: async () => null,
+        preparePath: () => null,
       },
     })
     renderer.root.add(app)
@@ -504,6 +505,30 @@ describe("Rottweiler attachments", () => {
     expect(app.composer.value).toBe("inspect\nnew draft")
     expect(app.composer.attachments.map((attachment) => attachment.name))
       .toEqual(["second.txt", "third.txt", "first.txt"])
+  })
+
+  test("retains a pending image across a deferred theme rebuild", async () => {
+    const setup = await createTestRenderer({ width: 88, height: 20, useThread: false })
+    renderer = setup.renderer
+    let finish!: (image: { name: string; mediaType: string; base64: string }) => void
+    const app = createRottweilerApp(renderer, {
+      historyReader: emptyHistoryReader,
+      initialState: visionCapableState(),
+      theme: systemThemeFor("dark"),
+      imagePaste: { readImage: () => new Promise(resolve => { finish = resolve }), preparePath: () => null },
+    })
+    renderer.root.add(app)
+    const original = app.composer
+    const input = original.pasteImage()
+    original.editor.insertText("typed while reading")
+    app.setSystemTheme(systemThemeFor("light"))
+    expect(app.composer).toBe(original)
+    finish({ name: "pending.png", mediaType: "image/png", base64: "aW1hZ2U=" })
+    expect(await input).toBeTrue()
+    await Promise.resolve()
+    expect(app.composer).not.toBe(original)
+    expect(app.composer.value).toBe("typed while reading")
+    expect(app.composer.attachments.map(item => item.name)).toEqual(["pending.png"])
   })
 
   test("defers retheming until an in-flight rejected submission restores its draft", async () => {

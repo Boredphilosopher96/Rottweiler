@@ -466,9 +466,20 @@ export class RottweilerApp extends BoxRenderable {
     }
   }
 
+  #resumeDeferredTheme(): void {
+    const deferred = this.#deferredTheme
+    if (deferred === null || this.#composerSubmissionsInFlight > 0 || this.#children.draftStore.usage.pending > 0) return
+    queueMicrotask(() => {
+      if (!this.#destroyed && this.#composerSubmissionsInFlight === 0
+        && this.#children.draftStore.usage.pending === 0 && this.#deferredTheme === deferred) {
+        this.#createThemedSurface(deferred)
+      }
+    })
+  }
+
   #createThemedSurface(theme: RottweilerTheme): void {
     const rebuilding = this.getChildrenCount() > 0
-    if (rebuilding && this.#composerSubmissionsInFlight > 0) {
+    if (rebuilding && (this.#composerSubmissionsInFlight > 0 || this.#children.draftStore.usage.pending > 0)) {
       this.#deferredTheme = theme
       return
     }
@@ -547,19 +558,10 @@ export class RottweilerApp extends BoxRenderable {
         this.#composerSubmissionsInFlight += 1
         return await this.#submission.sendMessage(content, submittedAttachments)
       },
+      onInputSettled: () => this.#resumeDeferredTheme(),
       onSubmissionSettled: () => {
         this.#composerSubmissionsInFlight = Math.max(0, this.#composerSubmissionsInFlight - 1)
-        const deferred = this.#deferredTheme
-        if (deferred === null || this.#composerSubmissionsInFlight > 0) return
-        queueMicrotask(() => {
-          if (
-            !this.#destroyed &&
-            this.#composerSubmissionsInFlight === 0 &&
-            this.#deferredTheme === deferred
-          ) {
-            this.#createThemedSurface(deferred)
-          }
-        })
+        this.#resumeDeferredTheme()
       },
     }, theme)
     this.setState(this.#state)

@@ -78,3 +78,9 @@ Timeline handoff restores the selected source through an around read. Unresolved
 Task state has one authoritative typed snapshot, committed independently from transformed tool presentation. The client retains no historical task-output checkpoints. A rewind immediately invalidates the displayed snapshot and records its physical sequence as the minimum acceptable read prefix. A late query cannot replace a newer live state commit.
 
 `GetTodos` uses the authenticated read channel in live and historical views. Each query advances the mode-independent index by a bounded number of transactions and returns either an exact snapshot or explicit catch-up progress. The client owns one pending task request and one catch-up timer; session changes and renderer destruction retire that timer. Task identities, item count, per-field UTF-8 bytes and aggregate text bytes are validated from the same source schema in Rust and generated client validators.
+
+## Asynchronous input
+
+The draft owner admits one outstanding image, external-editor or history-text read. Its reservation covers the eventual retained draft and survives destination cancellation until the read settles. Submission and renderer replacement wait for accepted input reads. Image completion adds its attachment without moving the current cursor or focus; external-editor completion merges a newer draft instead of overwriting it.
+
+Ordinary text paste is a synchronous editor operation at the initiating selection. The platform classifies explicit local image paths into deferred read capabilities before I/O; a recognized image path attaches an image or reports a read failure. Image files are descriptor-checked and bounded to 5 MiB. External-editor input/output is bounded to 2 MiB, and output is read from a checked regular-file descriptor.

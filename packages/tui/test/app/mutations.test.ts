@@ -45,7 +45,7 @@ describe("Rottweiler mutations", () => {
     const app = createRottweilerApp(renderer, {
       historyReader: emptyHistoryReader,
       editor: { compose: async () => null },
-      imagePaste: { readImage: async () => null, readPath: async () => null },
+      imagePaste: { readImage: async () => null, preparePath: () => null },
     })
     renderer.root.add(app)
     app.composer.value = "draft survives platform failure"

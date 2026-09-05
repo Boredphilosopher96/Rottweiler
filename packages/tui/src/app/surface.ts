@@ -78,6 +78,7 @@ interface SurfaceHost {
   projectError(code: string, message: string, retryable?: boolean): void
   onSubmit(content: string, attachments: readonly Attachment[]): Promise<boolean>
   onSubmissionSettled(): void
+  onInputSettled(): void
 }
 
 /** Construct the retained component tree and bind its interaction ports. */
@@ -241,6 +242,7 @@ export function buildSurface(host: SurfaceHost, theme: RottweilerTheme): void {
       onInput: (value) => host.submission.composerInputChanged(value),
       onSubmitted: () => host.submission.openPostSubmitPicker(),
       onSubmissionSettled: host.onSubmissionSettled,
+      onInputSettled: host.onInputSettled,
       onHeightChange: (height) => {
         host.ui.interactionPanel.resizeForTerminal(
           host.height,

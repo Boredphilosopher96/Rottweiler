@@ -157,6 +157,31 @@ describe("client-owned renderer handoff", () => {
     } finally { finish(); rmSync(root, { recursive: true, force: true }) }
   })
 
+  test("the process recycle caller waits for an admitted image input to settle", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 25, useThread: false })
+    renderer = setup.renderer
+    let finish!: (image: import("../src/platform").ClipboardImage | null) => void
+    const pending = new Promise<import("../src/platform").ClipboardImage | null>(resolve => { finish = resolve })
+    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader,
+      imagePaste: { readImage: () => pending, preparePath: () => null },
+    })
+    renderer.root.add(app)
+    await setup.flush()
+    app.composer.setImagePasteAvailable(true)
+    const reading = app.composer.pasteImage()
+    const root = mkdtempSync(join(tmpdir(), "rw-input-recycle-"))
+    let exits = 0
+    try {
+      expect(recycleTuiIfNeeded({ observedBytes: 500, thresholdBytes: 384,
+        path: join(root, "handoff.json"), capture: () => app.recycleState(), recycle: () => { exits++ },
+      })).toBe(false)
+      expect(exits).toBe(0)
+      finish({ name: "input.png", mediaType: "image/png", base64: "iVBORw0KGgo=" })
+      expect(await reading).toBe(true)
+      expect(app.recycleState()?.composer.attachments).toHaveLength(1)
+    } finally { finish(null); rmSync(root, { recursive: true, force: true }) }
+  })
+
   test("restores a detached child draft only in its owning session", async () => {
     const setup = await createTestRenderer({ width: 90, height: 25, useThread: false })
     renderer = setup.renderer
