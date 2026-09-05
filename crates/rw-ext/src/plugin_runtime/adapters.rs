@@ -134,31 +134,39 @@ where
         _context: &mut Context,
         invocation: CommandInvocation,
     ) -> Result<Value, CommandExecutionError> {
-        let connection = self
-            .endpoint
-            .connect(&CancellationToken::default())
-            .await
-            .map_err(|error| CommandExecutionError::new(error.code, error.message))?;
-        connection
-            .enforcer()
-            .check_command(&self.name)
-            .map_err(|error| {
-                CommandExecutionError::new("capability_violation", error.to_string())
-            })?;
-        connection
-            .client()
-            .request(
-                METHOD_COMMAND_EXECUTE,
-                serde_json::to_value(CommandExecuteParams {
-                    name: self.name.clone(),
-                    arguments: invocation.arguments().to_owned(),
-                })
+        let result = async {
+            let connection = self
+                .endpoint
+                .connect(&CancellationToken::default())
+                .await
+                .map_err(|error| CommandExecutionError::new(error.code, error.message))?;
+            connection
+                .enforcer()
+                .check_command(&self.name)
                 .map_err(|error| {
-                    CommandExecutionError::new("invalid_request", error.to_string())
-                })?,
-            )
+                    CommandExecutionError::new("capability_violation", error.to_string())
+                })?;
+            connection
+                .client()
+                .request(
+                    METHOD_COMMAND_EXECUTE,
+                    serde_json::to_value(CommandExecuteParams {
+                        name: self.name.clone(),
+                        arguments: invocation.arguments().to_owned(),
+                    })
+                    .map_err(|error| {
+                        CommandExecutionError::new("invalid_request", error.to_string())
+                    })?,
+                )
+                .await
+                .map_err(|error| CommandExecutionError::new(error.code, error.message))
+        }
+        .await;
+        self.endpoint
+            .settle_effects()
             .await
-            .map_err(|error| CommandExecutionError::new(error.code, error.message))
+            .map_err(|error| CommandExecutionError::new("effects_unsettled", error.to_string()))?;
+        result
     }
 }
 

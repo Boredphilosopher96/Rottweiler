@@ -145,6 +145,16 @@ pub(super) async fn dispatch_protocol(
         return;
     }
 
+    if state.pending_command.is_some() && !super::command_job::admit_while_pending(&command) {
+        let outcome = protocol_rejection(
+            "command_busy",
+            "an admitted command still owns the session policy and generation",
+        );
+        send_ack(state, events, &meta, session, outcome.clone());
+        let _ = respond.send(outcome);
+        return;
+    }
+
     if let ClientCommand::InvokeUiAction { request, .. } = &command
         && let Err(error) = request.validate()
     {
@@ -247,7 +257,8 @@ pub(super) async fn dispatch_protocol(
             return;
         }
         ClientCommand::SendMessage { attachments, .. }
-            if state.running.is_some() && !attachments.is_empty() =>
+            if (state.running.is_some() || state.pending_command.is_some())
+                && !attachments.is_empty() =>
         {
             let outcome = protocol_rejection(
                 "attachment_queue_unsupported",

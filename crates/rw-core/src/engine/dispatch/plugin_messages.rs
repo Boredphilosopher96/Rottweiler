@@ -38,7 +38,7 @@ pub(super) async fn handle_plugin_message(
         &content,
         MAX_PLUGIN_MESSAGE_BYTES,
     )?;
-    let disposition = if state.running.is_some() {
+    let disposition = if state.running.is_some() || state.pending_command.is_some() {
         let position = state
             .queued_positions
             .back()

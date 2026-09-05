@@ -14,7 +14,8 @@ pub(super) async fn resolve(
     request
         .validate()
         .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
-    if state.running.is_some()
+    if state.pending_command.is_some()
+        || state.running.is_some()
         || state.active_shell.is_some()
         || state.initialization_running
         || state.closing

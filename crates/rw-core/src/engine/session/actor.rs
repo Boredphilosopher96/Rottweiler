@@ -334,15 +334,55 @@ pub(super) async fn run_actor(
         if let Some(error) = state.tasks.failure() {
             state.unsettled.get_or_insert_with(|| error.to_string());
         }
-        if state.closing && state.tasks.idle() && signals.is_empty() && cleanup.is_none() {
+        if state.closing
+            && state.tasks.idle()
+            && state.pending_command.is_none()
+            && signals.is_empty()
+            && cleanup.is_none()
+        {
             cleanup = Some(shutdown::start_cleanup(
                 Arc::clone(&config),
                 turn_signals.clone(),
                 state.unsettled.clone(),
             ));
         }
+        if !state.closing
+            && state.running.is_none()
+            && !state.initialization_running
+            && state.active_shell.is_none()
+            && state.pending_command.is_none()
+            && !state.queued.is_empty()
+        {
+            state.queued_positions.clear();
+            let queued = state
+                .queued
+                .drain(..)
+                .map(|content| (content, Vec::new()))
+                .collect();
+            if let Err(error) = start_turn(
+                &mut state,
+                &config,
+                &tool_context,
+                &turn_signals,
+                &events,
+                queued,
+                &active_turn,
+            )
+            .await
+            {
+                state.unsettled.get_or_insert_with(|| error.to_string());
+                continue;
+            }
+        }
         let tasks = state.tasks.clone();
         tokio::select! {
+            result = crate::engine::dispatch::command_job::wait(&mut state.pending_command) => {
+                crate::engine::dispatch::command_job::finish(result, crate::engine::dispatch::DispatchContext {
+                    state: &mut state, config: &mut config, tool_context: &mut tool_context,
+                    turn_signals: &turn_signals, events: &events, active_turn: &active_turn,
+                    command_descriptors: &command_descriptors, mode_registry: &mode_registry,
+                }).await;
+            }
             () = shutdown.cancelled(), if !state.closing => {},
             () = tasks.changed() => {},
             () = shutdown::deadline(closing_started), if closing_started.is_some() => {
@@ -370,7 +410,7 @@ pub(super) async fn run_actor(
                     break;
                 };
                 if let Err(error) = handle_turn_signal(
-                    signal, &mut state, &config, &tool_context, &turn_signals, &events, &active_turn,
+                    signal, &mut state, &config, &turn_signals, &events, &active_turn,
                 ).await {
                     if state.closing {
                         state.unsettled.get_or_insert_with(|| error.to_string());

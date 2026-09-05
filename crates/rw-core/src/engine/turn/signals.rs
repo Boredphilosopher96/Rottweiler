@@ -16,14 +16,12 @@ use crate::engine::session::SessionActorConfig;
 use crate::engine::turn::journal_events::emit;
 use crate::engine::turn::journal_events::emit_batch;
 use crate::engine::turn::progress::ProgressSlot;
-use crate::engine::turn::start::start_turn;
 use crate::engine::turn::title::normalize_generated_session_title;
 use crate::engine::turn::title::start_session_title_generation;
 use crate::engine::wire_turn_id;
 use rw_context::Budgeter;
 use rw_tools::AskUserInput;
 use rw_tools::SubagentProgressEvent;
-use rw_tools::ToolContext;
 use rw_types::AccountingAttribution;
 use rw_types::ApprovalDecision;
 use rw_types::Cost;
@@ -52,7 +50,6 @@ pub(in crate::engine) async fn handle_turn_signal(
     signal: TurnSignal,
     state: &mut ActorState,
     config: &Arc<SessionActorConfig>,
-    tool_context: &ToolContext,
     turn_signals: &mpsc::UnboundedSender<TurnSignal>,
     events: &broadcast::Sender<RoutedEvent>,
     active_turn: &Arc<AtomicU64>,
@@ -360,24 +357,6 @@ pub(in crate::engine) async fn handle_turn_signal(
             if completed_successfully && !state.closing {
                 start_session_title_generation(state, config, turn_signals);
             }
-            if !state.closing && !state.queued.is_empty() {
-                state.queued_positions.clear();
-                let messages = state
-                    .queued
-                    .drain(..)
-                    .map(|content| (content, Vec::new()))
-                    .collect();
-                start_turn(
-                    state,
-                    config,
-                    tool_context,
-                    turn_signals,
-                    events,
-                    messages,
-                    active_turn,
-                )
-                .await?;
-            }
         }
         TurnSignal::ManualCompactionComplete {
             turn,
@@ -416,24 +395,6 @@ pub(in crate::engine) async fn handle_turn_signal(
             }
             if let Some(completion) = completion {
                 let _ = completion.send(result.map(|()| ProtocolCompletion::Unit));
-            }
-            if !state.closing && state.running.is_none() && !state.queued.is_empty() {
-                state.queued_positions.clear();
-                let messages = state
-                    .queued
-                    .drain(..)
-                    .map(|content| (content, Vec::new()))
-                    .collect();
-                start_turn(
-                    state,
-                    config,
-                    tool_context,
-                    turn_signals,
-                    events,
-                    messages,
-                    active_turn,
-                )
-                .await?;
             }
         }
     }

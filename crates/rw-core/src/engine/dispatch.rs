@@ -1,5 +1,8 @@
 mod accepted;
 mod admission;
+pub(super) mod command_job;
+mod command_result;
+mod command_snapshot;
 mod compaction;
 mod completed_turns;
 mod context_surgery;
@@ -245,7 +248,6 @@ pub(super) async fn handle_actor_command(
                 command_meta,
                 content,
                 attachments,
-                None,
                 observed_turn,
                 respond,
                 DispatchContext {

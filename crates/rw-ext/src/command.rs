@@ -255,10 +255,18 @@ impl<Context, Output> CommandRegistry<Context, Output> {
         context: &mut Context,
         line: &str,
     ) -> Result<Output, CommandRegistryError> {
+        self.bind_line(line)?.execute(context).await
+    }
+
+    /// Binds a parsed slash command before asynchronous execution.
+    /// # Errors
+    /// Rejects invalid syntax or an absent exact registration.
+    pub fn bind_line(
+        &self,
+        line: &str,
+    ) -> Result<BoundCommand<Context, Output>, CommandRegistryError> {
         let invocation = parse_invocation(line)?;
-        self.bind(&invocation.name, invocation.arguments)?
-            .execute(context)
-            .await
+        self.bind(&invocation.name, invocation.arguments)
     }
 
     /// Captures the exact registered handler and inert arguments at admission.
@@ -303,9 +311,9 @@ impl<Context, Output> BoundCommand<Context, Output> {
     ///
     /// # Errors
     /// Reports implementation rejection or panic.
-    pub async fn execute(self, context: &mut Context) -> Result<Output, CommandRegistryError> {
+    pub async fn execute(&self, context: &mut Context) -> Result<Output, CommandRegistryError> {
         let name = self.invocation.name.clone();
-        match AssertUnwindSafe(self.handler.execute(context, self.invocation))
+        match AssertUnwindSafe(self.handler.execute(context, self.invocation.clone()))
             .catch_unwind()
             .await
         {

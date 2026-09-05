@@ -272,19 +272,18 @@ pub(super) async fn apply_accepted(
             }
         }
         ClientCommand::InvokeUiAction { request, .. } => {
-            let action = super::ui_actions::resolve(state, config, &request).await;
-            let result = match action {
-                Err(error) => Err(error),
+            match super::ui_actions::resolve(state, config, &request).await {
+                Err(error) => {
+                    if let Some(complete) = completion.take() {
+                        let _ = complete.send(Err(error));
+                    }
+                }
                 Ok(bound) => {
-                    let command_text = format!("/{}", bound.name());
-                    let (respond, receive) = oneshot::channel();
-                    super::messages::dispatch_message(
+                    super::command_job::start(
                         meta,
-                        command_text,
-                        Vec::new(),
-                        Some(bound),
+                        Ok(bound),
                         active_turn.load(Ordering::Acquire),
-                        respond,
+                        super::command_job::CommandReply::Protocol(completion.take()),
                         DispatchContext {
                             state,
                             config,
@@ -297,14 +296,7 @@ pub(super) async fn apply_accepted(
                         },
                     )
                     .await;
-                    receive
-                        .await
-                        .map_err(|_| AgentLoopError::Closed)
-                        .and_then(std::convert::identity)
                 }
-            };
-            if let Some(complete) = completion.take() {
-                let _ = complete.send(result.map(ProtocolCompletion::Message));
             }
         }
         ClientCommand::SendMessage {
@@ -312,6 +304,27 @@ pub(super) async fn apply_accepted(
             attachments,
             ..
         } => {
+            if content.trim_start().starts_with('/') {
+                let bound = config.commands.bind_line(&content);
+                super::command_job::start(
+                    meta,
+                    bound,
+                    active_turn.load(Ordering::Acquire),
+                    super::command_job::CommandReply::Protocol(completion.take()),
+                    DispatchContext {
+                        state,
+                        config,
+                        tool_context,
+                        turn_signals,
+                        events,
+                        active_turn,
+                        command_descriptors,
+                        mode_registry,
+                    },
+                )
+                .await;
+                return;
+            }
             let (internal_respond, internal_receive) = oneshot::channel();
             Box::pin(handle_actor_command(
                 ActorCommand::SendMessage {

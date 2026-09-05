@@ -6,6 +6,7 @@ mod budget;
 mod cancellation;
 mod close;
 mod command_copy;
+mod command_lifetime;
 mod commands;
 mod compaction;
 mod compaction_recovery;

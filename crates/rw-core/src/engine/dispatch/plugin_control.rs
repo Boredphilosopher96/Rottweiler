@@ -110,7 +110,8 @@ pub(super) async fn control(
     control: ExtensionControl,
 ) -> Result<ExtensionControlOutcome, AgentLoopError> {
     control.validate().map_err(invalid)?;
-    if state.running.is_some()
+    if state.pending_command.is_some()
+        || state.running.is_some()
         || state.active_shell.is_some()
         || state.initialization_running
         || state.closing
