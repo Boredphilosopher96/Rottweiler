@@ -57,34 +57,7 @@ impl ExtensionInvocations {
             (completion, deadline, start)
         };
         if start {
-            let generation = self.lock().generation.id;
-            let deadline_gate = Arc::downgrade(self);
-            tokio::spawn(async move {
-                tokio::time::sleep_until(deadline).await;
-                if let Some(gate) = deadline_gate.upgrade() {
-                    let expired = {
-                        let state = gate.lock();
-                        state.phase == Phase::Retiring && state.generation.id == generation
-                    };
-                    if expired {
-                        gate.fail(error(
-                            "effects_unsettled",
-                            "extension retirement proof deadline expired",
-                        ));
-                    }
-                }
-            });
-            let gate = Arc::clone(self);
-            tokio::spawn(async move {
-                match AssertUnwindSafe(retire(&gate)).catch_unwind().await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(failure)) => gate.fail(failure),
-                    Err(_) => gate.fail(error(
-                        "effects_unsettled",
-                        "extension retirement owner panicked",
-                    )),
-                }
-            });
+            self.start_retirement(deadline);
         }
         let proof = async {
             loop {
@@ -99,16 +72,15 @@ impl ExtensionInvocations {
                 })?;
             }
         };
-        match tokio::time::timeout_at(deadline, proof).await {
-            Ok(result) => result?,
-            Err(_) => {
-                let failure = error(
-                    "effects_unsettled",
-                    "extension retirement proof deadline expired",
-                );
-                self.fail(failure.clone());
-                return Err(failure);
-            }
+        if let Ok(result) = tokio::time::timeout_at(deadline, proof).await {
+            result?;
+        } else {
+            let failure = error(
+                "effects_unsettled",
+                "extension retirement proof deadline expired",
+            );
+            self.fail(failure.clone());
+            return Err(failure);
         }
         let mut state = self.lock();
         if state.phase != Phase::Exclusive {
@@ -126,6 +98,37 @@ impl ExtensionInvocations {
             generation: state.generation.id,
             resumed: false,
         })
+    }
+
+    fn start_retirement(self: &Arc<Self>, deadline: tokio::time::Instant) {
+        let generation = self.lock().generation.id;
+        let deadline_gate = Arc::downgrade(self);
+        tokio::spawn(async move {
+            tokio::time::sleep_until(deadline).await;
+            if let Some(gate) = deadline_gate.upgrade() {
+                let expired = {
+                    let state = gate.lock();
+                    state.phase == Phase::Retiring && state.generation.id == generation
+                };
+                if expired {
+                    gate.fail(error(
+                        "effects_unsettled",
+                        "extension retirement proof deadline expired",
+                    ));
+                }
+            }
+        });
+        let gate = Arc::clone(self);
+        tokio::spawn(async move {
+            match AssertUnwindSafe(retire(&gate)).catch_unwind().await {
+                Ok(Ok(())) => {}
+                Ok(Err(failure)) => gate.fail(failure),
+                Err(_) => gate.fail(error(
+                    "effects_unsettled",
+                    "extension retirement owner panicked",
+                )),
+            }
+        });
     }
 }
 
