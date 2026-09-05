@@ -1,5 +1,13 @@
 //! Provider-call budget identities and admission bounds shared by durable storage and core.
 
+mod ledger;
+mod projection;
+mod schema;
+#[cfg(test)]
+mod tests;
+
+pub use ledger::{BudgetLedger, MAX_ACTIVE_PROVIDER_CALLS, ProviderCallPhase};
+
 use rw_types::{BudgetScope, BudgetUnit, SequenceId, config::BudgetConfig};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -94,6 +102,18 @@ pub enum BudgetReservationError {
     /// The owned storage task did not complete normally.
     #[error("provider budget storage task failed: {0}")]
     Worker(String),
+    /// A strict cap cannot include unknown outstanding provider liabilities.
+    #[error("strict budget admission requires reconciliation of unknown charges")]
+    UnresolvedCharge,
+    /// Checked projection arithmetic refused an overflow or inconsistent subtraction.
+    #[error("provider accounting projection arithmetic is inconsistent or exhausted")]
+    Arithmetic,
+    /// Durable `SQLite` authority could not complete the transaction.
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
+    /// A bounded provider accounting record is malformed.
+    #[error(transparent)]
+    Serialization(#[from] serde_json::Error),
 }
 
 impl BudgetCharge {
@@ -126,5 +146,25 @@ impl BudgetChargeBound {
             Self::Bounded(charge) => Some(charge),
             Self::BestEffort(charge) => charge,
         }
+    }
+}
+
+impl BudgetReservationPlan {
+    /// Validates fixed admission metadata before it enters a storage queue.
+    ///
+    /// # Errors
+    /// Rejects invalid identity, time, configuration, or output limits.
+    pub fn validate(&self) -> Result<(), BudgetReservationError> {
+        ledger::validate_plan(self)
+    }
+}
+
+impl ProviderCallReceipt {
+    /// Validates the receipt's identity, timestamp and bounded accounting strings.
+    ///
+    /// # Errors
+    /// Rejects malformed or oversized external accounting metadata.
+    pub fn validate(&self) -> Result<(), BudgetReservationError> {
+        ledger::validate_receipt(self)
     }
 }

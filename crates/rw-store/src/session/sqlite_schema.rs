@@ -54,7 +54,7 @@ pub(super) fn validate_accounting(connection: &Connection) -> Result<(), Session
 pub(super) fn validate_sessions(connection: &Connection) -> Result<(), SessionStoreError> {
     validate_table(connection, "sessions", SESSIONS_SCHEMA)
 }
-fn validate_table(
+pub(super) fn validate_table(
     connection: &Connection,
     table: &'static str,
     expected: &str,

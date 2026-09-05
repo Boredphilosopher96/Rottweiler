@@ -1,0 +1,9 @@
+# Provider budget admission
+
+The shared SQLite authority now owns each provider call and retry attempt. `BudgetLedger` admits reservations under an immediate transaction, persists provider entry, and transfers a reservation only against an exact durable call receipt. Caller loss performs no refund. Cancellation is accepted only before provider entry. Final identity records remain to reject duplicate execution.
+
+Unknown terminal charges retain their original bound. A recovered unknown charge without a bound prevents subsequent strict admission. Unfinished charges remain counted across UTC midnight. USD, credits, and subscription tokens have separate totals. Higher receipt sequences replace older accounting; an equal sequence with different actuals is rejected. Conversation rewind cannot remove this authority.
+
+The time projection uses a Fenwick index with fewer than 57 cells per prefix lookup. Updates and reads use checked 128-bit amounts encoded as fixed-width bytes. They neither load historical receipt collections nor use SQLite floating-point sums. Admission has a 4,096-active-call ceiling; stored call records have a 16 KiB ceiling.
+
+Validation: eleven new store tests cover competing connections, caller loss, exact receipt idempotency and corrections, unit changes, UTC boundaries, unknown liabilities, zero caps, identity conflicts, oversized metadata and full-u64 charges. The complete store suite and strict all-target store clippy passed locally. Runtime queue ownership and provider-route adoption are still being implemented; this is not a claim that production spend admission is finished.
