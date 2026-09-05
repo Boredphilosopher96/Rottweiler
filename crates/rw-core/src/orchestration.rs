@@ -138,6 +138,8 @@ pub struct SubagentRecoveryRecord {
 #[serde(rename_all = "snake_case")]
 pub enum SubagentRecoveryPhase {
     Pending,
+    /// The child closed before its first turn; reconcile lifecycle without reattaching its workspace.
+    Closed,
     #[default]
     Active,
 }
