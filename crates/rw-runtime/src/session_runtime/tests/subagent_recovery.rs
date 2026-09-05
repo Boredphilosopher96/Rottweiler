@@ -444,6 +444,23 @@ async fn recovery_recursively_rebinds_depth_two_children_and_is_restart_idempote
         .await
         .expect("grandchild metadata");
 
+    let terminal_counts = || {
+        [parent.clone(), child_session.clone()].map(|session| {
+            let events = if session == parent {
+                root_sink.load().expect("root journal")
+            } else {
+                load_session_events(
+                    &SessionEventLog::open(&storage, &session.0).expect("child journal"),
+                )
+                .expect("child events")
+            };
+            events
+                .iter()
+                .filter(|event| matches!(event, EngineEvent::SubagentFinished { .. }))
+                .count()
+        })
+    };
+
     let first_factory = Arc::new(RecoveryProbeFactory::default());
     let first_rebound = Arc::clone(&first_factory.rebound);
     let first = SubagentOrchestrator::new(
@@ -478,6 +495,11 @@ async fn recovery_recursively_rebinds_depth_two_children_and_is_restart_idempote
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
     assert_eq!(rebound, [grandchild_session.clone(), child_session.clone()]);
+    assert_eq!(
+        terminal_counts(),
+        [1, 1],
+        "one interrupted repair per child"
+    );
     assert_follow_up(
         &first,
         Arc::clone(&root_sink),
@@ -497,6 +519,11 @@ async fn recovery_recursively_rebinds_depth_two_children_and_is_restart_idempote
         &grandchild_session,
     )
     .await;
+    assert_eq!(
+        terminal_counts(),
+        [2, 2],
+        "follow-ups persist their own terminals"
+    );
     drop(first);
 
     let second_factory = Arc::new(RecoveryProbeFactory::default());
@@ -534,6 +561,11 @@ async fn recovery_recursively_rebinds_depth_two_children_and_is_restart_idempote
             .as_slice(),
         [grandchild_session.clone(), child_session.clone()]
     );
+    assert_eq!(
+        terminal_counts(),
+        [2, 2],
+        "restart must not duplicate repairs"
+    );
     assert_follow_up(
         &second,
         Arc::clone(&root_sink),
@@ -554,23 +586,9 @@ async fn recovery_recursively_rebinds_depth_two_children_and_is_restart_idempote
     )
     .await;
     assert_eq!(
-        root_sink
-            .load()
-            .expect("root events after second recovery")
-            .iter()
-            .filter(|event| matches!(event, EngineEvent::SubagentFinished { .. }))
-            .count(),
-        1
-    );
-    assert_eq!(
-        load_session_events(
-            &SessionEventLog::open(&storage, &child_session.0).expect("child log after restart")
-        )
-        .expect("child events after restart")
-        .iter()
-        .filter(|event| matches!(event, EngineEvent::SubagentFinished { .. }))
-        .count(),
-        1
+        terminal_counts(),
+        [3, 3],
+        "second follow-ups persist exactly one terminal each"
     );
 }
 
