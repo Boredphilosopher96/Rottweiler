@@ -67,7 +67,7 @@ enum SessionSlot {
 #[derive(Debug, Default)]
 struct HostRegistry {
     sessions: HashMap<SessionId, SessionSlot>,
-    anonymous_openings: usize,
+    shutdown_failure: Option<Arc<str>>,
 }
 
 #[derive(Clone, Debug)]
@@ -372,6 +372,7 @@ pub struct EngineHost {
     provider_mutation: Arc<tokio::sync::Mutex<()>>,
     provider_api_key_store: Arc<ProviderApiKeyStore>,
     shutting_down: Arc<AtomicBool>,
+    closure: Arc<lifecycle::HostClosure>,
 }
 
 impl fmt::Debug for EngineHost {
@@ -420,6 +421,7 @@ impl EngineHost {
                     .map_err(|_| HostError::Query("provider credential storage failed".to_owned()))
             }),
             shutting_down: Arc::new(AtomicBool::new(false)),
+            closure: Arc::new(lifecycle::HostClosure::default()),
         })
     }
 
@@ -630,105 +632,6 @@ impl EngineHost {
                 .await?
         };
         Ok(session.descriptor())
-    }
-
-    /// Reserves the supervisor-selected fresh identity before asynchronous
-    /// factory work begins. Clients that connect after authenticated health is
-    /// ready but before provider composition finishes join the same opening.
-    async fn prepare_fresh_session_after_reservation<F>(
-        &self,
-        request: CreateSessionRequest,
-        mut on_reserved: Option<F>,
-    ) -> Result<Arc<HostedSession>, HostError>
-    where
-        F: FnOnce(),
-    {
-        loop {
-            let (ready, wait, owns_opening) = {
-                let mut registry = self.registry.lock().await;
-                if self.shutting_down.load(Ordering::Acquire) {
-                    return Err(HostError::ShuttingDown);
-                }
-                match registry.sessions.get(&request.session_id) {
-                    Some(SessionSlot::Ready(session)) => (Some(Arc::clone(session)), None, false),
-                    Some(SessionSlot::Opening(completed)) => {
-                        (None, Some(completed.subscribe()), false)
-                    }
-                    None => {
-                        if registry
-                            .sessions
-                            .len()
-                            .saturating_add(registry.anonymous_openings)
-                            >= self.config.max_sessions
-                        {
-                            return Err(HostError::SessionCapacity);
-                        }
-                        let (completed, receiver) = watch::channel(false);
-                        drop(receiver);
-                        registry
-                            .sessions
-                            .insert(request.session_id.clone(), SessionSlot::Opening(completed));
-                        (None, None, true)
-                    }
-                }
-            };
-            if let Some(on_reserved) = on_reserved.take() {
-                on_reserved();
-            }
-            if let Some(session) = ready {
-                return Ok(session);
-            }
-            if let Some(mut completed) = wait {
-                if !*completed.borrow_and_update() {
-                    let _ = completed.changed().await;
-                }
-                continue;
-            }
-            if owns_opening {
-                break;
-            }
-        }
-
-        let created = match self.factory.create(request.clone()).await {
-            Ok(session)
-                if session.descriptor().session_id == request.session_id
-                    && session.handle().session_id() == &request.session_id =>
-            {
-                let session = Arc::new(session);
-                session.project_durable_descriptor().await.map(|()| session)
-            }
-            Ok(_) => Err(HostError::SessionIdentityMismatch),
-            Err(error) => Err(error),
-        };
-        let mut registry = self.registry.lock().await;
-        let completed = match registry.sessions.remove(&request.session_id) {
-            Some(SessionSlot::Opening(completed)) => Some(completed),
-            Some(SessionSlot::Ready(session)) => {
-                registry
-                    .sessions
-                    .insert(request.session_id.clone(), SessionSlot::Ready(session));
-                None
-            }
-            None => None,
-        };
-        let result = if self.shutting_down.load(Ordering::Acquire) {
-            Err(HostError::ShuttingDown)
-        } else {
-            match created {
-                Ok(session) => {
-                    registry
-                        .sessions
-                        .insert(request.session_id, SessionSlot::Ready(Arc::clone(&session)));
-                    Ok(session)
-                }
-                Err(error) => Err(error),
-            }
-        };
-        drop(registry);
-        if let Some(completed) = completed {
-            completed.send_replace(true);
-        }
-        result
     }
 }
 

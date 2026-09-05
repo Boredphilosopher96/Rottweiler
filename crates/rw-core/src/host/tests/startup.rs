@@ -34,18 +34,31 @@ async fn shutdown_wakes_opening_waiters_and_never_inserts_late_resume() {
     .await
     .expect("second resume registered as an opening waiter");
 
-    assert_eq!(
-        host.dispatch(
-            BoundClient {
-                client_id: ClientId("shutdown-client".to_owned()),
-            },
-            ClientCommand::ShutdownHost {
-                meta: meta("spoofed", "shutdown-resume"),
-            },
-        )
-        .await
-        .outcome,
-        CommandOutcome::Accepted
+    let shutdown = tokio::spawn({
+        let host = host.clone();
+        async move {
+            host.dispatch(
+                BoundClient {
+                    client_id: ClientId("shutdown-client".to_owned()),
+                },
+                ClientCommand::ShutdownHost {
+                    meta: meta("spoofed", "shutdown-resume"),
+                },
+            )
+            .await
+            .outcome
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !host.shutting_down.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("shutdown started");
+    assert!(
+        !shutdown.is_finished(),
+        "unsettled opening must prevent shutdown acknowledgement"
     );
     assert!(matches!(
         tokio::time::timeout(Duration::from_secs(1), waiter)
@@ -63,6 +76,13 @@ async fn shutdown_wakes_opening_waiters_and_never_inserts_late_resume() {
             .expect("owner task"),
         Err(HostError::ShuttingDown)
     ));
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), shutdown)
+            .await
+            .expect("shutdown settled")
+            .expect("shutdown task"),
+        CommandOutcome::Accepted
+    );
     assert!(host.session(&session_id).await.is_none());
     assert!(host.registry.lock().await.sessions.is_empty());
     assert_eq!(factory.shutdowns.load(Ordering::Relaxed), 1);
@@ -247,18 +267,31 @@ async fn shutdown_never_inserts_a_session_created_after_shutdown_started() {
     tokio::time::timeout(Duration::from_secs(1), factory.create_started.notified())
         .await
         .expect("create entered factory");
-    assert_eq!(
-        host.dispatch(
-            BoundClient {
-                client_id: ClientId("shutdown-client".to_owned()),
-            },
-            ClientCommand::ShutdownHost {
-                meta: meta("spoofed", "shutdown-create"),
-            },
-        )
-        .await
-        .outcome,
-        CommandOutcome::Accepted
+    let shutdown = tokio::spawn({
+        let host = host.clone();
+        async move {
+            host.dispatch(
+                BoundClient {
+                    client_id: ClientId("shutdown-client".to_owned()),
+                },
+                ClientCommand::ShutdownHost {
+                    meta: meta("spoofed", "shutdown-create"),
+                },
+            )
+            .await
+            .outcome
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !host.shutting_down.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("shutdown started");
+    assert!(
+        !shutdown.is_finished(),
+        "unsettled opening must prevent shutdown acknowledgement"
     );
     factory.create_release.notify_one();
     assert!(matches!(
@@ -268,10 +301,17 @@ async fn shutdown_never_inserts_a_session_created_after_shutdown_started() {
             .expect("create task"),
         Err(HostError::ShuttingDown)
     ));
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), shutdown)
+            .await
+            .expect("shutdown settled")
+            .expect("shutdown task"),
+        CommandOutcome::Accepted
+    );
     assert!(host.session(&session_id).await.is_none());
     let registry = host.registry.lock().await;
     assert!(registry.sessions.is_empty());
-    assert_eq!(registry.anonymous_openings, 0);
+    assert!(registry.shutdown_failure.is_none());
 }
 
 #[tokio::test]

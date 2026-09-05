@@ -1,0 +1,82 @@
+   Compiling rw-core v0.1.4 (/Users/sumukhnitundila/MyProjects/Rottweiler/crates/rw-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 25.74s
+     Running unittests src/lib.rs (target/debug/deps/rw_core-a695f0872d4f6e8c)
+
+running 44 tests
+test host::tests::catalog::wire_command_catalog_preserves_each_runtime_source ... ok
+test host::tests::catalog::wire_command_catalog_is_bounded_below_the_sse_line_limit ... ok
+test host::tests::catalog::wire_mode_catalog_is_count_and_byte_bounded ... ok
+test host::tests::delivery::active_read_identity_survives_ledger_eviction_pressure ... ok
+test host::tests::closure::factory_panic_retains_factory_owner_and_fails_shutdown_without_hanging ... ok
+test host::tests::delivery::empty_subagent_replay_completion_keeps_cursor_and_request_correlation ... ok
+test host::tests::delivery::malformed_metadata_never_enters_the_request_ledger ... ok
+test host::tests::delivery::read_admission_is_global_and_independent_of_the_request_ledger ... ok
+test host::tests::catalog::list_modes_returns_a_bounded_connection_scoped_live_catalog ... ok
+test host::tests::closure::shutdown_retains_ready_sessions_and_survives_its_callers_drop ... ok
+test host::tests::delivery::client_event_fanout_cleans_up_each_subscription ... ok
+test host::tests::delivery::reads_are_direct_fresh_and_keep_admission_until_body_clones_drop ... ok
+test host::tests::closure::invalid_factory_identity_closes_the_returned_actor_before_releasing_capacity ... ok
+test host::tests::delivery::subagent_replay_batches_are_lossless_and_fit_the_broadcast_window ... ok
+test host::tests::closure::late_fork_closes_before_shutdown_acknowledgement ... ok
+test host::tests::provider_auth::cancelled_begin_future_drops_its_opening_reservation ... ok
+test host::tests::closure::shutdown_attempts_every_session_and_never_accepts_failed_proof ... ok
+test host::tests::models::model_switch_persistence_failure_is_visible_after_the_session_commit ... ok
+test host::tests::catalog::list_commands_routes_to_the_explicit_sessions_assembled_registry ... ok
+test host::tests::provider_auth::provider_auth_prompts_and_connection_events_are_bounded_and_non_durable ... ok
+test host::tests::models::accepted_alias_and_concrete_model_switches_persist_in_dispatch_order ... ok
+test host::tests::provider_auth::provider_readiness_requires_the_target_catalog_row_to_be_usable ... ok
+test host::tests::provider_auth::provider_auth_completion_is_async_and_stale_cancel_keeps_real_attempt ... ok
+test host::tests::closure::dropped_create_resume_and_fork_callers_keep_reserved_factory_work_owned ... ok
+test host::tests::provider_auth::provider_auth_poll_is_cancelled_when_another_driver_takes_over ... ok
+test host::tests::provider_auth::provider_catalog_refresh_failure_does_not_delay_or_relabel_login ... ok
+test host::tests::session_queries::export_session_requires_an_absolute_path_and_current_driver ... ok
+test host::tests::sessions::bound_identity_and_request_deduplication_fail_closed ... ok
+test host::tests::sessions::concurrent_resume_opens_one_actor_and_capacity_is_atomic ... ok
+test host::tests::sessions::empty_log_rejects_sequence_zero_cursor_and_null_cursor_completes_promptly ... ok
+test host::tests::models::pending_switch_is_not_persisted_and_each_context_choice_persists_on_commit ... ok
+test host::tests::session_queries::rename_persists_and_lists_a_session_without_its_driver_lease ... ok
+test host::tests::sessions::failed_resume_removes_reservation_and_retry_succeeds ... ok
+test host::tests::startup::initial_preparation_reserves_identity_before_blocking_factory_work ... ok
+test host::tests::startup::descriptors_follow_only_durable_driver_model_and_shell_state ... ok
+test host::tests::startup::initial_resume_publishes_readiness_only_after_reserving_reconnect_identity ... ok
+test host::tests::sessions::concurrent_fork_waits_for_takeover_and_revalidates_actor_driver ... ok
+test host::tests::sessions::fork_requires_idle_driver_and_returns_typed_child_descriptor ... ok
+test host::tests::startup::shutdown_never_inserts_a_session_created_after_shutdown_started ... ok
+test host::tests::startup::shutdown_wakes_opening_waiters_and_never_inserts_late_resume ... ok
+test host::tests::provider_auth::cancelled_api_key_request_cannot_interrupt_store_or_overtake_lifecycle ... ok
+test host::tests::provider_auth::oauth_and_api_key_mutations_share_one_global_store_boundary ... ok
+test host::tests::delivery::connection_results_survive_slow_subscriber_backpressure ... ok
+test host::tests::delivery::stalled_subscription_does_not_block_active_sibling ... ok
+
+test result: ok. 44 passed; 0 failed; 0 ignored; 0 measured; 325 filtered out; finished in 0.58s
+
+     Running tests/init_generation.rs (target/debug/deps/init_generation-cd75227559d1ba69)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/live_smoke_credentials.rs (target/debug/deps/live_smoke_credentials-b9c9f9b7db933357)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/lsp_plan_denial.rs (target/debug/deps/lsp_plan_denial-89038e3960e67d6d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/native_websearch.rs (target/debug/deps/native_websearch-36d194e6cf3c51a4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/provider_factory.rs (target/debug/deps/provider_factory-8c9f4cf535d26a02)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 0.00s
+

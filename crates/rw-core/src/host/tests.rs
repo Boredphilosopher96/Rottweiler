@@ -132,6 +132,8 @@ struct StubFactory {
     next: AtomicUsize,
     resumes: AtomicUsize,
     fail_resume_once: AtomicBool,
+    corrupt_identity: bool,
+    panic_resume: bool,
     block_create: AtomicBool,
     block_resume: AtomicBool,
     block_fork: AtomicBool,
@@ -154,6 +156,8 @@ impl StubFactory {
             next: AtomicUsize::new(1),
             resumes: AtomicUsize::new(0),
             fail_resume_once: AtomicBool::new(false),
+            corrupt_identity: false,
+            panic_resume: false,
             block_create: AtomicBool::new(false),
             block_resume: AtomicBool::new(false),
             block_fork: AtomicBool::new(false),
@@ -232,7 +236,11 @@ impl StubFactory {
         .expect("session actor");
         HostedSession::new(
             SessionDescriptor {
-                session_id: session_id.clone(),
+                session_id: if self.corrupt_identity {
+                    SessionId("wrong-identity".to_owned())
+                } else {
+                    session_id.clone()
+                },
                 title: "New session".to_owned(),
                 workspace_name: session_id.0.clone(),
                 model: ModelAlias("fast".to_owned()),
@@ -262,6 +270,7 @@ impl SessionFactory for StubFactory {
     }
 
     async fn resume(&self, session_id: &SessionId) -> Result<HostedSession, HostError> {
+        assert!(!self.panic_resume, "injected factory panic");
         self.resumes.fetch_add(1, Ordering::Relaxed);
         if self.block_resume.load(Ordering::Acquire) {
             self.resume_started.notify_one();
@@ -599,6 +608,7 @@ fn host(max_sessions: usize) -> (EngineHost, Arc<StubFactory>) {
 }
 
 mod catalog;
+mod closure;
 mod delivery;
 mod models;
 mod provider_auth;

@@ -325,9 +325,8 @@ pub trait SessionFactory: Send + Sync + 'static {
         Ok((sessions, truncated))
     }
 
-    async fn shutdown(&self) -> Result<(), HostError> {
-        Ok(())
-    }
+    /// Settle every factory-owned operation before reporting success.
+    async fn shutdown(&self) -> Result<(), HostError>;
 }
 
 /// Remote-safe host query boundary implemented by the CLI/storage layer.

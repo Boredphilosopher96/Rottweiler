@@ -1143,31 +1143,7 @@ impl EngineHost {
                 Ok((CommandOutcome::Accepted, Some(session_id), Vec::new()))
             }
             ClientCommand::ShutdownHost { meta } => {
-                self.provider_auth.cancel_all();
-                let opening_waiters = {
-                    let mut registry = self.registry.lock().await;
-                    // The shutdown flag and registry transition share this
-                    // lock with every post-factory insertion check. This is
-                    // the host's shutdown linearization point: an opener
-                    // either inserts before it and is drained, or observes
-                    // shutdown and can never insert.
-                    self.shutting_down.store(true, Ordering::Release);
-                    registry
-                        .sessions
-                        .drain()
-                        .filter_map(|(_, slot)| match slot {
-                            SessionSlot::Opening(completed) => Some(completed),
-                            SessionSlot::Ready(_) => None,
-                        })
-                        .collect::<Vec<_>>()
-                };
-                // Clearing an Opening reservation without completing its
-                // signal strands waiters forever. Cancel every opening before awaiting
-                // factory shutdown; each rechecks `shutting_down` and exits.
-                for completed in opening_waiters {
-                    completed.send_replace(true);
-                }
-                self.factory.shutdown().await?;
+                self.shutdown_sessions().await?;
                 Ok((
                     CommandOutcome::Accepted,
                     None,
