@@ -140,3 +140,48 @@ impl<'de> Deserialize<'de> for UiCatalog {
         Ok(value)
     }
 }
+
+impl super::UiPanels {
+    /// # Errors
+    /// Rejects repeated panels, excess count/encoded bytes or invalid surfaces.
+    pub fn validate(&self) -> Result<(), UiContractError> {
+        validation::encoded_bytes(self, 512 * 1024)?;
+        if self.panels.len() > 8 {
+            return Err(UiContractError("panel count"));
+        }
+        let mut identities = BTreeSet::new();
+        for panel in &self.panels {
+            panel.presentation.validate()?;
+            if panel.revision == 0
+                || !matches!(
+                    panel.presentation.descriptor.surface,
+                    UiDisplaySurface::Panel {}
+                )
+            {
+                return Err(UiContractError("panel surface identity"));
+            }
+            if !identities.insert((
+                &panel.presentation.owner.generation,
+                &panel.presentation.descriptor.id,
+            )) {
+                return Err(UiContractError("duplicate panel identity"));
+            }
+        }
+        Ok(())
+    }
+}
+impl<'de> Deserialize<'de> for super::UiPanels {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            panels: Vec<super::UiPanelSnapshot>,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        let value = Self {
+            panels: wire.panels,
+        };
+        value.validate().map_err(serde::de::Error::custom)?;
+        Ok(value)
+    }
+}

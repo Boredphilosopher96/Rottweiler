@@ -281,3 +281,13 @@ pub struct UiPanelSnapshot {
 
 #[cfg(test)]
 mod tests;
+
+/// One coalesced surface per live panel. Historical tool surfaces use their
+/// canonical result source and do not consume this ephemeral registry.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema, TS, PrepareAllocation)]
+#[serde(deny_unknown_fields)]
+#[schemars(extend("x-rw-max-json-bytes"=524288))]
+pub struct UiPanels {
+    #[schemars(length(max = 8))]
+    pub panels: Vec<UiPanelSnapshot>,
+}

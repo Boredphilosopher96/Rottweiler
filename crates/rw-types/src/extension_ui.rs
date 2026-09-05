@@ -4,7 +4,7 @@ mod client;
 pub use client::{
     UiActionRequest, UiActionTarget, UiCatalog, UiCatalogEntry, UiContributionOwner,
     UiDisplayAction, UiDisplayDescriptor, UiDisplayField, UiDisplaySurface, UiGenerationId,
-    UiPanelSnapshot, UiPresentation,
+    UiPanelSnapshot, UiPanels, UiPresentation,
 };
 mod wire_bounds;
 use wire_bounds::{

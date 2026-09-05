@@ -1,12 +1,14 @@
 import { readFile, writeFile } from "node:fs/promises"
 import { fileURLToPath } from "node:url"
 import eventSchema from "../../../protocol/schema/engine-event.schema.json"
+import presentationSchema from "../../../protocol/schema/ui-presentation.schema.json"
 import replySchema from "../../../protocol/schema/command-reply.schema.json"
 import { standaloneValidator } from "./standalone-validator"
 
 const root = new URL("../../../protocol/", import.meta.url)
 for (const { schema, name, typeName } of [
   { schema: eventSchema, name: "engine-event", typeName: "EngineEvent" },
+  { schema: presentationSchema, name: "ui-presentation", typeName: "UiPresentation" },
   { schema: replySchema, name: "command-reply", typeName: "CommandReply" },
 ]) {
   const { javascript, declaration } = await standaloneValidator({

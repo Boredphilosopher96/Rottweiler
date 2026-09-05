@@ -21,8 +21,8 @@ pub use agent::{
 };
 
 pub use command::{
-    CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation, CommandRegistry,
-    CommandRegistryError,
+    BoundCommand, CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation,
+    CommandRegistry, CommandRegistryError,
 };
 pub use discovery::{
     ArtifactKind, ArtifactLocation, ArtifactOrigin, ArtifactScope, CommandTemplate,

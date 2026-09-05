@@ -256,13 +256,56 @@ impl<Context, Output> CommandRegistry<Context, Output> {
         line: &str,
     ) -> Result<Output, CommandRegistryError> {
         let invocation = parse_invocation(line)?;
-        let Some(registered) = self.commands.get(invocation.name()) else {
-            return Err(CommandRegistryError::Unknown {
-                name: invocation.name,
-            });
-        };
-        let name = invocation.name.clone();
-        match AssertUnwindSafe(registered.handler.execute(context, invocation))
+        self.bind(&invocation.name, invocation.arguments)?
+            .execute(context)
+            .await
+    }
+
+    /// Captures the exact registered handler and inert arguments at admission.
+    /// Subsequent registry replacement cannot retarget the invocation.
+    ///
+    /// # Errors
+    /// Rejects noncanonical or absent command names.
+    pub fn bind(
+        &self,
+        name: &str,
+        arguments: String,
+    ) -> Result<BoundCommand<Context, Output>, CommandRegistryError> {
+        validate_name(name)?;
+        let registered = self
+            .commands
+            .get(name)
+            .ok_or_else(|| CommandRegistryError::Unknown {
+                name: name.to_owned(),
+            })?;
+        Ok(BoundCommand {
+            handler: Arc::clone(&registered.handler),
+            invocation: CommandInvocation {
+                name: name.to_owned(),
+                arguments,
+            },
+        })
+    }
+}
+
+/// One admitted command bound to its actual implementation, never a later name lookup.
+pub struct BoundCommand<Context, Output> {
+    handler: Arc<dyn CommandHandler<Context, Output>>,
+    invocation: CommandInvocation,
+}
+impl<Context, Output> BoundCommand<Context, Output> {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        self.invocation.name()
+    }
+
+    /// Executes the captured implementation through the shared panic boundary.
+    ///
+    /// # Errors
+    /// Reports implementation rejection or panic.
+    pub async fn execute(self, context: &mut Context) -> Result<Output, CommandRegistryError> {
+        let name = self.invocation.name.clone();
+        match AssertUnwindSafe(self.handler.execute(context, self.invocation))
             .catch_unwind()
             .await
         {
@@ -371,6 +414,32 @@ mod tests {
             Ok("review".to_owned())
         );
         assert_eq!(context, ["built-in:2 ", "extension:src/"]);
+    }
+
+    #[tokio::test]
+    async fn captured_command_cannot_retarget_a_replaced_registration() {
+        let mut registry = CommandRegistry::new();
+        registry
+            .register(CommandDescriptor::new("open", "Open"), Append("first"))
+            .expect("first registration");
+        let admitted = registry
+            .bind("open", "{\"path\":\"a b\"}".into())
+            .expect("bound action");
+        assert!(registry.unregister("open"));
+        registry
+            .register(CommandDescriptor::new("open", "Open"), Append("second"))
+            .expect("replacement registration");
+        let mut context = Vec::new();
+        admitted
+            .execute(&mut context)
+            .await
+            .expect("admitted implementation");
+        assert_eq!(context, ["first:{\"path\":\"a b\"}"]);
+        registry
+            .dispatch_line(&mut context, "/open later")
+            .await
+            .expect("new implementation");
+        assert_eq!(context[1], "second:later");
     }
 
     #[test]

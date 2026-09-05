@@ -17,6 +17,7 @@ mod subscription_credentials;
 pub mod todo_projection;
 #[cfg(unix)]
 pub mod transcript;
+pub mod ui;
 mod update;
 
 pub use rw_types::config::{

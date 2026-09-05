@@ -16,8 +16,8 @@ use rw_types::extension_contract::{
 use rw_types::extension_ui::{
     UiAction, UiActionRequest, UiActionTarget, UiCatalog, UiCatalogEntry, UiContribution,
     UiContributionOwner, UiDisplayAction, UiDisplayDescriptor, UiDisplayField, UiDisplaySurface,
-    UiField, UiGenerationId, UiPanelSnapshot, UiPresentation, UiProjectedField, UiProjectedFields,
-    UiSelectorStep, UiTableColumn,
+    UiField, UiGenerationId, UiPanelSnapshot, UiPanels, UiPresentation, UiProjectedField,
+    UiProjectedFields, UiSelectorStep, UiTableColumn,
 };
 use rw_types::todo::{TodoItem, TodoReadResult, TodoReadSnapshot, TodoSnapshot, TodoStatus};
 use rw_types::{
@@ -127,6 +127,10 @@ fn generated_artifacts() -> Result<Vec<(PathBuf, String)>, XtaskError> {
             generate_schema::<EngineEvent>()?,
         ),
         (
+            PathBuf::from("schema/ui-presentation.schema.json"),
+            generate_schema::<UiPresentation>()?,
+        ),
+        (
             PathBuf::from("schema/command-reply.schema.json"),
             generate_schema::<rw_types::CommandReply>()?,
         ),
@@ -169,6 +173,10 @@ fn generate_typescript() -> Result<String, XtaskError> {
         ("MAX_MCP_SERVER_ID_BYTES", MAX_MCP_SERVER_ID_BYTES),
         ("MAX_COMMAND_REPLY_BYTES", rw_types::MAX_COMMAND_REPLY_BYTES),
         ("MAX_CLIENT_READS", rw_types::MAX_CLIENT_READS),
+        (
+            "MAX_UI_SURFACE_BYTES",
+            rw_types::extension_ui::MAX_UI_SURFACE_BYTES,
+        ),
         ("MAX_TODO_ITEMS", rw_types::todo::MAX_TODO_ITEMS),
         ("MAX_TODO_ID_BYTES", rw_types::todo::MAX_TODO_ID_BYTES),
         (
@@ -215,6 +223,7 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(UiActionTarget);
     declaration!(UiActionRequest);
     declaration!(UiPanelSnapshot);
+    declaration!(UiPanels);
     declaration!(UiAction);
     declaration!(UiContribution);
     declaration!(UiField);
