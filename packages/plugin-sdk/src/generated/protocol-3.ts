@@ -203,6 +203,7 @@ export interface ToolResponse {
 }
 
 export interface CommandExecuteParams {
+  readonly invocation_id: import("./extension-contract").ExtensionInvocationId | null
   readonly name: string
   readonly arguments: string
 }
