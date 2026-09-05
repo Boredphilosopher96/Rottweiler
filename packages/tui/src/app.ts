@@ -1,3 +1,4 @@
+import { InputUiController } from "./app/input"
 import { ChildUiController } from "./app/children"
 import { SessionUiController } from "./app/sessions"
 import {
@@ -227,6 +228,7 @@ export class RottweilerApp extends BoxRenderable {
   banner!: StateBannerRenderable
   main!: BoxRenderable
 
+  readonly #input: InputUiController
   readonly #children: ChildUiController
   readonly #sessions: SessionUiController
   readonly #themes: ThemeUiController
@@ -266,7 +268,6 @@ export class RottweilerApp extends BoxRenderable {
   #projectionRequests: ProjectionRequestBroker
   #pickerController: PickerController
   #activeSubagentReadOnly = false
-  #interruptSubagentId: string | null = null
   #commandsRequested = false
   #commandCatalogTruncationNotified = false
   #projectionErrors: Partial<Record<ProjectionKind, string>> = {}
@@ -280,17 +281,11 @@ export class RottweilerApp extends BoxRenderable {
   #pendingShellTimer: ReturnType<typeof setTimeout> | null = null
   #pluginNotificationTimer: ReturnType<typeof setTimeout> | null = null
   #runtimeServicesTimer: ReturnType<typeof setTimeout> | null = null
-  #interruptEscapeTimer: ReturnType<typeof setTimeout> | null = null
   #clipboardNoticeTimer: ReturnType<typeof setTimeout> | null = null
-  #interruptEscapeArmed = false
   #pendingReviewPaths = new Set<string>()
   #composerNotice: string | null = null
   #lastComposerValue = ""
   #pendingClientState: AppClientState | null = null
-  #keybindings: CompiledKeybindings
-  #inputMode: InputMode
-  #vimFocus: VimFocus = "composer"
-  #vimFocusBeforePicker: Exclude<VimFocus, "picker"> = "composer"
   #destroyed = false
   #presentation: PresentationController<PendingPresentationEvent>
   #onTerminalFocus = () => {
@@ -298,7 +293,7 @@ export class RottweilerApp extends BoxRenderable {
   }
   #onTerminalBlur = () => {
     this.#terminalFocused = false
-    this.#clearInterruptEscape()
+    this.#input.clearInterruptEscape()
   }
   #onTerminalThemeMode = (mode: ThemeMode) => {
     this.#systemThemeMode = mode
@@ -328,7 +323,7 @@ export class RottweilerApp extends BoxRenderable {
       // completing out of order.
       if (this.ctx.getSelection() === selection) {
         this.ctx.clearSelection()
-        if (!this.#state.replay.active) this.#focusForInputMode()
+        if (!this.#state.replay.active) this.#input.focusForInputMode()
       }
       this.#showClipboardNotice()
     }).catch(() => {
@@ -340,149 +335,6 @@ export class RottweilerApp extends BoxRenderable {
       )
     })
   }
-  #onGlobalKey = (key: KeyEvent) => {
-    if (this.outputViewer.visible && this.#document?.snapshot.open
-      && !key.ctrl && !key.meta && !key.shift && (key.name === "left" || key.name === "right")) {
-      if (key.name === "left") void this.#document.previous()
-      else void this.#document.next()
-      key.preventDefault()
-      key.stopPropagation()
-      return
-    }
-    this.#pendingClientState = null
-    const focusOwner = this.#visibleFocusOwner()
-    const plainEscape = keyStrokeFromEvent(key) === "escape"
-    if (!plainEscape && this.#interruptEscapeArmed) this.#clearInterruptEscape()
-    if (
-      plainEscape &&
-      this.#children.activeId !== null &&
-      !this.#pickerVisible() &&
-      !this.outputViewer.visible &&
-      !this.#reviewOpen
-    ) {
-      if (this.#keybindings.preset === "vim" && this.#inputMode === "insert") {
-        this.#setInputMode("normal")
-        key.preventDefault()
-        key.stopPropagation()
-        return
-      }
-      const subagentId = this.#children.activeId
-      const running = this.#children.subagentDescriptor(subagentId)?.activity === "running"
-      this.#children.leaveSubagent()
-      if (running) this.#armInterruptEscape(subagentId)
-      key.preventDefault()
-      key.stopPropagation()
-      return
-    }
-    if (
-      plainEscape &&
-      !this.#pickerVisible() &&
-      !this.outputViewer.visible &&
-      !this.#reviewOpen &&
-      this.#isInterruptible()
-    ) {
-      // In Vim mode the first Escape still leaves insert mode, but it also
-      // counts as the first half of the universal double-Escape interrupt.
-      if (this.#inputMode === "insert") this.#setInputMode("normal")
-      if (this.#interruptEscapeArmed) {
-        const subagentId = this.#interruptSubagentId
-        this.#clearInterruptEscape()
-        void this.#interruptActiveResponse(subagentId)
-      } else {
-        this.#armInterruptEscape()
-      }
-      key.preventDefault()
-      key.stopPropagation()
-      return
-    }
-    if (
-      focusOwner === "composer" &&
-      !this.#pickerVisible() &&
-      !this.outputViewer.visible &&
-      !this.#reviewOpen &&
-      !key.ctrl &&
-      !key.meta &&
-      !key.super &&
-      !key.option &&
-      !key.hyper &&
-      !key.shift &&
-      (key.name === "up" || key.name === "down") &&
-      this.composer.navigateHistory(key.name === "up" ? "previous" : "next")
-    ) {
-      if (this.#pickerController.anchored) this.closePicker()
-      key.preventDefault()
-      key.stopPropagation()
-      return
-    }
-    if (
-      focusOwner === "interaction" &&
-      !key.ctrl &&
-      !key.meta &&
-      !key.super &&
-      !key.option &&
-      !key.hyper &&
-      !key.shift &&
-      (key.name === "return" || key.name === "kpenter" || key.name === "linefeed")
-    ) {
-      // SelectRenderable handles Return internally but does not normalize the
-      // keypad Enter or raw line-feed event on every terminal. Own all shapes
-      // at the global priority layer so the focused safety choice is committed
-      // exactly once.
-      this.interactionPanel.select.selectCurrent()
-      key.preventDefault()
-      key.stopPropagation()
-      return
-    }
-    const legacyMacNavigation = focusOwner === "composer"
-      ? legacyMacNavigationAction(key, this.#options.platform ?? process.platform)
-      : null
-    if (
-      legacyMacNavigation !== null &&
-      this.#handleKeybindingAction(legacyMacNavigation)
-    ) {
-      key.preventDefault()
-      key.stopPropagation()
-      return
-    }
-    if (
-      focusOwner === "composer" &&
-      !this.#pickerVisible() &&
-      key.name === "backspace" &&
-      !key.ctrl && !key.meta && !key.option &&
-      this.composer.value.length === 0 &&
-      this.composer.removeLastAttachment()
-    ) {
-      key.preventDefault()
-      key.stopPropagation()
-      return
-    }
-    const safetyPanelFocused =
-      focusOwner === "interaction" || focusOwner === "output" || focusOwner === "review"
-    const action =
-      focusOwner === "output" || focusOwner === "review"
-        ? this.#keybindings.resolve("review", key)
-        : focusOwner === "interaction"
-          ? null
-          : ( this.#keybindings.resolve("global", key) ??
-            this.#keybindings.resolve(this.#keybindingContext(), key))
-    if (action !== null && this.#handleKeybindingAction(action)) {
-      key.preventDefault()
-      key.stopPropagation()
-    } else if (
-      this.#keybindings.preset === "vim" &&
-      this.#inputMode === "normal" &&
-      !safetyPanelFocused &&
-      !key.ctrl &&
-      !key.meta &&
-      !key.option
-    ) {
-      // A focused OpenTUI editor still owns the terminal cursor in normal mode.
-      // Never let an unmapped printable/navigation key leak through as text.
-      key.preventDefault()
-      key.stopPropagation()
-    }
-  }
-
   constructor(ctx: RenderContext, options: RottweilerAppOptions) {
     const theme = options.theme ?? kennelTheme
     super(ctx, {
@@ -535,8 +387,31 @@ export class RottweilerApp extends BoxRenderable {
         )
       },
     })
-    this.#keybindings = compileKeybindings(options.keybindings)
-    this.#inputMode = this.#keybindings.preset === "vim" ? "normal" : "standard"
+    const inputApp = this
+    this.#input = new InputUiController({
+      get state() { return inputApp.#state }, get children() { return inputApp.#children },
+      get sessions() { return inputApp.#sessions }, get document() { return inputApp.#document },
+      get reviewOpen() { return inputApp.#reviewOpen }, get primaryView() { return inputApp.#primaryView },
+      get pickerController() { return inputApp.#pickerController }, get requests() { return inputApp.#projectionRequests },
+      get sessionId() { return inputApp.#sessionId }, get destroyed() { return inputApp.#destroyed },
+      get theme() { return inputApp.#theme }, get platform() { return inputApp.#options.platform },
+      get outputViewer() { return inputApp.outputViewer }, get reviewPanel() { return inputApp.reviewPanel },
+      get interactionPanel() { return inputApp.interactionPanel }, get composer() { return inputApp.composer },
+      get transcript() { return inputApp.transcript }, get toolsWorkspace() { return inputApp.toolsWorkspace },
+      get statusLine() { return inputApp.statusLine }, get banner() { return inputApp.banner },
+      get picker() { return inputApp.picker }, get mcpBrowser() { return inputApp.mcpBrowser },
+      get settingsBrowser() { return inputApp.settingsBrowser }, get themeBrowser() { return inputApp.themeBrowser },
+      get commandPalette() { return inputApp.commandPalette },
+      discardPendingRestore: () => { this.#pendingClientState = null },
+      projectRejection: outcome => this.#projectRejection(outcome),
+      projectError: (code, message, retryable) => this.#projectClientError(code, message, retryable),
+      modelSupportsVision: state => this.#modelSupportsVision(state),
+      closeOutputViewer: () => this.#closeOutputViewer(), closeReview: () => this.#closeReview(),
+      closePicker: () => this.closePicker(), openSessionPicker: () => this.openSessionPicker(),
+      openSubagentPicker: () => this.openSubagentPicker(), openReview: () => this.openReview(),
+      openCommandPicker: () => this.openCommandPicker(), openModelPicker: () => this.openModelPicker(),
+      openModePicker: () => this.openModePicker(),
+    }, compileKeybindings(options.keybindings))
     this.#theme = theme
     this.#systemThemeMode = options.systemThemeMode ?? null
     this.#systemTheme = options.systemTheme ?? systemThemeFor(this.#systemThemeMode)
@@ -549,9 +424,8 @@ export class RottweilerApp extends BoxRenderable {
       options.replaySessionId === undefined
         ? initialState
         : enterReplayMode(initialState, options.replaySessionId)
-    if (this.#state.replay.active && this.#keybindings.preset === "vim") {
-      this.#vimFocus = "transcript"
-      this.#vimFocusBeforePicker = "transcript"
+    if (this.#state.replay.active && this.#input.bindings.preset === "vim") {
+      this.#input.restoreFocus("transcript")
     }
     if (options.initialEvent !== undefined) {
       this.#state = reduceRottweilerState(
@@ -593,7 +467,7 @@ export class RottweilerApp extends BoxRenderable {
       get banner() { return app.banner }, get theme() { return app.#theme },
       get history() { return app.#history }, get diagnostics() { return app.#options.diagnostics },
       pickerController: this.#pickerController, requests: this.#projectionRequests,
-      focus: () => this.#focusForInputMode(), refresh: () => this.setState(this.#state),
+      focus: () => this.#input.focusForInputMode(), refresh: () => this.setState(this.#state),
       presentEvent: event => this.#presentation.markDirty(deferPresentationForEvent(event)),
       closePicker: () => this.closePicker(), binding: action => this.#paletteBinding(action),
       projectError: (code, message, retryable) => this.#projectClientError(code, message, retryable),
@@ -628,7 +502,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#themes = new ThemeUiController({
       get theme() { return app.#theme }, get browser() { return app.themeBrowser },
       pickerController: this.#pickerController, requests: this.#projectionRequests,
-      get sessionId() { return app.#sessionId }, get vim() { return app.#keybindings.preset === "vim" },
+      get sessionId() { return app.#sessionId }, get vim() { return app.#input.bindings.preset === "vim" },
       get terminalWidth() { return app.width || app.ctx.width }, get terminalHeight() { return app.height || app.ctx.height },
       get statusHeight() { return app.statusLine.height }, get composerDockHeight() { return app.composer.dockHeight },
       get deferred() { return app.#deferredTheme !== null }, get previewSuppressed() { return app.#rethemeInProgress },
@@ -647,7 +521,7 @@ export class RottweilerApp extends BoxRenderable {
       get terminalHeight() { return app.height || app.ctx.height },
       get statusHeight() { return app.statusLine.height },
       get composerDockHeight() { return app.composer.dockHeight },
-      get vim() { return app.#keybindings.preset === "vim" },
+      get vim() { return app.#input.bindings.preset === "vim" },
       closePicker: () => this.closePicker(), openThemePicker: () => this.openThemePicker(),
       modalOpened: () => this.#modalOpened(),
     })
@@ -668,7 +542,7 @@ export class RottweilerApp extends BoxRenderable {
       get terminalHeight() { return app.height || app.ctx.height },
       get statusHeight() { return app.statusLine.height },
       get composerDockHeight() { return app.composer.dockHeight },
-      get vim() { return app.#keybindings.preset === "vim" },
+      get vim() { return app.#input.bindings.preset === "vim" },
       closePicker: () => this.closePicker(),
       modalOpened: () => this.#modalOpened(),
       projectError: (code, message, retryable) => this.#projectClientError(code, message, retryable),
@@ -678,12 +552,12 @@ export class RottweilerApp extends BoxRenderable {
     ctx.on(CliRenderEvents.BLUR, this.#onTerminalBlur)
     ctx.on(CliRenderEvents.THEME_MODE, this.#onTerminalThemeMode)
     ctx.on(CliRenderEvents.SELECTION, this.#onSelection)
-    ctx.keyInput.on("keypress", this.#onGlobalKey)
+    ctx.keyInput.on("keypress", this.#input.onGlobalKey)
     this.setState(this.#state)
     if (this.#reviewOpen) {
       this.reviewPanel.files.focus()
     } else if (!this.#state.replay.active) {
-      this.#focusForInputMode()
+      this.#input.focusForInputMode()
     }
   }
 
@@ -699,7 +573,7 @@ export class RottweilerApp extends BoxRenderable {
     const toolsClientState = rebuilding ? this.toolsWorkspace.captureClientState() : null
     const toolsScrollTop = rebuilding ? this.toolsWorkspace.activityScroller.scrollTop : 0
     const scrollTop = rebuilding ? this.transcript.scroller.scrollTop : 0
-    const pickerWasVisible = rebuilding && this.#pickerVisible()
+    const pickerWasVisible = rebuilding && this.#input.pickerVisible()
     const pickerKind = this.#pickerController.kind
     const paletteWasVisible = pickerWasVisible && pickerKind === "palette"
     const mcpBrowserWasVisible = pickerWasVisible && pickerKind === "mcp"
@@ -766,7 +640,7 @@ export class RottweilerApp extends BoxRenderable {
       ...(this.#treeSitterClient === undefined
         ? {}
         : { treeSitterClient: this.#treeSitterClient }),
-      onInteraction: () => this.#restoreFocusAfterTranscriptInteraction(),
+      onInteraction: () => this.#input.restoreFocusAfterTranscriptInteraction(),
       onOpenSubagent: (subagentId) => {
         void this.#children.enterSubagent(subagentId)
       },
@@ -1363,8 +1237,8 @@ export class RottweilerApp extends BoxRenderable {
       toolsScrollTop: Math.max(0, this.toolsWorkspace.activityScroller.scrollTop),
       transcript: this.transcript.captureClientState(),
       tools: this.toolsWorkspace.captureClientState(),
-      inputMode: this.#inputMode,
-      focus: this.#vimFocus === "picker" ? this.#vimFocusBeforePicker : this.#vimFocus,
+      inputMode: this.#input.mode,
+      focus: this.#input.focus === "picker" ? this.#input.beforePicker : this.#input.focus,
       theme: this.#theme.name,
       picker: kind === null ? null : {
         kind,
@@ -1388,9 +1262,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#restoreComposerState(state.composer)
     this.#children.restoreDrafts({ content: state.composer.content, attachments: state.composer.attachments }, state.subagentDrafts)
     this.#lastComposerValue = state.composer.content
-    this.#inputMode = state.inputMode
-    this.#vimFocus = state.focus
-    this.#vimFocusBeforePicker = state.focus
+    this.#input.restore(state.inputMode, state.focus)
     this.#setPrimaryView(state.primaryView)
     const picker = state.picker
     if (picker !== null) {
@@ -1425,7 +1297,7 @@ export class RottweilerApp extends BoxRenderable {
     }
     this.#pendingClientState = state
     this.setState(this.#state)
-    this.#focusForInputMode()
+    this.#input.focusForInputMode()
   }
 
   /** Apply viewport/selection only after replay and OpenTUI layout have supplied their rows. */
@@ -1468,7 +1340,7 @@ export class RottweilerApp extends BoxRenderable {
 
   #bindStateToComponents(state: RottweilerState): void {
     const previousConnectionPhase = this.#state.connection.phase
-    const previousFocusOwner = this.#visibleFocusOwner()
+    const previousFocusOwner = this.#input.visibleFocusOwner()
     if (state.workspaceRoots !== this.#workspaceRoots) {
       this.#workspaceRoots = state.workspaceRoots
       setWorkspaceRoots(state.workspaceRoots?.roots ?? [])
@@ -1534,7 +1406,7 @@ export class RottweilerApp extends BoxRenderable {
       this.height === 0 ? this.ctx.height : this.height,
       this.interactionPanel.usesComposer && composerVisible ? this.composer.dockHeight : 0,
     )
-    const focusOwner = this.#visibleFocusOwner()
+    const focusOwner = this.#input.visibleFocusOwner()
     if (
       (previousFocusOwner === "interaction" ||
         previousFocusOwner === "output" ||
@@ -1543,17 +1415,17 @@ export class RottweilerApp extends BoxRenderable {
       focusOwner !== "output" &&
       focusOwner !== "review"
     ) {
-      this.#focusForInputMode()
+      this.#input.focusForInputMode()
     } else if (subagentBecameWritable) {
-      this.#focusForInputMode()
+      this.#input.focusForInputMode()
     }
     this.statusLine.setBranch(viewingSubagent ? null : state.workspaceStatus?.branch ?? null)
     this.statusLine.setKeybindingMode(
-      this.#inputMode === "standard" ? null : this.#inputMode,
-      this.#inputMode === "standard" ? null : this.#statusFocusOwner(),
+      this.#input.mode === "standard" ? null : this.#input.mode,
+      this.#input.mode === "standard" ? null : this.#input.statusFocusOwner(),
     )
     this.composer.setKeybindingMode(
-      this.#inputMode === "standard" ? null : this.#inputMode,
+      this.#input.mode === "standard" ? null : this.#input.mode,
     )
     this.statusLine.update(presented)
     this.banner.update(presented)
@@ -1563,11 +1435,11 @@ export class RottweilerApp extends BoxRenderable {
       this.banner.content = this.#composerNotice
     }
     if (viewingSubagent) this.#children.updateSubagentBanner(presented)
-    if (!this.#isInterruptible()) this.#clearInterruptEscape(false)
-    if (this.#interruptEscapeArmed) {
+    if (!this.#input.isInterruptible()) this.#input.clearInterruptEscape(false)
+    if (this.#input.escapeArmed) {
       this.banner.visible = true
       this.banner.fg = this.#theme.warning
-      this.banner.content = this.#interruptSubagentId === null
+      this.banner.content = this.#input.escapeChild === null
         ? "Press Esc again to stop the active response"
         : "Back in parent · press Esc again to stop the child agent"
     }
@@ -1791,12 +1663,7 @@ export class RottweilerApp extends BoxRenderable {
     try { action() } finally { this.#rethemeInProgress = previous }
   }
 
-  #modalOpened(): void {
-    if (this.#keybindings.preset !== "vim" || this.#vimFocus === "picker") return
-    this.#vimFocusBeforePicker = this.#vimFocus
-    this.#vimFocus = "picker"
-    this.#setInputMode("insert")
-  }
+  #modalOpened(): void { this.#input.modalOpened() }
 
   #afterPickerClosed(kind: PickerKind | null, reason: PickerCloseReason): void {
     const restoreSettingsBrowser = reason === "dismiss" && kind === "settingChoices"
@@ -1811,22 +1678,19 @@ export class RottweilerApp extends BoxRenderable {
     if (restoreMcpBrowser) {
       this.#pickerController.kind = "mcp"
       this.mcpBrowser.visible = true
-      if (this.#keybindings.preset === "vim") this.#vimFocus = "picker"
     } else if (restoreSettingsBrowser) {
       this.#pickerController.kind = "settings"
       this.settingsBrowser.visible = true
-      if (this.#keybindings.preset === "vim") this.#vimFocus = "picker"
-    } else if (this.#keybindings.preset === "vim") {
-      this.#vimFocus = this.#vimFocusBeforePicker
     }
-    if (!this.#state.replay.active) this.#focusForInputMode()
-    if (this.#keybindings.preset === "vim") {
+    this.#input.modalClosed(restoreMcpBrowser || restoreSettingsBrowser)
+    if (!this.#state.replay.active) this.#input.focusForInputMode()
+    if (this.#input.bindings.preset === "vim") {
       this.statusLine.setKeybindingMode(
-        this.#inputMode === "normal" ? "normal" : "insert",
-        this.#statusFocusOwner(),
+        this.#input.mode === "normal" ? "normal" : "insert",
+        this.#input.statusFocusOwner(),
       )
       this.composer.setKeybindingMode(
-        this.#inputMode === "normal" ? "normal" : "insert",
+        this.#input.mode === "normal" ? "normal" : "insert",
       )
       this.statusLine.update(this.#children.presentedState())
     }
@@ -1865,13 +1729,13 @@ export class RottweilerApp extends BoxRenderable {
     this.#clearPluginNotificationTimer()
     this.#clearRuntimeServicesTimer()
     this.#clearToolsElapsedTimer()
-    this.#clearInterruptEscape(false)
+    this.#input.clearInterruptEscape(false)
     this.#clearClipboardNotice()
     this.ctx.off(CliRenderEvents.FOCUS, this.#onTerminalFocus)
     this.ctx.off(CliRenderEvents.BLUR, this.#onTerminalBlur)
     this.ctx.off(CliRenderEvents.THEME_MODE, this.#onTerminalThemeMode)
     this.ctx.off(CliRenderEvents.SELECTION, this.#onSelection)
-    this.ctx.keyInput.off("keypress", this.#onGlobalKey)
+    this.ctx.keyInput.off("keypress", this.#input.onGlobalKey)
     this.#syntaxStyle.destroy()
     super.destroy()
   }
@@ -1891,365 +1755,6 @@ export class RottweilerApp extends BoxRenderable {
     if (this.#clipboardNoticeTimer === null) return
     clearTimeout(this.#clipboardNoticeTimer)
     this.#clipboardNoticeTimer = null
-  }
-
-  #keybindingContext(): KeybindingContext {
-    if (this.#keybindings.preset === "standard") {
-      return this.outputViewer.visible || this.#reviewOpen ? "review" : "standard"
-    }
-    if (this.#modalPickerVisible()) {
-      return this.#inputMode === "insert" ? "picker_insert" : "picker_normal"
-    }
-    if (this.outputViewer.visible || this.#reviewOpen) return "review"
-    return this.#inputMode === "insert" ? "vim_insert" : "vim_normal"
-  }
-
-  #handleKeybindingAction(action: KeybindingAction): boolean {
-    if (action === "close_overlay") {
-      if (this.outputViewer.visible) {
-        this.#closeOutputViewer()
-        return true
-      }
-      if (this.#pickerVisible()) {
-        this.closePicker()
-        return true
-      }
-      if (this.#reviewOpen) {
-        this.#closeReview()
-        return true
-      }
-      return false
-    }
-    if (action === "open_session_picker") {
-      this.openSessionPicker()
-      return true
-    }
-    if (action === "new_session") {
-      void this.#sessions.createSession()
-      return true
-    }
-    if (action === "open_subagent_picker") {
-      this.openSubagentPicker()
-      return true
-    }
-    if (action === "block_previous" || action === "block_next" || action === "block_toggle") {
-      const focusOwner = this.#visibleFocusOwner()
-      if (
-        (this.#keybindings.preset === "vim" && focusOwner !== "transcript") ||
-        (this.#keybindings.preset === "standard" && focusOwner !== "composer")
-      ) return false
-      const blocks = this.#primaryView === "tools" ? this.toolsWorkspace : this.transcript
-      if (action === "block_previous") blocks.selectPreviousBlock()
-      else if (action === "block_next") blocks.selectNextBlock()
-      else blocks.toggleSelectedBlock()
-      return true
-    }
-    if (this.#state.replay.active) {
-      return this.#handleReplayNavigation(action)
-    }
-    switch (action) {
-      case "cycle_agent_mode": {
-        const mode: ModeId = nextModeId(this.#state.mode, this.#state.modes)
-        this.#projectionRequests.emit({
-          type: "switch_mode",
-          meta: this.#projectionRequests.meta(),
-          session_id: this.#sessionId,
-          mode,
-        })
-        return true
-      }
-      case "open_review":
-        this.openReview()
-        return true
-      case "open_command_picker":
-        this.openCommandPicker()
-        return true
-      case "open_model_picker":
-        this.openModelPicker()
-        return true
-      case "open_mode_picker":
-        this.openModePicker()
-        return true
-      case "paste_image":
-        if (!this.#modelSupportsVision(this.#children.presentedState())) return false
-        void this.composer.pasteImage()
-        // Let the terminal's normal text-paste path continue. When the
-        // clipboard contains an image pasteImage attaches it asynchronously;
-        // when it does not, Ctrl-V must remain ordinary text paste.
-        return false
-      case "open_external_editor":
-        if (
-          this.#pickerVisible() ||
-          this.outputViewer.visible ||
-          this.#reviewOpen
-        ) return false
-        void this.composer.openExternalEditor()
-        return true
-      case "enter_normal":
-        this.#setInputMode("normal")
-        return true
-      case "enter_insert":
-        this.#vimFocus = this.#pickerVisible() ? "picker" : "composer"
-        this.#setInputMode("insert")
-        return true
-      case "append_insert":
-        if (!this.#pickerVisible() && this.#vimFocus === "composer") {
-          this.composer.editor.moveCursorRight()
-        }
-        this.#vimFocus = this.#pickerVisible() ? "picker" : "composer"
-        this.#setInputMode("insert")
-        return true
-      case "focus_next":
-        this.#cycleVimFocus(1)
-        return true
-      case "focus_previous":
-        this.#cycleVimFocus(-1)
-        return true
-      case "move_left":
-        if (this.#vimFocus === "composer") this.composer.editor.moveCursorLeft()
-        return true
-      case "move_right":
-        if (this.#vimFocus === "composer") this.composer.editor.moveCursorRight()
-        return true
-      case "move_up":
-        this.#moveVertical(-1)
-        return true
-      case "move_down":
-        this.#moveVertical(1)
-        return true
-      case "word_backward":
-        if (this.#vimFocus === "composer") this.composer.editor.moveWordBackward()
-        return true
-      case "word_forward":
-        if (this.#vimFocus === "composer") this.composer.editor.moveWordForward()
-        return true
-      case "line_start":
-        if (this.#vimFocus === "composer") this.composer.editor.gotoLineStart()
-        return true
-      case "line_end":
-        if (this.#vimFocus === "composer") this.composer.editor.gotoLineTextEnd()
-        return true
-      case "delete_character":
-        if (this.#vimFocus === "composer") this.composer.editor.deleteChar()
-        return true
-      case "page_up":
-        this.#scrollTranscript(-1, "viewport")
-        return true
-      case "page_down":
-        this.#scrollTranscript(1, "viewport")
-        return true
-      case "view_top":
-        if (this.#keybindings.preset === "standard") this.#scrollPrimaryTo(0)
-        else this.#moveToBoundary(false)
-        return true
-      case "view_bottom":
-        if (this.#keybindings.preset === "standard") {
-          this.#scrollPrimaryTo(this.#primaryScrollHeight())
-        } else {
-          this.#moveToBoundary(true)
-        }
-        return true
-      case "select_current":
-        if (!this.#pickerVisible()) return false
-        if (this.themeBrowser.visible) this.themeBrowser.activateSelected()
-        else if (this.commandPalette.visible) this.commandPalette.activateSelected()
-        else this.picker.select.selectCurrent()
-        return true
-    }
-  }
-
-  #handleReplayNavigation(action: KeybindingAction): boolean {
-    if (this.#keybindings.preset !== "vim") return false
-    switch (action) {
-      case "move_up":
-        this.#scrollTranscript(-1, "step")
-        return true
-      case "move_down":
-        this.#scrollTranscript(1, "step")
-        return true
-      case "page_up":
-        this.#scrollTranscript(-1, "viewport")
-        return true
-      case "page_down":
-        this.#scrollTranscript(1, "viewport")
-        return true
-      case "view_top":
-        this.#scrollPrimaryTo(0)
-        return true
-      case "view_bottom":
-        this.#scrollPrimaryTo(this.#primaryScrollHeight())
-        return true
-      default:
-        return false
-    }
-  }
-
-  #setInputMode(mode: Exclude<InputMode, "standard">): void {
-    if (this.#keybindings.preset !== "vim") return
-    this.#inputMode = mode
-    this.#focusForInputMode()
-    this.statusLine.setKeybindingMode(mode, this.#statusFocusOwner())
-    this.composer.setKeybindingMode(mode)
-    this.statusLine.update(this.#children.presentedState())
-  }
-
-  #focusForInputMode(): void {
-    if (this.outputViewer.visible) {
-      this.outputViewer.focusPresentation()
-      return
-    }
-    if (this.reviewPanel.visible) {
-      this.reviewPanel.focusPresentation()
-      return
-    }
-    if (this.interactionPanel.capturesInput) {
-      this.interactionPanel.select.focus()
-      return
-    }
-    if (this.#children.isActiveSubagentRunning()) {
-      this.composer.editor.showCursor = false
-      this.transcript.scroller.focus()
-      return
-    }
-    if (this.mcpBrowser.visible) {
-      this.mcpBrowser.input.focus()
-      return
-    }
-    if (this.settingsBrowser.visible) {
-      this.settingsBrowser.input.focus()
-      return
-    }
-    if (this.themeBrowser.visible) {
-      this.themeBrowser.input.focus()
-      return
-    }
-    if (this.commandPalette.visible) {
-      this.commandPalette.input.focus()
-      return
-    }
-    if (this.picker.visible && !this.#pickerController.anchored) {
-      if (this.#inputMode === "insert") {
-        this.picker.input.focus()
-      } else {
-        this.picker.select.focus()
-      }
-      return
-    }
-    if (this.#inputMode === "standard") {
-      this.composer.editor.showCursor = true
-      this.composer.focus()
-      return
-    }
-    this.composer.editor.showCursor = this.#inputMode === "insert"
-    if (this.#vimFocus === "transcript" || this.#state.replay.active) {
-      if (this.#primaryView === "tools") this.toolsWorkspace.activityScroller.focus()
-      else this.transcript.scroller.focus()
-    } else {
-      this.composer.focus()
-    }
-  }
-
-  #cycleVimFocus(direction: 1 | -1): void {
-    if (this.#keybindings.preset !== "vim" || this.#pickerVisible()) return
-    const targets: readonly Exclude<VimFocus, "picker">[] = ["composer", "transcript"]
-    const current = Math.max(0, targets.indexOf(this.#vimFocus as Exclude<VimFocus, "picker">))
-    this.#vimFocus = targets[(current + direction + targets.length) % targets.length] ?? "composer"
-    this.#focusForInputMode()
-    this.statusLine.setKeybindingMode("normal", this.#vimFocus)
-    this.composer.setKeybindingMode("normal")
-    this.statusLine.update(this.#children.presentedState())
-  }
-
-  #moveVertical(direction: 1 | -1): void {
-    if (this.mcpBrowser.visible) {
-      this.mcpBrowser.moveSelection(direction)
-    } else if (this.settingsBrowser.visible) {
-      this.settingsBrowser.moveSelection(direction)
-    } else if (this.themeBrowser.visible) {
-      this.themeBrowser.moveSelection(direction)
-    } else if (this.commandPalette.visible) {
-      this.commandPalette.moveSelection(direction)
-    } else if (this.picker.visible) {
-      this.picker.moveSelection(direction)
-    } else if (this.#vimFocus === "composer") {
-      if (direction < 0) this.composer.editor.moveCursorUp()
-      else this.composer.editor.moveCursorDown()
-    } else {
-      this.#scrollTranscript(direction, "step")
-    }
-  }
-
-  #scrollTranscript(direction: 1 | -1, unit: "step" | "viewport"): void {
-    if (this.#primaryView === "tools") {
-      this.toolsWorkspace.activityScroller.scrollBy(direction, unit)
-    } else {
-      this.transcript.scrollBy(direction, unit)
-    }
-  }
-
-  #moveToBoundary(end: boolean): void {
-    if (this.mcpBrowser.visible) {
-      this.mcpBrowser.moveToBoundary(end)
-    } else if (this.themeBrowser.visible) {
-      this.themeBrowser.moveToBoundary(end)
-    } else if (this.commandPalette.visible) {
-      this.commandPalette.moveToBoundary(end)
-    } else if (this.picker.visible) {
-      this.picker.moveToBoundary(end)
-    } else if (this.#vimFocus === "composer") {
-      if (end) this.composer.editor.gotoBufferEnd()
-      else this.composer.editor.gotoBufferHome()
-    } else {
-      this.#scrollPrimaryTo(end ? this.#primaryScrollHeight() : 0)
-    }
-  }
-
-  #scrollPrimaryTo(position: number): void {
-    if (this.#primaryView === "tools") this.toolsWorkspace.activityScroller.scrollTo(position)
-    else this.transcript.scrollTo(position)
-  }
-
-  #primaryScrollHeight(): number {
-    return this.#primaryView === "tools"
-      ? this.toolsWorkspace.activityScroller.scrollHeight
-      : this.transcript.scroller.scrollHeight
-  }
-
-  #restoreFocusAfterTranscriptInteraction(): void {
-    if (this.#destroyed || this.#state.replay.active) return
-    if (this.#inputMode === "standard") {
-      this.#focusForInputMode()
-      return
-    }
-    this.#vimFocus = "transcript"
-    this.#vimFocusBeforePicker = "transcript"
-    this.#focusForInputMode()
-    this.statusLine.setKeybindingMode(this.#inputMode, "transcript")
-    this.composer.setKeybindingMode(this.#inputMode)
-    this.statusLine.update(this.#children.presentedState())
-  }
-
-  #visibleFocusOwner(): VimFocus | "interaction" | "output" | "review" {
-    if (this.#modalPickerVisible()) return "picker"
-    if (this.outputViewer.visible) return "output"
-    if (this.reviewPanel.visible) return "review"
-    if (this.interactionPanel.capturesInput) return "interaction"
-    if (this.#state.replay.active) return "transcript"
-    if (this.#children.isActiveSubagentRunning()) return "transcript"
-    return this.#vimFocus
-  }
-
-  #pickerVisible(): boolean {
-    return this.mcpBrowser.visible || this.settingsBrowser.visible || this.themeBrowser.visible || this.commandPalette.visible || this.picker.visible
-  }
-
-  #modalPickerVisible(): boolean {
-    return this.mcpBrowser.visible || this.settingsBrowser.visible || this.themeBrowser.visible || this.commandPalette.visible || (this.picker.visible && !this.#pickerController.anchored)
-  }
-
-  #statusFocusOwner(): VimFocus | "interaction" | "review" {
-    const owner = this.#visibleFocusOwner()
-    return owner === "output" ? "review" : owner
   }
 
   #renderPicker(): void {
@@ -2337,8 +1842,8 @@ export class RottweilerApp extends BoxRenderable {
       }
       case "keyboardHelp": {
         const items: PickerItem<null>[] = []
-        for (const context of KEYBOARD_HELP_CONTEXTS[this.#keybindings.preset]) {
-          const bindings = this.#keybindings.bindings(context)
+        for (const context of KEYBOARD_HELP_CONTEXTS[this.#input.bindings.preset]) {
+          const bindings = this.#input.bindings.bindings(context)
           if (bindings.size === 0) continue
           items.push({
             id: `keyboard-help.section.${context}`,
@@ -2670,7 +2175,7 @@ export class RottweilerApp extends BoxRenderable {
 
   #bindingHint(action: KeybindingAction, contexts: readonly KeybindingContext[]): string | null {
     for (const context of contexts) {
-      for (const [stroke, boundAction] of this.#keybindings.bindings(context)) {
+      for (const [stroke, boundAction] of this.#input.bindings.bindings(context)) {
         if (boundAction === action) return formatKeycap(stroke)
       }
     }
@@ -2678,7 +2183,7 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #composerKeybindingContext(): Extract<KeybindingContext, "standard" | "vim_insert"> {
-    return this.#keybindings.preset === "vim" ? "vim_insert" : "standard"
+    return this.#input.bindings.preset === "vim" ? "vim_insert" : "standard"
   }
 
   #paletteDescription(description: string, binding?: KeybindingAction): string {
@@ -3207,7 +2712,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#projectionRequests.clear("workspace_diff")
     this.reviewPanel.closePresentation()
     this.setState(this.#state)
-    this.#focusForInputMode()
+    this.#input.focusForInputMode()
   }
 
   #closeOutputViewer(): void {
@@ -3216,7 +2721,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#outputViewerToolCallId = null
     this.outputViewer.closePresentation()
     this.setState(this.#state)
-    this.#focusForInputMode()
+    this.#input.focusForInputMode()
   }
 
   #recordProjectionFailure(kind: ProjectionKind, message: string): void {
@@ -3270,57 +2775,6 @@ export class RottweilerApp extends BoxRenderable {
       clearTimeout(this.#pendingShellTimer)
       this.#pendingShellTimer = null
     }
-  }
-
-  #isInterruptible(): boolean {
-    return this.#interruptSubagentId !== null ||
-      this.#state.compaction.active ||
-      Object.values(this.#state.turns).some((turn) => turn.status === "running")
-  }
-
-  #armInterruptEscape(subagentId: string | null = null): void {
-    this.#clearInterruptEscape(false)
-    this.#interruptEscapeArmed = true
-    this.#interruptSubagentId = subagentId
-    this.banner.visible = true
-    this.banner.fg = this.#theme.warning
-    this.banner.content = subagentId === null
-      ? "Press Esc again to stop the active response"
-      : "Back in parent · press Esc again to stop the child agent"
-    this.#interruptEscapeTimer = setTimeout(() => this.#clearInterruptEscape(), 900)
-  }
-
-  #clearInterruptEscape(refresh = true): void {
-    if (this.#interruptEscapeTimer !== null) {
-      clearTimeout(this.#interruptEscapeTimer)
-      this.#interruptEscapeTimer = null
-    }
-    if (!this.#interruptEscapeArmed) return
-    this.#interruptEscapeArmed = false
-    this.#interruptSubagentId = null
-    if (refresh && !this.#destroyed) this.banner.update(this.#state)
-  }
-
-  async #interruptActiveResponse(subagentId: string | null = this.#interruptSubagentId): Promise<void> {
-    if (subagentId !== null) {
-      this.#interruptSubagentId = null
-      await this.#children.interruptSubagent(subagentId)
-      return
-    }
-    const outcome = await this.#projectionRequests.emit({
-      type: "interrupt",
-      meta: this.#projectionRequests.meta(),
-      session_id: this.#sessionId,
-    })
-    if (outcome === null) {
-      this.#projectClientError(
-        "interrupt_unavailable",
-        "Couldn't stop the active response because the engine connection is unavailable.",
-        true,
-      )
-      return
-    }
-    this.#projectRejection(outcome)
   }
 
   #schedulePluginNotificationDismissal(
