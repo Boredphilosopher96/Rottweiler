@@ -620,6 +620,13 @@ pattern = '''\benum\s+PermissionMode\b'''
 reason = "Clap parses the protocol-owned mode through its FromStr implementation."
 
 [[shadow]]
+id = "duplicate-cli-argument-permission-mode"
+owner = "permission-mode-contract"
+path = "crates/rw-cli/src/cli_args.rs"
+pattern = '''\benum\s+PermissionMode\b'''
+reason = "Clap parses the protocol-owned mode through its FromStr implementation."
+
+[[shadow]]
 id = "duplicate-remote-permission-mode"
 owner = "permission-mode-contract"
 path = "crates/rw-cli/src/remote.rs"
