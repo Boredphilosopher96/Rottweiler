@@ -200,7 +200,7 @@ symbols = ["SessionExtensionSnapshot", "SessionExtensionController"]
 
 [[owner]]
 id = "live-plugin-development"
-path = "crates/rw-runtime/src/extension_runtime.rs"
+path = "crates/rw-runtime/src/extension_runtime/development.rs"
 symbols = ["RuntimeSessionExtensionController", "DevelopmentExtensionState"]
 
 [[owner]]
@@ -256,7 +256,7 @@ reason = "rw-ext imports the leaf contract directly and owns only runtime conver
 [[shadow]]
 id = "duplicate-plugin-runtime-catalog-dto"
 owner = "plugin-wire-contract"
-path = "crates/rw-ext/src/plugin_runtime.rs"
+path = "crates/rw-ext/src/plugin_runtime/adapters.rs"
 pattern = '''\bstruct\s+(?:RpcProviderModelsResponse|RpcProviderModel|ProviderHttpCapabilityParams)\b'''
 reason = "The runtime deserializes protocol-3 catalog and HTTP requests through leaf-owned DTOs."
 
@@ -671,7 +671,7 @@ reason = "The updater imports the root-chain DTOs and structural limits from rw-
 [[shadow]]
 id = "duplicate-provider-factory-onboarding-map"
 owner = "built-in-provider-onboarding"
-path = "crates/rw-core/src/provider_factory.rs"
+path = "crates/rw-core/src/provider_factory/catalog.rs"
 pattern = '''\bfn\s+known_provider_auth_kind\b'''
 reason = "Unconfigured provider rows project the core-owned built-in profile registry."
 
@@ -736,7 +736,7 @@ reason = "Plugin initialization imports the host identity from rw-plugin-protoco
 [[shadow]]
 id = "duplicate-plugin-host-id-runtime"
 owner = "plugin-wire-contract"
-path = "crates/rw-ext/src/plugin_runtime.rs"
+path = "crates/rw-ext/src/plugin_runtime/host.rs"
 pattern = '''host:\s*"rottweiler"'''
 reason = "The plugin runtime imports the host identity from rw-plugin-protocol."
 
@@ -771,7 +771,7 @@ reason = "The TUI consumes the current required model descriptor directly."
 [[shadow]]
 id = "legacy-command-argument-alias"
 owner = "engine-slash-command-catalog"
-path = "crates/rw-ext/src/discovery.rs"
+path = "crates/rw-ext/src/discovery/markdown.rs"
 pattern = '''(?:used_legacy_args_alias|optional_scalar\([^\n]+"args"\))'''
 reason = "Custom commands accept only the canonical argument-hint field."
 
@@ -930,3 +930,17 @@ symbols = ["OperationLifetime", "ProgressAmount", "ToolProgress", "MAX_OPERATION
 id = "wasm-worker-lifecycle"
 path = "crates/rw-ext/src/wasm_process/pool.rs"
 symbols = ["WasmWorkerPool", "WasmWorkerStats", "MAX_ADMITTED", "DEFAULT_WORKERS"]
+
+[[shadow]]
+id = "duplicate-plugin-runtime-http-dto"
+owner = "plugin-wire-contract"
+path = "crates/rw-ext/src/plugin_runtime/incoming.rs"
+pattern = '\bstruct\s+ProviderHttpCapabilityParams\b'
+reason = "Incoming host HTTP requests deserialize through the leaf-owned DTO."
+
+[[shadow]]
+id = "duplicate-openai-catalog-boundary-limit"
+owner = "provider-boundary-limits"
+path = "crates/rw-providers/src/openai/catalog.rs"
+pattern = '\bconst\s+MAX_MODEL_CATALOG_BYTES\b'
+reason = "OpenAI catalog decoding consumes the provider-neutral response limit."

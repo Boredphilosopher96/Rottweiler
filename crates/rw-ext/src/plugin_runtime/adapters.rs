@@ -1,0 +1,494 @@
+use super::*;
+
+pub struct RpcToolAdapter {
+    declaration: rw_plugin_protocol::PluginToolCapability,
+    client: Arc<dyn PluginRpcClient>,
+    enforcer: Arc<CapabilityEnforcer>,
+}
+
+impl RpcToolAdapter {
+    /// Constructs an adapter only for the exact immutable approved declaration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an approval error if any declaration field differs from the manifest snapshot.
+    pub fn new(
+        declaration: rw_plugin_protocol::PluginToolCapability,
+        client: Arc<dyn PluginRpcClient>,
+        enforcer: Arc<CapabilityEnforcer>,
+    ) -> Result<Self, PluginHostError> {
+        if !enforcer.tool_declaration_matches(&declaration) {
+            return Err(PluginHostError::Approval(
+                "tool adapter declaration differs from approved manifest".to_owned(),
+            ));
+        }
+        Ok(Self {
+            declaration,
+            client,
+            enforcer,
+        })
+    }
+}
+
+#[async_trait]
+impl Tool for RpcToolAdapter {
+    async fn settle_effects(&self) {
+        self.client.settle_effects().await;
+    }
+    fn descriptor(&self) -> ToolDescriptor {
+        let process_effects = self.enforcer.process_tool_effects();
+        ToolDescriptor {
+            name: self.declaration.name.clone(),
+            description: self.declaration.description.clone(),
+            input_schema: self.declaration.schema.clone(),
+            capabilities: CapabilityManifest::new(process_effects.into_iter().map(tool_effect)),
+        }
+    }
+
+    fn mutation_scope(&self, _input: &Value) -> MutationScope {
+        if self
+            .enforcer
+            .process_tool_effects()
+            .contains(&rw_plugin_protocol::PluginToolEffect::WritesFilesystem)
+        {
+            MutationScope::OpaqueWorkspace
+        } else {
+            MutationScope::None
+        }
+    }
+
+    async fn execute(&self, _context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {
+        self.enforcer
+            .check_tool(&self.declaration.name)
+            .map_err(|error| ToolError::Output(error.to_string()))?;
+        let result = self
+            .client
+            .call_tool(
+                ToolCallParams {
+                    name: self.declaration.name.clone(),
+                    input,
+                    lifetime: rw_plugin_protocol::OperationLifetime::default(),
+                },
+                &_context.cancellation,
+                Arc::clone(&_context.progress),
+            )
+            .await
+            .map_err(|error| ToolError::Output(error.to_string()))?;
+        serde_json::from_value(result).map_err(|error| {
+            ToolError::Output(format!("plugin returned invalid tool result: {error}"))
+        })
+    }
+}
+
+fn tool_effect(effect: rw_plugin_protocol::PluginToolEffect) -> ToolCapability {
+    match effect {
+        rw_plugin_protocol::PluginToolEffect::ReadsFilesystem => ToolCapability::ReadFilesystem,
+        rw_plugin_protocol::PluginToolEffect::WritesFilesystem => ToolCapability::WriteFilesystem,
+        rw_plugin_protocol::PluginToolEffect::Network => ToolCapability::Network,
+        rw_plugin_protocol::PluginToolEffect::Execute => ToolCapability::Execute,
+    }
+}
+
+pub struct RpcCommandAdapter {
+    name: String,
+    client: Arc<dyn PluginRpcClient>,
+    enforcer: Arc<CapabilityEnforcer>,
+}
+
+impl RpcCommandAdapter {
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        client: Arc<dyn PluginRpcClient>,
+        enforcer: Arc<CapabilityEnforcer>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            client,
+            enforcer,
+        }
+    }
+}
+
+#[async_trait]
+impl<Context> CommandHandler<Context, Value> for RpcCommandAdapter
+where
+    Context: Send,
+{
+    async fn execute(
+        &self,
+        _context: &mut Context,
+        invocation: CommandInvocation,
+    ) -> Result<Value, CommandExecutionError> {
+        self.enforcer.check_command(&self.name).map_err(|error| {
+            CommandExecutionError::new("capability_violation", error.to_string())
+        })?;
+        self.client
+            .request(
+                METHOD_COMMAND_EXECUTE,
+                serde_json::to_value(CommandExecuteParams {
+                    name: self.name.clone(),
+                    arguments: invocation.arguments().to_owned(),
+                })
+                .map_err(|error| {
+                    CommandExecutionError::new("invalid_request", error.to_string())
+                })?,
+            )
+            .await
+            .map_err(|error| CommandExecutionError::new(error.code, error.message))
+    }
+}
+
+pub struct RpcProviderAdapter {
+    name: String,
+    alias_prefix: String,
+    capabilities: Capabilities,
+    client: Arc<dyn PluginRpcClient>,
+    enforcer: Arc<CapabilityEnforcer>,
+    model_catalog: bool,
+    catalog_cache: StdRwLock<RpcProviderCatalogCache>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RpcProviderCatalogCache {
+    catalog: Option<DiscoveredProviderCatalog>,
+    aggregate_capabilities: Option<Capabilities>,
+    single_model_metadata: Option<ProviderModelMetadata>,
+    metadata_by_model: BTreeMap<String, ProviderModelMetadata>,
+}
+
+impl RpcProviderAdapter {
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        alias_prefix: impl Into<String>,
+        capabilities: Capabilities,
+        client: Arc<dyn PluginRpcClient>,
+        enforcer: Arc<CapabilityEnforcer>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            alias_prefix: alias_prefix.into(),
+            capabilities,
+            client,
+            enforcer,
+            model_catalog: false,
+            catalog_cache: StdRwLock::new(RpcProviderCatalogCache::default()),
+        }
+    }
+
+    /// Enables protocol-3 model discovery for an approval-fingerprinted provider declaration.
+    #[must_use]
+    pub fn with_model_catalog(mut self) -> Self {
+        self.model_catalog = true;
+        self
+    }
+
+    fn cached_capabilities(&self) -> Option<Capabilities> {
+        self.catalog_cache
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .aggregate_capabilities
+            .clone()
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "catalog validation keeps the complete untrusted wire boundary visible"
+    )]
+    fn parse_catalog(&self, value: Value) -> Result<RpcProviderCatalogCache, ProviderError> {
+        let response: ProviderModelsResponse = serde_json::from_value(value).map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::Protocol,
+                "plugin returned an invalid provider model catalog",
+            )
+        })?;
+        if response.models.len() > rw_plugin_protocol::MAX_CAPABILITIES_PER_KIND {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Protocol,
+                "plugin provider model catalog exceeds the entry limit",
+            ));
+        }
+        let mut ids = BTreeSet::new();
+        let mut models = Vec::with_capacity(response.models.len());
+        let mut metadata = Vec::with_capacity(response.models.len());
+        let mut metadata_by_model = BTreeMap::new();
+        for model in response.models {
+            if model.id.is_empty()
+                || model.id.len() > MAX_NAME_BYTES
+                || model.id.chars().any(char::is_control)
+                || !ids.insert(model.id.clone())
+            {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::Protocol,
+                    "plugin provider model id is invalid or duplicated",
+                ));
+            }
+            if model.display_name.as_ref().is_some_and(|name| {
+                name.is_empty() || name.len() > MAX_NAME_BYTES || name.chars().any(char::is_control)
+            }) {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::Protocol,
+                    "plugin provider model display name is invalid",
+                ));
+            }
+            let max_context_tokens = model
+                .max_context_tokens
+                .map(|limit| limit.clamp(1, MAX_PLUGIN_MODEL_TOKENS));
+            let max_output_tokens = model
+                .max_output_tokens
+                .map(|limit| limit.clamp(1, MAX_PLUGIN_MODEL_TOKENS));
+            let capabilities = Capabilities {
+                tool_calling: model.capabilities.tool_calling,
+                vision: model.capabilities.vision,
+                thinking: model.capabilities.thinking,
+                cache_breakpoints: match model.capabilities.cache_breakpoints {
+                    ProviderCacheBreakpoints::None => CacheBreakpointSupport::None,
+                    ProviderCacheBreakpoints::Explicit => CacheBreakpointSupport::Explicit,
+                    ProviderCacheBreakpoints::Automatic => CacheBreakpointSupport::Automatic,
+                },
+                max_context_tokens,
+                max_output_tokens,
+                wire_mode: WireMode::NormalizedReplay,
+            };
+            let pricing = model.pricing.map(|pricing| ModelPricing {
+                display_name: model
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| model.id.clone()),
+                max_context_tokens,
+                max_output_tokens,
+                supports_tools: capabilities.tool_calling,
+                supports_thinking: capabilities.thinking,
+                supports_vision: capabilities.vision,
+                reasoning_efforts: Vec::new(),
+                input_per_million_micros_usd: pricing
+                    .input_per_million_micros_usd
+                    .min(MAX_PLUGIN_PRICE_MICROS_USD),
+                output_per_million_micros_usd: pricing
+                    .output_per_million_micros_usd
+                    .min(MAX_PLUGIN_PRICE_MICROS_USD),
+                cache_read_per_million_micros_usd: pricing
+                    .cache_read_per_million_micros_usd
+                    .map(|price| price.min(MAX_PLUGIN_PRICE_MICROS_USD)),
+                cache_write_per_million_micros_usd: pricing
+                    .cache_write_per_million_micros_usd
+                    .map(|price| price.min(MAX_PLUGIN_PRICE_MICROS_USD)),
+                reasoning_per_million_micros_usd: pricing
+                    .reasoning_per_million_micros_usd
+                    .map(|price| price.min(MAX_PLUGIN_PRICE_MICROS_USD)),
+            });
+            let model_metadata = ProviderModelMetadata {
+                capabilities: capabilities.clone(),
+                accounting: if pricing.is_some() {
+                    UsageAccounting::ApiDollars
+                } else {
+                    UsageAccounting::UnpricedApi
+                },
+                pricing: pricing.clone(),
+            };
+            metadata_by_model.insert(model.id.clone(), model_metadata.clone());
+            metadata.push(model_metadata);
+            models.push(DiscoveredModel {
+                id: model.id,
+                display_name: model.display_name,
+                description: None,
+                capabilities: Some(capabilities),
+                pricing,
+            });
+        }
+        let aggregate_capabilities = aggregate_plugin_capabilities(&metadata, &self.capabilities);
+        Ok(RpcProviderCatalogCache {
+            catalog: Some(DiscoveredProviderCatalog {
+                provider: self.alias_prefix.trim_end_matches('/').to_owned(),
+                models,
+            }),
+            aggregate_capabilities: Some(aggregate_capabilities),
+            single_model_metadata: (metadata.len() == 1).then(|| metadata.remove(0)),
+            metadata_by_model,
+        })
+    }
+}
+
+fn aggregate_plugin_capabilities(
+    metadata: &[ProviderModelMetadata],
+    fallback: &Capabilities,
+) -> Capabilities {
+    let Some(first) = metadata.first() else {
+        return fallback.clone();
+    };
+    Capabilities {
+        tool_calling: metadata.iter().all(|entry| entry.capabilities.tool_calling),
+        vision: metadata.iter().all(|entry| entry.capabilities.vision),
+        thinking: metadata.iter().all(|entry| entry.capabilities.thinking),
+        cache_breakpoints: if metadata.iter().all(|entry| {
+            entry.capabilities.cache_breakpoints == first.capabilities.cache_breakpoints
+        }) {
+            first.capabilities.cache_breakpoints
+        } else {
+            CacheBreakpointSupport::None
+        },
+        max_context_tokens: common_plugin_limit(metadata, |entry| {
+            entry.capabilities.max_context_tokens
+        }),
+        max_output_tokens: common_plugin_limit(metadata, |entry| {
+            entry.capabilities.max_output_tokens
+        }),
+        wire_mode: WireMode::NormalizedReplay,
+    }
+}
+
+fn common_plugin_limit(
+    metadata: &[ProviderModelMetadata],
+    get: impl Fn(&ProviderModelMetadata) -> Option<u64>,
+) -> Option<u64> {
+    metadata.iter().try_fold(u64::MAX, |minimum, entry| {
+        get(entry).map(|limit| minimum.min(limit))
+    })
+}
+
+#[async_trait]
+impl Provider for RpcProviderAdapter {
+    async fn settle_effects(&self) {
+        self.client.settle_effects().await;
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn capabilities(&self) -> Capabilities {
+        self.cached_capabilities()
+            .unwrap_or_else(|| self.capabilities.clone())
+    }
+    async fn model_metadata(&self) -> Result<Option<ProviderModelMetadata>, ProviderError> {
+        if let Some(metadata) = self.cached_model_metadata() {
+            return Ok(Some(metadata));
+        }
+        let _ = self.discover_models().await?;
+        Ok(self.cached_model_metadata())
+    }
+    fn cached_model_metadata(&self) -> Option<ProviderModelMetadata> {
+        self.catalog_cache
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .single_model_metadata
+            .clone()
+    }
+    fn cached_model_metadata_for(&self, model: &str) -> Option<ProviderModelMetadata> {
+        self.catalog_cache
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .metadata_by_model
+            .get(model)
+            .cloned()
+    }
+    async fn discover_models(&self) -> Result<Option<DiscoveredProviderCatalog>, ProviderError> {
+        if !self.model_catalog {
+            return Ok(None);
+        }
+        self.enforcer
+            .check_provider(&format!("{}catalog", self.alias_prefix))
+            .map_err(|error| {
+                ProviderError::new(ProviderErrorKind::Unsupported, error.to_string())
+            })?;
+        let value = self
+            .client
+            .request(
+                METHOD_PROVIDER_MODELS,
+                serde_json::to_value(ProviderModelsParams {
+                    alias_prefix: self.alias_prefix.clone(),
+                })
+                .map_err(|error| {
+                    ProviderError::new(ProviderErrorKind::Protocol, error.to_string())
+                })?,
+            )
+            .await
+            .map_err(|error| ProviderError::new(ProviderErrorKind::Protocol, error.to_string()))?;
+        let cache = self.parse_catalog(value)?;
+        let catalog = cache.catalog.clone();
+        *self
+            .catalog_cache
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = cache;
+        Ok(catalog)
+    }
+    async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
+        let alias = format!("{}{}", self.alias_prefix, request.model);
+        self.enforcer.check_provider(&alias).map_err(|error| {
+            ProviderError::new(ProviderErrorKind::Unsupported, error.to_string())
+        })?;
+        let events = self
+            .client
+            .provider_stream(
+                serde_json::to_value(ProviderCompleteParams {
+                    alias,
+                    request: serde_json::to_value(request).map_err(|error| {
+                        ProviderError::new(ProviderErrorKind::Protocol, error.to_string())
+                    })?,
+                })
+                .map_err(|error| {
+                    ProviderError::new(ProviderErrorKind::Protocol, error.to_string())
+                })?,
+            )
+            .await
+            .map_err(|error| provider_rpc_error(&error))?;
+        Ok(Box::pin(events.map(|event| {
+            let value = event.map_err(|error| provider_rpc_error(&error))?;
+            serde_json::from_value(value).map_err(|_| {
+                ProviderError::new(
+                    ProviderErrorKind::Protocol,
+                    "plugin returned an invalid provider event",
+                )
+            })
+        })))
+    }
+}
+
+fn provider_rpc_error(error: &PluginRpcError) -> ProviderError {
+    let kind = match error.code.as_str() {
+        "provider_http_authentication" | "authentication" => ProviderErrorKind::Authentication,
+        "provider_http_rate_limited" => ProviderErrorKind::RateLimited,
+        "provider_http_timeout" => ProviderErrorKind::Timeout,
+        "provider_http_server" => ProviderErrorKind::Server,
+        "provider_http_network" => ProviderErrorKind::Network,
+        "provider_http_network_disabled" => ProviderErrorKind::NetworkDisabled,
+        "provider_http_cancelled" | "cancelled" => ProviderErrorKind::Cancelled,
+        "provider_http_invalid_request" | "invalid_request" | "domain_denied" => {
+            ProviderErrorKind::InvalidRequest
+        }
+        _ => ProviderErrorKind::Protocol,
+    };
+    ProviderError::new(kind, error.to_string())
+}
+
+pub struct PluginEventRouter {
+    client: Arc<dyn PluginRpcClient>,
+    enforcer: Arc<CapabilityEnforcer>,
+}
+
+impl PluginEventRouter {
+    #[must_use]
+    pub fn new(client: Arc<dyn PluginRpcClient>, enforcer: Arc<CapabilityEnforcer>) -> Self {
+        Self { client, enforcer }
+    }
+    /// Publishes an event only when it appears in the immutable subscription snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an RPC error for an undeclared event or failed notification delivery.
+    pub async fn publish(&self, event: &str, payload: Value) -> Result<(), PluginRpcError> {
+        self.enforcer
+            .check_event(event)
+            .map_err(|error| rpc_error("capability_violation", &error.to_string()))?;
+        self.client
+            .notify(
+                METHOD_EVENT_PUBLISH,
+                serde_json::to_value(EventPublishParams {
+                    event: event.to_owned(),
+                    payload,
+                })
+                .map_err(|error| rpc_error("invalid_request", &error.to_string()))?,
+            )
+            .await
+    }
+}
