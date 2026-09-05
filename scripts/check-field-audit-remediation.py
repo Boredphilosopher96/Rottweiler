@@ -122,8 +122,8 @@ def main() -> int:
         "crates/rw-sandbox/src/lib.rs",
         "const SENSITIVE_HOME_SUFFIXES",
         "fn sensitive_home_roots",
-        "for lexical in sensitive_home_roots(home)",
     )
+    require_contains("crates/rw-sandbox/src/linux.rs", "for lexical in sensitive_home_roots(home)")
     require_contains(
         "benchmarks/release-optimization-2026-08-22.json",
         '"samples": 100',
@@ -186,7 +186,7 @@ def main() -> int:
         "SessionExtensionController",
     )
     require_contains(
-        "crates/rw-runtime/src/extension_runtime.rs",
+        "crates/rw-runtime/src/extension_runtime/development.rs",
         "RuntimeSessionExtensionController",
         "candidate.shutdown().await",
         "state.active.replace(candidate)",
