@@ -6,7 +6,9 @@
 //! Original producer memory remains that producer's responsibility until released.
 //! Admission must reserve the reported bytes before calling `AllocationPlan::prepare`.
 
+mod decode;
 mod prepared;
+pub use decode::DecodeAllocation;
 pub use prepared::{AllocationPlan, PreparedAllocation};
 
 use std::{
@@ -17,7 +19,7 @@ use std::{
 /// Checked upper bound after preparing an owned value's nested allocations.
 /// `None` means overflow or unsupported nesting and requires rejection.
 /// Implementations must preserve values and serialization order during preparation.
-pub trait PrepareAllocation {
+pub trait PrepareAllocation: DecodeAllocation {
     fn prepared_heap_bytes(&self) -> Option<usize>;
 
     fn prepare_allocations(&mut self);
@@ -28,7 +30,11 @@ pub trait PrepareAllocation {
 }
 
 macro_rules! inline {
-    ($($ty:ty),* $(,)?) => {$(impl PrepareAllocation for $ty {
+    ($($ty:ty),* $(,)?) => {$(
+    impl DecodeAllocation for $ty {
+        fn decode_node_bytes() -> Option<usize> { Some(size_of::<Self>()) }
+    }
+    impl PrepareAllocation for $ty {
         fn prepared_heap_bytes(&self) -> Option<usize> { Some(0) }
         fn prepare_allocations(&mut self) {}
     })*};

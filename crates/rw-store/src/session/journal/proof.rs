@@ -269,7 +269,7 @@ impl JournalReadView {
     ///
     /// # Errors
     /// Has the same integrity, cursor and allocation errors as ordinary paging.
-    pub fn verified_page<T: DeserializeOwned>(
+    pub fn verified_page<T: DeserializeOwned + rw_types::allocation::DecodeAllocation>(
         &self,
         after: Option<SequenceId>,
         mut limits: SessionEventPageLimits,

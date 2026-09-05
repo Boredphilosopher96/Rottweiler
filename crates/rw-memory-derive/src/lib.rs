@@ -27,6 +27,22 @@ fn additions(bindings: &[proc_macro2::TokenStream], normalize: bool) -> proc_mac
 }
 
 fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    for attribute in &input.attrs {
+        if attribute.path().is_ident("serde")
+            && attribute
+                .meta
+                .require_list()?
+                .tokens
+                .to_string()
+                .split(',')
+                .any(|part| part.trim() == "untagged")
+        {
+            return Err(syn::Error::new_spanned(
+                attribute,
+                "allocation profiles require a tagged or structurally unambiguous decoder",
+            ));
+        }
+    }
     let name = &input.ident;
     let mut generics = input.generics.clone();
     for parameter in generics.type_params_mut() {
@@ -37,7 +53,23 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let (implementation, types, clause) = generics.split_for_impl();
     let bytes = operation(input, false)?;
     let normalization = operation(input, true)?;
+    let fields: Vec<_> = match &input.data {
+        Data::Struct(data) => data.fields.iter().map(|field| &field.ty).collect(),
+        Data::Enum(data) => data
+            .variants
+            .iter()
+            .flat_map(|variant| variant.fields.iter().map(|field| &field.ty))
+            .collect(),
+        Data::Union(_) => Vec::new(),
+    };
     Ok(quote! {
+        impl #implementation crate::allocation::DecodeAllocation for #name #types #clause {
+            fn decode_node_bytes() -> Option<usize> {
+                let mut largest = std::mem::size_of::<Self>();
+                #(largest = largest.max(<#fields as crate::allocation::DecodeAllocation>::decode_node_bytes()?);)*
+                Some(largest)
+            }
+        }
         impl #implementation crate::allocation::PrepareAllocation for #name #types #clause {
             fn prepared_heap_bytes(&self) -> Option<usize> { #bytes }
             fn prepare_allocations(&mut self) { #normalization }

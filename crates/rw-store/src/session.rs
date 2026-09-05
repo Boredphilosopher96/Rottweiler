@@ -38,8 +38,8 @@ use journal_io::open_or_create_directory;
 #[cfg(test)]
 use journal_io::{EVENT_READ_HOOK, install_append_fault, run_event_read_hook};
 use journal_io::{
-    EventFileSnapshot, event_file_snapshot, parse_events_bounded_from_sequence,
-    read_opened_file_bounded, sync_event_file, truncate_and_sync_event_file, validate_session_id,
+    EventFileSnapshot, event_file_snapshot, read_opened_file_bounded, sync_event_file,
+    truncate_and_sync_event_file, validate_events_from_sequence, validate_session_id,
     verify_event_file_snapshot, write_event_bytes,
 };
 use rw_types::SequenceId;

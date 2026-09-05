@@ -50,7 +50,7 @@ impl SessionEventLog {
     ///
     /// # Errors
     /// Propagates serialization, identity, capacity and durable write failures.
-    pub fn append<T: Serialize>(
+    pub fn append<T: Serialize + rw_types::allocation::DecodeAllocation>(
         &mut self,
         event: T,
     ) -> Result<EventEnvelope<T>, SessionStoreError> {
@@ -63,7 +63,7 @@ impl SessionEventLog {
     ///
     /// # Errors
     /// Rejects a mismatched sequence before serialization or writing.
-    pub fn append_expected<T: Serialize>(
+    pub fn append_expected<T: Serialize + rw_types::allocation::DecodeAllocation>(
         &mut self,
         expected: SequenceId,
         event: T,
@@ -81,7 +81,7 @@ impl SessionEventLog {
     ///
     /// # Errors
     /// Propagates serialization, capacity, identity and durable write failures.
-    pub fn append_batch<T: Serialize>(
+    pub fn append_batch<T: Serialize + rw_types::allocation::DecodeAllocation>(
         &mut self,
         events: impl IntoIterator<Item = T>,
     ) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
@@ -103,7 +103,9 @@ impl SessionEventLog {
     ///
     /// # Errors
     /// Rejects journals exceeding 512 MiB or one million events and corruption.
-    pub fn load<T: DeserializeOwned>(&self) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
+    pub fn load<T: DeserializeOwned + rw_types::allocation::DecodeAllocation>(
+        &self,
+    ) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
         self.read_view()
             .collect_bounded(512 * 1024 * 1024, 1_000_000)
     }
@@ -125,7 +127,7 @@ impl SessionEventLog {
     ///
     /// # Errors
     /// Rejects live ownership, corruption and excessive aggregate output.
-    pub fn load_existing<T: DeserializeOwned>(
+    pub fn load_existing<T: DeserializeOwned + rw_types::allocation::DecodeAllocation>(
         root: &Path,
         session_id: &str,
     ) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
@@ -136,7 +138,7 @@ impl SessionEventLog {
     ///
     /// # Errors
     /// Rejects live ownership, corruption and excessive aggregate output.
-    pub fn load_existing_bounded<T: DeserializeOwned>(
+    pub fn load_existing_bounded<T: DeserializeOwned + rw_types::allocation::DecodeAllocation>(
         root: &Path,
         session_id: &str,
         max_bytes: u64,
@@ -149,7 +151,9 @@ impl SessionEventLog {
     ///
     /// # Errors
     /// Rejects live ownership, corruption and excessive aggregate output.
-    pub fn load_existing_bounded_with_size<T: DeserializeOwned>(
+    pub fn load_existing_bounded_with_size<
+        T: DeserializeOwned + rw_types::allocation::DecodeAllocation,
+    >(
         root: &Path,
         session_id: &str,
         max_bytes: u64,
@@ -166,7 +170,7 @@ impl SessionEventLog {
     ///
     /// # Errors
     /// Rejects live ownership, invalid limits/cursors and referenced corruption.
-    pub fn load_existing_page<T: DeserializeOwned>(
+    pub fn load_existing_page<T: DeserializeOwned + rw_types::allocation::DecodeAllocation>(
         root: &Path,
         session_id: &str,
         after: Option<SequenceId>,
@@ -179,7 +183,7 @@ impl SessionEventLog {
     ///
     /// # Errors
     /// Rejects live ownership, invalid limits and referenced corruption.
-    pub fn load_existing_tail_page<T: DeserializeOwned>(
+    pub fn load_existing_tail_page<T: DeserializeOwned + rw_types::allocation::DecodeAllocation>(
         root: &Path,
         session_id: &str,
         limits: SessionEventPageLimits,
@@ -224,7 +228,7 @@ impl SessionEventLog {
         map: Map,
     ) -> Result<Self, SessionStoreError>
     where
-        T: DeserializeOwned + PartialEq + Serialize,
+        T: DeserializeOwned + rw_types::allocation::DecodeAllocation + PartialEq + Serialize,
         Map: FnMut(T) -> Result<T, SessionStoreError>,
     {
         let parent = Self::existing_view(root, parent_session_id)?;
@@ -253,7 +257,7 @@ impl SessionEventLog {
         mut map: Map,
     ) -> Result<Self, SessionStoreError>
     where
-        T: DeserializeOwned + PartialEq + Serialize,
+        T: DeserializeOwned + rw_types::allocation::DecodeAllocation + PartialEq + Serialize,
         Map: FnMut(T) -> Result<T, SessionStoreError>,
     {
         validate_session_id(parent_session_id)?;

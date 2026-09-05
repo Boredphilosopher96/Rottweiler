@@ -89,6 +89,11 @@ fn derive_covers_struct_tuple_enum_and_nested_optional_allocations() {
 }
 
 struct Overflow;
+impl super::DecodeAllocation for Overflow {
+    fn decode_node_bytes() -> Option<usize> {
+        None
+    }
+}
 impl PrepareAllocation for Overflow {
     fn prepared_heap_bytes(&self) -> Option<usize> {
         Some(usize::MAX)

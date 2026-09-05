@@ -68,6 +68,11 @@ fn plan_bounds_escaped_bytes_and_rejects_sequence_overflow() {
 #[test]
 fn changed_serialization_cannot_grow_the_reserved_buffer() {
     struct Changing(Cell<bool>);
+    impl rw_types::allocation::DecodeAllocation for Changing {
+        fn decode_node_bytes() -> Option<usize> {
+            Some(std::mem::size_of::<String>())
+        }
+    }
     impl Serialize for Changing {
         fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
             if self.0.replace(true) {

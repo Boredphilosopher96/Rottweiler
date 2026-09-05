@@ -1,6 +1,7 @@
 //! Bounded immutable journal segments and descriptor-pinned read views (ADR-029).
 
 mod append;
+pub(super) mod decode;
 pub use append::{JournalAppendPlan, PreparedJournalAppend};
 mod catalog;
 mod proof;
@@ -500,14 +501,7 @@ impl SegmentedJournal {
             super::truncate_and_sync_event_file(&active, complete as u64)?;
             bytes.truncate(complete);
         }
-        let records = super::parse_events_bounded_from_sequence::<serde_json::Value>(
-            &bytes,
-            usize::MAX,
-            active_first,
-        )?;
-        let next_sequence = active_first
-            .checked_add(records.len() as u64)
-            .ok_or(SessionStoreError::SequenceOverflow)?;
+        let next_sequence = super::validate_events_from_sequence(&bytes, active_first)?;
         let mut active_hash = blake3::Hasher::new();
         active_hash.update(&bytes);
         let active_state = super::event_file_snapshot(&active)?;
@@ -545,7 +539,7 @@ impl SegmentedJournal {
     ///
     /// # Errors
     /// Rejects oversized batches, changed active data and failed durable writes.
-    pub fn append_batch<T: Serialize>(
+    pub fn append_batch<T: Serialize + rw_types::allocation::DecodeAllocation>(
         &mut self,
         events: impl IntoIterator<Item = T>,
     ) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
@@ -772,14 +766,7 @@ impl JournalReadView {
             .checked_sub(1)
             .and_then(|index| segments.get(index))
             .map_or(0, |segment| segment.next);
-        let records = super::parse_events_bounded_from_sequence::<serde_json::Value>(
-            &bytes,
-            usize::MAX,
-            first,
-        )?;
-        let next_sequence = first
-            .checked_add(records.len() as u64)
-            .ok_or(SessionStoreError::SequenceOverflow)?;
+        let next_sequence = super::validate_events_from_sequence(&bytes, first)?;
         let active_segment = (!bytes.is_empty()).then(|| Segment {
             first,
             next: next_sequence,
@@ -1041,7 +1028,7 @@ impl JournalReadView {
     ///
     /// # Errors
     /// Rejects invalid cursors/limits, corrupt referenced segments and oversized records.
-    pub fn page<T: DeserializeOwned>(
+    pub fn page<T: DeserializeOwned + rw_types::allocation::DecodeAllocation>(
         &self,
         after: Option<SequenceId>,
         limits: SessionEventPageLimits,
@@ -1053,7 +1040,7 @@ impl JournalReadView {
     ///
     /// # Errors
     /// Has the same cursor, integrity and resource-limit errors as [`Self::page`].
-    pub fn page_with_metrics<T: DeserializeOwned>(
+    pub fn page_with_metrics<T: DeserializeOwned + rw_types::allocation::DecodeAllocation>(
         &self,
         after: Option<SequenceId>,
         limits: SessionEventPageLimits,
@@ -1087,7 +1074,7 @@ impl JournalReadView {
         Ok(first)
     }
 
-    fn page_internal<T: DeserializeOwned>(
+    fn page_internal<T: DeserializeOwned + rw_types::allocation::DecodeAllocation>(
         &self,
         after: Option<SequenceId>,
         limits: SessionEventPageLimits,
@@ -1103,6 +1090,7 @@ impl JournalReadView {
         let mut metrics = JournalReadMetrics::default();
         let mut events = Vec::new();
         let mut page_bytes = 0;
+        let mut decode_bytes = 0usize;
         let mut next = first;
         let first_segment = self
             .segments
@@ -1150,6 +1138,11 @@ impl JournalReadView {
                     }
                     break 'segments;
                 }
+                let charge = decode::preflight_record::<T>(line)?;
+                if charge > decode::MAX_PAGE_DECODE_BYTES - decode_bytes {
+                    break 'segments;
+                }
+                decode_bytes += charge;
                 let envelope = decode_page_event(line, next)?;
                 if let Some(proof) = &mut proof {
                     proof.line(sequence, line, true);
@@ -1192,7 +1185,7 @@ impl JournalReadView {
     ///
     /// # Errors
     /// Rejects aggregate limits before allocation and propagates page integrity errors.
-    pub fn collect_bounded<T: DeserializeOwned>(
+    pub fn collect_bounded<T: DeserializeOwned + rw_types::allocation::DecodeAllocation>(
         &self,
         max_bytes: u64,
         max_events: usize,
@@ -1230,7 +1223,7 @@ impl JournalReadView {
     ///
     /// # Errors
     /// Rejects invalid limits, corrupt referenced segments and oversized last records.
-    pub fn tail_page<T: DeserializeOwned>(
+    pub fn tail_page<T: DeserializeOwned + rw_types::allocation::DecodeAllocation>(
         &self,
         limits: SessionEventPageLimits,
     ) -> Result<SessionEventPage<T>, SessionStoreError> {
@@ -1244,6 +1237,7 @@ impl JournalReadView {
         }
         let mut events = Vec::new();
         let mut page_bytes = 0;
+        let mut decode_bytes = 0usize;
         let mut metrics = JournalReadMetrics::default();
         'segments: for (segment, active) in self.segments_from(0).rev() {
             if events.len() >= limits.max_page_events || page_bytes >= limits.max_page_bytes {
@@ -1275,6 +1269,11 @@ impl JournalReadView {
                     }
                     break 'segments;
                 }
+                let charge = decode::preflight_record::<T>(line)?;
+                if charge > decode::MAX_PAGE_DECODE_BYTES - decode_bytes {
+                    break 'segments;
+                }
+                decode_bytes += charge;
                 let event: EventEnvelope<T> = serde_json::from_slice(line)?;
                 if event.schema_version != EVENT_SCHEMA_VERSION {
                     return Err(SessionStoreError::UnsupportedEventVersion(
@@ -1313,12 +1312,7 @@ impl JournalReadView {
         let mut verified_bytes = 0;
         for (segment, active) in self.segments_from(0) {
             let bytes = self.segment_bytes(&segment, active)?;
-            let events = super::parse_events_bounded_from_sequence::<serde_json::Value>(
-                &bytes,
-                usize::MAX,
-                expected,
-            )?;
-            expected += events.len() as u64;
+            expected = super::validate_events_from_sequence(&bytes, expected)?;
             if expected != segment.next {
                 return Err(SessionStoreError::CorruptEvent(
                     "journal segment record count differs from index",
@@ -1333,7 +1327,7 @@ impl JournalReadView {
     }
 }
 
-fn decode_page_event<T: DeserializeOwned>(
+fn decode_page_event<T: DeserializeOwned + rw_types::allocation::DecodeAllocation>(
     line: &[u8],
     next: u64,
 ) -> Result<EventEnvelope<T>, SessionStoreError> {

@@ -1,7 +1,6 @@
 //! Descriptor validation, bounded record decoding, append faults, and durable file I/O.
 use super::{EVENT_SCHEMA_VERSION, EventEnvelope, SessionStoreError};
 use rw_types::SequenceId;
-use serde::de::DeserializeOwned;
 #[cfg(unix)]
 use std::os::unix::fs::FileExt as _;
 #[cfg(not(unix))]
@@ -11,10 +10,7 @@ use std::{
     io::{Read as _, Seek as _, SeekFrom},
     path::Path,
 };
-use std::{
-    fs::File,
-    io::{BufRead, BufReader, Write},
-};
+use std::{fs::File, io::Write};
 
 pub(super) fn truncate_and_sync_event_file(file: &File, len: u64) -> std::io::Result<()> {
     set_event_file_len(file, len)?;
@@ -198,39 +194,29 @@ pub(super) fn verify_event_file_snapshot(
     Ok(())
 }
 
-pub(super) fn parse_events_bounded_from_sequence<T: DeserializeOwned>(
+pub(super) fn validate_events_from_sequence(
     bytes: &[u8],
-    max_events: usize,
     first_sequence: u64,
-) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
-    let mut events = Vec::new();
-    for line in BufReader::new(bytes).lines() {
-        if events.len() >= max_events {
-            return Err(SessionStoreError::EventCountTooLarge { max_events });
-        }
-        let line = line?;
-        if line.is_empty() {
-            return Err(SessionStoreError::CorruptEvent("blank JSONL record"));
-        }
-        let envelope: EventEnvelope<T> = serde_json::from_str(&line)?;
+) -> Result<u64, SessionStoreError> {
+    let mut expected = first_sequence;
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        super::journal::decode::preflight_record::<serde_json::Value>(line)?;
+        let envelope: EventEnvelope<serde::de::IgnoredAny> = serde_json::from_slice(line)?;
         if envelope.schema_version != EVENT_SCHEMA_VERSION {
             return Err(SessionStoreError::UnsupportedEventVersion(
                 envelope.schema_version,
             ));
         }
-        let expected = first_sequence
-            .checked_add(
-                u64::try_from(events.len()).map_err(|_| SessionStoreError::SequenceOverflow)?,
-            )
-            .ok_or(SessionStoreError::SequenceOverflow)?;
         if envelope.sequence != SequenceId(expected) {
             return Err(SessionStoreError::CorruptEvent(
                 "non-contiguous event sequence",
             ));
         }
-        events.push(envelope);
+        expected = expected
+            .checked_add(1)
+            .ok_or(SessionStoreError::SequenceOverflow)?;
     }
-    Ok(events)
+    Ok(expected)
 }
 
 #[cfg(unix)]

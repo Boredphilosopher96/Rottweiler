@@ -54,7 +54,7 @@ impl JournalAppendPlan {
     /// # Errors
     /// Rejects changed batch length/encoding and serialization errors. The output
     /// cannot grow beyond the measured reservation even for a stateful serializer.
-    pub fn encode<T: Serialize>(
+    pub fn encode<T: Serialize + rw_types::allocation::DecodeAllocation>(
         self,
         events: &[T],
     ) -> Result<PreparedJournalAppend, SessionStoreError> {
@@ -74,6 +74,9 @@ impl JournalAppendPlan {
             return Err(SessionStoreError::CorruptEvent(
                 "prepared journal batch encoding changed",
             ));
+        }
+        for line in output.destination.split_inclusive(|byte| *byte == b'\n') {
+            super::decode::preflight_record::<T>(line)?;
         }
         Ok(PreparedJournalAppend {
             first: self.first,
@@ -176,7 +179,7 @@ impl Write for Count {
     }
 }
 
-pub(super) fn encode_owned<T: Serialize>(
+pub(super) fn encode_owned<T: Serialize + rw_types::allocation::DecodeAllocation>(
     first: u64,
     events: impl IntoIterator<Item = T>,
 ) -> Result<(PreparedJournalAppend, Vec<EventEnvelope<T>>), SessionStoreError> {
@@ -198,7 +201,9 @@ pub(super) fn encode_owned<T: Serialize>(
             sequence: SequenceId(sequence),
             event,
         };
+        let start = output.written;
         write_envelope(&envelope, &mut output)?;
+        super::decode::preflight_record::<T>(&output.destination[start..])?;
         envelopes.push(envelope);
     }
     let count = u64::try_from(envelopes.len()).map_err(|_| SessionStoreError::SequenceOverflow)?;
