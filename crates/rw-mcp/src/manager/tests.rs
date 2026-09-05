@@ -1,4 +1,5 @@
 #![allow(clippy::expect_used)]
+mod failed_owners;
 mod inbound;
 mod lifetimes;
 

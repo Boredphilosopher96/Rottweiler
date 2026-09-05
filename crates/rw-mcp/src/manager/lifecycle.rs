@@ -1,7 +1,7 @@
 //! Connect, disable, and shutdown own their actual futures through completion.
 use super::{
-    McpManager, ServerEntry, catalog_fingerprint, load_catalog, operations, sanitize_catalog,
-    status_message, transition::Transition,
+    McpManager, ServerEntry, catalog_fingerprint, client_proof::ClientProof, load_catalog,
+    operations, sanitize_catalog, status_message, transition::Transition,
 };
 use crate::{McpError, McpServerConfig, ServerState};
 use futures_util::future::join_all;
@@ -106,7 +106,7 @@ impl McpManager {
             .ok_or_else(|| operations::unsettled(&id))?;
         entry.config.enabled = true;
         entry.state = ServerState::Connecting;
-        let previous_client = entry.client.take();
+        let previous_client = entry.client.take().map(ClientProof::new);
         let config = entry.config.clone();
         let generation = entry.generation;
         let manager = self.clone();
@@ -145,7 +145,7 @@ impl McpManager {
         generation: u64,
         transition: &Transition,
     ) -> Result<(), McpError> {
-        let client = self.inner.connector.connect(&config).await?;
+        let client = ClientProof::new(self.inner.connector.connect(&config).await?);
         if transition.cancelled() {
             client
                 .close(self.inner.limits.shutdown_timeout)
@@ -153,15 +153,16 @@ impl McpManager {
                 .map_err(|_| operations::unsettled(&config.id))?;
             return Err(McpError::Disabled(config.id));
         }
-        let catalog = load_catalog(&*client)
-            .await
-            .and_then(|(tools, resources, prompts)| {
-                Ok((
-                    sanitize_catalog(tools)?,
-                    sanitize_catalog(resources)?,
-                    sanitize_catalog(prompts)?,
-                ))
-            });
+        let catalog =
+            load_catalog(client.client())
+                .await
+                .and_then(|(tools, resources, prompts)| {
+                    Ok((
+                        sanitize_catalog(tools)?,
+                        sanitize_catalog(resources)?,
+                        sanitize_catalog(prompts)?,
+                    ))
+                });
         let (tools, resources, prompts) = match catalog {
             Ok(catalog) => catalog,
             Err(error) => {
@@ -178,7 +179,7 @@ impl McpManager {
                 && entry.generation == generation
                 && entry.config.enabled
                 && !transition.cancelled()
-                && client.catalog_valid()
+                && client.client().catalog_valid()
             {
                 let fingerprint = catalog_fingerprint(&tools);
                 if entry.catalog_fingerprint.is_some()
@@ -191,7 +192,7 @@ impl McpManager {
                 }
                 entry.resources = resources;
                 entry.prompts = prompts;
-                entry.client = Some(Arc::clone(&client));
+                entry.client = Some(client.share());
                 entry.state = if entry.pending_catalog.is_some() {
                     ServerState::ApprovalRequired
                 } else {
@@ -203,6 +204,7 @@ impl McpManager {
             }
         };
         if accepted {
+            client.handed_off();
             return Ok(());
         }
         client
@@ -231,7 +233,7 @@ impl McpManager {
         if let Some(previous) = &previous {
             previous.cancel();
         }
-        let client = entry.client.take();
+        let client = entry.client.take().map(ClientProof::new);
         let manager = self.clone();
         let transition = Transition::start(id.clone(), move |_| async move {
             let connection = async {
@@ -297,11 +299,16 @@ impl McpManager {
                             servers
                                 .values_mut()
                                 .map(|entry| manager.begin_retirement(entry))
-                                .collect::<Result<Vec<_>, _>>()?
+                                .collect::<Vec<_>>()
                         };
                         let results =
-                            join_all(transitions.iter().map(|transition| transition.completed()))
-                                .await;
+                            join_all(transitions.into_iter().map(|transition| async move {
+                                match transition {
+                                    Ok(transition) => transition.completed().await,
+                                    Err(error) => Err(error),
+                                }
+                            }))
+                            .await;
                         let settled = manager
                             .inner
                             .operations

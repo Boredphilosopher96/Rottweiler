@@ -1,3 +1,4 @@
+mod client_proof;
 mod invocations;
 mod lifecycle;
 mod operations;

@@ -42,11 +42,11 @@ impl Drop for WorkGuard<'_> {
     }
 }
 
-struct ControlledClient {
+pub(super) struct ControlledClient {
     invocation: Work,
     closing: Work,
     block_close: AtomicBool,
-    closed: AtomicBool,
+    pub(super) closed: AtomicBool,
     catalogs: AtomicUsize,
 }
 impl Default for ControlledClient {
@@ -96,8 +96,8 @@ impl McpClient for ControlledClient {
         Ok(())
     }
 }
-struct ControlledConnector {
-    client: Arc<ControlledClient>,
+pub(super) struct ControlledConnector {
+    pub(super) client: Arc<ControlledClient>,
     connecting: Work,
     block: AtomicBool,
     calls: AtomicUsize,
@@ -112,7 +112,7 @@ impl McpConnector for ControlledConnector {
         Ok(self.client.clone())
     }
 }
-fn config(id: &str) -> McpServerConfig {
+pub(super) fn config(id: &str) -> McpServerConfig {
     McpServerConfig {
         id: McpServerId::new(id).expect("id"),
         transport: McpTransportConfig::Stdio {
@@ -127,7 +127,9 @@ fn config(id: &str) -> McpServerConfig {
         tool_capabilities: crate::McpToolCapabilityOverrides::default(),
     }
 }
-async fn fixture(block_connect: bool) -> (McpManager, Arc<ControlledConnector>, McpServerId) {
+pub(super) async fn fixture(
+    block_connect: bool,
+) -> (McpManager, Arc<ControlledConnector>, McpServerId) {
     let connector = Arc::new(ControlledConnector {
         client: Arc::new(ControlledClient::default()),
         connecting: Work::default(),
