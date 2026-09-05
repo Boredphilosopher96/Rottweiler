@@ -1050,7 +1050,7 @@ export class PluginServer {
     this.transport.error?.write(`[rottweiler-plugin:${this.definition.manifest.name}] ${safe}\n`)
   }
 
-  async #push(method: PluginPushMethod, params: JsonValue, signal: AbortSignal): Promise<JsonValue> {
+  async #push(method: PluginPushMethod, params: JsonValue, signal: AbortSignal, deadlineAt?: number): Promise<JsonValue> {
     if (!this.#pushCapabilities.has(method)) throw new SafeRpcError(-32003, "push method is not declared")
     if (signal.aborted) throw new SafeRpcError(-32800, "plugin request cancelled")
     if (this.#hostCommands.size >= 64) throw new SafeRpcError(-32005, "host command admission denied")
@@ -1067,7 +1067,7 @@ export class PluginServer {
       pending.reject(error)
     }
     const cancel = () => fail(new SafeRpcError(-32800, "host command cancelled; outcome unknown"))
-    const timer = setTimeout(() => fail(new SafeRpcError(-32004, "host command deadline exceeded; outcome unknown")), this.#handlerTimeoutMs)
+    const timer = setTimeout(() => fail(new SafeRpcError(-32004, "host command deadline exceeded; outcome unknown")), deadlineAt === undefined ? this.#handlerTimeoutMs : Math.max(0, deadlineAt - performance.now()))
     this.#hostCommands.set(id, {
       resolve, reject,
       cleanup: () => { clearTimeout(timer); signal.removeEventListener("abort", cancel) },
@@ -1266,10 +1266,10 @@ export class PluginServer {
     }
   }
 
-  #context(signal: AbortSignal, providerAlias: string | undefined, origin: ExtensionInvocationId | null): HandlerContext {
+  #context(signal: AbortSignal, providerAlias: string | undefined, origin: ExtensionInvocationId | null, deadlineAt?: number): HandlerContext {
     return {
       signal,
-      ...hostStateContext((method, params) => this.#push(method, params, signal), origin),
+      ...hostStateContext((method, params) => this.#push(method, params, signal, method === RPC_METHODS.sessionToolCall ? deadlineAt : undefined), origin),
       providerHttp: {
         request: (credentialReference, request) => this.#providerHttpRequest(
           providerAlias, credentialReference, request, signal,
@@ -1329,13 +1329,14 @@ export class PluginServer {
     const cancel = () => call.abort()
     this.#lifetime.signal.addEventListener("abort", cancel, { once: true })
     if (this.#lifetime.signal.aborted) call.abort()
+    const deadlineAt = performance.now() + deadlineMs
     let timer: ReturnType<typeof setTimeout> | undefined
     timer = setTimeout(() => {
       timedOut = true
       call.abort()
     }, deadlineMs)
     try {
-      const result = await this.#invoke(() => invoke(this.#context(call.signal, providerAlias, origin)))
+      const result = await this.#invoke(() => invoke(this.#context(call.signal, providerAlias, origin, deadlineAt)))
       call.signal.throwIfAborted()
       return result
     } catch (error) {

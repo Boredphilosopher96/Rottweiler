@@ -569,3 +569,28 @@ test("command lifetime owns the actual handler beyond the ordinary control timer
   send(stop)
   await serving
 })
+
+test("host tool callback inherits remaining command time while controls keep their own deadline", async () => {
+  let queryTimedOut = false
+  const definition: PluginDefinition = {
+    manifest: {name:"tool-deadline",version:"1",protocol:3,capabilities:{
+      commands:[{name:"read",description:"read",allowed_tools:["read"]}],push:["session/query","session/tool_call"],
+    }},
+    handlers:{commands:{read:async (_params,{session})=>{
+      try { await session.query() } catch { queryTimedOut=true }
+      return await session.callTool("read", {path:"file"})
+    }}},
+  }
+  const {frames,send,serving}=harness(definition,10)
+  send({jsonrpc:"2.0",id:10,method:"command/execute",params:{name:"read",arguments:"",invocation_id:"01".repeat(16),lifetime:{total_ms:300,idle_ms:300}}})
+  await until(()=>frames.some(frame=>frame.method==="session/tool_call"))
+  expect(queryTimedOut).toBe(true)
+  await new Promise(resolve=>setTimeout(resolve,30))
+  expect(frames.some(frame=>frame.id===10)).toBe(false)
+  const request=frames.find(frame=>frame.method==="session/tool_call")!
+  send({jsonrpc:"2.0",id:request.id!,result:{turn_id:"1",invocation_id:"turn-1:extension-0",is_error:false,output:{type:"text",text:"settled"}}})
+  await until(()=>frames.some(frame=>frame.id===10))
+  expect(frames.find(frame=>frame.id===10)?.result).toMatchObject({is_error:false})
+  send(stop)
+  await serving
+})
