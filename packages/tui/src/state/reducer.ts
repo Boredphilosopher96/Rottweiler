@@ -1,3 +1,4 @@
+import { assertLiveAdmission, citationBytes } from "./live-admission"
 import { prepareToolDisplay } from "./tool-display"
 import { commitTodos, invalidateTodos, readTodos } from "./todos"
 import {
@@ -121,6 +122,7 @@ export function reduceWireEvent(
     }
   }
 
+  assertLiveAdmission(state, event)
   const withCursor: RottweilerState = {
     ...state,
     lastSequence: sequenceText,
@@ -762,6 +764,7 @@ function applyKnownEvent(
         ...state,
         streamingTail: updateTail(state.streamingTail, event.turn_id, (tail) => ({
           ...tail,
+          citationBytes: tail.citationBytes + citationBytes(event.uri, event.title ?? null),
           citations: [
             ...tail.citations,
             { uri: event.uri, title: event.title ?? null },
@@ -919,27 +922,16 @@ function applyKnownEvent(
             questionId: event.question_id,
             turnId: event.turn_id,
             questions: event.questions,
-            answers: null,
-            answered: false,
           },
         },
       }
     case "question_answered": {
-      const existing = state.questions[event.question_id]
-      return {
-        ...state,
-        questions: {
-          ...state.questions,
-          [event.question_id]: {
-            questionId: event.question_id,
-            turnId: event.turn_id,
-            questions: existing?.questions ?? [],
-            answers: event.answers,
-            answered: true,
-          },
-        },
-      }
+      if (state.questions[event.question_id] === undefined) return state
+      const questions = { ...state.questions }
+      delete questions[event.question_id]
+      return { ...state, questions }
     }
+
     case "turn_finished": {
       const tail =
         state.streamingTail?.turnId === event.turn_id

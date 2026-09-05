@@ -154,7 +154,7 @@ export class SubmissionController {
       return true
     }
     const textQuestion = Object.values(this.host.ui.state.questions).find(
-      (question) => !question.answered && question.questions[0]?.response_kind === "text",
+      (question) => question.questions[0]?.response_kind === "text",
     )
     if (textQuestion !== undefined) {
       if (attachments.length > 0) {

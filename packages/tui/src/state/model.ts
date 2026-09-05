@@ -1,8 +1,8 @@
+import { citationBytes } from "./live-admission"
 import type { ToolDisplay } from "./tool-display"
 import { emptyTodos, type TodoState } from "./todos"
 import { MAX_TAIL_TEXT_BYTES, utf8Prefix, type ToolOutputBuffer } from "./display-buffer"
 import type {
-  Answer,
   AttachmentData,
   BudgetLevel,
   BudgetScope,
@@ -83,6 +83,7 @@ export interface StreamingTail {
     readonly text: { readonly bytes: number; readonly omittedBytes: number }
     readonly thinking: { readonly bytes: number; readonly omittedBytes: number }
   }
+  readonly citationBytes: number
   readonly citations: readonly StreamingCitation[]
   readonly toolInvocationIds: readonly string[]
   readonly finished: {
@@ -92,12 +93,12 @@ export interface StreamingTail {
   } | null
 }
 
-export function createStreamingTail(value: Omit<StreamingTail, "displayBudget">): StreamingTail {
+export function createStreamingTail(value: Omit<StreamingTail, "displayBudget" | "citationBytes">): StreamingTail {
   const text = utf8Prefix(value.text, MAX_TAIL_TEXT_BYTES)
   const thinking = utf8Prefix(value.thinking, MAX_TAIL_TEXT_BYTES)
   const textBytes = Buffer.byteLength(text)
   const thinkingBytes = Buffer.byteLength(thinking)
-  return { ...value, text, thinking, displayBudget: {
+  return { ...value, text, thinking, citationBytes: value.citations.reduce((bytes, citation) => bytes + citationBytes(citation.uri, citation.title), 0), displayBudget: {
     text: { bytes: textBytes, omittedBytes: Buffer.byteLength(value.text) - textBytes },
     thinking: { bytes: thinkingBytes, omittedBytes: Buffer.byteLength(value.thinking) - thinkingBytes },
   } }
@@ -165,8 +166,6 @@ export interface QuestionProjection {
   readonly questionId: string
   readonly turnId: string
   readonly questions: readonly Question[]
-  readonly answers: readonly Answer[] | null
-  readonly answered: boolean
 }
 
 export interface CommandAcknowledgement {

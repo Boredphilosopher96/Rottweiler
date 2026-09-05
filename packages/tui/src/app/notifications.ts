@@ -11,7 +11,7 @@ export function notifyTransition(notifications: NotificationAdapter, previous: R
         previous.tools[tool.invocationId]?.status !== "awaiting_approval",
     )
     const question = Object.values(next.questions).find(
-      (candidate) => !candidate.answered && previous.questions[candidate.questionId] === undefined,
+      (candidate) => previous.questions[candidate.questionId] === undefined,
     )
     const pluginNotification =
       next.pluginNotifications.at(-1) !== previous.pluginNotifications.at(-1)

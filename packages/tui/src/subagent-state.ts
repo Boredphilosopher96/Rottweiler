@@ -73,7 +73,6 @@ export function boundSubagentState(state: RottweilerState): RottweilerState {
     latestShell: null,
     turns: boundProjectionRecord(state.turns),
     tools: boundProjectionRecord(state.tools),
-    questions: boundProjectionRecord(state.questions),
     commandAcks: boundProjectionRecord(state.commandAcks),
   }
 }

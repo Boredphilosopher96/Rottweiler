@@ -343,7 +343,7 @@ describe("state queries", () => {
       args: null,
       source: { sequence: "7", selector: { type: "tool_output" } },
     })
-    expect(state.questions["question-1"]).toMatchObject({ answered: true })
+    expect(state.questions["question-1"]).toBeUndefined()
     expect(state.shell).toEqual({
       shellId: "shell-1",
       active: false,

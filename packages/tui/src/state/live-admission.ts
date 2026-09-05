@@ -1,0 +1,31 @@
+import {
+  MAX_CITATION_TEXT_BYTES, MAX_TURN_CITATIONS, MAX_TURN_CITATION_TEXT_BYTES,
+  MAX_PENDING_QUESTION_REQUESTS, MAX_QUESTION_SET_BYTES,
+} from "../../../../protocol/types"
+import type { EngineEvent } from "../protocol"
+import { jsonEncodedBytes } from "../json-size"
+import { EngineProtocolError } from "../transport/errors"
+import type { RottweilerState } from "./model"
+
+export function citationBytes(uri: string, title: string | null): number {
+  return Buffer.byteLength(uri) + (title === null ? 0 : Buffer.byteLength(title))
+}
+
+/** Reject an inadmissible live payload before its cursor or projection can advance. */
+export function assertLiveAdmission(state: RottweilerState, event: EngineEvent): void {
+  if (event.type === "question_asked") {
+    const pending = Object.keys(state.questions).length
+    if ((state.questions[event.question_id] === undefined && pending >= MAX_PENDING_QUESTION_REQUESTS)
+      || event.questions.length === 0 || event.questions.length > MAX_PENDING_QUESTION_REQUESTS
+      || jsonEncodedBytes(event.questions, MAX_QUESTION_SET_BYTES) > MAX_QUESTION_SET_BYTES) {
+      throw new EngineProtocolError("unresolved questions exceed the source-owned admission limit")
+    }
+  } else if (event.type === "citation_delta") {
+    const tail = state.streamingTail?.turnId === event.turn_id ? state.streamingTail : null
+    const bytes = citationBytes(event.uri, event.title ?? null)
+    if (bytes > MAX_CITATION_TEXT_BYTES || (tail?.citations.length ?? 0) >= MAX_TURN_CITATIONS
+      || (tail?.citationBytes ?? 0) + bytes > MAX_TURN_CITATION_TEXT_BYTES) {
+      throw new EngineProtocolError("turn citations exceed the source-owned admission limit")
+    }
+  }
+}

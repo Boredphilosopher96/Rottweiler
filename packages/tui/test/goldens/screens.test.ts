@@ -337,8 +337,6 @@ function scenarios(): ScreenScenario[] {
           question: {
             questionId: "question",
             turnId: "2",
-            answered: false,
-            answers: null,
             questions: [
               {
                 id: "question",

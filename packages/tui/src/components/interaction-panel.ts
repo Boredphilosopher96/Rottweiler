@@ -155,7 +155,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
       return
     }
     const tool = Object.values(state.tools).find((candidate) => candidate.status === "awaiting_approval")
-    const question = Object.values(state.questions).find((candidate) => !candidate.answered)
+    const question = Object.values(state.questions)[0]
     const turnRunning = Object.values(state.turns).some((turn) => turn.status === "running")
     if (state.pendingPlan !== null && !turnRunning) {
       this.#showPlan(state.pendingPlan)

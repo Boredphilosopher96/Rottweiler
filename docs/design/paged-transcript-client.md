@@ -113,3 +113,6 @@ The client constructs ancestry from the selected semantic child row and carries 
 
 
 Reply collection and JSON decoding use the same cache allocation owner as retained pages. Each read reserves an entry before dispatch. The transport incrementally counts strings, keys and containers without materializing them, admits buffer growth and the decoded graph, then validates the generated protocol under that charge. The consumer transfers the reservation to its exact page revision. Rejected or aborted reads retain their credit until the response reader settles; mounted values remain pinned while competing reads either evict idle entries or fail admission. Content inspection, timeline source restoration and child history use this contract as well. Optional `reply_allocation` timing counters measure the structure-counting work without recording payloads.
+
+
+The question projection owns unresolved interactions only. A durable answer releases the corresponding question body; the canonical journal retains the exchange. Question request count and serialized payload admission use generated producer limits. Citation count and UTF-8 bytes are accumulated for the active agent turn using the same source-owned ceilings. An inadmissible event is rejected before advancing the durable client cursor; unresolved interactions are never evicted to make room.

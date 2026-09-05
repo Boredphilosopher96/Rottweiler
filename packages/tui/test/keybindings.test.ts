@@ -601,8 +601,6 @@ describe("Vim TUI interaction", () => {
         scope: {
           questionId: "scope",
           turnId: "1",
-          answered: false,
-          answers: null,
           questions: [{
             id: "scope",
             prompt: "Which scope?",

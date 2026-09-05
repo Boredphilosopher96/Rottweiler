@@ -178,8 +178,6 @@ describe("Rottweiler layout", () => {
               { value: "revert", label: "Revert", description: "Revert the change" },
             ],
           }],
-          answers: null,
-          answered: false,
         },
       },
     })
