@@ -2388,7 +2388,9 @@
             }
           ]
         },
-        "event": true,
+        "event": {
+          "description": "Null invalidates child history at the required canonical child_sequence.\nA non-null value is a bounded preview; complete content remains in the child log."
+        },
         "type": {
           "type": "string",
           "const": "subagent_progress"
