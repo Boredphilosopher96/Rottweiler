@@ -15,7 +15,9 @@ type TreeSitterClient,
 import { homedir } from "node:os"
 import { McpUiController } from "./app/mcp"
 import type { RottweilerAppOptions } from "./app/options"
+import { PermissionUiController } from "./app/permissions"
 import { ProviderUiController } from "./app/provider"
+import { SettingsUiController } from "./app/settings"
 import { DocumentController } from "./history/document"
 import { HistoryPresentation } from "./history/presentation"
 export type { RottweilerAppOptions,TerminalHandoverAdapter } from "./app/options"
@@ -60,7 +62,7 @@ import {
 mcpBrowserRow,
 type McpBrowserAction
 } from "./mcp-browser"
-import { PickerController,type PickerKind, type PickerCloseReason } from "./picker-controller"
+import { PickerController,type PickerCloseReason,type PickerKind } from "./picker-controller"
 import {
 noExternalEditor,
 noExternalUrl,
@@ -82,9 +84,6 @@ type Attachment,
 type CommandOutcome,
 type EngineEvent,
 type ModeId,
-type PermissionApprovalScope,
-type PermissionDecision,
-type PermissionModeDescriptor,
 type PlanDecision
 } from "./protocol"
 import {
@@ -111,9 +110,7 @@ parseSessionAction,
 type CommandChoice,
 } from "./session-commands"
 import {
-createSettingsBrowserModel,
-type SettingsBrowserAction,
-type SettingsCatalog,
+type SettingsBrowserAction
 } from "./settings-browser"
 import {
 createInitialState,
@@ -148,7 +145,6 @@ import { createThemeBrowserModel } from "./theme-browser"
 import {
 durableSequenceId,
 isRecord,
-
 } from "./transport"
 import { stabilizeTreeSitterClient } from "./tree-sitter-client"
 import {
@@ -156,9 +152,6 @@ boundedUiText,
 contextPanelHasContent,
 modePickerPresentation,
 nextModeId,
-permissionActionLabel,
-permissionPatternLabel,
-permissionRuleActionLabel,
 queuedMessageLabel,
 timelineTurnLabel
 } from "./ui-presentation"
@@ -174,14 +167,6 @@ interface PendingPresentationEvent {
 }
 
 export type { AppClientState } from "./recycle-state"
-
-type BudgetSettingKey =
-  | "budget.session_cost_cap_micros_usd"
-  | "budget.daily_cost_cap_micros_usd"
-  | "budget.session_token_cap"
-  | "budget.daily_token_cap"
-  | "budget.token_rate_alarm_per_minute"
-  | "budget.warn_at_percent"
 const MAX_VISIBLE_SUBAGENTS = 256
 
 interface TimelineTurnChoice {
@@ -208,14 +193,6 @@ type SubagentAction =
   | { readonly kind: "running"; readonly subagent: SubagentDescriptor }
   | { readonly kind: "interrupt"; readonly subagent: SubagentDescriptor }
   | { readonly kind: "close"; readonly subagent: SubagentDescriptor }
-
-type PermissionPickerAction =
-  | { readonly kind: "refresh" }
-  | { readonly kind: "mode"; readonly mode: PermissionMode }
-  | { readonly kind: "add"; readonly action: PermissionDecision }
-  | { readonly kind: "remove"; readonly ruleId: string }
-  | { readonly kind: "revoke"; readonly approvalId: string; readonly scope: PermissionApprovalScope }
-  | { readonly kind: "info" }
 type QueuedMessagePickerAction =
   | { readonly kind: "remove"; readonly position: string }
   | { readonly kind: "clear" }
@@ -234,7 +211,6 @@ interface PendingExport {
   readonly force: boolean
   readonly requestId: string | null
 }
-type PermissionModePickerAction = Extract<PermissionPickerAction, { readonly kind: "mode" }>
 
 interface PaletteAction {
   readonly id: string
@@ -257,13 +233,6 @@ type PaletteSection =
   | "Commands"
 
 export type PrimaryView = "conversation" | "tools"
-
-type PermissionMode = PermissionModeDescriptor | "default"
-
-interface PermissionModeChoice {
-  readonly mode: PermissionMode
-  readonly description: string
-}
 
 const PALETTE_SECTIONS: readonly PaletteSection[] = [
   "Conversation",
@@ -289,13 +258,6 @@ const KEYBOARD_HELP_CONTEXTS: Record<KeybindingPreset, readonly KeybindingContex
   standard: ["global", "standard", "review"],
   vim: ["global", "vim_normal", "vim_insert", "picker_normal", "picker_insert", "review"],
 }
-
-const PERMISSION_MODE_CHOICES: readonly PermissionModeChoice[] = [
-  { mode: "strict", description: "Ask before every tool use" },
-  { mode: "auto-safe", description: "Ask only for risky actions" },
-  { mode: "yolo", description: "Never ask · dangerous" },
-  { mode: "default", description: "Follow the launch policy" },
-]
 
 const EXPORT_FORMAT_CHOICES: readonly {
   readonly format: ExportFormat
@@ -326,6 +288,8 @@ export class RottweilerApp extends BoxRenderable {
   banner!: StateBannerRenderable
   main!: BoxRenderable
 
+  readonly #settings: SettingsUiController
+  readonly #permissions: PermissionUiController
   readonly #mcp: McpUiController
   readonly #providers: ProviderUiController
   readonly #document: DocumentController
@@ -376,8 +340,6 @@ export class RottweilerApp extends BoxRenderable {
   #commandsRequested = false
   #commandCatalogTruncationNotified = false
   #projectionErrors: Partial<Record<ProjectionKind, string>> = {}
-  #budgetSettingKey: BudgetSettingKey | null = null
-  #settingChoiceKey: string | null = null
   #outputViewerToolCallId: string | null = null
   #primaryView: PrimaryView = "conversation"
   #toolsElapsedTimer: ReturnType<typeof setInterval> | null = null
@@ -719,6 +681,25 @@ export class RottweilerApp extends BoxRenderable {
       closePicker: () => this.closePicker(),
       clearProjectionError: kind => this.#clearProjectionError(kind),
       projectError: (code, message, retryable) => this.#projectClientError(code, message, retryable),
+    })
+    this.#settings = new SettingsUiController({
+      get state() { return app.#state }, get picker() { return app.picker },
+      get browser() { return app.settingsBrowser },
+      pickerController: this.#pickerController, requests: this.#projectionRequests,
+      get projectionErrors() { return app.#projectionErrors },
+      get terminalWidth() { return app.width || app.ctx.width },
+      get terminalHeight() { return app.height || app.ctx.height },
+      get statusHeight() { return app.statusLine.height },
+      get composerDockHeight() { return app.composer.dockHeight },
+      get vim() { return app.#keybindings.preset === "vim" },
+      closePicker: () => this.closePicker(), openThemePicker: () => this.openThemePicker(),
+      modalOpened: () => this.#modalOpened(),
+    })
+    this.#permissions = new PermissionUiController({
+      get state() { return app.#state }, get picker() { return app.picker },
+      pickerController: this.#pickerController, requests: this.#projectionRequests,
+      get projectionErrors() { return app.#projectionErrors },
+      closePicker: () => this.closePicker(), submitPaletteCommand: content => this.#submitPaletteCommand(content),
     })
     this.#mcp = new McpUiController({
       get state() { return app.#state },
@@ -1799,97 +1780,16 @@ export class RottweilerApp extends BoxRenderable {
   openProviderRecoveryPicker(provider: RottweilerState["providers"][number]): void { this.#providers.openProviderRecoveryPicker(provider) }
 
   openProviderApiKeyPrompt(provider: string): void { this.#providers.openProviderApiKeyPrompt(provider) }
+  openSettingsPicker(): void { this.#settings.openSettingsPicker() }
 
-  openSettingsPicker(): void {
-    this.#pickerController.begin("settings")
-    this.#resizeSettingsBrowser(
-      this.width === 0 ? this.ctx.width : this.width,
-      this.height === 0 ? this.ctx.height : this.height,
-    )
-    this.#projectionRequests.command({ type: "list_settings" })
-    this.#pickerController.refresh()
-    this.settingsBrowser.input.focus()
-  }
+  openPermissionPicker(): void { this.#permissions.openPermissionPicker() }
 
-  #activateSettingsAction(action: SettingsBrowserAction): void {
-    switch (action.kind) {
-      case "choose":
-        this.#settingChoiceKey = action.key
-        this.settingsBrowser.visible = false
-        this.settingsBrowser.input.blur()
-        this.#pickerController.kind = "settingChoices"
-        this.#pickerController.refresh()
-        return
-      case "openThemes":
-        this.settingsBrowser.close()
-        this.openThemePicker()
-        return
-      case "openBudgets":
-        this.settingsBrowser.close()
-        this.openBudgetPicker()
-        return
-      case "inspect":
-        return
-    }
-  }
+  openBudgetPicker(): void { this.#settings.openBudgetPicker() }
 
-  openPermissionPicker(): void {
-    this.#pickerController.begin("permissions")
-    this.#projectionRequests.command({ type: "list_permissions" })
-    this.#pickerController.refresh()
-  }
+  openPermissionModePicker(): void { this.#permissions.openPermissionModePicker() }
 
-  openBudgetPicker(): void {
-    this.#budgetSettingKey = null
-    this.#settingChoiceKey = null
-    this.#pickerController.begin("budgets")
-    this.#projectionRequests.command({ type: "list_settings" })
-    this.#pickerController.refresh()
-  }
+  openTrustPicker(): void { this.#permissions.openTrustPicker() }
 
-  #openBudgetPresetPicker(key: BudgetSettingKey): void {
-    this.#budgetSettingKey = key
-    this.#pickerController.kind = "budgetPresets"
-    this.#pickerController.refresh()
-  }
-
-  #openBudgetTextPrompt(key: BudgetSettingKey): void {
-    this.#budgetSettingKey = key
-    this.#pickerController.kind = "budgetInput"
-    const prompt = key === "budget.session_cost_cap_micros_usd"
-      ? "Session limit in USD, e.g. 12.50"
-      : key === "budget.daily_cost_cap_micros_usd"
-        ? "Daily limit in USD, e.g. 12.50"
-        : key === "budget.session_token_cap"
-          ? "Session token limit, e.g. 250000"
-          : key === "budget.daily_token_cap"
-            ? "Daily token limit, e.g. 1000000"
-            : key === "budget.token_rate_alarm_per_minute"
-              ? "Token rate alarm per minute, e.g. 100000"
-              : "Warning threshold as a percent, e.g. 70"
-    const placeholder = key === "budget.warn_at_percent"
-      ? "70"
-      : key.includes("token")
-        ? "250000"
-        : "12.50"
-    this.picker.openTextPrompt({ title: prompt, placeholder: placeholder, onSubmit: (value) => {
-      const selectedKey = this.#budgetSettingKey
-      this.closePicker()
-      if (selectedKey !== null) {
-        this.#projectionRequests.command({ type: "set_setting", key: selectedKey, value })
-      }
-    }, maxBytes: 32, empty: "reject" })
-  }
-
-  openPermissionModePicker(): void {
-    this.#pickerController.begin("permissionMode")
-    this.#pickerController.refresh()
-  }
-
-  openTrustPicker(): void {
-    this.#pickerController.begin("trust")
-    this.#pickerController.refresh()
-  }
 
   openTimelinePicker(): void {
     this.#timelineTurn = null
@@ -1981,17 +1881,6 @@ export class RottweilerApp extends BoxRenderable {
   }
   openMcpPicker(): void { this.#mcp.openMcpPicker() }
 
-
-  #openPermissionPatternPrompt(
-    action: PermissionDecision
-  ): void {
-    this.#pickerController.kind = "permissionInput"
-    this.picker.openTextPrompt({ title: `Add ${action} permission rule`, placeholder: "tool(glob), e.g. bash(cargo test*)", onSubmit: (pattern) => {
-        this.closePicker()
-        this.#projectionRequests.command({ type: "add_session_permission_rule", pattern, action })
-      }, maxBytes: 2048, empty: "reject" })
-  }
-
   openThemePicker(): void {
     this.#themeBeforePreview = this.#theme
     this.#themePreviewCommitted = false
@@ -2017,14 +1906,6 @@ export class RottweilerApp extends BoxRenderable {
       height - this.statusLine.height - this.composer.dockHeight,
     )
     this.themeBrowser.resizeForTerminal(width, height, primaryHeight)
-  }
-
-  #resizeSettingsBrowser(width: number, height: number): void {
-    const primaryHeight = Math.max(
-      6,
-      height - this.statusLine.height - this.composer.dockHeight,
-    )
-    this.settingsBrowser.resizeForTerminal(width, height, primaryHeight)
   }
 
   #resizeReviewPanel(width: number, height: number): void {
@@ -2306,8 +2187,8 @@ export class RottweilerApp extends BoxRenderable {
     this.#projectionRequests.setFilePreview(null)
     this.#providers.pickerClosed()
     this.#mcp.pickerClosed()
-    this.#budgetSettingKey = null
-    this.#settingChoiceKey = null
+    this.#settings.pickerClosed()
+    this.#permissions.pickerClosed()
     this.#subagentActionId = null
     this.#sessionActionId = null
     this.#themeBeforePreview = null
@@ -2352,7 +2233,7 @@ export class RottweilerApp extends BoxRenderable {
     this.outputViewer.resizeForTerminal(height)
     this.#resizeReviewPanel(width, height)
     if (this.mcpBrowser.visible) this.#mcp.resize(width, height)
-    else if (this.settingsBrowser.visible) this.#resizeSettingsBrowser(width, height)
+    else if (this.settingsBrowser.visible) this.#settings.resize(width, height)
     else if (this.themeBrowser.visible) this.#resizeThemeBrowser(width, height)
     else if (this.commandPalette.visible) this.commandPalette.resizeForTerminal(width, height)
     else if (this.picker.visible) this.#pickerController.position(this.#pickerController.anchored)
@@ -2363,6 +2244,8 @@ export class RottweilerApp extends BoxRenderable {
     this.#destroyed = true
     this.#providers.dispose()
     this.#mcp.pickerClosed()
+    this.#settings.pickerClosed()
+    this.#permissions.pickerClosed()
     this.#document?.close()
     this.#history?.dispose()
     this.#presentation.destroy()
@@ -3269,374 +3152,27 @@ export class RottweilerApp extends BoxRenderable {
       case "providerApiKey":
         this.#providers.render(this.#pickerController.kind)
         break
-
       case "permissionInput":
+      case "trust":
+      case "permissionMode":
+      case "permissionYoloConfirm":
+      case "permissions":
+        this.#permissions.render(this.#pickerController.kind)
         break
+
       case "mcp":
       case "mcpInput":
       case "mcpActions":
       case "mcpRemoveConfirm":
         this.#mcp.render(this.#pickerController.kind)
         break
+      case "budgets":
+      case "budgetPresets":
+      case "settings":
+      case "settingChoices":
+        this.#settings.render(this.#pickerController.kind)
+        break
 
-      case "trust":
-        this.#pickerController.show(
-          "Folder trust",
-          [
-            {
-              id: "trust.status",
-              label: "Show trust status",
-              description: "Display the current folder trust state",
-              value: "/trust status",
-            },
-            {
-              id: "trust.grant",
-              label: "Grant trust",
-              description: "Allow executable project configuration",
-              value: "/trust grant",
-            },
-            {
-              id: "trust.revoke",
-              label: "Revoke trust",
-              description: "Disable executable project configuration",
-              value: "/trust revoke",
-            },
-          ],
-          (item) => this.#submitPaletteCommand(item.value),
-        )
-        break
-      case "permissionMode":
-        this.#pickerController.show(
-          "Permission mode",
-          this.#permissionModeItems(),
-          (item) => this.#selectPermissionMode(item.value.mode),
-        )
-        break
-      case "permissionYoloConfirm":
-        this.#pickerController.show(
-          "Run every tool without asking?",
-          [
-            {
-              id: "permissions.yolo.confirm",
-              label: "Yes, enable yolo",
-              description: "Never ask before tool use",
-              value: true,
-            },
-            {
-              id: "permissions.yolo.cancel",
-              label: "Cancel",
-              description: "Keep the current permission mode",
-              value: false,
-            },
-          ],
-          (item) => {
-            if (item.value) this.#submitPaletteCommand("/permissions mode yolo")
-            else this.closePicker()
-          },
-        )
-        break
-      case "permissions":
-        {
-          const permissions = this.#state.permissions
-          const permissionError = this.#projectionErrors.permissions
-          if (permissions === null && permissionError === undefined) {
-            this.#pickerController.showLoading("Permission rules", "Loading permission rules")
-            break
-          }
-          if (permissions === null) {
-            this.#pickerController.showStatus(
-              "Permission rules",
-              "Permission rules could not be loaded",
-              "Close and reopen this panel to retry.",
-            )
-            break
-          }
-          const items: PickerItem<PermissionPickerAction>[] = [
-            ...this.#permissionModeItems(),
-            {
-              id: "permissions.refresh",
-              label: `Default behavior · ${permissionActionLabel(permissions.default)}`,
-              description: permissions.truncated === true
-                ? "Inventory truncated · refresh after removing entries"
-                : "Refresh effective rules and remembered approvals",
-              value: { kind: "refresh" },
-            },
-            ...(["allow", "ask", "deny"] as const).map((action) => ({
-              id: `permissions.add.${action}`,
-              label: permissionRuleActionLabel(action),
-              description: "Applies to this session · choose a tool or command pattern",
-              value: { kind: "add", action } as const,
-            })),
-            ...(permissions?.effective_rules ?? []).map((rule) => ({
-              id: `permissions.effective.${rule.id}`,
-              label: `${permissionActionLabel(rule.action)} · ${permissionPatternLabel(rule.pattern)}`,
-              description: "Trusted configuration · read-only",
-              value: { kind: "info" } as const,
-            })),
-            ...(permissions?.project_rules ?? []).map((rule) => ({
-              id: `permissions.project.${rule.id}`,
-              label: `${permissionActionLabel(rule.action)} · ${permissionPatternLabel(rule.pattern)}`,
-              description: "Project rule · read-only",
-              value: { kind: "info" } as const,
-            })),
-            ...(permissions?.session_rules ?? []).map((rule) => ({
-              id: `permissions.remove.${rule.id}`,
-              label: `Remove · ${permissionPatternLabel(rule.pattern)}`,
-              description: `This session · ${permissionActionLabel(rule.action).toLowerCase()} · select to remove`,
-              value: { kind: "remove", ruleId: rule.id } as const,
-            })),
-            ...(permissions?.approvals ?? []).map((approval) => ({
-              id: `permissions.revoke.${approval.id}`,
-              label: `Revoke · ${approval.tool_name}`,
-              description: `${approval.scope === "project" ? "This project" : "This session"} · remembered approval`,
-              value: {
-                kind: "revoke",
-                approvalId: approval.id,
-                scope: approval.scope,
-              } as const,
-            })),
-          ]
-        this.#pickerController.show(
-          "Permission rules",
-          items,
-          (item) => {
-            const action = item.value
-            if (action.kind === "refresh") this.#projectionRequests.command({ type: "list_permissions" })
-            else if (action.kind === "mode") {
-              this.#selectPermissionMode(action.mode)
-            }
-            else if (action.kind === "add") this.#openPermissionPatternPrompt(action.action)
-            else if (action.kind === "remove") {
-              this.#projectionRequests.command({ type: "remove_session_permission_rule", ruleId: action.ruleId })
-            } else if (action.kind === "revoke") {
-              this.#projectionRequests.command({
-                type: "revoke_permission_approval",
-                approvalId: action.approvalId,
-                scope: action.scope,
-              })
-            }
-          }
-        )
-        }
-        break
-      case "budgets": {
-        const rows = [
-          {
-            key: "budget.session_cost_cap_micros_usd",
-            label: "Session limit",
-            description: "Maximum spend for this session",
-          },
-          {
-            key: "budget.daily_cost_cap_micros_usd",
-            label: "Daily limit",
-            description: "Maximum spend per UTC day",
-          },
-          {
-            key: "budget.session_token_cap",
-            label: "Session tokens",
-            description: "Maximum subscription tokens for this session",
-          },
-          {
-            key: "budget.daily_token_cap",
-            label: "Daily tokens",
-            description: "Maximum subscription tokens per UTC day",
-          },
-          {
-            key: "budget.token_rate_alarm_per_minute",
-            label: "Token rate alarm",
-            description: "Alert when one minute of subscription usage reaches this value",
-          },
-          {
-            key: "budget.warn_at_percent",
-            label: "Warn at",
-            description: "Warn when a configured cap reaches this percentage",
-          },
-        ] as const
-        const settings = rows.map((row) => ({
-          ...row,
-          setting: this.#state.settings.find((setting) => setting.key === row.key),
-        }))
-        if (settings.some(({ setting }) => setting === undefined)) {
-          if (this.#projectionRequests.current("settings_pending") !== null) {
-            this.#pickerController.showLoading("Budget limits", "Loading budget limits")
-          } else {
-            this.#pickerController.showStatus(
-              "Budget limits",
-              "Budget limits could not be loaded",
-              "Close and reopen this panel to retry.",
-            )
-          }
-          break
-        }
-        this.#pickerController.show(
-          "Budget limits",
-          settings.map(({ key, label, description, setting }) => ({
-            id: `budget.setting.${key}`,
-            label: `${label} · ${setting?.value}`,
-            description: `${description} · ${setting?.provenance}${setting?.appliesImmediately ? " · live" : " · next session"}`,
-            value: key,
-          })),
-          (item) => this.#openBudgetPresetPicker(item.value),
-        )
-        break
-      }
-      case "budgetPresets": {
-        const key = this.#budgetSettingKey
-        if (key === null) {
-          this.openBudgetPicker()
-          break
-        }
-        const isWarning = key === "budget.warn_at_percent"
-        const isToken = key.includes("token")
-        const title = key === "budget.session_cost_cap_micros_usd"
-          ? "Session limit"
-          : key === "budget.daily_cost_cap_micros_usd"
-            ? "Daily limit"
-            : key === "budget.session_token_cap"
-              ? "Session tokens"
-              : key === "budget.daily_token_cap"
-                ? "Daily tokens"
-                : key === "budget.token_rate_alarm_per_minute"
-                  ? "Token rate alarm"
-                  : "Warn at"
-        const presets = isWarning
-          ? [
-              { label: "50%", value: "50" },
-              { label: "75%", value: "75" },
-              { label: "80%", value: "80" },
-              { label: "90%", value: "90" },
-              { label: "Custom…", value: null },
-            ]
-          : isToken
-            ? [
-                { label: "50k tokens", value: "50000" },
-                { label: "100k tokens", value: "100000" },
-                { label: "250k tokens", value: "250000" },
-                { label: "1m tokens", value: "1000000" },
-                { label: "Unlimited", value: "unlimited" },
-                { label: "Custom amount…", value: null },
-              ]
-            : [
-              { label: "$5", value: "5" },
-              { label: "$10", value: "10" },
-              { label: "$20", value: "20" },
-              { label: "$50", value: "50" },
-              { label: "$100", value: "100" },
-              { label: "Unlimited", value: "unlimited" },
-              { label: "Custom amount…", value: null },
-            ]
-        this.#pickerController.show(
-          title,
-          presets.map((preset) => ({
-            id: `budget.preset.${key}.${preset.value ?? "custom"}`,
-            label: preset.label,
-            description: preset.value === null
-              ? isWarning
-                ? "Enter a custom warning percentage"
-                : isToken
-                  ? "Enter a positive whole-token amount"
-                  : "Enter a USD amount with up to two decimals"
-              : isWarning
-                ? `Warn at ${preset.label} of every configured cap`
-                : preset.value === "unlimited"
-                  ? `Remove the ${title.toLowerCase()} cap`
-                  : `Set the ${title.toLowerCase()} to ${preset.label}`,
-            value: preset.value,
-          })),
-          (item) => {
-            if (item.value === null) {
-              this.#openBudgetTextPrompt(key)
-              return
-            }
-            this.closePicker()
-            this.#projectionRequests.command({ type: "set_setting", key, value: item.value })
-          },
-        )
-        break
-      }
-      case "settings": {
-        this.#resizeSettingsBrowser(
-          this.width === 0 ? this.ctx.width : this.width,
-          this.height === 0 ? this.ctx.height : this.height,
-        )
-        const catalog: SettingsCatalog = this.#projectionErrors.settings === undefined
-          ? this.#state.settings.length === 0 && this.#projectionRequests.current("settings_pending") !== null
-            ? { kind: "loading" }
-            : { kind: "ready", settings: this.#state.settings }
-          : {
-              kind: "error",
-              message: this.#projectionErrors.settings,
-              stale: this.#state.settings,
-            }
-        const query = this.settingsBrowser.visible
-          ? this.settingsBrowser.input.value
-          : this.#pickerController.query
-        const preserveSelection = query === this.#pickerController.query
-        this.#pickerController.query = query
-        const model = createSettingsBrowserModel({
-          catalog,
-          query,
-          selectedId: this.settingsBrowser.visible && preserveSelection
-            ? this.settingsBrowser.selectedId
-            : null,
-        })
-        const presentation = this.#keybindings.preset === "vim" && model.status.includes("Esc close")
-          ? { ...model, status: model.status.replace("Esc close", "Esc×2 close") }
-          : model
-        if (this.settingsBrowser.visible) {
-          this.settingsBrowser.refresh(presentation)
-        } else {
-          this.settingsBrowser.open(presentation, (action) => {
-            this.#activateSettingsAction(action)
-          }, {
-            onQuery: () => this.#renderPicker(),
-            onSelection: () => this.#renderPicker(),
-            onRetry: () => {
-              this.#projectionRequests.command({ type: "list_settings" })
-              this.#pickerController.refresh()
-            },
-          })
-          this.#modalOpened()
-        }
-        break
-      }
-      case "settingChoices": {
-        const setting = this.#state.settings.find((candidate) => candidate.key === this.#settingChoiceKey)
-        if (setting === undefined || setting.choices.length === 0) {
-          this.#pickerController.showStatus(
-            "Setting choices",
-            "No choices available",
-            "Close this panel and refresh settings.",
-          )
-          break
-        }
-        this.#pickerController.show(
-          setting.label,
-          setting.choices.map((value) => ({
-            id: value,
-            label: value,
-            description: value === setting.value
-              ? `current · ${setting.provenance}`
-              : setting.provenance,
-            value,
-          })),
-          (item) => {
-            const key = this.#settingChoiceKey
-            if (key === null) return
-            this.picker.close()
-            this.#settingChoiceKey = null
-            this.#pickerController.kind = "settings"
-            this.settingsBrowser.visible = true
-            this.settingsBrowser.input.focus()
-            this.#projectionRequests.command({
-              type: "set_setting",
-              key,
-              value: item.value,
-            })
-          },
-        )
-        break
-      }
       case "themes": {
         this.#resizeThemeBrowser(
           this.width === 0 ? this.ctx.width : this.width,
@@ -3983,27 +3519,6 @@ export class RottweilerApp extends BoxRenderable {
         true,
       )
     }
-  }
-
-  #permissionModeItems(): PickerItem<PermissionModePickerAction>[] {
-    const current = this.#state.permissions?.runtime_mode ?? "default"
-    return PERMISSION_MODE_CHOICES.map((choice) => ({
-      id: `permissions.mode.${choice.mode}`,
-      label: choice.mode === current ? `● ${choice.mode}` : choice.mode,
-      description: choice.description,
-      value: { kind: "mode", mode: choice.mode },
-    }))
-  }
-
-  #selectPermissionMode(mode: PermissionMode): void {
-    if (mode === "yolo") {
-      this.#pickerController.anchored = false
-      this.#pickerController.query = ""
-      this.#pickerController.kind = "permissionYoloConfirm"
-      this.#pickerController.refresh()
-      return
-    }
-    this.#submitPaletteCommand(`/permissions mode ${mode}`)
   }
 
   #submitPaletteCommand(content: string): void {
