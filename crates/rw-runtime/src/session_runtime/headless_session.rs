@@ -863,7 +863,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
             PluginFanoutEventSink::new(
                 durable_sink.clone(),
                 runtime.event_routers.clone(),
-                engine_redactor.clone(),
+                &engine_redactor,
             )
             .map_err(|error| miette!("plugin event delivery admission: {error}"))?,
         )

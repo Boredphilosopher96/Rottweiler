@@ -307,7 +307,7 @@ impl UiRegistry for RuntimeUiRegistry {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        ensure_open(&state).map_err(core_error)?;
+        ensure_open(&state).map_err(|error| core_error(&error))?;
         Ok(UiCatalog {
             entries: state
                 .registrations
@@ -321,7 +321,7 @@ impl UiRegistry for RuntimeUiRegistry {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        ensure_open(&state).map_err(core_error)?;
+        ensure_open(&state).map_err(|error| core_error(&error))?;
         Ok(UiPanels {
             panels: state
                 .panels
@@ -339,8 +339,9 @@ impl UiRegistry for RuntimeUiRegistry {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        ensure_open(&state).map_err(core_error)?;
-        let registration = find_registration(&state, &request.owner).map_err(core_error)?;
+        ensure_open(&state).map_err(|error| core_error(&error))?;
+        let registration =
+            find_registration(&state, &request.owner).map_err(|error| core_error(&error))?;
         let presentation = match &request.target {
             UiActionTarget::Tool { .. } => tool,
             UiActionTarget::Panel { revision } => state
@@ -442,7 +443,7 @@ fn encoded_bytes(value: &impl Serialize, limit: usize) -> Result<usize, PluginRp
     serde_json::to_writer(&mut count, value).map_err(error)?;
     Ok(count.bytes)
 }
-fn core_error(error: PluginRpcError) -> AgentLoopError {
+fn core_error(error: &PluginRpcError) -> AgentLoopError {
     AgentLoopError::InvalidConfiguration(error.to_string())
 }
 fn error(message: impl std::fmt::Display) -> PluginRpcError {

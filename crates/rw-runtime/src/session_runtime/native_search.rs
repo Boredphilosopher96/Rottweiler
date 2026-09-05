@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use futures_util::FutureExt as _;
 use rw_core::AgentLoopError;
 use rw_core::Config;
 use rw_core::ModelDriver;
@@ -291,7 +292,6 @@ impl WebSearcher for BoundWebSearcher {
     async fn settle_effects(&self) -> Result<(), ToolError> {
         // Both services retain their work independently. One failed proof cannot skip the other.
         let native = std::panic::AssertUnwindSafe(self.native.settle_effects());
-        use futures_util::FutureExt as _;
         let native = native.catch_unwind().await.unwrap_or_else(|_| {
             Err(ToolError::EffectsUnsettled(
                 "native search settlement panicked".into(),

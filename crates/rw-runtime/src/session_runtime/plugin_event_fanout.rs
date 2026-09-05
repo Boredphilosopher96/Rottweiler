@@ -22,7 +22,7 @@ impl PluginFanoutEventSink {
     pub(super) fn new(
         inner: Arc<DurableEventSink>,
         registrations: Vec<PluginEventRegistration>,
-        redactor: FixtureRedactor,
+        redactor: &FixtureRedactor,
     ) -> Result<Self, AgentLoopError> {
         // Reserve every worker before starting any task, so constructor failure
         // cannot leave a partially registered set of event consumers.

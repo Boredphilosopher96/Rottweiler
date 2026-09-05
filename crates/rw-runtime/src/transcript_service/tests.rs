@@ -461,27 +461,10 @@ fn complete_content_chunks_reuse_one_canonical_document_and_validate_view_bounda
 
 #[tokio::test]
 async fn tool_action_presentation_requires_exact_prefix_and_effective_invocation() {
-    use rw_types::extension_ui::{
-        UiContribution, UiContributionOwner, UiGenerationId, UiPresentation,
-    };
     use rw_types::{ToolCallId, ToolInvocationId, ToolOutput, TurnId};
     let mut fixture = Fixture::new(0, "");
     let invocation = ToolInvocationId("tool-instance".into());
-    let presentation = UiPresentation::project(
-        UiContributionOwner {
-            extension: "example".into(),
-            generation: UiGenerationId::from_bytes([1; 16]),
-        },
-        &UiContribution::Tool {
-            id: "result".into(),
-            tool_name: "read".into(),
-            title: "Read result".into(),
-            fields: vec![],
-            actions: vec![],
-        },
-        &serde_json::json!({}),
-    )
-    .expect("presentation");
+    let presentation = tool_presentation_fixture();
     fixture
         .journal
         .append_batch([
@@ -568,4 +551,25 @@ async fn tool_action_presentation_requires_exact_prefix_and_effective_invocation
             .expect("removed effective source"),
         None
     );
+}
+
+fn tool_presentation_fixture() -> rw_types::extension_ui::UiPresentation {
+    use rw_types::extension_ui::{
+        UiContribution, UiContributionOwner, UiGenerationId, UiPresentation,
+    };
+    UiPresentation::project(
+        UiContributionOwner {
+            extension: "example".into(),
+            generation: UiGenerationId::from_bytes([1; 16]),
+        },
+        &UiContribution::Tool {
+            id: "result".into(),
+            tool_name: "read".into(),
+            title: "Read result".into(),
+            fields: vec![],
+            actions: vec![],
+        },
+        &serde_json::json!({}),
+    )
+    .expect("presentation")
 }

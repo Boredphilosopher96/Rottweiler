@@ -654,7 +654,7 @@ pub(crate) async fn compose_hosted_actor(
             PluginFanoutEventSink::new(
                 durable_sink.clone(),
                 runtime.event_routers.clone(),
-                engine_redactor.clone(),
+                &engine_redactor,
             )
             .map_err(|error| miette!("plugin event delivery admission: {error}"))?,
         )

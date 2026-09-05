@@ -37,8 +37,10 @@ impl RuntimeSessionFactory {
             let mut store = CommandReceipts::open(
                 &factory.options.storage_root.join("command-receipts.sqlite"),
             )
-            .map_err(receipt_error)?;
-            store.admit(&operation, &fingerprint).map_err(receipt_error)
+            .map_err(|error| receipt_error(&error))?;
+            store
+                .admit(&operation, &fingerprint)
+                .map_err(|error| receipt_error(&error))
         })
         .await
         .map_err(|_| HostError::Persistence("command admission worker failed".into()))?
@@ -57,17 +59,17 @@ impl RuntimeSessionFactory {
         tokio::task::spawn_blocking(move || {
             let _io = io;
             let mut store = CommandReceipts::open(&root.join("command-receipts.sqlite"))
-                .map_err(receipt_error)?;
+                .map_err(|error| receipt_error(&error))?;
             store
                 .complete(&operation, &fingerprint, &receipt)
-                .map_err(receipt_error)?;
+                .map_err(|error| receipt_error(&error))?;
             Ok(receipt)
         })
         .await
         .map_err(|_| HostError::Persistence("command completion worker failed".into()))?
     }
 }
-fn receipt_error(error: ReceiptError) -> HostError {
+fn receipt_error(error: &ReceiptError) -> HostError {
     match error {
         ReceiptError::Conflict => HostError::Protocol(
             "operation identity was reused for another command or outcome".into(),

@@ -667,16 +667,7 @@ impl PushHandler for SessionPluginPushHandler {
             METHOD_SESSION_QUERY => plugin_push_result(capability.query().await),
             METHOD_EXTENSION_STATE_READ => plugin_push_result(capability.read_state().await),
             METHOD_EXTENSION_STATE_COMMIT => {
-                let transaction: rw_types::extension_contract::ExtensionStateTransaction =
-                    serde_json::from_value(params).map_err(|_| {
-                        plugin_push_error("invalid_push", "invalid state transaction")
-                    })?;
-                if transaction.acknowledged.is_some() {
-                    return Err(plugin_push_error(
-                        "invalid_push",
-                        "delivery acknowledgement is host-owned",
-                    ));
-                }
+                let transaction = plugin_state_transaction(params)?;
                 plugin_push_result(capability.commit_state(transaction).await)
             }
             METHOD_SESSION_INJECT_MESSAGE => {
@@ -1100,3 +1091,18 @@ fn validate_private_root(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests;
+
+fn plugin_state_transaction(
+    params: serde_json::Value,
+) -> std::result::Result<rw_types::extension_contract::ExtensionStateTransaction, PluginRpcError> {
+    let transaction: rw_types::extension_contract::ExtensionStateTransaction =
+        serde_json::from_value(params)
+            .map_err(|_| plugin_push_error("invalid_push", "invalid state transaction"))?;
+    if transaction.acknowledged.is_some() {
+        return Err(plugin_push_error(
+            "invalid_push",
+            "delivery acknowledgement is host-owned",
+        ));
+    }
+    Ok(transaction)
+}

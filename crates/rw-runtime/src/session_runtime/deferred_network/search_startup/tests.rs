@@ -39,8 +39,8 @@ async fn cancelled_initializer_keeps_worker_result_for_settlement() {
     started.await.expect("worker entered");
     caller.abort();
     assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
-    let owned = Arc::clone(&owner);
-    let settlement = tokio::spawn(async move { owned.settle().await });
+    let settlement_owner = Arc::clone(&owner);
+    let settlement = tokio::spawn(async move { settlement_owner.settle().await });
     tokio::task::yield_now().await;
     assert!(!settlement.is_finished());
     release.send(()).expect("release worker");

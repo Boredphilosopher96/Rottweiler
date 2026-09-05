@@ -277,7 +277,8 @@ impl SessionEventSink for DurableEventSink {
     async fn todo_state(
         &self,
     ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
-        self.read_canonical(|history| history.todo_state()).await
+        self.read_canonical(rw_core::CanonicalHistory::todo_state)
+            .await
     }
     async fn source_rewind_target(
         &self,
