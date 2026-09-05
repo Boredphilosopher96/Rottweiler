@@ -236,7 +236,7 @@ struct PreparingProvider {
 
 #[async_trait]
 impl Provider for PreparingProvider {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "preparing"
     }
     fn capabilities(&self) -> Capabilities {

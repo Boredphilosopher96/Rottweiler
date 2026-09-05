@@ -9,6 +9,7 @@ mod command_copy;
 mod commands;
 mod compaction;
 mod compaction_recovery;
+mod completion_hooks;
 mod context;
 mod diff_approval;
 mod doom_loop;

@@ -239,11 +239,11 @@ pub(super) fn register_declarative_hooks(
         if hook.registration().effect() == HookEffect::WorkspaceMutating
             && !matches!(
                 hook.registration().event(),
-                HookEvent::PreTool | HookEvent::PostTool
+                HookEvent::PreTool | HookEvent::PostTool | HookEvent::TurnEnd
             )
         {
             return Err(miette!(
-                "declarative lifecycle hook {:?} cannot mutate the workspace without a tool checkpoint; declare `effect = \"read-only\"` or move it to pre_tool/post_tool",
+                "declarative lifecycle hook {:?} cannot mutate the workspace; mutation requires pre_tool, post_tool, or turn_end",
                 hook.id()
             ));
         }

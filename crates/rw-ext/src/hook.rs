@@ -456,7 +456,7 @@ impl HookDispatcher {
             || (registration.effect() == HookEffect::WorkspaceMutating
                 && !matches!(
                     registration.event(),
-                    HookEvent::PreTool | HookEvent::PostTool
+                    HookEvent::PreTool | HookEvent::PostTool | HookEvent::TurnEnd
                 ))
             || registration.timeout().is_zero()
             || registration.timeout() > Duration::from_mins(10)
@@ -548,11 +548,11 @@ impl HookDispatcher {
         capabilities
     }
 
-    /// Dispatches one filesystem-effect phase for the input's tool.
+    /// Dispatches the registrations with the specified filesystem effect.
     ///
     /// # Errors
     /// Rejects oversized input and returns an error if physical effects cannot settle.
-    pub async fn dispatch_tool_effect(
+    pub async fn dispatch_effect(
         &self,
         input: HookInput,
         effect: HookEffect,

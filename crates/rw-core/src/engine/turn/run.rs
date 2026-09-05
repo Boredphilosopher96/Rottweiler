@@ -62,7 +62,6 @@ use rw_types::Turn;
 use rw_types::TurnMeta;
 use rw_types::hook_contract::HookInput;
 use rw_types::hook_contract::HookPromptInput;
-use rw_types::hook_contract::HookTurnInput;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -985,15 +984,14 @@ pub(super) async fn run_turn(
         );
     }
 
-    let hook = dispatch_hook(
-        &config.hooks,
-        HookInput::TurnEnd(HookTurnInput {
-            turn,
-            status: status.into(),
-        }),
-        &cancellation,
-        &signals,
-    )
+    let hook = super::completion_hooks::CompletionHooks {
+        config: &config,
+        cancellation: &cancellation,
+        signals: &signals,
+        approver: &approver,
+        mode,
+    }
+    .dispatch(turn, status)
     .await;
     match hook {
         Ok(hook) => {
@@ -1032,8 +1030,20 @@ pub(super) async fn run_turn(
                 status = AgentTurnStatus::Failed;
             }
         }
-        Err(_) if status == AgentTurnStatus::Completed => {
-            status = AgentTurnStatus::Interrupted;
+        Err(error) if status == AgentTurnStatus::Completed => {
+            send_event(
+                &signals,
+                PendingEvent::Error {
+                    message: config.secret_redactor.redact(&error.to_string()),
+                },
+            );
+            status = if cancellation.is_cancelled()
+                && !matches!(error, crate::engine::AgentLoopError::EffectsUnsettled(_))
+            {
+                AgentTurnStatus::Interrupted
+            } else {
+                AgentTurnStatus::Failed
+            };
         }
         Err(_) => {}
     }

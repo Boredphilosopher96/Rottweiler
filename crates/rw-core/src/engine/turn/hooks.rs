@@ -64,6 +64,7 @@ pub(super) async fn dispatch_hook(
 ) -> Result<HookDispatchResult, AgentLoopError> {
     let event = input.event();
     let result = tokio::select! {
+        biased;
         () = cancellation.cancelled() => Err(AgentLoopError::Extension(
             format!("{} hook dispatch cancelled", hook_event_name(event)),
         )),
@@ -76,7 +77,7 @@ pub(super) async fn dispatch_hook(
     result
 }
 
-pub(super) async fn dispatch_tool_hook_effect(
+pub(super) async fn dispatch_hook_effect(
     dispatcher: &HookDispatcher,
     input: HookInput,
     effect: HookEffect,
@@ -85,10 +86,11 @@ pub(super) async fn dispatch_tool_hook_effect(
 ) -> Result<HookDispatchResult, AgentLoopError> {
     let event = input.event();
     let result = tokio::select! {
+        biased;
         () = cancellation.cancelled() => Err(AgentLoopError::Extension(
             format!("{} hook dispatch cancelled", hook_event_name(event)),
         )),
-        result = dispatcher.dispatch_tool_effect(input, effect) => result.map_err(|error| if error.code() == "effects_unsettled" { AgentLoopError::EffectsUnsettled(error.to_string()) } else { AgentLoopError::Extension(error.to_string()) }),
+        result = dispatcher.dispatch_effect(input, effect) => result.map_err(|error| if error.code() == "effects_unsettled" { AgentLoopError::EffectsUnsettled(error.to_string()) } else { AgentLoopError::Extension(error.to_string()) }),
     };
     if let Err(error) = dispatcher.settle_effects(event).await {
         mark_unsettled(signals, cancellation, error.to_string());

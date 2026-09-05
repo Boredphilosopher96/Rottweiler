@@ -247,6 +247,8 @@ impl JournalCommits {
             match result {
                 Ok(Ok(committed)) if Arc::ptr_eq(&retained.batch, &committed) => {
                     guard.retained.take();
+                    // Delivery also releases an abandoned reply before settlement is visible.
+                    let _ = send.send(Ok(committed));
                     guard.completion.finish(Ok(()));
                     guard
                         .queue
@@ -255,7 +257,6 @@ impl JournalCommits {
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .jobs
                         .remove(&guard.id);
-                    let _ = send.send(Ok(committed));
                 }
                 Ok(Err(error)) => {
                     guard.completion.finish(Err(error.to_string()));

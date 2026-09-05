@@ -1,6 +1,7 @@
 mod accounting;
 mod command_tools;
 mod compaction;
+mod completion_hooks;
 mod context;
 mod hooks;
 mod journal_events;

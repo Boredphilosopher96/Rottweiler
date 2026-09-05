@@ -133,7 +133,12 @@ stops dispatch. An `ask` decision requires fresh approval, including when a
 remembered approval or ordinary allow rule exists. Hook approval cannot override
 an explicit deny rule or mode restriction. Rewritten tool arguments are authorized
 again before execution. Workspace-mutating pre-tool hooks run inside the tool's
-checkpoint and cannot rewrite the authorized invocation.
+checkpoint and cannot rewrite the authorized invocation. Workspace-mutating
+`turn_end` policies run only after a successful provider turn. The engine authorizes
+the exact hook set and its capabilities, captures an opaque workspace checkpoint,
+and waits for physical hook effects before finalizing the checkpoint and turn.
+An active background shell blocks this mutation phase. Permission denial, policy
+failure, or unproven settlement prevents successful turn completion.
 
 | Hook | Mutable fields and policy |
 |---|---|

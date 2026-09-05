@@ -8,7 +8,7 @@ use crate::engine::mutation_checkpoints::MutationCheckpointCoordinator;
 use crate::engine::mutation_checkpoints::MutationCheckpointOutcome;
 use crate::engine::redaction::SecretRedactor;
 use crate::engine::turn::hooks::dispatch_hook;
-use crate::engine::turn::hooks::dispatch_tool_hook_effect;
+use crate::engine::turn::hooks::dispatch_hook_effect;
 use crate::engine::turn::hooks::hook_rejection;
 use crate::engine::turn::hooks::mark_unsettled;
 use crate::engine::turn::hooks::report_hook_failures;
@@ -130,7 +130,7 @@ pub(super) async fn run_deferred_mutating_pre_hook(
     runtime: &ToolExecutionRuntime,
 ) -> Result<(), ToolError> {
     let displayed_arguments = redacted_json(arguments.clone(), runtime.secret_redactor.as_ref());
-    let result = dispatch_tool_hook_effect(
+    let result = dispatch_hook_effect(
         &runtime.hooks,
         HookInput::PreTool(HookToolInput {
             id: call.id.clone(),

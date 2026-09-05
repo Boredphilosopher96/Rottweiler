@@ -9,7 +9,7 @@ use crate::engine::pending_event::PendingEvent;
 use crate::engine::redaction::SecretRedactor;
 use crate::engine::session::SessionActorConfig;
 use crate::engine::turn::hooks::dispatch_hook;
-use crate::engine::turn::hooks::dispatch_tool_hook_effect;
+use crate::engine::turn::hooks::dispatch_hook_effect;
 use crate::engine::turn::hooks::hook_rejection;
 use crate::engine::turn::hooks::permission_hook_override;
 use crate::engine::turn::hooks::report_hook_failures;
@@ -409,7 +409,7 @@ pub(super) async fn prepare_tool_call(
     };
     let original_name = call.name.clone();
     let original_arguments = arguments.clone();
-    let pre_tool = match dispatch_tool_hook_effect(
+    let pre_tool = match dispatch_hook_effect(
         &config.hooks,
         HookInput::PreTool(HookToolInput {
             id: call.id.clone(),
