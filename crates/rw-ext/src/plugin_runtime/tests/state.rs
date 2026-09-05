@@ -65,7 +65,7 @@ fn typed_session_controls_reject_implicit_actions_and_foreign_authority() {
         json!({"model":"fast","provider":null}),
         json!({"action":"select_model","model":"fast"}),
         json!({"action":"select_mode","mode":"plan","session_id":"other"}),
-        json!({"action":"pin_context","item_id":"x".repeat(257)}),
+        json!({"action":"pin_context","item_id":"x".repeat(rw_types::extension_control::MAX_CONTEXT_ITEM_ID_BYTES + 1)}),
     ] {
         assert!(validate_push_params(METHOD_SESSION_CONTROL, &value).is_err());
     }
