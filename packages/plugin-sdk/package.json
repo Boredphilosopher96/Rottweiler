@@ -41,7 +41,9 @@
     "./extension-context-read.schema.json": "./fixtures/wire/extension-context-read.schema.json",
     "./extension-context-page.schema.json": "./fixtures/wire/extension-context-page.schema.json",
     "./extension-control.schema.json": "./fixtures/wire/extension-control.schema.json",
-    "./extension-control-outcome.schema.json": "./fixtures/wire/extension-control-outcome.schema.json"
+    "./extension-control-outcome.schema.json": "./fixtures/wire/extension-control-outcome.schema.json",
+    "./ui-panel-update.schema.json": "./fixtures/wire/ui-panel-update.schema.json",
+    "./ui-panel-updated.schema.json": "./fixtures/wire/ui-panel-updated.schema.json"
   },
   "bin": {
     "rottweiler-plugin-scaffold": "./dist/bin/scaffold.js"
@@ -69,7 +71,9 @@
     "fixtures/wire/extension-context-read.schema.json",
     "fixtures/wire/extension-context-page.schema.json",
     "fixtures/wire/extension-control.schema.json",
-    "fixtures/wire/extension-control-outcome.schema.json"
+    "fixtures/wire/extension-control-outcome.schema.json",
+    "fixtures/wire/ui-panel-update.schema.json",
+    "fixtures/wire/ui-panel-updated.schema.json"
   ],
   "scripts": {
     "build": "bun run build.ts",

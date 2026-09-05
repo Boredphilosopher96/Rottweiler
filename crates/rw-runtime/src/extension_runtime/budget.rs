@@ -19,6 +19,7 @@ pub(super) const ACTIVATION_DEADLINE: Duration = Duration::from_secs(30);
 /// Shared by every configured plugin generation in one application host.
 /// Construction starts no workers and allocates no filesystem resources.
 pub(crate) struct PluginRuntimeBudget {
+    pub(crate) ui: Arc<super::ui::UiBudget>,
     pub(crate) delivery: Arc<super::PluginDeliveryBudget>,
     waiters: Arc<Semaphore>,
     starts: Arc<Semaphore>,
@@ -29,6 +30,7 @@ pub(crate) struct PluginRuntimeBudget {
 impl Default for PluginRuntimeBudget {
     fn default() -> Self {
         Self {
+            ui: Arc::new(super::ui::UiBudget::default()),
             delivery: Arc::new(super::PluginDeliveryBudget::default()),
             waiters: Arc::new(Semaphore::new(MAX_WAITERS)),
             starts: Arc::new(Semaphore::new(MAX_STARTING)),
@@ -41,6 +43,7 @@ impl Default for PluginRuntimeBudget {
 impl PluginRuntimeBudget {
     pub(crate) fn close(&self) -> Result<(), PluginRpcError> {
         let delivery = self.delivery.close();
+        let ui = self.ui.close();
         self.waiters.close();
         self.starts.close();
         self.execution.close();
@@ -54,7 +57,7 @@ impl PluginRuntimeBudget {
                 "plugin activation capacity remains owned at application shutdown",
             ));
         }
-        delivery
+        delivery.and(ui)
     }
 
     pub(super) fn waiter(&self) -> Result<OwnedSemaphorePermit, PluginRpcError> {

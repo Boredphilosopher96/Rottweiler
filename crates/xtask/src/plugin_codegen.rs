@@ -19,8 +19,9 @@ use rw_plugin_protocol::{
     METHOD_PROVIDER_HTTP, METHOD_PROVIDER_HTTP_CANCEL, METHOD_PROVIDER_HTTP_EVENT,
     METHOD_PROVIDER_MODELS, METHOD_SESSION_CONTEXT_READ, METHOD_SESSION_CONTROL,
     METHOD_SESSION_INJECT_MESSAGE, METHOD_SESSION_QUERY, METHOD_SESSION_SET_STATUS,
-    METHOD_SHUTDOWN, METHOD_TOOL_CALL, METHOD_TOOL_PROGRESS, METHOD_UI_NOTIFY, PLUGIN_HOST_ID,
-    PROTOCOL_VERSION, PROVIDER_WINDOW_BYTES, PROVIDER_WINDOW_EVENTS,
+    METHOD_SHUTDOWN, METHOD_TOOL_CALL, METHOD_TOOL_PROGRESS, METHOD_UI_NOTIFY,
+    METHOD_UI_PUBLISH_PANEL, PLUGIN_HOST_ID, PROTOCOL_VERSION, PROVIDER_WINDOW_BYTES,
+    PROVIDER_WINDOW_EVENTS,
 };
 use serde_json::{Value, json};
 use ts_rs::TS;
@@ -78,6 +79,7 @@ export type PluginPushMethod =
   | "session/inject_message"
   | "session/set_status"
   | "ui/notify"
+  | "ui/publish_panel"
 
 import type { UiContribution } from "./ui-contract"
 export type { UiContribution } from "./ui-contract"
@@ -532,6 +534,7 @@ fn methods() -> Value {
         "injectMessage": METHOD_SESSION_INJECT_MESSAGE,
         "setStatus": METHOD_SESSION_SET_STATUS,
         "notify": METHOD_UI_NOTIFY,
+        "publishPanel": METHOD_UI_PUBLISH_PANEL,
         "shutdown": METHOD_SHUTDOWN,
         "exit": METHOD_EXIT,
     })
@@ -600,6 +603,7 @@ export const RPC_METHODS = Object.freeze({{\n\
   injectMessage: \"{METHOD_SESSION_INJECT_MESSAGE}\",\n\
   setStatus: \"{METHOD_SESSION_SET_STATUS}\",\n\
   notify: \"{METHOD_UI_NOTIFY}\",\n\
+  publishPanel: \"{METHOD_UI_PUBLISH_PANEL}\",\n\
   shutdown: \"{METHOD_SHUTDOWN}\",\n\
   exit: \"{METHOD_EXIT}\",\n\
 }} as const)\n\n\

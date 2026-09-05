@@ -88,6 +88,7 @@ pub const METHOD_EXTENSION_STATE_READ: &str = "extension/state_read";
 pub const METHOD_EXTENSION_STATE_COMMIT: &str = "extension/state_commit";
 pub const METHOD_SESSION_INJECT_MESSAGE: &str = "session/inject_message";
 pub const METHOD_SESSION_SET_STATUS: &str = "session/set_status";
+pub const METHOD_UI_PUBLISH_PANEL: &str = "ui/publish_panel";
 pub const METHOD_UI_NOTIFY: &str = "ui/notify";
 pub const METHOD_SHUTDOWN: &str = "shutdown";
 pub const METHOD_EXIT: &str = "exit";
@@ -411,6 +412,8 @@ pub enum PluginPush {
     SessionSetStatus,
     #[serde(rename = "ui/notify")]
     UiNotify,
+    #[serde(rename = "ui/publish_panel")]
+    UiPublishPanel,
 }
 
 impl PluginPush {
@@ -426,6 +429,7 @@ impl PluginPush {
             Self::SessionInjectMessage => METHOD_SESSION_INJECT_MESSAGE,
             Self::SessionSetStatus => METHOD_SESSION_SET_STATUS,
             Self::UiNotify => METHOD_UI_NOTIFY,
+            Self::UiPublishPanel => METHOD_UI_PUBLISH_PANEL,
         }
     }
 }

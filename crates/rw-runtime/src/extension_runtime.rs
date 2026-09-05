@@ -8,6 +8,7 @@ pub(crate) use mcp_service::*;
 
 mod activation;
 mod budget;
+pub(crate) mod ui;
 pub(crate) use budget::PluginRuntimeBudget;
 pub(crate) mod delivery_budget;
 pub(crate) use delivery_budget::PluginDeliveryBudget;
@@ -307,6 +308,7 @@ fn plugin_http_error(code: &str, message: &str) -> PluginRpcError {
 }
 
 pub(crate) struct PluginSessionRuntime {
+    pub(crate) ui: Arc<ui::RuntimeUiRegistry>,
     delivery: Arc<PluginDeliveryBudget>,
     endpoints: Vec<Arc<dyn rw_ext::PluginEndpoint>>,
     push_handlers: Vec<(String, Arc<SessionPluginPushHandler>)>,
@@ -331,8 +333,12 @@ pub(crate) struct PluginEventRegistration {
 }
 
 impl PluginSessionRuntime {
-    fn new(budget: &Arc<PluginRuntimeBudget>) -> Self {
+    fn new(budget: &Arc<PluginRuntimeBudget>, redactor: &Arc<SharedPluginRedactor>) -> Self {
         Self {
+            ui: Arc::new(ui::RuntimeUiRegistry::new(
+                Arc::clone(&budget.ui),
+                Arc::clone(redactor),
+            )),
             delivery: Arc::clone(&budget.delivery),
             endpoints: Vec::new(),
             push_handlers: Vec::new(),
@@ -353,7 +359,7 @@ impl PluginSessionRuntime {
         redactor: &Arc<SharedPluginRedactor>,
         budget: &Arc<PluginRuntimeBudget>,
     ) -> Result<Self> {
-        let mut runtime = Self::new(budget);
+        let mut runtime = Self::new(budget, redactor);
         for config in configs.iter().filter(|config| config.enabled) {
             let manifest = match config.load_manifest() {
                 Ok(manifest) => manifest,
@@ -394,6 +400,10 @@ impl PluginSessionRuntime {
         endpoint: Arc<dyn rw_ext::PluginEndpoint>,
         push_handler: Arc<SessionPluginPushHandler>,
     ) -> Result<()> {
+        self.ui
+            .register(endpoint.clone())
+            .map_err(|error| miette!(error.to_string()))?;
+        push_handler.bind_ui(Arc::downgrade(&self.ui), endpoint.metadata().ui_owner());
         for declaration in &manifest.capabilities.tools {
             self.tools.push(Arc::new(
                 RpcToolAdapter::new(declaration.clone(), endpoint.clone())
@@ -511,6 +521,7 @@ impl PluginSessionRuntime {
     }
 
     pub(crate) async fn shutdown(&self) -> Result<()> {
+        self.ui.close();
         let mut failure = None;
         for endpoint in &self.endpoints {
             if let Err(error) = endpoint.close().await {
@@ -535,12 +546,28 @@ fn plugin_command_descriptor(
 
 #[derive(Default)]
 pub(crate) struct SessionPluginPushHandler {
+    ui: RwLock<
+        Option<(
+            std::sync::Weak<ui::RuntimeUiRegistry>,
+            rw_types::extension_ui::UiContributionOwner,
+        )>,
+    >,
     pub(crate) event_sources: Arc<PluginEventSources>,
     attached: tokio::sync::Notify,
     binding: std::sync::RwLock<Option<(String, rw_core::PluginSessionCapability)>>,
 }
 
 impl SessionPluginPushHandler {
+    fn bind_ui(
+        &self,
+        registry: std::sync::Weak<ui::RuntimeUiRegistry>,
+        owner: rw_types::extension_ui::UiContributionOwner,
+    ) {
+        *self
+            .ui
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((registry, owner));
+    }
     fn bind(&self, session_id: String, capability: rw_core::PluginSessionCapability) {
         *self
             .binding
@@ -597,6 +624,28 @@ impl PushHandler for SessionPluginPushHandler {
     ) -> std::result::Result<serde_json::Value, PluginRpcError> {
         let capability = self.bound(&params)?;
         match method {
+            rw_plugin_protocol::METHOD_UI_PUBLISH_PANEL => {
+                let update: rw_types::extension_ui::UiPanelUpdate = serde_json::from_value(params)
+                    .map_err(|_| plugin_push_error("invalid_push", "invalid panel update"))?;
+                update
+                    .validate()
+                    .map_err(|error| plugin_push_error("invalid_push", &error.to_string()))?;
+                let (registry, owner) = self
+                    .ui
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+                    .ok_or_else(|| {
+                        plugin_push_error("ui_unavailable", "UI registry is not attached")
+                    })?;
+                let registry = registry
+                    .upgrade()
+                    .ok_or_else(|| plugin_push_error("ui_unavailable", "UI registry is closed"))?;
+                let revision = registry.publish_panel(&owner, &update.id, update.data)?;
+                serde_json::to_value(rw_types::extension_ui::UiPanelUpdated { revision }).map_err(
+                    |_| plugin_push_error("ui_unavailable", "cannot encode panel revision"),
+                )
+            }
             METHOD_EVENT_READ => {
                 let read = serde_json::from_value(params).map_err(|_| {
                     plugin_push_error("invalid_event_read", "invalid event source parameters")

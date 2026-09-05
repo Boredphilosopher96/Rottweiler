@@ -291,3 +291,33 @@ pub struct UiPanels {
     #[schemars(length(max = 8))]
     pub panels: Vec<UiPanelSnapshot>,
 }
+
+/// Panel publication carries only source data; the host owns selectors,
+/// generation identity and the monotonically increasing revision.
+#[derive(
+    Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS, PrepareAllocation,
+)]
+#[serde(deny_unknown_fields)]
+pub struct UiPanelUpdate {
+    #[schemars(length(min=1,max=128),regex(pattern="^[A-Za-z0-9_.-]+$"),extend("x-rw-max-utf8-bytes"=128))]
+    pub id: String,
+    #[schemars(extend("x-rw-max-json-bytes"=65536))]
+    pub data: serde_json::Value,
+}
+impl UiPanelUpdate {
+    /// # Errors
+    /// Rejects invalid names and source data outside the publication allowance.
+    pub fn validate(&self) -> Result<(), UiContractError> {
+        validation::identifier(&self.id)?;
+        validation::encoded_bytes(&self.data, 64 * 1024)?;
+        Ok(())
+    }
+}
+#[derive(
+    Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS, PrepareAllocation,
+)]
+#[serde(deny_unknown_fields)]
+pub struct UiPanelUpdated {
+    #[schemars(range(min = 1))]
+    pub revision: u32,
+}

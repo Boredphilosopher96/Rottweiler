@@ -181,7 +181,7 @@ impl RuntimeSessionExtensionController {
                 launcher: None,
             }),
         );
-        let mut candidate = PluginSessionRuntime::new(&self.activation);
+        let mut candidate = PluginSessionRuntime::new(&self.activation, &self.redactor);
         candidate
             .register_endpoint(plugin, manifest, Arc::clone(&endpoint), push_handler)
             .map_err(development_error)?;

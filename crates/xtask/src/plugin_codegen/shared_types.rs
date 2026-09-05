@@ -78,8 +78,18 @@ pub(super) fn generate(root: &Path, check: bool) -> Result<(), String> {
         declarations: BTreeMap::new(),
     };
     ui.visit::<rw_types::extension_ui::UiContribution>();
+    ui.visit::<rw_types::extension_ui::UiPanelUpdate>();
+    ui.visit::<rw_types::extension_ui::UiPanelUpdated>();
     write_types(root, "ui-contract", ui, check)?;
     for (name, schema) in [
+        (
+            "ui-panel-update",
+            schema::<rw_types::extension_ui::UiPanelUpdate>(),
+        ),
+        (
+            "ui-panel-updated",
+            schema::<rw_types::extension_ui::UiPanelUpdated>(),
+        ),
         (
             "ui-contribution",
             schema::<rw_types::extension_ui::UiContribution>(),

@@ -1,3 +1,5 @@
+import validateUiPanelUpdate from "./generated/ui-panel-update-validator.js"
+import validateUiPanelUpdated from "./generated/ui-panel-updated-validator.js"
 import validateUiContribution from "./generated/ui-contribution-validator.js"
 import { eventSourceReader, type EventHandlerContext } from "./host-events"
 import validateEventNotice from "./generated/extension-event-notice-validator.js"
@@ -58,6 +60,7 @@ export class SafeRpcError extends Error {
 }
 
 export interface PushApi {
+  publishPanel(id: string, data: JsonValue): Promise<number>
   injectMessage(sessionId: string, content: string): Promise<InjectMessageResult>
   setStatus(sessionId: string, status: string): Promise<void>
   notify(title: string, message: string, sessionId?: string): Promise<void>
@@ -312,7 +315,7 @@ function validateManifest(manifest: PluginManifest): void {
   if (push.length > PROTOCOL_LIMITS.maxCapabilitiesPerKind) throw new Error("too many push capabilities")
   requireUnique(push, "push")
   const validPush = new Set<PluginPushMethod>([
-    RPC_METHODS.injectMessage, RPC_METHODS.setStatus, RPC_METHODS.notify,
+    RPC_METHODS.injectMessage, RPC_METHODS.setStatus, RPC_METHODS.notify, RPC_METHODS.publishPanel,
     RPC_METHODS.sessionQuery, RPC_METHODS.contextRead, RPC_METHODS.sessionControl, RPC_METHODS.stateRead, RPC_METHODS.stateCommit, RPC_METHODS.eventRead,
   ])
   if (push.some((method) => !validPush.has(method))) throw new Error("unknown push capability")
@@ -1260,6 +1263,13 @@ export class PluginServer {
         ),
       },
       push: {
+        publishPanel: async (id, data) => {
+          const update = { id, data }
+          if (!validateUiPanelUpdate(update)) throw new SafeRpcError(-32602, "invalid panel update")
+          const result = await this.#push(RPC_METHODS.publishPanel, update, signal)
+          if (!validateUiPanelUpdated(result)) throw new SafeRpcError(-32603, "invalid panel revision")
+          return result.revision
+        },
         injectMessage: async (sessionId, content) => {
           requireText(sessionId, "session id", PROTOCOL_LIMITS.maxNameBytes)
           requireText(content, "injected message", PROTOCOL_LIMITS.maxHookPayloadBytes)
