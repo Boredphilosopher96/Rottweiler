@@ -104,6 +104,12 @@ pub enum SessionStoreError {
     /// Accumulated accounting values exceeded their lossless representation.
     #[error("accounting total overflow")]
     AccountingOverflow,
+    /// The derived bounded totals do not cover all retained accounting facts.
+    #[error("accounting totals require projection recovery")]
+    IncompleteAccountingTotals,
+    /// The bounded totals projection has invalid arithmetic, rows or coverage.
+    #[error("accounting totals projection is corrupt")]
+    CorruptAccountingTotals,
     /// A pre-sequenced event did not match the durable log tail.
     #[error("session event sequence mismatch: expected {expected:?}, got {actual:?}")]
     UnexpectedEventSequence {

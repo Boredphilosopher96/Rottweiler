@@ -146,8 +146,9 @@ impl SessionIndex {
         let mut connection = Connection::open(&index.path)?;
         sqlite_schema::validate_accounting(&connection)?;
         configure_connection(&connection)?;
+        ensure_accounting_schema(&connection)?;
+        super::accounting::totals::catch_up(&mut connection)?;
         let transaction = connection.transaction()?;
-        ensure_accounting_schema(&transaction)?;
         transaction.execute_batch("DROP TRIGGER IF EXISTS sessions_ai; DROP TRIGGER IF EXISTS sessions_ad; DROP TRIGGER IF EXISTS sessions_au; DROP TABLE IF EXISTS sessions_fts; DROP TABLE IF EXISTS sessions;")?;
         sqlite_schema::ensure_sessions_schema(&transaction)?;
         for projection in projections {

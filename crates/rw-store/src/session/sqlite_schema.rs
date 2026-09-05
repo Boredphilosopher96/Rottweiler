@@ -19,6 +19,17 @@ const ACCOUNTING_PROGRESS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS accounting_
     next_sequence TEXT NOT NULL,
     digest BLOB NOT NULL CHECK(length(digest)=32)
 );";
+const ACCOUNTING_TOTALS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS accounting_totals(
+    scope TEXT NOT NULL,
+    node INTEGER NOT NULL CHECK(node>0 AND node<=562949953421312),
+    totals BLOB NOT NULL CHECK(typeof(totals)='blob' AND length(totals)=112),
+    PRIMARY KEY(scope,node)
+) WITHOUT ROWID;";
+const ACCOUNTING_TOTALS_PROGRESS_SCHEMA: &str =
+    "CREATE TABLE IF NOT EXISTS accounting_totals_progress(
+    id INTEGER NOT NULL PRIMARY KEY CHECK(id=1),
+    projected_rowid INTEGER NOT NULL CHECK(projected_rowid>=0)
+);";
 pub(super) const SESSIONS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS sessions(
                id TEXT NOT NULL UNIQUE,
                title TEXT NOT NULL,
@@ -48,6 +59,12 @@ pub(super) const SEARCH_SCHEMA: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS sessi
 
 pub(super) fn validate_accounting(connection: &Connection) -> Result<(), SessionStoreError> {
     validate_table(connection, "turn_accounting", ACCOUNTING_SCHEMA)?;
+    validate_table(connection, "accounting_totals", ACCOUNTING_TOTALS_SCHEMA)?;
+    validate_table(
+        connection,
+        "accounting_totals_progress",
+        ACCOUNTING_TOTALS_PROGRESS_SCHEMA,
+    )?;
     validate_table(
         connection,
         "accounting_progress",
@@ -99,8 +116,33 @@ pub(super) fn configure_connection(connection: &Connection) -> Result<(), Sessio
 }
 pub(super) fn ensure_accounting_schema(connection: &Connection) -> Result<(), SessionStoreError> {
     validate_accounting(connection)?;
+    connection.execute_batch("SAVEPOINT rw_accounting_schema")?;
+    match create_accounting_schema(connection) {
+        Ok(()) => connection
+            .execute_batch("RELEASE rw_accounting_schema")
+            .map_err(SessionStoreError::from),
+        Err(error) => {
+            connection
+                .execute_batch("ROLLBACK TO rw_accounting_schema; RELEASE rw_accounting_schema")?;
+            Err(error)
+        }
+    }
+}
+fn create_accounting_schema(connection: &Connection) -> Result<(), SessionStoreError> {
     connection.execute_batch(ACCOUNTING_SCHEMA)?;
     connection.execute_batch(ACCOUNTING_PROGRESS_SCHEMA)?;
+    let totals_tables: i64 = connection.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('accounting_totals','accounting_totals_progress')", [], |row| row.get(0))?;
+    if totals_tables == 1 {
+        return Err(SessionStoreError::CorruptAccountingTotals);
+    }
+    if totals_tables == 0 {
+        connection.execute_batch(ACCOUNTING_TOTALS_SCHEMA)?;
+        connection.execute_batch(ACCOUNTING_TOTALS_PROGRESS_SCHEMA)?;
+        connection.execute(
+            "INSERT INTO accounting_totals_progress(id,projected_rowid) VALUES(1,0)",
+            [],
+        )?;
+    }
     connection.execute_batch("CREATE INDEX IF NOT EXISTS turn_accounting_session_time ON turn_accounting(session_id,emitted_at_utc); CREATE INDEX IF NOT EXISTS turn_accounting_day_time ON turn_accounting(utc_day,emitted_at_utc); CREATE INDEX IF NOT EXISTS turn_accounting_time ON turn_accounting(emitted_at_utc);")?;
     Ok(())
 }

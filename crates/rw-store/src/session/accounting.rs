@@ -1,5 +1,6 @@
 //! Durable accounting facts, reconciliation, and bounded reporting.
 mod progress;
+pub(super) mod totals;
 use super::{
     SessionStoreError,
     journal_io::validate_session_id,
@@ -7,9 +8,7 @@ use super::{
     sqlite_snapshot::{read_only_index_snapshot, same_file_identity, validate_read_only_index},
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _, params};
-use rw_types::{
-    AccountingAttribution, Cost, SequenceId, SubscriptionTokenAccounting, TurnId, Usage,
-};
+use rw_types::{AccountingAttribution, Cost, SequenceId, TurnId, Usage};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -227,7 +226,7 @@ impl AccountingLedger {
         let ledger = Self {
             path: root.join("index.sqlite"),
         };
-        ledger.connection()?;
+        totals::catch_up(&mut ledger.connection()?)?;
         Ok(ledger)
     }
 
@@ -375,76 +374,6 @@ impl AccountingLedger {
         Ok(entries)
     }
 
-    /// Computes session, UTC-day, and trailing-window totals as of the injected
-    /// window end. The caller supplies every boundary so replay never reads a
-    /// clock and future-dated rows cannot affect a current budget decision.
-    ///
-    /// # Errors
-    ///
-    /// Returns an invalid query, corrupt-row, overflow, JSON, or `SQLite` error.
-    #[allow(clippy::too_many_lines)]
-    pub fn totals(
-        &self,
-        session_id: &str,
-        utc_day: &UtcDayKey,
-        trailing_window_start_utc: &UtcTimestamp,
-        trailing_window_end_utc: &UtcTimestamp,
-    ) -> Result<AccountingTotals, SessionStoreError> {
-        validate_session_id(session_id)?;
-        if trailing_window_start_utc > trailing_window_end_utc {
-            return Err(SessionStoreError::InvalidAccountingTimestamp);
-        }
-        let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT session_id,utc_day,emitted_at_utc,cost_json FROM turn_accounting \
-             WHERE emitted_at_utc<=?4 \
-               AND (session_id=?1 OR utc_day=?2 OR emitted_at_utc>=?3)",
-        )?;
-        let rows = statement.query_map(
-            params![
-                session_id,
-                utc_day.as_str(),
-                trailing_window_start_utc.as_str(),
-                trailing_window_end_utc.as_str()
-            ],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            },
-        )?;
-        let mut totals = AccountingTotals::empty(
-            session_id,
-            utc_day,
-            trailing_window_start_utc,
-            trailing_window_end_utc,
-        );
-        for row in rows {
-            let (row_session, row_day, emitted_at, cost_json) = row?;
-            let cost: Cost = serde_json::from_str(&cost_json)?;
-            let in_session = row_session == session_id;
-            let in_day = row_day == utc_day.as_str();
-            let in_window = emitted_at.as_str() >= trailing_window_start_utc.as_str()
-                && emitted_at.as_str() <= trailing_window_end_utc.as_str();
-            if in_session {
-                add_accounting_cost(&cost, &mut totals, AccountingScope::Session)?;
-                if in_window {
-                    add_accounting_cost(&cost, &mut totals, AccountingScope::TrailingSession)?;
-                }
-            }
-            if in_day {
-                add_accounting_cost(&cost, &mut totals, AccountingScope::Day)?;
-            }
-            if in_window {
-                add_accounting_cost(&cost, &mut totals, AccountingScope::TrailingAllSessions)?;
-            }
-        }
-        Ok(totals)
-    }
-
     fn connection(&self) -> Result<Connection, SessionStoreError> {
         sqlite_schema::open_accounting_connection(&self.path)
     }
@@ -485,111 +414,6 @@ impl AccountingTotals {
             day_non_usd_monetary_turns: 0,
         }
     }
-}
-
-#[derive(Clone, Copy)]
-enum AccountingScope {
-    Session,
-    Day,
-    TrailingSession,
-    TrailingAllSessions,
-}
-
-fn add_accounting_cost(
-    cost: &Cost,
-    totals: &mut AccountingTotals,
-    scope: AccountingScope,
-) -> Result<(), SessionStoreError> {
-    match cost {
-        Cost::Monetary {
-            amount_micros,
-            currency,
-        } if currency.eq_ignore_ascii_case("USD") => match scope {
-            AccountingScope::Session => checked_add(&mut totals.session_micros_usd, *amount_micros),
-            AccountingScope::Day => checked_add(&mut totals.day_micros_usd, *amount_micros),
-            AccountingScope::TrailingSession => {
-                checked_add(&mut totals.trailing_session_micros_usd, *amount_micros)
-            }
-            AccountingScope::TrailingAllSessions => {
-                checked_add(&mut totals.trailing_all_sessions_micros_usd, *amount_micros)
-            }
-        },
-        Cost::Monetary { .. } => match scope {
-            AccountingScope::Session => checked_add(&mut totals.session_non_usd_monetary_turns, 1),
-            AccountingScope::Day => checked_add(&mut totals.day_non_usd_monetary_turns, 1),
-            AccountingScope::TrailingSession | AccountingScope::TrailingAllSessions => Ok(()),
-        },
-        Cost::AiCredits { credits_micros, .. } => match scope {
-            AccountingScope::Session => {
-                checked_add(&mut totals.session_ai_credit_micros, *credits_micros)
-            }
-            AccountingScope::Day => checked_add(&mut totals.day_ai_credit_micros, *credits_micros),
-            AccountingScope::TrailingSession => checked_add(
-                &mut totals.trailing_session_ai_credit_micros,
-                *credits_micros,
-            ),
-            AccountingScope::TrailingAllSessions => checked_add(
-                &mut totals.trailing_all_sessions_ai_credit_micros,
-                *credits_micros,
-            ),
-        },
-        Cost::SubscriptionQuota { .. } => {
-            let accounting = cost.subscription_token_accounting();
-            match scope {
-                AccountingScope::Session => {
-                    checked_add(&mut totals.session_subscription_quota_turns, 1)?;
-                    match accounting {
-                        SubscriptionTokenAccounting::Metered(tokens) => {
-                            checked_add(&mut totals.session_subscription_tokens, tokens)
-                        }
-                        SubscriptionTokenAccounting::Unavailable => {
-                            checked_add(&mut totals.session_unmetered_subscription_quota_turns, 1)
-                        }
-                        SubscriptionTokenAccounting::NotApplicable => Ok(()),
-                    }
-                }
-                AccountingScope::Day => {
-                    checked_add(&mut totals.day_subscription_quota_turns, 1)?;
-                    match accounting {
-                        SubscriptionTokenAccounting::Metered(tokens) => {
-                            checked_add(&mut totals.day_subscription_tokens, tokens)
-                        }
-                        SubscriptionTokenAccounting::Unavailable => {
-                            checked_add(&mut totals.day_unmetered_subscription_quota_turns, 1)
-                        }
-                        SubscriptionTokenAccounting::NotApplicable => Ok(()),
-                    }
-                }
-                AccountingScope::TrailingSession => match accounting {
-                    SubscriptionTokenAccounting::Metered(tokens) => {
-                        checked_add(&mut totals.trailing_session_subscription_tokens, tokens)
-                    }
-                    SubscriptionTokenAccounting::NotApplicable
-                    | SubscriptionTokenAccounting::Unavailable => Ok(()),
-                },
-                AccountingScope::TrailingAllSessions => match accounting {
-                    SubscriptionTokenAccounting::Metered(tokens) => checked_add(
-                        &mut totals.trailing_all_sessions_subscription_tokens,
-                        tokens,
-                    ),
-                    SubscriptionTokenAccounting::NotApplicable
-                    | SubscriptionTokenAccounting::Unavailable => Ok(()),
-                },
-            }
-        }
-        Cost::Unavailable { .. } => match scope {
-            AccountingScope::Session => checked_add(&mut totals.session_unavailable_turns, 1),
-            AccountingScope::Day => checked_add(&mut totals.day_unavailable_turns, 1),
-            AccountingScope::TrailingSession | AccountingScope::TrailingAllSessions => Ok(()),
-        },
-    }
-}
-
-fn checked_add(total: &mut u64, value: u64) -> Result<(), SessionStoreError> {
-    *total = total
-        .checked_add(value)
-        .ok_or(SessionStoreError::AccountingOverflow)?;
-    Ok(())
 }
 
 pub(super) fn validate_accounting_entry(
@@ -680,6 +504,7 @@ pub(super) fn insert_accounting_entry(
     connection: &Connection,
     entry: &TurnAccountingEntry,
 ) -> Result<(), SessionStoreError> {
+    totals::require_complete(connection)?;
     let sequence = entry.sequence_id.0.to_string();
     let attribution_json = serde_json::to_string(&entry.attribution)?;
     let usage_json = serde_json::to_string(&entry.usage)?;
@@ -701,7 +526,7 @@ pub(super) fn insert_accounting_entry(
         ],
     )?;
     if inserted == 1 {
-        return Ok(());
+        return totals::record(connection, entry);
     }
     let existing = connection
         .query_row(
