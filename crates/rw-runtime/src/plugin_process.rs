@@ -313,18 +313,12 @@ struct PluginChild {
 
 impl Drop for PluginChild {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        if let Some(group) = self
-            .process_group
-            .and_then(|id| i32::try_from(id).ok())
-            .and_then(rustix::process::Pid::from_raw)
-        {
-            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-        }
-        #[cfg(not(unix))]
-        if let Ok(child) = self.child.get_mut() {
-            let _ = child.start_kill();
-        }
+        let _ = self.kill_original_group();
+        let child = self
+            .child
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = child.start_kill();
     }
 }
 
@@ -344,29 +338,13 @@ impl SupervisedPluginProcess for PluginChild {
     }
 
     fn kill_tree(&self) -> Result<(), PluginProcessError> {
-        #[cfg(unix)]
-        if let Some(group) = self
-            .process_group
-            .and_then(|id| i32::try_from(id).ok())
-            .and_then(rustix::process::Pid::from_raw)
-        {
-            rustix::process::kill_process_group(group, rustix::process::Signal::KILL)
-                .or_else(|errno| {
-                    if errno == rustix::io::Errno::SRCH {
-                        Ok(())
-                    } else {
-                        Err(errno)
-                    }
-                })
-                .map_err(|errno| error(&errno.to_string()))?;
-        }
-        #[cfg(not(unix))]
-        self.child
+        let group = self.kill_original_group();
+        let child = self
+            .child
             .lock()
-            .map_err(|_| error("plugin child lock was poisoned"))?
-            .start_kill()
-            .map_err(|error| process_error(&error))?;
-        Ok(())
+            .map_err(|_| error("plugin child lock was poisoned"))
+            .and_then(|mut child| child.start_kill().map_err(|error| process_error(&error)));
+        group.and(child)
     }
 
     async fn wait(&self) -> Result<Option<i32>, PluginProcessError> {
@@ -384,6 +362,26 @@ impl SupervisedPluginProcess for PluginChild {
 }
 
 impl PluginChild {
+    fn kill_original_group(&self) -> Result<(), PluginProcessError> {
+        #[cfg(unix)]
+        if let Some(group) = self
+            .process_group
+            .and_then(|id| i32::try_from(id).ok())
+            .and_then(rustix::process::Pid::from_raw)
+        {
+            rustix::process::kill_process_group(group, rustix::process::Signal::KILL)
+                .or_else(|errno| {
+                    if errno == rustix::io::Errno::SRCH {
+                        Ok(())
+                    } else {
+                        Err(errno)
+                    }
+                })
+                .map_err(|errno| error(&errno.to_string()))?;
+        }
+        Ok(())
+    }
+
     async fn wait_for_exit(&self) -> Result<Option<i32>, PluginProcessError> {
         loop {
             let status = self
@@ -902,3 +900,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+mod child_signals;
