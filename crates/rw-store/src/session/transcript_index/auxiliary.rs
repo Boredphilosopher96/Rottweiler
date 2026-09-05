@@ -121,7 +121,13 @@ mod tests {
         assert!(index.auxiliary_range(2, 1, 4096).is_err());
         let head = index.head().expect("head");
         let advance = view.prove_advance(head.prefix).expect("advance");
+        let mut overallocated = Vec::with_capacity(MAX_AUXILIARY_CELL_BYTES + 1);
+        overallocated.push(1);
         for invalid in [
+            TranscriptIndexMutation::PutAuxiliary {
+                key: 0,
+                payload: overallocated,
+            },
             TranscriptIndexMutation::PutAuxiliary {
                 key: MAX_AUXILIARY_CELLS,
                 payload: vec![0],

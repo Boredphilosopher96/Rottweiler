@@ -142,7 +142,7 @@ impl TranscriptIndexMutation {
     #[must_use]
     pub fn charged_bytes(&self) -> usize {
         match self {
-            Self::PutAuxiliary { payload, .. } => payload.len() + 16,
+            Self::PutAuxiliary { payload, .. } => payload.capacity() + 16,
             Self::Put(row) => row.payload.len() + row.key.len() + 48,
             Self::Delete(key) => key.len() + 48,
             Self::Bind { binding, key } => binding.len() + key.len() + 48,
@@ -880,6 +880,9 @@ fn validate_mutation(
 ) -> Result<(), TranscriptIndexError> {
     let key = match mutation {
         TranscriptIndexMutation::PutAuxiliary { key, payload } => {
+            if payload.capacity() > MAX_AUXILIARY_CELL_BYTES {
+                return Err(TranscriptIndexError::Limit("auxiliary allocation"));
+            }
             return auxiliary::validate(*key, payload);
         }
         TranscriptIndexMutation::Put(row) => {
