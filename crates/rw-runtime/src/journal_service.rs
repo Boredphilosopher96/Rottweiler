@@ -18,6 +18,7 @@ pub(crate) struct JournalService {
     pub(crate) commits: Arc<JournalCommits>,
     root: JournalRoot,
     active: Mutex<HashMap<String, Weak<JournalPublication>>>,
+    child_projection_orders: Mutex<HashMap<String, Weak<Mutex<()>>>>,
     admission: Arc<Semaphore>,
 }
 
@@ -98,8 +99,30 @@ impl JournalService {
             root: JournalRoot::open(root)
                 .map_err(|error| miette!("journal root could not open: {error}"))?,
             active: Mutex::new(HashMap::new()),
+            child_projection_orders: Mutex::new(HashMap::new()),
             admission: Arc::new(Semaphore::new(MAX_READ_VIEWS)),
         }))
+    }
+
+    /// All lifecycle and presentation readers serialize this session's derived writer.
+    /// Acquire its lock before capturing a prefix so a waiting read cannot go behind the index.
+    pub(crate) fn child_projection_order(&self, session: &str) -> Result<Arc<Mutex<()>>> {
+        rw_types::SessionId::validate(session)
+            .map_err(|error| miette!("child projection identity: {error}"))?;
+        let mut orders = self
+            .child_projection_orders
+            .lock()
+            .map_err(|_| miette!("child projection registry is poisoned"))?;
+        orders.retain(|_, order| order.strong_count() > 0);
+        if let Some(order) = orders.get(session).and_then(Weak::upgrade) {
+            return Ok(order);
+        }
+        if orders.len() >= MAX_ACTIVE_JOURNALS {
+            return Err(miette!("child projection admission exhausted"));
+        }
+        let order = Arc::new(Mutex::new(()));
+        orders.insert(session.to_owned(), Arc::downgrade(&order));
+        Ok(order)
     }
 
     pub(crate) fn contains_session(&self, session: &str) -> Result<bool> {

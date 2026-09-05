@@ -28,6 +28,13 @@ impl TranscriptReader {
     ) -> Result<SessionChildrenResult, HostError> {
         let mut budget = ProjectionBudget::new();
         self.authorize_scope(session, scope, &mut budget)?;
+        let order = self
+            .journals
+            .child_projection_order(&session.0)
+            .map_err(storage)?;
+        let _order = order
+            .lock()
+            .map_err(|_| storage("child projection owner poisoned"))?;
         let source = self.journals.capture(&session.0).map_err(storage)?;
         let mut index = SubagentLifecycleIndex::open(&source.view).map_err(storage)?;
         let ready = index.is_current(&source.view).map_err(storage)?;

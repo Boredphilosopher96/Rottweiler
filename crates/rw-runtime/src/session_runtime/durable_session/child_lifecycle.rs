@@ -7,11 +7,10 @@ use rw_core::{
 };
 use rw_tools::{AuthorizedDiffArtifact, DiffArtifactAuthority, ToolError};
 use rw_types::{SequenceId, SessionId, SubagentId, SubagentResult};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 pub(in crate::session_runtime) struct ChildLifecycleReader {
     sink: Arc<DurableEventSink>,
-    order: Arc<Mutex<()>>,
     metadata_pages: Arc<tokio::sync::Semaphore>,
 }
 pub(in crate::session_runtime) struct MetadataRead<T> {
@@ -22,7 +21,6 @@ impl ChildLifecycleReader {
     pub(in crate::session_runtime) fn new(sink: Arc<DurableEventSink>) -> Arc<Self> {
         Arc::new(Self {
             sink,
-            order: Arc::new(Mutex::new(())),
             metadata_pages: Arc::new(tokio::sync::Semaphore::new(4)),
         })
     }
@@ -92,7 +90,11 @@ impl ChildLifecycleReader {
             .journal_service
             .admit_read()
             .map_err(persistence)?;
-        let order = Arc::clone(&self.order);
+        let order = self
+            .sink
+            .journal_service
+            .child_projection_order(&session)
+            .map_err(persistence)?;
         self.sink
             .reads
             .run((Some(admission), order), move |(admission, order)| {
@@ -271,5 +273,53 @@ mod tests {
         })
         .await
         .expect("completion released permit");
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lifecycle_and_display_queries_share_the_child_index_writer() {
+        let root = tempfile::tempdir().expect("root");
+        let lifecycle = reader(root.path());
+        let presentation = crate::transcript_service::TranscriptReader::new(Arc::clone(
+            &lifecycle.sink.journal_service,
+        ));
+        let (started, entered) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let worker = Arc::clone(&lifecycle);
+        let first = tokio::spawn(async move {
+            worker
+                .query(&SessionId("parent".into()), move |view, _| {
+                    started.send(()).expect("entered");
+                    wait.recv().expect("release");
+                    Ok(view.through())
+                })
+                .await
+        });
+        entered.await.expect("lifecycle owns writer");
+        let mut second = tokio::spawn(async move {
+            presentation
+                .children(
+                    SessionId("parent".into()),
+                    rw_types::session_read::SessionReadScope::Root,
+                )
+                .await
+        });
+        let early = tokio::time::timeout(std::time::Duration::from_millis(50), &mut second).await;
+        release.send(()).expect("release writer");
+        assert!(
+            early.is_err(),
+            "display must await the shared writer instead of failing an independent open"
+        );
+        first
+            .await
+            .expect("lifecycle worker")
+            .expect("lifecycle query");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), second)
+            .await
+            .expect("display settled")
+            .expect("display worker")
+            .expect("display query");
+        assert!(
+            matches!(result.value(), rw_types::session_children::SessionChildrenResult::Ready { snapshot } if snapshot.children.is_empty())
+        );
+        lifecycle.sink.reads.settle().await.expect("settled reads");
     }
 }
