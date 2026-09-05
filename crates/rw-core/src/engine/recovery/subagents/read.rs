@@ -90,6 +90,28 @@ impl SubagentLifecycleView {
             })
             .collect()
     }
+    /// Read every active association from this immutable lifecycle generation.
+    /// The producer admits at most 256 active children; a corrupt excess is rejected.
+    /// # Errors
+    /// Rejects inconsistent source selectors or an excessive active set.
+    pub fn active_children(&self) -> Result<Vec<SubagentBinding>, RecoveryError> {
+        let mut children = Vec::new();
+        let mut after = None;
+        loop {
+            let page = self.pending(after, 32)?;
+            if page.is_empty() {
+                return Ok(children);
+            }
+            if children.len() + page.len() > 256 {
+                return Err(RecoveryError::Limit("active child snapshot"));
+            }
+            if page.iter().any(|child| child.task_preview.len() > 1024) {
+                return Err(RecoveryError::Invalid("child task preview"));
+            }
+            after = page.last().map(|child| child.spawned);
+            children.extend(page);
+        }
+    }
     /// Resolve one authorized artifact from its exact effective terminal source.
     /// # Errors
     /// Rejects mismatched selectors, artifact content identities and source corruption.

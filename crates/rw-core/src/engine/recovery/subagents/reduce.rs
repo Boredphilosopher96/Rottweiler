@@ -49,6 +49,7 @@ pub(super) fn apply(
         EngineEvent::SubagentSpawned {
             subagent_id,
             child_session_id,
+            task,
             ..
         } => {
             let turn = head
@@ -78,6 +79,8 @@ pub(super) fn apply(
                 session_id: child_session_id.clone(),
                 spawned: sequence,
                 spawned_turn: turn,
+                task_preview: task[..task.floor_char_boundary(1024.min(task.len()))].to_owned(),
+                task_truncated: task.len() > 1024,
                 terminal: None,
                 latest_artifact: current
                     .as_ref()
