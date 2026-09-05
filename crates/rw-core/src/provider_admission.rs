@@ -40,3 +40,47 @@ pub trait ActiveProviderCall: Send {
         receipt: ProviderCallReceipt,
     ) -> Result<(), BudgetReservationError>;
 }
+
+/// Whether final request admission has a proven input bound or only an estimate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderInputBudget {
+    /// Enforced input bound, including tools, framing, cached input and attachments.
+    Bounded(u64),
+    /// Estimation supports best-effort accounting only.
+    Estimated(u64),
+}
+
+/// Session-owned logical call context; retries receive distinct attempt identities.
+/// Runtime callbacks never enter provider wire requests or recordings.
+#[derive(Clone)]
+pub struct ProviderInvocation {
+    /// Durable session which owns this logical call.
+    pub session_id: rw_types::SessionId,
+    /// Durable parent turn, including title and compaction attribution.
+    pub turn_id: rw_types::TurnId,
+    /// Accounting role of this call.
+    pub attribution: rw_types::AccountingAttribution,
+    /// Bounded host-generated logical call identity.
+    pub call_id: String,
+    /// Input bound from the final request admission step.
+    pub input: ProviderInputBudget,
+    /// Effective guardrails shared across every candidate and retry.
+    pub budget: rw_types::config::BudgetConfig,
+    /// Injected clock sampled before each actual attempt.
+    pub clock: std::sync::Arc<dyn crate::EventClock>,
+    /// Application-owned durable budget admission service.
+    pub admission: std::sync::Arc<dyn ProviderAdmission>,
+    /// Session-owned writer returning exact durable accounting receipts.
+    pub accounting: std::sync::Arc<dyn ProviderAccountingSink>,
+}
+
+/// Appends exact provider accounting without exposing storage internals to routing.
+#[async_trait]
+pub trait ProviderAccountingSink: Send + Sync {
+    /// Completes only after the supplied call actuals have been durably appended.
+    async fn append_accounted(
+        &self,
+        identity: ProviderCallIdentity,
+        actuals: ProviderCallActuals,
+    ) -> Result<ProviderCallReceipt, BudgetReservationError>;
+}

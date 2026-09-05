@@ -6,6 +6,7 @@
 //! the deterministic replay format.
 
 mod anthropic;
+mod attempt;
 mod auth;
 mod github_copilot;
 mod http;
@@ -23,6 +24,7 @@ mod token_response;
 mod types;
 
 pub use anthropic::{AnthropicConfig, AnthropicProvider, AnthropicThinkingStrategy};
+pub use attempt::{ProviderAttempt, ProviderAttemptGate, ProviderAttemptOutcome};
 pub use auth::{
     AuthMaterial, AuthProvider, DEFAULT_OAUTH_CALLBACK_TIMEOUT, KnownSecretRegistrar,
     OAuthAuthorizationCode, OAuthAuthorizationCodeConfig, OAuthEntropy, OAuthLoginSession,
