@@ -107,42 +107,6 @@ impl Drop for PrivateMcpScratch {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PluginHttpParams {
-    alias: String,
-    credential_reference: String,
-    request: PluginHttpRequest,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PluginHttpRequest {
-    method: PluginHttpMethod,
-    url: String,
-    #[serde(default)]
-    headers: Vec<PluginHttpHeader>,
-    body_base64: String,
-    credential_header: String,
-    #[serde(default)]
-    credential_prefix: String,
-}
-
-#[derive(Clone, Copy, Deserialize)]
-#[serde(rename_all = "UPPERCASE")]
-enum PluginHttpMethod {
-    Get,
-    Post,
-    Delete,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PluginHttpHeader {
-    name: String,
-    value: String,
-}
-
 struct RuntimePluginProviderHttp {
     credentials: Arc<CredentialManager>,
     registrar: Arc<dyn rw_providers::KnownSecretRegistrar>,
@@ -190,9 +154,10 @@ impl PluginProviderHttpHandler for RuntimePluginProviderHttp {
         params: serde_json::Value,
         cancellation: &CancellationToken,
     ) -> std::result::Result<PluginHttpStreamResponse, PluginRpcError> {
-        let params: PluginHttpParams = serde_json::from_value(params).map_err(|_| {
-            plugin_http_error("invalid_request", "provider HTTP request is invalid")
-        })?;
+        let params: rw_plugin_protocol::ProviderHttpCapabilityParams =
+            serde_json::from_value(params).map_err(|_| {
+                plugin_http_error("invalid_request", "provider HTTP request is invalid")
+            })?;
         let _ = params.alias;
         let url = url::Url::parse(&params.request.url)
             .map_err(|_| plugin_http_error("invalid_request", "provider HTTP URL is invalid"))?;
@@ -203,7 +168,14 @@ impl PluginProviderHttpHandler for RuntimePluginProviderHttp {
             ));
         }
         let body = BASE64_STANDARD
-            .decode(params.request.body_base64.as_bytes())
+            .decode(
+                params
+                    .request
+                    .body_base64
+                    .as_deref()
+                    .unwrap_or("")
+                    .as_bytes(),
+            )
             .map_err(|_| plugin_http_error("invalid_request", "provider HTTP body is invalid"))?;
         let mut headers = params
             .request
@@ -235,14 +207,20 @@ impl PluginProviderHttpHandler for RuntimePluginProviderHttp {
             params.request.credential_header,
             format!(
                 "{}{}",
-                params.request.credential_prefix,
+                params.request.credential_prefix.unwrap_or_default(),
                 secret.expose_secret()
             ),
         ));
-        let method = match params.request.method {
-            PluginHttpMethod::Get => rw_providers::GuardedHttpMethod::Get,
-            PluginHttpMethod::Post => rw_providers::GuardedHttpMethod::Post,
-            PluginHttpMethod::Delete => rw_providers::GuardedHttpMethod::Delete,
+        let method = match params.request.method.as_str() {
+            "GET" => rw_providers::GuardedHttpMethod::Get,
+            "POST" => rw_providers::GuardedHttpMethod::Post,
+            "DELETE" => rw_providers::GuardedHttpMethod::Delete,
+            _ => {
+                return Err(plugin_http_error(
+                    "invalid_request",
+                    "provider HTTP method is invalid",
+                ));
+            }
         };
         let guarded = rw_providers::GuardedHttpRequest {
             method,

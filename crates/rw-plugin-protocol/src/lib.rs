@@ -1035,6 +1035,8 @@ pub struct ProviderHttpRequest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderHttpCapabilityParams {
+    /// Exact host-owned provider or catalog invocation authorizing this request.
+    pub invocation_id: RpcId,
     pub alias: String,
     pub credential_reference: String,
     pub request: ProviderHttpRequest,

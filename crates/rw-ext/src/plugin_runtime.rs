@@ -89,6 +89,8 @@ pub type PluginStdout = Pin<Box<dyn AsyncBufRead + Send + Sync + Unpin + 'static
 type Pending = Arc<Mutex<BTreeMap<RpcId, PendingRequest>>>;
 
 struct PendingProviderStream {
+    alias: String,
+    deadline: tokio::time::Instant,
     sender: mpsc::Sender<(Value, usize)>,
     terminal: watch::Sender<Option<Result<Value, PluginRpcError>>>,
     finished: Option<Value>,
@@ -424,7 +426,7 @@ impl JsonRpcPluginClient {
         );
         let (sender, receiver) = oneshot::channel();
         let (mut pending, observer) = policy.begin(sender, self.timeout);
-        pending.bind_command(method, &params)?;
+        pending.bind_authority(method, &params)?;
         self.pending.lock().await.insert(id.clone(), pending);
         let mut guard = OrdinaryRequestGuard {
             termination: &self.termination,
@@ -581,6 +583,8 @@ impl JsonRpcPluginClient {
         if self.closed.load(Ordering::Acquire) {
             return Err(rpc_error("closed", "plugin RPC client is closed"));
         }
+        let provider: ProviderCompleteParams = serde_json::from_value(params.clone())
+            .map_err(|_| rpc_error("invalid_params", "invalid provider invocation"))?;
         let deadline = tokio::time::Instant::now()
             + Duration::from_millis(rw_plugin_protocol::MAX_OPERATION_DURATION_MS);
         let numeric = self
@@ -608,6 +612,8 @@ impl JsonRpcPluginClient {
             .insert(
                 id.clone(),
                 PendingProviderStream {
+                    alias: provider.alias,
+                    deadline,
                     sender,
                     terminal,
                     finished: None,

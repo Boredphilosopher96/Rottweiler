@@ -237,3 +237,8 @@ Event callbacks use the fixed five-second request deadline. Cancellation stops
 new admission; shutdown waits for accepted reads, callbacks and actor transactions
 and requires endpoint effect settlement. A failed proof keeps the endpoint and
 its resource admission retained.
+
+Authenticated provider HTTP requires `invocation_id`, the exact host request ID
+for the active provider or model catalog call. The SDK exposes this operation
+only on `ProviderHandlerContext`. The host checks identity, exact alias, declared
+credential reference and the invocation deadline before starting the request.

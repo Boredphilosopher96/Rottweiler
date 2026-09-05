@@ -147,7 +147,7 @@ async fn process_incoming_frame(frame: RpcFrame, wire_bytes: usize, state: &Read
         }
         RpcFrame::Request(request) => {
             if request.method == METHOD_PROVIDER_HTTP {
-                return start_provider_http_request(request, state);
+                return start_provider_http_request(request, state).await;
             }
             start_host_command(request, state)
         }
@@ -373,7 +373,7 @@ pub(super) async fn validate_control_origin(
     ))
 }
 
-fn start_provider_http_request(request: RpcRequest, state: &ReaderState) -> bool {
+async fn start_provider_http_request(request: RpcRequest, state: &ReaderState) -> bool {
     let Ok(effect) = Arc::clone(&state.termination.host_effects).try_acquire_owned() else {
         return false;
     };
@@ -389,7 +389,25 @@ fn start_provider_http_request(request: RpcRequest, state: &ReaderState) -> bool
     {
         return false;
     }
-    let _ = capability.request;
+    let stream_authorized = state.provider_streams.lock().is_ok_and(|streams| {
+        streams
+            .get(&capability.invocation_id)
+            .is_some_and(|stream| {
+                stream.alias == capability.alias
+                    && stream.finished.is_none()
+                    && tokio::time::Instant::now() < stream.deadline
+            })
+    });
+    if !stream_authorized
+        && !state
+            .pending
+            .lock()
+            .await
+            .get(&capability.invocation_id)
+            .is_some_and(|request| request.owns_provider_http(&capability.alias))
+    {
+        return false;
+    }
     let cancellation = CancellationToken::default();
     let inserted = state.active_provider_http.lock().is_ok_and(|mut active| {
         if state.termination.cancellation.is_cancelled()

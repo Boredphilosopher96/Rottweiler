@@ -516,8 +516,8 @@ async fn ordinary_cancellation_drops_host_http_even_when_handler_ignores_token()
         tokio::spawn(async move {
             client
                 .request_cancellable(
-                    rw_plugin_protocol::METHOD_HOOK_INVOKE,
-                    Value::Null,
+                    rw_plugin_protocol::METHOD_PROVIDER_MODELS,
+                    json!({"alias_prefix":"fixture/"}),
                     &cancellation,
                 )
                 .await
@@ -529,12 +529,15 @@ async fn ordinary_cancellation_drops_host_http_even_when_handler_ignores_token()
         .await
         .expect("request deadline")
         .expect("request frame");
+    let RpcFrame::Request(invocation) = serde_json::from_str(&line).expect("catalog frame") else {
+        panic!("catalog request")
+    };
     let frame = RpcFrame::Request(RpcRequest {
         jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
         id: RpcId::String("http-owned-effect".to_owned()),
         method: METHOD_PROVIDER_HTTP.to_owned(),
         params: Some(json!({
-            "alias": "fixture/model", "credential_reference": "fixture-token",
+            "invocation_id": invocation.id, "alias": "fixture/", "credential_reference": "fixture-token",
             "request": {"url": "https://example.test", "method": "GET", "credential_header": "Authorization"}
         })),
     });

@@ -170,3 +170,13 @@ fn initialization_has_one_exact_protocol_and_no_range_fields() {
         );
     }
 }
+
+#[test]
+fn provider_http_requires_its_host_invocation_identity() {
+    let mut params = fixture("protocol-3.json")["provider_http_request"]["params"].clone();
+    params
+        .as_object_mut()
+        .expect("HTTP params")
+        .remove("invocation_id");
+    assert!(serde_json::from_value::<ProviderHttpCapabilityParams>(params).is_err());
+}

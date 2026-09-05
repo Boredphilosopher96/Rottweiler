@@ -2,6 +2,7 @@
 
 mod authority;
 mod catalog;
+mod http_authority;
 mod sdk;
 mod settlement;
 mod state;

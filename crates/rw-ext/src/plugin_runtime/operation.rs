@@ -51,6 +51,8 @@ impl RequestPolicy {
                 PendingRequest::Ordinary {
                     response,
                     origin: None,
+                    provider_alias: None,
+                    deadline: Instant::now() + timeout,
                 },
                 RequestObserver::Ordinary(timeout),
             ),
@@ -97,6 +99,8 @@ pub(super) enum PendingRequest {
     Ordinary {
         response: oneshot::Sender<Result<Value, PluginRpcError>>,
         origin: Option<rw_types::extension_invocation::ExtensionInvocationId>,
+        provider_alias: Option<String>,
+        deadline: Instant,
     },
     Tool {
         response: oneshot::Sender<Result<Value, PluginRpcError>>,
@@ -117,11 +121,25 @@ impl PendingRequest {
         }
     }
 
-    pub(super) fn bind_command(
+    pub(super) fn bind_authority(
         &mut self,
         method: &str,
         params: &Value,
     ) -> Result<(), PluginRpcError> {
+        if method == rw_plugin_protocol::METHOD_PROVIDER_MODELS {
+            let catalog: rw_plugin_protocol::ProviderModelsParams =
+                serde_json::from_value(params.clone()).map_err(|_| {
+                    rpc_error("invalid_params", "invalid provider catalog invocation")
+                })?;
+            let Self::Ordinary { provider_alias, .. } = self else {
+                return Err(rpc_error(
+                    "invalid_method",
+                    "catalog requires ordinary request admission",
+                ));
+            };
+            *provider_alias = Some(catalog.alias_prefix);
+            return Ok(());
+        }
         if method != rw_plugin_protocol::METHOD_COMMAND_EXECUTE {
             return Ok(());
         }
@@ -136,6 +154,11 @@ impl PendingRequest {
         };
         *origin = command.invocation_id;
         Ok(())
+    }
+
+    pub(super) fn owns_provider_http(&self, alias: &str) -> bool {
+        matches!(self, Self::Ordinary { provider_alias: Some(owned), deadline, .. }
+            if owned == alias && Instant::now() < *deadline)
     }
 
     pub(super) fn owns_origin(
@@ -354,6 +377,27 @@ mod tests {
         assert_eq!(receive.await.unwrap().unwrap_err().code, "timeout");
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn catalog_http_authority_is_exact_and_expires_at_admission_deadline() {
+        let (send, _receive) = oneshot::channel();
+        let (mut pending, _) = RequestPolicy::Ordinary {
+            allow_closed: false,
+        }
+        .begin(send, Duration::from_secs(5));
+        assert!(!pending.owns_provider_http("fixture/"));
+        pending
+            .bind_authority(
+                rw_plugin_protocol::METHOD_PROVIDER_MODELS,
+                &serde_json::json!({"alias_prefix":"fixture/"}),
+            )
+            .unwrap();
+        assert!(pending.owns_provider_http("fixture/"));
+        assert!(!pending.owns_provider_http("fixture/model"));
+        assert!(!pending.owns_provider_http("other/"));
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert!(!pending.owns_provider_http("fixture/"));
+    }
+
     #[derive(Default)]
     struct Updates(Mutex<Vec<String>>);
     impl ToolProgressSink for Updates {
@@ -459,7 +503,9 @@ mod tests {
         assert!(
             !PendingRequest::Ordinary {
                 response: ordinary,
-                origin: None
+                origin: None,
+                provider_alias: None,
+                deadline: Instant::now() + Duration::from_secs(5),
             }
             .progress(update(1))
         );

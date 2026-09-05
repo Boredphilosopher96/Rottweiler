@@ -175,7 +175,10 @@ catalog, model binding, and accounting paths.
 
 Providers can also declare bounded, approval-fingerprinted
 `credential-references`. For `provider/http`, the plugin sends the declared
-reference and a credential-free request. The host resolves and registers the
+reference, the exact active host provider or catalog request identity, and a
+credential-free request. The host matches the exact alias and immutable deadline;
+tool, hook, command, unrelated and completed invocations have no provider HTTP
+authority. The host resolves and registers the
 secret, attaches it to the requested header, and owns the guarded HTTP request;
 the raw credential and authenticated request representation never enter a
 JSON-RPC value. `provider/http_event` streams a redacted response head and

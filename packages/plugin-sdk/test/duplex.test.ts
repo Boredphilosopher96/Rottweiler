@@ -106,6 +106,7 @@ describe("production SDK duplex serve", () => {
     const { frames, send, serving } = harness()
     send(models)
     await until(() => frames.some((frame) => frame.method === "provider/http"))
+    expect(frames.find(frame => frame.method === "provider/http")?.params).toMatchObject({ invocation_id: 2, alias: "probe/" })
     const request = frames.find((frame) => frame.method === "provider/http")
     expect(request?.params).toMatchObject({ alias: "probe/", credential_reference: "probe-key" })
     respond(send, httpId(frames))
@@ -119,6 +120,7 @@ describe("production SDK duplex serve", () => {
     const { frames, send, serving } = harness()
     send(models)
     await until(() => frames.some((frame) => frame.method === "provider/http"))
+    expect(frames.find(frame => frame.method === "provider/http")?.params).toMatchObject({ invocation_id: 2, alias: "probe/" })
     for (let id = 10; id < 74; id += 1) send({ jsonrpc: "2.0", id, method: "tool/call", params: { name: "hang", input: {}, lifetime: { total_ms: 300000, idle_ms: 90000 } } })
     await until(() => frames.some((frame) => frame.id === 73))
     expect(frames.find((frame) => frame.id === 73)?.error).toMatchObject({ code: -32005 })
@@ -213,6 +215,7 @@ describe("production SDK duplex serve", () => {
     const { frames, send, serving } = harness()
     send(models)
     await until(() => frames.some((frame) => frame.method === "provider/http"))
+    expect(frames.find(frame => frame.method === "provider/http")?.params).toMatchObject({ invocation_id: 2, alias: "probe/" })
     send(stop)
     await serving
     expect(frames.find((frame) => frame.id === 2)?.error).toMatchObject({ code: -32800 })
@@ -231,6 +234,7 @@ describe("production SDK duplex serve", () => {
     } })
     send(models)
     await until(() => frames.some((frame) => frame.method === "provider/http"))
+    expect(frames.find(frame => frame.method === "provider/http")?.params).toMatchObject({ invocation_id: 2, alias: "probe/" })
     const id = httpId(frames)
     send(httpEvent(id, { type: "head", status: 200, headers: [] }))
     for (let i = 0; i < 65; i += 1) send(httpEvent(id, { type: "body", data_base64: "YQ==" }))
@@ -245,6 +249,7 @@ describe("production SDK duplex serve", () => {
     const { frames, send, serving } = harness()
     send(models)
     await until(() => frames.some((frame) => frame.method === "provider/http"))
+    expect(frames.find(frame => frame.method === "provider/http")?.params).toMatchObject({ invocation_id: 2, alias: "probe/" })
     send({ jsonrpc: "2.0", id: httpId(frames), error: { code: -32003, message: "secret", data: { code: "permission_denied", secret: "token" } } })
     await until(() => frames.some((frame) => frame.id === 2))
     send(stop)
@@ -260,15 +265,15 @@ describe("production SDK duplex serve", () => {
     const { frames, send, serving } = harness({ ...definition, handlers: {
       ...definition.handlers,
       tools: { hang: async (_params, context) => {
-        await context.providerHttp.request("probe-key", httpRequest)
-        return { content: "unreachable", data: null, truncated: false }
+        expect("providerHttp" in context).toBe(false)
+        return { content: "no provider authority", data: null, truncated: false }
       } },
     } })
     send({ jsonrpc: "2.0", id: 3, method: "tool/call", params: { name: "hang", input: {}, lifetime: { total_ms: 300000, idle_ms: 90000 } } })
     await until(() => frames.some((frame) => frame.id === 3))
     send(stop)
     await serving
-    expect(frames.find((frame) => frame.id === 3)?.error).toMatchObject({ code: -32003 })
+    expect(frames.find((frame) => frame.id === 3)?.result).toEqual({ content: "no provider authority", data: null, truncated: false })
     expect(frames.some((frame) => frame.method === "provider/http")).toBe(false)
   })
 })

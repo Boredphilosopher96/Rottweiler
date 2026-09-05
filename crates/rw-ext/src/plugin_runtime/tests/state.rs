@@ -91,7 +91,7 @@ async fn control_origin_is_bound_to_active_outbound_command_in_this_process() {
     }
     .begin(send, DEFAULT_REQUEST_TIMEOUT);
     request
-        .bind_command(
+        .bind_authority(
             METHOD_COMMAND_EXECUTE,
             &json!({"name":"command", "arguments":"", "invocation_id":origin,"lifetime":{"total_ms":300_000,"idle_ms":300_000}}),
         )

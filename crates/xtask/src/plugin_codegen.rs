@@ -336,6 +336,7 @@ const FIXTURE_TEMPLATE: &str = r#"{
     "method": "provider/http",
     "params": {
       "alias": "fixture-v3/vision-thinking",
+      "invocation_id": 9,
       "credential_reference": "fixture-token",
       "request": {
         "method": "POST",

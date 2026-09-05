@@ -74,14 +74,17 @@ export interface HandlerContext {
   readonly push: PushApi
   readonly session: HostSessionApi
   readonly state: HostStateApi
-  /** Host-owned authenticated HTTP. Credential values never enter this process. */
-  readonly providerHttp: {
-    request(credentialReference: string, request: ProviderHttpRequest): Promise<ProviderHttpResponse>
-  }
   /** Aborts on shutdown, provider cancellation, or the admitted operation's deadline. */
   readonly signal: AbortSignal
   /** Writes only a bounded label to stderr. Never pass prompts, tool args, or credentials. */
   debug(label: string): void
+}
+
+export interface ProviderHandlerContext extends HandlerContext {
+  /** Host-owned authenticated HTTP. Credential values never enter this process. */
+  readonly providerHttp: {
+    request(credentialReference: string, request: ProviderHttpRequest): Promise<ProviderHttpResponse>
+  }
 }
 
 export interface ToolHandlerContext extends HandlerContext {
@@ -100,11 +103,11 @@ export type CommandHandler = (
 export type EventHandler = (params: ExtensionEventNotice, context: EventHandlerContext) => ExtensionEventOutcome | Promise<ExtensionEventOutcome>
 export type ProviderHandler = (
   params: ProviderCompleteParams,
-  context: HandlerContext,
+  context: ProviderHandlerContext,
 ) => ProviderStream | Promise<ProviderStream>
 export type ProviderModelsHandler = (
   params: ProviderModelsParams,
-  context: HandlerContext,
+  context: ProviderHandlerContext,
 ) => ProviderModelsResponse | Promise<ProviderModelsResponse>
 
 export interface PluginHandlers {
@@ -709,7 +712,7 @@ export class PluginServer {
 
   async #handleRequest(method: string, params: unknown, id: RpcId | undefined): Promise<void> {
     try {
-      const result = await this.#dispatch(method, params)
+      const result = await this.#dispatch(id, method, params)
       if (id !== undefined) await this.#success(id, result)
     } catch (error) {
       if (id === undefined) {
@@ -766,7 +769,7 @@ export class PluginServer {
     }
   }
 
-  async #dispatch(method: string, rawParams: unknown): Promise<JsonValue> {
+  async #dispatch(id: RpcId | undefined, method: string, rawParams: unknown): Promise<JsonValue> {
     if (method === RPC_METHODS.initialize) {
       if (this.#initialized) throw new SafeRpcError(-32600, "plugin is already initialized")
       const params = object(rawParams)
@@ -819,7 +822,7 @@ export class PluginServer {
       const params = this.#commandParams(rawParams)
       const handler = this.definition.handlers.commands?.[params.name]
       if (handler === undefined) throw new SafeRpcError(-32601, "command is not declared")
-      return this.#runHandler((context) => handler(params, context), undefined, params.invocation_id, Math.min(params.lifetime.total_ms, params.lifetime.idle_ms))
+      return this.#runHandler((context) => handler(params, context), params.invocation_id, Math.min(params.lifetime.total_ms, params.lifetime.idle_ms))
     }
     if (method === RPC_METHODS.hookInvoke) {
       const params = this.#hookParams(rawParams)
@@ -848,12 +851,12 @@ export class PluginServer {
       })
     }
     if (method === RPC_METHODS.providerModels) {
+      if (id === undefined) throw new SafeRpcError(-32600, "provider catalog requires a request identity")
       const params = this.#providerModelsParams(rawParams)
       const handler = this.definition.handlers.providerModels?.[params.alias_prefix]
       if (handler === undefined) throw new SafeRpcError(-32601, "provider models are not declared")
       const response = await this.#runHandler(
-        (context) => handler(params, context),
-        params.alias_prefix,
+        (context) => handler(params, this.#providerContext(context, id, params.alias_prefix)),
       )
       validateProviderModelsResponse(response)
       return response as unknown as JsonValue
@@ -893,7 +896,7 @@ export class PluginServer {
       const result = await this.#invoke(() => {
           if (this.#lifetime.signal.aborted) call.abort()
           if (call.signal.aborted) throw new SafeRpcError(-32800, "plugin tool cancelled")
-          return handler(params, { ...this.#context(call.signal, undefined, null),
+          return handler(params, { ...this.#context(call.signal, null),
             effects: { callTool: async (name, input) => {
               const request = { request_id: id, name, input }
               if (!validateEffectCall(request)) throw new SafeRpcError(-32602, "invalid host effect request")
@@ -961,7 +964,7 @@ export class PluginServer {
     try {
       await this.#invoke(async () => {
         if (call.signal.aborted) throw new SafeRpcError(-32800, "plugin request cancelled")
-        const events = await providerHandler(params, this.#context(call.signal, params.alias, null))
+        const events = await providerHandler(params, this.#providerContext(this.#context(call.signal, null), id, params.alias))
         if (events === null || typeof events !== "object" || !(Symbol.asyncIterator in events)) {
           throw new SafeRpcError(-32603, "provider must return an async event stream")
         }
@@ -1117,12 +1120,12 @@ export class PluginServer {
   }
 
   async #providerHttpRequest(
-    alias: string | undefined,
+    invocationId: RpcId,
+    alias: string,
     credentialReference: string,
     request: ProviderHttpRequest,
     signal: AbortSignal,
   ): Promise<ProviderHttpResponse> {
-    if (alias === undefined) throw new SafeRpcError(-32003, "provider HTTP is provider-scoped")
     requireText(credentialReference, "credential reference", PROTOCOL_LIMITS.maxNameBytes)
     requireText(request.url, "provider HTTP URL", PROTOCOL_LIMITS.maxHookPayloadBytes)
     requireText(request.credential_header, "provider HTTP credential header", PROTOCOL_LIMITS.maxNameBytes)
@@ -1186,6 +1189,7 @@ export class PluginServer {
         id,
         method: RPC_METHODS.providerHttp,
         params: {
+          invocation_id: invocationId,
           alias,
           credential_reference: credentialReference,
           request: {
@@ -1278,15 +1282,19 @@ export class PluginServer {
     }
   }
 
-  #context(signal: AbortSignal, providerAlias: string | undefined, origin: ExtensionInvocationId | null, deadlineAt?: number): HandlerContext {
+  #providerContext(context: HandlerContext, invocationId: RpcId, alias: string): ProviderHandlerContext {
+    return {
+      ...context,
+      providerHttp: {
+        request: (reference, request) => this.#providerHttpRequest(invocationId, alias, reference, request, context.signal),
+      },
+    }
+  }
+
+  #context(signal: AbortSignal, origin: ExtensionInvocationId | null, deadlineAt?: number): HandlerContext {
     return {
       signal,
       ...hostStateContext((method, params) => this.#push(method, params, signal, method === RPC_METHODS.sessionToolCall ? deadlineAt : undefined), origin),
-      providerHttp: {
-        request: (credentialReference, request) => this.#providerHttpRequest(
-          providerAlias, credentialReference, request, signal,
-        ),
-      },
       push: {
         publishPanel: async (id, data) => {
           const update = { id, data }
@@ -1331,7 +1339,6 @@ export class PluginServer {
 
   async #runHandler<T>(
     invoke: (context: HandlerContext) => T | Promise<T>,
-    providerAlias?: string,
     origin: ExtensionInvocationId | null = null,
     deadlineMs: number = this.#handlerTimeoutMs,
   ): Promise<T> {
@@ -1348,7 +1355,7 @@ export class PluginServer {
       call.abort()
     }, deadlineMs)
     try {
-      const result = await this.#invoke(() => invoke(this.#context(call.signal, providerAlias, origin, deadlineAt)))
+      const result = await this.#invoke(() => invoke(this.#context(call.signal, origin, deadlineAt)))
       call.signal.throwIfAborted()
       return result
     } catch (error) {
