@@ -2,35 +2,31 @@
 #![allow(clippy::expect_used)]
 use super::super::DurableEventSink;
 use crate::journal_service::JournalService;
-use rw_core::{
-    AgentTurnStatus, PendingEvent, SessionEventSink, SessionUsage, commit_session_events,
-};
+use rw_core::{SessionEventSink, SessionUsage, commit_session_events};
 use rw_store::session::{AccountingLedger, SessionEventLog};
-use rw_types::{Cost, EngineEvent, EventMeta, SequenceId, SessionId};
+use rw_types::{Cost, EngineEvent, EventMeta, SequenceId, SessionId, TurnId, TurnStatus};
 use std::sync::{Arc, atomic::Ordering};
 
-fn event(sequence: u64, pending: PendingEvent) -> EngineEvent {
-    pending.stamp(EventMeta {
+fn meta(sequence: u64) -> EventMeta {
+    EventMeta {
         protocol_version: rw_core::SESSION_EVENT_VERSION,
         session_id: SessionId("accounting".into()),
         sequence_id: SequenceId(sequence),
         emitted_at: "2026-09-05T00:00:00.000Z".into(),
         caused_by: None,
-    })
+    }
 }
 fn finished(sequence: u64, turn: u64) -> EngineEvent {
-    event(
-        sequence,
-        PendingEvent::TurnFinished {
-            turn,
-            status: AgentTurnStatus::Completed,
-            usage: SessionUsage::default(),
-            cost: Cost::Monetary {
-                amount_micros: 7,
-                currency: "USD".into(),
-            },
+    EngineEvent::TurnFinished {
+        meta: meta(sequence),
+        turn_id: TurnId(turn.to_string()),
+        status: TurnStatus::Completed,
+        usage: SessionUsage::default().into(),
+        cost: Cost::Monetary {
+            amount_micros: 7,
+            currency: "USD".into(),
         },
-    )
+    }
 }
 fn open(root: &std::path::Path) -> Arc<DurableEventSink> {
     let sink = DurableEventSink::new(
@@ -104,20 +100,21 @@ async fn text_batches_do_not_checkpoint_accounting_until_the_billed_boundary() {
     let ledger = AccountingLedger::open(root.path()).expect("ledger");
     commit_session_events(
         Arc::clone(&sink),
-        vec![event(0, PendingEvent::TurnStarted { turn: 1 })],
+        vec![EngineEvent::TurnStarted {
+            meta: meta(0),
+            turn_id: TurnId("1".into()),
+        }],
     )
     .await
     .expect("start");
     for sequence in 1..=8 {
         commit_session_events(
             Arc::clone(&sink),
-            vec![event(
-                sequence,
-                PendingEvent::TextDelta {
-                    turn: 1,
-                    text: "token".into(),
-                },
-            )],
+            vec![EngineEvent::TextDelta {
+                meta: meta(sequence),
+                turn_id: TurnId("1".into()),
+                text: "token".into(),
+            }],
         )
         .await
         .expect("text");
