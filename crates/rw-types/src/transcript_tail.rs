@@ -176,7 +176,8 @@ mod tests {
         let mut extra = value;
         extra["part"]["offset"] = json!(0);
         assert!(serde_json::from_value::<TranscriptTailRead>(extra).is_err());
-        let schema = schemars::schema_for!(TranscriptTailRead);
+        let schema =
+            serde_json::to_value(schemars::schema_for!(TranscriptTailRead)).expect("schema");
         assert_eq!(
             schema["properties"]["max_bytes"]["maximum"],
             json!(TRANSCRIPT_TAIL_PAGE_BYTES)
