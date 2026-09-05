@@ -336,12 +336,10 @@ all consume the same tag-built release archives.
 honestly be called measured evidence, but they also should not prevent a
 pre-v1 release from making the narrower claims it actually proves. Deriving
 the tier from SemVer keeps that narrower path unavailable to v1 while avoiding
-a caller-controlled release bypass. Measuring an exact commit twice made
-publication depend on unrelated hosted-runner noise even after qualification
-had passed. Binding retained preflight evidence to the commit preserves the
-performance authority without weakening it or rebuilding publication bytes
-outside the tag workflow. Preserving the existing tag publisher and original
-archives keeps signing and rerun behavior in one established owner.
+a caller-controlled release bypass. Retained preflight evidence binds
+performance qualification to the exact commit. Publication consumes that
+evidence rather than introducing another hosted-runner measurement. The tag
+workflow owns publication archives, signing, and rerun behavior.
 
 **Revisit when.** Protected soak measurements and runners are continuously
 available for pre-v1 development, or the project needs preflight-built archives
