@@ -861,8 +861,11 @@ async fn incomplete_authenticated_bodies_expire_without_dispatching() {
     let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(serve(listener, state, shutdown_rx));
     let requests = ["/v1/command", "/v1/provider-api-key", "/v1/activate-provider"]
-        .map(|path| async {
-            let mut stream = UnixStream::connect(&runtime.paths.socket).await.expect("connect");
+        .map(|path| {
+            let socket = &runtime.paths.socket;
+            let credentials = &credentials;
+            async move {
+            let mut stream = UnixStream::connect(socket).await.expect("connect");
             let request = format!(
                 "POST {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\n{}: {}\r\n{}: normal\r\nContent-Length: 32\r\n\r\n{{",
                 credentials.token, CLIENT_HEADER, credentials.client_id.0, COMMAND_LANE_HEADER,
@@ -872,7 +875,7 @@ async fn incomplete_authenticated_bodies_expire_without_dispatching() {
             tokio::time::timeout(REQUEST_BODY_TIMEOUT * 2, stream.read_exact(&mut prefix))
                 .await.expect("body must expire").expect("response prefix");
             assert_eq!(&prefix, b"HTTP/1.1 408", "{path}");
-        });
+        }});
     futures_util::future::join_all(requests).await;
     assert_eq!(engine.dispatches.load(Ordering::Relaxed), 0);
     assert!(engine.provider_keys.lock().expect("keys").is_empty());
