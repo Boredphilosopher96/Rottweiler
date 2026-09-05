@@ -222,9 +222,9 @@ impl PendingCommand {
         &self,
         origin: &rw_types::extension_invocation::ExtensionInvocationId,
         config: &Arc<SessionActorConfig>,
-        driver: Option<ClientId>,
+        driver: Option<&ClientId>,
     ) -> bool {
-        &self.origin == origin && Arc::ptr_eq(&self.owner, config) && self.driver == driver
+        &self.origin == origin && Arc::ptr_eq(&self.owner, config) && self.driver.as_ref() == driver
     }
     pub(super) fn update_mode(&mut self, mode: ModeId) {
         self.mode = mode;

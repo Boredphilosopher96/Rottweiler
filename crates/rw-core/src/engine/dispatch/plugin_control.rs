@@ -112,7 +112,9 @@ pub(super) async fn control(
 ) -> Result<ExtensionControlOutcome, AgentLoopError> {
     control.validate().map_err(invalid)?;
     let own_command = match (&state.pending_command, origin) {
-        (Some(pending), Some(origin)) if pending.allows(origin, config, state.control.driver()) => {
+        (Some(pending), Some(origin))
+            if pending.allows(origin, config, state.control.driver().as_ref()) =>
+        {
             true
         }
         (_, Some(_)) => return Err(invalid("extension command origin is no longer active")),
