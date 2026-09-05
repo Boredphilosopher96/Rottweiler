@@ -17,6 +17,7 @@ mod journal_service;
 mod mode_recovery;
 mod plugin_process;
 mod project_commands;
+mod projection_budget;
 /// Durable provider budget admission and storage-worker settlement.
 pub mod provider_admission;
 mod session_host;
@@ -210,6 +211,7 @@ mod tests {
         async fn todos(
             &self,
             _session: &rw_types::SessionId,
+            _scope: rw_types::session_read::SessionReadScope,
         ) -> Result<rw_types::todo::TodoReadResult, HostError> {
             Ok(rw_types::todo::TodoReadResult::Ready {
                 todos: rw_types::todo::TodoReadSnapshot {

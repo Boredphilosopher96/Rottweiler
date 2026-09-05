@@ -56,6 +56,7 @@ impl Fixture {
         self.service
             .read(
                 &SessionId("semantic".into()),
+                &rw_types::session_read::SessionReadScope::Session {},
                 &TranscriptRead {
                     known_view: known,
                     position,
@@ -189,12 +190,25 @@ async fn offline_reader_uses_the_same_projection_without_a_session_actor() {
     };
     assert!(matches!(
         reader
-            .page(session.clone(), request.clone())
+            .page(
+                session.clone(),
+                rw_types::session_read::SessionReadScope::Session {},
+                request.clone()
+            )
             .await
             .expect("catchup"),
         TranscriptReadResult::CatchingUp { .. }
     ));
-    let page = ready(reader.page(session, request).await.expect("page"));
+    let page = ready(
+        reader
+            .page(
+                session,
+                rw_types::session_read::SessionReadScope::Session {},
+                request,
+            )
+            .await
+            .expect("page"),
+    );
     assert_eq!(page.first_ordinal, TranscriptOrdinal(292));
     assert_eq!(
         page.items.last().expect("last").id,
@@ -363,6 +377,7 @@ fn malformed_limits_are_rejected_before_projector_or_journal_admission() {
             .service
             .read(
                 &SessionId("semantic".into()),
+                &rw_types::session_read::SessionReadScope::Session {},
                 &TranscriptRead {
                     known_view: None,
                     position: TranscriptPosition::Latest {},
@@ -414,7 +429,11 @@ fn complete_content_chunks_reuse_one_canonical_document_and_validate_view_bounda
     loop {
         let chunk = fixture
             .service
-            .read_content(&SessionId("semantic".into()), &next)
+            .read_content(
+                &SessionId("semantic".into()),
+                &rw_types::session_read::SessionReadScope::Session {},
+                &next,
+            )
             .expect("chunk");
         assert!(chunk.text.len() <= 101);
         complete.push_str(&chunk.text);
@@ -438,7 +457,11 @@ fn complete_content_chunks_reuse_one_canonical_document_and_validate_view_bounda
     assert!(
         fixture
             .service
-            .read_content(&SessionId("semantic".into()), &bad)
+            .read_content(
+                &SessionId("semantic".into()),
+                &rw_types::session_read::SessionReadScope::Session {},
+                &bad
+            )
             .is_err()
     );
     bad = request.clone();
@@ -446,7 +469,11 @@ fn complete_content_chunks_reuse_one_canonical_document_and_validate_view_bounda
     assert!(
         fixture
             .service
-            .read_content(&SessionId("semantic".into()), &bad)
+            .read_content(
+                &SessionId("semantic".into()),
+                &rw_types::session_read::SessionReadScope::Session {},
+                &bad
+            )
             .is_err()
     );
     bad = request;
@@ -454,7 +481,11 @@ fn complete_content_chunks_reuse_one_canonical_document_and_validate_view_bounda
     assert!(
         fixture
             .service
-            .read_content(&SessionId("semantic".into()), &bad)
+            .read_content(
+                &SessionId("semantic".into()),
+                &rw_types::session_read::SessionReadScope::Session {},
+                &bad
+            )
             .is_err()
     );
 }

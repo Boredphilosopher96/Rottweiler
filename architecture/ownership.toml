@@ -19,6 +19,11 @@ path = "crates/rw-types/src/protocol/commands.rs"
 symbols = ["ClientCommand::session_id", "ClientCommand::execution", "CommandReply", "MAX_COMMAND_REPLY_BYTES", "MAX_CLIENT_READS"]
 
 [[owner]]
+id = "session-read-scope-contract"
+path = "crates/rw-types/src/session_read.rs"
+symbols = ["SessionReadScope::root", "MAX_SESSION_READ_ANCESTORS", "MAX_SESSION_READ_SUBAGENT_ID_BYTES"]
+
+[[owner]]
 id = "engine-event-contract"
 path = "crates/rw-types/src/protocol/events.rs"
 symbols = ["EngineEvent::delivery", "TRANSIENT_ENGINE_EVENT_TYPES"]

@@ -331,12 +331,16 @@ pub trait SessionFactory: Send + Sync + 'static {
 /// Remote-safe host query boundary implemented by the CLI/storage layer.
 #[async_trait]
 pub trait HostQueryService: Send + Sync + 'static {
-    async fn todos(&self, session: &SessionId)
-    -> Result<rw_types::todo::TodoReadResult, HostError>;
+    async fn todos(
+        &self,
+        session: &SessionId,
+        scope: rw_types::session_read::SessionReadScope,
+    ) -> Result<rw_types::todo::TodoReadResult, HostError>;
 
     async fn read_transcript(
         &self,
         _session: &SessionId,
+        _scope: rw_types::session_read::SessionReadScope,
         _read: rw_types::transcript::TranscriptRead,
     ) -> Result<rw_types::transcript::TranscriptReadResult, HostError> {
         Err(HostError::Query("transcript history is unavailable".into()))
@@ -344,6 +348,7 @@ pub trait HostQueryService: Send + Sync + 'static {
     async fn read_transcript_content(
         &self,
         _session: &SessionId,
+        _scope: rw_types::session_read::SessionReadScope,
         _read: rw_types::transcript::TranscriptContentRead,
     ) -> Result<rw_types::transcript::TranscriptContentPage, HostError> {
         Err(HostError::Query("transcript content is unavailable".into()))

@@ -93,6 +93,32 @@ pub fn finished_tool_source(
     }
 }
 
+/// Check one effective, source-qualified child association without scanning rows.
+///
+/// # Errors
+/// Rejects a corrupt semantic binding; absent or removed associations return false.
+pub fn matches_child_source(
+    rows: &impl TranscriptRowLookup,
+    child: &rw_types::session_read::SessionReadAncestor,
+) -> Result<bool, TranscriptProjectionError> {
+    let Some(row) = rows.bound_row(&entity_binding("subagent", &[&child.subagent_id.0]))? else {
+        return Ok(false);
+    };
+    if row.source != child.source_sequence {
+        return Ok(false);
+    }
+    match decode(&row)? {
+        TranscriptContent::Subagent {
+            subagent_id,
+            session_id,
+            ..
+        } => Ok(subagent_id == child.subagent_id && session_id == child.session_id),
+        _ => Err(TranscriptProjectionError::Invalid(
+            "child source binding identity",
+        )),
+    }
+}
+
 /// Interpret one contiguous durable event without performing I/O mutations.
 /// The caller publishes these changes and the processed raw prefix atomically.
 /// A rewind must complete before its sequence can advance the published prefix.

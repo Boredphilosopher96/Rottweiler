@@ -14,13 +14,14 @@ use std::{
     },
 };
 
+mod authority;
 mod content;
+use crate::projection_budget::ProjectionBudget;
 mod page;
 pub(crate) mod reader;
 mod tool_presentation;
 
 const MAX_OPEN_PROJECTORS: usize = 8;
-const MAX_ADVANCE_BATCHES: usize = 4;
 
 type ProjectorOwner = Arc<Mutex<Option<TranscriptProjector>>>;
 struct CachedProjector {
@@ -109,10 +110,13 @@ impl TranscriptReader {
     pub(crate) fn read(
         &self,
         session: &SessionId,
+        scope: &rw_types::session_read::SessionReadScope,
         request: &TranscriptRead,
     ) -> Result<TranscriptReadResult, HostError> {
         page::limits(request)?;
-        match self.projected(session, |index, journal| {
+        let mut budget = ProjectionBudget::new();
+        self.authorize_scope(session, scope, &mut budget)?;
+        match self.projected_with_budget(session, &mut budget, |index, journal| {
             page::read(index, journal, session, request)
         })? {
             ProjectionRead::Ready(result) => Ok(result),
@@ -125,10 +129,13 @@ impl TranscriptReader {
     pub(crate) fn read_content(
         &self,
         session: &SessionId,
+        scope: &rw_types::session_read::SessionReadScope,
         request: &rw_types::transcript::TranscriptContentRead,
     ) -> Result<rw_types::transcript::TranscriptContentPage, HostError> {
         content::validate(session, request)?;
-        match self.projected(session, |index, journal| {
+        let mut budget = ProjectionBudget::new();
+        self.authorize_scope(session, scope, &mut budget)?;
+        match self.projected_with_budget(session, &mut budget, |index, journal| {
             content::read(&self.documents, index, journal, request)
         })? {
             ProjectionRead::Ready(page) => Ok(page),
@@ -141,6 +148,18 @@ impl TranscriptReader {
     fn projected<R>(
         &self,
         session: &SessionId,
+        operation: impl FnOnce(
+            &rw_store::session::transcript_index::TranscriptIndex,
+            &rw_store::session::journal::JournalReadView,
+        ) -> Result<R, HostError>,
+    ) -> Result<ProjectionRead<R>, HostError> {
+        self.projected_with_budget(session, &mut ProjectionBudget::new(), operation)
+    }
+
+    fn projected_with_budget<R>(
+        &self,
+        session: &SessionId,
+        budget: &mut ProjectionBudget,
         operation: impl FnOnce(
             &rw_store::session::transcript_index::TranscriptIndex,
             &rw_store::session::journal::JournalReadView,
@@ -169,7 +188,7 @@ impl TranscriptReader {
         if !current.rebuilding && current.prefix == journal.view.prefix_identity() {
             return operation(projector.index(), &journal.view).map(ProjectionRead::Ready);
         }
-        for _ in 0..MAX_ADVANCE_BATCHES {
+        while budget.take_batch() {
             let progress = projector.advance(&journal.view).map_err(page::storage)?;
             if !progress.has_more && !progress.rebuilding {
                 return operation(projector.index(), &journal.view).map(ProjectionRead::Ready);

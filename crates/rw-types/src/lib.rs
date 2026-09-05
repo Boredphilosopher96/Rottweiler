@@ -25,6 +25,7 @@ pub mod mcp;
 mod permission_mode;
 mod protocol;
 pub mod schema;
+pub mod session_read;
 pub mod todo;
 pub mod tool_admission;
 pub mod transcript;

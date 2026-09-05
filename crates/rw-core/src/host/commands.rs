@@ -55,8 +55,12 @@ impl EngineHost {
                     }],
                 ))
             }
-            ClientCommand::GetTodos { meta, session_id } => {
-                let result = self.queries.todos(&session_id).await?;
+            ClientCommand::GetTodos {
+                meta,
+                session_id,
+                scope,
+            } => {
+                let result = self.queries.todos(&session_id, scope).await?;
                 Ok((
                     CommandOutcome::Accepted {},
                     Some(session_id.clone()),
@@ -70,9 +74,13 @@ impl EngineHost {
             ClientCommand::ReadTranscript {
                 meta,
                 session_id,
+                scope,
                 read,
             } => {
-                let result = self.queries.read_transcript(&session_id, read).await?;
+                let result = self
+                    .queries
+                    .read_transcript(&session_id, scope, read)
+                    .await?;
                 Ok((
                     CommandOutcome::Accepted {},
                     Some(session_id.clone()),
@@ -86,11 +94,12 @@ impl EngineHost {
             ClientCommand::ReadTranscriptContent {
                 meta,
                 session_id,
+                scope,
                 read,
             } => {
                 let page = self
                     .queries
-                    .read_transcript_content(&session_id, read)
+                    .read_transcript_content(&session_id, scope, read)
                     .await?;
                 Ok((
                     CommandOutcome::Accepted {},

@@ -35,7 +35,7 @@ async fn active_and_offline_queries_use_acknowledged_prefix_and_bounded_catch_up
     let registration = service
         .register("tasks", journal.read_view())
         .expect("active publisher");
-    let first = read_todos(Arc::clone(&service), SessionId("tasks".into()), || Ok(()))
+    let first = read_todos(Arc::clone(&service), SessionId("tasks".into()), |_| Ok(()))
         .await
         .expect("first read");
     assert!(matches!(
@@ -45,7 +45,7 @@ async fn active_and_offline_queries_use_acknowledged_prefix_and_bounded_catch_up
             target: Some(SequenceId(299))
         }
     ));
-    let ready = read_todos(Arc::clone(&service), SessionId("tasks".into()), || Ok(()))
+    let ready = read_todos(Arc::clone(&service), SessionId("tasks".into()), |_| Ok(()))
         .await
         .expect("ready");
     assert!(
@@ -54,7 +54,7 @@ async fn active_and_offline_queries_use_acknowledged_prefix_and_bounded_catch_up
     drop(registration);
     drop(journal);
     assert!(matches!(
-        read_todos(service, SessionId("tasks".into()), || Ok(()))
+        read_todos(service, SessionId("tasks".into()), |_| Ok(()))
             .await
             .expect("offline"),
         TodoReadResult::Ready { .. }
@@ -66,7 +66,7 @@ async fn rejected_authorization_releases_admission_without_reading_session_data(
     let root = tempfile::tempdir().expect("root");
     let service = JournalService::new(root.path()).expect("service");
     for _ in 0..16 {
-        let error = read_todos(Arc::clone(&service), SessionId("absent".into()), || {
+        let error = read_todos(Arc::clone(&service), SessionId("absent".into()), |_| {
             Err(rw_core::HostError::Query("denied".into()))
         })
         .await
@@ -132,12 +132,86 @@ async fn task_rewind_query_reads_authoritative_commits_without_replaying_tool_ar
         ])
         .expect("source commits");
     drop(journal);
-    let TodoReadResult::Ready { todos } = read_todos(service, SessionId("tasks".into()), || Ok(()))
-        .await
-        .expect("query")
+    let TodoReadResult::Ready { todos } =
+        read_todos(service, SessionId("tasks".into()), |_| Ok(()))
+            .await
+            .expect("query")
     else {
         panic!("small source ready")
     };
     assert_eq!(todos.through, Some(SequenceId(3)));
     assert_eq!(todos.snapshot, state("retained"));
+}
+
+#[tokio::test]
+async fn ancestry_and_task_projection_share_one_four_transaction_allowance() {
+    use crate::transcript_service::TranscriptReader;
+    use rw_types::session_read::{SessionReadAncestor, SessionReadScope};
+    let root = tempfile::tempdir().expect("root");
+    let service = JournalService::new(root.path()).expect("journals");
+    let metadata = |session: &str, sequence| EventMeta {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: SessionId(session.into()),
+        sequence_id: SequenceId(sequence),
+        emitted_at: "2026-09-05T00:00:00Z".into(),
+        caused_by: None,
+    };
+    let mut parent =
+        rw_store::session::SessionEventLog::open(root.path(), "parent").expect("parent");
+    for sequence in 0..127 {
+        parent
+            .append(EngineEvent::UserMessageAccepted {
+                meta: metadata("parent", sequence),
+                agent_turn: sequence,
+                content: "body".into(),
+                attachments: vec![],
+            })
+            .expect("parent event");
+    }
+    parent
+        .append(EngineEvent::SubagentSpawned {
+            meta: metadata("parent", 127),
+            subagent_id: rw_types::SubagentId("agent".into()),
+            child_session_id: SessionId("child".into()),
+            task: "Read".into(),
+        })
+        .expect("spawn");
+    let mut child = rw_store::session::SessionEventLog::open(root.path(), "child").expect("child");
+    for sequence in 0..300 {
+        child
+            .append(EngineEvent::TodoStateCommitted {
+                meta: metadata("child", sequence),
+                snapshot: TodoSnapshot::default(),
+            })
+            .expect("task");
+    }
+    drop(child);
+    drop(parent);
+    let reader = TranscriptReader::new(service);
+    let scope = SessionReadScope::Descendant {
+        root_session_id: SessionId("parent".into()),
+        ancestry: vec![SessionReadAncestor {
+            subagent_id: rw_types::SubagentId("agent".into()),
+            session_id: SessionId("child".into()),
+            source_sequence: SequenceId(127),
+        }],
+    };
+    let first = reader
+        .todos(SessionId("child".into()), scope.clone())
+        .await
+        .expect("bounded query");
+    assert!(matches!(
+        first,
+        TodoReadResult::CatchingUp {
+            through: Some(SequenceId(127)),
+            target: Some(SequenceId(299))
+        }
+    ));
+    assert!(matches!(
+        reader
+            .todos(SessionId("child".into()), scope)
+            .await
+            .expect("resume"),
+        TodoReadResult::Ready { .. }
+    ));
 }

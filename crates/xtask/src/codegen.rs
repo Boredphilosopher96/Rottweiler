@@ -173,6 +173,10 @@ fn generate_typescript() -> Result<String, XtaskError> {
         ("MAX_MCP_SERVER_ID_BYTES", MAX_MCP_SERVER_ID_BYTES),
         ("MAX_COMMAND_REPLY_BYTES", rw_types::MAX_COMMAND_REPLY_BYTES),
         ("MAX_CLIENT_READS", rw_types::MAX_CLIENT_READS),
+        (
+            "MAX_SESSION_READ_ANCESTORS",
+            rw_types::session_read::MAX_SESSION_READ_ANCESTORS,
+        ),
         ("MAX_CLIENT_CONTROLS", rw_types::MAX_CLIENT_CONTROLS),
         (
             "MAX_UI_CONTRIBUTIONS",
@@ -419,6 +423,8 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(CommandOutcome);
     declaration!(EngineEvent);
     declaration!(rw_types::CommandReply);
+    declaration!(rw_types::session_read::SessionReadAncestor);
+    declaration!(rw_types::session_read::SessionReadScope);
     declaration!(rw_types::transcript::TranscriptOrdinal);
     declaration!(rw_types::transcript::TranscriptGeneration);
     declaration!(rw_types::transcript::TranscriptView);
@@ -879,6 +885,7 @@ fn contract_fixture() -> ContractFixture {
                 item_id: ContextItemId("context-2".to_owned()),
             },
             ClientCommand::GetTodos {
+                scope: rw_types::session_read::SessionReadScope::Session {},
                 meta: command_meta.clone(),
                 session_id: SessionId("session-fixture".to_owned()),
             },

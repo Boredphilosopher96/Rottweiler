@@ -575,6 +575,7 @@ impl HostQueryService for StubQueries {
     async fn todos(
         &self,
         _session: &rw_types::SessionId,
+        _scope: rw_types::session_read::SessionReadScope,
     ) -> Result<rw_types::todo::TodoReadResult, HostError> {
         Ok(rw_types::todo::TodoReadResult::Ready {
             todos: rw_types::todo::TodoReadSnapshot {

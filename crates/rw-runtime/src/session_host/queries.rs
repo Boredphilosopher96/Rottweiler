@@ -14,21 +14,27 @@ impl HostQueryService for RuntimeSessionFactory {
     async fn todos(
         &self,
         session: &rw_types::SessionId,
+        scope: rw_types::session_read::SessionReadScope,
     ) -> Result<rw_types::todo::TodoReadResult, HostError> {
         let factory = self.clone();
         let requested = session.clone();
+        let root = scope
+            .root(session)
+            .map_err(|message| HostError::Protocol(message.into()))?
+            .clone();
         crate::todo_service::read_todos(
             Arc::clone(&self.journal_service),
             session.clone(),
-            move || {
+            move |budget| {
                 let metadata =
-                    super::load_session_metadata_any(&factory.options.storage_root, &requested.0)
+                    super::load_session_metadata_any(&factory.options.storage_root, &root.0)
                         .map_err(|_| {
-                        HostError::Persistence("session metadata is unavailable".into())
-                    })?;
+                            HostError::Persistence("session metadata is unavailable".into())
+                        })?;
+                factory.authorize_workspace_path(&metadata.workspace)?;
                 factory
-                    .authorize_workspace_path(&metadata.workspace)
-                    .map(|_| ())
+                    .transcripts
+                    .authorize_scope(&requested, &scope, budget)
             },
         )
         .await
@@ -37,19 +43,24 @@ impl HostQueryService for RuntimeSessionFactory {
     async fn read_transcript(
         &self,
         session: &rw_types::SessionId,
+        scope: rw_types::session_read::SessionReadScope,
         read: rw_types::transcript::TranscriptRead,
     ) -> Result<rw_types::transcript::TranscriptReadResult, HostError> {
         let factory = self.clone();
         let session = session.clone();
+        let root = scope
+            .root(&session)
+            .map_err(|message| HostError::Protocol(message.into()))?
+            .clone();
         self.transcripts
             .blocking(move |transcripts| {
                 let metadata =
-                    super::load_session_metadata_any(&factory.options.storage_root, &session.0)
+                    super::load_session_metadata_any(&factory.options.storage_root, &root.0)
                         .map_err(|_| {
                             HostError::Persistence("session metadata is unavailable".into())
                         })?;
                 factory.authorize_workspace_path(&metadata.workspace)?;
-                transcripts.read(&session, &read)
+                transcripts.read(&session, &scope, &read)
             })
             .await
     }
@@ -57,19 +68,24 @@ impl HostQueryService for RuntimeSessionFactory {
     async fn read_transcript_content(
         &self,
         session: &rw_types::SessionId,
+        scope: rw_types::session_read::SessionReadScope,
         read: rw_types::transcript::TranscriptContentRead,
     ) -> Result<rw_types::transcript::TranscriptContentPage, HostError> {
         let factory = self.clone();
         let session = session.clone();
+        let root = scope
+            .root(&session)
+            .map_err(|message| HostError::Protocol(message.into()))?
+            .clone();
         self.transcripts
             .blocking(move |transcripts| {
                 let metadata =
-                    super::load_session_metadata_any(&factory.options.storage_root, &session.0)
+                    super::load_session_metadata_any(&factory.options.storage_root, &root.0)
                         .map_err(|_| {
                             HostError::Persistence("session metadata is unavailable".into())
                         })?;
                 factory.authorize_workspace_path(&metadata.workspace)?;
-                transcripts.read_content(&session, &read)
+                transcripts.read_content(&session, &scope, &read)
             })
             .await
     }

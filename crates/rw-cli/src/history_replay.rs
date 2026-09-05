@@ -36,8 +36,27 @@ impl HistoricalReplayEngine {
         &self,
         command: ClientCommand,
     ) -> std::result::Result<(CommandOutcome, Vec<EngineEvent>), HostError> {
-        if command.session_id() != Some(&self.session_id) {
-            return Err(HostError::Protocol("historical session mismatch".into()));
+        let (session, scope) = match &command {
+            ClientCommand::ReadTranscript {
+                session_id, scope, ..
+            }
+            | ClientCommand::ReadTranscriptContent {
+                session_id, scope, ..
+            }
+            | ClientCommand::GetTodos {
+                session_id, scope, ..
+            } => (session_id, scope),
+            _ => {
+                return Err(HostError::Protocol(
+                    "query is unavailable in historical view".into(),
+                ));
+            }
+        };
+        let root = scope
+            .root(session)
+            .map_err(|message| HostError::Protocol(message.into()))?;
+        if root != &self.session_id {
+            return Err(HostError::Protocol("historical read root mismatch".into()));
         }
         let meta = rw_core::CommandAckMeta {
             protocol_version: rw_core::PROTOCOL_VERSION,
@@ -46,15 +65,20 @@ impl HistoricalReplayEngine {
             emitted_at: SystemEventClock.emitted_at(),
         };
         let event = match command {
-            ClientCommand::GetTodos { session_id, .. } => EngineEvent::TodosRead {
+            ClientCommand::GetTodos {
+                session_id, scope, ..
+            } => EngineEvent::TodosRead {
                 meta,
-                result: self.reader.todos(session_id.clone()).await?,
+                result: self.reader.todos(session_id.clone(), scope).await?,
                 session_id,
             },
             ClientCommand::ReadTranscript {
-                session_id, read, ..
+                session_id,
+                scope,
+                read,
+                ..
             } => {
-                let result = self.reader.page(session_id.clone(), read).await?;
+                let result = self.reader.page(session_id.clone(), scope, read).await?;
                 EngineEvent::TranscriptPageReady {
                     meta,
                     session_id,
@@ -62,9 +86,12 @@ impl HistoricalReplayEngine {
                 }
             }
             ClientCommand::ReadTranscriptContent {
-                session_id, read, ..
+                session_id,
+                scope,
+                read,
+                ..
             } => {
-                let page = self.reader.content(session_id.clone(), read).await?;
+                let page = self.reader.content(session_id.clone(), scope, read).await?;
                 EngineEvent::TranscriptContentReady {
                     meta,
                     session_id,

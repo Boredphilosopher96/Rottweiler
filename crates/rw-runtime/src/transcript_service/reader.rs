@@ -33,8 +33,14 @@ impl TranscriptReader {
     pub async fn todos(
         self: &Arc<Self>,
         session: SessionId,
+        scope: rw_types::session_read::SessionReadScope,
     ) -> Result<rw_types::todo::TodoReadResult, HostError> {
-        crate::todo_service::read_todos(Arc::clone(&self.journals), session, || Ok(())).await
+        let reader = Arc::clone(self);
+        let target = session.clone();
+        crate::todo_service::read_todos(Arc::clone(&self.journals), session, move |budget| {
+            reader.authorize_scope(&target, &scope, budget)
+        })
+        .await
     }
 
     /// Read a bounded current-effective transcript page without starting a session.
@@ -44,10 +50,11 @@ impl TranscriptReader {
     pub async fn page(
         self: &Arc<Self>,
         session: SessionId,
+        scope: rw_types::session_read::SessionReadScope,
         request: TranscriptRead,
     ) -> Result<TranscriptReadResult, HostError> {
         super::page::limits(&request)?;
-        self.blocking(move |reader| reader.read(&session, &request))
+        self.blocking(move |reader| reader.read(&session, &scope, &request))
             .await
     }
 
@@ -58,10 +65,11 @@ impl TranscriptReader {
     pub async fn content(
         self: &Arc<Self>,
         session: SessionId,
+        scope: rw_types::session_read::SessionReadScope,
         request: TranscriptContentRead,
     ) -> Result<TranscriptContentPage, HostError> {
         super::content::validate(&session, &request)?;
-        self.blocking(move |reader| reader.read_content(&session, &request))
+        self.blocking(move |reader| reader.read_content(&session, &scope, &request))
             .await
     }
 

@@ -45,6 +45,7 @@ fn fixture(count: u64) -> (tempfile::TempDir, HistoricalReplayEngine) {
 }
 fn read(id: &str) -> ClientCommand {
     ClientCommand::ReadTranscript {
+        scope: rw_types::session_read::SessionReadScope::Session {},
         meta: meta(id),
         session_id: SessionId("history".into()),
         read: TranscriptRead {
@@ -231,6 +232,7 @@ async fn historical_task_reads_are_source_owned_and_session_bound() {
         .dispatch(
             ClientId("bound".into()),
             ClientCommand::GetTodos {
+                scope: rw_types::session_read::SessionReadScope::Session {},
                 meta: meta("tasks"),
                 session_id: SessionId("history".into()),
             },
@@ -247,6 +249,7 @@ async fn historical_task_reads_are_source_owned_and_session_bound() {
         .dispatch(
             ClientId("bound".into()),
             ClientCommand::GetTodos {
+                scope: rw_types::session_read::SessionReadScope::Session {},
                 meta: meta("foreign-tasks"),
                 session_id: SessionId("foreign".into()),
             },
@@ -257,4 +260,153 @@ async fn historical_task_reads_are_source_owned_and_session_bound() {
     assert!(
         matches!(parsed, CommandReply::Read { outcome: CommandOutcome::Rejected { .. }, events } if events.is_empty())
     );
+}
+
+#[tokio::test]
+async fn historical_child_reads_require_effective_source_ancestry_and_reject_rewind_removal() {
+    use rw_types::session_read::{SessionReadAncestor, SessionReadScope};
+    let (root, engine) = fixture(1);
+    let event_meta = |session: &str, sequence| EventMeta {
+        protocol_version: rw_core::PROTOCOL_VERSION,
+        session_id: SessionId(session.into()),
+        sequence_id: SequenceId(sequence),
+        emitted_at: "2026-09-05T00:00:00Z".into(),
+        caused_by: None,
+    };
+    let mut parent = SessionEventLog::open(root.path(), "history").expect("parent");
+    parent
+        .append(EngineEvent::TurnStarted {
+            meta: event_meta("history", 1),
+            turn_id: rw_types::TurnId("1".into()),
+        })
+        .expect("turn");
+    parent
+        .append(EngineEvent::SubagentSpawned {
+            meta: event_meta("history", 2),
+            subagent_id: rw_types::SubagentId("agent".into()),
+            child_session_id: SessionId("child".into()),
+            task: "Inspect".into(),
+        })
+        .expect("spawn");
+    drop(parent);
+    let mut child = SessionEventLog::open(root.path(), "child").expect("child");
+    child
+        .append(EngineEvent::ConversationTurnCommitted {
+            meta: event_meta("child", 0),
+            agent_turn: 0,
+            turn: Turn {
+                role: Role::User,
+                blocks: vec![Block::Text {
+                    text: "child body".into(),
+                }],
+                meta: TurnMeta::default(),
+            },
+        })
+        .expect("child message");
+    child
+        .append(EngineEvent::TodoStateCommitted {
+            meta: event_meta("child", 1),
+            snapshot: rw_types::todo::TodoSnapshot::default(),
+        })
+        .expect("tasks");
+    drop(child);
+    let scope = SessionReadScope::Descendant {
+        root_session_id: SessionId("history".into()),
+        ancestry: vec![SessionReadAncestor {
+            subagent_id: rw_types::SubagentId("agent".into()),
+            session_id: SessionId("child".into()),
+            source_sequence: SequenceId(2),
+        }],
+    };
+    let command = |scope| ClientCommand::GetTodos {
+        meta: meta("child-tasks"),
+        session_id: SessionId("child".into()),
+        scope,
+    };
+    assert!(
+        engine
+            .query(command(SessionReadScope::Session {}))
+            .await
+            .is_err()
+    );
+    let mut wrong = scope.clone();
+    if let SessionReadScope::Descendant { ancestry, .. } = &mut wrong {
+        ancestry[0].source_sequence = SequenceId(1);
+    }
+    assert!(engine.query(command(wrong)).await.is_err());
+    let (_, events) = engine
+        .query(command(scope.clone()))
+        .await
+        .expect("authorized tasks");
+    assert!(
+        matches!(&events[..], [EngineEvent::TodosRead { session_id, result: rw_types::todo::TodoReadResult::Ready { todos }, .. }]
+        if session_id.0 == "child" && todos.through == Some(SequenceId(1)))
+    );
+    let mut page_command = read("child-page");
+    if let ClientCommand::ReadTranscript {
+        session_id,
+        scope: target_scope,
+        ..
+    } = &mut page_command
+    {
+        *session_id = SessionId("child".into());
+        *target_scope = scope.clone();
+    }
+    let (_, events) = engine.query(page_command).await.expect("child page");
+    let [
+        EngineEvent::TranscriptPageReady {
+            result: TranscriptReadResult::Ready { page },
+            ..
+        },
+    ] = &events[..]
+    else {
+        panic!("page")
+    };
+    let source = match &page.items[0].content {
+        rw_types::transcript::TranscriptContent::Conversation { blocks, .. } => match &blocks[0] {
+            rw_types::transcript::TranscriptConversationBlock::Text { body } => body.source.clone(),
+            _ => panic!("text"),
+        },
+        _ => panic!("conversation"),
+    };
+    let (_, events) = engine
+        .query(ClientCommand::ReadTranscriptContent {
+            meta: meta("child-body"),
+            session_id: SessionId("child".into()),
+            scope: scope.clone(),
+            read: rw_types::transcript::TranscriptContentRead {
+                view: page.view.clone(),
+                source,
+                offset: 0,
+                max_bytes: 4096,
+            },
+        })
+        .await
+        .expect("source");
+    assert!(
+        matches!(&events[..], [EngineEvent::TranscriptContentReady { page, .. }] if page.text.contains("child body"))
+    );
+    let mut parent = SessionEventLog::open(root.path(), "history").expect("rewind parent");
+    parent
+        .append(EngineEvent::ConversationRewound {
+            meta: event_meta("history", 3),
+            to_agent_turn: 0,
+            operation_id: "rewind-child".into(),
+            unrestorable_paths: vec![],
+        })
+        .expect("rewind");
+    drop(parent);
+    let mut removed = false;
+    for _ in 0..4 {
+        let error = engine
+            .query(command(scope.clone()))
+            .await
+            .expect_err("removed association");
+        if error.to_string().contains("association is unavailable") {
+            removed = true;
+            break;
+        }
+        assert!(error.to_string().contains("catching up"));
+    }
+    assert!(removed, "rewind must revoke the effective child source");
 }

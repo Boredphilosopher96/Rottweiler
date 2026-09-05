@@ -32,15 +32,18 @@ pub enum ClientCommand {
     GetTodos {
         meta: CommandMeta,
         session_id: SessionId,
+        scope: crate::session_read::SessionReadScope,
     },
     ReadTranscript {
         meta: CommandMeta,
         session_id: SessionId,
+        scope: crate::session_read::SessionReadScope,
         read: crate::transcript::TranscriptRead,
     },
     ReadTranscriptContent {
         meta: CommandMeta,
         session_id: SessionId,
+        scope: crate::session_read::SessionReadScope,
         read: crate::transcript::TranscriptContentRead,
     },
     CreateSession {
