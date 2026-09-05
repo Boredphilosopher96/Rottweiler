@@ -215,3 +215,9 @@ export const EMPTY_TOOL_OUTPUT = ToolOutputBuffer.empty()
 export function toolOutputBuffer(chunks: readonly ToolOutputChunk[]): ToolOutputBuffer {
   return chunks.reduce((buffer, chunk) => buffer.append(chunk), EMPTY_TOOL_OUTPUT)
 }
+
+export function boundedUtf8(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value) <= maxBytes) return value
+  if (maxBytes < 3) return ".".repeat(Math.max(0, maxBytes))
+  return `${utf8Prefix(value, maxBytes - 3)}…`
+}
