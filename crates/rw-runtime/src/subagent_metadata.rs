@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 const VERSION: u16 = 1;
 const MAX_RECORD_BYTES: u64 = 1024 * 1024;
-const MAX_RECORDS: usize = 256;
+const MAX_RECORDS: usize = rw_core::MAX_RETAINED_SUBAGENTS;
 const MAX_PAGE_RECORDS: usize = 16;
 const MAX_PAGE_ALLOCATION_BYTES: usize = 16 * 1024 * 1024;
 
@@ -65,6 +65,26 @@ fn decode_charge(bytes: &[u8]) -> Result<usize, OrchestrationError> {
     }
     Ok(charge)
 }
+pub(crate) fn record_fingerprint(
+    record: &SubagentRecoveryRecord,
+) -> Result<[u8; 32], OrchestrationError> {
+    struct HashWriter(blake3::Hasher);
+    impl Write for HashWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = HashWriter(blake3::Hasher::new());
+    serde_json::to_writer(&mut writer, record).map_err(|error| {
+        session_error(format!("subagent metadata could not fingerprint: {error}"))
+    })?;
+    Ok(*writer.0.finalize().as_bytes())
+}
+
 fn validate_record(record: &SubagentRecoveryRecord) -> Result<(), OrchestrationError> {
     validate_session_id(&record.parent_session_id)?;
     validate_session_id(&record.handle.session_id)?;
@@ -159,13 +179,36 @@ impl PrivateSubagentMetadataStore {
         parent: &SessionId,
         after: Option<&SubagentId>,
     ) -> Result<MetadataPage, OrchestrationError> {
+        self.load_records(parent, after, None)
+    }
+
+    pub(crate) fn load_record(
+        &self,
+        parent: &SessionId,
+        child: &SubagentId,
+    ) -> Result<SubagentRecoveryRecord, OrchestrationError> {
+        validate_component(&child.0)?;
+        self.load_records(parent, None, Some(child))?
+            .records
+            .into_iter()
+            .next()
+            .map(|(record, _)| record)
+            .ok_or_else(|| session_error("subagent recovery record disappeared"))
+    }
+
+    fn load_records(
+        &self,
+        parent: &SessionId,
+        after: Option<&SubagentId>,
+        only: Option<&SubagentId>,
+    ) -> Result<MetadataPage, OrchestrationError> {
         if let Some(after) = after {
             validate_component(&after.0)?;
         }
         #[cfg(unix)]
         {
             self.validate_root_namespace()?;
-            load_parent_unix(&self.root, parent, after)
+            load_parent_unix(&self.root, parent, after, only)
         }
         #[cfg(not(unix))]
         {
@@ -204,6 +247,11 @@ impl PrivateSubagentMetadataStore {
             let mut allocated = 0usize;
             let after = after.map(|id| format!("{}.json", id.0));
             for entry in paths {
+                if only.is_some_and(|only| {
+                    entry.path().file_stem().and_then(|name| name.to_str()) != Some(only.0.as_str())
+                }) {
+                    continue;
+                }
                 if after.as_ref().is_some_and(|after| {
                     entry
                         .file_name()
@@ -540,6 +588,7 @@ fn load_parent_unix(
     root: &OwnedFd,
     parent: &SessionId,
     after: Option<&SubagentId>,
+    only: Option<&SubagentId>,
 ) -> Result<MetadataPage, OrchestrationError> {
     use rustix::fs::{AtFlags, FileType, Mode, OFlags};
     let Some(directory) = open_parent(root, parent, false)? else {
@@ -587,6 +636,9 @@ fn load_parent_unix(
         .into_iter()
         .filter(|name| after.as_ref().is_none_or(|after| name > after))
     {
+        if only.is_some_and(|only| name.strip_suffix(".json") != Some(only.0.as_str())) {
+            continue;
+        }
         if records.len() == MAX_PAGE_RECORDS {
             next = records
                 .last()

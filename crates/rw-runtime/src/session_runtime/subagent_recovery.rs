@@ -176,7 +176,6 @@ pub(super) async fn recover_subagent_tree(
     }]);
     let mut visited = HashSet::new();
     let mut records = Vec::new();
-    let mut retained_bytes = 0usize;
 
     while let Some(node) = queue.pop_front() {
         if !visited.insert(node.parent_session_id.clone()) {
@@ -202,17 +201,8 @@ pub(super) async fn recover_subagent_tree(
                 .load_parent_page(&node.parent_session_id, after.as_ref())
                 .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
             after = page.next;
-            for (mut record, charge) in page.records {
-                // The page owns at most 16 MiB while retained records own at most 48 MiB.
-                if retained_bytes
-                    .checked_add(charge)
-                    .is_none_or(|bytes| bytes > 48 * 1024 * 1024)
-                {
-                    return Err(AgentLoopError::Persistence(
-                        "subagent recovery aggregate allocation exceeded".into(),
-                    ));
-                }
-                if records.len() == 256 {
+            for (mut record, _) in page.records {
+                if records.len() == rw_core::MAX_RETAINED_SUBAGENTS {
                     return Err(AgentLoopError::Persistence(
                         "subagent recovery child capacity exceeded".into(),
                     ));
@@ -276,8 +266,13 @@ pub(super) async fn recover_subagent_tree(
                     parent_depth: record.depth,
                     authorized_roots: vec![child_root],
                 });
-                retained_bytes += charge;
-                records.push(record);
+                let fingerprint = crate::subagent_metadata::record_fingerprint(&record)
+                    .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+                records.push((
+                    record.parent_session_id,
+                    record.handle.subagent_id,
+                    fingerprint,
+                ));
             }
             if after.is_none() {
                 break;
@@ -287,7 +282,18 @@ pub(super) async fn recover_subagent_tree(
 
     // Every actor opens a fully repaired log. Descendant-first rebinding also
     // makes the recovered depth map complete before any parent follow-up runs.
-    for record in records.into_iter().rev() {
+    for (parent, child, expected) in records.into_iter().rev() {
+        let record = metadata
+            .load_record(&parent, &child)
+            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+        if crate::subagent_metadata::record_fingerprint(&record)
+            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?
+            != expected
+        {
+            return Err(AgentLoopError::Persistence(
+                "subagent metadata changed during recovery".into(),
+            ));
+        }
         orchestrator
             .recover_record(record)
             .await

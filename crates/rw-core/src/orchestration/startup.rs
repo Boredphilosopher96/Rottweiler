@@ -70,8 +70,14 @@ pub(super) struct ChildStartup {
     pub(super) metadata: Arc<dyn SubagentMetadataStore>,
     observer: Arc<dyn SubagentObserver>,
     permit: Option<OwnedSemaphorePermit>,
+    retained: Option<OwnedSemaphorePermit>,
 }
 impl ChildStartup {
+    pub(super) fn retained(&mut self) -> Result<OwnedSemaphorePermit, OrchestrationError> {
+        self.retained.take().ok_or_else(|| {
+            OrchestrationError::Session("retained child slot already transferred".into())
+        })
+    }
     pub(super) fn permit(&mut self) -> Result<OwnedSemaphorePermit, OrchestrationError> {
         self.permit.take().ok_or_else(|| {
             OrchestrationError::Session("child startup permit already transferred".to_owned())
@@ -212,6 +218,11 @@ impl SubagentOrchestrator {
             .map_err(|_| OrchestrationError::ConcurrencyExceeded {
                 maximum: self.inner.limits.max_concurrency,
             })?;
+        let retained = Arc::clone(&self.inner.retained)
+            .try_acquire_owned()
+            .map_err(|_| OrchestrationError::RetainedCapacityExceeded {
+                maximum: super::MAX_RETAINED_SUBAGENTS,
+            })?;
         let metadata = self
             .inner
             .metadata
@@ -225,6 +236,7 @@ impl SubagentOrchestrator {
             metadata,
             observer,
             permit: Some(permit),
+            retained: Some(retained),
         };
         let owner = self.clone();
         self.inner.startups.active.send_modify(|count| *count += 1);

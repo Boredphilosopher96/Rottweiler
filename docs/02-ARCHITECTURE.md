@@ -632,3 +632,9 @@ Built on OpenTUI (per ADR-001), which supplies the retained component tree and t
 - **Cancellation**: every async boundary takes a `CancelToken`. No detached tasks without a registered owner.
 - **Redaction**: a single `Redactor`, with **scoped aggressiveness**: content entering model context (file reads, `bash`/`webfetch` output) is redacted only via *known secrets* (registered environment values and credential-file entries) and strict key-format regexes — no entropy heuristic there, because false positives corrupt what the model sees and cause wrong edits. The entropy heuristic applies only at export/share boundaries, where a false positive is cosmetic.
 - **Time & randomness** injected via traits — required for deterministic replay.
+
+### Continuable child ownership
+
+One orchestration owner admits at most 256 live or continuable children across its tree. A child keeps that slot after a turn finishes; a proven close releases it. Startup and failed cleanup retain the same slot, so cancellation cannot exceed the admitted ownership. Canonical child history and artifacts remain queryable independently of live child actors.
+
+Private recovery records have explicit fields and bounded JSON decode admission. Recovery visits record pages of at most 16 entries and 16 MiB of admitted allocation, retains only bounded identity/fingerprint references between parents, then checks each record against its captured fingerprint before rebinding. It does not retain all child policy bodies while traversing the tree.

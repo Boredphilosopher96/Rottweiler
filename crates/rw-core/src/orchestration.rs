@@ -24,6 +24,9 @@ pub const DEFAULT_SUBAGENT_MAX_DEPTH: usize = 2;
 pub const DEFAULT_SUBAGENT_CONCURRENCY: usize = 4;
 pub const DEFAULT_SUBAGENT_MAX_TURNS: usize = 32;
 pub const DEFAULT_SUBAGENT_MAX_DURATION: Duration = Duration::from_mins(30);
+/// Live and continuable children admitted by one session orchestration owner.
+/// Closing a child releases its slot; durable history remains independently queryable.
+pub const MAX_RETAINED_SUBAGENTS: usize = 256;
 const MAX_SUBAGENT_FINAL_TEXT_BYTES: usize = 256 * 1024;
 const MAX_SUBAGENT_DIFF_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SUBAGENT_TOUCHED_FILES: usize = 4096;
@@ -364,6 +367,8 @@ pub enum OrchestrationError {
     DepthExceeded { requested: usize, maximum: usize },
     #[error("subagent concurrency limit {maximum} is exhausted")]
     ConcurrencyExceeded { maximum: usize },
+    #[error("continuable subagent capacity {maximum} is exhausted; close an inactive child")]
+    RetainedCapacityExceeded { maximum: usize },
     #[error("subagent request is invalid: {0}")]
     InvalidRequest(String),
     #[error("subagent `{0}` does not exist")]
@@ -392,6 +397,7 @@ struct OrchestratorInner {
     base_tools: Arc<ToolRegistry>,
     tools: RwLock<Weak<ToolRegistry>>,
     permits: Arc<Semaphore>,
+    retained: Arc<Semaphore>,
     sequence: std::sync::atomic::AtomicU64,
     sessions: Mutex<HashMap<SubagentId, SessionRecord>>,
     session_depths: Mutex<HashMap<SessionId, usize>>,
@@ -400,6 +406,7 @@ struct OrchestratorInner {
 }
 
 struct SessionRecord {
+    _retained: tokio::sync::OwnedSemaphorePermit,
     handle: SubagentHandle,
     task: String,
     agent: String,

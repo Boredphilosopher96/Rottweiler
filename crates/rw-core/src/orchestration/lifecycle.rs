@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    path::Path,
     sync::{Arc, Mutex, RwLock},
     time::Instant,
 };
@@ -19,10 +18,9 @@ use super::{
     NoopSubagentMetadataStore, ObserverProgress, OrchestrationError, OrchestratorInner,
     SessionRecord, SessionState, SubagentHandle, SubagentLaunch, SubagentLimits,
     SubagentMetadataStore, SubagentObserver, SubagentOrchestrator, SubagentProgressObserver,
-    SubagentRecoveryPhase, SubagentRecoveryPolicy, SubagentRecoveryRecord, SubagentRequest,
-    SubagentSession, SubagentSessionFactory, bound_turn_result, bounded_cancel, control_timeout,
-    ensure_child_owner, random_id, restricted_registry, session_record_descriptor,
-    validate_request, zero_usage,
+    SubagentRecoveryPhase, SubagentRecoveryRecord, SubagentRequest, SubagentSession,
+    SubagentSessionFactory, bound_turn_result, bounded_cancel, control_timeout, ensure_child_owner,
+    random_id, restricted_registry, session_record_descriptor, validate_request, zero_usage,
 };
 
 impl SubagentOrchestrator {
@@ -51,6 +49,7 @@ impl SubagentOrchestrator {
                 base_tools: tools,
                 tools: RwLock::new(weak_tools),
                 permits: Arc::new(Semaphore::new(limits.max_concurrency)),
+                retained: Arc::new(Semaphore::new(super::MAX_RETAINED_SUBAGENTS)),
                 sequence: std::sync::atomic::AtomicU64::new(0),
                 sessions: Mutex::new(HashMap::new()),
                 session_depths: Mutex::new(HashMap::new()),
@@ -191,6 +190,7 @@ impl SubagentOrchestrator {
         recovery_record.phase = SubagentRecoveryPhase::Active;
         metadata.save(recovery_record).await?;
         let permit = startup.permit()?;
+        let retained = startup.retained()?;
         let (result_tx, result_rx) = watch::channel(None);
         self.inner
             .session_depths
@@ -204,6 +204,7 @@ impl SubagentOrchestrator {
             .insert(
                 handle.subagent_id.clone(),
                 SessionRecord {
+                    _retained: retained,
                     handle: handle.clone(),
                     task: request.task.clone(),
                     agent: request.agent.clone(),
@@ -672,69 +673,6 @@ impl SubagentOrchestrator {
         Ok(session_record_descriptor(record))
     }
 
-    /// Rebinds a persisted child so follow-up survives a parent process restart.
-    ///
-    /// # Errors
-    ///
-    /// Returns for invalid depth, missing recovery data, or factory rebind failure.
-    pub async fn recover(
-        &self,
-        parent_session_id: SessionId,
-        handle: SubagentHandle,
-        depth: usize,
-        workspace_root: &Path,
-        worktree: Option<&WorktreeLeaseRecord>,
-        policy: &SubagentRecoveryPolicy,
-    ) -> Result<(), OrchestrationError> {
-        if depth == 0 || depth > self.inner.limits.max_depth {
-            return Err(OrchestrationError::DepthExceeded {
-                requested: depth,
-                maximum: self.inner.limits.max_depth,
-            });
-        }
-        self.ensure_recovery_identity_available(&handle)?;
-        let session = self
-            .inner
-            .factory
-            .rebind(
-                &handle.session_id,
-                Some(workspace_root),
-                worktree,
-                None,
-                policy,
-            )
-            .await?
-            .ok_or_else(|| OrchestrationError::UnknownSubagent(handle.subagent_id.0.clone()))?;
-        self.inner
-            .session_depths
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(handle.session_id.clone(), depth);
-        self.inner
-            .sessions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                handle.subagent_id.clone(),
-                SessionRecord {
-                    handle,
-                    task: "Recovered subagent".to_owned(),
-                    agent: "subagent".to_owned(),
-                    model: policy.model_alias.clone(),
-                    session,
-                    state: SessionState::Inactive,
-                    result: None,
-                    isolation: SubagentIsolation::Worktree,
-                    parent_session_id,
-                    latest_durable_artifact_id: None,
-                    closing_artifact: None,
-                    close_completed: false,
-                    close_gate: Arc::new(tokio::sync::Mutex::new(())),
-                },
-            );
-        Ok(())
-    }
-
     /// Restores one child solely from validated host-private metadata.
     ///
     /// # Errors
@@ -752,6 +690,11 @@ impl SubagentOrchestrator {
             });
         }
         self.ensure_recovery_identity_available(&record.handle)?;
+        let retained = Arc::clone(&self.inner.retained)
+            .try_acquire_owned()
+            .map_err(|_| OrchestrationError::RetainedCapacityExceeded {
+                maximum: super::MAX_RETAINED_SUBAGENTS,
+            })?;
         let unique_tool_names = record
             .tool_names
             .iter()
@@ -822,6 +765,7 @@ impl SubagentOrchestrator {
             .insert(
                 record.handle.subagent_id.clone(),
                 SessionRecord {
+                    _retained: retained,
                     handle: record.handle,
                     task: record.task,
                     agent: record.agent,

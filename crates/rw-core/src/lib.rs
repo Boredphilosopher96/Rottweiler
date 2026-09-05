@@ -98,10 +98,10 @@ pub use model_catalog::{
 };
 pub use orchestration::{
     ActorSubagentSessionFactory, DEFAULT_SUBAGENT_CONCURRENCY, DEFAULT_SUBAGENT_MAX_DEPTH,
-    DEFAULT_SUBAGENT_MAX_DURATION, DEFAULT_SUBAGENT_MAX_TURNS, NoopSubagentMetadataStore,
-    OrchestrationError, SpawnAgentTool, SubagentArtifactSource, SubagentHandle, SubagentLaunch,
-    SubagentLimits, SubagentMetadataStore, SubagentObserver, SubagentOrchestrator,
-    SubagentProgressObserver, SubagentRecoveryPhase, SubagentRecoveryPolicy,
+    DEFAULT_SUBAGENT_MAX_DURATION, DEFAULT_SUBAGENT_MAX_TURNS, MAX_RETAINED_SUBAGENTS,
+    NoopSubagentMetadataStore, OrchestrationError, SpawnAgentTool, SubagentArtifactSource,
+    SubagentHandle, SubagentLaunch, SubagentLimits, SubagentMetadataStore, SubagentObserver,
+    SubagentOrchestrator, SubagentProgressObserver, SubagentRecoveryPhase, SubagentRecoveryPolicy,
     SubagentRecoveryRecord, SubagentRequest, SubagentSession, SubagentSessionFactory,
     SubagentTurnResult, WorktreeSubagentSessionFactory, diff_artifact_reference,
     incomplete_subagent_lifecycles, interrupted_subagent_recovery_result,

@@ -941,3 +941,67 @@ async fn promotion_failure_closes_child_commits_terminal_and_removes_metadata() 
     assert!(events[0].starts_with("spawn:"));
     assert!(events[1].starts_with("finish:"));
 }
+
+#[tokio::test]
+async fn continuable_children_hold_capacity_until_their_close_is_proven() {
+    let factory = Arc::new(FakeFactory::default());
+    let owner = orchestrator(SubagentLimits::default(), factory.clone());
+    let parent = SessionId("capacity-parent".into());
+    let observer = Arc::new(RecordingObserver::default());
+    let mut handles = Vec::new();
+    for _ in 0..MAX_RETAINED_SUBAGENTS {
+        let handle = owner
+            .start(
+                parent.clone(),
+                request("short"),
+                observer.clone(),
+                CancellationToken::default(),
+            )
+            .await
+            .expect("admitted child");
+        owner.wait(&handle).await.expect("settled turn");
+        handles.push(handle);
+    }
+    assert!(matches!(
+        owner
+            .start(
+                parent.clone(),
+                request("overflow"),
+                observer.clone(),
+                CancellationToken::default()
+            )
+            .await,
+        Err(OrchestrationError::RetainedCapacityExceeded {
+            maximum: MAX_RETAINED_SUBAGENTS
+        })
+    ));
+    let released = handles.pop().expect("retained child");
+    owner
+        .close(&parent, &released.subagent_id)
+        .await
+        .expect("proven close");
+    let replacement = owner
+        .start(
+            parent.clone(),
+            request("replacement"),
+            observer,
+            CancellationToken::default(),
+        )
+        .await
+        .expect("released slot reused");
+    owner.wait(&replacement).await.expect("replacement settles");
+    owner
+        .close(&parent, &replacement.subagent_id)
+        .await
+        .expect("close replacement");
+    for handle in handles {
+        owner
+            .close(&parent, &handle.subagent_id)
+            .await
+            .expect("close retained");
+    }
+    assert_eq!(
+        owner.inner.retained.available_permits(),
+        MAX_RETAINED_SUBAGENTS
+    );
+}
