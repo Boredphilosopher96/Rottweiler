@@ -148,6 +148,11 @@ fn preflight_does_not_normalize_until_the_caller_admits_it() {
     use std::sync::atomic::{AtomicBool, Ordering};
     static PREPARED: AtomicBool = AtomicBool::new(false);
     struct Probe;
+    impl DecodeAllocation for Probe {
+        fn decode_node_bytes() -> Option<usize> {
+            Some(1024)
+        }
+    }
     impl PrepareAllocation for Probe {
         fn prepared_heap_bytes(&self) -> Option<usize> {
             Some(1024)
