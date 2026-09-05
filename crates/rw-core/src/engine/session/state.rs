@@ -73,6 +73,24 @@ pub(in crate::engine) enum ActorCommand {
         content: String,
         respond: oneshot::Sender<Result<MessageDisposition, AgentLoopError>>,
     },
+    PluginQuery {
+        respond: oneshot::Sender<
+            Result<rw_types::extension_contract::ExtensionSessionSnapshot, AgentLoopError>,
+        >,
+    },
+    PluginStateRead {
+        plugin_id: String,
+        respond: oneshot::Sender<
+            Result<rw_types::extension_contract::ExtensionStateSnapshot, AgentLoopError>,
+        >,
+    },
+    PluginStateCommit {
+        plugin_id: String,
+        transaction: rw_types::extension_contract::ExtensionStateTransaction,
+        respond: oneshot::Sender<
+            Result<rw_types::extension_contract::ExtensionStateCommitOutcome, AgentLoopError>,
+        >,
+    },
     PluginSetStatus {
         plugin_id: String,
         status: String,

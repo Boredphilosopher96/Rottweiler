@@ -110,6 +110,41 @@ pub(super) async fn handle_actor_command(
             .await;
             let _ = respond.send(result);
         }
+        ActorCommand::PluginQuery { respond } => {
+            let _ = respond.send(Ok(rw_types::extension_contract::ExtensionSessionSnapshot {
+                session_id: state.session_id.clone(),
+                title: state.session_title.clone(),
+                mode_id: state.mode_id.clone(),
+                model_alias: state.model_alias.clone(),
+                active_turn: state
+                    .running
+                    .as_ref()
+                    .map(|turn| crate::engine::wire_turn_id(turn.id)),
+                queued_messages: state.queued.len(),
+                last_sequence: state.sequence.map(SequenceId),
+            }));
+        }
+        ActorCommand::PluginStateRead { plugin_id, respond } => {
+            let result = async {
+                validate_plugin_id(&plugin_id)?;
+                config
+                    .event_sink
+                    .extension_state(&plugin_id)
+                    .await
+                    .map(|view| view.snapshot)
+            }
+            .await;
+            let _ = respond.send(result);
+        }
+        ActorCommand::PluginStateCommit {
+            plugin_id,
+            transaction,
+            respond,
+        } => {
+            let result =
+                super::plugin_state::commit(plugin_id, transaction, state, config, events).await;
+            let _ = respond.send(result);
+        }
         ActorCommand::PluginSetStatus {
             plugin_id,
             status,

@@ -23,6 +23,7 @@ pub use event_clock::BudgetLedgerTotals;
 pub use event_clock::EventClock;
 pub use event_clock::SystemEventClock;
 mod pending_event;
+mod plugin_state;
 use pending_event::PendingEvent;
 use std::{
     collections::{BTreeMap, VecDeque},

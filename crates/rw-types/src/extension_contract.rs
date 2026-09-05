@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use ts_rs::TS;
 
-use crate::{SequenceId, SessionId};
+use crate::{ModeId, SequenceId, SessionId, TurnId};
 
 pub const MAX_EXTENSION_NAMESPACES: usize = 64;
 pub const MAX_EXTENSION_STATE_KEYS: usize = 64;
@@ -75,6 +75,35 @@ pub struct ExtensionStateSnapshot {
     /// starts after its inherited prefix instead of redelivering parent effects.
     #[serde(deserialize_with = "Option::deserialize")]
     pub delivery_start: Option<ExtensionDeliveryCursor>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExtensionStateCommitOutcome {
+    Committed {
+        revision: SequenceId,
+    },
+    Conflict {
+        #[serde(deserialize_with = "Option::deserialize")]
+        actual_revision: Option<SequenceId>,
+    },
+}
+
+/// Bounded operational state; prompts, credentials and provider configuration
+/// are outside this session observation capability.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionSessionSnapshot {
+    pub session_id: SessionId,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub title: Option<String>,
+    pub mode_id: ModeId,
+    pub model_alias: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub active_turn: Option<TurnId>,
+    pub queued_messages: usize,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub last_sequence: Option<SequenceId>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]

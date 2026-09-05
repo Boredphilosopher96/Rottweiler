@@ -12,9 +12,8 @@ use tokio::sync::oneshot;
 
 /// Opaque, plugin-scoped machine capability for one session actor.
 ///
-/// This capability deliberately exposes only the three approved plugin push
-/// operations. It cannot dispatch client commands, acquire the driver lease,
-/// answer permissions, or interrupt a turn.
+/// Its namespace is fixed by the host. Operations enter the actor and do not
+/// acquire the client driver lease or bypass permission policy.
 #[derive(Clone)]
 pub struct PluginSessionCapability {
     pub(super) commands: mpsc::Sender<ActorCommand>,
@@ -31,6 +30,61 @@ impl fmt::Debug for PluginSessionCapability {
 }
 
 impl PluginSessionCapability {
+    /// Reads bounded operational state from the attached session actor.
+    ///
+    /// # Errors
+    /// Rejects a closed actor.
+    pub async fn query(
+        &self,
+    ) -> Result<rw_types::extension_contract::ExtensionSessionSnapshot, AgentLoopError> {
+        let (respond, receive) = oneshot::channel();
+        self.commands
+            .send(ActorCommand::PluginQuery { respond })
+            .await
+            .map_err(|_| AgentLoopError::Closed)?;
+        receive.await.map_err(|_| AgentLoopError::Closed)?
+    }
+
+    /// Reads only this plugin's canonical durable namespace.
+    ///
+    /// # Errors
+    /// Rejects unavailable persistence or a closed actor.
+    pub async fn read_state(
+        &self,
+    ) -> Result<rw_types::extension_contract::ExtensionStateSnapshot, AgentLoopError> {
+        let (respond, receive) = oneshot::channel();
+        self.commands
+            .send(ActorCommand::PluginStateRead {
+                plugin_id: self.plugin_id.clone(),
+                respond,
+            })
+            .await
+            .map_err(|_| AgentLoopError::Closed)?;
+        receive.await.map_err(|_| AgentLoopError::Closed)?
+    }
+
+    /// Commits a bounded compare-and-swap in this plugin's namespace.
+    ///
+    /// # Errors
+    /// Rejects invalid state, exhausted admission, persistence failure or closure.
+    pub async fn commit_state(
+        &self,
+        transaction: rw_types::extension_contract::ExtensionStateTransaction,
+    ) -> Result<rw_types::extension_contract::ExtensionStateCommitOutcome, AgentLoopError> {
+        rw_types::extension_contract::validate_state_transaction(&transaction)
+            .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
+        let (respond, receive) = oneshot::channel();
+        self.commands
+            .send(ActorCommand::PluginStateCommit {
+                plugin_id: self.plugin_id.clone(),
+                transaction,
+                respond,
+            })
+            .await
+            .map_err(|_| AgentLoopError::Closed)?;
+        receive.await.map_err(|_| AgentLoopError::Closed)?
+    }
+
     /// Injects one plain user message through normal actor sequencing.
     /// Slash-prefixed content remains a message and is never command-dispatched.
     ///
