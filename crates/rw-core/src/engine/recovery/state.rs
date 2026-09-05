@@ -7,6 +7,9 @@ pub(super) const BOUNDARIES: u8 = 2;
 pub(super) const CONTEXT_ACTIONS: u8 = 3;
 pub(super) const PRUNED_OUTPUTS: u8 = 4;
 pub(super) const ACCOUNTING: u8 = 5;
+pub(super) const ACTIVE_ASSISTANT: u8 = 6;
+pub(super) const ACTIVE_TOOL_LIFECYCLE: u8 = 7;
+pub(super) const ACTIVE_TOOL_RESULTS: u8 = 8;
 pub(super) const MAX_QUEUED: usize = 128;
 pub(super) const MAX_QUESTIONS: usize = 64;
 
@@ -63,6 +66,44 @@ pub struct ActiveTurn {
     pub first_conversation_ordinal: u64,
     pub last_assistant_commit: Option<SequenceId>,
     pub last_tool_commit: Option<SequenceId>,
+    pub assistant_parts: SourceTotals,
+    pub tool_lifecycle: SourceTotals,
+    pub tool_results: SourceTotals,
+}
+
+impl ActiveTurn {
+    pub(super) fn replace_conversation(&mut self, sequence: SequenceId) {
+        self.first_conversation_ordinal = 0;
+        self.last_assistant_commit = Some(sequence);
+        self.last_tool_commit = Some(sequence);
+        self.assistant_parts = SourceTotals::default();
+        self.tool_results = SourceTotals::default();
+    }
+}
+
+/// Admission totals for source-backed active work, independent of historical output.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SourceTotals {
+    pub records: u64,
+    pub serialized_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(super) struct ActiveSource {
+    pub sequence: SequenceId,
+    pub serialized_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ToolStartIdentity {
+    pub invocation_id: rw_types::ToolInvocationId,
+    pub tool_call_id: rw_types::ToolCallId,
+    pub index: usize,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(super) enum ToolLifecycleSource {
+    Started(ToolStartIdentity),
+    Finished(rw_types::ToolInvocationId),
 }
 
 /// Bounded live control state. Large client/provider payloads are source selectors.

@@ -1,0 +1,35 @@
+{
+  "scope": "Bounded indexed interrupted-turn input construction; production actor adoption remains in progress",
+  "runtime": "Rust 1.97.1; macOS aarch64; private /tmp/rw-storage-target",
+  "verification": [
+    {
+      "command": "CARGO_TARGET_DIR=/tmp/rw-storage-target cargo test -p rw-core engine::recovery --lib",
+      "result": "9 passed; includes reused provider tool IDs, compacted active conversation, oversize metadata rejection"
+    },
+    {
+      "command": "CARGO_TARGET_DIR=/tmp/rw-storage-target cargo clippy -p rw-core --all-targets -- -D warnings",
+      "result": "passed"
+    }
+  ],
+  "limits": {
+    "materialization_json_bytes": 33554432,
+    "materialization_records": 16384,
+    "head_bytes": 65536
+  },
+  "limitations": [
+    "No production cold-open claim",
+    "No Linux, 1M-event or eight-hour soak qualification in this unit",
+    "Canonical serialized-byte admission is not process RSS measurement"
+  ],
+  "source_sha256": {
+    "crates/rw-core/src/engine/recovery/maintenance.rs": "0fd1ca8ad93f874250bff56f1e54353860bbf597d03eec044ef58d627af45c36",
+    "crates/rw-core/src/engine/recovery/encoding.rs": "4aced7a8ab8295ffc74b0ce7c1132bd64d06e3133e08b7d93615629b1d10d5de",
+    "crates/rw-core/src/engine/recovery/reduce.rs": "16e2ab35d5612cb027e3721d492856b36b81c0a1d24ad1fdbcc2731b64e0b8fd",
+    "crates/rw-core/src/engine/recovery/active.rs": "2686f987f0b2f05147556cf2a6d91fd2a63bf7c22098014a4220123dca77fa98",
+    "crates/rw-core/src/engine/recovery/read.rs": "24c60a52f3fabf848b60404b668ed876d614a4fec41e7ec443c2a3ca754f169b",
+    "crates/rw-core/src/engine/recovery/state.rs": "26a4ef599b185307c9a579bff5874abf44ca345f43941d19aa1608d5032281cf",
+    "crates/rw-core/src/engine/recovery/tests.rs": "3f1942f9c41c4f34678bac3341eba41809642c391ecefdab4d596640d7152459",
+    "crates/rw-core/src/engine/recovery/active_tests.rs": "593d60af21234411ea851708536d53d197fba34948136a9ee9ff5c66f0e296cf",
+    "crates/rw-core/src/engine/recovery/projector.rs": "6c5df9aeca1941e645593f6c99d24a4f3f08fbdb45752ff4b8e70e8ff1a92a5c"
+  }
+}

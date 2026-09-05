@@ -9,7 +9,7 @@ use rw_types::{
 };
 use tempfile::tempdir;
 
-fn text(role: Role, body: &str) -> Turn {
+pub(super) fn text(role: Role, body: &str) -> Turn {
     Turn {
         role,
         blocks: vec![Block::Text { text: body.into() }],
@@ -35,7 +35,7 @@ fn terminal(turn: u64) -> PendingEvent {
         },
     }
 }
-fn catch_up(
+pub(super) fn catch_up(
     recovery: &mut CanonicalRecovery,
     source: &rw_store::session::journal::JournalReadView,
     modes: &ModeRegistry,
@@ -47,7 +47,7 @@ fn catch_up(
     }
     panic!("projection did not converge");
 }
-fn append(journal: &mut SegmentedJournal, pending: Vec<PendingEvent>) {
+pub(super) fn append(journal: &mut SegmentedJournal, pending: Vec<PendingEvent>) {
     let first = journal.read_view().prefix_identity().next_sequence;
     journal
         .append_batch(

@@ -3,9 +3,11 @@ use super::{
     encoding::serialized_size,
     projector::{BatchRows, key},
     state::{
-        ACCOUNTING, AcceptedSource, ActiveTurn, BOUNDARIES, Boundary, CONTEXT_ACTIONS,
-        CONVERSATION, ConversationCut, ConversationSource, MAX_QUESTIONS, MAX_QUEUED, Maintenance,
-        PRUNED_OUTPUTS, QuestionSource, QueuedSource, RecoveryHead, RewindPhase, TurnSourceKind,
+        ACCOUNTING, ACTIVE_ASSISTANT, ACTIVE_TOOL_LIFECYCLE, ACTIVE_TOOL_RESULTS, AcceptedSource,
+        ActiveSource, ActiveTurn, BOUNDARIES, Boundary, CONTEXT_ACTIONS, CONVERSATION,
+        ConversationCut, ConversationSource, MAX_QUESTIONS, MAX_QUEUED, Maintenance,
+        PRUNED_OUTPUTS, QuestionSource, QueuedSource, RecoveryHead, RewindPhase, SourceTotals,
+        ToolLifecycleSource, ToolStartIdentity, TurnSourceKind,
     },
 };
 use crate::engine::{
@@ -68,8 +70,14 @@ pub(super) fn reduce(
                 }
                 if let Some(active) = &mut head.control.active {
                     match turn.role {
-                        Role::Assistant => active.last_assistant_commit = Some(sequence),
-                        Role::Tool => active.last_tool_commit = Some(sequence),
+                        Role::Assistant => {
+                            active.last_assistant_commit = Some(sequence);
+                            active.assistant_parts = SourceTotals::default();
+                        }
+                        Role::Tool => {
+                            active.last_tool_commit = Some(sequence);
+                            active.tool_results = SourceTotals::default();
+                        }
                         _ => {}
                     }
                 }
@@ -111,6 +119,9 @@ pub(super) fn reduce(
                 first_conversation_ordinal: head.conversation.turns,
                 last_assistant_commit: None,
                 last_tool_commit: None,
+                assistant_parts: SourceTotals::default(),
+                tool_lifecycle: SourceTotals::default(),
+                tool_results: SourceTotals::default(),
             });
             head.control.next_turn = head.control.next_turn.max(turn.saturating_add(1));
         }
@@ -322,6 +333,9 @@ pub(super) fn reduce(
         PendingEvent::CompactionFinished { usage, cost, .. } => {
             if let Some(cut) = head.compacting.take() {
                 head.conversation = cut;
+                if let Some(active) = &mut head.control.active {
+                    active.replace_conversation(sequence);
+                }
             }
             if usage.is_some() && cost.is_some() {
                 rows.put(key(ACCOUNTING, 0, sequence.0), &sequence)?;
@@ -393,12 +407,45 @@ pub(super) fn reduce(
             );
             head.budget = budget.snapshot();
         }
-        PendingEvent::TextDelta { .. }
-        | PendingEvent::ThinkingDelta { .. }
-        | PendingEvent::CitationDelta { .. }
-        | PendingEvent::ToolCallStarted { .. }
-        | PendingEvent::ToolCallFinished { .. }
-        | PendingEvent::ToolOutput { .. }
+        PendingEvent::TextDelta { turn, .. }
+        | PendingEvent::ThinkingDelta { turn, .. }
+        | PendingEvent::CitationDelta { turn, .. } => {
+            active_source(head, rows, event, turn, ACTIVE_ASSISTANT)?;
+        }
+        PendingEvent::ToolCallStarted {
+            turn,
+            id,
+            invocation_id,
+            index,
+            ..
+        } => {
+            tool_lifecycle(
+                head,
+                rows,
+                turn,
+                sequence,
+                &ToolLifecycleSource::Started(ToolStartIdentity {
+                    invocation_id,
+                    tool_call_id: rw_types::ToolCallId(id),
+                    index,
+                }),
+            )?;
+        }
+        PendingEvent::ToolCallFinished {
+            turn,
+            invocation_id,
+            ..
+        } => {
+            tool_lifecycle(
+                head,
+                rows,
+                turn,
+                sequence,
+                &ToolLifecycleSource::Finished(invocation_id),
+            )?;
+            active_source(head, rows, event, turn, ACTIVE_TOOL_RESULTS)?;
+        }
+        PendingEvent::ToolOutput { .. }
         | PendingEvent::PermissionRequested { .. }
         | PendingEvent::ToolDiffReady { .. }
         | PendingEvent::HookFailure { .. }
@@ -476,4 +523,70 @@ fn context_change(
     )?;
     head.context_cut = sequence.0;
     Ok(())
+}
+
+fn active_source(
+    head: &mut RecoveryHead,
+    rows: &mut BatchRows,
+    event: &EngineEvent,
+    turn: u64,
+    namespace: u8,
+) -> Result<(), RecoveryError> {
+    let Some(active) = head
+        .control
+        .active
+        .as_mut()
+        .filter(|active| active.turn == turn)
+    else {
+        return Ok(());
+    };
+    let totals = match namespace {
+        ACTIVE_ASSISTANT => &mut active.assistant_parts,
+        ACTIVE_TOOL_RESULTS => &mut active.tool_results,
+        _ => return Err(RecoveryError::Invalid("active source namespace")),
+    };
+    let source = ActiveSource {
+        sequence: event
+            .meta()
+            .ok_or(RecoveryError::Invalid("non-durable active source"))?
+            .sequence_id,
+        serialized_bytes: serialized_size(event)?,
+    };
+    totals.records = totals
+        .records
+        .checked_add(1)
+        .ok_or(RecoveryError::Limit("active source count"))?;
+    totals.serialized_bytes = totals
+        .serialized_bytes
+        .checked_add(source.serialized_bytes)
+        .ok_or(RecoveryError::Limit("active source bytes"))?;
+    rows.put(key(namespace, turn, source.sequence.0), &source)
+}
+
+fn tool_lifecycle(
+    head: &mut RecoveryHead,
+    rows: &mut BatchRows,
+    turn: u64,
+    sequence: SequenceId,
+    source: &ToolLifecycleSource,
+) -> Result<(), RecoveryError> {
+    let Some(active) = head
+        .control
+        .active
+        .as_mut()
+        .filter(|active| active.turn == turn)
+    else {
+        return Ok(());
+    };
+    active.tool_lifecycle.records = active
+        .tool_lifecycle
+        .records
+        .checked_add(1)
+        .ok_or(RecoveryError::Limit("tool lifecycle count"))?;
+    active.tool_lifecycle.serialized_bytes = active
+        .tool_lifecycle
+        .serialized_bytes
+        .checked_add(serialized_size(source)?)
+        .ok_or(RecoveryError::Limit("tool lifecycle bytes"))?;
+    rows.put(key(ACTIVE_TOOL_LIFECYCLE, turn, sequence.0), source)
 }

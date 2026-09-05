@@ -1,5 +1,7 @@
 //! Canonical recovery and exact provider history; independent of display transcript rows.
 
+mod active;
+pub use active::InterruptedTurnInputs;
 mod encoding;
 mod maintenance;
 mod projector;
@@ -14,7 +16,7 @@ pub use projector::{CanonicalRecovery, RecoveryProgress};
 use rw_store::session::recovery_index::RecoveryIndexError;
 pub use state::{
     AcceptedSource, ActiveTurn, ConversationCut, ConversationSource, QuestionSource, QueuedSource,
-    RecoveryControl, RecoveryHead, TurnSourceKind,
+    RecoveryControl, RecoveryHead, SourceTotals, ToolStartIdentity, TurnSourceKind,
 };
 use thiserror::Error;
 
@@ -41,3 +43,6 @@ pub enum RecoveryError {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod active_tests;

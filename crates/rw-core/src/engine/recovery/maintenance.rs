@@ -113,6 +113,9 @@ impl CanonicalRecovery {
                     || from.turns == 0
                 {
                     head.conversation = to;
+                    if let Some(active) = &mut head.control.active {
+                        active.replace_conversation(sequence);
+                    }
                     head.context_cut = 0;
                     head.next_sequence = sequence
                         .0

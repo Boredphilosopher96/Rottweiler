@@ -73,9 +73,9 @@ impl CanonicalRecovery {
 
 /// Exact canonical history snapshot; all pages share one metadata transaction and raw prefix.
 pub struct CanonicalHistory {
-    read: RecoveryReadView,
-    head: RecoveryHead,
-    source: JournalReadView,
+    pub(super) read: RecoveryReadView,
+    pub(super) head: RecoveryHead,
+    pub(super) source: JournalReadView,
 }
 impl CanonicalHistory {
     /// Bounded state describing the visible conversation and current controls.
@@ -201,12 +201,12 @@ impl CanonicalHistory {
     }
 }
 
-struct SourceReader<'a> {
-    source: &'a JournalReadView,
-    events: VecDeque<EngineEvent>,
+pub(super) struct SourceReader<'a> {
+    pub(super) source: &'a JournalReadView,
+    pub(super) events: VecDeque<EngineEvent>,
 }
 impl SourceReader<'_> {
-    fn event(&mut self, sequence: SequenceId) -> Result<EngineEvent, RecoveryError> {
+    pub(super) fn event(&mut self, sequence: SequenceId) -> Result<EngineEvent, RecoveryError> {
         if self
             .events
             .front()

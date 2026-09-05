@@ -13,7 +13,7 @@ use rw_types::{EngineEvent, SequenceId};
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeMap;
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const EVENTS_PER_BATCH: usize = 64;
 
 /// One cancellable, durable canonical projection step.
