@@ -46,7 +46,7 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for CallbackCom
             .set_status("callback entered")
             .await
             .expect("actor services callback");
-        assert_eq!(
+        assert!(matches!(
             session
                 .control(ExtensionControl::SelectMode {
                     mode: ModeId("plan".into())
@@ -54,7 +54,7 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for CallbackCom
                 .await
                 .expect("policy response"),
             ExtensionControlOutcome::Busy {}
-        );
+        ));
         self.called_back.notify_one();
         self.release.notified().await;
         session
