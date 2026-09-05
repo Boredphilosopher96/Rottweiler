@@ -136,6 +136,7 @@ describe("client-owned renderer handoff", () => {
     let finish!: () => void
     const pending = new Promise<void>(resolve => { finish = resolve })
     const app = createRottweilerApp(renderer, { sessionReader: {
+      tail: emptySessionReader.tail,
       uiCatalog: async () => ({ entries: [] }),
   uiPanels: async () => ({ panels: [] }),
   todos: async () => ({ type: "ready", todos: { through: "1000", snapshot: { items: [] } } }),

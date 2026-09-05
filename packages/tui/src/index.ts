@@ -234,6 +234,11 @@ async function main(): Promise<void> {
       if (transcriptPainted && value.length > 0) composerAcceptedInput = true
     },
     sessionReader: {
+      tail: async (target, read, signal, allocation) => {
+        const { runtime } = await runtimeBootstrap
+        if (runtime === null) throw new Error("engine runtime is unavailable")
+        return runtime.sessionReader.tail(target, read, signal, allocation)
+      },
       uiCatalog: async (sessionId, signal) => {
         const { runtime } = await runtimeBootstrap
         if (runtime === null) throw new Error("engine runtime is unavailable")

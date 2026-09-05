@@ -24,6 +24,7 @@ export function fixturePage(session: string, read: TranscriptRead): TranscriptPa
 
 /** Explicit read capability for interaction tests that have no historical content. */
 export const emptySessionReader: import("../../src/session-reader").SessionReader = {
+  tail: async () => { throw new Error("this fixture has no live tail") },
   uiCatalog: async () => ({ entries: [] }),
   uiPanels: async () => ({ panels: [] }),
   todos: async () => ({ type: "ready", todos: { through: "1000", snapshot: { items: [] } } }),
@@ -62,6 +63,7 @@ export function conversationItem(id: number, role: "user" | "assistant", text: s
 /** Native semantic fixture data, kept outside the app's bounded read cache. */
 export function sessionReaderFor(items: readonly import("../../src/protocol").TranscriptItem[], head?: () => Pick<import("../../src/protocol").TranscriptView, "generation" | "through">): import("../../src/session-reader").SessionReader {
   return {
+    tail: emptySessionReader.tail,
     todos: emptySessionReader.todos,
     uiCatalog: emptySessionReader.uiCatalog,
     uiPanels: emptySessionReader.uiPanels,

@@ -3,7 +3,7 @@ import { expect, test } from "bun:test"
 import { createTestRenderer, MockTreeSitterClient } from "@opentui/core/testing"
 import { createRottweilerApp } from "../src/app"
 import { PROTOCOL_VERSION, type ClientCommand } from "../src/protocol"
-import { fixturePage, sessionReaderFor, toolItem, waitForHistory } from "./fixtures/history"
+import { emptySessionReader, fixturePage, sessionReaderFor, toolItem, waitForHistory } from "./fixtures/history"
 
 async function waitForParent(app: RottweilerApp): Promise<void> {
   const deadline = performance.now() + 1000
@@ -20,6 +20,7 @@ async function childHarness(activity: "running" | "idle", sourceReader?: import(
   const app = createRottweilerApp(harness.renderer, {
     sessionId: "parent", treeSitterClient: new MockTreeSitterClient(),
     sessionReader: {
+      tail: emptySessionReader.tail,
       uiCatalog: async () => ({ entries: [] }),
   uiPanels: async () => ({ panels: [] }),
   todos: async () => ({ type: "ready", todos: { through: "1000", snapshot: { items: [] } } }),

@@ -179,6 +179,14 @@ export class TuiEngineRuntime {
   )
 
   readonly sessionReader: SessionReader = {
+    tail: async ({ sessionId, scope }, read, signal, allocation) => {
+      const reply = await this.#readSession({ type: "read_transcript_tail", meta: this.#meta(), session_id: sessionId, scope, read }, signal, allocation)
+      const event = reply.events[0]
+      if (reply.events.length !== 1 || event?.type !== "transcript_tail_ready" || event.session_id !== sessionId) {
+        throw new EngineRuntimeError("live tail reply is missing its session-bound result")
+      }
+      return event.result
+    },
     uiCatalog: async (sessionId, signal) => {
       const reply = await this.#readSession({ type: "get_ui_catalog", meta: this.#meta(), session_id: sessionId }, signal)
       const event = reply.events[0]
@@ -807,7 +815,7 @@ export class TuiEngineRuntime {
   }
 
   async #readSession(
-    command: Extract<ClientCommand, { type: "read_transcript" | "read_transcript_content" | "get_todos" | "get_ui_catalog" | "get_ui_panels" }>,
+    command: Extract<ClientCommand, { type: "read_transcript_tail" | "read_transcript" | "read_transcript_content" | "get_todos" | "get_ui_catalog" | "get_ui_panels" }>,
     signal: AbortSignal,
     allocation?: ReplyAllocation,
   ): Promise<Extract<CommandReply, { type: "read" }>> {
