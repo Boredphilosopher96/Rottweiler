@@ -269,8 +269,9 @@ async fn empty_log_rejects_sequence_zero_cursor_and_null_cursor_completes_prompt
         .expect("null cursor replay must complete")
         .expect("replay completion item")
         .expect("valid replay completion");
+    let completed = decode_host_event(completed);
     assert!(matches!(
-        &decode_host_event(completed),
+        &completed,
         EngineEvent::SessionReplayCompleted {
             session_id,
             through_sequence: None,

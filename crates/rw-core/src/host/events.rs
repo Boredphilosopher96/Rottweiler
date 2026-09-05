@@ -32,7 +32,7 @@ impl EngineHost {
         } else {
             None
         };
-        let (channel, subscription_id, host_events) = self
+        let (channel, subscription_id, host_events, lease) = self
             .client_events
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -47,6 +47,7 @@ impl EngineHost {
                 client_id: bound.client_id.clone(),
                 subscription_id,
                 receiver: host_events,
+                _lease: lease,
                 channel,
                 registry: client_events,
                 pending: provider_auth,

@@ -156,15 +156,36 @@ struct ClientEventSubscribers {
     senders: HashMap<ClientEventSubscriptionId, mpsc::Sender<HostEvent>>,
 }
 
-#[derive(Default)]
 struct ClientEventChannel {
     delivery: tokio::sync::Mutex<()>,
     subscribers: Mutex<ClientEventSubscribers>,
+    slots: Arc<tokio::sync::Semaphore>,
+}
+impl Default for ClientEventChannel {
+    fn default() -> Self {
+        Self {
+            delivery: tokio::sync::Mutex::default(),
+            subscribers: Mutex::default(),
+            slots: Arc::new(tokio::sync::Semaphore::new(4)),
+        }
+    }
 }
 
-#[derive(Default)]
 struct ClientEventRegistry {
     clients: HashMap<ClientId, Arc<ClientEventChannel>>,
+    slots: Arc<tokio::sync::Semaphore>,
+}
+impl Default for ClientEventRegistry {
+    fn default() -> Self {
+        Self {
+            clients: HashMap::new(),
+            slots: Arc::new(tokio::sync::Semaphore::new(64)),
+        }
+    }
+}
+struct ClientSubscriptionLease {
+    _global: tokio::sync::OwnedSemaphorePermit,
+    _client: tokio::sync::OwnedSemaphorePermit,
 }
 
 impl ClientEventChannel {
@@ -214,30 +235,34 @@ impl ClientEventRegistry {
             Arc<ClientEventChannel>,
             ClientEventSubscriptionId,
             mpsc::Receiver<HostEvent>,
+            ClientSubscriptionLease,
         ),
         HostError,
     > {
-        let total: usize = self
-            .clients
-            .values()
-            .map(|channel| channel.senders().len())
-            .sum();
-        let own = self
-            .clients
-            .get(client_id)
-            .map_or(0, |channel| channel.senders().len());
-        if total >= 64 || own >= 4 {
-            return Err(HostError::Protocol(
-                "host subscription admission exhausted".into(),
-            ));
-        }
+        let global = self
+            .slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| HostError::Protocol("host subscription admission exhausted".into()))?;
         let channel = Arc::clone(
             self.clients
                 .entry(client_id.clone())
                 .or_insert_with(|| Arc::new(ClientEventChannel::default())),
         );
+        let client =
+            channel.slots.clone().try_acquire_owned().map_err(|_| {
+                HostError::Protocol("client subscription admission exhausted".into())
+            })?;
         let (id, receiver) = channel.subscribe();
-        Ok((channel, id, receiver))
+        Ok((
+            channel,
+            id,
+            receiver,
+            ClientSubscriptionLease {
+                _global: global,
+                _client: client,
+            },
+        ))
     }
 
     fn unsubscribe(
@@ -281,6 +306,7 @@ struct ProviderAuthSubscriptionGuard {
     client_id: ClientId,
     subscription_id: ClientEventSubscriptionId,
     receiver: mpsc::Receiver<HostEvent>,
+    _lease: ClientSubscriptionLease,
     channel: Arc<ClientEventChannel>,
     registry: Arc<Mutex<ClientEventRegistry>>,
     pending: Arc<PendingProviderAuths>,

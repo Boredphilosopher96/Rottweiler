@@ -294,11 +294,16 @@ async fn production_factory_fork_composes_and_resumes_child() {
         CommandOutcome::Accepted {}
     );
     let replayed_child = loop {
-        if let EngineEvent::SessionForked { child, meta, .. } = replacement_events
-            .recv()
-            .await
-            .expect("replayed fork event")
-            .expect("replayed fork result")
+        if let EngineEvent::SessionForked { child, meta, .. } =
+            serde_json::from_slice::<EngineEvent>(
+                &replacement_events
+                    .recv()
+                    .await
+                    .expect("replayed fork event")
+                    .expect("replayed fork result")
+                    .json,
+            )
+            .expect("encoded fork event")
         {
             assert_eq!(meta.client_id, restarted_client_key.client_id);
             assert_eq!(meta.request_id, restarted_client_key.request_id);
@@ -455,11 +460,16 @@ async fn production_factory_fork_composes_and_resumes_child() {
         CommandOutcome::Accepted {}
     );
     let replayed_child = loop {
-        if let EngineEvent::SessionForked { child, meta, .. } = replacement_events
-            .recv()
-            .await
-            .expect("replayed fork event")
-            .expect("replayed fork result")
+        if let EngineEvent::SessionForked { child, meta, .. } =
+            serde_json::from_slice::<EngineEvent>(
+                &replacement_events
+                    .recv()
+                    .await
+                    .expect("replayed fork event")
+                    .expect("replayed fork result")
+                    .json,
+            )
+            .expect("encoded fork event")
         {
             assert_eq!(meta.client_id, second_restart_key.client_id);
             assert_eq!(meta.request_id, second_restart_key.request_id);
