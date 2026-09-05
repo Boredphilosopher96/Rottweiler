@@ -582,3 +582,5 @@ mod lifecycle;
 mod tools;
 
 mod startup;
+
+mod worktree_startup;
