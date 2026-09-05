@@ -170,7 +170,6 @@ impl ProviderRuntime {
             .resolve(alias)
             .ok()?
             .iter()
-            .cloned()
             .filter(|route| {
                 self.route_candidates
                     .get(&route.provider)
@@ -180,6 +179,7 @@ impl ProviderRuntime {
                             == NativeWebSearchCapability::Supported
                     })
             })
+            .cloned()
             .collect::<Vec<_>>();
         if candidates.is_empty() || candidates.len() > 64 {
             return None;
