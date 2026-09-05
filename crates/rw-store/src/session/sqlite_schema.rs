@@ -16,8 +16,7 @@ pub(super) const ACCOUNTING_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS turn_acco
          );";
 const ACCOUNTING_PROGRESS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS accounting_progress(
     session_id TEXT NOT NULL PRIMARY KEY,
-    search_complete INTEGER NOT NULL CHECK(search_complete IN (0,1)),
-    next_sequence TEXT NOT NULL CHECK(length(next_sequence)<=20),
+    next_sequence TEXT NOT NULL,
     digest BLOB NOT NULL CHECK(length(digest)=32)
 );";
 const ACCOUNTING_TOTALS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS accounting_totals(
@@ -38,7 +37,8 @@ pub(super) const SESSIONS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS sessions(
     cost_micros INTEGER NOT NULL,
     turn_count INTEGER NOT NULL,
     explicit_title INTEGER NOT NULL CHECK(explicit_title IN (0,1)),
-    next_sequence TEXT NOT NULL,
+    search_complete INTEGER NOT NULL CHECK(search_complete IN (0,1)),
+    next_sequence TEXT NOT NULL CHECK(length(next_sequence)<=20),
     source_digest BLOB NOT NULL CHECK(length(source_digest)=32)
 );";
 pub(super) const DOCUMENTS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS search_documents(
