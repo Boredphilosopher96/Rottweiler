@@ -446,8 +446,8 @@ mod tests {
 
     use super::*;
     use rw_ext::{
-        ApprovalStore, ApprovalStoreError, DenyPushHandler, LaunchedPluginProcess, PluginHost,
-        PluginLauncher, SupervisedPluginProcess, approve_plugin_launch,
+        ApprovalStore, ApprovalStoreError, DenyPushHandler, PluginHost, PluginLauncher,
+        approve_plugin_launch,
     };
     use rw_plugin_protocol::{PluginCapabilities, PluginManifest, PluginToolCapability};
     use rw_tools::EgressPolicy;

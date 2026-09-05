@@ -1,5 +1,6 @@
 #![allow(clippy::expect_used)]
 use super::*;
+use rw_tools::EgressPolicy;
 use std::os::unix::process::CommandExt as _;
 
 fn incomplete_child() -> (Child, PluginProcessConfig, u32) {

@@ -26,7 +26,7 @@ use crate::{HookDirective, HookError, HookHandler, HookInvocation};
 use rw_plugin_protocol::{
     ExtensionEventKind, HookEvent, MAX_CAPABILITIES_PER_KIND, MAX_NAME_BYTES,
     MAX_RPC_MESSAGE_BYTES, METHOD_HOOK_INVOKE, ManifestError, PluginCapabilities,
-    PluginHookCapability, PluginManifest, PluginPush, PluginToolCapability, PluginToolEffect,
+    PluginHookCapability, PluginManifest, PluginPush, PluginToolCapability,
 };
 #[cfg(test)]
 use rw_plugin_protocol::{
@@ -34,6 +34,7 @@ use rw_plugin_protocol::{
     METHOD_PROVIDER_COMPLETE, METHOD_PROVIDER_EVENT, METHOD_PROVIDER_HTTP,
     METHOD_PROVIDER_HTTP_CANCEL, METHOD_PROVIDER_HTTP_EVENT, METHOD_PROVIDER_MODELS,
     METHOD_TOOL_CALL, METHOD_UI_NOTIFY, PROTOCOL_VERSION, PluginProviderCapability,
+    PluginToolEffect,
 };
 
 /// Converts a protocol hook declaration into rw-ext's runtime registration.
