@@ -98,7 +98,7 @@ pub(super) fn selector(path: &[UiSelectorStep]) -> Result<(), UiContractError> {
     Ok(())
 }
 
-fn identifier(value: &str) -> Result<(), UiContractError> {
+pub(super) fn identifier(value: &str) -> Result<(), UiContractError> {
     if value.is_empty()
         || value.len() > MAX_UI_LABEL_BYTES
         || !value

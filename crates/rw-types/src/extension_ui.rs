@@ -1,10 +1,17 @@
 //! Declarative presentation data. The host evaluates selectors; clients render
 //! bounded projected fields without executing extension code.
+mod client;
+pub use client::{
+    UiActionRequest, UiActionTarget, UiCatalog, UiCatalogEntry, UiContributionOwner,
+    UiDisplayAction, UiDisplayDescriptor, UiDisplayField, UiDisplaySurface, UiGenerationId,
+    UiPanelSnapshot, UiPresentation,
+};
 mod projection;
 mod validation;
 pub use projection::project_fields;
 pub use validation::{validate_contributions, validate_projected_fields};
 
+use rw_memory_derive::PrepareAllocation;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -23,21 +30,27 @@ pub const MAX_UI_TABLE_ROWS: usize = 32;
 pub const MAX_UI_TABLE_COLUMNS: usize = 8;
 pub const MAX_UI_ACTION_ARGUMENT_BYTES: usize = 4096;
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS)]
+#[derive(
+    Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS, PrepareAllocation,
+)]
 #[serde(tag = "step", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UiSelectorStep {
     Field { name: String },
     Index { index: u32 },
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS)]
+#[derive(
+    Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS, PrepareAllocation,
+)]
 #[serde(deny_unknown_fields)]
 pub struct UiTableColumn {
     pub label: String,
     pub path: Vec<UiSelectorStep>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS)]
+#[derive(
+    Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS, PrepareAllocation,
+)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UiField {
     Text {
@@ -96,7 +109,9 @@ impl UiField {
 }
 
 /// A command identifier, never a shell fragment, file path, URL or executable.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS)]
+#[derive(
+    Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS, PrepareAllocation,
+)]
 #[serde(deny_unknown_fields)]
 pub struct UiAction {
     pub id: String,
@@ -105,7 +120,9 @@ pub struct UiAction {
     pub arguments: Value,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS)]
+#[derive(
+    Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS, PrepareAllocation,
+)]
 #[serde(tag = "surface", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UiContribution {
     Tool {
@@ -152,7 +169,9 @@ impl UiContribution {
 
 /// Host-produced data, keyed by the declared field identity. Missing/wrong-shaped
 /// source values become null or empty collections instead of executing coercions.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS)]
+#[derive(
+    Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS, PrepareAllocation,
+)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UiProjectedField {
     Text {
@@ -177,7 +196,9 @@ pub enum UiProjectedField {
     },
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS)]
+#[derive(
+    Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS, PrepareAllocation,
+)]
 #[serde(deny_unknown_fields)]
 pub struct UiProjectedFields {
     pub fields: Vec<UiProjectedField>,

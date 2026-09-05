@@ -14,8 +14,10 @@ use rw_types::extension_contract::{
     ExtensionDeliveryCursor, ExtensionStateMutation, ExtensionStateTransaction,
 };
 use rw_types::extension_ui::{
-    UiAction, UiContribution, UiField, UiProjectedField, UiProjectedFields, UiSelectorStep,
-    UiTableColumn,
+    UiAction, UiActionRequest, UiActionTarget, UiCatalog, UiCatalogEntry, UiContribution,
+    UiContributionOwner, UiDisplayAction, UiDisplayDescriptor, UiDisplayField, UiDisplaySurface,
+    UiField, UiGenerationId, UiPanelSnapshot, UiPresentation, UiProjectedField, UiProjectedFields,
+    UiSelectorStep, UiTableColumn,
 };
 use rw_types::todo::{TodoItem, TodoReadResult, TodoReadSnapshot, TodoSnapshot, TodoStatus};
 use rw_types::{
@@ -201,6 +203,18 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(ExtensionDeliveryCursor);
     declaration!(ExtensionStateMutation);
     declaration!(ExtensionStateTransaction);
+    declaration!(UiGenerationId);
+    declaration!(UiContributionOwner);
+    declaration!(UiDisplayField);
+    declaration!(UiDisplayAction);
+    declaration!(UiDisplaySurface);
+    declaration!(UiDisplayDescriptor);
+    declaration!(UiPresentation);
+    declaration!(UiCatalogEntry);
+    declaration!(UiCatalog);
+    declaration!(UiActionTarget);
+    declaration!(UiActionRequest);
+    declaration!(UiPanelSnapshot);
     declaration!(UiAction);
     declaration!(UiContribution);
     declaration!(UiField);

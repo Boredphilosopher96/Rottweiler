@@ -11,15 +11,22 @@ pub fn project_fields(
     fields: &[UiField],
     source: &Value,
 ) -> Result<UiProjectedFields, UiContractError> {
+    project_fields_with_budget(fields, source, MAX_UI_SURFACE_BYTES)
+}
+pub(super) fn project_fields_with_budget(
+    fields: &[UiField],
+    source: &Value,
+    limit: usize,
+) -> Result<UiProjectedFields, UiContractError> {
     validation::validate_fields(fields)?;
     let mut output = UiProjectedFields {
         fields: fields.iter().map(empty).collect(),
         truncated: false,
     };
-    let base = validation::encoded_bytes(&output, MAX_UI_SURFACE_BYTES)?;
+    let base = validation::encoded_bytes(&output, limit)?;
     // Account for commas/quotes before retaining values, including JSON escaping.
     let mut budget = Budget {
-        bytes: MAX_UI_SURFACE_BYTES - base,
+        bytes: limit - base,
         truncated: false,
     };
     for (field, projected) in fields.iter().zip(&mut output.fields) {
