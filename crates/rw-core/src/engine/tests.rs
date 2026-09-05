@@ -1,0 +1,37 @@
+#![cfg(test)]
+#![allow(clippy::expect_used)]
+
+mod attachments;
+mod budget;
+mod cancellation;
+mod close;
+mod command_copy;
+mod commands;
+mod compaction;
+mod compaction_recovery;
+mod context;
+mod diff_approval;
+mod doom_loop;
+mod event_batches;
+mod fixtures;
+mod hooks;
+mod model_selection;
+mod modes;
+mod mutation_checkpoints;
+mod permissions;
+mod persistence;
+mod plan;
+mod plugin_capability;
+mod protocol_control;
+mod provider_usage;
+mod questions;
+mod reasoning;
+mod recovery;
+mod redaction;
+mod rewind;
+mod shell;
+mod startup;
+mod subagents;
+mod subscription;
+mod titles;
+mod tool_order;

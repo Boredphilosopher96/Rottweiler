@@ -1,4 +1,56 @@
-use super::*;
+#![cfg(test)]
+
+use crate::engine::AgentLoopError;
+use crate::engine::model;
+use crate::engine::model::ModelDriver;
+use crate::engine::pending_event::PendingEvent;
+use crate::engine::session;
+use crate::engine::session::SessionActor;
+use crate::engine::session::SessionHandle;
+use crate::engine::session_resources::SessionResources;
+use crate::engine::shutdown;
+use crate::engine::tests::fixtures::checkpoints::RecordingCheckpoints;
+use crate::engine::tests::fixtures::models::ScriptedModel;
+use crate::engine::tests::fixtures::sinks::RecordingSink;
+use crate::engine::tests::fixtures::support::config;
+use crate::engine::tests::fixtures::support::descriptor;
+use crate::engine::tests::fixtures::support::stop_script;
+use crate::engine::tests::fixtures::support::tool_script;
+use crate::engine::tests::fixtures::tools::StubOutcome;
+use crate::engine::tests::fixtures::tools::StubTool;
+use crate::engine::turn;
+use async_trait::async_trait;
+use futures_util::stream;
+use rw_ext::HookDirective;
+use rw_ext::HookDispatcher;
+use rw_ext::HookEffect;
+use rw_ext::HookError;
+use rw_ext::HookEvent;
+use rw_ext::HookHandler;
+use rw_ext::HookInvocation;
+use rw_ext::HookRegistration;
+use rw_providers::BoxEventStream;
+use rw_providers::ProviderRequest;
+use rw_tools::CapabilityManifest;
+use rw_tools::Tool;
+use rw_tools::ToolContext;
+use rw_tools::ToolDescriptor;
+use rw_tools::ToolError;
+use rw_tools::ToolRegistry;
+use rw_tools::ToolResult;
+use rw_types::SessionId;
+use rw_types::SubagentId;
+use rw_types::ToolCapability;
+use rw_types::config::PermissionDecision;
+use serde_json::Value;
+use serde_json::json;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+use tokio::sync::Notify;
+use tokio::time::timeout;
 
 #[derive(Default)]
 struct CleanupTool {
