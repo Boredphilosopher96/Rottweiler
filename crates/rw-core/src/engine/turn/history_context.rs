@@ -44,24 +44,6 @@ pub(in crate::engine) async fn read_view(
     Ok(page)
 }
 
-pub(in crate::engine) async fn read_current(
-    config: &SessionActorConfig,
-    expected_through: Option<SequenceId>,
-) -> Result<HistoryRead<ConversationPage>, AgentLoopError> {
-    read_view(&capture(config, expected_through).await?).await
-}
-
-pub(in crate::engine) async fn assemble_current(
-    config: Arc<SessionActorConfig>,
-    tasks: &crate::engine::task_ownership::ActorTasks,
-    expected_through: Option<SequenceId>,
-    queued: VecDeque<String>,
-    include_dump: bool,
-) -> Result<HistoryRead<CurrentContext>, AgentLoopError> {
-    let view = capture(&config, expected_through).await?;
-    assemble_view(config, tasks, view, queued, include_dump).await
-}
-
 pub(in crate::engine) async fn assemble_view(
     config: Arc<SessionActorConfig>,
     tasks: &crate::engine::task_ownership::ActorTasks,
