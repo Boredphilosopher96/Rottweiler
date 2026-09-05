@@ -2,6 +2,7 @@
 use super::*;
 use crate::server::ServerEngine as _;
 use rw_store::session::SessionEventLog;
+use rw_types::session_read::{SessionReadAncestor, SessionReadScope};
 use rw_types::{
     Block, ClientRole, CommandMeta, CommandReply, EventMeta, RequestId, Role, Turn, TurnMeta,
     transcript::{TranscriptPosition, TranscriptRead, TranscriptReadResult},
@@ -262,27 +263,28 @@ async fn historical_task_reads_are_source_owned_and_session_bound() {
     );
 }
 
-#[tokio::test]
-async fn historical_child_reads_require_effective_source_ancestry_and_reject_rewind_removal() {
-    use rw_types::session_read::{SessionReadAncestor, SessionReadScope};
-    let (root, engine) = fixture(1);
-    let event_meta = |session: &str, sequence| EventMeta {
+fn descendant_meta(session: &str, sequence: u64) -> EventMeta {
+    EventMeta {
         protocol_version: rw_core::PROTOCOL_VERSION,
         session_id: SessionId(session.into()),
         sequence_id: SequenceId(sequence),
         emitted_at: "2026-09-05T00:00:00Z".into(),
         caused_by: None,
-    };
+    }
+}
+
+fn descendant_fixture() -> (tempfile::TempDir, HistoricalReplayEngine, SessionReadScope) {
+    let (root, engine) = fixture(1);
     let mut parent = SessionEventLog::open(root.path(), "history").expect("parent");
     parent
         .append(EngineEvent::TurnStarted {
-            meta: event_meta("history", 1),
+            meta: descendant_meta("history", 1),
             turn_id: rw_types::TurnId("1".into()),
         })
         .expect("turn");
     parent
         .append(EngineEvent::SubagentSpawned {
-            meta: event_meta("history", 2),
+            meta: descendant_meta("history", 2),
             subagent_id: rw_types::SubagentId("agent".into()),
             child_session_id: SessionId("child".into()),
             task: "Inspect".into(),
@@ -292,7 +294,7 @@ async fn historical_child_reads_require_effective_source_ancestry_and_reject_rew
     let mut child = SessionEventLog::open(root.path(), "child").expect("child");
     child
         .append(EngineEvent::ConversationTurnCommitted {
-            meta: event_meta("child", 0),
+            meta: descendant_meta("child", 0),
             agent_turn: 0,
             turn: Turn {
                 role: Role::User,
@@ -305,7 +307,7 @@ async fn historical_child_reads_require_effective_source_ancestry_and_reject_rew
         .expect("child message");
     child
         .append(EngineEvent::TodoStateCommitted {
-            meta: event_meta("child", 1),
+            meta: descendant_meta("child", 1),
             snapshot: rw_types::todo::TodoSnapshot::default(),
         })
         .expect("tasks");
@@ -318,6 +320,12 @@ async fn historical_child_reads_require_effective_source_ancestry_and_reject_rew
             source_sequence: SequenceId(2),
         }],
     };
+    (root, engine, scope)
+}
+
+#[tokio::test]
+async fn historical_child_reads_require_effective_source_ancestry_and_reject_rewind_removal() {
+    let (root, engine, scope) = descendant_fixture();
     let command = |scope| ClientCommand::GetTodos {
         meta: meta("child-tasks"),
         session_id: SessionId("child".into()),
@@ -389,7 +397,7 @@ async fn historical_child_reads_require_effective_source_ancestry_and_reject_rew
     let mut parent = SessionEventLog::open(root.path(), "history").expect("rewind parent");
     parent
         .append(EngineEvent::ConversationRewound {
-            meta: event_meta("history", 3),
+            meta: descendant_meta("history", 3),
             to_agent_turn: 0,
             operation_id: "rewind-child".into(),
             unrestorable_paths: vec![],

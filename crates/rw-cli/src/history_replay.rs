@@ -36,21 +36,25 @@ impl HistoricalReplayEngine {
         &self,
         command: ClientCommand,
     ) -> std::result::Result<(CommandOutcome, Vec<EngineEvent>), HostError> {
-        let (session, scope) = match &command {
-            ClientCommand::ReadTranscript {
-                session_id, scope, ..
-            }
-            | ClientCommand::ReadTranscriptContent {
-                session_id, scope, ..
-            }
-            | ClientCommand::GetTodos {
-                session_id, scope, ..
-            } => (session_id, scope),
-            _ => {
-                return Err(HostError::Protocol(
-                    "query is unavailable in historical view".into(),
-                ));
-            }
+        let (ClientCommand::ReadTranscript {
+            session_id: session,
+            scope,
+            ..
+        }
+        | ClientCommand::ReadTranscriptContent {
+            session_id: session,
+            scope,
+            ..
+        }
+        | ClientCommand::GetTodos {
+            session_id: session,
+            scope,
+            ..
+        }) = &command
+        else {
+            return Err(HostError::Protocol(
+                "query is unavailable in historical view".into(),
+            ));
         };
         let root = scope
             .root(session)
