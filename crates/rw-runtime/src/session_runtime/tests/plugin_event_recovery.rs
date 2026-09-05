@@ -56,7 +56,7 @@ async fn sdk_event_process_crash_replays_only_the_unacknowledged_delivery() {
             .dispatch(rw_types::ClientCommand::AttachSession {
                 meta: rw_types::CommandMeta {
                     protocol_version: rw_types::PROTOCOL_VERSION,
-                    client_id: rw_types::ClientId("event-fixture".into()),
+                    client_id: rw_types::ClientId("local".into()),
                     request_id: rw_types::RequestId("first-attach".into())
                 },
                 session_id: rw_types::SessionId("event-recovery-session".into()),

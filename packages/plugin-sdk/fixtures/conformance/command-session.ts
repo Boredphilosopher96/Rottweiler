@@ -12,16 +12,6 @@ export const plugin = definePlugin({
   handlers: {
     commands: {
       "context-panel": async (params, { session, state, push }) => {
-        const tool = await session.callTool("read", { path: "broker.txt" })
-        if (tool.is_error || tool.output === null || !JSON.stringify(tool.output).includes("broker owned bytes")) throw new Error("host tool did not return its canonical output")
-        const context = await session.readContext({ expected_sequence: null, after_item_id: null })
-        if (context.outcome !== "ready") throw new Error("context inventory was not ready")
-        const changed = await session.control({ action: "select_mode", mode: "plan" })
-        if (changed.outcome !== "applied") throw new Error("same-command mode control was rejected")
-        const previous = await state.read()
-        const committed = await state.commit({ expected_revision: previous.revision, mutations: [{ action: "set", key: "context/items", value: context.items.length }] })
-        if (committed.outcome !== "committed") throw new Error("state commit did not settle")
-        const revision = await push.publishPanel("context", { summary: `Context has ${context.items.length} items` })
         if (params.arguments === "navigate") {
           const navigation = await session.control({ action: "navigate", target: { kind: "transcript", sequence: "0" } })
           if (navigation.outcome !== "applied") throw new Error("navigation was not deferred")
@@ -33,7 +23,18 @@ export const plugin = definePlugin({
           const beforeFinish = await state.read()
           const finished = await state.commit({ expected_revision: beforeFinish.revision, mutations: [{ action: "set", key: "navigation/completed", value: true }] })
           if (finished.outcome !== "committed") throw new Error("callback completion marker did not commit")
+          return { navigation: true }
         }
+        const tool = await session.callTool("read", { path: "broker.txt" })
+        if (tool.is_error || tool.output === null || !JSON.stringify(tool.output).includes("broker owned bytes")) throw new Error("host tool did not return its canonical output")
+        const context = await session.readContext({ expected_sequence: null, after_item_id: null })
+        if (context.outcome !== "ready") throw new Error("context inventory was not ready")
+        const changed = await session.control({ action: "select_mode", mode: "plan" })
+        if (changed.outcome !== "applied") throw new Error("same-command mode control was rejected")
+        const previous = await state.read()
+        const committed = await state.commit({ expected_revision: previous.revision, mutations: [{ action: "set", key: "context/items", value: context.items.length }] })
+        if (committed.outcome !== "committed") throw new Error("state commit did not settle")
+        const revision = await push.publishPanel("context", { summary: `Context has ${context.items.length} items` })
         return { revision, state_revision: committed.revision, items: context.items.length }
       },
     },
