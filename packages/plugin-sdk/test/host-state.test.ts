@@ -71,3 +71,18 @@ test("typed controls preserve pending outcomes and reject implicit authority", a
   await expect(hostStateContext(async () => badPage).session.readContext(read)).rejects.toThrow("invalid context page")
   expect(await hostStateContext(async () => ({ outcome: "restart" })).session.readContext(read)).toEqual({ outcome: "restart" })
 })
+
+test("context paging admits a complete namespaced tool identity", async () => {
+  const itemId = `tool:${"x".repeat(256)}`
+  const page = {
+    outcome: "ready", sequence: "4", next_after_item_id: itemId,
+    items: [{ item_id: itemId, kind: "tool_definitions", source: "tool_registry",
+      estimated_tokens: "42", state: { pinned: false, evicted: false, summarized: false, pruned: false } }],
+  }
+  const calls: JsonValue[] = []
+  const session = hostStateContext(async (_, params) => { calls.push(params); return page }).session
+  expect(await session.readContext({ expected_sequence: "4", after_item_id: itemId })).toEqual(page)
+  await expect(session.readContext({ expected_sequence: "4", after_item_id: `${itemId}x` }))
+    .rejects.toThrow("invalid context read")
+  expect(calls).toHaveLength(1)
+})
