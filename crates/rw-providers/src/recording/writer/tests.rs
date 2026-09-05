@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used)]
+
 use super::{RecordingWriter, WriterMessage};
 use crate::ProviderErrorKind;
 use std::sync::atomic::Ordering;
@@ -55,7 +57,7 @@ impl crate::Provider for PanickingProvider {
     async fn settle_effects(&self) -> Result<(), crate::ProviderError> {
         panic!("injected provider proof panic")
     }
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "proof-panic"
     }
     fn capabilities(&self) -> crate::Capabilities {

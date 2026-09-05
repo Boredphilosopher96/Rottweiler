@@ -26,6 +26,11 @@ pub enum ReceiptError {
     Conflict,
 }
 
+struct StoredReceipt {
+    fingerprint: Option<String>,
+    length: Option<i64>,
+    completion: Option<Vec<u8>>,
+}
 pub struct CommandReceipts {
     connection: Connection,
 }
@@ -118,14 +123,19 @@ impl CommandReceipts {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let existing: Option<(Option<String>, Option<i64>, Option<Vec<u8>>)> = transaction.query_row(
+        let existing: Option<StoredReceipt> = transaction.query_row(
             "SELECT CASE WHEN length(fingerprint)=64 THEN fingerprint ELSE NULL END, length(completion), CASE WHEN length(completion)<=?2 THEN completion ELSE NULL END FROM command_receipts WHERE operation_id=?1",
-            params![operation.0, 16 * 1024 * 1024_i64], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            params![operation.0, 16 * 1024 * 1024_i64], |row| Ok(StoredReceipt { fingerprint: row.get(0)?, length: row.get(1)?, completion: row.get(2)? }),
         ).optional()?;
-        if let Some((stored, length, completion)) = existing {
+        if let Some(StoredReceipt {
+            fingerprint: stored,
+            length,
+            completion,
+        }) = existing
+        {
             let stored = stored.ok_or(ReceiptError::Invalid)?;
             validate(operation, &stored)?;
-            if length.is_some_and(|length| length > 16 * 1024 * 1024 || length < 0)
+            if length.is_some_and(|length| !(0..=16 * 1024 * 1024).contains(&length))
                 || length.is_some() != completion.is_some()
             {
                 return Err(ReceiptError::Invalid);

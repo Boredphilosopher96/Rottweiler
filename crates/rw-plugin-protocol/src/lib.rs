@@ -543,7 +543,7 @@ impl PluginCapabilities {
             .try_for_each(PluginHookCapability::validate)
     }
 
-    fn validate(&self) -> Result<(), ManifestError> {
+    fn validate_ui(&self) -> Result<(), ManifestError> {
         rw_types::extension_ui::validate_contributions(&self.ui).map_err(|_| {
             ManifestError::InvalidField {
                 field: "ui",
@@ -572,6 +572,11 @@ impl PluginCapabilities {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<(), ManifestError> {
+        self.validate_ui()?;
         validate_count("tools", self.tools.len())?;
         validate_count("commands", self.commands.len())?;
         self.validate_hooks()?;

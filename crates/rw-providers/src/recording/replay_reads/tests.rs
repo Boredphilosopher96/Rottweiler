@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used)]
+
 use super::{MAX_FIXTURE_BYTES, PROOF_TIMEOUT, ReplayReads, read_fixture};
 use crate::ProviderErrorKind;
 use std::{
