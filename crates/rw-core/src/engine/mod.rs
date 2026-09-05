@@ -27,10 +27,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     fmt,
     path::{Component, Path, PathBuf},
-    sync::{
-        Arc, RwLock,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Arc,
     time::Duration,
 };
 
@@ -42,31 +39,23 @@ use rw_ext::{
     HookRegistration, ModeDefinition, ModeRegistry,
 };
 use rw_providers::TokenUsage;
-use rw_tools::{ApprovalPreview, CancellationToken, MutationScope, ToolContext, ToolRegistry};
-use rw_types::attachment_contract::{
-    MAX_ATTACHMENTS_PER_MESSAGE, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TEXT_ATTACHMENT_BYTES,
-    MAX_TOTAL_ATTACHMENT_BYTES,
-};
+use rw_tools::{ApprovalPreview, CancellationToken, ToolRegistry};
 use rw_types::config::ThinkingLevel;
 use rw_types::config::{PermissionDecision, PermissionRule};
 use rw_types::{
-    AccountingAttribution, Answer, ApprovalBinding, ApprovalDecision, Attachment, AttachmentData,
-    Block, ClientCommand, ClientId, ClientRole, CommandAckMeta, CommandMeta, CommandOutcome,
-    CompactionReason, ContextItemId, ContextItemKind, ContextSnapshot, Cost, CostSnapshot,
-    EngineError, EngineErrorCategory, EngineEvent, ImageRef, ModeId, ModelAlias,
-    ModelContextTransfer, ModelSwitchQuestion, PROTOCOL_VERSION, PermissionApprovalDescriptor,
-    PermissionApprovalScope, PermissionModeDescriptor, PermissionRuleDescriptor,
-    PermissionStateDescriptor, PlanArtifact, PlanDecision, Question, QuestionId, QuestionOption,
-    QuestionResponseKind, ReviewFileStatus, RewindTarget, Role, SequenceId, SessionId, SessionMode,
-    SessionReview, ShellId, StoredAttachment, ToolCallId, ToolOutput, ToolOutputStream, Turn,
-    TurnAccounting, TurnId, TurnMeta, TurnStatus, UnifiedDiff, UnrestorablePath, Usage,
+    AccountingAttribution, Answer, ApprovalBinding, Block, ClientId, ContextItemId,
+    ContextItemKind, ContextSnapshot, Cost, CostSnapshot, EngineEvent, ModeId, ModelAlias,
+    ModelContextTransfer, ModelSwitchQuestion, PROTOCOL_VERSION, PlanArtifact, PlanDecision,
+    Question, QuestionId, QuestionOption, QuestionResponseKind, ReviewFileStatus, Role, SequenceId,
+    SessionId, SessionMode, SessionReview, ShellId, StoredAttachment, ToolCallId, ToolOutput,
+    ToolOutputStream, Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus, UnifiedDiff, Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::broadcast;
 
-use crate::{InitDepth, PermissionGate, PermissionRequest, apply_init_plan, plan_init};
+use crate::{InitDepth, PermissionGate, PermissionRequest};
 
 mod commands;
 mod dispatch;
@@ -89,24 +78,13 @@ pub use commands::{
     SessionCommandContext, SessionCommandOutput, WorkspaceRootController,
     WorkspaceRuntimeGeneration, builtin_command_registry,
 };
-use commands::{
-    render_context_snapshot, render_cost_snapshot, render_permission_approvals,
-    render_permission_snapshot, render_plan, render_session_review,
-};
+use projection::approved_plan_context_item;
 pub use projection::{
     ContextSurgeryAction, InterruptedToolRepair, RecoveredQuestion, RecoveredUserShell,
     SessionProjectionError, SessionProjector, SessionRecoveredState, project_session_events,
     project_session_events_with_modes, project_session_read_view,
 };
-use projection::{
-    approved_plan_context_item, find_journal_boundary, parse_turn_id, plan_review_context_turn,
-    project_journal_prefix, review_hash_is_valid, review_path_is_valid, shell_context_turn,
-};
-use session::{
-    ActorCommand, ActorState, PendingModelSwitch, PrecommittedAnswer, PreparedModelSwitch,
-    ProtocolCompletion, recover_actor_from_journal, validate_gap, validate_plugin_id,
-    validate_plugin_text,
-};
+use session::ActorState;
 pub use session::{
     PluginSessionCapability, SessionActor, SessionActorConfig, SessionHandle, SessionSubscription,
     StartupNotification,
@@ -114,13 +92,7 @@ pub use session::{
 pub use session_extension::{
     NoopSessionExtensionController, SessionExtensionController, SessionExtensionSnapshot,
 };
-use turn::{
-    BudgetUsage, CommandTurnOverrides, RunningTurn, StartTurnRuntime, TurnSignal, append_text,
-    append_thinking, assemble_session_context, build_cost_snapshot, compact_during_turn,
-    context_snapshot, current_approval_diff, emit, emit_batch, evaluate_budget, hook_event_name,
-    normalize_manual_session_title, persist_event, prompt_dump, session_accounting_fallback,
-    start_turn, start_turn_with_overrides, validate_mutation_scope,
-};
+use turn::{TurnSignal, append_text, append_thinking, emit_batch, hook_event_name, persist_event};
 
 const SESSION_TITLE_TIMEOUT: Duration = Duration::from_secs(4);
 const SESSION_TITLE_PROMPT_CHARS: usize = 1_024;
