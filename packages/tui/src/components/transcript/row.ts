@@ -27,6 +27,7 @@ export class TranscriptRowRenderable extends BoxRenderable {
   readonly markdown: MarkdownRenderable
   readonly footer: TextRenderable
   readonly diffFooter: TextRenderable
+  readonly presentationFooter: TextRenderable
   readonly shellCommand: CodeRenderable | null
   readonly shellOutput: TextRenderable | null
   readonly reasoning: ReasoningBlockRenderable
@@ -38,6 +39,7 @@ export class TranscriptRowRenderable extends BoxRenderable {
   #width = 0
   #source: TranscriptContentSource | null = null
   #diffSource: TranscriptContentSource | null = null
+  #presentationSource: TranscriptContentSource | null = null
 
   constructor(ctx: RenderContext, theme: RottweilerTheme, item: TranscriptItem, options: TranscriptRowOptions, expanded?: boolean) {
     super(ctx, { id: `history-row:${item.id}`, width: "100%", flexDirection: "column", flexShrink: 0, marginTop: 1 })
@@ -72,6 +74,11 @@ export class TranscriptRowRenderable extends BoxRenderable {
       if (this.#diffSource !== null) options.onOpenContent?.(this.#diffSource)
       options.onInteraction?.()
     })
+    this.presentationFooter = new TextRenderable(ctx, { content: "", fg: theme.accent, height: 1, selectable: false, visible: false })
+    bindSelectableClick(ctx, this.presentationFooter, () => {
+      if (this.#presentationSource !== null) options.onOpenContent?.(this.#presentationSource)
+      options.onInteraction?.()
+    })
     this.footer = new TextRenderable(ctx, { content: "", fg: theme.textMuted, height: 1, selectable: false })
     bindSelectableClick(ctx, this.header, () => { this.toggle(); options.onInteraction?.() })
     bindSelectableClick(ctx, this.footer, () => {
@@ -85,6 +92,7 @@ export class TranscriptRowRenderable extends BoxRenderable {
     if (this.shellCommand !== null) this.add(this.shellCommand)
     if (this.shellOutput !== null) this.add(this.shellOutput)
     this.add(this.diffFooter)
+    this.add(this.presentationFooter)
     this.add(this.footer)
     this.#render()
   }
@@ -123,6 +131,8 @@ export class TranscriptRowRenderable extends BoxRenderable {
     let reasoning = ""
     this.#source = null
     this.#diffSource = null
+    this.#presentationSource = null
+    this.presentationFooter.visible = false
     switch (content.type) {
       case "turn_summary":
         title = `${content.status.replaceAll("_", " ")} · ${content.cost.kind === "subscription_quota" && content.cost.used == null ? "turn usage · " : ""}${formatCost(content.cost, content.usage)}`
@@ -142,6 +152,11 @@ export class TranscriptRowRenderable extends BoxRenderable {
         if (content.status.type === "finished") {
           bodies.push(content.status.output)
           this.#source = content.status.output.source
+          if (content.status.presentation !== null) {
+            this.#presentationSource = content.status.presentation.source
+            this.presentationFooter.content = `${content.status.presentation.title} →`
+            this.presentationFooter.visible = this.#expanded
+          }
         } else this.#source = content.arguments.source
         if (content.diff !== null) bodies.push(content.diff)
         break

@@ -66,6 +66,36 @@ describe("aggregate client cache", () => {
     }
   })
 
+  test("decoding reservations compete with mounted history and survive invalidation until settlement", () => {
+    const cache = new ClientCache<{ text: string }>({ bytes: 2000, entries: 2 })
+    cache.insert("history", { text: "visible" })
+    const history = cache.lease("history")!
+    const reserved = cache.reserve(1200)!
+    expect(cache.reserve(1200)).toBeNull()
+    const pendingBytes = cache.usage.bytes
+    cache.clear()
+    expect(cache.usage.bytes).toBe(pendingBytes)
+    const surface = reserved.commit("surface", { text: "decoded" })
+    expect(cache.usage.bytes).toBeLessThan(pendingBytes)
+    reserved.release()
+    expect(surface.value.text).toBe("decoded")
+    history.release()
+    surface.release()
+    cache.clear()
+    expect(cache.usage.bytes).toBe(0)
+  })
+
+  test("failed decoded admission keeps its reservation charged until cleanup", () => {
+    const cache = new ClientCache<{ text: string }>({ bytes: 1000, entries: 2 })
+    const reserved = cache.reserve(500)!
+    expect(() => reserved.commit("large", { text: "x".repeat(1000) })).toThrow("reserved")
+    expect(cache.usage.bytes).toBe(500)
+    reserved.release()
+    reserved.release()
+    expect(cache.usage.bytes).toBe(0)
+    expect(() => reserved.commit("late", { text: "x" })).toThrow("released")
+  })
+
   test("measurement rejects excessive nesting and non-JSON ownership", () => {
     const cycle: { next?: unknown } = {}
     cycle.next = cycle

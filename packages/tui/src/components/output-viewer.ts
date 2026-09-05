@@ -1,3 +1,4 @@
+import { UiPresentationRenderable } from "./ui-presentation"
 import type { DocumentSnapshot } from "../history/document"
 import {
   BoxRenderable,
@@ -17,6 +18,7 @@ export class OutputViewerRenderable extends BoxRenderable {
   readonly header: TextRenderable
   readonly scroller: ScrollBoxRenderable
   readonly body: TextRenderable
+  readonly surface: UiPresentationRenderable
   readonly hint: TextRenderable
   #toolCallId: string | null = null
   #documentPage: DocumentSnapshot["page"] = null
@@ -74,7 +76,9 @@ export class OutputViewerRenderable extends BoxRenderable {
       height: 1,
       flexShrink: 0,
     })
+    this.surface = new UiPresentationRenderable(ctx, theme)
     this.scroller.add(this.body)
+    this.scroller.add(this.surface)
     this.add(this.header)
     this.add(this.scroller)
     this.add(this.hint)
@@ -92,7 +96,10 @@ export class OutputViewerRenderable extends BoxRenderable {
     this.#toolCallId = null
     this.visible = true
     const page = snapshot.page
+    this.surface.setSurface(snapshot.surface)
+    this.body.visible = snapshot.surface === null
     this.header.content = page === null ? "Content" : `Content · bytes ${page.offset + 1}–${page.next_offset ?? page.total_bytes} of ${page.total_bytes}`
+    if (snapshot.surface !== null) this.header.content = snapshot.surface.presentation.descriptor.title
     if (changed) this.body.content = page?.text ?? ""
     this.hint.content = snapshot.error ?? (snapshot.loading ? "Loading content…"
       : `${snapshot.previous ? "← previous · " : ""}${page?.next_offset != null ? "next → · " : ""}Esc to close`)
@@ -102,6 +109,8 @@ export class OutputViewerRenderable extends BoxRenderable {
   /** Open at the beginning of the complete output. */
   open(tool: ToolProjection): void {
     this.#documentPage = null
+    this.surface.setSurface(null)
+    this.body.visible = true
     this.#toolCallId = tool.toolCallId
     this.update(tool)
     this.visible = true
@@ -123,6 +132,7 @@ export class OutputViewerRenderable extends BoxRenderable {
     this.scroller.blur()
     this.visible = false
     this.body.content = ""
+    this.surface.setSurface(null)
     this.header.content = ""
   }
 

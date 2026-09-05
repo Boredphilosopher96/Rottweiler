@@ -1,3 +1,4 @@
+import type { UiSurfaceModel } from "../ui/presentation"
 import type { ClientDiagnostics } from "../client-diagnostics"
 import type { TranscriptContentPage, TranscriptItemId, TranscriptPage, TranscriptPosition, TranscriptView } from "../protocol"
 import { TRANSCRIPT_PROJECTION_VERSION } from "../protocol"
@@ -8,6 +9,7 @@ import type { HistoryReader } from "./reader"
 export type HistoryCacheValue =
   | { readonly kind: "page"; readonly page: TranscriptPage }
   | { readonly kind: "document"; readonly page: TranscriptContentPage }
+  | { readonly kind: "surface"; readonly surface: UiSurfaceModel }
 
 export interface HistoryAnchor {
   readonly id: TranscriptItemId

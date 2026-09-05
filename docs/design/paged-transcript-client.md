@@ -84,3 +84,9 @@ Task state has one authoritative typed snapshot, committed independently from tr
 The draft owner admits one outstanding image, external-editor or history-text read. Its reservation covers the eventual retained draft and survives destination cancellation until the read settles. Submission and renderer replacement wait for accepted input reads. Image completion adds its attachment without moving the current cursor or focus; external-editor completion merges a newer draft instead of overwriting it.
 
 Ordinary text paste is a synchronous editor operation at the initiating selection. The platform classifies explicit local image paths into deferred read capabilities before I/O; a recognized image path attaches an image or reports a read failure. Image files are descriptor-checked and bounded to 5 MiB. External-editor input/output is bounded to 2 MiB, and output is read from a checked regular-file descriptor.
+
+## Tool surfaces
+
+A completed tool row stores a compact title and an invocation-bound canonical source reference. Opening that reference uses the existing content read capability and exact journal view. The full declarative surface is collected from bounded UTF-8 pages, validated from its generated schema, and prepared once into native text, badge, list and table fields. Neither row paging nor frame rendering executes plugin code or repeats selector traversal.
+
+The document owner presents one full surface at a time. It reserves collection and decode credit in the shared history cache before reading, then transfers that credit to the validated surface and prepared field strings. Cancellation retains the reservation until the outstanding read settles. Render nodes borrow the pinned model's strings and clear their content before destruction; replacement releases the previous cache lease after its nodes stop using it. Theme changes rebuild nodes against the same pinned source without another read.

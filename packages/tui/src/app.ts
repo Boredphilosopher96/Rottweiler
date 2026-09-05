@@ -565,6 +565,7 @@ export class RottweilerApp extends BoxRenderable {
       },
     }, theme)
     this.setState(this.#state)
+    if (this.#document.snapshot.open) this.outputViewer.showDocument(this.#document.snapshot)
     if (composerState !== null) this.#clientRestore.restoreComposerState(composerState)
     if (transcriptClientState !== null) this.transcript.restoreClientState(transcriptClientState)
     if (toolsClientState !== null) {

@@ -4,6 +4,7 @@ export {
   CLIENT_COMMAND_LANE,
   TRANSCRIPT_PROJECTION_VERSION,
   MAX_COMMAND_REPLY_BYTES,
+  MAX_UI_SURFACE_BYTES,
   MAX_CLIENT_READS,
   MAX_ATTACHMENTS_PER_MESSAGE,
   MAX_IMAGE_ATTACHMENT_BYTES,
@@ -14,6 +15,10 @@ export {
   PROTOCOL_VERSION,
 } from "../../../protocol/types"
 export type {
+  UiPresentation,
+  UiDisplayField,
+  UiProjectedField,
+  UiActionRequest,
   TodoItem,
   TodoStatus,
   TodoSnapshot,

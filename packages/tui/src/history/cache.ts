@@ -6,6 +6,12 @@ export interface CacheLease<Value> {
   release(): void
 }
 
+/** Admission before source collection/decoding; cancellation keeps credit until settlement. */
+export interface CacheReservation<Value> {
+  commit(key: string, value: Value): CacheLease<Value>
+  release(): void
+}
+
 export interface CacheLimits {
   readonly bytes: number
   readonly entries: number
@@ -73,6 +79,45 @@ export class ClientCache<Value> {
     this.#bytes += bytes
     this.#entries += 1
     return true
+  }
+
+  reserve(maximumBytes: number): CacheReservation<Value> | null {
+    if (!Number.isSafeInteger(maximumBytes) || maximumBytes <= 0 || maximumBytes > this.#limits.bytes) return null
+    let bytes = this.#limits.bytes - this.#bytes
+    let entries = this.#limits.entries - this.#entries
+    const evictions: string[] = []
+    for (const [key, entry] of this.#resident) {
+      if (bytes >= maximumBytes && entries >= 1) break
+      if (entry.readers !== 0) continue
+      evictions.push(key)
+      bytes += entry.bytes
+      entries += 1
+    }
+    if (bytes < maximumBytes || entries < 1) return null
+    for (const key of evictions) this.remove(key)
+    this.#bytes += maximumBytes
+    this.#entries += 1
+    let active = true
+    return {
+      release: () => {
+        if (!active) return
+        active = false
+        this.#bytes -= maximumBytes
+        this.#entries -= 1
+      },
+      commit: (key, value) => {
+        if (!active) throw new Error("cache reservation is released")
+        const actual = retainedJsonBytes(value, maximumBytes) + 96 + key.length * 2
+        if (actual > maximumBytes) throw new Error("decoded value exceeds reserved cache allocation")
+        this.remove(key)
+        this.#bytes -= maximumBytes - actual
+        this.#resident.set(key, { value, bytes: actual, readers: 0, resident: true })
+        active = false
+        const lease = this.lease(key)
+        if (lease === null) throw new Error("committed cache value is missing")
+        return lease
+      },
+    }
   }
 
   /** A lease pins its exact revision, including after replacement or invalidation. */

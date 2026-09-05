@@ -1,3 +1,5 @@
+import { readToolSurface } from "./tool-surface"
+import type { UiSurfaceModel } from "../ui/presentation"
 import type { TranscriptContentPage, TranscriptContentSource, TranscriptView } from "../protocol"
 import type { CacheLease, ClientCache } from "./cache"
 import type { HistoryCacheValue } from "./controller"
@@ -10,6 +12,7 @@ const MAX_CHUNKS = Math.ceil(MAX_DOCUMENT_BYTES / (CHUNK_BYTES - 3)) + 1
 export interface DocumentSnapshot {
   readonly open: boolean
   readonly page: TranscriptContentPage | null
+  readonly surface: UiSurfaceModel | null
   readonly loading: boolean
   readonly error: string | null
   readonly previous: boolean
@@ -38,6 +41,7 @@ export class DocumentController {
     const value = this.#active?.value
     return {
       open: this.#selection !== null, page: value?.kind === "document" ? value.page : null,
+      surface: value?.kind === "surface" ? value.surface : null,
       loading: this.#loading, error: this.#error, previous: this.#index > 0
     }
   }
@@ -85,6 +89,10 @@ export class DocumentController {
       if (index >= MAX_CHUNKS) throw new Error("document exceeds the bounded content index")
       const key = `document:${selection.key}:${offset}`
       let lease = this.#cache.lease(key)
+      if (lease === null && selection.source.selector.type === "tool_presentation") {
+        lease = await readToolSurface(this.#reader, this.#cache, key, selection.view, selection.source, request.signal)
+        if (this.#request !== request || request.signal.aborted) { lease.release(); return }
+      }
       if (lease === null) {
         const page = await this.#reader.content(selection.view.session_id, {
           view: selection.view, source: selection.source, offset, max_bytes: CHUNK_BYTES,
@@ -101,7 +109,7 @@ export class DocumentController {
         if (!this.#cache.insert(key, { kind: "document", page })) throw new Error("content cache is full with active readers")
         lease = this.#cache.lease(key)
       }
-      if (lease === null || lease.value.kind !== "document") {
+      if (lease === null || (lease.value.kind !== "document" && lease.value.kind !== "surface")) {
         lease?.release()
         throw new Error("admitted content is unavailable")
       }
