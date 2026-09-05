@@ -88,6 +88,7 @@
                   "todos_read",
                   "transcript_content_ready",
                   "transcript_page_ready",
+                  "transcript_tail_ready",
                   "ui_catalog_ready",
                   "ui_panels_ready",
                   "workspace_diff_ready",

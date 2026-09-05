@@ -184,6 +184,31 @@
           "$ref": "#/$defs/SessionId"
         },
         "result": {
+          "$ref": "#/$defs/TranscriptTailResult"
+        },
+        "type": {
+          "type": "string",
+          "const": "transcript_tail_ready"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "result"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "result": {
           "$ref": "#/$defs/TranscriptReadResult"
         },
         "type": {
@@ -2414,7 +2439,7 @@
           ]
         },
         "event": {
-          "description": "Null invalidates child history at the required canonical child_sequence.\nA non-null value is a bounded preview; complete content remains in the child log."
+          "description": "Null invalidates child history at the required canonical `child_sequence`.\nA non-null value is a bounded preview; complete content remains in the child log."
         },
         "type": {
           "type": "string",
@@ -4307,6 +4332,633 @@
         "snapshot"
       ]
     },
+    "TranscriptTailResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "page": {
+              "$ref": "#/$defs/TranscriptTailPage"
+            },
+            "type": {
+              "type": "string",
+              "const": "ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "page"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "view": {
+              "$ref": "#/$defs/TranscriptView"
+            },
+            "identity": {
+              "$ref": "#/$defs/TranscriptTailIdentity"
+            },
+            "type": {
+              "type": "string",
+              "const": "changed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "view",
+            "identity"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "through": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SequenceId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SequenceId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "catching_up"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "through",
+            "target"
+          ]
+        }
+      ]
+    },
+    "TranscriptTailPage": {
+      "type": "object",
+      "properties": {
+        "view": {
+          "$ref": "#/$defs/TranscriptView"
+        },
+        "identity": {
+          "$ref": "#/$defs/TranscriptTailIdentity"
+        },
+        "content": {
+          "$ref": "#/$defs/TranscriptTailContent"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "view",
+        "identity",
+        "content"
+      ],
+      "x-rw-max-json-bytes": 1048576
+    },
+    "TranscriptView": {
+      "description": "Exact canonical prefix interpreted by a complete semantic view.",
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "projection_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "generation": {
+          "$ref": "#/$defs/TranscriptGeneration"
+        },
+        "through": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "digest": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "minItems": 32,
+          "maxItems": 32
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "projection_version",
+        "generation",
+        "digest"
+      ]
+    },
+    "TranscriptGeneration": {
+      "description": "Current semantic ordering generation, changed by rewind.",
+      "type": "string"
+    },
+    "TranscriptTailIdentity": {
+      "description": "Structural and response identity; pages can advance their source cut within this identity.",
+      "type": "object",
+      "properties": {
+        "generation": {
+          "$ref": "#/$defs/TranscriptGeneration"
+        },
+        "turn_started": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "response_epoch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tools_epoch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "generation",
+        "turn_started",
+        "response_epoch",
+        "tools_epoch"
+      ]
+    },
+    "TranscriptTailContent": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "preview": {
+              "$ref": "#/$defs/TranscriptTailText"
+            },
+            "type": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "preview"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "preview": {
+              "$ref": "#/$defs/TranscriptTailText"
+            },
+            "type": {
+              "type": "string",
+              "const": "thinking"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "preview"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "offset": {
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/TranscriptTailCitation"
+              },
+              "maxItems": 32
+            },
+            "next_offset": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint16",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "type": {
+              "type": "string",
+              "const": "citations"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "offset",
+            "items",
+            "next_offset"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "offset": {
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/TranscriptTailTool"
+              },
+              "maxItems": 32
+            },
+            "next_offset": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint16",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "type": {
+              "type": "string",
+              "const": "tools"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "offset",
+            "items",
+            "next_offset"
+          ]
+        }
+      ]
+    },
+    "TranscriptTailText": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "maxLength": 65536,
+          "x-rw-max-utf8-bytes": 65536
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "text",
+        "truncated"
+      ]
+    },
+    "TranscriptTailCitation": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "uri": {
+          "type": "string",
+          "maxLength": 65536,
+          "x-rw-max-utf8-bytes": 65536
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 65536,
+          "x-rw-max-utf8-bytes": 65536
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "uri",
+        "title"
+      ]
+    },
+    "TranscriptTailTool": {
+      "description": "Active invocation preview. Argument and diff bodies remain canonical content sources.",
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "tool_call_id": {
+          "$ref": "#/$defs/ToolCallId"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/ToolInvocationId"
+        },
+        "name": {
+          "type": "string"
+        },
+        "call_index": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "arguments": {
+          "$ref": "#/$defs/TranscriptBodyPreview"
+        },
+        "diff": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TranscriptBodyPreview"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output": {
+          "$ref": "#/$defs/TranscriptTailText"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "turn_id",
+        "tool_call_id",
+        "invocation_id",
+        "name",
+        "call_index",
+        "arguments",
+        "diff",
+        "output"
+      ]
+    },
+    "TranscriptBodyPreview": {
+      "description": "A bounded prefix with an authoritative source for the complete body.",
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "format": {
+          "$ref": "#/$defs/TranscriptPreviewFormat"
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "source": {
+          "$ref": "#/$defs/TranscriptContentSource"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "text",
+        "format",
+        "complete",
+        "source"
+      ]
+    },
+    "TranscriptPreviewFormat": {
+      "description": "Preview syntax. Incomplete JSON is display text and must not be parsed as JSON.",
+      "type": "string",
+      "enum": [
+        "text",
+        "json"
+      ]
+    },
+    "TranscriptContentSource": {
+      "description": "Body location within the exact journal prefix carried by its enclosing view.",
+      "type": "object",
+      "properties": {
+        "sequence": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "selector": {
+          "$ref": "#/$defs/TranscriptContentSelector"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "selector"
+      ]
+    },
+    "TranscriptContentSelector": {
+      "description": "A closed selector into one canonical event. It never names a filesystem path.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "conversation"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "index": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "conversation_block"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "index"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "tool_arguments"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "tool_output"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "tool_diff"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "invocation_id": {
+              "$ref": "#/$defs/ToolInvocationId"
+            },
+            "type": {
+              "type": "string",
+              "const": "tool_presentation"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "invocation_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "command_message"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "shell_command"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "shell_output"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "subagent_task"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "subagent_result"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "subagent_diff"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
     "TranscriptReadResult": {
       "oneOf": [
         {
@@ -4412,55 +5064,6 @@
         "anchor",
         "invalidation"
       ]
-    },
-    "TranscriptView": {
-      "description": "Exact canonical prefix interpreted by a complete semantic view.",
-      "type": "object",
-      "properties": {
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "projection_version": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        },
-        "generation": {
-          "$ref": "#/$defs/TranscriptGeneration"
-        },
-        "through": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SequenceId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "digest": {
-          "type": "array",
-          "items": {
-            "type": "integer",
-            "format": "uint8",
-            "minimum": 0,
-            "maximum": 255
-          },
-          "minItems": 32,
-          "maxItems": 32
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "session_id",
-        "projection_version",
-        "generation",
-        "digest"
-      ]
-    },
-    "TranscriptGeneration": {
-      "description": "Current semantic ordering generation, changed by rewind.",
-      "type": "string"
     },
     "TranscriptOrdinal": {
       "description": "Logical row position, distinct from a canonical event sequence.",
@@ -4926,227 +5529,6 @@
           "required": [
             "type",
             "body"
-          ]
-        }
-      ]
-    },
-    "TranscriptBodyPreview": {
-      "description": "A bounded prefix with an authoritative source for the complete body.",
-      "type": "object",
-      "properties": {
-        "text": {
-          "type": "string"
-        },
-        "format": {
-          "$ref": "#/$defs/TranscriptPreviewFormat"
-        },
-        "complete": {
-          "type": "boolean"
-        },
-        "source": {
-          "$ref": "#/$defs/TranscriptContentSource"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "text",
-        "format",
-        "complete",
-        "source"
-      ]
-    },
-    "TranscriptPreviewFormat": {
-      "description": "Preview syntax. Incomplete JSON is display text and must not be parsed as JSON.",
-      "type": "string",
-      "enum": [
-        "text",
-        "json"
-      ]
-    },
-    "TranscriptContentSource": {
-      "description": "Body location within the exact journal prefix carried by its enclosing view.",
-      "type": "object",
-      "properties": {
-        "sequence": {
-          "$ref": "#/$defs/SequenceId"
-        },
-        "selector": {
-          "$ref": "#/$defs/TranscriptContentSelector"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "sequence",
-        "selector"
-      ]
-    },
-    "TranscriptContentSelector": {
-      "description": "A closed selector into one canonical event. It never names a filesystem path.",
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": {
-            "type": {
-              "type": "string",
-              "const": "conversation"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "type"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "index": {
-              "type": "integer",
-              "format": "uint32",
-              "minimum": 0
-            },
-            "type": {
-              "type": "string",
-              "const": "conversation_block"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "type",
-            "index"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "type": {
-              "type": "string",
-              "const": "tool_arguments"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "type"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "type": {
-              "type": "string",
-              "const": "tool_output"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "type"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "type": {
-              "type": "string",
-              "const": "tool_diff"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "type"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "invocation_id": {
-              "$ref": "#/$defs/ToolInvocationId"
-            },
-            "type": {
-              "type": "string",
-              "const": "tool_presentation"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "type",
-            "invocation_id"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "type": {
-              "type": "string",
-              "const": "command_message"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "type"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "type": {
-              "type": "string",
-              "const": "shell_command"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "type"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "type": {
-              "type": "string",
-              "const": "shell_output"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "type"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "type": {
-              "type": "string",
-              "const": "subagent_task"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "type"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "type": {
-              "type": "string",
-              "const": "subagent_result"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "type"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "type": {
-              "type": "string",
-              "const": "subagent_diff"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "type"
           ]
         }
       ]

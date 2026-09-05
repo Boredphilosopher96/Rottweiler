@@ -150,6 +150,35 @@
           "$ref": "#/$defs/SessionReadScope"
         },
         "read": {
+          "$ref": "#/$defs/TranscriptTailRead"
+        },
+        "type": {
+          "type": "string",
+          "const": "read_transcript_tail"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "scope",
+        "read"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "scope": {
+          "$ref": "#/$defs/SessionReadScope"
+        },
+        "read": {
           "$ref": "#/$defs/TranscriptRead"
         },
         "type": {
@@ -2058,6 +2087,163 @@
       "description": "Monotonic per-session sequence encoded as a decimal string on the wire.",
       "type": "string"
     },
+    "TranscriptTailRead": {
+      "type": "object",
+      "properties": {
+        "expected": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TranscriptTailIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "part": {
+          "$ref": "#/$defs/TranscriptTailPart"
+        },
+        "max_items": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "max_bytes": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 524288,
+          "maximum": 1048576
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "expected",
+        "part",
+        "max_items",
+        "max_bytes"
+      ]
+    },
+    "TranscriptTailIdentity": {
+      "description": "Structural and response identity; pages can advance their source cut within this identity.",
+      "type": "object",
+      "properties": {
+        "generation": {
+          "$ref": "#/$defs/TranscriptGeneration"
+        },
+        "turn_started": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "response_epoch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tools_epoch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "generation",
+        "turn_started",
+        "response_epoch",
+        "tools_epoch"
+      ]
+    },
+    "TranscriptGeneration": {
+      "description": "Current semantic ordering generation, changed by rewind.",
+      "type": "string"
+    },
+    "TranscriptTailPart": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "thinking"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "offset": {
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "type": {
+              "type": "string",
+              "const": "citations"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "offset"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "offset": {
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "type": {
+              "type": "string",
+              "const": "tools"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "offset"
+          ]
+        }
+      ]
+    },
     "TranscriptRead": {
       "type": "object",
       "properties": {
@@ -2136,10 +2322,6 @@
         "generation",
         "digest"
       ]
-    },
-    "TranscriptGeneration": {
-      "description": "Current semantic ordering generation, changed by rewind.",
-      "type": "string"
     },
     "TranscriptPosition": {
       "oneOf": [
