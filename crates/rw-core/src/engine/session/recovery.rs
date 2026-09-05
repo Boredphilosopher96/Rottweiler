@@ -136,7 +136,7 @@ pub(in crate::engine) async fn recover_actor_from_journal(
             interrupted_turn_recovery_events(&recovered),
         )
         .await?;
-        state.accounting.record(TurnAccounting {
+        state.accounting.record(&TurnAccounting {
             turn_id: wire_turn_id(turn),
             attribution: AccountingAttribution::Main,
             usage: SessionUsage::default().into(),

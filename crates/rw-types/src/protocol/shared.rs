@@ -990,6 +990,9 @@ pub enum AccountingAttribution {
 pub struct CostSnapshot {
     pub utc_day: String,
     #[serde(deserialize_with = "Option::deserialize")]
+    #[schemars(
+        schema_with = "crate::schema::required_nullable::<crate::billing::SubscriptionQuotaSummary>"
+    )]
     pub subscription_quota: Option<crate::billing::SubscriptionQuotaSummary>,
     pub session_usage: Usage,
     #[serde(with = "decimal_u64")]

@@ -102,7 +102,7 @@ pub(in crate::engine) async fn handle_turn_signal(
             if result.is_ok()
                 && let Some(accounting) = compaction_accounting
             {
-                state.accounting.record(accounting);
+                state.accounting.record(&accounting);
             }
             let _ = respond.send(result.clone());
             result?;
@@ -283,7 +283,7 @@ pub(in crate::engine) async fn handle_turn_signal(
                     .await?;
                     state.session_title = Some(title);
                     if let (Some(usage), Some(cost)) = (usage, cost) {
-                        state.accounting.record(TurnAccounting {
+                        state.accounting.record(&TurnAccounting {
                             turn_id: TurnId("title".to_owned()),
                             attribution: AccountingAttribution::Title,
                             usage: usage.into(),
@@ -330,7 +330,7 @@ pub(in crate::engine) async fn handle_turn_signal(
             state.context_surgery = outcome.context_surgery;
             state.pruned_tool_outputs = outcome.pruned_tool_outputs;
             state.budgeter = outcome.budgeter;
-            state.accounting.record(TurnAccounting {
+            state.accounting.record(&TurnAccounting {
                 turn_id: wire_turn_id(outcome.turn),
                 attribution: AccountingAttribution::Main,
                 usage: outcome.usage.into(),

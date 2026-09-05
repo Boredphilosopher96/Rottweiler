@@ -425,7 +425,7 @@ impl SessionProjector {
                 } => {
                     title = Some(updated.clone());
                     if let (Some(usage), Some(cost)) = (usage, cost) {
-                        accounting.record(TurnAccounting {
+                        accounting.record(&TurnAccounting {
                             turn_id: TurnId("title".to_owned()),
                             attribution: AccountingAttribution::Title,
                             usage: (*usage).into(),
@@ -531,7 +531,7 @@ impl SessionProjector {
                     turn_ends.insert(*turn, conversation.len());
                     pending_questions
                         .retain(|_, question: &mut RecoveredQuestion| question.agent_turn != *turn);
-                    accounting.record(TurnAccounting {
+                    accounting.record(&TurnAccounting {
                         turn_id: wire_turn_id(*turn),
                         attribution: AccountingAttribution::Main,
                         usage: (*usage).into(),
@@ -647,7 +647,7 @@ impl SessionProjector {
                     usage,
                     cost,
                 } => {
-                    accounting.record(TurnAccounting {
+                    accounting.record(&TurnAccounting {
                         turn_id: wire_turn_id(*summary_turn),
                         attribution: AccountingAttribution::Compaction,
                         usage: (*usage).into(),
@@ -670,7 +670,7 @@ impl SessionProjector {
                     if let Some(start) = compaction_surgery_start.take() {
                         context_surgery.drain(..start);
                     }
-                    accounting.record(TurnAccounting {
+                    accounting.record(&TurnAccounting {
                         turn_id: wire_turn_id(*summary_turn),
                         attribution: AccountingAttribution::Compaction,
                         usage: (*usage).into(),

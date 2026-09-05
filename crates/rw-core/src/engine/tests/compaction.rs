@@ -34,7 +34,6 @@ use rw_providers::Recorder;
 use rw_providers::ReplayProvider;
 use rw_providers::TokenUsage;
 use rw_tools::ToolRegistry;
-use rw_types::AccountingAttribution;
 use rw_types::Block;
 use rw_types::CompactionReason;
 use rw_types::EngineEvent;
@@ -407,14 +406,8 @@ async fn manual_compaction_keeps_queries_and_interrupt_responsive() {
         .cost_snapshot()
         .await
         .expect("cancelled compaction cost");
-    let cancelled = cost
-        .turns
-        .iter()
-        .filter(|entry| entry.attribution == AccountingAttribution::Compaction)
-        .collect::<Vec<_>>();
-    assert_eq!(cancelled.len(), 1);
-    assert_eq!(cancelled[0].usage.input_tokens, 11);
-    assert_eq!(cancelled[0].usage.output_tokens, 7);
+    assert_eq!(cost.session_usage.input_tokens, 11);
+    assert_eq!(cost.session_usage.output_tokens, 7);
     let durable = sink
         .test_events_after(None)
         .await
@@ -541,20 +534,24 @@ async fn failed_compaction_alias_usage_is_accounted_before_successful_fallback()
         .cost_snapshot()
         .await
         .expect("compaction cost snapshot");
-    let compaction = snapshot
-        .turns
-        .iter()
-        .filter(|entry| entry.attribution == AccountingAttribution::Compaction)
-        .collect::<Vec<_>>();
-    assert_eq!(compaction.len(), 2);
-    assert_eq!(compaction[0].usage.output_tokens, 60);
-    assert_eq!(compaction[1].usage.output_tokens, 20);
+    assert_eq!(snapshot.session_usage.output_tokens, 80);
     assert_eq!(snapshot.session_cost_micros_usd, 80);
 
     let durable = sink
         .test_events_after(None)
         .await
         .expect("durable fallback events");
+    let attempts = durable
+        .iter()
+        .filter_map(|event| match event {
+            EngineEvent::CompactionAttemptFinished { usage, .. }
+            | EngineEvent::CompactionFinished {
+                usage: Some(usage), ..
+            } => Some(usage.output_tokens),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(attempts, vec![60, 20]);
     assert_eq!(
         durable
             .iter()

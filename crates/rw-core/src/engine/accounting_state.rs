@@ -43,7 +43,7 @@ impl Default for SessionAccountingState {
     }
 }
 impl SessionAccountingState {
-    pub(crate) fn record(&mut self, entry: TurnAccounting) {
+    pub(crate) fn record(&mut self, entry: &TurnAccounting) {
         self.record_actuals(&entry.usage, &entry.cost);
     }
     pub(crate) fn record_actuals(&mut self, usage: &Usage, cost: &Cost) {
@@ -57,13 +57,13 @@ impl SessionAccountingState {
                 self.cost_micros_usd = self.cost_micros_usd.saturating_add(*amount_micros);
             }
             Cost::Monetary { .. } => {
-                self.non_usd_monetary_entries = self.non_usd_monetary_entries.saturating_add(1)
+                self.non_usd_monetary_entries = self.non_usd_monetary_entries.saturating_add(1);
             }
             Cost::AiCredits { credits_micros, .. } => {
-                self.ai_credit_micros = self.ai_credit_micros.saturating_add(*credits_micros)
+                self.ai_credit_micros = self.ai_credit_micros.saturating_add(*credits_micros);
             }
             Cost::Unavailable { .. } => {
-                self.cost_unavailable_entries = self.cost_unavailable_entries.saturating_add(1)
+                self.cost_unavailable_entries = self.cost_unavailable_entries.saturating_add(1);
             }
             Cost::SubscriptionQuota { used, unit } => {
                 self.subscription_quota_entries = self.subscription_quota_entries.saturating_add(1);
@@ -72,11 +72,11 @@ impl SessionAccountingState {
                 }
                 match cost.subscription_token_accounting() {
                     SubscriptionTokenAccounting::Metered(tokens) => {
-                        self.subscription_tokens = self.subscription_tokens.saturating_add(tokens)
+                        self.subscription_tokens = self.subscription_tokens.saturating_add(tokens);
                     }
                     SubscriptionTokenAccounting::Unavailable => {
                         self.unmetered_subscription_quota_entries =
-                            self.unmetered_subscription_quota_entries.saturating_add(1)
+                            self.unmetered_subscription_quota_entries.saturating_add(1);
                     }
                     SubscriptionTokenAccounting::NotApplicable => {}
                 }
