@@ -54,7 +54,7 @@ fn selectors_are_structural_and_preserve_declared_shape() {
         projected.fields[1],
         UiProjectedField::Table {
             id: "files".into(),
-            rows: vec![vec!["src/a.rs".into()], vec![String::new()]]
+            rows: vec![vec!["src/a.rs".into()], vec!["false".into()]]
         }
     );
     assert!(projected.truncated);
@@ -122,4 +122,47 @@ fn projection_rejects_extra_fields_changed_ids_and_missing_null() {
         *id = "other".into();
     }
     assert!(validate_projected_fields(&[field()], &result).is_err());
+}
+
+#[test]
+fn scalar_projection_preserves_integer_precision_and_never_formats_containers() {
+    for (value, expected) in [
+        (json!(u64::MAX), Some(u64::MAX.to_string())),
+        (json!(-12), Some("-12".into())),
+        (json!(true), Some("true".into())),
+        (json!(null), None),
+        (json!({"private":"not a display field"}), None),
+        (json!(["not a display field"]), None),
+    ] {
+        let projected =
+            project_fields(&[field()], &json!({"summary":value})).expect("scalar projection");
+        assert_eq!(
+            projected.fields,
+            vec![UiProjectedField::Text {
+                id: "summary".into(),
+                value: expected
+            }]
+        );
+    }
+    let fields = [UiField::List {
+        id: "values".into(),
+        label: "Values".into(),
+        path: vec![],
+        max_items: 8,
+    }];
+    let projected =
+        project_fields(&fields, &json!([1, false, null, {}, []])).expect("list scalars");
+    assert_eq!(
+        projected.fields,
+        vec![UiProjectedField::List {
+            id: "values".into(),
+            values: vec![
+                "1".into(),
+                "false".into(),
+                String::new(),
+                String::new(),
+                String::new()
+            ]
+        }]
+    );
 }

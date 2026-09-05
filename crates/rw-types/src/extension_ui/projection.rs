@@ -3,6 +3,8 @@ use super::{
     UiProjectedFields, UiSelectorStep, validate_projected_fields, validation,
 };
 use serde_json::Value;
+use std::borrow::Cow;
+use std::fmt::Write as _;
 
 /// # Errors
 /// Rejects an invalid descriptor. Projection visits at most the declared field,
@@ -34,10 +36,10 @@ pub(super) fn project_fields_with_budget(
         match (field, projected) {
             (UiField::Text { .. }, UiProjectedField::Text { value, .. })
             | (UiField::Badge { .. }, UiProjectedField::Badge { value, .. }) => {
-                if let Some(text) = selected.and_then(Value::as_str)
+                if let Some(text) = selected.and_then(scalar)
                     && budget.reserve(2)
                 {
-                    *value = Some(budget.text(text));
+                    *value = Some(budget.text(&text));
                 }
             }
             (UiField::List { max_items, .. }, UiProjectedField::List { values, .. }) => {
@@ -49,7 +51,7 @@ pub(super) fn project_fields_with_budget(
                         if !budget.reserve(3) {
                             break;
                         }
-                        values.push(budget.text(item.as_str().unwrap_or("")));
+                        values.push(budget.text(&scalar(item).unwrap_or_default()));
                     }
                 }
             }
@@ -73,7 +75,8 @@ pub(super) fn project_fields_with_budget(
                                 .map(|column| {
                                     budget.text(
                                         select(item, &column.path)
-                                            .and_then(Value::as_str)
+                                            .and_then(scalar)
+                                            .as_deref()
                                             .unwrap_or(""),
                                     )
                                 })
@@ -155,5 +158,29 @@ impl Budget {
             text.push(ch);
         }
         text
+    }
+}
+
+/// Display scalar JSON values without traversing or serializing source objects.
+fn scalar(value: &Value) -> Option<Cow<'_, str>> {
+    match value {
+        Value::String(value) => Some(Cow::Borrowed(value)),
+        Value::Bool(value) => Some(Cow::Borrowed(if *value { "true" } else { "false" })),
+        Value::Number(value) => {
+            let mut text = ScalarText(String::new());
+            write!(&mut text, "{value}").ok()?;
+            Some(Cow::Owned(text.0))
+        }
+        Value::Null | Value::Array(_) | Value::Object(_) => None,
+    }
+}
+struct ScalarText(String);
+impl std::fmt::Write for ScalarText {
+    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        if self.0.len().saturating_add(value.len()) > MAX_UI_VALUE_BYTES {
+            return Err(std::fmt::Error);
+        }
+        self.0.push_str(value);
+        Ok(())
     }
 }
