@@ -7,6 +7,8 @@ use super::{
     TurnId, command_ack, completed_fork_dispatch, host_error_code, rejected, trim_dedupe, watch,
 };
 
+struct ControlRejection(&'static str, &'static str);
+
 enum ControlRequest {
     Complete(Arc<CachedDispatch>),
     Running(watch::Receiver<Option<Arc<CachedDispatch>>>),
@@ -31,7 +33,7 @@ impl EngineHost {
         let key = (bound.client_id.clone(), command.meta().request_id.clone());
         let request = match self.reserve_control(&key, &payload_hash) {
             Ok(request) => request,
-            Err(outcome) => return outcome,
+            Err(ControlRejection(code, message)) => return rejected(code, message),
         };
         let (mut completion, owns_execution) = match request {
             ControlRequest::Complete(dispatch) => {
@@ -69,13 +71,13 @@ impl EngineHost {
         &self,
         key: &(ClientId, RequestId),
         payload_hash: &str,
-    ) -> Result<ControlRequest, CommandOutcome> {
+    ) -> Result<ControlRequest, ControlRejection> {
         let mut dedupe = self
             .dedupe
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match dedupe.entries.get(key) {
-            Some(DedupeState::Read { .. }) => Err(rejected(
+            Some(DedupeState::Read { .. }) => Err(ControlRejection(
                 "request_id_conflict",
                 "request id was used for a read",
             )),
@@ -85,7 +87,7 @@ impl EngineHost {
                 retry_same_request,
             }) => {
                 if existing != payload_hash {
-                    return Err(rejected(
+                    return Err(ControlRejection(
                         "request_id_conflict",
                         "request id was reused with a different command",
                     ));
@@ -102,7 +104,7 @@ impl EngineHost {
                 completion,
             }) => {
                 if existing != payload_hash {
-                    return Err(rejected(
+                    return Err(ControlRejection(
                         "request_id_conflict",
                         "request id was reused with a different command",
                     ));
@@ -112,7 +114,9 @@ impl EngineHost {
             None => {
                 let admission = Arc::clone(&self.control_admission)
                     .try_acquire_owned()
-                    .map_err(|_| rejected("control_busy", "host control admission exhausted"))?;
+                    .map_err(|_| {
+                        ControlRejection("control_busy", "host control admission exhausted")
+                    })?;
                 let (completion, wait) = watch::channel(None);
                 dedupe.entries.insert(
                     key.clone(),
@@ -144,29 +148,25 @@ impl EngineHost {
         let operation_hash = payload_hash.clone();
         let work = async move {
             let _admission = admission;
-            let dispatch =
-                match std::panic::AssertUnwindSafe(host.execute(command, operation_hash.clone()))
+            let dispatch = if let Ok(dispatch) =
+                std::panic::AssertUnwindSafe(host.execute(command, operation_hash.clone()))
                     .catch_unwind()
                     .await
-                {
-                    Ok(dispatch) => dispatch,
-                    Err(_) => {
-                        host.retain_failed_owners(
-                            "host control panicked before effect proof".into(),
-                            (),
-                        )
-                        .await;
-                        let outcome = rejected(
-                            "control_panicked",
-                            "host control failed; effects require host recovery",
-                        );
-                        CachedDispatch {
-                            events: vec![command_ack(&meta, None, outcome.clone(), &*host.clock)],
-                            outcome,
-                            cacheable: true,
-                        }
-                    }
-                };
+            {
+                dispatch
+            } else {
+                host.retain_failed_owners("host control panicked before effect proof".into(), ())
+                    .await;
+                let outcome = rejected(
+                    "control_panicked",
+                    "host control failed; effects require host recovery",
+                );
+                CachedDispatch {
+                    events: vec![command_ack(&meta, None, outcome.clone(), &*host.clock)],
+                    outcome,
+                    cacheable: true,
+                }
+            };
             host.complete_request(
                 operation_key,
                 operation_hash,

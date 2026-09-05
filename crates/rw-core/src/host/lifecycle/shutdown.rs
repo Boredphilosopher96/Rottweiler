@@ -130,7 +130,11 @@ impl EngineHost {
         result
     }
 
-    pub(in crate::host) async fn retain_failed_owners<T: Send + 'static>(&self, error: String, owners: T) {
+    pub(in crate::host) async fn retain_failed_owners<T: Send + 'static>(
+        &self,
+        error: String,
+        owners: T,
+    ) {
         {
             let mut registry = self.registry.lock().await;
             registry

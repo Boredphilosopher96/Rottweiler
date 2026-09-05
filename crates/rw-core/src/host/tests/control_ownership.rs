@@ -80,17 +80,15 @@ async fn duplicate_completion_survives_cache_eviction_before_delivery() {
     })
     .await
     .expect("result prepared before delivery");
-    let read = host
-        .dispatch(
-            bound(),
-            ClientCommand::ListModels {
-                meta: meta("spoof", "evict-receipt"),
-                session_id: None,
-                refresh: false,
-            },
-        )
-        .await;
-    drop(read);
+    host.dispatch(
+        bound(),
+        ClientCommand::ListModels {
+            meta: meta("spoof", "evict-receipt"),
+            session_id: None,
+            refresh: false,
+        },
+    )
+    .await;
     assert!(
         !host
             .dedupe

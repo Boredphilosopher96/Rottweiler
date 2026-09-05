@@ -110,6 +110,17 @@ impl CanonicalHistory {
             }
         }
         snapshot.entries.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+        snapshot.acknowledged = self.extension_acknowledgement(plugin)?;
+        Ok(ExtensionStateView {
+            snapshot,
+            session_bytes: root.bytes,
+            namespaces: root.namespaces.len(),
+        })
+    }
+    fn extension_acknowledgement(
+        &self,
+        plugin: &str,
+    ) -> Result<Option<ExtensionDeliveryCursor>, RecoveryError> {
         if let Some(row) = self.read.get(acknowledgement_key(plugin))? {
             let ack: Acknowledgement = serde_json::from_slice(&row.payload)?;
             if ack.plugin != plugin
@@ -118,12 +129,8 @@ impl CanonicalHistory {
             {
                 return Err(RecoveryError::Invalid("extension delivery identity"));
             }
-            snapshot.acknowledged = Some(ack.cursor);
+            return Ok(Some(ack.cursor));
         }
-        Ok(ExtensionStateView {
-            snapshot,
-            session_bytes: root.bytes,
-            namespaces: root.namespaces.len(),
-        })
+        Ok(None)
     }
 }
