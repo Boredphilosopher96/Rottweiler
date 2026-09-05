@@ -37,7 +37,8 @@ impl McpManager {
                 if matches!(
                     entry.state,
                     ServerState::Ready | ServerState::ApprovalRequired
-                ) {
+                ) && entry.catalog_valid()
+                {
                     return Ok(());
                 }
                 if matches!(entry.state, ServerState::Stopping) {
@@ -70,7 +71,9 @@ impl McpManager {
             let entry = servers
                 .get_mut(server)
                 .ok_or_else(|| McpError::UnknownServer(server.clone()))?;
-            if !entry.config.enabled || !matches!(entry.state, ServerState::Failed { .. }) {
+            if !entry.config.enabled
+                || (!matches!(entry.state, ServerState::Failed { .. }) && entry.catalog_valid())
+            {
                 return Ok(false);
             }
             if entry
@@ -103,13 +106,23 @@ impl McpManager {
             .ok_or_else(|| operations::unsettled(&id))?;
         entry.config.enabled = true;
         entry.state = ServerState::Connecting;
+        let previous_client = entry.client.take();
         let config = entry.config.clone();
         let generation = entry.generation;
         let manager = self.clone();
         let transition = Transition::start(id, move |transition| async move {
-            let result = manager
-                .connect_generation(config.clone(), generation, &transition)
-                .await;
+            let result = async {
+                if let Some(previous) = previous_client {
+                    previous
+                        .close(manager.inner.limits.shutdown_timeout)
+                        .await
+                        .map_err(|_| operations::unsettled(&config.id))?;
+                }
+                manager
+                    .connect_generation(config.clone(), generation, &transition)
+                    .await
+            }
+            .await;
             if let Err(error) = &result {
                 let mut servers = manager.inner.servers.write().await;
                 if let Some(entry) = servers.get_mut(&config.id)
@@ -165,6 +178,7 @@ impl McpManager {
                 && entry.generation == generation
                 && entry.config.enabled
                 && !transition.cancelled()
+                && client.catalog_valid()
             {
                 let fingerprint = catalog_fingerprint(&tools);
                 if entry.catalog_fingerprint.is_some()

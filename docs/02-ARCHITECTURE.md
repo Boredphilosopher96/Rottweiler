@@ -112,6 +112,30 @@ socket transport, process launch, and supervision. Runtime implementation
 modules never re-export lower crates wholesale, so every dependency remains
 visible in the crate that actually uses it.
 
+### MCP connection authority
+
+`McpInboundRouter` owns the inbound request matrix and handshake for both stdio
+and guarded HTTP connections. It advertises no server-initiated host capabilities.
+An inbound request cannot acquire session, credential, filesystem, or model
+access through a library default handler.
+
+| MCP operation | Contract |
+|---|---|
+| Tools, resources, prompts | List only server-advertised capabilities; use bounded reviewed catalogs and owned unary calls |
+| Ping | Reply without session authority |
+| Sampling, roots, form/URL elicitation, task/custom requests | Not advertised; reject with `METHOD_NOT_FOUND`, without selecting an answer or reflecting payloads |
+| Catalog/resource change notifications | Revoke the connection's catalog snapshot; hide its definitions and reject new calls until explicit reconnection and schema review |
+| Cancellation | RPC request owner handles the cancellation token; physical operation settlement remains independently owned |
+| Progress, logging, task/subscription/custom observations | No subscription or authority is granted; discard payloads without a retained queue or user-visible secret channel |
+
+Catalog invalidation uses one shared atomic flag per connection. Disconnection
+also revokes the snapshot. Reconnection waits for prior invocation ownership and
+settles the exact prior client before opening a replacement; changed tool schemas
+remain inactive until approved. Adding an inbound host capability requires a
+session-authorized command route, a declared handshake capability, and explicit
+cancellation/settlement behavior in this owner. Terminal and embedded clients
+receive the same unsupported-capability behavior.
+
 ### Process model
 
 `rw` (Rust) is the single entry point. In TUI mode it: binds the engine server to a unix socket (localhost TCP on Windows) with a per-engine auth token, spawns the bundled TUI executable with the socket address + token, and supervises it. Engine and TUI fail independently: TUI crash → `rw` restarts it and reattaches to the live session; engine crash → TUI shows a reconnect state, sessions recover from the event log. Print/serve/SDK paths never touch Bun — headless usage is pure Rust.

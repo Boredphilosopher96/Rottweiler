@@ -11,7 +11,7 @@ mod types;
 pub use client::{GuardedStreamableHttpConnector, TestOnlyUnsandboxedStdioConnector};
 pub use client::{
     McpAuthorizationProvider, McpClient, McpConnectionApprovalPolicy, McpConnector,
-    SandboxedStdioConnector, boxed_running_http_client, sorted_headers,
+    McpInboundRouter, SandboxedStdioConnector, boxed_running_http_client, sorted_headers,
 };
 pub use manager::{CompactJsonEncoder, MAX_SERVERS, McpManager, StructuredResponseEncoder};
 pub use server::{

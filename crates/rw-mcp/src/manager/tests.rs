@@ -1,4 +1,5 @@
 #![allow(clippy::expect_used)]
+mod inbound;
 mod lifetimes;
 
 use std::{
@@ -20,10 +21,15 @@ struct MockClient {
     schema_version: Arc<Mutex<u8>>,
     closed: AtomicBool,
     fail_close: bool,
+    invalidated: AtomicBool,
 }
 
 #[async_trait]
 impl McpClient for MockClient {
+    fn catalog_valid(&self) -> bool {
+        !self.invalidated.load(Ordering::Acquire)
+    }
+
     async fn list_tools(&self) -> Result<Vec<Value>, McpError> {
         let version = *self.schema_version.lock().await;
         Ok(vec![
@@ -133,6 +139,7 @@ async fn five_servers_stay_deferred_and_support_full_catalog_and_calls() {
                 schema_version: Arc::new(Mutex::new(1)),
                 closed: AtomicBool::new(false),
                 fail_close: false,
+                invalidated: AtomicBool::new(false),
             }),
         );
     }
@@ -225,6 +232,7 @@ async fn changed_schema_stays_inactive_until_approval() {
         schema_version: Arc::clone(&schema_version),
         closed: AtomicBool::new(false),
         fail_close: false,
+        invalidated: AtomicBool::new(false),
     });
     let connector = Arc::new(MockConnector {
         clients: Mutex::new(BTreeMap::from([(id.clone(), client)])),
@@ -291,6 +299,7 @@ async fn failed_close_does_not_make_an_explicitly_disabled_server_reconnectable(
         schema_version: Arc::new(Mutex::new(1)),
         closed: AtomicBool::new(false),
         fail_close: true,
+        invalidated: AtomicBool::new(false),
     });
     let connector = Arc::new(MockConnector {
         clients: Mutex::new(BTreeMap::from([(id.clone(), client)])),
@@ -336,6 +345,7 @@ async fn disable_during_connect_cannot_resurrect_stale_generation() {
             schema_version: Arc::new(Mutex::new(1)),
             closed: AtomicBool::new(false),
             fail_close: false,
+            invalidated: AtomicBool::new(false),
         }),
         started: Notify::new(),
         proceed: Notify::new(),

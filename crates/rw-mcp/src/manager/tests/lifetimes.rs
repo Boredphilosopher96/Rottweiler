@@ -62,6 +62,10 @@ impl Default for ControlledClient {
 }
 #[async_trait]
 impl McpClient for ControlledClient {
+    fn catalog_valid(&self) -> bool {
+        true
+    }
+
     async fn list_tools(&self) -> Result<Vec<Value>, McpError> {
         self.catalogs.fetch_add(1, Ordering::SeqCst);
         Ok(vec![json!({"name":"work","inputSchema":{"type":"object"}})])

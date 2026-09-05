@@ -99,7 +99,7 @@ async fn fixture() -> (Arc<ConnectionClosure>, Arc<Completion>, Arc<Completion>)
     let transport = Arc::new(Completion::default());
     let child = Arc::new(Completion::default());
     let (sender, receiver) = mpsc::channel(4);
-    let service = ()
+    let service = crate::McpInboundRouter::default()
         .serve(HeldTransport {
             sender,
             receiver,

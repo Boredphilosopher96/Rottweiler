@@ -66,6 +66,10 @@ struct PolicyClient {
 
 #[async_trait]
 impl rw_mcp::McpClient for PolicyClient {
+    fn catalog_valid(&self) -> bool {
+        true
+    }
+
     async fn list_tools(&self) -> Result<Vec<Value>, McpError> {
         let names = if self.server == "github" {
             vec!["get_issue", "delete_issue"]

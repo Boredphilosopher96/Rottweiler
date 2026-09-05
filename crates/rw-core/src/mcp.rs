@@ -198,9 +198,12 @@ impl McpConnector for ProductionMcpHttpConnector {
         }
         let transport =
             StreamableHttpClientTransport::with_client(self.client.clone(), transport_config);
-        let service = ().serve(transport).await.map_err(|_| {
-            McpError::Protocol("remote MCP protocol initialization failed".to_owned())
-        })?;
+        let service = rw_mcp::McpInboundRouter::default()
+            .serve(transport)
+            .await
+            .map_err(|_| {
+                McpError::Protocol("remote MCP protocol initialization failed".to_owned())
+            })?;
         Ok(boxed_running_http_client(config.id.clone(), service))
     }
 }

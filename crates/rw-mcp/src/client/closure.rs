@@ -26,7 +26,7 @@ pub(super) struct ConnectionClosure {
 
 impl ConnectionClosure {
     pub(super) fn new(
-        service: RunningService<RoleClient, ()>,
+        service: RunningService<RoleClient, super::McpInboundRouter>,
         child: Option<Box<dyn ProtocolProcessHandle>>,
     ) -> Self {
         Self::from_resources(Resources {
@@ -91,7 +91,7 @@ impl Drop for ConnectionClosure {
 }
 
 struct Resources {
-    service: Option<RunningService<RoleClient, ()>>,
+    service: Option<RunningService<RoleClient, super::McpInboundRouter>>,
     child: Option<Box<dyn ProtocolProcessHandle>>,
 }
 

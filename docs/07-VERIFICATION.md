@@ -444,3 +444,11 @@ signer remains authoritative for signatures and the full channel transition.
 3. Docs updated in the same PR (01-FEATURES if user-visible, 03-DECISIONS if a choice was contested, plugin protocol doc if the API changed).
 4. If it fixed a bug: a fixture reproduces the bug and now passes.
 5. No `unwrap()`/`expect()` outside tests and provably-infallible spots (clippy lint enforced).
+
+MCP inbound acceptance exercises the real protocol handshake, unadvertised catalog
+methods, unsolicited host requests, catalog invalidation, schema approval after
+reconnection, and disconnection. Repeated change notifications retain constant
+state rather than a notification backlog. The runtime embedding acceptance uses
+an isolated process with stdin closed: it captures events, chooses a question
+answer, resumes durable state, interrupts a pending question, and verifies empty
+stdout and stderr after owned shutdown.

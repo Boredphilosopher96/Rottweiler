@@ -54,11 +54,33 @@ struct ServerEntry {
 }
 
 impl ServerEntry {
+    fn catalog_valid(&self) -> bool {
+        self.client
+            .as_ref()
+            .is_none_or(|client| client.catalog_valid())
+    }
+
+    fn ready(&self) -> bool {
+        self.config.enabled && matches!(self.state, ServerState::Ready) && self.catalog_valid()
+    }
+
     fn status(&self) -> ServerStatus {
         ServerStatus {
             id: self.config.id.clone(),
             enabled: self.config.enabled,
-            state: self.state.clone(),
+            state: if self.config.enabled
+                && !self.catalog_valid()
+                && matches!(
+                    self.state,
+                    ServerState::Ready | ServerState::ApprovalRequired
+                ) {
+                ServerState::Failed {
+                    message: "MCP catalog connection requires reconnection and schema review"
+                        .to_owned(),
+                }
+            } else {
+                self.state.clone()
+            },
             tool_count: self.tools.len(),
             resource_count: self.resources.len(),
             prompt_count: self.prompts.len(),
@@ -214,10 +236,11 @@ impl McpManager {
         let entry = servers
             .get_mut(server)
             .ok_or_else(|| McpError::UnknownServer(server.clone()))?;
-        if !entry
-            .client
-            .as_ref()
-            .is_some_and(|active| Arc::ptr_eq(active, &client))
+        if !entry.catalog_valid()
+            || !entry
+                .client
+                .as_ref()
+                .is_some_and(|active| Arc::ptr_eq(active, &client))
         {
             return Err(McpError::NotConnected(server.clone()));
         }
@@ -244,7 +267,7 @@ impl McpManager {
         if !entry.config.enabled {
             return Err(McpError::Disabled(server.clone()));
         }
-        if entry.client.is_none() {
+        if entry.client.is_none() || !entry.catalog_valid() {
             return Err(McpError::NotConnected(server.clone()));
         }
         let Some(tools) = entry.pending_catalog.take() else {
@@ -276,6 +299,7 @@ impl McpManager {
             if !entry.config.enabled
                 || !entry.config.defer_tools
                 || !matches!(entry.state, ServerState::Ready)
+                || !entry.catalog_valid()
             {
                 continue;
             }
@@ -305,6 +329,7 @@ impl McpManager {
             if !entry.config.enabled
                 || entry.config.defer_tools
                 || !matches!(entry.state, ServerState::Ready)
+                || !entry.catalog_valid()
             {
                 continue;
             }
@@ -337,6 +362,7 @@ impl McpManager {
             if server_filter.is_some_and(|filter| filter != server)
                 || !entry.config.enabled
                 || !matches!(entry.state, ServerState::Ready)
+                || !entry.catalog_valid()
             {
                 continue;
             }
@@ -376,7 +402,7 @@ impl McpManager {
         let servers = self.inner.servers.read().await;
         let mut result = Vec::new();
         for (server, entry) in &*servers {
-            if !entry.config.enabled || !matches!(entry.state, ServerState::Ready) {
+            if !entry.ready() {
                 continue;
             }
             let values = if kind == "resources" {
@@ -479,7 +505,7 @@ impl McpManager {
         if !entry.config.enabled {
             return Err(McpError::Disabled(server.clone()));
         }
-        if !matches!(entry.state, ServerState::Ready) {
+        if !entry.ready() {
             return Err(McpError::NotConnected(server.clone()));
         }
         entry

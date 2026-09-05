@@ -1,4 +1,6 @@
 mod closure;
+mod inbound;
+pub use inbound::McpInboundRouter;
 
 use std::{
     collections::BTreeMap,
@@ -49,6 +51,9 @@ pub trait McpConnectionApprovalPolicy: Send + Sync {
 
 #[async_trait]
 pub trait McpClient: Send + Sync {
+    /// Whether the connected catalog snapshot remains authoritative.
+    /// A notification that revokes it requires explicit reconnection and review.
+    fn catalog_valid(&self) -> bool;
     async fn list_tools(&self) -> Result<Vec<Value>, McpError>;
     async fn list_resources(&self) -> Result<Vec<Value>, McpError>;
     async fn list_prompts(&self) -> Result<Vec<Value>, McpError>;
@@ -134,7 +139,10 @@ where
         }
         let transport =
             StreamableHttpClientTransport::with_client(self.client.clone(), transport_config);
-        let service = ().serve(transport).await.map_err(protocol)?;
+        let service = McpInboundRouter::default()
+            .serve(transport)
+            .await
+            .map_err(protocol)?;
         Ok(Arc::new(RmcpClient::new(config.id.clone(), service, None)))
     }
 }
@@ -191,9 +199,9 @@ where
             stdout,
             mut handle,
         } = spawned;
-        if let Ok(service) =
-            ().serve((BoundedLineReader::new(stdout, MAX_STDIO_FRAME_BYTES), stdin))
-                .await
+        if let Ok(service) = McpInboundRouter::default()
+            .serve((BoundedLineReader::new(stdout, MAX_STDIO_FRAME_BYTES), stdin))
+            .await
         {
             Ok(Arc::new(RmcpClient::new(
                 config.id.clone(),
@@ -247,24 +255,26 @@ impl TestOnlyUnsandboxedStdioConnector {
 struct RmcpClient {
     server: McpServerId,
     peer: rmcp::Peer<RoleClient>,
+    inbound: McpInboundRouter,
     closure: closure::ConnectionClosure,
 }
 
 impl RmcpClient {
     fn new(
         server: McpServerId,
-        service: RunningService<RoleClient, ()>,
+        service: RunningService<RoleClient, McpInboundRouter>,
         child: Option<Box<dyn ProtocolProcessHandle>>,
     ) -> Self {
         Self {
             server,
             peer: service.peer().clone(),
+            inbound: service.service().clone(),
             closure: closure::ConnectionClosure::new(service, child),
         }
     }
 
     fn peer(&self) -> Result<rmcp::Peer<RoleClient>, McpError> {
-        if self.closure.is_closed() {
+        if self.closure.is_closed() || !self.catalog_valid() {
             Err(McpError::NotConnected(self.server.clone()))
         } else {
             Ok(self.peer.clone())
@@ -278,7 +288,7 @@ impl RmcpClient {
 #[must_use]
 pub fn boxed_running_http_client(
     server: McpServerId,
-    service: RunningService<RoleClient, ()>,
+    service: RunningService<RoleClient, McpInboundRouter>,
 ) -> Arc<dyn McpClient> {
     Arc::new(RmcpClient::new(server, service, None))
 }
@@ -308,7 +318,10 @@ impl McpConnector for TestOnlyUnsandboxedStdioConnector {
                 }
                 let transport = TokioChildProcess::new(command)
                     .map_err(|error| McpError::Protocol(error.to_string()))?;
-                let service = ().serve(transport).await.map_err(|_| protocol_failure())?;
+                let service = McpInboundRouter::default()
+                    .serve(transport)
+                    .await
+                    .map_err(|_| protocol_failure())?;
                 Ok(Arc::new(RmcpClient::new(config.id.clone(), service, None)))
             }
             McpTransportConfig::StreamableHttp { .. } => Err(McpError::Policy(
@@ -414,8 +427,18 @@ impl<R: AsyncRead + Unpin> AsyncRead for BoundedLineReader<R> {
 
 #[async_trait]
 impl McpClient for RmcpClient {
+    fn catalog_valid(&self) -> bool {
+        self.inbound.catalog_valid() && !self.peer.is_transport_closed()
+    }
+
     async fn list_tools(&self) -> Result<Vec<Value>, McpError> {
         let peer = self.peer()?;
+        if peer
+            .peer_info()
+            .is_none_or(|info| info.capabilities.tools.is_none())
+        {
+            return Ok(Vec::new());
+        }
         let mut cursor = None;
         let mut values = Vec::new();
         loop {
@@ -444,6 +467,12 @@ impl McpClient for RmcpClient {
 
     async fn list_resources(&self) -> Result<Vec<Value>, McpError> {
         let peer = self.peer()?;
+        if peer
+            .peer_info()
+            .is_none_or(|info| info.capabilities.resources.is_none())
+        {
+            return Ok(Vec::new());
+        }
         let mut cursor = None;
         let mut values = Vec::new();
         loop {
@@ -472,6 +501,12 @@ impl McpClient for RmcpClient {
 
     async fn list_prompts(&self) -> Result<Vec<Value>, McpError> {
         let peer = self.peer()?;
+        if peer
+            .peer_info()
+            .is_none_or(|info| info.capabilities.prompts.is_none())
+        {
+            return Ok(Vec::new());
+        }
         let mut cursor = None;
         let mut values = Vec::new();
         loop {
