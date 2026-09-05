@@ -23,21 +23,27 @@ struct Lane {
     slots: Arc<Semaphore>,
     bytes: Arc<Semaphore>,
     clients: Mutex<HashMap<ClientId, Weak<Semaphore>>>,
+    client_count: usize,
 }
 impl Default for CommandIngress {
     fn default() -> Self {
         Self {
-            normal: Lane::new(16, 96 * 1024),
-            urgent: Lane::new(8, 4 * 1024),
+            normal: Lane::new(
+                16,
+                96 * 1024,
+                rw_types::MAX_CLIENT_CONTROLS + rw_types::MAX_CLIENT_READS,
+            ),
+            urgent: Lane::new(8, 4 * 1024, 2),
         }
     }
 }
 impl Lane {
-    fn new(count: usize, units: usize) -> Self {
+    fn new(count: usize, units: usize, client_count: usize) -> Self {
         Self {
             slots: Arc::new(Semaphore::new(count)),
             bytes: Arc::new(Semaphore::new(units)),
             clients: Mutex::default(),
+            client_count,
         }
     }
     fn client(&self, id: &ClientId) -> Arc<Semaphore> {
@@ -49,7 +55,7 @@ impl Lane {
         if let Some(owner) = clients.get(id).and_then(Weak::upgrade) {
             return owner;
         }
-        let owner = Arc::new(Semaphore::new(2));
+        let owner = Arc::new(Semaphore::new(self.client_count));
         clients.insert(id.clone(), Arc::downgrade(&owner));
         owner
     }
@@ -209,6 +215,25 @@ pub(super) async fn decode(
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+    #[test]
+    fn transport_admits_the_clients_combined_read_and_control_window() {
+        let ingress = CommandIngress::default();
+        let client = ClientId("client".into());
+        let limit = rw_types::MAX_CLIENT_CONTROLS + rw_types::MAX_CLIENT_READS;
+        let admitted: Vec<_> = (0..limit)
+            .map(|_| {
+                ingress
+                    .acquire(&client, "normal", Some(128))
+                    .expect("semantic window")
+            })
+            .collect();
+        assert!(matches!(
+            ingress.acquire(&client, "normal", Some(128)),
+            Err(AdmissionError::Busy)
+        ));
+        drop(admitted);
+        assert_eq!(ingress.normal.slots.available_permits(), 16);
+    }
     #[test]
     fn normal_input_saturation_preserves_urgent_credit() {
         let ingress = CommandIngress::default();

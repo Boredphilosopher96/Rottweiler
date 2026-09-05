@@ -36,7 +36,13 @@ pub(super) struct ControlLease {
 impl Default for ControlAdmission {
     fn default() -> Self {
         Self {
-            normal: Lane::new(64, 32 * 1024 * 1024, 8, 8, 16 * 1024 * 1024),
+            normal: Lane::new(
+                64,
+                32 * 1024 * 1024,
+                rw_types::MAX_CLIENT_CONTROLS,
+                8,
+                16 * 1024 * 1024,
+            ),
             urgent: Lane::new(8, 1024 * 1024, 2, 2, 64 * 1024),
         }
     }

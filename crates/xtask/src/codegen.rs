@@ -173,6 +173,7 @@ fn generate_typescript() -> Result<String, XtaskError> {
         ("MAX_MCP_SERVER_ID_BYTES", MAX_MCP_SERVER_ID_BYTES),
         ("MAX_COMMAND_REPLY_BYTES", rw_types::MAX_COMMAND_REPLY_BYTES),
         ("MAX_CLIENT_READS", rw_types::MAX_CLIENT_READS),
+        ("MAX_CLIENT_CONTROLS", rw_types::MAX_CLIENT_CONTROLS),
         (
             "MAX_UI_SURFACE_BYTES",
             rw_types::extension_ui::MAX_UI_SURFACE_BYTES,
