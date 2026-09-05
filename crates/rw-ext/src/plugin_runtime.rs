@@ -11,6 +11,7 @@ mod testing;
 #[cfg(test)]
 use testing::*;
 mod incoming;
+mod provider_http;
 #[cfg(test)]
 use incoming::stream_provider_http_body;
 use incoming::{
@@ -165,7 +166,7 @@ async fn return_stream_credit(
 }
 
 type PendingProviderStreams = Arc<StdMutex<BTreeMap<RpcId, PendingProviderStream>>>;
-type ActiveProviderHttp = Arc<StdMutex<BTreeMap<RpcId, CancellationToken>>>;
+type ActiveProviderHttp = Arc<StdMutex<BTreeMap<RpcId, provider_http::ActiveHttp>>>;
 
 type SettlementResult = Option<Result<(), PluginProcessError>>;
 
@@ -176,10 +177,16 @@ struct RequestTermination {
     active_provider_http: ActiveProviderHttp,
     cancellation: CancellationToken,
     host_effects: Arc<Semaphore>,
+    host_failure: watch::Sender<bool>,
     completion: StdMutex<Option<watch::Receiver<SettlementResult>>>,
 }
 
 impl RequestTermination {
+    fn fail_host_proof(&self) {
+        self.host_failure.send_replace(true);
+        self.begin();
+    }
+
     fn begin(&self) {
         let mut completion = self
             .completion
@@ -197,6 +204,7 @@ impl RequestTermination {
         }
         let process = Arc::clone(&self.process);
         let host_effects = Arc::clone(&self.host_effects);
+        let mut host_failure = self.host_failure.subscribe();
         let (sender, receiver) = watch::channel(None);
         *completion = Some(receiver);
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
@@ -205,7 +213,18 @@ impl RequestTermination {
         };
         runtime.spawn(async move {
             let result = process.settle_effects().await;
-            let _host_settlement = host_effects.acquire_many(HOST_EFFECT_CAPACITY).await;
+            let host_proof = async {
+                loop {
+                    if *host_failure.borrow_and_update() { return false; }
+                    tokio::select! {
+                        permit = host_effects.acquire_many(HOST_EFFECT_CAPACITY) => return permit.is_ok(),
+                        changed = host_failure.changed() => if changed.is_err() { return false; },
+                    }
+                }
+            }.await;
+            let result = if host_proof { result } else {
+                Err(PluginProcessError { message: "host effect settlement remains unproven".to_owned() })
+            };
             if let Err(error) = &result {
                 tracing::error!(%error, "plugin effects could not be settled; operation remains blocked");
             }
@@ -315,6 +334,7 @@ impl JsonRpcPluginClient {
             active_provider_http: Arc::clone(&active_provider_http),
             cancellation: CancellationToken::default(),
             host_effects: Arc::new(Semaphore::new(HOST_EFFECT_CAPACITY as usize)),
+            host_failure: watch::channel(false).0,
             completion: StdMutex::new(None),
         });
         let client = Arc::new(Self {
@@ -583,8 +603,12 @@ impl JsonRpcPluginClient {
         if self.closed.load(Ordering::Acquire) {
             return Err(rpc_error("closed", "plugin RPC client is closed"));
         }
-        let provider: ProviderCompleteParams = serde_json::from_value(params.clone())
-            .map_err(|_| rpc_error("invalid_params", "invalid provider invocation"))?;
+        let alias = params
+            .get("alias")
+            .and_then(Value::as_str)
+            .filter(|alias| !alias.is_empty() && alias.len() <= MAX_NAME_BYTES)
+            .ok_or_else(|| rpc_error("invalid_params", "invalid provider invocation alias"))?
+            .to_owned();
         let deadline = tokio::time::Instant::now()
             + Duration::from_millis(rw_plugin_protocol::MAX_OPERATION_DURATION_MS);
         let numeric = self
@@ -612,7 +636,7 @@ impl JsonRpcPluginClient {
             .insert(
                 id.clone(),
                 PendingProviderStream {
-                    alias: provider.alias,
+                    alias,
                     deadline,
                     sender,
                     terminal,

@@ -118,18 +118,16 @@ pub(super) async fn activate(
             Arc::new(rw_ext::DenyPluginProviderHttpHandler)
         } else {
             let registrar: Arc<dyn rw_providers::KnownSecretRegistrar> = recipe.redactor.clone();
-            Arc::new(
-                RuntimePluginProviderHttp::new(
-                    &recipe.private_root.join("credentials.toml"),
-                    &process
-                        .allowed_domains()
-                        .iter()
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                    registrar,
-                )
-                .map_err(diagnostic)?,
-            )
+            Arc::new(RuntimePluginProviderHttp::new(
+                &recipe.private_root.join("credentials.toml"),
+                &process
+                    .allowed_domains()
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                registrar,
+                recipe.budget.clone(),
+            ))
         };
     let redactor: Arc<dyn PluginBoundaryRedactor> = recipe.redactor.clone();
     // Accepted launch is never cancellation-dropped. A late initialized host is

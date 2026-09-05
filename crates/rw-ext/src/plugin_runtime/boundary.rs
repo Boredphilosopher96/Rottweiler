@@ -87,25 +87,32 @@ pub struct PluginHttpStreamResponse {
     pub body: PluginHttpByteStream,
 }
 
-/// Trusted host boundary that resolves credentials and owns the provider socket.
-#[async_trait]
+/// Factory for inert, individually owned authenticated HTTP operations.
+/// Returning an error must not leave locally owned effects.
 pub trait PluginProviderHttpHandler: Send + Sync {
-    async fn request(
+    fn prepare(
         &self,
         params: Value,
-        cancellation: &CancellationToken,
-    ) -> Result<PluginHttpStreamResponse, PluginRpcError>;
+        cancellation: CancellationToken,
+    ) -> Result<Arc<dyn PluginProviderHttpOperation>, PluginRpcError>;
+}
+
+/// One operation retains its socket, runtime and resource admission through proof.
+#[async_trait]
+pub trait PluginProviderHttpOperation: Send + Sync {
+    async fn response(&self) -> Result<PluginHttpStreamResponse, PluginRpcError>;
+    /// Called after the response future and body have been dropped. Cancellation
+    /// requests retirement; only this result proves locally owned effects ended.
+    async fn settle_effects(&self) -> Result<(), PluginRpcError>;
 }
 
 pub struct DenyPluginProviderHttpHandler;
-
-#[async_trait]
 impl PluginProviderHttpHandler for DenyPluginProviderHttpHandler {
-    async fn request(
+    fn prepare(
         &self,
         _params: Value,
-        _cancellation: &CancellationToken,
-    ) -> Result<PluginHttpStreamResponse, PluginRpcError> {
+        _cancellation: CancellationToken,
+    ) -> Result<Arc<dyn PluginProviderHttpOperation>, PluginRpcError> {
         Err(rpc_error(
             "provider_http_unavailable",
             "host-mediated provider HTTP is unavailable on this host surface",

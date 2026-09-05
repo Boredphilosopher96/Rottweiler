@@ -219,12 +219,12 @@ async fn plugin_http_registers_secret_and_respects_process_network_denial() {
         &credentials_path,
         &["example.com".to_owned()],
         Arc::new(redactor.clone()),
-    )
-    .expect("HTTP handler");
-    let outside = handler
-        .request(
+        Arc::new(PluginRuntimeBudget::default()),
+    );
+    let outside_operation = handler
+        .prepare(
             json!({
-                "alias":"fixture/model",
+                "invocation_id":1, "alias":"fixture/model",
                 "credential_reference":"fixture-token",
                 "request":{
                     "method":"POST",
@@ -235,16 +235,21 @@ async fn plugin_http_registers_secret_and_respects_process_network_denial() {
                     "credential_prefix":"Bearer "
                 }
             }),
-            &CancellationToken::default(),
+            CancellationToken::default(),
         )
-        .await;
+        .expect("HTTP operation");
+    let outside = outside_operation.response().await;
+    outside_operation
+        .settle_effects()
+        .await
+        .expect("rejected URL proof");
     assert!(matches!(outside, Err(PluginRpcError { code, .. }) if code == "domain_denied"));
     assert_eq!(redactor.registered_secret_count(), 0);
     let _deny = rw_providers::deny_outbound_network_for_process();
-    let result = handler
-        .request(
+    let operation = handler
+        .prepare(
             json!({
-                "alias":"fixture/model",
+                "invocation_id":1, "alias":"fixture/model",
                 "credential_reference":"fixture-token",
                 "request":{
                     "method":"POST",
@@ -255,9 +260,14 @@ async fn plugin_http_registers_secret_and_respects_process_network_denial() {
                     "credential_prefix":"Bearer "
                 }
             }),
-            &CancellationToken::default(),
+            CancellationToken::default(),
         )
-        .await;
+        .expect("HTTP operation");
+    let result = operation.response().await;
+    operation
+        .settle_effects()
+        .await
+        .expect("network denial proof");
     let Err(error) = result else {
         panic!("network denial must fail before opening a socket");
     };

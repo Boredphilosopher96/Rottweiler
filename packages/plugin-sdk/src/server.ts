@@ -1250,7 +1250,6 @@ export class PluginServer {
         throw new SafeRpcError(-32603, "provider HTTP finished event is invalid")
       }
       pending.sawFinished = true
-      pending.body.finish()
       return
     }
     throw new SafeRpcError(-32603, "provider HTTP event type is invalid")
@@ -1279,7 +1278,9 @@ export class PluginServer {
       const error = new SafeRpcError(-32603, "host-mediated provider HTTP ended incorrectly")
       pending.body.fail(error)
       pending.reject(error)
+      return
     }
+    pending.body.finish()
   }
 
   #providerContext(context: HandlerContext, invocationId: RpcId, alias: string): ProviderHandlerContext {

@@ -8,6 +8,10 @@ pub(crate) use mcp_service::*;
 
 mod activation;
 mod budget;
+mod provider_http;
+use provider_http::RuntimePluginProviderHttp;
+#[cfg(test)]
+use provider_http::plugin_http_domain_allowed;
 pub(crate) mod generations;
 pub(crate) mod ui;
 pub(crate) use budget::PluginRuntimeBudget;
@@ -29,8 +33,6 @@ use std::{
 };
 
 use async_trait::async_trait;
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use futures_util::StreamExt as _;
 use miette::{IntoDiagnostic, Result, miette};
 use rw_core::{
     HostError, HostMcpService, LoopbackMcpAuthority, McpApprovalReview, McpEnvironmentEntry,
@@ -40,9 +42,8 @@ use rw_core::{
 };
 use rw_ext::{
     ApprovalStore, ApprovalStoreError, HookHandler, HookRegistration, PluginBoundaryRedactor,
-    PluginEventRouter, PluginHttpStreamResponse, PluginProviderHttpHandler, PluginRpcError,
-    PushHandler, RpcCommandAdapter, RpcHookHandler, RpcProviderAdapter, RpcToolAdapter,
-    plugin_hook_registration,
+    PluginEventRouter, PluginProviderHttpHandler, PluginRpcError, PushHandler, RpcCommandAdapter,
+    RpcHookHandler, RpcProviderAdapter, RpcToolAdapter, plugin_hook_registration,
 };
 use rw_ext::{
     CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation, CommandRegistry,
@@ -59,10 +60,7 @@ use rw_plugin_protocol::{
 };
 use rw_store::config::ConfigLoader;
 use rw_store::credentials::{CredentialManager, CredentialReference};
-use rw_tools::{
-    CancellationToken, EgressPolicy, SandboxedProtocolLauncher, SupervisedEgressProxy, Tool,
-    UpstreamProxy,
-};
+use rw_tools::{CancellationToken, EgressPolicy, SandboxedProtocolLauncher, Tool, UpstreamProxy};
 use rw_types::{Block, CommandSource, McpServerId, Role, Turn, TurnMeta};
 use serde::{Deserialize, Serialize};
 
@@ -104,154 +102,6 @@ impl Drop for PrivateMcpScratch {
         {
             tracing::warn!(path=%self.path.display(),%error,"MCP scratch cleanup failed");
         }
-    }
-}
-
-struct RuntimePluginProviderHttp {
-    credentials: Arc<CredentialManager>,
-    registrar: Arc<dyn rw_providers::KnownSecretRegistrar>,
-    proxy: SupervisedEgressProxy,
-    allowed_domains: BTreeSet<String>,
-}
-
-impl RuntimePluginProviderHttp {
-    fn new(
-        credentials_path: &Path,
-        allowed_domains: &[String],
-        registrar: Arc<dyn rw_providers::KnownSecretRegistrar>,
-    ) -> Result<Self> {
-        let proxy = SupervisedEgressProxy::start(EgressPolicy::new(allowed_domains))
-            .map_err(|error| miette!(error.to_string()))?;
-        Ok(Self {
-            credentials: Arc::new(CredentialManager::system(credentials_path)),
-            registrar,
-            proxy,
-            allowed_domains: allowed_domains.iter().cloned().collect(),
-        })
-    }
-
-    fn domain_allowed(&self, url: &url::Url) -> bool {
-        plugin_http_domain_allowed(&self.allowed_domains, url)
-    }
-}
-
-fn plugin_http_domain_allowed(allowed_domains: &BTreeSet<String>, url: &url::Url) -> bool {
-    url.host_str().is_some_and(|host| {
-        let host = host.trim_end_matches('.').to_ascii_lowercase();
-        allowed_domains.iter().any(|allowed| {
-            host == *allowed
-                || host
-                    .strip_suffix(allowed)
-                    .is_some_and(|prefix| prefix.ends_with('.'))
-        })
-    })
-}
-
-#[async_trait]
-impl PluginProviderHttpHandler for RuntimePluginProviderHttp {
-    async fn request(
-        &self,
-        params: serde_json::Value,
-        cancellation: &CancellationToken,
-    ) -> std::result::Result<PluginHttpStreamResponse, PluginRpcError> {
-        let params: rw_plugin_protocol::ProviderHttpCapabilityParams =
-            serde_json::from_value(params).map_err(|_| {
-                plugin_http_error("invalid_request", "provider HTTP request is invalid")
-            })?;
-        let _ = params.alias;
-        let url = url::Url::parse(&params.request.url)
-            .map_err(|_| plugin_http_error("invalid_request", "provider HTTP URL is invalid"))?;
-        if !self.domain_allowed(&url) {
-            return Err(plugin_http_error(
-                "domain_denied",
-                "provider HTTP URL is outside the plugin allowed_domains policy",
-            ));
-        }
-        let body = BASE64_STANDARD
-            .decode(
-                params
-                    .request
-                    .body_base64
-                    .as_deref()
-                    .unwrap_or("")
-                    .as_bytes(),
-            )
-            .map_err(|_| plugin_http_error("invalid_request", "provider HTTP body is invalid"))?;
-        let mut headers = params
-            .request
-            .headers
-            .into_iter()
-            .map(|header| (header.name, header.value))
-            .collect::<Vec<_>>();
-        if headers
-            .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case(&params.request.credential_header))
-        {
-            return Err(plugin_http_error(
-                "invalid_request",
-                "provider HTTP credential header cannot also be plugin-supplied",
-            ));
-        }
-        let resolved = self
-            .credentials
-            .resolve(&CredentialReference::new(&params.credential_reference))
-            .map_err(|_| {
-                plugin_http_error(
-                    "authentication",
-                    "provider HTTP credential reference could not be resolved",
-                )
-            })?;
-        let secret = rw_providers::Secret::new(resolved.secret().expose_secret().clone());
-        self.registrar.register(&secret);
-        headers.push((
-            params.request.credential_header,
-            format!(
-                "{}{}",
-                params.request.credential_prefix.unwrap_or_default(),
-                secret.expose_secret()
-            ),
-        ));
-        let method = match params.request.method.as_str() {
-            "GET" => rw_providers::GuardedHttpMethod::Get,
-            "POST" => rw_providers::GuardedHttpMethod::Post,
-            "DELETE" => rw_providers::GuardedHttpMethod::Delete,
-            _ => {
-                return Err(plugin_http_error(
-                    "invalid_request",
-                    "provider HTTP method is invalid",
-                ));
-            }
-        };
-        let guarded = rw_providers::GuardedHttpRequest {
-            method,
-            url,
-            headers,
-            body,
-            proxy: url::Url::parse(&self.proxy.url()).ok(),
-            proxy_authentication: None,
-            dns_pin: None,
-            allow_private_destinations: false,
-            response_deadline: Duration::from_mins(5),
-            frame_deadline: Duration::from_secs(30),
-            max_frame_bytes: 256 * 1024,
-            max_body_bytes: 64 * 1024 * 1024,
-        };
-        let response = tokio::select! {
-            () = cancellation.cancelled() => {
-                return Err(plugin_http_error("cancelled", "provider HTTP request was cancelled"));
-            }
-            response = rw_providers::guarded_http_request(guarded) => response,
-        }
-        .map_err(|error| plugin_http_guard_error(&error))?;
-        Ok(PluginHttpStreamResponse {
-            status: response.status,
-            headers: response.headers,
-            body: Box::pin(
-                response
-                    .body
-                    .map(|chunk| chunk.map_err(|error| plugin_http_guard_error(&error))),
-            ),
-        })
     }
 }
 

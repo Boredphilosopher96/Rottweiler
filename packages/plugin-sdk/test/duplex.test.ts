@@ -116,6 +116,23 @@ describe("production SDK duplex serve", () => {
     expect(frames.find((frame) => frame.id === 2)).toEqual({ jsonrpc: "2.0", id: 2, result: { models: [] } })
   })
 
+  test("HTTP finished data does not release provider completion before host settlement outcome", async () => {
+    const { frames, send, serving } = harness()
+    send(models)
+    await until(() => frames.some(frame => frame.method === "provider/http"))
+    const id = httpId(frames)
+    send(httpEvent(id, { type: "head", status: 200, headers: [] }))
+    send(httpEvent(id, { type: "body", data_base64: Buffer.from("catalog").toString("base64") }))
+    send(httpEvent(id, { type: "finished" }))
+    await Bun.sleep(20)
+    expect(frames.some(frame => frame.id === 2)).toBe(false)
+    send({ jsonrpc: "2.0", id, result: null })
+    await until(() => frames.some(frame => frame.id === 2))
+    send(stop)
+    await serving
+    expect(frames.find(frame => frame.id === 2)?.result).toEqual({ models: [] })
+  })
+
   test("handler saturation rejects excess requests but still reads HTTP and shutdown", async () => {
     const { frames, send, serving } = harness()
     send(models)

@@ -386,3 +386,13 @@ canonical tool-only turns with host invocation identities; they do not fabricate
 provider messages. The callback receives its outcome after canonical tool and
 turn completion. Output exceeding the callback byte limit is explicitly absent;
 its complete output remains in the canonical tool event.
+
+Authenticated HTTP operations share an application-wide admission limit of eight.
+Each retains a private network runtime, a supervised egress proxy and an eight-frame
+response channel (256 KiB per frame). Cancellation drops the response path inside
+that owned runtime. Completion waits for its connection and blocking resolver tasks
+and all proxy workers to settle. The terminal HTTP outcome follows this proof;
+stream data alone cannot complete the provider call. A failed or five-second
+expired cleanup proof retains the operation and its capacity, closes plugin
+admission and reports `effects_unsettled`. This proves local resource retirement;
+it does not assert that a remote service stopped inference or settled billing.

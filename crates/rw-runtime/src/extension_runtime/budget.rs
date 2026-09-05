@@ -14,6 +14,7 @@ const MAX_WAITERS: usize = 32;
 const MAX_STARTING: usize = 32;
 const PARALLEL_STARTS: usize = 2;
 const MAX_RESIDENT_PROCESSES: usize = 32;
+const MAX_HTTP_OPERATIONS: usize = 8;
 pub(super) const ACTIVATION_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Shared by every configured plugin generation in one application host.
@@ -25,6 +26,7 @@ pub(crate) struct PluginRuntimeBudget {
     starts: Arc<Semaphore>,
     execution: Arc<Semaphore>,
     residents: Arc<Semaphore>,
+    http: Arc<Semaphore>,
     pub(super) preparation: Arc<SourcePreparationBudget>,
 }
 impl Default for PluginRuntimeBudget {
@@ -36,6 +38,7 @@ impl Default for PluginRuntimeBudget {
             starts: Arc::new(Semaphore::new(MAX_STARTING)),
             execution: Arc::new(Semaphore::new(PARALLEL_STARTS)),
             residents: Arc::new(Semaphore::new(MAX_RESIDENT_PROCESSES)),
+            http: Arc::new(Semaphore::new(MAX_HTTP_OPERATIONS)),
             preparation: Arc::new(SourcePreparationBudget::default()),
         }
     }
@@ -48,16 +51,25 @@ impl PluginRuntimeBudget {
         self.starts.close();
         self.execution.close();
         self.residents.close();
+        self.http.close();
         if self.waiters.available_permits() != MAX_WAITERS
             || self.starts.available_permits() != MAX_STARTING
             || self.execution.available_permits() != PARALLEL_STARTS
             || self.residents.available_permits() != MAX_RESIDENT_PROCESSES
+            || self.http.available_permits() != MAX_HTTP_OPERATIONS
         {
             return Err(super::activation::unsettled(
                 "plugin activation capacity remains owned at application shutdown",
             ));
         }
         delivery.and(ui)
+    }
+
+    pub(super) fn http(&self) -> Result<OwnedSemaphorePermit, PluginRpcError> {
+        self.http
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| exhausted())
     }
 
     pub(super) fn waiter(&self) -> Result<OwnedSemaphorePermit, PluginRpcError> {

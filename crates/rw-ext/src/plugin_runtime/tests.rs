@@ -259,15 +259,14 @@ impl PluginBoundaryRedactor for HttpSecretRedactor {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct FixtureProviderHttp {
-    requests: StdMutex<Vec<Value>>,
+    requests: Arc<StdMutex<Vec<Value>>>,
     cancelled: Arc<AtomicBool>,
 }
 
-#[async_trait]
-impl PluginProviderHttpHandler for FixtureProviderHttp {
-    async fn request(
+impl FixtureProviderHttp {
+    async fn respond(
         &self,
         params: Value,
         cancellation: &CancellationToken,
@@ -288,12 +287,6 @@ impl PluginProviderHttpHandler for FixtureProviderHttp {
             .and_then(Value::as_str)
             .is_some_and(|url| url.ends_with("/cancelled"));
         if is_cancellation_fixture {
-            let cancellation = cancellation.clone();
-            let cancelled = Arc::clone(&self.cancelled);
-            tokio::spawn(async move {
-                cancellation.cancelled().await;
-                cancelled.store(true, Ordering::Release);
-            });
             return Ok(PluginHttpStreamResponse {
                 status: 200,
                 headers: Vec::new(),
@@ -318,6 +311,39 @@ impl PluginProviderHttpHandler for FixtureProviderHttp {
             headers: vec![("x-echo".to_owned(), HTTP_SECRET.to_owned())],
             body: Box::pin(futures_util::stream::iter(chunks)),
         })
+    }
+}
+
+impl PluginProviderHttpHandler for FixtureProviderHttp {
+    fn prepare(
+        &self,
+        params: Value,
+        cancellation: CancellationToken,
+    ) -> Result<Arc<dyn PluginProviderHttpOperation>, PluginRpcError> {
+        Ok(Arc::new(FixtureHttpOperation {
+            owner: self.clone(),
+            params,
+            cancellation,
+        }))
+    }
+}
+struct FixtureHttpOperation {
+    owner: FixtureProviderHttp,
+    params: Value,
+    cancellation: CancellationToken,
+}
+#[async_trait]
+impl PluginProviderHttpOperation for FixtureHttpOperation {
+    async fn response(&self) -> Result<PluginHttpStreamResponse, PluginRpcError> {
+        self.owner
+            .respond(self.params.clone(), &self.cancellation)
+            .await
+    }
+    async fn settle_effects(&self) -> Result<(), PluginRpcError> {
+        self.owner
+            .cancelled
+            .store(self.cancellation.is_cancelled(), Ordering::Release);
+        Ok(()) // This fixture has only future-owned body bytes and no detached work.
     }
 }
 
@@ -518,19 +544,26 @@ impl PushHandler for DelayedActorPush {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct IgnoringCancellationHttp {
-    started: tokio::sync::Notify,
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    settling: Arc<tokio::sync::Notify>,
     dropped: Arc<AtomicBool>,
 }
 
-#[async_trait]
 impl PluginProviderHttpHandler for IgnoringCancellationHttp {
-    async fn request(
+    fn prepare(
         &self,
         _params: Value,
-        _cancellation: &CancellationToken,
-    ) -> Result<PluginHttpStreamResponse, PluginRpcError> {
+        _cancellation: CancellationToken,
+    ) -> Result<Arc<dyn PluginProviderHttpOperation>, PluginRpcError> {
+        Ok(Arc::new(self.clone()))
+    }
+}
+#[async_trait]
+impl PluginProviderHttpOperation for IgnoringCancellationHttp {
+    async fn response(&self) -> Result<PluginHttpStreamResponse, PluginRpcError> {
         struct MarkDropped(Arc<AtomicBool>);
         impl Drop for MarkDropped {
             fn drop(&mut self) {
@@ -540,6 +573,11 @@ impl PluginProviderHttpHandler for IgnoringCancellationHttp {
         let _dropped = MarkDropped(Arc::clone(&self.dropped));
         self.started.notify_one();
         std::future::pending().await
+    }
+    async fn settle_effects(&self) -> Result<(), PluginRpcError> {
+        self.settling.notify_one();
+        self.release.notified().await;
+        Ok(())
     }
 }
 

@@ -352,11 +352,14 @@ async fn panicked_host_command_cannot_release_its_settlement_barrier() {
     })
     .await
     .expect("panic started teardown");
-    let mut settlement = tokio::spawn(async move { client.settle_effects().await });
-    assert!(
-        tokio::time::timeout(Duration::from_millis(30), &mut settlement)
-            .await
-            .is_err()
+    let error = tokio::time::timeout(Duration::from_secs(1), client.settle_effects())
+        .await
+        .expect("failed proof wakes waiters")
+        .expect_err("panic is not settled");
+    assert_eq!(error.code, "effects_unsettled");
+    assert_eq!(
+        client.termination.host_effects.available_permits(),
+        HOST_EFFECT_CAPACITY as usize - 1
     );
     push.release.notify_one();
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -366,13 +369,18 @@ async fn panicked_host_command_cannot_release_its_settlement_barrier() {
     })
     .await
     .expect("already admitted actor work can still commit");
-    assert!(
-        tokio::time::timeout(Duration::from_millis(30), &mut settlement)
+    assert_eq!(
+        client
+            .settle_effects()
             .await
-            .is_err()
+            .expect_err("failed proof is sticky")
+            .code,
+        "effects_unsettled"
     );
-    settlement.abort();
-    let _ = settlement.await;
+    assert_eq!(
+        client.termination.host_effects.available_permits(),
+        HOST_EFFECT_CAPACITY as usize - 1
+    );
 }
 
 #[tokio::test]
@@ -487,7 +495,7 @@ async fn ordinary_cancellation_drains_admitted_host_push_before_reporting_settle
 }
 
 #[tokio::test]
-async fn ordinary_cancellation_drops_host_http_even_when_handler_ignores_token() {
+async fn ordinary_cancellation_retains_host_http_until_explicit_effect_proof() {
     let process = Arc::new(FakeProcess::default());
     let (host_stdin, plugin_input) = tokio::io::duplex(4096);
     let (mut plugin_output, host_stdout) = tokio::io::duplex(4096);
@@ -549,6 +557,24 @@ async fn ordinary_cancellation_drops_host_http_even_when_handler_ignores_token()
         .await
         .expect("HTTP started");
     cancellation.cancel();
+    tokio::time::timeout(Duration::from_secs(2), http.settling.notified())
+        .await
+        .expect("proof begins");
+    assert!(http.dropped.load(Ordering::Acquire));
+    assert!(
+        !task.is_finished(),
+        "response future drop is not physical HTTP proof"
+    );
+    assert_eq!(
+        client
+            .termination
+            .active_provider_http
+            .lock()
+            .expect("HTTP ownership")
+            .len(),
+        1
+    );
+    http.release.notify_one();
     let failure = tokio::time::timeout(Duration::from_secs(2), task)
         .await
         .expect("settlement deadline")
@@ -567,7 +593,7 @@ async fn ordinary_cancellation_drops_host_http_even_when_handler_ignores_token()
 }
 
 #[tokio::test]
-async fn reader_exit_cancels_and_drains_active_provider_http() {
+async fn reader_exit_cancels_without_discarding_active_provider_http_ownership() {
     let process = Arc::new(FakeProcess::default());
     let (plugin_output, host_stdout) = tokio::io::duplex(1024);
     drop(plugin_output);
@@ -579,7 +605,11 @@ async fn reader_exit_cancels_and_drains_active_provider_http() {
         .expect("active HTTP lock")
         .insert(
             RpcId::String("active-http".to_owned()),
-            cancellation.clone(),
+            super::super::provider_http::ActiveHttp {
+                invocation: RpcId::Number(1),
+                cancellation: cancellation.clone(),
+                settled: Arc::new(AtomicBool::new(false)),
+            },
         );
     let enforcer = Arc::new(CapabilityEnforcer::new(&manifest(), process.clone()));
     let termination = Arc::new(RequestTermination {
@@ -589,6 +619,7 @@ async fn reader_exit_cancels_and_drains_active_provider_http() {
         active_provider_http: Arc::clone(&active_provider_http),
         cancellation: CancellationToken::default(),
         host_effects: Arc::new(Semaphore::new(HOST_EFFECT_CAPACITY as usize)),
+        host_failure: watch::channel(false).0,
         completion: StdMutex::new(None),
     });
     let state = ReaderState {
@@ -608,11 +639,10 @@ async fn reader_exit_cancels_and_drains_active_provider_http() {
     reader_loop(Box::pin(BufReader::new(host_stdout)), state).await;
 
     assert!(cancellation.is_cancelled());
-    assert!(
-        active_provider_http
-            .lock()
-            .expect("active HTTP lock")
-            .is_empty()
+    assert_eq!(
+        active_provider_http.lock().expect("active HTTP lock").len(),
+        1,
+        "cancellation cannot erase an operation's identity before its owner proves settlement"
     );
     assert!(process.killed.load(Ordering::Acquire) >= 1);
 }

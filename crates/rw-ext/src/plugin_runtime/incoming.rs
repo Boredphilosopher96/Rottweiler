@@ -49,9 +49,9 @@ pub(super) async fn reader_loop(mut stdout: PluginStdout, state: ReaderState) {
 }
 
 pub(super) fn cancel_active_provider_http(active: &ActiveProviderHttp) {
-    if let Ok(mut active) = active.lock() {
-        for (_, cancellation) in std::mem::take(&mut *active) {
-            cancellation.cancel();
+    if let Ok(active) = active.lock() {
+        for operation in active.values() {
+            operation.cancellation.cancel();
         }
     }
 }
@@ -69,6 +69,9 @@ async fn process_incoming_frame(frame: RpcFrame, wire_bytes: usize, state: &Read
     match frame {
         RpcFrame::Success(success) => {
             let id = success.id;
+            if super::provider_http::has_unsettled(&state.active_provider_http, &id) {
+                return false;
+            }
             let provider = state
                 .provider_streams
                 .lock()
@@ -100,6 +103,9 @@ async fn process_incoming_frame(frame: RpcFrame, wire_bytes: usize, state: &Read
                 let _ = state.process.kill_tree();
                 return false;
             };
+            if super::provider_http::has_unsettled(&state.active_provider_http, &id) {
+                return false;
+            }
             let safe_code = failure
                 .error
                 .data
@@ -147,7 +153,7 @@ async fn process_incoming_frame(frame: RpcFrame, wire_bytes: usize, state: &Read
         }
         RpcFrame::Request(request) => {
             if request.method == METHOD_PROVIDER_HTTP {
-                return start_provider_http_request(request, state).await;
+                return super::provider_http::start(request, state).await;
             }
             start_host_command(request, state)
         }
@@ -172,7 +178,7 @@ async fn process_incoming_frame(frame: RpcFrame, wire_bytes: usize, state: &Read
                     .is_some_and(|request| request.progress(params));
             }
             if notification.method == METHOD_PROVIDER_HTTP_CANCEL {
-                return cancel_provider_http_request(
+                return super::provider_http::cancel(
                     &state.active_provider_http,
                     notification.params.unwrap_or(Value::Null),
                 );
@@ -212,7 +218,7 @@ impl Drop for HostCommandLease {
             // Destruction after a panic is not an actor outcome. Keep the barrier
             // charged permanently: queued host work may still commit later.
             std::mem::forget(effect);
-            self.termination.begin();
+            self.termination.fail_host_proof();
             tracing::error!("host command owner disappeared without proving settlement");
         }
     }
@@ -373,176 +379,6 @@ pub(super) async fn validate_control_origin(
     ))
 }
 
-async fn start_provider_http_request(request: RpcRequest, state: &ReaderState) -> bool {
-    let Ok(effect) = Arc::clone(&state.termination.host_effects).try_acquire_owned() else {
-        return false;
-    };
-    let params = request.params.unwrap_or(Value::Null);
-    let Ok(capability) = serde_json::from_value::<ProviderHttpCapabilityParams>(params.clone())
-    else {
-        return false;
-    };
-    if state
-        .enforcer
-        .check_provider_credential(&capability.alias, &capability.credential_reference)
-        .is_err()
-    {
-        return false;
-    }
-    let stream_authorized = state.provider_streams.lock().is_ok_and(|streams| {
-        streams
-            .get(&capability.invocation_id)
-            .is_some_and(|stream| {
-                stream.alias == capability.alias
-                    && stream.finished.is_none()
-                    && tokio::time::Instant::now() < stream.deadline
-            })
-    });
-    if !stream_authorized
-        && !state
-            .pending
-            .lock()
-            .await
-            .get(&capability.invocation_id)
-            .is_some_and(|request| request.owns_provider_http(&capability.alias))
-    {
-        return false;
-    }
-    let cancellation = CancellationToken::default();
-    let inserted = state.active_provider_http.lock().is_ok_and(|mut active| {
-        if state.termination.cancellation.is_cancelled()
-            || active.len() >= WRITER_QUEUE_CAPACITY
-            || active.contains_key(&request.id)
-        {
-            false
-        } else {
-            active.insert(request.id.clone(), cancellation.clone());
-            true
-        }
-    });
-    if !inserted {
-        return false;
-    }
-    let handler = Arc::clone(&state.provider_http);
-    let writer = state.writer.clone();
-    let active = Arc::clone(&state.active_provider_http);
-    let redactor = Arc::clone(&state.redactor);
-    let termination = Arc::clone(&state.termination);
-    tokio::spawn(async move {
-        let _effect = effect;
-        let id = request.id.clone();
-        let cancel_writer = writer.clone();
-        let cancelled = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => true,
-            () = stream_provider_http_response(
-            request.id,
-            params,
-            cancellation.clone(),
-            handler,
-            writer,
-            Arc::clone(&active),
-            redactor,
-        ) => false,
-        };
-        if let Ok(mut active) = active.lock() {
-            active.remove(&id);
-        }
-        if cancelled && !termination.cancellation.is_cancelled() {
-            let result = provider_http_result_frame(
-                id,
-                Err(rpc_error("cancelled", "provider HTTP was cancelled")),
-            );
-            if cancel_writer.try_send(result).is_err() {
-                termination.begin();
-            }
-        }
-    });
-    true
-}
-
-fn cancel_provider_http_request(active: &ActiveProviderHttp, params: Value) -> bool {
-    let Ok(cancel) = serde_json::from_value::<ProviderHttpCancelParams>(params) else {
-        return false;
-    };
-    let Ok(active) = active.lock() else {
-        return false;
-    };
-    if let Some(token) = active.get(&cancel.request_id) {
-        token.cancel();
-    }
-    true
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn stream_provider_http_response(
-    id: RpcId,
-    params: Value,
-    cancellation: CancellationToken,
-    handler: Arc<dyn PluginProviderHttpHandler>,
-    writer: RpcWriter,
-    active: ActiveProviderHttp,
-    redactor: Arc<dyn PluginBoundaryRedactor>,
-) {
-    let result = handler.request(params, &cancellation).await;
-    let result = match result {
-        Ok(mut response) => {
-            let head = json!({
-                "request_id": id,
-                "event": {
-                    "type": "head",
-                    "status": response.status,
-                    "headers": response.headers,
-                }
-            });
-            if send_provider_http_event(&writer, redactor.as_ref(), head)
-                .await
-                .is_err()
-            {
-                cancellation.cancel();
-                Err(rpc_error(
-                    "connection_closed",
-                    "plugin RPC connection closed",
-                ))
-            } else {
-                stream_provider_http_body(
-                    &id,
-                    &mut response.body,
-                    &cancellation,
-                    &writer,
-                    redactor.as_ref(),
-                )
-                .await
-            }
-        }
-        Err(error) => Err(error),
-    };
-    if let Ok(mut active) = active.lock() {
-        active.remove(&id);
-    }
-    let frame = provider_http_result_frame(id, result);
-    let _ = writer.send(frame).await;
-}
-
-fn provider_http_result_frame(id: RpcId, result: Result<(), PluginRpcError>) -> RpcFrame {
-    match result {
-        Ok(()) => RpcFrame::Success(RpcSuccess {
-            jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
-            id,
-            result: Value::Null,
-        }),
-        Err(error) => RpcFrame::Failure(RpcFailure {
-            jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
-            id: Some(id),
-            error: rw_plugin_protocol::RpcErrorObject {
-                code: -32020,
-                message: error.message,
-                data: Some(json!({"code":error.code})),
-            },
-        }),
-    }
-}
-
 pub(super) async fn stream_provider_http_body(
     id: &RpcId,
     body: &mut PluginHttpByteStream,
@@ -593,15 +429,10 @@ pub(super) async fn stream_provider_http_body(
         )
         .await?;
     }
-    send_provider_http_event(
-        writer,
-        redactor,
-        json!({"request_id":id,"event":{"type":"finished"}}),
-    )
-    .await
+    Ok(())
 }
 
-async fn send_provider_http_event(
+pub(super) async fn send_provider_http_event(
     writer: &RpcWriter,
     redactor: &dyn PluginBoundaryRedactor,
     params: Value,
