@@ -61,7 +61,7 @@ async fn rewind_event_reprojects_ephemeral_todo_state() {
             name: "todo".to_owned(),
             args: serde_json::json!({
                 "action": "replace",
-                "items": [{"id": "one", "content": "kept until rewind"}]
+                "items": [{"id": "one", "content": "kept until rewind", "status": "pending"}]
             }),
         }],
         meta: TurnMeta::default(),

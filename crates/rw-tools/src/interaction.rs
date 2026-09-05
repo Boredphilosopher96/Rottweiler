@@ -1,10 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use rw_types::{PlanArtifact, SessionId};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::RwLock;
 
@@ -149,33 +149,17 @@ impl Tool for AskUserTool {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TodoStatus {
-    #[default]
-    Pending,
-    InProgress,
-    Completed,
-    Blocked,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct TodoItem {
-    pub id: String,
-    pub content: String,
-    #[serde(default)]
-    pub status: TodoStatus,
-}
+use rw_types::todo::{MAX_TODO_ITEMS, MAX_TODO_TOTAL_BYTES, TodoSnapshot};
+pub use rw_types::todo::{TodoItem, TodoStatus};
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
-#[serde(tag = "action", rename_all = "snake_case")]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TodoAction {
-    List,
+    List {},
     Replace { items: Vec<TodoItem> },
     Upsert { item: TodoItem },
     Remove { id: String },
-    Clear,
+    Clear {},
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
@@ -193,8 +177,8 @@ impl TodoTool {
     pub fn new(limits: ToolLimits) -> Self {
         Self {
             items: RwLock::new(HashMap::new()),
-            max_items: limits.max_search_results,
-            max_bytes: limits.max_result_bytes,
+            max_items: limits.max_search_results.min(MAX_TODO_ITEMS),
+            max_bytes: limits.max_result_bytes.min(MAX_TODO_TOTAL_BYTES),
         }
     }
 
@@ -225,57 +209,55 @@ impl Tool for TodoTool {
         let session_key = context.session_id().map(|id| id.0.clone()).ok_or_else(|| {
             ToolError::InvalidInput("todo requires a session_id in ToolContext".to_owned())
         })?;
+        let mut state = self.items.write().await;
+        context.cancellation.check()?;
+        let mut next = state.get(&session_key).cloned().unwrap_or_default();
         match action {
-            TodoAction::List => {}
-            TodoAction::Replace { items } => {
-                validate_items(&items, self.max_items, self.max_bytes)?;
-                let mut state = self.items.write().await;
-                context.cancellation.check()?;
-                state.insert(session_key.clone(), items);
-            }
+            TodoAction::List {} => {}
+            TodoAction::Replace { items } => next = items,
             TodoAction::Upsert { item } => {
-                validate_item(&item)?;
-                let mut items = self.items.write().await;
-                context.cancellation.check()?;
-                let mut next = items.get(&session_key).cloned().unwrap_or_default();
                 if let Some(existing) = next.iter_mut().find(|existing| existing.id == item.id) {
                     *existing = item;
                 } else {
                     next.push(item);
                 }
-                validate_items(&next, self.max_items, self.max_bytes)?;
-                items.insert(session_key.clone(), next);
             }
-            TodoAction::Remove { id } => {
-                let mut items = self.items.write().await;
-                context.cancellation.check()?;
-                if let Some(session_items) = items.get_mut(&session_key) {
-                    session_items.retain(|item| item.id != id);
-                }
-            }
-            TodoAction::Clear => {
-                let mut items = self.items.write().await;
-                context.cancellation.check()?;
-                items.remove(&session_key);
-            }
+            TodoAction::Remove { id } => next.retain(|item| item.id != id),
+            TodoAction::Clear {} => next.clear(),
         }
-        context.cancellation.check()?;
-        let items = self
-            .items
-            .read()
-            .await
-            .get(&session_key)
-            .cloned()
-            .unwrap_or_default();
-        let model_text = items
+        validate_items(&next, self.max_items, self.max_bytes)?;
+        let model_text = next
             .iter()
             .map(|item| format!("[{:?}] {}: {}", item.status, item.id, item.content))
             .collect::<Vec<_>>()
             .join("\n");
-        Ok(ToolResult::new(
+        let snapshot = TodoSnapshot {
+            count: next.len(),
+            items: next,
+        };
+        let result = ToolResult::new(
             model_text,
-            json!({"items": items, "count": items.len()}),
-        ))
+            serde_json::to_value(&snapshot)
+                .map_err(|error| ToolError::Output(error.to_string()))?,
+        );
+        // Mutation is admitted only if the exact full snapshot survives the
+        // central output limit. A successful todo never publishes truncated state.
+        if serde_json::to_vec(&result)
+            .map_err(|error| ToolError::Output(error.to_string()))?
+            .len()
+            > context.result_limit_bytes()
+        {
+            return Err(ToolError::SizeLimit {
+                limit: context.result_limit_bytes(),
+            });
+        }
+        context.cancellation.check()?;
+        if snapshot.items.is_empty() {
+            state.remove(&session_key);
+        } else {
+            state.insert(session_key, snapshot.items);
+        }
+        Ok(result)
     }
 }
 
@@ -285,31 +267,14 @@ fn validate_items(items: &[TodoItem], max_items: usize, max_bytes: usize) -> Res
             "todo list exceeds the {max_items}-item limit"
         )));
     }
-    let mut ids = HashSet::new();
-    let mut bytes = 0usize;
-    for item in items {
-        validate_item(item)?;
-        bytes = bytes
-            .saturating_add(item.id.len())
-            .saturating_add(item.content.len());
-        if bytes > max_bytes {
-            return Err(ToolError::SizeLimit { limit: max_bytes });
-        }
-        if !ids.insert(&item.id) {
-            return Err(ToolError::InvalidInput(format!(
-                "duplicate todo id: {}",
-                item.id
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn validate_item(item: &TodoItem) -> Result<(), ToolError> {
-    if item.id.trim().is_empty() || item.content.trim().is_empty() {
-        return Err(ToolError::InvalidInput(
-            "todo id and content must not be empty".to_owned(),
-        ));
+    rw_types::todo::validate_items(items)
+        .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
+    let bytes = items
+        .iter()
+        .map(|item| item.id.len() + item.content.len())
+        .sum::<usize>();
+    if bytes > max_bytes {
+        return Err(ToolError::SizeLimit { limit: max_bytes });
     }
     Ok(())
 }
@@ -363,8 +328,8 @@ mod tests {
                 serde_json::json!({
                     "action": "replace",
                     "items": [
-                        {"id": "a", "content": "one"},
-                        {"id": "a", "content": "two"}
+                        {"id": "a", "content": "one", "status": "pending"},
+                        {"id": "a", "content": "two", "status": "pending"}
                     ]
                 }),
             )
@@ -406,7 +371,7 @@ mod tests {
                     &pending_context,
                     serde_json::json!({
                         "action": "replace",
-                        "items": [{"id": "late", "content": "must not commit"}]
+                        "items": [{"id": "late", "content": "must not commit", "status": "pending"}]
                     }),
                 )
                 .await
@@ -418,6 +383,33 @@ mod tests {
             pending.await.expect("todo task"),
             Err(ToolError::Cancelled)
         ));
+        assert!(tool.items.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn todo_rejects_missing_status_and_unrecoverable_output_before_mutating() {
+        let root = tempdir().expect("workspace");
+        let context = ToolContext::new(root.path())
+            .expect("context")
+            .with_session_id(SessionId("bounded-todo".into()));
+        let tool = TodoTool::new(ToolLimits::default());
+        assert!(
+            tool.execute(
+                &context,
+                json!({"action":"upsert","item":{"id":"a","content":"task"}})
+            )
+            .await
+            .is_err()
+        );
+        let tiny = context.with_result_limit(32);
+        assert!(
+            tool.execute(
+                &tiny,
+                json!({"action":"upsert","item":{"id":"a","content":"task","status":"pending"}})
+            )
+            .await
+            .is_err()
+        );
         assert!(tool.items.read().await.is_empty());
     }
 
@@ -435,7 +427,7 @@ mod tests {
             &first,
             serde_json::json!({
                 "action": "upsert",
-                "item": {"id": "a", "content": "only first"}
+                "item": {"id": "a", "content": "only first", "status": "pending"}
             }),
         )
         .await
