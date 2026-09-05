@@ -49,7 +49,7 @@ Pending means no completion claim. Source complete needs checked-in implementati
 | A20 | P2: Performance diagnosis lacks stage-level ownership | Pending | |
 | A21 | P1: Cancelling an ordinary plugin request does not settle its effects | Ordinary request,Bash and shutdown checkpoints verified; containment gap remains | Owned process-group/host-effect settlement and builtin Bash drop/lease fixes integrated. Shutdown now shares settlement proof;native macOS fixture plus ten repeats pass. Deliberately escaped native macOS descendants remain a containment gap. Provider lifecycle forwarding remains underway. |
 | A22 | P2: WASM hooks pay process and compilation costs per invocation | Pending | |
-| A23 | P2: Plugin tools lack a proper long-operation contract | Pending | |
+| A23 | P2: Plugin tools lack a proper long-operation contract | Checkpoint verified; global integration pending | Typed host total/idle deadlines, bounded transient progress, invocation identity and recovery pairing; [local evidence and remaining qualification](2026-09-04-architecture-evidence/tool-lifetime-progress.md). |
 | A24 | P2: Plugin pushes discard the host's outcome | Correlated command checkpoint verified | Typed SDK injection disposition and host errors;64 owned host commands,duplicate ID refusal,reader independence. Actor work retains settlement permits through outcomes;panic leaves effects unproven.65 integrated SDK tests pass. Full protocol-3 lifecycle migration remains pending. Integrated workspace:1361 tests passed,4 ignored;clippy,format and both code generators passed. |
 | A25 | P2: Plugin effect precision stops at process authority | Pending | |
 | A26 | P2: Extension event delivery can lose state without recovery | Pending | |

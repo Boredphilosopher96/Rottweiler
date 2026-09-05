@@ -27,7 +27,7 @@ import {
   transportDisconnected,
   type RottweilerState,
 } from "../src/state"
-import type { WireEngineEvent } from "../src/transport"
+import { isWireEngineEvent, type WireEngineEvent } from "../src/transport"
 
 function meta(sequence: string) {
   return {
@@ -88,6 +88,7 @@ describe("pure TUI state reducer", () => {
       meta: metaAt("2", "2026-01-01T12:00:00.000Z"),
       turn_id: "timed-turn",
       tool_call_id: "timed-tool",
+      invocation_id: "timed-tool",
       name: "bash",
       args: { command: "bun test" },
       call_index: 0,
@@ -97,6 +98,7 @@ describe("pure TUI state reducer", () => {
       meta: metaAt("3", "2026-01-01T12:00:03.000Z"),
       turn_id: "timed-turn",
       tool_call_id: "timed-tool",
+      invocation_id: "timed-tool",
       stream: "stdout",
       chunk: "running",
     })
@@ -105,6 +107,7 @@ describe("pure TUI state reducer", () => {
       meta: metaAt("4", "2026-01-01T12:00:05.000Z"),
       turn_id: "timed-turn",
       tool_call_id: "timed-tool",
+      invocation_id: "timed-tool",
       output: { type: "text", text: "done" },
       is_error: false,
       call_index: 0,
@@ -142,6 +145,7 @@ describe("pure TUI state reducer", () => {
       meta: metaAt("1", "2026-01-01T12:00:03.000Z"),
       turn_id: "late-turn",
       tool_call_id: "late-tool",
+      invocation_id: "late-tool",
       name: "edit",
       args: { path: "src/app.ts" },
       capabilities: ["write_filesystem"],
@@ -152,6 +156,7 @@ describe("pure TUI state reducer", () => {
       meta: metaAt("2", "2026-01-01T12:00:04.000Z"),
       turn_id: "late-turn",
       tool_call_id: "late-tool",
+      invocation_id: "late-tool",
       stream: "stderr",
       chunk: "waiting",
     })
@@ -162,6 +167,7 @@ describe("pure TUI state reducer", () => {
       meta: metaAt("3", "2026-01-01T12:00:05.000Z"),
       turn_id: "late-turn",
       tool_call_id: "late-tool",
+      invocation_id: "late-tool",
       output: { type: "text", text: "permission denied for tool edit" },
       is_error: true,
       call_index: 0,
@@ -185,6 +191,7 @@ describe("pure TUI state reducer", () => {
         meta: metaAt("2", "2026-01-01T12:00:01.000Z"),
         turn_id: "replay-turn",
         tool_call_id: "replay-tool",
+        invocation_id: "replay-tool",
         name: "read",
         args: { path: "README.md" },
         call_index: 0,
@@ -194,6 +201,7 @@ describe("pure TUI state reducer", () => {
         meta: metaAt("3", "2026-01-01T12:00:03.000Z"),
         turn_id: "replay-turn",
         tool_call_id: "replay-tool",
+        invocation_id: "replay-tool",
         stream: "stdout",
         chunk: "retained",
       },
@@ -223,6 +231,7 @@ describe("pure TUI state reducer", () => {
       meta: metaAt("2", "still-not-a-timestamp"),
       turn_id: "malformed-turn",
       tool_call_id: "malformed-tool",
+      invocation_id: "malformed-tool",
       name: "read",
       args: { path: "README.md" },
       call_index: 0,
@@ -284,6 +293,7 @@ describe("pure TUI state reducer", () => {
         meta: meta(`${index * 2 + 1}`),
         turn_id: `${index + 1}`,
         tool_call_id: toolCallId,
+        invocation_id: toolCallId,
         name: "read",
         args: { path: `${toolCallId}.txt` },
         call_index: 0,
@@ -293,6 +303,7 @@ describe("pure TUI state reducer", () => {
         meta: meta(`${index * 2 + 2}`),
         turn_id: `${index + 1}`,
         tool_call_id: toolCallId,
+        invocation_id: toolCallId,
         output: { type: "text", text: "done" },
         is_error: false,
         call_index: 0,
@@ -309,6 +320,7 @@ describe("pure TUI state reducer", () => {
       meta: meta(`${(MAX_RETAINED_TOOL_PROJECTIONS + 4) * 2 + 1}`),
       turn_id: "100",
       tool_call_id: activeToolId,
+      invocation_id: activeToolId,
       name: "bash",
       args: { command: "sleep 1" },
       call_index: 0,
@@ -325,6 +337,7 @@ describe("pure TUI state reducer", () => {
         meta: meta(`${turn * 2 - 1}`),
         turn_id: `${turn}`,
         tool_call_id: `todo-${turn}`,
+        invocation_id: `todo-${turn}`,
         name: "todo",
         args: { action: "replace" },
         call_index: 0,
@@ -334,6 +347,7 @@ describe("pure TUI state reducer", () => {
         meta: meta(`${turn * 2}`),
         turn_id: `${turn}`,
         tool_call_id: `todo-${turn}`,
+        invocation_id: `todo-${turn}`,
         output: {
           type: "structured",
           value: {
@@ -357,6 +371,7 @@ describe("pure TUI state reducer", () => {
         meta: meta(`${sequence}`),
         turn_id: `${1_000 + index}`,
         tool_call_id: toolCallId,
+        invocation_id: toolCallId,
         name: "read",
         args: { path: `${index}.txt` },
         call_index: 0,
@@ -366,6 +381,7 @@ describe("pure TUI state reducer", () => {
         meta: meta(`${sequence + 1}`),
         turn_id: `${1_000 + index}`,
         tool_call_id: toolCallId,
+        invocation_id: toolCallId,
         output: { type: "text", text: "done" },
         is_error: false,
         call_index: 0,
@@ -703,6 +719,7 @@ describe("pure TUI state reducer", () => {
       meta: meta("1"),
       turn_id: "2",
       tool_call_id: "todo-valid",
+      invocation_id: "todo-valid",
       name: "todo",
       args: { action: "replace" },
       call_index: 0,
@@ -712,6 +729,7 @@ describe("pure TUI state reducer", () => {
       meta: meta("2"),
       turn_id: "2",
       tool_call_id: "todo-valid",
+      invocation_id: "todo-valid",
       output: {
         type: "mixed",
         parts: [
@@ -744,6 +762,7 @@ describe("pure TUI state reducer", () => {
       meta: meta("3"),
       turn_id: "3",
       tool_call_id: "todo-unbounded",
+      invocation_id: "todo-unbounded",
       name: "todo",
       args: { action: "replace" },
       call_index: 0,
@@ -753,6 +772,7 @@ describe("pure TUI state reducer", () => {
       meta: meta("4"),
       turn_id: "3",
       tool_call_id: "todo-unbounded",
+      invocation_id: "todo-unbounded",
       output: {
         type: "structured",
         value: {
@@ -770,6 +790,7 @@ describe("pure TUI state reducer", () => {
       meta: meta("5"),
       turn_id: "4",
       tool_call_id: "todo-malformed",
+      invocation_id: "todo-malformed",
       name: "todo",
       args: { action: "replace" },
       call_index: 0,
@@ -779,6 +800,7 @@ describe("pure TUI state reducer", () => {
       meta: meta("6"),
       turn_id: "4",
       tool_call_id: "todo-malformed",
+      invocation_id: "todo-malformed",
       output: {
         type: "structured",
         value: {
@@ -801,6 +823,7 @@ describe("pure TUI state reducer", () => {
       meta: meta("1"),
       turn_id: "8",
       tool_call_id: "late-glob",
+      invocation_id: "late-glob",
       name: "glob",
       args: { pattern: "**/*.rs", path: "." },
       capabilities: ["read_filesystem"],
@@ -814,6 +837,7 @@ describe("pure TUI state reducer", () => {
       meta: meta("2"),
       turn_id: "8",
       tool_call_id: "late-glob",
+      invocation_id: "late-glob",
       stream: "stdout",
       chunk: "src/lib.rs",
     })
@@ -822,6 +846,7 @@ describe("pure TUI state reducer", () => {
       meta: meta("3"),
       turn_id: "8",
       tool_call_id: "late-glob",
+      invocation_id: "late-glob",
       output: { type: "text", text: "src/lib.rs" },
       is_error: false,
       call_index: 0,
@@ -838,6 +863,7 @@ describe("pure TUI state reducer", () => {
       meta: meta("1"),
       turn_id: "9",
       tool_call_id: "yolo-write",
+      invocation_id: "yolo-write",
       name: "write",
       args: { path: "src/main.rs", content: "new" },
       call_index: 0,
@@ -847,6 +873,7 @@ describe("pure TUI state reducer", () => {
       meta: meta("2"),
       turn_id: "9",
       tool_call_id: "yolo-write",
+      invocation_id: "yolo-write",
       diff: {
         proposal_id: "proposal-yolo",
         path: "src/main.rs",
@@ -862,6 +889,7 @@ describe("pure TUI state reducer", () => {
       meta: meta("3"),
       turn_id: "9",
       tool_call_id: "yolo-write",
+      invocation_id: "yolo-write",
       output: { type: "text", text: "updated src/main.rs" },
       is_error: false,
       call_index: 0,
@@ -884,6 +912,7 @@ describe("pure TUI state reducer", () => {
         meta: meta(sequence),
         turn_id: turn,
         tool_call_id: `todo-${id}`,
+        invocation_id: `todo-${id}`,
         name: "todo",
         args: { action: "replace" },
         call_index: 0,
@@ -893,6 +922,7 @@ describe("pure TUI state reducer", () => {
         meta: meta(String(Number(sequence) + 1)),
         turn_id: turn,
         tool_call_id: `todo-${id}`,
+        invocation_id: `todo-${id}`,
         output: {
           type: "mixed",
           parts: [{
@@ -927,6 +957,7 @@ describe("pure TUI state reducer", () => {
       meta: meta("2"),
       turn_id: "1",
       tool_call_id: "tool-1",
+      invocation_id: "tool-1",
       name: "read",
       args: { path: "one.txt" },
       call_index: 0,
@@ -941,6 +972,7 @@ describe("pure TUI state reducer", () => {
       meta: meta("4"),
       turn_id: "2",
       tool_call_id: "tool-2",
+      invocation_id: "tool-2",
       name: "read",
       args: { path: "two.txt" },
       call_index: 0,
@@ -959,6 +991,7 @@ describe("pure TUI state reducer", () => {
         "opaque-tool": {
           ...state.tools["tool-2"]!,
           toolCallId: "opaque-tool",
+          invocationId: "opaque-tool",
           turnId: "opaque-turn",
         },
       },
@@ -2213,6 +2246,7 @@ describe("pure TUI state reducer", () => {
         meta: meta("4"),
         turn_id: "4",
         tool_call_id: "tool-1",
+        invocation_id: "tool-1",
         name: "read",
         args: { path: "README.md" },
         call_index: 0,
@@ -2222,6 +2256,7 @@ describe("pure TUI state reducer", () => {
         meta: meta("5"),
         turn_id: "4",
         tool_call_id: "tool-1",
+        invocation_id: "tool-1",
         name: "read",
         args: { path: "README.md" },
         capabilities: ["read_filesystem"],
@@ -2232,6 +2267,7 @@ describe("pure TUI state reducer", () => {
         meta: meta("6"),
         turn_id: "4",
         tool_call_id: "tool-1",
+        invocation_id: "tool-1",
         stream: "stdout",
         chunk: "live",
       },
@@ -2240,6 +2276,7 @@ describe("pure TUI state reducer", () => {
         meta: meta("7"),
         turn_id: "4",
         tool_call_id: "tool-1",
+        invocation_id: "tool-1",
         output: { type: "text", text: "done" },
         is_error: false,
         call_index: 0,
@@ -2392,4 +2429,29 @@ describe("pure TUI state reducer", () => {
     expect(state.transcript[0]?.shell?.capturedOutput).toContain("more lines")
     expect(state.shell.capturedOutput).toBe(state.transcript[0]?.shell?.capturedOutput ?? null)
   })
+})
+
+
+test("reused provider IDs reject late observations from an earlier invocation", () => {
+  let state = createInitialState()
+  for (const [sequence, invocation] of [["1", "first"], ["2", "second"]] as const) {
+    state = reduce(state, { type: "tool_call_started", meta: meta(sequence), turn_id: "1", tool_call_id: "reused", invocation_id: invocation, name: "read", args: {}, call_index: 0 })
+  }
+  state = reduce(state, { type: "tool_output_delta", meta: meta("3"), turn_id: "1", tool_call_id: "reused", invocation_id: "first", stream: "stdout", chunk: "stale output" })
+  state = reduce(state, { type: "tool_call_finished", meta: meta("4"), turn_id: "1", tool_call_id: "reused", invocation_id: "first", output: { type: "text", text: "stale result" }, is_error: false, call_index: 0 })
+  expect(state.tools.reused?.invocationId).toBe("second")
+  expect(state.tools.reused?.status).toBe("running")
+  expect(state.tools.reused?.chunks).toEqual([])
+  const cursor = state.lastSequence
+  state = reduce(state, { type: "tool_progress", session_id: "session-state", turn_id: "1", tool_call_id: "reused", invocation_id: "first", progress: { message: "late" } })
+  expect(state.lastSequence).toBe(cursor)
+  expect(state.tools.reused?.invocationId).toBe("second")
+})
+
+test("progress wire validation enforces plain Unicode text and count relationships", () => {
+  const event = { type: "tool_progress", session_id: "session-state", turn_id: "1", tool_call_id: "call", invocation_id: "invocation", progress: { message: "🐕".repeat(256), amount: { completed: 1, total: 2 } } }
+  expect(isWireEngineEvent(event)).toBe(true)
+  for (const progress of [{ message: "bad\n" }, { message: "🐕".repeat(257) }, { message: "work", amount: { completed: 2, total: 1 } }]) {
+    expect(isWireEngineEvent({ ...event, progress })).toBe(false)
+  }
 })

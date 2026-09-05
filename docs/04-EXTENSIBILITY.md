@@ -96,6 +96,19 @@ private limit after a plugin has been accepted.
 
 ### Hook catalog
 
+Plugin tools use typed operation admission. `tool/call` requires
+`lifetime: { total_ms, idle_ms }`, with `0 < idle_ms <= total_ms <= 300000`.
+The host defaults to 300000 ms total and 90000 ms idle. Valid `tool/progress`
+notifications identify the request and carry a strictly increasing sequence plus
+bounded plain-text progress and optional completed/total work counts. Progress
+renews idle time, never total time. Each side coalesces pending observations;
+the SDK sends at most four per second, and the host admits a burst of four plus
+four per second per operation. Sixty-four admitted requests bound aggregate
+progress state. Progress is transient and cannot substitute for a tool result.
+SDK completion closes pending progress and awaits its current physical write
+before sending the final outcome. Tool timeout, cancellation and caller drop
+retain the same native-process settlement barrier as other effectful requests.
+
 Hooks are request/response (can modify/block); events are fire-and-forget. Hook timeout default 5s, configurable; on timeout the engine proceeds per hook's declared `fail-open`/`fail-closed` bit. Before applying that policy, the host waits for any cancelled hook effects to settle. An ordinary native-plugin request that times out, is cancelled after admission, or loses its caller future closes the shared plugin process: new requests and pushes are rejected, admitted host commands are drained, host HTTP futures are cancelled, and the supervised child is reaped with a process-group exit barrier. Tools and hooks retain their checkpoint/continuation barrier outside the cancellable invocation future. An unproven cleanup stays pending with a diagnostic; sending a kill signal is not settlement. Other in-flight calls to the same plugin fail with that process. The process supervisor must provide a containment boundary for descendants; the current macOS process-group proof does not cover a child that deliberately escapes into another session.
 
 **One dispatcher, two adapters:** the engine-internal **hook dispatcher** owns registration, ordering, and fail-open/closed semantics. Built-ins such as `[toolchain]` formatters/linters and permission supplements consume it directly; the RPC bridge exposes that same dispatcher to out-of-process plugins. Both paths use the identical interface (dogfooding rule), and the conformance suite rejects a second hook mechanism.

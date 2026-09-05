@@ -25,6 +25,7 @@ use url::Url;
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct PermissionRequest {
     pub id: String,
+    pub invocation_id: rw_types::ToolInvocationId,
     pub tool_name: String,
     pub arguments: Value,
     pub capabilities: Vec<ToolCapability>,
@@ -2088,6 +2089,7 @@ mod tests {
 
     fn request(command: &str, capabilities: Vec<ToolCapability>) -> PermissionRequest {
         PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: "call".to_owned(),
             tool_name: "bash".to_owned(),
             arguments: json!({ "command": command }),
@@ -2098,6 +2100,7 @@ mod tests {
 
     fn bash_request(command: &str, cwd: &Path) -> PermissionRequest {
         PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: "exact-bash".to_owned(),
             tool_name: "bash".to_owned(),
             arguments: json!({
@@ -2233,6 +2236,7 @@ mod tests {
             .restricted_to_patterns(&["bash(git status)".to_owned()])
             .expect("qualified restriction");
         let request = |command: &str| PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: format!("bash-{command}"),
             tool_name: "bash".to_owned(),
             arguments: json!({
@@ -2420,6 +2424,7 @@ mod tests {
     #[tokio::test]
     async fn unavailable_project_approval_persistence_degrades_to_allow_once() {
         let invocation = PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: "write".to_owned(),
             tool_name: "write".to_owned(),
             arguments: json!({"path": "file.txt", "content": "content"}),
@@ -2638,6 +2643,7 @@ mod tests {
     async fn trusted_project_allows_read_only_tools_but_preserves_explicit_denies() {
         let root = tempfile::tempdir().expect("tempdir");
         let request = PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: "trusted-glob".to_owned(),
             tool_name: "glob".to_owned(),
             arguments: json!({"pattern": "**/*.rs", "path": "."}),
@@ -2675,6 +2681,7 @@ mod tests {
         let primary = tempfile::tempdir().expect("primary");
         let secondary = tempfile::tempdir().expect("secondary");
         let symbols = || PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: "workspace-symbols".to_owned(),
             tool_name: "symbols".to_owned(),
             arguments: json!({"pattern": "ProviderRuntime"}),
@@ -2709,6 +2716,7 @@ mod tests {
             .with_workspace_roots([root.path()])
             .with_trusted_read_roots([root.path()]);
         let extension = PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: "extension-read".to_owned(),
             tool_name: "extension_read".to_owned(),
             arguments: json!({"path": "."}),
@@ -2721,6 +2729,7 @@ mod tests {
         );
 
         let network = PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: "network-symbols".to_owned(),
             tool_name: "symbols".to_owned(),
             arguments: json!({
@@ -2746,6 +2755,7 @@ mod tests {
         .with_workspace_roots([root.path()])
         .with_trusted_read_roots([root.path()]);
         let symbols = PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: "denied-symbols".to_owned(),
             tool_name: "symbols".to_owned(),
             arguments: json!({"pattern": "ProviderRuntime"}),
@@ -2772,6 +2782,7 @@ mod tests {
         let no_prompt = CountingDeny(AtomicUsize::new(0));
 
         let primary_read = PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: "primary-read".to_owned(),
             tool_name: "read".to_owned(),
             arguments: json!({"path": "@root/0/primary.rs"}),
@@ -2784,6 +2795,7 @@ mod tests {
         );
 
         let secondary_read = PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: "secondary-read".to_owned(),
             tool_name: "read".to_owned(),
             arguments: json!({"path": "@root/1/secondary.rs"}),
@@ -2796,6 +2808,7 @@ mod tests {
         );
 
         let all_roots_glob = PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: "all-roots-glob".to_owned(),
             tool_name: "glob".to_owned(),
             arguments: json!({"pattern": "**/*.rs", "path": "."}),
@@ -2807,6 +2820,7 @@ mod tests {
             PermissionOutcome::Allowed
         );
         let default_all_roots_ls = PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: "default-all-roots-ls".to_owned(),
             tool_name: "ls".to_owned(),
             arguments: json!({"recursive": false}),
@@ -2832,6 +2846,7 @@ mod tests {
             .with_trusted_read_roots([secondary.path()]);
         let no_prompt = CountingDeny(AtomicUsize::new(0));
         let secondary_read = PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: "secondary-read".to_owned(),
             tool_name: "read".to_owned(),
             arguments: json!({"path": "@root/1/secondary.rs"}),
@@ -2856,6 +2871,7 @@ mod tests {
             .with_trusted_read_roots([tree.path()]);
         let prompt = CountingDeny(AtomicUsize::new(0));
         let request = PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: "nested-read".to_owned(),
             tool_name: "read".to_owned(),
             arguments: json!({"path": "@root/1/private.rs"}),
@@ -2874,6 +2890,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let approval_file = root.path().join("approvals.json");
         let request = PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: "glob-first".to_owned(),
             tool_name: "glob".to_owned(),
             arguments: json!({"pattern": "**/*.rs", "path": "."}),
@@ -3351,6 +3368,7 @@ mod tests {
             action: PermissionDecision::Allow,
         };
         let invocation = |network| PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: "network-call".to_owned(),
             tool_name: "bash".to_owned(),
             arguments: json!({
@@ -3401,6 +3419,7 @@ mod tests {
         );
         let gate = PermissionGate::new(PermissionDecision::Ask).with_command_safety(safety);
         let request = |command: &str, sandbox: &str, domains: Vec<&str>| PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: "safe-list-call".to_owned(),
             tool_name: "bash".to_owned(),
             arguments: json!({
@@ -3461,6 +3480,7 @@ mod tests {
     async fn unsandboxed_escape_hatch_requires_explicit_and_exact_authority() {
         let root = tempfile::tempdir().expect("root");
         let unsandboxed = PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: "unsandboxed-call".to_owned(),
             tool_name: "bash".to_owned(),
             arguments: json!({
@@ -3570,6 +3590,7 @@ mod tests {
             .with_workspace_roots([&primary, &added]);
         let approver = CountingDeny(AtomicUsize::new(0));
         let write = |path: &str| PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: "auto-safe-write".to_owned(),
             tool_name: "write".to_owned(),
             arguments: json!({"path": path, "content": "fixture"}),
@@ -3589,6 +3610,7 @@ mod tests {
             PermissionOutcome::Allowed
         );
         let multi_edit = |path: &str| PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: "auto-safe-multi-edit".to_owned(),
             tool_name: "multi_edit".to_owned(),
             arguments: json!({
@@ -3655,6 +3677,7 @@ mod tests {
         let gate = PermissionGate::for_headless_mode(PermissionModeDescriptor::AutoSafe)
             .with_workspace_roots([&workspace]);
         let request = PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: "symlink-write".to_owned(),
             tool_name: "edit".to_owned(),
             arguments: json!({"path": "escape/file.txt", "old": "a", "new": "b"}),
@@ -3677,6 +3700,7 @@ mod tests {
     async fn explicitly_typed_unsandboxed_patterns_are_rememberable_without_generic_escalation() {
         let root = tempfile::tempdir().expect("root");
         let request = |command: &str| PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: "unsandboxed-pattern".to_owned(),
             tool_name: "bash".to_owned(),
             arguments: json!({
@@ -3938,6 +3962,7 @@ mod tests {
         for (request, behavior) in [
             (
                 PermissionRequest {
+                    invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
                     id: "read".to_owned(),
                     tool_name: "read".to_owned(),
                     arguments: json!({"path": "README.md"}),
@@ -3948,6 +3973,7 @@ mod tests {
             ),
             (
                 PermissionRequest {
+                    invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
                     id: "todo".to_owned(),
                     tool_name: "todo".to_owned(),
                     arguments: json!({"action": "clear"}),
@@ -3958,6 +3984,7 @@ mod tests {
             ),
             (
                 PermissionRequest {
+                    invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
                     id: "webfetch".to_owned(),
                     tool_name: "webfetch".to_owned(),
                     arguments: json!({"url": "https://example.com/"}),
@@ -3968,6 +3995,7 @@ mod tests {
             ),
             (
                 PermissionRequest {
+                    invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
                     id: "mcp".to_owned(),
                     tool_name: "mcp__fixture__inspect".to_owned(),
                     arguments: json!({}),
@@ -3985,6 +4013,7 @@ mod tests {
         assert_eq!(approver.0.load(Ordering::SeqCst), 0);
 
         let write = PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: "write".to_owned(),
             tool_name: "write".to_owned(),
             arguments: json!({"path": "README.md", "content": "changed"}),
@@ -4031,6 +4060,7 @@ mod tests {
         });
         let deny = CountingDeny(AtomicUsize::new(0));
         let write = |path: &str| PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: format!("write-{path}"),
             tool_name: "write".to_owned(),
             arguments: json!({"path": path, "content": "fixture"}),
@@ -4112,6 +4142,7 @@ mod tests {
 
         let approver = CountingDeny(AtomicUsize::new(0));
         let spawn = PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: "spawn-general".to_owned(),
             tool_name: "spawn_agent".to_owned(),
             arguments: json!({
@@ -4168,6 +4199,7 @@ mod tests {
     async fn remembered_mutations_bind_full_arguments_diff_and_bash_execution_context() {
         let gate = PermissionGate::new(PermissionDecision::Ask);
         let write = PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: "write".to_owned(),
             tool_name: "write".to_owned(),
             arguments: json!({"path": "same.txt", "content": "approved"}),
@@ -4217,6 +4249,7 @@ mod tests {
 
         let bash_gate = PermissionGate::new(PermissionDecision::Ask);
         let bash = PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: "bash".to_owned(),
             tool_name: "bash".to_owned(),
             arguments: json!({
@@ -4301,6 +4334,7 @@ mod tests {
     async fn remembered_network_domains_are_normalized_exact_and_invalid_fail_closed() {
         let gate = PermissionGate::new(PermissionDecision::Ask);
         let invocation = |domains: Vec<&str>| PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: "network-domains".to_owned(),
             tool_name: "bash".to_owned(),
             arguments: json!({
@@ -4360,6 +4394,7 @@ mod tests {
     async fn webfetch_is_no_prompt_for_every_valid_public_origin() {
         let gate = PermissionGate::new(PermissionDecision::Ask);
         let request = |url: &str| PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: "webfetch".to_owned(),
             tool_name: "webfetch".to_owned(),
             arguments: json!({"url": url, "headers": {}}),

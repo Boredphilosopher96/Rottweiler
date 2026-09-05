@@ -164,6 +164,9 @@
         "tool_call_id": {
           "$ref": "#/$defs/ToolCallId"
         },
+        "invocation_id": {
+          "$ref": "#/$defs/ToolInvocationId"
+        },
         "decision": {
           "$ref": "#/$defs/ApprovalDecision"
         },
@@ -188,6 +191,7 @@
         "meta",
         "session_id",
         "tool_call_id",
+        "invocation_id",
         "decision"
       ]
     },
@@ -1739,6 +1743,10 @@
     },
     "ToolCallId": {
       "description": "Stable identifier assigned to a model tool call.",
+      "type": "string"
+    },
+    "ToolInvocationId": {
+      "description": "Host-owned identity of one tool execution, independent of provider call IDs.",
       "type": "string"
     },
     "ApprovalDecision": {

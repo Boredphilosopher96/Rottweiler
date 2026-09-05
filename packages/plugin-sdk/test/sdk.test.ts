@@ -129,6 +129,7 @@ describe("wire protocol", () => {
     expect(RPC_METHODS).toEqual({
       initialize: "initialize",
       toolCall: "tool/call",
+      toolProgress: "tool/progress",
       commandExecute: "command/execute",
       hookInvoke: "hook/invoke",
       providerComplete: "provider/complete",
@@ -174,7 +175,7 @@ describe("wire protocol", () => {
     const { server, messages } = harness()
     await request(server, 1, RPC_METHODS.initialize, initializeParams)
     await request(server, 2, RPC_METHODS.toolCall, {
-      name: "echo", input: { value: 7 },
+      lifetime: { total_ms: 300000, idle_ms: 90000 }, name: "echo", input: { value: 7 },
     })
     await request(server, 3, RPC_METHODS.commandExecute, {
       name: "fixture", arguments: "hello",
@@ -212,7 +213,7 @@ describe("wire protocol", () => {
       { jsonrpc: "2.0", id: 1, method: "initialize", params: initializeParams },
       {
         jsonrpc: "2.0", id: 2, method: "tool/call",
-        params: { name: "fixture_echo", input: { text: "hello" } },
+        params: { lifetime: { total_ms: 300000, idle_ms: 90000 }, name: "fixture_echo", input: { text: "hello" } },
       },
       {
         jsonrpc: "2.0", id: 3, method: "hook/invoke",
@@ -343,7 +344,7 @@ describe("wire protocol", () => {
   test("exercises the raw capability-violator host fixture", () => {
     const wire = [
       { jsonrpc: "2.0", id: 1, method: "initialize", params: initializeParams },
-      { jsonrpc: "2.0", id: 2, method: "tool/call", params: { name: "escaped", input: {} } },
+      { jsonrpc: "2.0", id: 2, method: "tool/call", params: { lifetime: { total_ms: 300000, idle_ms: 90000 }, name: "escaped", input: {} } },
     ].map((line) => JSON.stringify(line)).join("\n") + "\n"
     const child = Bun.spawnSync(
       ["bun", join(import.meta.dir, "../fixtures/conformance/capability-violator.ts")],
@@ -360,12 +361,12 @@ describe("wire protocol", () => {
     const { server, messages, errors } = harness(fixtureDefinition(secret))
     await request(server, 1, RPC_METHODS.initialize, initializeParams)
     await request(server, 2, RPC_METHODS.toolCall, {
-      name: "echo", input: { fail: true },
+      lifetime: { total_ms: 300000, idle_ms: 90000 }, name: "echo", input: { fail: true },
     })
     expect(JSON.stringify(messages)).not.toContain(secret)
     expect(errors.join("")).not.toContain(secret)
     expect(messages.at(-1)).toEqual({
-      jsonrpc: "2.0", id: 2, error: { code: -32603, message: "plugin handler failed" },
+      jsonrpc: "2.0", id: 2, error: { code: -32603, message: "plugin tool failed" },
     })
   })
 
@@ -485,11 +486,11 @@ describe("wire protocol", () => {
     const server = new PluginServer(definition, transport, 4096, 20)
     await request(server, 1, RPC_METHODS.initialize, initializeParams)
     const started = performance.now()
-    await request(server, 2, RPC_METHODS.toolCall, { name: "hang", input: {} })
+    await request(server, 2, RPC_METHODS.toolCall, { lifetime: { total_ms: 20, idle_ms: 20 }, name: "hang", input: {} })
     expect(performance.now() - started).toBeLessThan(250)
     expect(observedAbort).toBe(true)
     expect(messages.at(-1)).toEqual({
-      jsonrpc: "2.0", id: 2, error: { code: -32004, message: "plugin handler timed out" },
+      jsonrpc: "2.0", id: 2, error: { code: -32004, message: "plugin tool deadline exceeded" },
     })
   })
 
@@ -506,13 +507,13 @@ describe("wire protocol", () => {
     })
     const { server, messages } = harness(definition)
     await request(server, 1, RPC_METHODS.initialize, initializeParams)
-    const pending = request(server, 2, RPC_METHODS.toolCall, { name: "hang", input: {} })
+    const pending = request(server, 2, RPC_METHODS.toolCall, { lifetime: { total_ms: 300000, idle_ms: 90000 }, name: "hang", input: {} })
     await Bun.sleep(1)
     await server.shutdown()
     await pending
     expect(observedAbort).toBe(true)
     expect(messages.at(-1)).toEqual({
-      jsonrpc: "2.0", id: 2, error: { code: -32800, message: "plugin request cancelled" },
+      jsonrpc: "2.0", id: 2, error: { code: -32800, message: "plugin tool cancelled" },
     })
   })
 
@@ -529,7 +530,7 @@ describe("wire protocol", () => {
     })
     const { server, messages } = harness(definition)
     await request(server, 1, RPC_METHODS.initialize, initializeParams)
-    await request(server, 2, RPC_METHODS.toolCall, { name: "attempt", input: {} })
+    await request(server, 2, RPC_METHODS.toolCall, { lifetime: { total_ms: 300000, idle_ms: 90000 }, name: "attempt", input: {} })
     expect(messages).toHaveLength(2)
     expect(messages[1]).toEqual({
       jsonrpc: "2.0", id: 2, error: { code: -32003, message: "push method is not declared" },

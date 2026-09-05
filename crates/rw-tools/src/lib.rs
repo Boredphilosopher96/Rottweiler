@@ -55,10 +55,10 @@ pub use protocol::{
 };
 pub use registry::{
     ApprovalPreview, CancellationToken, CapabilityManifest, McpToolPolicy, MutationScope,
-    NoopOutputSink, SubagentEventSink, SubagentLifecycleEvent, SubagentLifecycleMode,
-    SubagentProgressEvent, Tool, ToolBehavior, ToolContext, ToolDescriptor, ToolError,
-    ToolInvocationSemantics, ToolLimits, ToolOutputChunk, ToolOutputSink, ToolRegistry, ToolResult,
-    WorkspaceBinding, validate_mcp_virtual_tool,
+    NoopOutputSink, NoopProgressSink, SubagentEventSink, SubagentLifecycleEvent,
+    SubagentLifecycleMode, SubagentProgressEvent, Tool, ToolBehavior, ToolContext, ToolDescriptor,
+    ToolError, ToolInvocationSemantics, ToolLimits, ToolOutputChunk, ToolOutputSink,
+    ToolProgressSink, ToolRegistry, ToolResult, WorkspaceBinding, validate_mcp_virtual_tool,
 };
 pub use rw_intel::{
     CodeIntelligence, Diagnostic, DiagnosticSeverity, IntelligenceBackend, IntelligenceResult,

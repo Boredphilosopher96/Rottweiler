@@ -398,6 +398,7 @@ describe("Vim TUI interaction", () => {
     renderer = setup.renderer
     const tool = {
       toolCallId: "vim-keyboard-block",
+      invocationId: "vim-keyboard-block",
       turnId: "1",
       name: "read",
       args: { path: "vim.txt" },
@@ -482,6 +483,7 @@ describe("Vim TUI interaction", () => {
         tools: {
           approval: {
             toolCallId: "approval",
+            invocationId: "approval",
             turnId: "active",
             name: "bash",
             args: { command: "cargo test" },
@@ -606,6 +608,7 @@ describe("Vim TUI interaction", () => {
       tools: {
         safety: {
           toolCallId: "safety",
+          invocationId: "safety",
           turnId: "1",
           name: "bash",
           args: { command: "bun test" },
@@ -625,6 +628,7 @@ describe("Vim TUI interaction", () => {
     expect(commands.at(-1)).toMatchObject({
       type: "approve_tool",
       tool_call_id: "safety",
+      invocation_id: "safety",
       decision: "allow_once",
     })
 

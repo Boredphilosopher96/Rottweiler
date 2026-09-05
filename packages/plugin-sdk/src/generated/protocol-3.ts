@@ -7,6 +7,7 @@ export const PLUGIN_HOST_ID = "rottweiler" as const
 export const RPC_METHODS = Object.freeze({
 initialize: "initialize",
 toolCall: "tool/call",
+toolProgress: "tool/progress",
 commandExecute: "command/execute",
 hookInvoke: "hook/invoke",
 providerComplete: "provider/complete",
@@ -38,6 +39,7 @@ maxHookPayloadBytes: 262144 as number,
 maxModelTokens: 16777216 as number,
 maxPriceMicrosUsd: 1000000000000 as number,
 defaultHandlerTimeoutMs: 5000 as number,
+maxInFlightRequests: 64 as number,
 maxProviderStreams: 4 as number,
 controlQueueFrames: 64 as number,
 controlQueueBytes: 16777216 as number,
@@ -45,7 +47,17 @@ dataQueueBytes: 16777220 as number,
 providerWindowEvents: 64 as number,
 providerWindowBytes: 4194304 as number,
 maxOperationDurationMs: 300000 as number,
+defaultToolIdleTimeoutMs: 90000 as number,
+maxProgressMessageChars: 256 as number,
+maxProgressMessageBytes: 1024 as number,
+maxProgressFrameBytes: 4096 as number,
+progressIntervalMs: 250 as number,
+progressBurst: 4 as number,
 } as const
+
+export type OperationLifetime = { total_ms: number, idle_ms: number, };
+export type ProgressAmount = { completed: number, total: number, };
+export type ToolProgress = { message: string, amount?: ProgressAmount | null, };
 
 export type JsonPrimitive = boolean | number | string | null
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue }
@@ -163,6 +175,13 @@ export interface InjectMessageResult {
 export interface ToolCallParams {
   readonly name: string
   readonly input: JsonObject
+  readonly lifetime: OperationLifetime
+}
+
+export interface ToolProgressParams {
+  readonly request_id: RpcId
+  readonly sequence: number
+  readonly progress: ToolProgress
 }
 
 /** Exact wire result consumed by rw-tools::ToolResult. */

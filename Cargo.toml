@@ -6,6 +6,7 @@ members = [
     "crates/rw-ext",
     "crates/rw-intel",
     "crates/rw-mcp",
+    "crates/rw-operation-contract",
     "crates/rw-plugin-protocol",
     "crates/rw-providers",
     "crates/rw-runtime",
@@ -58,6 +59,7 @@ panic = "abort"
 
 [workspace.dependencies]
 memchr = "2.8.3"
+rw-operation-contract = { path = "crates/rw-operation-contract" }
 base64 = "0.23.0"
 blake3 = "1.8.2"
 clap = { version = "4.5", features = ["derive"] }

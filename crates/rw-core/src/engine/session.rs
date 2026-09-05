@@ -907,9 +907,11 @@ impl SessionHandle {
     pub async fn approve(
         &self,
         request_id: impl Into<String>,
+        invocation_id: rw_types::ToolInvocationId,
         decision: ApprovalDecision,
     ) -> Result<bool, AgentLoopError> {
-        self.approve_bound(request_id, decision, None).await
+        self.approve_bound(request_id, invocation_id, decision, None)
+            .await
     }
 
     /// Answers one pending ask-tier permission request with the exact binding
@@ -922,6 +924,7 @@ impl SessionHandle {
     pub async fn approve_bound(
         &self,
         request_id: impl Into<String>,
+        invocation_id: rw_types::ToolInvocationId,
         decision: ApprovalDecision,
         binding: Option<ApprovalBinding>,
     ) -> Result<bool, AgentLoopError> {
@@ -935,6 +938,7 @@ impl SessionHandle {
                 meta: self.local_meta(),
                 session_id: self.session_id.clone(),
                 tool_call_id: ToolCallId(request_id.into()),
+                invocation_id,
                 decision,
                 binding,
             })
@@ -1146,6 +1150,31 @@ impl SessionHandle {
         }
     }
 }
+pub(super) fn interrupted_tool_recovery_events(
+    repair: &InterruptedToolRepair,
+) -> Vec<PendingEvent> {
+    let mut events = Vec::with_capacity(2);
+    if let Some(start) = &repair.missing_start {
+        events.push(PendingEvent::ToolCallStarted {
+            turn: repair.agent_turn,
+            id: repair.tool_call_id.0.clone(),
+            invocation_id: repair.invocation_id.clone(),
+            name: start.name.clone(),
+            arguments: start.arguments.clone(),
+            index: repair.call_index,
+        });
+    }
+    events.push(PendingEvent::ToolCallFinished {
+        turn: repair.agent_turn,
+        id: repair.tool_call_id.0.clone(),
+        invocation_id: repair.invocation_id.clone(),
+        output: repair.output.clone(),
+        is_error: true,
+        index: repair.call_index,
+    });
+    events
+}
+
 fn interrupted_turn_recovery_events(recovered: &SessionRecoveredState) -> Vec<PendingEvent> {
     let Some(turn) = recovered.interrupted_turn else {
         return Vec::new();
@@ -1153,13 +1182,7 @@ fn interrupted_turn_recovery_events(recovered: &SessionRecoveredState) -> Vec<Pe
     let mut events = recovered
         .interrupted_tool_repairs
         .iter()
-        .map(|repair| PendingEvent::ToolCallFinished {
-            turn: repair.agent_turn,
-            id: repair.tool_call_id.0.clone(),
-            output: repair.output.clone(),
-            is_error: true,
-            index: repair.call_index,
-        })
+        .flat_map(interrupted_tool_recovery_events)
         .collect::<Vec<_>>();
     if let Some(tool_turn) = &recovered.interrupted_tool_turn {
         events.push(PendingEvent::ConversationTurnCommitted {
@@ -1376,13 +1399,7 @@ async fn run_actor(
             .recovered
             .interrupted_tool_repairs
             .iter()
-            .map(|repair| PendingEvent::ToolCallFinished {
-                turn: repair.agent_turn,
-                id: repair.tool_call_id.0.clone(),
-                output: repair.output.clone(),
-                is_error: true,
-                index: repair.call_index,
-            })
+            .flat_map(interrupted_tool_recovery_events)
             .collect::<Vec<_>>();
         if let Some(tool_turn) = &config.recovered.interrupted_tool_turn {
             recovery_events.push(PendingEvent::ConversationTurnCommitted {

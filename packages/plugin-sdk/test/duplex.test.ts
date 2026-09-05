@@ -110,7 +110,7 @@ describe("production SDK duplex serve", () => {
     const { frames, send, serving } = harness()
     send(models)
     await until(() => frames.some((frame) => frame.method === "provider/http"))
-    for (let id = 10; id < 74; id += 1) send({ jsonrpc: "2.0", id, method: "tool/call", params: { name: "hang", input: {} } })
+    for (let id = 10; id < 74; id += 1) send({ jsonrpc: "2.0", id, method: "tool/call", params: { name: "hang", input: {}, lifetime: { total_ms: 300000, idle_ms: 90000 } } })
     await until(() => frames.some((frame) => frame.id === 73))
     expect(frames.find((frame) => frame.id === 73)?.error).toMatchObject({ code: -32005 })
     respond(send, httpId(frames))
@@ -129,9 +129,9 @@ describe("production SDK duplex serve", () => {
       ...definition.handlers,
       tools: { hang: () => { invoked += 1; return new Promise<never>(() => {}) } },
     } }, 20)
-    for (let id = 10; id < 74; id += 1) send({ jsonrpc: "2.0", id, method: "tool/call", params: { name: "hang", input: {} } })
+    for (let id = 10; id < 74; id += 1) send({ jsonrpc: "2.0", id, method: "tool/call", params: { name: "hang", input: {}, lifetime: { total_ms: 20, idle_ms: 20 } } })
     await until(() => frames.filter((frame) => typeof frame.id === "number" && frame.id >= 10).length === 64)
-    send({ jsonrpc: "2.0", id: 74, method: "tool/call", params: { name: "hang", input: {} } })
+    send({ jsonrpc: "2.0", id: 74, method: "tool/call", params: { name: "hang", input: {}, lifetime: { total_ms: 20, idle_ms: 20 } } })
     await until(() => frames.some((frame) => frame.id === 74))
     send(stop)
     await serving
@@ -209,7 +209,7 @@ describe("production SDK duplex serve", () => {
         return { content: "unreachable", data: null }
       } },
     } })
-    send({ jsonrpc: "2.0", id: 3, method: "tool/call", params: { name: "hang", input: {} } })
+    send({ jsonrpc: "2.0", id: 3, method: "tool/call", params: { name: "hang", input: {}, lifetime: { total_ms: 300000, idle_ms: 90000 } } })
     await until(() => frames.some((frame) => frame.id === 3))
     send(stop)
     await serving
@@ -294,7 +294,7 @@ describe("correlated host command outcomes", () => {
 
   test("awaits queued injection disposition while the reader services unrelated requests", async () => {
     const { frames, send, serving } = harness(commandDefinition())
-    send({ jsonrpc: "2.0", id: 2, method: "tool/call", params: { name: "hang", input: {} } })
+    send({ jsonrpc: "2.0", id: 2, method: "tool/call", params: { name: "hang", input: {}, lifetime: { total_ms: 300000, idle_ms: 90000 } } })
     await until(() => frames.some(frame => frame.method === "session/inject_message"))
     expect(frames.some(frame => frame.id === 2)).toBe(false)
     const command = frames.find(frame => frame.method === "session/inject_message")
@@ -311,7 +311,7 @@ describe("correlated host command outcomes", () => {
   test("host rejection reaches the caller and malformed outcomes cannot strand a promise", async () => {
     for (const outcome of [{ error: { code: -32003, message: "wrong session" } }, { error: null }]) {
       const { frames, send, serving } = harness(commandDefinition())
-      send({ jsonrpc: "2.0", id: 2, method: "tool/call", params: { name: "hang", input: {} } })
+      send({ jsonrpc: "2.0", id: 2, method: "tool/call", params: { name: "hang", input: {}, lifetime: { total_ms: 300000, idle_ms: 90000 } } })
       await until(() => frames.some(frame => frame.method === "session/inject_message"))
       const command = frames.find(frame => frame.method === "session/inject_message")
       if (command?.id === undefined) throw new Error("missing command id")
@@ -327,7 +327,7 @@ describe("correlated host command outcomes", () => {
 
   test("disconnect rejects a pending host outcome", async () => {
     const { frames, send, serving } = harness(commandDefinition())
-    send({ jsonrpc: "2.0", id: 2, method: "tool/call", params: { name: "hang", input: {} } })
+    send({ jsonrpc: "2.0", id: 2, method: "tool/call", params: { name: "hang", input: {}, lifetime: { total_ms: 300000, idle_ms: 90000 } } })
     await until(() => frames.some(frame => frame.method === "session/inject_message"))
     send(stop)
     await serving

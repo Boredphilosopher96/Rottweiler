@@ -1137,8 +1137,14 @@ pub(super) async fn handle_actor_command(
                     let _ = respond.send(outcome);
                     return;
                 }
-                ClientCommand::ApproveTool { tool_call_id, .. }
-                    if !state.pending_approvals.contains_key(&tool_call_id.0) =>
+                ClientCommand::ApproveTool {
+                    tool_call_id,
+                    invocation_id,
+                    ..
+                } if state
+                    .pending_approvals
+                    .get(&tool_call_id.0)
+                    .is_none_or(|pending| &pending.request.invocation_id != invocation_id) =>
                 {
                     let outcome =
                         protocol_rejection("unknown_approval", "tool approval is not pending");

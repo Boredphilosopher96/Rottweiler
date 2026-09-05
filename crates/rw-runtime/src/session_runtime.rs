@@ -12578,7 +12578,10 @@ async fn run_print(
             }
         };
         if let EngineEvent::ToolApprovalNeeded {
-            tool_call_id, diff, ..
+            tool_call_id,
+            invocation_id,
+            diff,
+            ..
         } = &event
         {
             let binding = diff.as_ref().map(|diff| ApprovalBinding {
@@ -12588,7 +12591,12 @@ async fn run_print(
                 diff_hash: diff.diff_hash.clone(),
             });
             actor
-                .approve_bound(tool_call_id.0.clone(), ApprovalDecision::Deny, binding)
+                .approve_bound(
+                    tool_call_id.0.clone(),
+                    invocation_id.clone(),
+                    ApprovalDecision::Deny,
+                    binding,
+                )
                 .await
                 .map_err(display_agent_error)?;
         }
@@ -12871,10 +12879,10 @@ async fn run_repl(
                                         .await
                                         .map_err(display_agent_error)?;
                                 }
-                                PendingInteraction::Permission { tool_call_id, binding, .. } => {
+                                PendingInteraction::Permission { tool_call_id, invocation_id, binding, .. } => {
                                     let decision = parse_approval(&line);
                                     let _ = actor
-                                        .approve_bound(tool_call_id, decision, binding)
+                                        .approve_bound(tool_call_id, invocation_id, decision, binding)
                                         .await
                                         .map_err(display_agent_error)?;
                                 }
@@ -12909,6 +12917,7 @@ async fn run_repl(
                 let event = event.map_err(|error| miette!("session event stream failed: {error}"))?;
                 if let EngineEvent::ToolApprovalNeeded {
                     tool_call_id,
+                    invocation_id,
                     capabilities,
                     rationale,
                     diff,
@@ -12917,6 +12926,7 @@ async fn run_repl(
                     let announce = interactions.is_empty();
                     interactions.push_back(PendingInteraction::Permission {
                         tool_call_id: tool_call_id.0.clone(),
+                        invocation_id: invocation_id.clone(),
                         capabilities: capabilities.clone(),
                         rationale: rationale.clone(),
                         binding: diff.as_ref().map(|diff| ApprovalBinding {
@@ -12977,6 +12987,7 @@ enum PendingInteraction {
     },
     Permission {
         tool_call_id: String,
+        invocation_id: rw_types::ToolInvocationId,
         capabilities: Vec<ToolCapability>,
         rationale: String,
         binding: Option<ApprovalBinding>,
@@ -19309,6 +19320,9 @@ mod tests {
             },
             PendingInteraction::Permission {
                 tool_call_id: "permission-second".to_owned(),
+                invocation_id: rw_types::ToolInvocationId(
+                    "permission-second-invocation".to_owned(),
+                ),
                 capabilities: vec![ToolCapability::ReadFilesystem],
                 rationale: "fixture".to_owned(),
                 binding: None,
@@ -20272,6 +20286,9 @@ mod tests {
                 .authorize(
                     PermissionRequest {
                         id: "recovered-child-write".to_owned(),
+                        invocation_id: rw_types::ToolInvocationId(
+                            "recovered-child-write-invocation".to_owned()
+                        ),
                         tool_name: "write".to_owned(),
                         arguments: serde_json::json!({
                             "path": "child-write.txt",

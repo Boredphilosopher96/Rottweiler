@@ -19,7 +19,9 @@ pub mod update_contract;
 pub use error::Error;
 
 pub use config::PermissionDecision;
-pub use ir::{Block, ImageRef, Role, ToolCallId, ToolOutput, ToolOutputPart, Turn, TurnMeta};
+pub use ir::{
+    Block, ImageRef, Role, ToolCallId, ToolInvocationId, ToolOutput, ToolOutputPart, Turn, TurnMeta,
+};
 pub use mcp::{MAX_MCP_SERVER_ID_BYTES, MCP_SERVER_ID_PATTERN, McpServerId, McpServerIdError};
 pub use permission_mode::PermissionModeDescriptor;
 pub use protocol::{
@@ -48,3 +50,5 @@ pub use protocol::{
 
 /// Version of the protocol emitted by these types.
 pub const PROTOCOL_VERSION: u16 = 1;
+
+pub use rw_operation_contract::{OperationLifetime, ProgressAmount, ToolProgress};

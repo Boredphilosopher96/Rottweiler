@@ -139,6 +139,7 @@ describe("Rottweiler OpenTUI shell", () => {
     renderer = setup.renderer
     const tool = {
       toolCallId: "keyboard-block",
+      invocationId: "keyboard-block",
       turnId: "1",
       name: "read",
       args: { path: "keyboard.txt" },
@@ -448,6 +449,7 @@ describe("Rottweiler OpenTUI shell", () => {
       },
       turn_id: "turn-services",
       tool_call_id: "tool-services",
+      invocation_id: "tool-services",
       name: "edit",
       args: { path: "src/lib.rs" },
       call_index: 0,
@@ -464,6 +466,7 @@ describe("Rottweiler OpenTUI shell", () => {
       },
       turn_id: "turn-services",
       tool_call_id: "tool-services",
+      invocation_id: "tool-services",
       output: { type: "text", text: "done" },
       is_error: false,
       call_index: 0,
@@ -505,6 +508,7 @@ describe("Rottweiler OpenTUI shell", () => {
       },
       turn_id: "turn-services",
       tool_call_id: "tool-services",
+      invocation_id: "tool-services",
       name: "edit",
       args: { path: "src/lib.rs" },
       call_index: 0,
@@ -519,6 +523,7 @@ describe("Rottweiler OpenTUI shell", () => {
       },
       turn_id: "turn-services",
       tool_call_id: "tool-services",
+      invocation_id: "tool-services",
       output: { type: "text", text: "done" },
       is_error: false,
       call_index: 0,
@@ -716,6 +721,7 @@ describe("Rottweiler OpenTUI shell", () => {
         },
         turn_id: "turn-terminal",
         tool_call_id: "tool-1",
+        invocation_id: "tool-1",
         name: "bash",
         args: { command: "pwd" },
         capabilities: ["execute"],
@@ -1239,6 +1245,7 @@ describe("Rottweiler OpenTUI shell", () => {
       tools: {
         edit: {
           toolCallId: "edit",
+          invocationId: "edit",
           turnId: "1",
           name: "edit",
           args: { path: "src/main.rs" },
@@ -1892,6 +1899,7 @@ describe("Rottweiler OpenTUI shell", () => {
         tools: {
           edit: {
             toolCallId: "edit",
+            invocationId: "edit",
             turnId: "5",
             name: "edit",
             args: { path: "src/app.ts" },
@@ -3473,6 +3481,7 @@ describe("Rottweiler OpenTUI shell", () => {
         },
         turn_id: "child-turn",
         tool_call_id: "grep-auth",
+        invocation_id: "grep-auth",
         name: "grep",
         args: { pattern: "token exchange" },
         call_index: 0,
@@ -3572,6 +3581,7 @@ describe("Rottweiler OpenTUI shell", () => {
         },
         turn_id: "child-turn",
         tool_call_id: "child-tool",
+        invocation_id: "child-tool",
         name: "edit",
         args: { path: "src/auth.rs" },
         capabilities: ["write_filesystem"],
@@ -9645,6 +9655,7 @@ describe("Rottweiler OpenTUI shell", () => {
       },
       turn_id: "turn-tools",
       tool_call_id: "approval-tools",
+      invocation_id: "approval-tools",
       name: "edit",
       args: { path: "src/app.ts" },
       capabilities: ["write_filesystem"],
@@ -9660,6 +9671,7 @@ describe("Rottweiler OpenTUI shell", () => {
     renderer = setup.renderer
     const toolForTurn = (turnId: string): ToolProjection => ({
       toolCallId: `tool-${turnId}`,
+      invocationId: `tool-${turnId}`,
       turnId,
       name: "read",
       args: { path: `${turnId}.txt` },
@@ -9747,6 +9759,7 @@ function toolsAppState(): RottweilerState {
   const tools = Object.fromEntries(Array.from({ length: 8 }, (_, index) => {
     const item: ToolProjection = {
       toolCallId: `tools-${index}`,
+      invocationId: `tools-${index}`,
       turnId: "turn-tools",
       name: "bash",
       args: { command: `bun test tools-${index}` },

@@ -76,6 +76,7 @@ describe("subagent state boundary", () => {
       tools: {
         approval: {
           toolCallId: "approval",
+          invocationId: "approval",
           turnId: "1",
           name: "write",
           status: "awaiting_approval",

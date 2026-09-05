@@ -257,6 +257,7 @@ describe("M4 executable TUI performance budgets", () => {
         meta: meta(index + 1),
         turn_id: "tool-output-turn",
         tool_call_id: `mounted-tool-${index}`,
+        invocation_id: `mounted-tool-${index}`,
         name: "bash",
         args: { command: `fixture-${index}` },
         call_index: index,
@@ -278,6 +279,7 @@ describe("M4 executable TUI performance budgets", () => {
         meta: meta(100 + index),
         turn_id: "tool-output-turn",
         tool_call_id: "mounted-tool-15",
+        invocation_id: "mounted-tool-15",
         stream: "stdout",
         chunk,
       }))
@@ -318,6 +320,7 @@ describe("M4 executable TUI performance budgets", () => {
         meta: meta(index + 1),
         turn_id: "tools-performance-turn",
         tool_call_id: `tools-performance-${index}`,
+        invocation_id: `tools-performance-${index}`,
         name: "bash",
         args: { command: `fixture-${index}` },
         call_index: index,
@@ -342,6 +345,7 @@ describe("M4 executable TUI performance budgets", () => {
         meta: meta(100 + index),
         turn_id: "tools-performance-turn",
         tool_call_id: `tools-performance-${index % 16}`,
+        invocation_id: `tools-performance-${index % 16}`,
         stream: "stdout",
         chunk,
       }))

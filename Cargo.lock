@@ -2816,6 +2816,7 @@ dependencies = [
  "ed25519-dalek",
  "futures-util",
  "rustix",
+ "rw-operation-contract",
  "rw-plugin-protocol",
  "rw-providers",
  "rw-tools",
@@ -2872,13 +2873,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "rw-operation-contract"
+version = "0.1.4"
+dependencies = [
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "ts-rs",
+]
+
+[[package]]
 name = "rw-plugin-protocol"
 version = "0.1.4"
 dependencies = [
  "blake3",
+ "rw-operation-contract",
+ "schemars",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "ts-rs",
 ]
 
 [[package]]
@@ -2999,6 +3014,7 @@ dependencies = [
  "ignore",
  "rustix",
  "rw-intel",
+ "rw-operation-contract",
  "rw-sandbox",
  "rw-types",
  "schemars",
@@ -3016,6 +3032,7 @@ dependencies = [
 name = "rw-types"
 version = "0.1.4"
 dependencies = [
+ "rw-operation-contract",
  "schemars",
  "serde",
  "serde_json",

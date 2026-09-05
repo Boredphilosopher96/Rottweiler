@@ -154,6 +154,7 @@
       },
       "session_id": "session-fixture",
       "tool_call_id": "tool-1",
+      "invocation_id": "tool-1",
       "decision": "allow_once",
       "binding": null
     },
@@ -502,6 +503,7 @@
       },
       "turn_id": "turn-fixture",
       "tool_call_id": "tool-1",
+      "invocation_id": "tool-1",
       "name": "bash",
       "args": {
         "command": "cargo test"
@@ -519,6 +521,7 @@
       },
       "turn_id": "turn-fixture",
       "tool_call_id": "tool-1",
+      "invocation_id": "tool-1",
       "name": "bash",
       "args": {
         "command": "cargo test"
@@ -540,6 +543,7 @@
       },
       "turn_id": "turn-fixture",
       "tool_call_id": "tool-1",
+      "invocation_id": "tool-1",
       "stream": "stdout",
       "chunk": "running tests"
     },
@@ -554,6 +558,7 @@
       },
       "turn_id": "turn-fixture",
       "tool_call_id": "tool-1",
+      "invocation_id": "tool-1",
       "output": {
         "type": "mixed",
         "parts": [

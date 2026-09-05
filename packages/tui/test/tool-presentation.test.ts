@@ -13,6 +13,7 @@ function finished(
 ): ToolProjection {
   return {
     toolCallId: `tool-${name}`,
+    invocationId: `tool-${name}`,
     turnId: "1",
     name,
     args,

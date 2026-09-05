@@ -273,6 +273,21 @@ impl ToolOutputSink for NoopOutputSink {
     }
 }
 
+/// Replaceable operational status. It is never tool output or a durable record.
+pub trait ToolProgressSink: Send + Sync {
+    /// # Errors
+    /// Rejects progress after the invocation's admission has closed.
+    fn report(&self, progress: rw_operation_contract::ToolProgress) -> Result<(), ToolError>;
+}
+
+#[derive(Debug, Default)]
+pub struct NoopProgressSink;
+impl ToolProgressSink for NoopProgressSink {
+    fn report(&self, _progress: rw_operation_contract::ToolProgress) -> Result<(), ToolError> {
+        Ok(())
+    }
+}
+
 /// Per-invocation context supplied by core after permission approval.
 #[derive(Clone)]
 pub struct ToolContext {
@@ -284,6 +299,7 @@ pub struct ToolContext {
     result_limit_bytes: usize,
     pub cancellation: CancellationToken,
     pub output: Arc<dyn ToolOutputSink>,
+    pub progress: Arc<dyn ToolProgressSink>,
     question_asker: Option<Arc<dyn QuestionAsker>>,
     subagent_events: Option<Arc<dyn SubagentEventSink>>,
     mcp_tool_policy: McpToolPolicy,
@@ -363,6 +379,7 @@ impl ToolContext {
             result_limit_bytes: ToolLimits::default().max_result_bytes,
             cancellation: CancellationToken::default(),
             output: Arc::new(NoopOutputSink),
+            progress: Arc::new(NoopProgressSink),
             question_asker: None,
             subagent_events: None,
             mcp_tool_policy: McpToolPolicy::Unrestricted,
@@ -436,6 +453,12 @@ impl ToolContext {
     #[must_use]
     pub fn with_output(mut self, output: Arc<dyn ToolOutputSink>) -> Self {
         self.output = output;
+        self
+    }
+
+    #[must_use]
+    pub fn with_progress(mut self, progress: Arc<dyn ToolProgressSink>) -> Self {
+        self.progress = progress;
         self
     }
 

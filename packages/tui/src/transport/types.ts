@@ -38,6 +38,8 @@ export function isWireEngineEvent(value: unknown): value is WireEngineEvent {
   if (!isRecord(value) || typeof value.type !== "string") return false
   if (!Object.hasOwn(ENGINE_EVENT_DELIVERY, value.type)) return true
   if (!validateEngineEvent(value)) return false
+  if (value.type === "tool_progress" && value.progress.amount !== undefined && value.progress.amount !== null
+    && value.progress.amount.completed > value.progress.amount.total) return false
   if (ENGINE_EVENT_DELIVERY[value.type] === "transient") return true
   if (!("meta" in value) || value.meta.protocol_version !== PROTOCOL_VERSION) return false
   return ENGINE_EVENT_DELIVERY[value.type] !== "durable" || parseU64(durableSequenceId(value)) !== null

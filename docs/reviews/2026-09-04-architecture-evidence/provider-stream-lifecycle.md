@@ -6,6 +6,10 @@ correlated host outcomes were implemented in the preceding checkpoints. A23's
 long-running ordinary tool requests and typed progress remain unfinished: tool,
 hook, and catalog handlers still have the existing five-second deadline.
 
+The subsequent A23 checkpoint replaces the tool-only five-second behavior; see
+[tool lifetime and progress evidence](tool-lifetime-progress.md). The observation
+above describes this provider checkpoint at its original commit.
+
 ADR-031 is the contract decision. Protocol 3 replaces protocol 2 directly. The
 old generated SDK module, wire fixture, schema, and `provider/cancel` method are
 removed. Host-mediated HTTP retains its distinct `provider/http_cancel` operation:

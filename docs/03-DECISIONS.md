@@ -449,46 +449,6 @@ detects divergence.
 
 ---
 
-## ADR-031: Bounded plugin operations own their effects through settlement
-
-**Status:** accepted 2026-09-04.
-
-**Decision.** Protocol 3 gives host commands correlated typed outcomes and gives
-streaming operations explicit bounded delivery and finite host-issued lifetimes.
-The reader routes responses and control independently of application handlers.
-Admitted host commands own their actor reply and settlement permit until the
-actual operation completes; a caller deadline never abandons that ownership.
-Transport admission, data bytes, control frames, pending outcomes, and active
-operations all have aggregate bounds. Stream completion has reserved storage.
-Consumption returns delivery credit; producing progress cannot extend a total
-deadline. Progress is observation, not authorization or proof of settlement.
-
-Native process authority remains the isolation boundary. Cancellation, timeout,
-or abandonment of native execution stops admission and tears down the shared
-process, reaps it, and drains owned host work before effectful callers finish.
-A cooperative cancellation acknowledgement is not proof that native effects
-stopped. Slow consumers may pause their stream within its fixed lifetime while
-unrelated RPC responses continue; expired or abandoned native operations retain
-the conservative process-wide failure domain.
-
-**Alternatives.** A single awaited reader deadlocks nested RPC and couples slow
-consumers. Unlimited detached handlers move the deadlock into unbounded memory.
-Per-stream cancellation without enforced per-invocation authority cannot prove
-effect settlement. A periodically renewed total deadline admits infinite work.
-
-**Consequences.** Rust owns the wire types, limits, and generated SDK projections.
-Protocol 2 is removed rather than supported through a compatibility layer. Host
-command errors and unknown outcomes are distinct; retrying an unknown mutation
-is not automatically safe. Active correlation IDs must be unique. These are
-process-bound operations, not durable tasks: disconnect fails pending work and
-reconnect requires a fresh process and fresh operation. Durable task recovery
-needs a separate actor-owned persistence contract.
-
-**Revisit when.** Host-enforced per-invocation authority can prove independent
-cancellation, or a durable operation registry supplies replayable recovery.
-
----
-
 ## ADR-029: Session journals use immutable segments and bounded replay views
 
 **Context.** A single lifetime JSONL file makes cursor reads proportional to session
@@ -590,3 +550,60 @@ compaction, rewind, mode changes and accounting.
 primitive that makes stronger whole-history integrity checks inexpensive, or
 measured workloads justify a different bounded segment/page size. Change those
 policies through explicit validation rather than restoring whole-gap reads.
+
+---
+
+## ADR-031: Bounded plugin operations own their effects through settlement
+
+**Status:** accepted 2026-09-04.
+
+**Decision.** Protocol 3 gives host commands correlated typed outcomes and gives
+streaming operations explicit bounded delivery and finite host-issued lifetimes.
+The reader routes responses and control independently of application handlers.
+Admitted host commands own their actor reply and settlement permit until the
+actual operation completes; a caller deadline never abandons that ownership.
+Transport admission, data bytes, control frames, pending outcomes, and active
+operations all have aggregate bounds. Stream completion has reserved storage.
+Consumption returns delivery credit; producing progress cannot extend a total
+deadline. Progress is observation, not authorization or proof of settlement.
+
+Tool calls carry a validated host-issued `OperationLifetime`: immutable total and
+renewable idle deadlines, both monotonic and capped at five minutes. Defaults are
+five minutes total and ninety seconds idle. Typed `tool/progress` observations
+renew only idle time; hook, catalog, command and lifecycle requests keep their
+five-second control contract. Progress has a separate bounded delivery lane,
+coalesces to one pending observation per admitted operation, and is rate limited.
+Its writer must settle before the final RPC response. Host-owned invocation IDs
+bind starts, output, diffs, approvals and final outcomes even when a provider
+reuses its call ID. Client progress has no durable sequence and cannot grow the
+journal. Recovery finishes an existing invocation or emits a paired start and
+finish when committed IR never reached execution admission.
+
+`rw-operation-contract` owns runtime-independent validated lifetime/progress
+values shared by tool execution and both wire protocols. Protocol owners generate
+TypeScript and schema projections. SDK and client boundary checks preserve the
+same semantic count and plain-text constraints.
+
+Native process authority remains the isolation boundary. Cancellation, timeout,
+or abandonment of native execution stops admission and tears down the shared
+process, reaps it, and drains owned host work before effectful callers finish.
+A cooperative cancellation acknowledgement is not proof that native effects
+stopped. Slow consumers may pause their stream within its fixed lifetime while
+unrelated RPC responses continue; expired or abandoned native operations retain
+the conservative process-wide failure domain.
+
+**Alternatives.** A single awaited reader deadlocks nested RPC and couples slow
+consumers. Unlimited detached handlers move the deadlock into unbounded memory.
+Per-stream cancellation without enforced per-invocation authority cannot prove
+effect settlement. A periodically renewed total deadline admits infinite work.
+
+**Consequences.** Rust owns the wire types, limits, and generated SDK projections.
+Protocol 2 is removed rather than supported through a compatibility layer. Host
+command errors and unknown outcomes are distinct; retrying an unknown mutation
+is not automatically safe. Active correlation IDs must be unique. These are
+process-bound operations, not durable tasks: disconnect fails pending work and
+reconnect requires a fresh process and fresh operation. Durable task recovery
+needs a separate actor-owned persistence contract.
+
+**Revisit when.** Host-enforced per-invocation authority can prove independent
+cancellation, or a durable operation registry supplies replayable recovery.

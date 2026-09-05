@@ -9,16 +9,17 @@ import sys
 
 
 ALLOWED = {
-    "rw-plugin-protocol": set(),
-    "rw-types": set(),
+    "rw-operation-contract": set(),
+    "rw-plugin-protocol": {"rw-operation-contract"},
+    "rw-types": {"rw-operation-contract"},
     "rw-store": {"rw-types"},
     "rw-providers": {"rw-types"},
     "rw-context": {"rw-providers", "rw-types"},
     "rw-sandbox": {"rw-types"},
     "rw-intel": {"rw-types"},
-    "rw-tools": {"rw-intel", "rw-sandbox", "rw-types"},
+    "rw-tools": {"rw-operation-contract", "rw-intel", "rw-sandbox", "rw-types"},
     "rw-mcp": {"rw-tools", "rw-types"},
-    "rw-ext": {"rw-plugin-protocol", "rw-providers", "rw-tools", "rw-types"},
+    "rw-ext": {"rw-operation-contract", "rw-plugin-protocol", "rw-providers", "rw-tools", "rw-types"},
     "rw-core": {
         "rw-context",
         "rw-ext",

@@ -55,8 +55,9 @@ rottweiler/
 ├── contracts/
 │   └── release-contract.json  # release platforms, archive shape, and product budgets
 ├── crates/
+│   ├── rw-operation-contract/ # leaf lifetime/progress values shared across tool and wire boundaries
 │   ├── rw-types/              # shared types: message IR, events, config schema, errors
-│   ├── rw-plugin-protocol/    # dependency-leaf plugin wire contract + current codegen
+│   ├── rw-plugin-protocol/    # runtime-independent plugin wire contract + current codegen
 │   ├── rw-store/              # session persistence, checkpoints, config loading
 │   ├── rw-providers/          # router, adapters, pricing, auth
 │   ├── rw-context/            # token budget, compaction, TOON, cache strategy
@@ -77,7 +78,7 @@ rottweiler/
 └── tests/                     # cross-crate integration + replay fixtures + protocol contract tests
 ```
 
-Dependency rule: arrows point downward only. No Rust crate depends on anything in `packages/`. `rw-types` and `rw-plugin-protocol` are dependency leaves. `rw-core` is independent of `rw-runtime` and all executable frontends. `rw-runtime` owns concrete storage/provider/tool/MCP/extension assembly and injects it into the core engine. `rw-cli` consumes that owned composition API; its direct lower-level dependencies are explicit, narrow administrative and transport commands, not a re-export facade. The metadata and source-layout rules are enforced in CI by `scripts/check-dependency-direction.py`.
+Dependency rule: arrows point downward only. No Rust crate depends on anything in `packages/`. `rw-operation-contract` is a dependency leaf. `rw-types` and `rw-plugin-protocol` depend only on that shared runtime-independent contract within the workspace. `rw-core` is independent of `rw-runtime` and all executable frontends. `rw-runtime` owns concrete storage/provider/tool/MCP/extension assembly and injects it into the core engine. `rw-cli` consumes that owned composition API; its direct lower-level dependencies are explicit, narrow administrative and transport commands, not a re-export facade. The metadata and source-layout rules are enforced in CI by `scripts/check-dependency-direction.py`.
 
 Each piece of contract data and each feature catalog has one hand-maintained
 owner. Other crates, clients, scripts, tests, and docs either consume that owner
@@ -161,7 +162,7 @@ IR shape constraint (ADR-013): all protocol-crossing enums use **struct variants
 ```rust
 enum ClientCommand {
     SendMessage { session, content, attachments },
-    Interrupt { session }, ApproveTool { id, decision },
+    Interrupt { session }, ApproveTool { id, invocation_id, decision },
     AnswerQuestion { .. }, SwitchMode(Mode), SwitchModel(Alias),
     Compact { instructions }, Fork { at_turn }, Rewind { to_turn }, ...
 }

@@ -1,6 +1,8 @@
-//! Dependency-leaf owner of the public Rottweiler plugin wire protocol.
+//! Runtime-independent owner of the public Rottweiler plugin wire protocol.
 
 use std::collections::{BTreeMap, BTreeSet};
+
+pub use rw_operation_contract::{OperationLifetime, ProgressAmount, ToolProgress};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -25,12 +27,13 @@ pub const MAX_PLUGIN_MODEL_TOKENS: u64 = 16 * 1024 * 1024;
 pub const MAX_PLUGIN_PRICE_MICROS_USD: u64 = 1_000_000_000_000;
 pub const DEFAULT_HANDLER_TIMEOUT_MS: u64 = 5_000;
 pub const MAX_PROVIDER_STREAMS: usize = 4;
+pub const MAX_IN_FLIGHT_REQUESTS: u16 = 64;
 pub const CONTROL_QUEUE_FRAMES: usize = 64;
 pub const CONTROL_QUEUE_BYTES: usize = 16 * 1024 * 1024;
 pub const DATA_QUEUE_BYTES: usize = MAX_PROVIDER_STREAMS * (MAX_FRAME_BYTES + 1);
 pub const PROVIDER_WINDOW_EVENTS: usize = 64;
 pub const PROVIDER_WINDOW_BYTES: usize = MAX_FRAME_BYTES;
-pub const MAX_OPERATION_DURATION_MS: u64 = 300_000;
+pub const MAX_OPERATION_DURATION_MS: u64 = rw_operation_contract::MAX_OPERATION_DURATION_MS as u64;
 
 /// Maximum wire length of a provider alias prefix, including its trailing slash.
 pub const MAX_PROVIDER_ALIAS_PREFIX_BYTES: usize = MAX_NAME_BYTES;
@@ -64,6 +67,7 @@ pub fn validate_provider_alias_prefix(prefix: &str) -> Result<(), ProviderAliasP
 
 pub const METHOD_INITIALIZE: &str = "initialize";
 pub const METHOD_TOOL_CALL: &str = "tool/call";
+pub const METHOD_TOOL_PROGRESS: &str = "tool/progress";
 pub const METHOD_COMMAND_EXECUTE: &str = "command/execute";
 pub const METHOD_HOOK_INVOKE: &str = "hook/invoke";
 pub const METHOD_PROVIDER_COMPLETE: &str = "provider/complete";
@@ -855,6 +859,15 @@ pub struct InjectMessageResult {
 pub struct ToolCallParams {
     pub name: String,
     pub input: Value,
+    pub lifetime: OperationLifetime,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolProgressParams {
+    pub request_id: RpcId,
+    pub sequence: u32,
+    pub progress: ToolProgress,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

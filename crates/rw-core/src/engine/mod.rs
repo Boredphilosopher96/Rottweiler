@@ -794,6 +794,7 @@ enum PendingEvent {
     ToolCallStarted {
         turn: u64,
         id: String,
+        invocation_id: rw_types::ToolInvocationId,
         name: String,
         arguments: Value,
         index: usize,
@@ -805,17 +806,20 @@ enum PendingEvent {
     ToolDiffReady {
         turn: u64,
         id: String,
+        invocation_id: rw_types::ToolInvocationId,
         diff: UnifiedDiff,
     },
     ToolOutput {
         turn: u64,
         id: String,
+        invocation_id: rw_types::ToolInvocationId,
         stream: String,
         chunk: String,
     },
     ToolCallFinished {
         turn: u64,
         id: String,
+        invocation_id: rw_types::ToolInvocationId,
         output: ToolOutput,
         is_error: bool,
         index: usize,
@@ -1289,6 +1293,7 @@ impl PendingEvent {
             Self::ToolCallStarted {
                 turn,
                 id,
+                invocation_id,
                 name,
                 arguments,
                 index,
@@ -1296,6 +1301,7 @@ impl PendingEvent {
                 meta,
                 turn_id: wire_turn_id(turn),
                 tool_call_id: ToolCallId(id),
+                invocation_id,
                 name,
                 args: arguments,
                 call_index: u32::try_from(index).unwrap_or(u32::MAX),
@@ -1304,6 +1310,7 @@ impl PendingEvent {
                 meta,
                 turn_id: wire_turn_id(turn),
                 tool_call_id: ToolCallId(request.id),
+                invocation_id: request.invocation_id,
                 name: request.tool_name.clone(),
                 rationale: if request.arguments.get("sandbox").and_then(Value::as_str)
                     == Some("unsandboxed")
@@ -1317,21 +1324,29 @@ impl PendingEvent {
                 capabilities: request.capabilities,
                 diff: request.approval_diff,
             },
-            Self::ToolDiffReady { turn, id, diff } => EngineEvent::ToolDiffReady {
+            Self::ToolDiffReady {
+                turn,
+                id,
+                invocation_id,
+                diff,
+            } => EngineEvent::ToolDiffReady {
                 meta,
                 turn_id: wire_turn_id(turn),
                 tool_call_id: ToolCallId(id),
+                invocation_id,
                 diff,
             },
             Self::ToolOutput {
                 turn,
                 id,
+                invocation_id,
                 stream,
                 chunk,
             } => EngineEvent::ToolOutputDelta {
                 meta,
                 turn_id: wire_turn_id(turn),
                 tool_call_id: ToolCallId(id),
+                invocation_id,
                 stream: if stream == "stderr" {
                     ToolOutputStream::Stderr
                 } else {
@@ -1342,6 +1357,7 @@ impl PendingEvent {
             Self::ToolCallFinished {
                 turn,
                 id,
+                invocation_id,
                 output,
                 is_error,
                 index,
@@ -1349,6 +1365,7 @@ impl PendingEvent {
                 meta,
                 turn_id: wire_turn_id(turn),
                 tool_call_id: ToolCallId(id),
+                invocation_id,
                 output,
                 is_error,
                 call_index: u32::try_from(index).unwrap_or(u32::MAX),
@@ -5547,6 +5564,7 @@ mod tests {
                 .with_project_approval_file(root.path().join("approvals.json")),
         );
         let approval_request = |id: &str, secret: &str| PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: id.to_owned(),
             tool_name: "bash".to_owned(),
             arguments: json!({"command": format!("printf {secret}")}),
@@ -6972,6 +6990,7 @@ mod tests {
                 turn: assistant,
             },
             PendingEvent::ToolCallStarted {
+                invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
                 turn: 1,
                 id: "call".to_owned(),
                 name: "fixture".to_owned(),
@@ -6979,6 +6998,7 @@ mod tests {
                 index: 0,
             },
             PendingEvent::ToolCallFinished {
+                invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
                 turn: 1,
                 id: "call".to_owned(),
                 output: ToolOutput::Text {
@@ -7211,7 +7231,7 @@ mod tests {
             };
             assert!(
                 handle
-                    .approve(request.id, decision.clone())
+                    .approve(request.id, request.invocation_id.clone(), decision.clone())
                     .await
                     .expect("approval")
             );
@@ -7291,7 +7311,7 @@ mod tests {
             );
             assert!(request.capabilities.contains(&ToolCapability::Execute));
             handle
-                .approve(request.id, decision)
+                .approve(request.id, request.invocation_id.clone(), decision)
                 .await
                 .expect("approval");
             collect_turn(&mut events).await;
@@ -7352,7 +7372,7 @@ mod tests {
             assert_eq!(request.arguments["command"], "fixture-shell");
             assert!(
                 handle
-                    .approve(request.id, decision.clone())
+                    .approve(request.id, request.invocation_id.clone(), decision.clone())
                     .await
                     .expect("approval response")
             );
@@ -7484,7 +7504,11 @@ mod tests {
         );
         assert!(
             handle
-                .approve(request.id, ApprovalDecision::Deny)
+                .approve(
+                    request.id,
+                    request.invocation_id.clone(),
+                    ApprovalDecision::Deny
+                )
                 .await
                 .expect("approval response")
         );
@@ -7560,7 +7584,11 @@ mod tests {
         };
         assert!(
             handle
-                .approve(request.id, ApprovalDecision::Deny)
+                .approve(
+                    request.id,
+                    request.invocation_id.clone(),
+                    ApprovalDecision::Deny
+                )
                 .await
                 .expect("deny")
         );
@@ -7714,7 +7742,11 @@ mod tests {
             assert!(replayed.contains(&injection));
             assert!(
                 handle
-                    .approve(request.id, ApprovalDecision::Deny)
+                    .approve(
+                        request.id,
+                        request.invocation_id.clone(),
+                        ApprovalDecision::Deny
+                    )
                     .await
                     .expect("bash denial")
             );
@@ -7784,7 +7816,11 @@ mod tests {
         std::fs::write(&script, "#!/bin/sh\nprintf replaced\n").expect("replace executable");
         assert!(
             handle
-                .approve(request.id, ApprovalDecision::AllowOnce)
+                .approve(
+                    request.id,
+                    request.invocation_id.clone(),
+                    ApprovalDecision::AllowOnce
+                )
                 .await
                 .expect("approval")
         );
@@ -7858,7 +7894,11 @@ mod tests {
         };
         assert!(
             handle
-                .approve(request.id, ApprovalDecision::AllowProject)
+                .approve(
+                    request.id,
+                    request.invocation_id.clone(),
+                    ApprovalDecision::AllowProject
+                )
                 .await
                 .expect("approval response")
         );
@@ -7951,7 +7991,11 @@ mod tests {
         assert_eq!(request.arguments["nested"]["password"], "[REDACTED]");
         assert!(
             handle
-                .approve(request.id, ApprovalDecision::AllowOnce)
+                .approve(
+                    request.id,
+                    request.invocation_id.clone(),
+                    ApprovalDecision::AllowOnce
+                )
                 .await
                 .expect("approval")
         );
@@ -8052,7 +8096,11 @@ mod tests {
         };
         assert!(
             handle
-                .approve(request.id, ApprovalDecision::AllowOnce)
+                .approve(
+                    request.id,
+                    request.invocation_id.clone(),
+                    ApprovalDecision::AllowOnce
+                )
                 .await
                 .expect("approval")
         );
@@ -8148,6 +8196,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn diff_approval_rejects_tampered_binding_without_consuming_the_prompt() {
         let root = TempDir::new().expect("tempdir");
         std::fs::write(root.path().join("bound.txt"), "before").expect("fixture");
@@ -8186,7 +8235,23 @@ mod tests {
         let correct = diff_binding(request.approval_diff.as_ref().expect("diff"));
         assert!(
             !handle
-                .approve_bound(request.id.clone(), ApprovalDecision::AllowOnce, None,)
+                .approve_bound(
+                    request.id.clone(),
+                    rw_types::ToolInvocationId("previous-invocation".to_owned()),
+                    ApprovalDecision::AllowOnce,
+                    Some(correct.clone())
+                )
+                .await
+                .expect("stale invocation rejected")
+        );
+        assert!(
+            !handle
+                .approve_bound(
+                    request.id.clone(),
+                    request.invocation_id.clone(),
+                    ApprovalDecision::AllowOnce,
+                    None,
+                )
                 .await
                 .expect("missing approval binding")
         );
@@ -8212,6 +8277,7 @@ mod tests {
                 !handle
                     .approve_bound(
                         request.id.clone(),
+                        request.invocation_id.clone(),
                         ApprovalDecision::AllowOnce,
                         Some(binding),
                     )
@@ -8225,7 +8291,12 @@ mod tests {
         );
         assert!(
             handle
-                .approve_bound(request.id, ApprovalDecision::AllowOnce, Some(correct))
+                .approve_bound(
+                    request.id,
+                    request.invocation_id.clone(),
+                    ApprovalDecision::AllowOnce,
+                    Some(correct)
+                )
                 .await
                 .expect("bound approval")
         );
@@ -8338,7 +8409,12 @@ mod tests {
         ] {
             assert!(
                 !handle
-                    .approve_bound(request.id.clone(), decision, Some(binding.clone()))
+                    .approve_bound(
+                        request.id.clone(),
+                        request.invocation_id.clone(),
+                        decision,
+                        Some(binding.clone())
+                    )
                     .await
                     .expect("truncated allow rejection")
             );
@@ -8346,7 +8422,12 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).expect("unchanged"), "before");
         assert!(
             handle
-                .approve_bound(request.id, ApprovalDecision::Deny, Some(binding))
+                .approve_bound(
+                    request.id,
+                    request.invocation_id.clone(),
+                    ApprovalDecision::Deny,
+                    Some(binding)
+                )
                 .await
                 .expect("deny truncated proposal")
         );
@@ -8402,7 +8483,12 @@ mod tests {
         std::fs::write(&path, "concurrent user edit").expect("race mutation");
         assert!(
             !handle
-                .approve_bound(request.id, ApprovalDecision::AllowProject, Some(binding))
+                .approve_bound(
+                    request.id,
+                    request.invocation_id.clone(),
+                    ApprovalDecision::AllowProject,
+                    Some(binding)
+                )
                 .await
                 .expect("stale approval")
         );
@@ -8422,6 +8508,7 @@ mod tests {
             handle
                 .approve_bound(
                     refreshed.id,
+                    refreshed.invocation_id.clone(),
                     ApprovalDecision::Deny,
                     Some(refreshed_binding),
                 )
@@ -8478,7 +8565,11 @@ mod tests {
         };
         assert_eq!(request.arguments, json!({"path": "original"}));
         handle
-            .approve(request.id, ApprovalDecision::AllowOnce)
+            .approve(
+                request.id,
+                request.invocation_id.clone(),
+                ApprovalDecision::AllowOnce,
+            )
             .await
             .expect("initial approval");
         let event = next_matching(&mut events, |kind| {
@@ -8490,7 +8581,11 @@ mod tests {
         };
         assert_eq!(request.arguments, json!({"path": "rewritten"}));
         handle
-            .approve(request.id, ApprovalDecision::AllowOnce)
+            .approve(
+                request.id,
+                request.invocation_id.clone(),
+                ApprovalDecision::AllowOnce,
+            )
             .await
             .expect("approval");
         next_matching(&mut events, |kind| {
@@ -8851,7 +8946,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("fill window").await.expect("message");
         tokio::time::timeout(Duration::from_secs(2), probe.window_filled.notified())
             .await
@@ -8925,7 +9020,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle
             .send_message("run mixed tools")
             .await
@@ -8982,7 +9077,7 @@ mod tests {
         );
         actor_config.event_sink = sink.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle
             .send_message("stream both tools")
             .await
@@ -9574,7 +9669,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         );
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("run").await.expect("message");
         timeout(Duration::from_secs(2), provider.invoked.notified())
             .await
@@ -9678,7 +9773,7 @@ mod tests {
         );
         actor_config.checkpoints = checkpoints.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("run").await.expect("message");
         timeout(Duration::from_secs(3), tool.started.notified())
             .await
@@ -10400,6 +10495,7 @@ mod tests {
             permissions
                 .authorize(
                     PermissionRequest {
+                        invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
                         id: "remember-session".to_owned(),
                         tool_name: "write".to_owned(),
                         arguments: json!({
@@ -11486,6 +11582,116 @@ mod tests {
         assert!(chunks.iter().any(|chunk| chunk.contains("truncated")));
     }
 
+    #[test]
+    fn interrupted_repair_ids_remain_stable_when_recovery_itself_crashes() {
+        let mut events = vec![
+            wire_event(0, PendingEvent::TurnStarted { turn: 1 }),
+            wire_event(
+                1,
+                PendingEvent::ConversationTurnCommitted {
+                    agent_turn: 1,
+                    turn: Turn {
+                        role: Role::Assistant,
+                        blocks: ["first", "second"]
+                            .into_iter()
+                            .map(|id| Block::ToolCall {
+                                id: ToolCallId(id.to_owned()),
+                                name: "fixture".to_owned(),
+                                args: json!({}),
+                            })
+                            .collect(),
+                        meta: TurnMeta::default(),
+                    },
+                },
+            ),
+        ];
+        let first = project_session_events(&events).expect("first recovery");
+        assert_eq!(first.interrupted_tool_repairs.len(), 2);
+        let expected = first.interrupted_tool_repairs[1].invocation_id.clone();
+        for kind in session::interrupted_tool_recovery_events(&first.interrupted_tool_repairs[0]) {
+            events.push(wire_event(
+                u64::try_from(events.len()).expect("sequence"),
+                kind,
+            ));
+        }
+        let resumed = project_session_events(&events).expect("recovery after partial repair");
+        assert_eq!(resumed.interrupted_tool_repairs.len(), 1);
+        assert_eq!(resumed.interrupted_tool_repairs[0].tool_call_id.0, "second");
+        assert_eq!(resumed.interrupted_tool_repairs[0].invocation_id, expected);
+        assert_ne!(
+            resumed.interrupted_tool_repairs[0].invocation_id,
+            first.interrupted_tool_repairs[0].invocation_id
+        );
+    }
+
+    #[test]
+    fn interrupted_reused_provider_id_finishes_only_its_active_invocation() {
+        let mut events = vec![PendingEvent::TurnStarted { turn: 1 }];
+        for iteration in 0..2 {
+            let invocation_id = rw_types::ToolInvocationId(format!("invocation-{iteration}"));
+            events.push(PendingEvent::ConversationTurnCommitted {
+                agent_turn: 1,
+                turn: Turn {
+                    role: Role::Assistant,
+                    blocks: vec![Block::ToolCall {
+                        id: ToolCallId("reused".to_owned()),
+                        name: "fixture".to_owned(),
+                        args: json!({"iteration":iteration}),
+                    }],
+                    meta: TurnMeta::default(),
+                },
+            });
+            events.push(PendingEvent::ToolCallStarted {
+                turn: 1,
+                id: "reused".to_owned(),
+                invocation_id: invocation_id.clone(),
+                name: "fixture".to_owned(),
+                arguments: json!({"iteration":iteration}),
+                index: 0,
+            });
+            if iteration == 0 {
+                let output = ToolOutput::Text {
+                    text: "first result".to_owned(),
+                };
+                events.push(PendingEvent::ToolCallFinished {
+                    turn: 1,
+                    id: "reused".to_owned(),
+                    invocation_id,
+                    output: output.clone(),
+                    is_error: false,
+                    index: 0,
+                });
+                events.push(PendingEvent::ConversationTurnCommitted {
+                    agent_turn: 1,
+                    turn: Turn {
+                        role: Role::Tool,
+                        blocks: vec![Block::ToolResult {
+                            id: ToolCallId("reused".to_owned()),
+                            output,
+                            is_error: false,
+                        }],
+                        meta: TurnMeta::default(),
+                    },
+                });
+            }
+        }
+        let events = events
+            .into_iter()
+            .enumerate()
+            .map(|(index, event)| wire_event(u64::try_from(index).expect("index"), event))
+            .collect::<Vec<_>>();
+        let recovered = project_session_events(&events).expect("recovery");
+        assert_eq!(recovered.interrupted_tool_repairs.len(), 1);
+        let repair = &recovered.interrupted_tool_repairs[0];
+        assert_eq!(repair.invocation_id.0, "invocation-1");
+        assert!(repair.missing_start.is_none());
+        let repair_events = session::interrupted_tool_recovery_events(repair);
+        assert_eq!(repair_events.len(), 1);
+        assert!(
+            matches!(&repair_events[0], PendingEvent::ToolCallFinished { invocation_id, .. } if invocation_id.0 == "invocation-1")
+        );
+    }
+
     #[tokio::test]
     async fn resume_persists_tool_result_repairs_before_interrupted_closure() {
         let root = TempDir::new().expect("tempdir");
@@ -11526,7 +11732,7 @@ mod tests {
         let _handle = SessionActor::spawn(actor_config).expect("actor");
         timeout(Duration::from_secs(1), async {
             loop {
-                if sink.events.lock().expect("events").len() >= 3 {
+                if sink.events.lock().expect("events").len() >= 4 {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -11535,8 +11741,12 @@ mod tests {
         .await
         .expect("durable recovery closure");
         let repairs = sink.events.lock().expect("events").clone();
+        assert!(
+            matches!(&repairs[0].kind, PendingEvent::ToolCallStarted { id, invocation_id, name, .. }
+            if id == "lost-call" && invocation_id.0 == "turn-1:repair-0" && name == "fixture")
+        );
         assert!(matches!(
-            repairs[0].kind,
+            repairs[1].kind,
             PendingEvent::ToolCallFinished {
                 ref id,
                 is_error: true,
@@ -11544,7 +11754,7 @@ mod tests {
             } if id == "lost-call"
         ));
         assert!(matches!(
-            repairs[1].kind,
+            repairs[2].kind,
             PendingEvent::ConversationTurnCommitted {
                 turn: Turn {
                     role: Role::Tool,
@@ -11554,7 +11764,7 @@ mod tests {
             }
         ));
         assert!(matches!(
-            repairs[2].kind,
+            repairs[3].kind,
             PendingEvent::TurnFinished {
                 status: AgentTurnStatus::Interrupted,
                 ..

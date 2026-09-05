@@ -387,9 +387,7 @@ mod tests {
         ApprovalStore, ApprovalStoreError, DenyPushHandler, LaunchedPluginProcess, PluginHost,
         PluginLauncher, SupervisedPluginProcess, approve_plugin_launch,
     };
-    use rw_plugin_protocol::{
-        METHOD_TOOL_CALL, PluginCapabilities, PluginManifest, PluginToolCapability,
-    };
+    use rw_plugin_protocol::{PluginCapabilities, PluginManifest, PluginToolCapability};
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::sync::Mutex as StdMutex;
@@ -758,9 +756,14 @@ mod tests {
         .expect("production no-reads host");
         let response = host
             .client()
-            .request(
-                METHOD_TOOL_CALL,
-                json!({"name":"read_sibling_probe","input":{}}),
+            .call_tool(
+                rw_plugin_protocol::ToolCallParams {
+                    name: "read_sibling_probe".to_owned(),
+                    input: json!({}),
+                    lifetime: rw_plugin_protocol::OperationLifetime::default(),
+                },
+                &rw_tools::CancellationToken::default(),
+                Arc::new(rw_tools::NoopProgressSink),
             )
             .await
             .expect("probe response");

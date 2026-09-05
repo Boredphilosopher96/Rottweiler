@@ -174,6 +174,7 @@ function fixtureState(): RottweilerState {
 function pendingTool(diff: boolean): ToolProjection {
   return {
     toolCallId: diff ? "edit-tool" : "bash-tool",
+    invocationId: diff ? "edit-tool" : "bash-tool",
     turnId: "2",
     name: diff ? "edit" : "bash",
     args: diff ? { path: "src/main.rs" } : { command: "cargo test" },
@@ -226,6 +227,7 @@ function replayFixtureState(): RottweilerState {
       meta: eventMeta("5"),
       turn_id: "2",
       tool_call_id: "historical-read",
+      invocation_id: "historical-read",
       name: "read",
       args: { path: "PROJECT.md" },
       call_index: 0,
@@ -235,6 +237,7 @@ function replayFixtureState(): RottweilerState {
       meta: eventMeta("6"),
       turn_id: "2",
       tool_call_id: "historical-read",
+      invocation_id: "historical-read",
       output: { type: "text", text: "Historical PROJECT.md contents" },
       is_error: false,
       call_index: 0,
@@ -296,6 +299,7 @@ function toolsFixtureState(): RottweilerState {
     extra: Partial<ToolProjection>,
   ): ToolProjection => ({
     toolCallId,
+    invocationId: toolCallId,
     turnId: "tools-turn",
     name: "read",
     args: { path: `${toolCallId}.ts` },
@@ -413,6 +417,7 @@ function scenarios(): ScreenScenario[] {
           "live-tool": {
             ...pendingTool(false),
             toolCallId: "live-tool",
+            invocationId: "live-tool",
             status: "running",
             chunks: toolOutputBuffer([{ stream: "stdout", chunk: "test transport ... ok\ntest reducer ..." }]),
           },

@@ -1,5 +1,7 @@
 //! Supervised JSON-RPC plugin runtime and public extension adapters.
 
+mod operation;
+use operation::{PendingRequest, RequestPolicy};
 mod writer;
 use writer::{RpcReceiver, RpcWriter};
 
@@ -24,11 +26,12 @@ use rw_plugin_protocol::{
     METHOD_INITIALIZE, METHOD_PROVIDER_COMPLETE, METHOD_PROVIDER_CREDIT, METHOD_PROVIDER_EVENT,
     METHOD_PROVIDER_HTTP, METHOD_PROVIDER_HTTP_CANCEL, METHOD_PROVIDER_HTTP_EVENT,
     METHOD_PROVIDER_MODELS, METHOD_SESSION_INJECT_MESSAGE, METHOD_SESSION_SET_STATUS,
-    METHOD_SHUTDOWN, METHOD_TOOL_CALL, METHOD_UI_NOTIFY, PROVIDER_WINDOW_BYTES,
-    PROVIDER_WINDOW_EVENTS, PluginCapabilities, PluginManifest, ProviderCacheBreakpoints,
-    ProviderCompleteParams, ProviderEventParams, ProviderHttpCancelParams,
-    ProviderHttpCapabilityParams, ProviderModelsParams, ProviderModelsResponse, RpcFailure,
-    RpcFrame, RpcId, RpcNotification, RpcRequest, RpcSuccess, ToolCallParams,
+    METHOD_SHUTDOWN, METHOD_TOOL_CALL, METHOD_TOOL_PROGRESS, METHOD_UI_NOTIFY,
+    PROVIDER_WINDOW_BYTES, PROVIDER_WINDOW_EVENTS, PluginCapabilities, PluginManifest,
+    ProviderCacheBreakpoints, ProviderCompleteParams, ProviderEventParams,
+    ProviderHttpCancelParams, ProviderHttpCapabilityParams, ProviderModelsParams,
+    ProviderModelsResponse, RpcFailure, RpcFrame, RpcId, RpcNotification, RpcRequest, RpcSuccess,
+    ToolCallParams, ToolProgressParams,
 };
 use rw_providers::{
     BoxEventStream, CacheBreakpointSupport, Capabilities, DiscoveredModel,
@@ -55,7 +58,7 @@ use crate::plugin::{
 };
 use crate::{CommandExecutionError, CommandHandler, CommandInvocation};
 
-const RPC_REQUEST_CAPACITY: u16 = 64;
+const RPC_REQUEST_CAPACITY: u16 = rw_plugin_protocol::MAX_IN_FLIGHT_REQUESTS;
 const WRITER_QUEUE_CAPACITY: usize = RPC_REQUEST_CAPACITY as usize;
 const PROVIDER_EVENT_QUEUE_CAPACITY: usize = PROVIDER_WINDOW_EVENTS;
 const HOST_EFFECT_CAPACITY: u32 = RPC_REQUEST_CAPACITY as u32 * 2;
@@ -362,7 +365,7 @@ pub enum PluginHostError {
     Rpc(#[from] PluginRpcError),
 }
 
-type Pending = Arc<Mutex<BTreeMap<RpcId, oneshot::Sender<Result<Value, PluginRpcError>>>>>;
+type Pending = Arc<Mutex<BTreeMap<RpcId, PendingRequest>>>;
 
 struct PendingProviderStream {
     sender: mpsc::Sender<(Value, usize)>,
@@ -645,8 +648,21 @@ impl JsonRpcPluginClient {
         params: Value,
         cancellation: &CancellationToken,
     ) -> Result<Value, PluginRpcError> {
-        self.request_cancellable_inner(method, params, cancellation, false)
-            .await
+        if method == METHOD_TOOL_CALL {
+            return Err(rpc_error(
+                "invalid_method",
+                "tool calls require typed operation admission",
+            ));
+        }
+        self.request_cancellable_inner(
+            method,
+            params,
+            cancellation,
+            RequestPolicy::Ordinary {
+                allow_closed: false,
+            },
+        )
+        .await
     }
 
     async fn request_cancellable_inner(
@@ -654,8 +670,9 @@ impl JsonRpcPluginClient {
         method: &str,
         params: Value,
         cancellation: &CancellationToken,
-        allow_closed: bool,
+        policy: RequestPolicy,
     ) -> Result<Value, PluginRpcError> {
+        let allow_closed = policy.allows_closed();
         if self.closed.load(Ordering::Acquire) && !allow_closed {
             return Err(rpc_error("closed", "plugin RPC client is closed"));
         }
@@ -676,7 +693,8 @@ impl JsonRpcPluginClient {
                 .map_err(|_| rpc_error("id_exhausted", "plugin RPC request IDs exhausted"))?,
         );
         let (sender, receiver) = oneshot::channel();
-        self.pending.lock().await.insert(id.clone(), sender);
+        let (pending, observer) = policy.begin(sender, self.timeout);
+        self.pending.lock().await.insert(id.clone(), pending);
         let mut guard = OrdinaryRequestGuard {
             termination: &self.termination,
             armed: true,
@@ -715,34 +733,17 @@ impl JsonRpcPluginClient {
                 ));
             }
         }
-        let result = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => {
-                self.termination.begin();
-                self.termination.wait().await;
-                self.pending.lock().await.remove(&id);
-                Err(rpc_error("cancelled", "plugin RPC request was cancelled"))
-            }
-            response = tokio::time::timeout(self.timeout, receiver) => {
-                match response {
-                    Ok(Ok(result)) => result,
-                    Ok(Err(_)) => Err(rpc_error("connection_closed", "plugin RPC connection closed")),
-                    Err(_) => {
-                        self.termination.begin();
-                        self.termination.wait().await;
-                        self.pending.lock().await.remove(&id);
-                        Err(rpc_error("timeout", "plugin RPC request timed out"))
-                    }
-                }
-            }
-        };
-        if result
-            .as_ref()
-            .is_err_and(|error| matches!(error.code.as_str(), "-32004" | "-32800"))
-        {
+        let result = observer.wait(receiver, cancellation).await;
+        if result.as_ref().is_err_and(|error| {
+            matches!(
+                error.code.as_str(),
+                "timeout" | "cancelled" | "-32004" | "-32800"
+            )
+        }) {
             self.termination.begin();
         }
         self.termination.wait().await;
+        self.pending.lock().await.remove(&id);
         guard.armed = false;
         drop(permit);
         result
@@ -794,8 +795,13 @@ impl JsonRpcPluginClient {
         params: Value,
         cancellation: &CancellationToken,
     ) -> Result<Value, PluginRpcError> {
-        self.request_cancellable_inner(method, params, cancellation, true)
-            .await
+        self.request_cancellable_inner(
+            method,
+            params,
+            cancellation,
+            RequestPolicy::Ordinary { allow_closed: true },
+        )
+        .await
     }
 
     async fn send_notification(&self, method: &str, params: Value) -> Result<(), PluginRpcError> {
@@ -1018,6 +1024,24 @@ impl PluginRpcClient for JsonRpcPluginClient {
         JsonRpcPluginClient::request_cancellable(self, method, params, cancellation).await
     }
 
+    async fn call_tool(
+        &self,
+        params: ToolCallParams,
+        cancellation: &CancellationToken,
+        progress: Arc<dyn rw_tools::ToolProgressSink>,
+    ) -> Result<Value, PluginRpcError> {
+        let lifetime = params.lifetime;
+        let params = serde_json::to_value(params)
+            .map_err(|_| rpc_error("invalid_params", "invalid plugin tool call"))?;
+        self.request_cancellable_inner(
+            METHOD_TOOL_CALL,
+            params,
+            cancellation,
+            RequestPolicy::Tool { lifetime, progress },
+        )
+        .await
+    }
+
     async fn notify(&self, method: &str, params: Value) -> Result<(), PluginRpcError> {
         self.send_notification(method, params).await
     }
@@ -1179,7 +1203,7 @@ async fn process_incoming_frame(frame: RpcFrame, wire_bytes: usize, state: &Read
                 return true;
             }
             if let Some(sender) = state.pending.lock().await.remove(&id) {
-                let _ = sender.send(Ok(success.result));
+                sender.respond(Ok(success.result));
                 true
             } else {
                 let _ = state.process.kill_tree();
@@ -1222,7 +1246,7 @@ async fn process_incoming_frame(frame: RpcFrame, wire_bytes: usize, state: &Read
                 return true;
             }
             if let Some(sender) = state.pending.lock().await.remove(&id) {
-                let _ = sender.send(Err(PluginRpcError {
+                sender.respond(Err(PluginRpcError {
                     code: safe_code,
                     message: failure.error.message,
                 }));
@@ -1239,6 +1263,25 @@ async fn process_incoming_frame(frame: RpcFrame, wire_bytes: usize, state: &Read
             start_host_command(request, state)
         }
         RpcFrame::Notification(notification) => {
+            if notification.method == METHOD_TOOL_PROGRESS {
+                if wire_bytes > rw_operation_contract::MAX_PROGRESS_FRAME_BYTES {
+                    return false;
+                }
+                let Ok(params) = serde_json::from_value::<ToolProgressParams>(
+                    state
+                        .redactor
+                        .redact(notification.params.unwrap_or(Value::Null)),
+                ) else {
+                    return false;
+                };
+                let request_id = params.request_id.clone();
+                return state
+                    .pending
+                    .lock()
+                    .await
+                    .get_mut(&request_id)
+                    .is_some_and(|request| request.progress(params));
+            }
             if notification.method == METHOD_PROVIDER_HTTP_CANCEL {
                 return cancel_provider_http_request(
                     &state.active_provider_http,
@@ -1695,7 +1738,7 @@ fn validate_push_params(method: &str, params: &Value) -> Result<(), PluginRpcErr
 
 async fn fail_pending(pending: &Pending, error: PluginRpcError) {
     for (_, sender) in std::mem::take(&mut *pending.lock().await) {
-        let _ = sender.send(Err(error.clone()));
+        sender.respond(Err(error.clone()));
     }
 }
 
@@ -2107,14 +2150,14 @@ impl Tool for RpcToolAdapter {
             .map_err(|error| ToolError::Output(error.to_string()))?;
         let result = self
             .client
-            .request_cancellable(
-                METHOD_TOOL_CALL,
-                serde_json::to_value(ToolCallParams {
+            .call_tool(
+                ToolCallParams {
                     name: self.declaration.name.clone(),
                     input,
-                })
-                .map_err(|error| ToolError::Output(error.to_string()))?,
+                    lifetime: rw_plugin_protocol::OperationLifetime::default(),
+                },
                 &_context.cancellation,
+                Arc::clone(&_context.progress),
             )
             .await
             .map_err(|error| ToolError::Output(error.to_string()))?;
@@ -3304,7 +3347,11 @@ mod tests {
             let cancellation = cancellation.clone();
             tokio::spawn(async move {
                 client
-                    .request_cancellable(METHOD_TOOL_CALL, Value::Null, &cancellation)
+                    .request_cancellable(
+                        rw_plugin_protocol::METHOD_HOOK_INVOKE,
+                        Value::Null,
+                        &cancellation,
+                    )
                     .await
             })
         };
@@ -3349,12 +3396,136 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn typed_tool_progress_crosses_the_real_reader_without_extending_control_deadlines() {
+        #[derive(Default)]
+        struct Progress(StdMutex<Vec<String>>);
+        impl rw_tools::ToolProgressSink for Progress {
+            fn report(&self, update: rw_plugin_protocol::ToolProgress) -> Result<(), ToolError> {
+                self.0
+                    .lock()
+                    .expect("progress")
+                    .push(update.message().to_owned());
+                Ok(())
+            }
+        }
+        let process = Arc::new(FakeProcess::default());
+        let (host_stdin, plugin_input) = tokio::io::duplex(64 * 1024);
+        let (mut plugin_output, host_stdout) = tokio::io::duplex(64 * 1024);
+        let root = TempDir::new().expect("tempdir");
+        let client = JsonRpcPluginClient::start(
+            LaunchedPluginProcess {
+                stdin: Box::pin(host_stdin),
+                stdout: Box::pin(BufReader::new(host_stdout)),
+                stderr: Box::pin(BufReader::new(tokio::io::empty())),
+                process: process.clone(),
+                executable_identity: shell_config(&root).executable_identity().clone(),
+            },
+            Arc::new(CapabilityEnforcer::new(&manifest(), process.clone())),
+            Arc::new(DenyPushHandler),
+            Arc::new(DenyPluginProviderHttpHandler),
+            Arc::new(NoopPluginBoundaryRedactor),
+            Duration::from_millis(30),
+        );
+        let progress = Arc::new(Progress::default());
+        let result = {
+            let client = client.clone();
+            let progress = progress.clone();
+            tokio::spawn(async move {
+                client
+                    .call_tool(
+                        ToolCallParams {
+                            name: "fixture".to_owned(),
+                            input: json!({}),
+                            lifetime: rw_plugin_protocol::OperationLifetime::new(500, 150)
+                                .expect("lifetime"),
+                        },
+                        &CancellationToken::default(),
+                        progress,
+                    )
+                    .await
+            })
+        };
+        let mut input = BufReader::new(plugin_input);
+        let mut line = String::new();
+        input.read_line(&mut line).await.expect("tool request");
+        let request: RpcRequest = serde_json::from_str(line.trim()).expect("tool frame");
+        assert_eq!(request.method, METHOD_TOOL_CALL);
+        let params: ToolCallParams =
+            serde_json::from_value(request.params.expect("params")).expect("typed lifetime");
+        assert_eq!(params.lifetime.idle_ms(), 150);
+        for sequence in 1..=3 {
+            tokio::time::sleep(Duration::from_millis(75)).await;
+            let progress_frame = json!({"jsonrpc":"2.0","method":METHOD_TOOL_PROGRESS,"params":{"request_id":request.id,"sequence":sequence,"progress":{"message":format!("step {sequence}")}}});
+            plugin_output
+                .write_all(format!("{progress_frame}\n").as_bytes())
+                .await
+                .expect("progress frame");
+            tokio::task::yield_now().await;
+        }
+        let response = json!({"jsonrpc":"2.0","id":request.id,"result":null});
+        plugin_output
+            .write_all(format!("{response}\n").as_bytes())
+            .await
+            .expect("outcome");
+        assert_eq!(
+            result
+                .await
+                .expect("request task")
+                .expect("long tool result"),
+            Value::Null
+        );
+        assert!(!progress.0.lock().expect("progress").is_empty());
+        let control = client
+            .request("catalog-probe", Value::Null)
+            .await
+            .expect_err("ordinary control still bounded");
+        assert_eq!(control.code, "timeout");
+    }
+
+    #[tokio::test]
+    async fn typed_tool_idle_timeout_settles_parent_and_child_effects() {
+        let root = TempDir::new().expect("tempdir");
+        let client = mutating_child_client(&root, Duration::from_secs(5)).await;
+        let task = {
+            let client = Arc::clone(&client);
+            tokio::spawn(async move {
+                client
+                    .call_tool(
+                        ToolCallParams {
+                            name: "fixture".to_owned(),
+                            input: json!({}),
+                            lifetime: rw_plugin_protocol::OperationLifetime::new(5000, 500)
+                                .expect("lifetime"),
+                        },
+                        &CancellationToken::default(),
+                        Arc::new(rw_tools::NoopProgressSink),
+                    )
+                    .await
+            })
+        };
+        wait_for_mutation(&root).await;
+        let error = tokio::time::timeout(Duration::from_secs(4), task)
+            .await
+            .expect("settlement deadline")
+            .expect("request task")
+            .expect_err("idle timeout");
+        assert_eq!(error.code, "timeout");
+        assert!(error.message.contains("idle"));
+        assert_conflicting_writes_are_safe(&root).await;
+    }
+
+    #[tokio::test]
     async fn ordinary_request_timeout_settles_parent_and_child_effects() {
         let root = TempDir::new().expect("tempdir");
         let client = mutating_child_client(&root, Duration::from_millis(200)).await;
         let task = {
             let client = Arc::clone(&client);
-            tokio::spawn(async move { client.request(METHOD_TOOL_CALL, Value::Null).await })
+            tokio::spawn(async move {
+                client
+                    .request(rw_plugin_protocol::METHOD_HOOK_INVOKE, Value::Null)
+                    .await
+            })
         };
         wait_for_mutation(&root).await;
         let error = tokio::time::timeout(Duration::from_secs(4), task)
@@ -4108,7 +4279,11 @@ mod tests {
             let cancellation = cancellation.clone();
             tokio::spawn(async move {
                 client
-                    .request_cancellable(METHOD_TOOL_CALL, Value::Null, &cancellation)
+                    .request_cancellable(
+                        rw_plugin_protocol::METHOD_HOOK_INVOKE,
+                        Value::Null,
+                        &cancellation,
+                    )
                     .await
             })
         };
@@ -4241,7 +4416,11 @@ mod tests {
             let cancellation = cancellation.clone();
             tokio::spawn(async move {
                 client
-                    .request_cancellable(METHOD_TOOL_CALL, Value::Null, &cancellation)
+                    .request_cancellable(
+                        rw_plugin_protocol::METHOD_HOOK_INVOKE,
+                        Value::Null,
+                        &cancellation,
+                    )
                     .await
             })
         };

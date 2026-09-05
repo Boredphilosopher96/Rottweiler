@@ -158,6 +158,7 @@ export const contractFixture = {
       },
       "session_id": "session-fixture",
       "tool_call_id": "tool-1",
+      "invocation_id": "tool-1",
       "decision": "allow_once",
       "binding": null
     },
@@ -506,6 +507,7 @@ export const contractFixture = {
       },
       "turn_id": "turn-fixture",
       "tool_call_id": "tool-1",
+      "invocation_id": "tool-1",
       "name": "bash",
       "args": {
         "command": "cargo test"
@@ -523,6 +525,7 @@ export const contractFixture = {
       },
       "turn_id": "turn-fixture",
       "tool_call_id": "tool-1",
+      "invocation_id": "tool-1",
       "name": "bash",
       "args": {
         "command": "cargo test"
@@ -544,6 +547,7 @@ export const contractFixture = {
       },
       "turn_id": "turn-fixture",
       "tool_call_id": "tool-1",
+      "invocation_id": "tool-1",
       "stream": "stdout",
       "chunk": "running tests"
     },
@@ -558,6 +562,7 @@ export const contractFixture = {
       },
       "turn_id": "turn-fixture",
       "tool_call_id": "tool-1",
+      "invocation_id": "tool-1",
       "output": {
         "type": "mixed",
         "parts": [

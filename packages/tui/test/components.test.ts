@@ -57,6 +57,7 @@ function permissionState(runtimeMode: PermissionModeDescriptor): PermissionState
 function transcriptBlockState(): RottweilerState {
   const firstTool = {
     toolCallId: "block-tool-first",
+    invocationId: "block-tool-first",
     turnId: "1",
     name: "read",
     args: { path: "first.txt" },
@@ -73,6 +74,7 @@ function transcriptBlockState(): RottweilerState {
   const secondTool = {
     ...firstTool,
     toolCallId: "block-tool-second",
+    invocationId: "block-tool-second",
     args: { path: "second.txt" },
     output: { type: "text" as const, text: "second output" },
     callIndex: 1,
@@ -422,6 +424,7 @@ describe("M4 retained components", () => {
       meta: eventMeta("2"),
       turn_id: "1",
       tool_call_id: "tool-lifecycle",
+      invocation_id: "tool-lifecycle",
       name: "read",
       args: { path: "README.md" },
       call_index: 0,
@@ -431,6 +434,7 @@ describe("M4 retained components", () => {
       meta: eventMeta("3"),
       turn_id: "1",
       tool_call_id: "tool-lifecycle",
+      invocation_id: "tool-lifecycle",
       stream: "stdout",
       chunk: "canary output",
     })
@@ -439,6 +443,7 @@ describe("M4 retained components", () => {
       meta: eventMeta("4"),
       turn_id: "1",
       tool_call_id: "tool-lifecycle",
+      invocation_id: "tool-lifecycle",
       output: { type: "text", text: "canary output" },
       is_error: false,
       call_index: 0,
@@ -549,6 +554,7 @@ describe("M4 retained components", () => {
     const tailTool = {
       ...initial.tools["block-tool-first"]!,
       toolCallId: "block-tool-tail",
+      invocationId: "block-tool-tail",
       turnId: "2",
       args: { path: "tail.txt" },
       output: { type: "text" as const, text: "tail output" },
@@ -808,6 +814,7 @@ describe("M4 retained components", () => {
     try {
       const tool = {
         toolCallId: "elapsed-tool",
+        invocationId: "elapsed-tool",
         turnId: "1",
         name: "read",
         args: { path: "src/main.rs" },
@@ -841,6 +848,7 @@ describe("M4 retained components", () => {
     renderer = setup.renderer
     const card = new ToolBlockRenderable(renderer, kennelTheme, {
       toolCallId: "dedupe-tool",
+      invocationId: "dedupe-tool",
       turnId: "1",
       name: "custom_tool",
       args: { path: "src/main.rs" },
@@ -867,6 +875,7 @@ describe("M4 retained components", () => {
     renderer = setup.renderer
     const card = new ToolBlockRenderable(renderer, kennelTheme, {
       toolCallId: "edit-expanded",
+      invocationId: "edit-expanded",
       turnId: "1",
       name: "edit",
       args: { path: "src/main.rs" },
@@ -902,6 +911,7 @@ describe("M4 retained components", () => {
     renderer = setup.renderer
     const running = {
       toolCallId: "edit-live-expanded",
+      invocationId: "edit-live-expanded",
       turnId: "1",
       name: "edit",
       args: { path: "src/live.rs" },
@@ -952,6 +962,7 @@ describe("M4 retained components", () => {
     renderer = setup.renderer
     const tool = {
       toolCallId: "bash-live-tail",
+      invocationId: "bash-live-tail",
       turnId: "1",
       name: "bash",
       args: { command: "cargo test --workspace" },
@@ -997,6 +1008,7 @@ describe("M4 retained components", () => {
     renderer = setup.renderer
     const tool = {
       toolCallId: "full-output",
+      invocationId: "full-output",
       turnId: "1",
       name: "read",
       args: { path: "logs/full-output.log" },
@@ -1095,6 +1107,7 @@ describe("M4 retained components", () => {
     const opened: string[] = []
     const card = new ToolBlockRenderable(renderer, kennelTheme, {
       toolCallId: "selected-marker",
+      invocationId: "selected-marker",
       turnId: "1",
       name: "read",
       args: { path: "selection.log" },
@@ -1587,6 +1600,7 @@ describe("M4 retained components", () => {
     renderer = setup.renderer
     const runningTool = {
       toolCallId: "glob-visible",
+      invocationId: "glob-visible",
       turnId: "1",
       name: "glob",
       args: { pattern: "**/*.rs", path: "." },
@@ -1657,6 +1671,7 @@ describe("M4 retained components", () => {
     renderer = setup.renderer
     const tool = {
       toolCallId: "workspace-root-tool",
+      invocationId: "workspace-root-tool",
       turnId: "1",
       name: "read",
       args: { path: "/historical-root/src/main.rs" },
@@ -1717,6 +1732,7 @@ describe("M4 retained components", () => {
     treeSitter.setMockResult({ highlights: [] })
     const bash = {
       toolCallId: "bash-inline",
+      invocationId: "bash-inline",
       turnId: "1",
       name: "bash",
       args: { command: "cargo test --workspace" },
@@ -1732,6 +1748,7 @@ describe("M4 retained components", () => {
     }
     const edit = {
       toolCallId: "edit-inline",
+      invocationId: "edit-inline",
       turnId: "1",
       name: "edit",
       args: { path: "/workspace/src/main.rs" },
@@ -1838,6 +1855,7 @@ describe("M4 retained components", () => {
     ].join("\n") + "\n"
     const card = new ToolBlockRenderable(renderer, kennelTheme, {
       toolCallId: "edit-large-inline",
+      invocationId: "edit-large-inline",
       turnId: "1",
       name: "edit",
       args: { path: "src/large.rs" },
@@ -1882,6 +1900,7 @@ describe("M4 retained components", () => {
     ].join("\n") + "\n"
     const card = new ToolBlockRenderable(renderer, kennelTheme, {
       toolCallId: "edit-large-inline-narrow",
+      invocationId: "edit-large-inline-narrow",
       turnId: "1",
       name: "edit",
       args: { path: "src/large.rs" },
@@ -1919,6 +1938,7 @@ describe("M4 retained components", () => {
     renderer = setup.renderer
     const diagnostics = {
       toolCallId: "diagnostics-clean",
+      invocationId: "diagnostics-clean",
       turnId: "1",
       name: "diagnostics",
       args: { path: "src/main.rs" },
@@ -2040,6 +2060,7 @@ describe("M4 retained components", () => {
       tools: {
         edit: {
           toolCallId: "edit",
+          invocationId: "edit",
           turnId: "1",
           name: "edit",
           args: { path: "src/main.rs" },
@@ -2087,6 +2108,7 @@ describe("M4 retained components", () => {
       },
       session_id: "session-components",
       tool_call_id: "edit",
+      invocation_id: "edit",
       decision: "allow_once",
       binding: {
         proposal_id: "proposal-hash",
@@ -2112,6 +2134,7 @@ describe("M4 retained components", () => {
       expect.objectContaining({
         type: "approve_tool",
         tool_call_id: "edit",
+        invocation_id: "edit",
         decision: "deny",
       }),
     )
@@ -2123,6 +2146,7 @@ describe("M4 retained components", () => {
     const commands: ClientCommand[] = []
     const tool = {
       toolCallId: "click-approval",
+      invocationId: "click-approval",
       turnId: "1",
       name: "write",
       args: { path: "src/clicked.rs" },
@@ -2155,6 +2179,7 @@ describe("M4 retained components", () => {
       expect.objectContaining({
         type: "approve_tool",
         tool_call_id: "click-approval",
+        invocation_id: "click-approval",
         decision: "allow_session",
       }),
     ])
@@ -2168,6 +2193,7 @@ describe("M4 retained components", () => {
       expect.objectContaining({
         type: "approve_tool",
         tool_call_id: "click-approval",
+        invocation_id: "click-approval",
         decision: "allow_project",
       }),
     ])
@@ -2181,6 +2207,7 @@ describe("M4 retained components", () => {
       expect.objectContaining({
         type: "approve_tool",
         tool_call_id: "click-approval",
+        invocation_id: "click-approval",
         decision: "allow_once",
       }),
     ])
@@ -2194,6 +2221,7 @@ describe("M4 retained components", () => {
       expect.objectContaining({
         type: "approve_tool",
         tool_call_id: "click-approval",
+        invocation_id: "click-approval",
         decision: "allow_once",
       }),
     ])
@@ -2205,6 +2233,7 @@ describe("M4 retained components", () => {
     const commands: ClientCommand[] = []
     const tool = {
       toolCallId: "escape-hatch",
+      invocationId: "escape-hatch",
       turnId: "1",
       name: "bash",
       args: { command: "cargo test" },
@@ -2258,6 +2287,7 @@ describe("M4 retained components", () => {
       expect.objectContaining({
         type: "approve_tool",
         tool_call_id: "escape-hatch",
+        invocation_id: "escape-hatch",
         decision: "allow_once",
       }),
     ])
@@ -2278,6 +2308,7 @@ describe("M4 retained components", () => {
       expect.objectContaining({
         type: "approve_tool",
         tool_call_id: "escape-hatch",
+        invocation_id: "escape-hatch",
         decision: "allow_once",
       }),
     ])
@@ -2303,6 +2334,7 @@ describe("M4 retained components", () => {
       tools: {
         bash: {
           toolCallId: "bash",
+          invocationId: "bash",
           turnId: "1",
           name: "bash",
           args: {
@@ -2349,6 +2381,7 @@ describe("M4 retained components", () => {
       tools: {
         bash: {
           toolCallId: "bash",
+          invocationId: "bash",
           turnId: "1",
           name: "bash",
           args: { command: "cargo test" },

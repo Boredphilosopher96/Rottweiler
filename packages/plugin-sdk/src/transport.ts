@@ -63,7 +63,7 @@ export interface JsonWriterOptions {
 }
 
 interface PendingWrite {
-  readonly priority: "control" | "data"
+  readonly priority: "control" | "progress" | "data"
   readonly bytes: Uint8Array
   readonly resolve: () => void
   readonly reject: (error: Error) => void
@@ -73,6 +73,8 @@ export class BoundedJsonWriter {
   readonly #encoder = new TextEncoder()
   readonly #queue: PendingWrite[] = []
   readonly #dataQueue: PendingWrite[] = []
+  readonly #progressQueue: PendingWrite[] = []
+  #progressBytes = 0
   #dataBytes = 0
   readonly #drainers: Array<{ resolve: () => void; reject: (error: Error) => void }> = []
   #active: PendingWrite | undefined
@@ -98,7 +100,7 @@ export class BoundedJsonWriter {
     }
   }
 
-  write(value: JsonValue, priority: "control" | "data" = "control"): Promise<void> {
+  write(value: JsonValue, priority: "control" | "progress" | "data" = "control"): Promise<void> {
     if (this.#error !== undefined) return Promise.reject(this.#error)
     const serialized = JSON.stringify(value)
     if (serialized === undefined) return Promise.reject(new TypeError("JSON-RPC value is not serializable"))
@@ -107,18 +109,24 @@ export class BoundedJsonWriter {
       return Promise.reject(new LineTooLargeError(this.maxBytes))
     }
     const bytes = this.#encoder.encode(`${serialized}\n`)
-    const queue = priority === "control" ? this.#queue : this.#dataQueue
+    const queue = priority === "control" ? this.#queue : priority === "progress" ? this.#progressQueue : this.#dataQueue
     const active = this.#active?.priority === priority ? 1 : 0
-    const queuedBytes = priority === "control" ? this.#queuedBytes : this.#dataBytes
+    const queuedBytes = priority === "control" ? this.#queuedBytes : priority === "progress" ? this.#progressBytes : this.#dataBytes
     const maxBytes = priority === "control" ? this.#maxQueuedBytes
+      : priority === "progress" ? PROTOCOL_LIMITS.maxInFlightRequests * (PROTOCOL_LIMITS.maxProgressFrameBytes + 1)
       : PROTOCOL_LIMITS.dataQueueBytes
-    const maxFrames = priority === "control" ? this.#maxQueuedFrames : PROTOCOL_LIMITS.maxProviderStreams
+    const maxFrames = priority === "control" ? this.#maxQueuedFrames
+      : priority === "progress" ? PROTOCOL_LIMITS.maxInFlightRequests : PROTOCOL_LIMITS.maxProviderStreams
+    if (priority === "progress" && payload.byteLength > PROTOCOL_LIMITS.maxProgressFrameBytes) {
+      return Promise.reject(new LineTooLargeError(PROTOCOL_LIMITS.maxProgressFrameBytes))
+    }
     if (queuedBytes + bytes.byteLength > maxBytes || queue.length + active >= maxFrames) {
       const error = new OutboundQueueFullError()
       this.abort(error)
       return Promise.reject(error)
     }
     if (priority === "control") this.#queuedBytes += bytes.byteLength
+    else if (priority === "progress") this.#progressBytes += bytes.byteLength
     else this.#dataBytes += bytes.byteLength
     const pending = new Promise<void>((resolve, reject) => queue.push({ bytes, priority, resolve, reject }))
     this.#pump()
@@ -136,9 +144,10 @@ export class BoundedJsonWriter {
     this.#error = error
     this.#active?.reject(error)
     this.#active = undefined
-    for (const item of [...this.#queue.splice(0), ...this.#dataQueue.splice(0)]) item.reject(error)
+    for (const item of [...this.#queue.splice(0), ...this.#progressQueue.splice(0), ...this.#dataQueue.splice(0)]) item.reject(error)
     this.#queuedBytes = 0
     this.#dataBytes = 0
+    this.#progressBytes = 0
     for (const waiter of this.#drainers.splice(0)) waiter.reject(error)
     if (this.#timeout !== undefined) clearTimeout(this.#timeout)
     this.#onFailure?.(error)
@@ -146,7 +155,7 @@ export class BoundedJsonWriter {
 
   #pump(): void {
     if (this.#active !== undefined || this.#error !== undefined) return
-    const item = this.#queue.shift() ?? this.#dataQueue.shift()
+    const item = this.#queue.shift() ?? this.#progressQueue.shift() ?? this.#dataQueue.shift()
     if (item === undefined) {
       for (const waiter of this.#drainers.splice(0)) waiter.resolve()
       return
@@ -160,6 +169,7 @@ export class BoundedJsonWriter {
       if (this.#timeout !== undefined) clearTimeout(this.#timeout)
       this.#active = undefined
       if (item.priority === "control") this.#queuedBytes -= item.bytes.byteLength
+      else if (item.priority === "progress") this.#progressBytes -= item.bytes.byteLength
       else this.#dataBytes -= item.bytes.byteLength
       item.resolve()
       this.#pump()

@@ -5,7 +5,9 @@ use std::fmt;
 use thiserror::Error;
 use ts_rs::TS;
 
-use crate::{PermissionModeDescriptor, ToolCallId, ToolOutput, config::PermissionDecision};
+use crate::{
+    PermissionModeDescriptor, ToolCallId, ToolInvocationId, ToolOutput, config::PermissionDecision,
+};
 
 mod decimal_u64 {
     use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
@@ -1053,6 +1055,7 @@ pub enum ClientCommand {
         meta: CommandMeta,
         session_id: SessionId,
         tool_call_id: ToolCallId,
+        invocation_id: ToolInvocationId,
         decision: ApprovalDecision,
         /// Required when the pending approval displayed a unified diff. The
         /// actor rejects missing or stale bindings without consuming the ask.
@@ -1900,6 +1903,7 @@ pub enum EngineEventDelivery {
 
 /// Non-durable event tags that still belong to a live session stream.
 pub const TRANSIENT_ENGINE_EVENT_TYPES: &[&str] = &[
+    "tool_progress",
     "subagent_progress",
     "compaction_attempt_started",
     "compaction_text_delta",
@@ -2227,10 +2231,19 @@ pub enum EngineEvent {
         uri: String,
         title: Option<String>,
     },
+    /// Replaceable operational display state, excluded from the durable journal.
+    ToolProgress {
+        session_id: SessionId,
+        turn_id: TurnId,
+        tool_call_id: ToolCallId,
+        invocation_id: ToolInvocationId,
+        progress: rw_operation_contract::ToolProgress,
+    },
     ToolCallStarted {
         meta: EventMeta,
         turn_id: TurnId,
         tool_call_id: ToolCallId,
+        invocation_id: ToolInvocationId,
         name: String,
         args: Value,
         call_index: u32,
@@ -2239,6 +2252,7 @@ pub enum EngineEvent {
         meta: EventMeta,
         turn_id: TurnId,
         tool_call_id: ToolCallId,
+        invocation_id: ToolInvocationId,
         name: String,
         args: Value,
         capabilities: Vec<ToolCapability>,
@@ -2253,12 +2267,14 @@ pub enum EngineEvent {
         meta: EventMeta,
         turn_id: TurnId,
         tool_call_id: ToolCallId,
+        invocation_id: ToolInvocationId,
         diff: UnifiedDiff,
     },
     ToolOutputDelta {
         meta: EventMeta,
         turn_id: TurnId,
         tool_call_id: ToolCallId,
+        invocation_id: ToolInvocationId,
         stream: ToolOutputStream,
         chunk: String,
     },
@@ -2266,6 +2282,7 @@ pub enum EngineEvent {
         meta: EventMeta,
         turn_id: TurnId,
         tool_call_id: ToolCallId,
+        invocation_id: ToolInvocationId,
         output: ToolOutput,
         is_error: bool,
         call_index: u32,
@@ -2512,7 +2529,8 @@ impl EngineEvent {
     #[must_use]
     pub fn delivery(&self) -> EngineEventDelivery {
         match self {
-            Self::SubagentProgress { .. }
+            Self::ToolProgress { .. }
+            | Self::SubagentProgress { .. }
             | Self::CompactionAttemptStarted { .. }
             | Self::CompactionTextDelta { .. }
             | Self::CompactionThinkingDelta { .. } => EngineEventDelivery::Transient,
@@ -2525,7 +2543,8 @@ impl EngineEvent {
     #[must_use]
     pub fn meta(&self) -> Option<&EventMeta> {
         match self {
-            Self::CommandAcknowledged { .. }
+            Self::ToolProgress { .. }
+            | Self::CommandAcknowledged { .. }
             | Self::ContextSnapshotReady { .. }
             | Self::CostSnapshotReady { .. }
             | Self::SessionReviewReady { .. }
@@ -2615,7 +2634,8 @@ impl EngineEvent {
     #[must_use]
     pub fn meta_mut(&mut self) -> Option<&mut EventMeta> {
         match self {
-            Self::CommandAcknowledged { .. }
+            Self::ToolProgress { .. }
+            | Self::CommandAcknowledged { .. }
             | Self::ContextSnapshotReady { .. }
             | Self::CostSnapshotReady { .. }
             | Self::SessionReviewReady { .. }

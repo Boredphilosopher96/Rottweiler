@@ -5811,6 +5811,7 @@ export class RottweilerApp extends BoxRenderable {
         meta: this.#projectionRequests.meta(),
         session_id: this.#sessionId,
         tool_call_id: tool.toolCallId,
+        invocation_id: tool.invocationId,
         decision,
         binding: approvalBinding(tool.diff),
       })

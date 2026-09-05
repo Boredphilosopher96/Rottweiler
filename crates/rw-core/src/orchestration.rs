@@ -3316,6 +3316,7 @@ mod tests {
                 "the parent control call must not claim the child's tool authority"
             );
             let permission = crate::PermissionRequest {
+                invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
                 id: format!("spawn-{agent}"),
                 tool_name: "spawn_agent".to_owned(),
                 arguments: input.clone(),

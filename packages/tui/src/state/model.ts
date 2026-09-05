@@ -269,6 +269,7 @@ export type ToolStatus = "running" | "awaiting_approval" | "finished"
 
 export interface ToolProjection {
   readonly toolCallId: string
+  readonly invocationId: string
   readonly turnId: string
   readonly name: string
   readonly args: unknown

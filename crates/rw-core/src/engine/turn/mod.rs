@@ -1,3 +1,6 @@
+mod progress;
+use progress::{InvocationProgress, ProgressSlot};
+
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
@@ -825,6 +828,23 @@ pub(super) async fn handle_turn_signal(
             }
             let _ = respond.send(result.clone());
             result?;
+        }
+        TurnSignal::ToolProgress(slot) => {
+            if state.running.as_ref().map(|running| running.id) != Some(slot.turn) {
+                return Ok(());
+            }
+            if let Some(progress) = slot.take() {
+                let _ = events.send(RoutedEvent {
+                    target: state.driver_client_id.clone(),
+                    event: EngineEvent::ToolProgress {
+                        session_id: state.session_id.clone(),
+                        turn_id: wire_turn_id(slot.turn),
+                        tool_call_id: ToolCallId(slot.id.clone()),
+                        invocation_id: slot.invocation_id.clone(),
+                        progress,
+                    },
+                });
+            }
         }
         TurnSignal::SubagentProgress(progress) => {
             let event = EngineEvent::SubagentProgress {
@@ -1757,6 +1777,7 @@ impl PermissionApprover for ChannelApprover {
 #[derive(Clone)]
 struct PendingToolCall {
     id: String,
+    invocation_id: rw_types::ToolInvocationId,
     name: String,
     arguments: Option<Value>,
     index: usize,
@@ -1803,6 +1824,7 @@ struct OrderedOutputState {
 
 struct BoundedOutputChunk {
     id: String,
+    invocation_id: rw_types::ToolInvocationId,
     chunk: ToolOutputChunk,
     permit: OwnedSemaphorePermit,
     background_permit: Option<OwnedSemaphorePermit>,
@@ -1842,6 +1864,7 @@ impl OrderedOutputCoordinator {
         &self,
         index: usize,
         id: &str,
+        invocation_id: &rw_types::ToolInvocationId,
         mut chunk: ToolOutputChunk,
     ) -> Result<(), ToolError> {
         let closed = || ToolError::Output("tool output channel is closed".to_owned());
@@ -1891,6 +1914,7 @@ impl OrderedOutputCoordinator {
             chunk.content = self.redactor.redact(&chunk.content);
             let bounded = BoundedOutputChunk {
                 id: id.to_owned(),
+                invocation_id: invocation_id.clone(),
                 chunk,
                 permit,
                 background_permit,
@@ -1927,6 +1951,7 @@ impl OrderedOutputCoordinator {
                 event: PendingEvent::ToolOutput {
                     turn: self.turn,
                     id: bounded.id,
+                    invocation_id: bounded.invocation_id,
                     stream: format!("{:?}", bounded.chunk.stream).to_ascii_lowercase(),
                     chunk: bounded.chunk.content,
                 },
@@ -1939,6 +1964,7 @@ impl OrderedOutputCoordinator {
 struct OrderedOutputSink {
     index: usize,
     id: String,
+    invocation_id: rw_types::ToolInvocationId,
     coordinator: Arc<OrderedOutputCoordinator>,
     open: Arc<AtomicBool>,
     cancellation: CancellationToken,
@@ -1965,21 +1991,33 @@ mod ordered_output_tests {
         let coordinator = OrderedOutputCoordinator::new(1, signals, Arc::new(NoopSecretRedactor));
         for index in 0..MAX_IN_FLIGHT_TOOL_OUTPUT_CHUNKS - 1 {
             coordinator
-                .emit(2, "later", chunk(index.to_string()))
+                .emit(
+                    2,
+                    "later",
+                    &rw_types::ToolInvocationId("later".to_owned()),
+                    chunk(index.to_string()),
+                )
                 .await
                 .expect("buffer later");
         }
-        let promoted = coordinator.emit(1, "promoted", chunk("next"));
+        let promoted_id = rw_types::ToolInvocationId("promoted".to_owned());
+        let promoted = coordinator.emit(1, "promoted", &promoted_id, chunk("next"));
         tokio::pin!(promoted);
         assert!(futures_util::poll!(&mut promoted).is_pending());
         coordinator
-            .emit(0, "first", chunk("current"))
+            .emit(
+                0,
+                "first",
+                &rw_types::ToolInvocationId("first".to_owned()),
+                chunk("current"),
+            )
             .await
             .expect("reserved slot");
         assert_eq!(coordinator.permits.available_permits(), 0);
         assert_eq!(receiver.len(), 1);
         {
-            let blocked = coordinator.emit(0, "first", chunk("extra"));
+            let first_id = rw_types::ToolInvocationId("first".to_owned());
+            let blocked = coordinator.emit(0, "first", &first_id, chunk("extra"));
             tokio::pin!(blocked);
             assert!(futures_util::poll!(&mut blocked).is_pending());
         }
@@ -2010,9 +2048,29 @@ mod ordered_output_tests {
             coordinator.background_permits.available_permits(),
             MAX_IN_FLIGHT_TOOL_OUTPUT_CHUNKS - 1
         );
-        assert!(coordinator.emit(0, "late", chunk("stale")).await.is_err());
+        assert!(
+            coordinator
+                .emit(
+                    0,
+                    "late",
+                    &rw_types::ToolInvocationId("late".to_owned()),
+                    chunk("stale")
+                )
+                .await
+                .is_err()
+        );
         drop(receiver);
-        assert!(coordinator.emit(2, "closed", chunk("gone")).await.is_err());
+        assert!(
+            coordinator
+                .emit(
+                    2,
+                    "closed",
+                    &rw_types::ToolInvocationId("closed".to_owned()),
+                    chunk("gone")
+                )
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -2025,12 +2083,18 @@ mod ordered_output_tests {
         ));
         for _ in 0..MAX_IN_FLIGHT_TOOL_OUTPUT_CHUNKS - 1 {
             coordinator
-                .emit(2, "later", chunk("buffered"))
+                .emit(
+                    2,
+                    "later",
+                    &rw_types::ToolInvocationId("later".to_owned()),
+                    chunk("buffered"),
+                )
                 .await
                 .expect("buffer later");
         }
         let cancellation = CancellationToken::default();
         let sink = OrderedOutputSink {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             index: 1,
             id: "cancelled".to_owned(),
             coordinator: Arc::clone(&coordinator),
@@ -2063,6 +2127,7 @@ mod ordered_output_tests {
     async fn oversized_chunks_preserve_the_live_output_byte_ceiling() {
         let (signals, mut receiver) = mpsc::unbounded_channel();
         let sink = OrderedOutputSink {
+            invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             index: 0,
             id: "large".to_owned(),
             coordinator: Arc::new(OrderedOutputCoordinator::new(
@@ -2309,7 +2374,7 @@ impl ToolOutputSink for OrderedOutputSink {
         };
         tokio::select! {
             biased;
-            result = self.coordinator.emit(self.index, &self.id, chunk) => result,
+            result = self.coordinator.emit(self.index, &self.id, &self.invocation_id, chunk) => result,
             () = self.cancellation.cancelled() => Err(ToolError::Cancelled),
         }
     }
@@ -3058,6 +3123,7 @@ async fn authorize_tool_call(
 ) -> Result<AuthorizedToolBinding, String> {
     let mut request = PermissionRequest {
         id: call.id.clone(),
+        invocation_id: call.invocation_id.clone(),
         tool_name: call.name.clone(),
         arguments: arguments.clone(),
         capabilities,
@@ -3076,6 +3142,7 @@ async fn authorize_tool_call(
             PendingEvent::ToolDiffReady {
                 turn,
                 id: call.id.clone(),
+                invocation_id: call.invocation_id.clone(),
                 diff,
             },
         );
@@ -3149,23 +3216,27 @@ async fn prepare_tool_call(
     context: &ToolContext,
     mode: SessionMode,
 ) -> PreparedToolCall {
+    let displayed_arguments = redacted_json(
+        call.arguments.clone().unwrap_or(Value::Null),
+        config.secret_redactor.as_ref(),
+    );
+    send_event(
+        signals,
+        PendingEvent::ToolCallStarted {
+            turn,
+            id: call.id.clone(),
+            invocation_id: call.invocation_id.clone(),
+            name: call.name.clone(),
+            arguments: displayed_arguments.clone(),
+            index: call.index,
+        },
+    );
     let Some(arguments) = call.arguments.clone() else {
         return PreparedToolCall::Complete(failed_execution(
             call,
             "provider did not finish tool-call arguments",
         ));
     };
-    let displayed_arguments = redacted_json(arguments.clone(), config.secret_redactor.as_ref());
-    send_event(
-        signals,
-        PendingEvent::ToolCallStarted {
-            turn,
-            id: call.id.clone(),
-            name: call.name.clone(),
-            arguments: displayed_arguments.clone(),
-            index: call.index,
-        },
-    );
     let Some(initial_security) = resolve_tool_security(config, &call.name, &arguments) else {
         let name = call.name.clone();
         return PreparedToolCall::Complete(failed_execution(
@@ -3614,6 +3685,7 @@ async fn execute_prepared_tool(
     let sink = Arc::new(OrderedOutputSink {
         index: call.index,
         id: call.id.clone(),
+        invocation_id: call.invocation_id.clone(),
         coordinator: Arc::clone(&runtime.coordinator),
         open: output_open.clone(),
         cancellation: cancellation.clone(),
@@ -3624,7 +3696,15 @@ async fn execute_prepared_tool(
         coordinator: Arc::clone(&runtime.subagents),
         state: Mutex::new(ActorSubagentLifecycleState::default()),
     });
+    let progress = InvocationProgress::new(
+        runtime.turn,
+        call.id.clone(),
+        call.invocation_id.clone(),
+        runtime.signals.clone(),
+        Arc::clone(&runtime.secret_redactor),
+    );
     let invocation_context = context
+        .with_progress(progress.sink())
         .with_output(sink)
         .with_subagent_event_sink(subagent_events);
     let deferred_pre_result = if deferred_mutating_pre_hook {
@@ -3634,6 +3714,7 @@ async fn execute_prepared_tool(
     };
     let execution_request = PermissionRequest {
         id: call.id.clone(),
+        invocation_id: call.invocation_id.clone(),
         tool_name: call.name.clone(),
         arguments: arguments.clone(),
         capabilities: authorization.capabilities.clone(),
@@ -3701,6 +3782,7 @@ async fn execute_prepared_tool(
     };
     tool.settle_effects().await;
     output_open.store(false, Ordering::Release);
+    drop(progress);
     let tool_cancelled = matches!(&result, Err(ToolError::Cancelled));
     let (output, is_error) = match result {
         Ok(result) => (tool_result_output(result), false),
@@ -3955,6 +4037,7 @@ async fn execute_tool_calls(
             PendingEvent::ToolCallFinished {
                 turn,
                 id: execution.call.id.clone(),
+                invocation_id: execution.call.invocation_id.clone(),
                 output: execution.output.clone(),
                 is_error: execution.is_error,
                 index: execution.call.index,
@@ -4711,6 +4794,7 @@ async fn apply_command_tool_calls(
         .enumerate()
         .map(|(index, call)| PendingToolCall {
             id: format!("command-prelude-{turn}-{index}"),
+            invocation_id: rw_types::ToolInvocationId(format!("turn-{turn}:command-{index}")),
             name: call.name.clone(),
             arguments: Some(call.arguments.clone()),
             index,
@@ -4909,7 +4993,7 @@ async fn run_turn(
     let budget_config = config.model.budget_config();
     let mut turn_cost = None;
 
-    'iterations: for _ in 0..config.max_turns {
+    'iterations: for iteration in 0..config.max_turns {
         if cancellation.is_cancelled() {
             status = AgentTurnStatus::Interrupted;
             break;
@@ -5303,6 +5387,10 @@ async fn run_turn(
                         break;
                     }
                     calls.push(PendingToolCall {
+                        invocation_id: rw_types::ToolInvocationId(format!(
+                            "turn-{turn}:iteration-{iteration}:call-{}",
+                            calls.len()
+                        )),
                         id,
                         name,
                         arguments: None,
@@ -5741,6 +5829,7 @@ pub(super) enum TurnSignal {
         respond: oneshot::Sender<Result<(), AgentLoopError>>,
     },
     SubagentProgress(SubagentProgressEvent),
+    ToolProgress(Arc<ProgressSlot>),
     CompactionProgress(CompactionProgress),
     Approval {
         request: PermissionRequest,

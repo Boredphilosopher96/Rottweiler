@@ -16,6 +16,12 @@ string_id!(
     "Stable identifier assigned to a model tool call."
 );
 
+/// Host-owned identity of one tool execution, independent of provider call IDs.
+#[derive(
+    Clone, Debug, Deserialize, Eq, Hash, JsonSchema, Ord, PartialEq, PartialOrd, Serialize, TS,
+)]
+pub struct ToolInvocationId(pub String);
+
 /// A provider-neutral role in the conversation IR.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]

@@ -1391,6 +1391,39 @@
       ]
     },
     {
+      "description": "Replaceable operational display state, excluded from the durable journal.",
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "tool_call_id": {
+          "$ref": "#/$defs/ToolCallId"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/ToolInvocationId"
+        },
+        "progress": {
+          "$ref": "#/$defs/ToolProgress"
+        },
+        "type": {
+          "type": "string",
+          "const": "tool_progress"
+        }
+      },
+      "required": [
+        "type",
+        "session_id",
+        "turn_id",
+        "tool_call_id",
+        "invocation_id",
+        "progress"
+      ]
+    },
+    {
       "type": "object",
       "properties": {
         "meta": {
@@ -1401,6 +1434,9 @@
         },
         "tool_call_id": {
           "$ref": "#/$defs/ToolCallId"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/ToolInvocationId"
         },
         "name": {
           "type": "string"
@@ -1421,6 +1457,7 @@
         "meta",
         "turn_id",
         "tool_call_id",
+        "invocation_id",
         "name",
         "args",
         "call_index"
@@ -1437,6 +1474,9 @@
         },
         "tool_call_id": {
           "$ref": "#/$defs/ToolCallId"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/ToolInvocationId"
         },
         "name": {
           "type": "string"
@@ -1471,6 +1511,7 @@
         "meta",
         "turn_id",
         "tool_call_id",
+        "invocation_id",
         "name",
         "args",
         "capabilities",
@@ -1490,6 +1531,9 @@
         "tool_call_id": {
           "$ref": "#/$defs/ToolCallId"
         },
+        "invocation_id": {
+          "$ref": "#/$defs/ToolInvocationId"
+        },
         "diff": {
           "$ref": "#/$defs/UnifiedDiff"
         },
@@ -1503,6 +1547,7 @@
         "meta",
         "turn_id",
         "tool_call_id",
+        "invocation_id",
         "diff"
       ]
     },
@@ -1517,6 +1562,9 @@
         },
         "tool_call_id": {
           "$ref": "#/$defs/ToolCallId"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/ToolInvocationId"
         },
         "stream": {
           "$ref": "#/$defs/ToolOutputStream"
@@ -1534,6 +1582,7 @@
         "meta",
         "turn_id",
         "tool_call_id",
+        "invocation_id",
         "stream",
         "chunk"
       ]
@@ -1549,6 +1598,9 @@
         },
         "tool_call_id": {
           "$ref": "#/$defs/ToolCallId"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/ToolInvocationId"
         },
         "output": {
           "$ref": "#/$defs/ToolOutput"
@@ -1571,6 +1623,7 @@
         "meta",
         "turn_id",
         "tool_call_id",
+        "invocation_id",
         "output",
         "is_error",
         "call_index"
@@ -4549,6 +4602,57 @@
       "required": [
         "path",
         "reason"
+      ]
+    },
+    "ToolInvocationId": {
+      "description": "Host-owned identity of one tool execution, independent of provider call IDs.",
+      "type": "string"
+    },
+    "ToolProgress": {
+      "description": "Replaceable display state; never authoritative tool output or a durable record.",
+      "type": "object",
+      "properties": {
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+(?![\\s\\S])"
+        },
+        "amount": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProgressAmount"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "message"
+      ]
+    },
+    "ProgressAmount": {
+      "description": "Optional bounded work-count observation. It cannot grant more execution time.",
+      "type": "object",
+      "properties": {
+        "completed": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "total": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "completed",
+        "total"
       ]
     },
     "ToolCapability": {

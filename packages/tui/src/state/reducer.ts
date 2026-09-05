@@ -945,9 +945,12 @@ function applyKnownEvent(
           ],
         })),
       }
+    case "tool_progress":
+      return state
     case "tool_call_started": {
       const tool: ToolProjection = {
         toolCallId: event.tool_call_id,
+        invocationId: event.invocation_id,
         turnId: event.turn_id,
         name: event.name,
         args: event.args,
@@ -975,8 +978,10 @@ function applyKnownEvent(
     }
     case "tool_approval_needed": {
       const existing = state.tools[event.tool_call_id]
+      if (existing !== undefined && (existing.invocationId !== event.invocation_id || existing.turnId !== event.turn_id)) return state
       const tool: ToolProjection = {
         toolCallId: event.tool_call_id,
+        invocationId: event.invocation_id,
         turnId: event.turn_id,
         name: event.name,
         args: event.args,
@@ -997,8 +1002,11 @@ function applyKnownEvent(
       }
     }
     case "tool_diff_ready": {
+      const observed = state.tools[event.tool_call_id]
+      if (observed !== undefined && (observed.invocationId !== event.invocation_id || observed.turnId !== event.turn_id)) return state
       const existing: ToolProjection = state.tools[event.tool_call_id] ?? {
         toolCallId: event.tool_call_id,
+        invocationId: event.invocation_id,
         turnId: event.turn_id,
         name: "tool",
         args: null,
@@ -1027,8 +1035,11 @@ function applyKnownEvent(
       }
     }
     case "tool_output_delta": {
+      const observed = state.tools[event.tool_call_id]
+      if (observed !== undefined && (observed.invocationId !== event.invocation_id || observed.turnId !== event.turn_id)) return state
       const existing: ToolProjection = state.tools[event.tool_call_id] ?? {
         toolCallId: event.tool_call_id,
+        invocationId: event.invocation_id,
         turnId: event.turn_id,
         name: "tool",
         args: null,
@@ -1054,8 +1065,10 @@ function applyKnownEvent(
     }
     case "tool_call_finished": {
       const existing = state.tools[event.tool_call_id]
+      if (existing !== undefined && (existing.invocationId !== event.invocation_id || existing.turnId !== event.turn_id)) return state
       const tool: ToolProjection = {
         toolCallId: event.tool_call_id,
+        invocationId: event.invocation_id,
         turnId: event.turn_id,
         name: existing?.name ?? "unknown",
         args: existing?.args ?? null,

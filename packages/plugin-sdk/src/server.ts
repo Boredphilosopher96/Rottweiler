@@ -1,3 +1,4 @@
+import { ToolProgressReporter } from "./tool-progress"
 import { StreamCredit } from "./stream-credit"
 import {
   PLUGIN_PROTOCOL_VERSION,
@@ -24,6 +25,7 @@ import {
   type RpcId,
   type ToolCallParams,
   type ToolResponse,
+  type ToolProgress,
 } from "./generated/protocol-3"
 import {
   BoundedJsonWriter,
@@ -56,13 +58,18 @@ export interface HandlerContext {
   readonly providerHttp: {
     request(credentialReference: string, request: ProviderHttpRequest): Promise<ProviderHttpResponse>
   }
-  /** Aborts on host shutdown, SIGINT/SIGTERM, provider cancellation, or a bounded non-provider handler timeout. */
+  /** Aborts on shutdown, provider cancellation, or the admitted operation's deadline. */
   readonly signal: AbortSignal
   /** Writes only a bounded label to stderr. Never pass prompts, tool args, or credentials. */
   debug(label: string): void
 }
 
-export type ToolHandler = (params: ToolCallParams, context: HandlerContext) => ToolResponse | Promise<ToolResponse>
+export interface ToolHandlerContext extends HandlerContext {
+  /** Replaces pending progress; delivery renews idle time within the immutable total deadline. */
+  progress(update: ToolProgress): void
+}
+
+export type ToolHandler = (params: ToolCallParams, context: ToolHandlerContext) => ToolResponse | Promise<ToolResponse>
 export type CommandHandler = (
   params: CommandExecuteParams,
   context: HandlerContext,
@@ -613,14 +620,16 @@ export class PluginServer {
       return
     }
     if (this.#shuttingDown || this.#lifetime.signal.aborted
-      || this.#handlerTasks.size >= 64 || this.#activeInvocations >= 64) {
+      || this.#handlerTasks.size >= PROTOCOL_LIMITS.maxInFlightRequests || this.#activeInvocations >= PROTOCOL_LIMITS.maxInFlightRequests) {
       if (id !== undefined) await this.#controlReply(this.#failure(id, -32005, "plugin handler admission denied"), concurrent)
       return
     }
     const provider = candidate.method === RPC_METHODS.providerComplete && id !== undefined
     const task = provider
       ? this.#handleProvider(id, candidate.params)
-      : this.#handleRequest(candidate.method, candidate.params, id)
+      : candidate.method === RPC_METHODS.toolCall && id !== undefined
+        ? this.#handleTool(id, candidate.params)
+        : this.#handleRequest(candidate.method, candidate.params, id)
     this.#handlerTasks.add(task)
     void task.then(() => this.#handlerTasks.delete(task), () => {
       this.#handlerTasks.delete(task)
@@ -748,12 +757,6 @@ export class PluginServer {
       await this.shutdown()
       return null
     }
-    if (method === RPC_METHODS.toolCall) {
-      const params = this.#toolParams(rawParams)
-      const handler = this.definition.handlers.tools?.[params.name]
-      if (handler === undefined) throw new SafeRpcError(-32601, "tool is not declared")
-      return this.#runHandler((context) => handler(params, context)) as unknown as Promise<JsonValue>
-    }
     if (method === RPC_METHODS.commandExecute) {
       const params = this.#commandParams(rawParams)
       const handler = this.definition.handlers.commands?.[params.name]
@@ -785,6 +788,67 @@ export class PluginServer {
       return response as unknown as JsonValue
     }
     throw new SafeRpcError(-32601, "method not found")
+  }
+
+  async #handleTool(id: RpcId, rawParams: unknown): Promise<void> {
+    let reporter: ToolProgressReporter | undefined
+    const call = new AbortController()
+    let timedOut = false
+    const cancel = () => call.abort()
+    const expire = () => { timedOut = true; call.abort() }
+    let totalTimer: ReturnType<typeof setTimeout> | undefined
+    let idleTimer: ReturnType<typeof setTimeout> | undefined
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      call.signal.addEventListener("abort", () => reject(new SafeRpcError(
+        timedOut ? -32004 : -32800,
+        timedOut ? "plugin tool deadline exceeded" : "plugin tool cancelled",
+      )), { once: true })
+    })
+    // Early parameter failures still abort the local scope in finally.
+    void cancelled.catch(() => undefined)
+    this.#lifetime.signal.addEventListener("abort", cancel, { once: true })
+    try {
+      if (!this.#initialized) throw new SafeRpcError(-32002, "plugin is not initialized")
+      const params = this.#toolParams(rawParams)
+      const handler = this.definition.handlers.tools?.[params.name]
+      if (handler === undefined) throw new SafeRpcError(-32601, "tool is not declared")
+      const { total_ms: totalMs, idle_ms: idleMs } = params.lifetime
+      const renewIdle = () => {
+        clearTimeout(idleTimer)
+        if (!call.signal.aborted) idleTimer = setTimeout(expire, idleMs)
+      }
+      totalTimer = setTimeout(expire, totalMs)
+      renewIdle()
+      reporter = new ToolProgressReporter(
+        (sequence, progress) => this.#writer.write({
+          jsonrpc: "2.0", method: RPC_METHODS.toolProgress,
+          params: { request_id: id, sequence, progress },
+        }, "progress"), renewIdle, cancel,
+      )
+      const progress = reporter
+      const result = await Promise.race([
+        this.#invoke(() => {
+          if (this.#lifetime.signal.aborted) call.abort()
+          if (call.signal.aborted) throw new SafeRpcError(-32800, "plugin tool cancelled")
+          return handler(params, { ...this.#context(call.signal), progress: update => {
+            if (call.signal.aborted) throw new SafeRpcError(-32800, "plugin tool cancelled")
+            progress.report(update)
+          } })
+        }), cancelled,
+      ])
+      await reporter.finish()
+      if (call.signal.aborted) throw new SafeRpcError(timedOut ? -32004 : -32800, "plugin tool cancelled")
+      await this.#success(id, result as unknown as JsonValue)
+    } catch (error) {
+      await reporter?.finish()
+      if (error instanceof SafeRpcError) await this.#failure(id, error.code, error.safeMessage, error.safeData)
+      else await this.#failure(id, -32603, "plugin tool failed")
+    } finally {
+      call.abort()
+      clearTimeout(totalTimer)
+      clearTimeout(idleTimer)
+      this.#lifetime.signal.removeEventListener("abort", cancel)
+    }
   }
 
   #providerModelsParams(rawParams: unknown): ProviderModelsParams {
@@ -882,8 +946,17 @@ export class PluginServer {
 
   #toolParams(raw: unknown): ToolCallParams {
     const value = object(raw)
-    requireRpcKeys(value, "tool/call params", ["name", "input"])
+    requireRpcKeys(value, "tool/call params", ["name", "input", "lifetime"])
+    const lifetime = object(value.lifetime, "tool lifetime")
+    requireRpcKeys(lifetime, "tool lifetime", ["total_ms", "idle_ms"])
+    if (typeof lifetime.total_ms !== "number" || typeof lifetime.idle_ms !== "number"
+      || !Number.isInteger(lifetime.total_ms) || !Number.isInteger(lifetime.idle_ms)
+      || lifetime.idle_ms < 1 || lifetime.total_ms < lifetime.idle_ms
+      || lifetime.total_ms > PROTOCOL_LIMITS.maxOperationDurationMs) {
+      throw new SafeRpcError(-32602, "invalid tool lifetime")
+    }
     return {
+      lifetime: { total_ms: lifetime.total_ms, idle_ms: lifetime.idle_ms },
       name: string(value.name, "tool name"),
       input: object(value.input, "tool input"),
     }

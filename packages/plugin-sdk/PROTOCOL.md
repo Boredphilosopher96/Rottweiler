@@ -1,7 +1,29 @@
 # Rottweiler plugin API
 
-The dependency-leaf `rw-plugin-protocol` crate owns the contract and generates
-the TypeScript, schema, and fixture projections beside this file.
+The `rw-plugin-protocol` crate owns the wire contract and generates the
+TypeScript, schema, and fixture projections beside this file. Shared validated
+operation values and limits belong to the leaf `rw-operation-contract` crate.
+
+## Tool operations
+
+`tool/call` requires a host-owned `lifetime` containing `total_ms` and `idle_ms`.
+Both must be positive, idle cannot exceed total, and total cannot exceed 300000.
+The host currently grants 300000 total and 90000 idle by default. Total time never
+renews. Other unary methods retain their ordinary five-second deadline.
+
+Tool handlers receive `context.progress({ message, amount? })`. The SDK replaces
+pending observations and sends at most four updates per second as `tool/progress`
+notifications with `request_id`, increasing `sequence`, and `progress`. Valid
+progress renews idle time within the original total deadline. Messages are
+bounded to 256 Unicode characters without control characters; optional counts
+are unsigned 32-bit integers with `completed <= total` and `total > 0`.
+
+Progress uses a separately bounded lane below control traffic. Completion closes
+progress admission, discards unsent observations, and waits for any current
+physical progress write before sending the terminal response. Progress is
+best-effort transient state, not durable tool output. Timeout or cancellation
+aborts the handler signal; the host still requires its process/effect settlement
+proof before allowing conflicting work.
 
 ## Initialization
 
@@ -83,9 +105,8 @@ The SDK input pump handles correlated host replies and delivery control separate
 from application handlers. Ordinary handlers can run concurrently, including a
 catalog handler awaiting host-mediated HTTP. The SDK admits at most 64 handler
 invocations; timed-out invocations keep their slot until the underlying handler
-settles. New requests beyond that limit receive `-32005` (busy). Ordinary tool,
-hook, and catalog requests still use the five-second deadline; the separate
-long-running tool/progress contract remains pending.
+settles. New requests beyond that limit receive `-32005` (busy). Hook and catalog
+requests retain the five-second deadline; tools use the admitted lifetime above.
 
 Both sides use separate bounded control and data queues. Control has a 64-frame,
 16 MiB budget. Provider data has a 16 MiB payload budget across four windows;

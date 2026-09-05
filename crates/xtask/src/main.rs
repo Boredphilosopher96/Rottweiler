@@ -31,17 +31,17 @@ use rw_types::{
     ModelCatalogSnapshot, ModelContextTransfer, ModelDescriptor, ModelSwitchQuestion,
     PermissionApprovalDescriptor, PermissionApprovalScope, PermissionModeDescriptor,
     PermissionRuleDescriptor, PermissionStateDescriptor, PlanArtifact, PlanDecision, PlanStep,
-    PromptDump, PromptTool, ProviderAuthAttemptId, ProviderAuthChallenge, ProviderAuthKind,
-    ProviderDescriptor, ProviderNextAction, Question, QuestionId, QuestionOption,
+    ProgressAmount, PromptDump, PromptTool, ProviderAuthAttemptId, ProviderAuthChallenge,
+    ProviderAuthKind, ProviderDescriptor, ProviderNextAction, Question, QuestionId, QuestionOption,
     QuestionResponseKind, RequestId, ReviewFileDecision, ReviewFileStatus, RewindTarget, Role,
     RuntimeServiceDescriptor, RuntimeServiceKind, SequenceId, SessionDescriptor, SessionId,
     SessionReview, SessionReviewFile, ShellId, StoredAttachment, SubagentActivity,
     SubagentDescriptor, SubagentId, SubagentIsolation, SubagentReplayItem, SubagentResult,
-    SubagentStatus, TRANSIENT_ENGINE_EVENT_TYPES, ToolCallId, ToolCapability, ToolOutput,
-    ToolOutputPart, ToolOutputStream, TouchedFile, TouchedFileStatus, TranscriptFormat, Turn,
-    TurnAccounting, TurnId, TurnMeta, TurnStatus, UnifiedDiff, UnrestorablePath, Usage,
-    UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview,
-    WorkspaceRootDescriptor, WorkspaceStatus,
+    SubagentStatus, TRANSIENT_ENGINE_EVENT_TYPES, ToolCallId, ToolCapability, ToolInvocationId,
+    ToolOutput, ToolOutputPart, ToolOutputStream, ToolProgress, TouchedFile, TouchedFileStatus,
+    TranscriptFormat, Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus, UnifiedDiff,
+    UnrestorablePath, Usage, UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch,
+    WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus,
 };
 use schemars::{JsonSchema, schema_for};
 use semver::Version;
@@ -1662,6 +1662,9 @@ fn generate_typescript() -> Result<String, XtaskError> {
     }
 
     declaration!(ToolCallId);
+    declaration!(ToolInvocationId);
+    declaration!(ToolProgress);
+    declaration!(ProgressAmount);
     declaration!(SessionId);
     declaration!(ClientId);
     declaration!(RequestId);
@@ -2053,6 +2056,7 @@ fn contract_fixture() -> ContractFixture {
                 meta: command_meta.clone(),
                 session_id: SessionId("session-fixture".to_owned()),
                 tool_call_id: ToolCallId("tool-1".to_owned()),
+                invocation_id: ToolInvocationId("tool-1".to_owned()),
                 decision: ApprovalDecision::AllowOnce,
                 binding: None,
             },
@@ -2240,6 +2244,7 @@ fn contract_fixture() -> ContractFixture {
                 meta: event_meta(5),
                 turn_id: TurnId("turn-fixture".to_owned()),
                 tool_call_id: ToolCallId("tool-1".to_owned()),
+                invocation_id: ToolInvocationId("tool-1".to_owned()),
                 name: "bash".to_owned(),
                 args: json!({"command": "cargo test"}),
                 call_index: 0,
@@ -2248,6 +2253,7 @@ fn contract_fixture() -> ContractFixture {
                 meta: event_meta(6),
                 turn_id: TurnId("turn-fixture".to_owned()),
                 tool_call_id: ToolCallId("tool-1".to_owned()),
+                invocation_id: ToolInvocationId("tool-1".to_owned()),
                 name: "bash".to_owned(),
                 args: json!({"command": "cargo test"}),
                 capabilities: vec![ToolCapability::Execute],
@@ -2258,6 +2264,7 @@ fn contract_fixture() -> ContractFixture {
                 meta: event_meta(7),
                 turn_id: TurnId("turn-fixture".to_owned()),
                 tool_call_id: ToolCallId("tool-1".to_owned()),
+                invocation_id: ToolInvocationId("tool-1".to_owned()),
                 stream: ToolOutputStream::Stdout,
                 chunk: "running tests".to_owned(),
             },
@@ -2265,6 +2272,7 @@ fn contract_fixture() -> ContractFixture {
                 meta: event_meta(8),
                 turn_id: TurnId("turn-fixture".to_owned()),
                 tool_call_id: ToolCallId("tool-1".to_owned()),
+                invocation_id: ToolInvocationId("tool-1".to_owned()),
                 output: mixed_output,
                 is_error: false,
                 call_index: 0,

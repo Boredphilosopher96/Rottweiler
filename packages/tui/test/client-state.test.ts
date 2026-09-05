@@ -63,6 +63,7 @@ describe("client-owned renderer handoff", () => {
     renderer = setup.renderer
     const tool: ToolProjection = {
       toolCallId: "one", turnId: "turn", name: "read", args: { path: "one.txt" }, status: "running",
+      invocationId: "one",
       capabilities: ["read_filesystem"], rationale: null, diff: null, chunks: toolOutputBuffer([{ stream: "stdout", chunk: "some output" }]),
       output: null, isError: null, callIndex: 0, timing: { kind: "unknown" },
     }

@@ -29,6 +29,7 @@ function tool(
 ): ToolProjection {
   return {
     toolCallId,
+    invocationId: toolCallId,
     turnId: "turn-tools",
     name: "read",
     args: { path: `${toolCallId}.ts` },

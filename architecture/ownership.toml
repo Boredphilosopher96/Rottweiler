@@ -892,3 +892,8 @@ path = "packages/plugin-sdk/src/generated/protocol-2.ts"
 pattern = '''PLUGIN_PROTOCOL_VERSION'''
 allow_missing = true
 reason = "Protocol 3 replaced protocol 2 directly; the old projection must not return."
+
+[[owner]]
+id = "operation-lifetime-progress-contract"
+path = "crates/rw-operation-contract/src/lib.rs"
+symbols = ["OperationLifetime", "ProgressAmount", "ToolProgress", "MAX_OPERATION_DURATION_MS", "MAX_PROGRESS_MESSAGE_CHARS", "PROGRESS_INTERVAL_MS"]

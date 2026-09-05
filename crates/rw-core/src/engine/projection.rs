@@ -67,7 +67,23 @@ pub struct InterruptedToolRepair {
     pub agent_turn: u64,
     pub call_index: usize,
     pub tool_call_id: ToolCallId,
+    pub invocation_id: rw_types::ToolInvocationId,
+    pub missing_start: Option<InterruptedToolStart>,
     pub output: ToolOutput,
+}
+
+/// Authoritative display fields needed only when a committed call never started.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InterruptedToolStart {
+    pub name: String,
+    pub arguments: Value,
+}
+
+#[derive(Clone, Debug)]
+struct ActiveToolStart {
+    id: ToolCallId,
+    invocation_id: rw_types::ToolInvocationId,
+    index: usize,
 }
 
 /// A persisted event log cannot be projected safely.
@@ -236,6 +252,7 @@ pub(super) fn recovered_pending_event(
         EngineEvent::ToolCallStarted {
             turn_id,
             tool_call_id,
+            invocation_id,
             name,
             args,
             call_index,
@@ -243,6 +260,7 @@ pub(super) fn recovered_pending_event(
         } => PendingEvent::ToolCallStarted {
             turn: parse_turn_id(turn_id)?,
             id: tool_call_id.0.clone(),
+            invocation_id: invocation_id.clone(),
             name: name.clone(),
             arguments: args.clone(),
             index: usize::try_from(*call_index).unwrap_or(usize::MAX),
@@ -250,12 +268,14 @@ pub(super) fn recovered_pending_event(
         EngineEvent::ToolOutputDelta {
             turn_id,
             tool_call_id,
+            invocation_id,
             stream,
             chunk,
             ..
         } => PendingEvent::ToolOutput {
             turn: parse_turn_id(turn_id)?,
             id: tool_call_id.0.clone(),
+            invocation_id: invocation_id.clone(),
             stream: match stream {
                 ToolOutputStream::Stdout => "stdout",
                 ToolOutputStream::Stderr => "stderr",
@@ -266,16 +286,19 @@ pub(super) fn recovered_pending_event(
         EngineEvent::ToolDiffReady {
             turn_id,
             tool_call_id,
+            invocation_id,
             diff,
             ..
         } => PendingEvent::ToolDiffReady {
             turn: parse_turn_id(turn_id)?,
             id: tool_call_id.0.clone(),
+            invocation_id: invocation_id.clone(),
             diff: diff.clone(),
         },
         EngineEvent::ToolCallFinished {
             turn_id,
             tool_call_id,
+            invocation_id,
             output,
             is_error,
             call_index,
@@ -283,6 +306,7 @@ pub(super) fn recovered_pending_event(
         } => PendingEvent::ToolCallFinished {
             turn: parse_turn_id(turn_id)?,
             id: tool_call_id.0.clone(),
+            invocation_id: invocation_id.clone(),
             output: output.clone(),
             is_error: *is_error,
             index: usize::try_from(*call_index).unwrap_or(usize::MAX),
@@ -290,6 +314,7 @@ pub(super) fn recovered_pending_event(
         EngineEvent::ToolApprovalNeeded {
             turn_id,
             tool_call_id,
+            invocation_id,
             name,
             args,
             capabilities,
@@ -299,6 +324,7 @@ pub(super) fn recovered_pending_event(
             turn: parse_turn_id(turn_id)?,
             request: PermissionRequest {
                 id: tool_call_id.0.clone(),
+                invocation_id: invocation_id.clone(),
                 tool_name: name.clone(),
                 arguments: args.clone(),
                 capabilities: capabilities.clone(),
@@ -649,6 +675,7 @@ pub struct SessionProjector {
     driver_client_id: Option<ClientId>,
     session_id: Option<SessionId>,
     interrupted_tool_repairs: Vec<InterruptedToolRepair>,
+    active_tool_starts: BTreeMap<rw_types::ToolInvocationId, ActiveToolStart>,
     interrupted_tool_turn: Option<Turn>,
     pending_questions: BTreeMap<String, RecoveredQuestion>,
     context_surgery: Vec<ContextSurgeryAction>,
@@ -691,6 +718,7 @@ impl Default for SessionProjector {
             driver_client_id: None,
             session_id: None,
             interrupted_tool_repairs: Vec::new(),
+            active_tool_starts: BTreeMap::new(),
             interrupted_tool_turn: None,
             pending_questions: BTreeMap::new(),
             context_surgery: Vec::new(),
@@ -762,6 +790,7 @@ impl SessionProjector {
             mut driver_client_id,
             mut session_id,
             interrupted_tool_repairs,
+            mut active_tool_starts,
             interrupted_tool_turn,
             mut pending_questions,
             mut context_surgery,
@@ -818,6 +847,7 @@ impl SessionProjector {
             };
             match &kind {
                 PendingEvent::TurnStarted { turn } => {
+                    active_tool_starts.clear();
                     active_turn = Some(*turn);
                     partial_assistant_blocks.clear();
                     partial_tool_blocks.clear();
@@ -950,6 +980,7 @@ impl SessionProjector {
                     turn, usage, cost, ..
                 } => {
                     if active_turn == Some(*turn) {
+                        active_tool_starts.clear();
                         active_turn = None;
                     }
                     completed_turns = completed_turns.saturating_add(1);
@@ -991,13 +1022,31 @@ impl SessionProjector {
                         excerpt: None,
                     });
                 }
+                PendingEvent::ToolCallStarted {
+                    turn,
+                    id,
+                    invocation_id,
+                    index,
+                    ..
+                } if active_turn == Some(*turn) => {
+                    active_tool_starts.insert(
+                        invocation_id.clone(),
+                        ActiveToolStart {
+                            id: ToolCallId(id.clone()),
+                            invocation_id: invocation_id.clone(),
+                            index: *index,
+                        },
+                    );
+                }
                 PendingEvent::ToolCallFinished {
                     turn,
                     id,
+                    invocation_id,
                     output,
                     is_error,
                     ..
                 } if active_turn == Some(*turn) => {
+                    active_tool_starts.remove(invocation_id);
                     partial_tool_blocks.push(Block::ToolResult {
                         id: ToolCallId(id.clone()),
                         output: output.clone(),
@@ -1274,6 +1323,7 @@ impl SessionProjector {
             driver_client_id,
             session_id,
             interrupted_tool_repairs,
+            active_tool_starts,
             interrupted_tool_turn,
             pending_questions,
             context_surgery,
@@ -1321,6 +1371,7 @@ impl SessionProjector {
             driver_client_id,
             session_id: _,
             mut interrupted_tool_repairs,
+            mut active_tool_starts,
             mut interrupted_tool_turn,
             pending_questions,
             context_surgery,
@@ -1354,42 +1405,89 @@ impl SessionProjector {
             }
         }
         if let Some(interrupted_turn) = active_turn {
-            let mut requested = Vec::<ToolCallId>::new();
-            let mut finished = Vec::<ToolCallId>::new();
+            // Match each occurrence in order: providers may reuse call IDs in later iterations.
+            let mut pending = Vec::<(usize, usize, ToolCallId, String, Value)>::new();
+            let mut ordinal = 0;
             for (turn, conversation_turn) in conversation_agent_turns.iter().zip(&conversation) {
                 if *turn != interrupted_turn {
                     continue;
                 }
+                let mut call_index = 0;
                 for block in &conversation_turn.blocks {
                     match block {
-                        Block::ToolCall { id, .. } => requested.push(id.clone()),
-                        Block::ToolResult { id, .. } => finished.push(id.clone()),
+                        Block::ToolCall { id, name, args } => {
+                            pending.push((
+                                ordinal,
+                                call_index,
+                                id.clone(),
+                                name.clone(),
+                                args.clone(),
+                            ));
+                            ordinal += 1;
+                            call_index += 1;
+                        }
+                        Block::ToolResult { id, .. } => {
+                            if let Some(index) = pending.iter().position(|call| &call.2 == id) {
+                                pending.remove(index);
+                            }
+                        }
                         _ => {}
                     }
                 }
             }
             for block in &partial_tool_blocks {
-                if let Block::ToolResult { id, .. } = block {
-                    finished.push(id.clone());
+                if let Block::ToolResult { id, .. } = block
+                    && let Some(index) = pending.iter().position(|call| &call.2 == id)
+                {
+                    pending.remove(index);
                 }
             }
-            for (call_index, id) in requested.into_iter().enumerate() {
-                if !finished.contains(&id) {
-                    let output = ToolOutput::Text {
-                        text: "tool call was interrupted before a result was persisted".to_owned(),
-                    };
-                    interrupted_tool_repairs.push(InterruptedToolRepair {
-                        agent_turn: interrupted_turn,
+            for (ordinal, call_index, id, name, arguments) in pending {
+                let started = active_tool_starts
+                    .iter()
+                    .find(|(_, start)| start.id == id)
+                    .map(|(key, _)| key.clone())
+                    .and_then(|key| active_tool_starts.remove(&key));
+                let (invocation_id, index, missing_start) = if let Some(start) = started {
+                    (start.invocation_id, start.index, None)
+                } else {
+                    (
+                        rw_types::ToolInvocationId(format!(
+                            "turn-{interrupted_turn}:repair-{ordinal}"
+                        )),
                         call_index,
-                        tool_call_id: id.clone(),
-                        output: output.clone(),
-                    });
-                    partial_tool_blocks.push(Block::ToolResult {
-                        id,
-                        output,
-                        is_error: true,
-                    });
-                }
+                        Some(InterruptedToolStart { name, arguments }),
+                    )
+                };
+                let output = ToolOutput::Text {
+                    text: "tool call was interrupted before a result was persisted".to_owned(),
+                };
+                interrupted_tool_repairs.push(InterruptedToolRepair {
+                    agent_turn: interrupted_turn,
+                    call_index: index,
+                    tool_call_id: id.clone(),
+                    invocation_id,
+                    missing_start,
+                    output: output.clone(),
+                });
+                partial_tool_blocks.push(Block::ToolResult {
+                    id,
+                    output,
+                    is_error: true,
+                });
+            }
+            // A recorded start without committed IR still owns a historical row, but cannot invent a model tool result.
+            for start in active_tool_starts.into_values() {
+                interrupted_tool_repairs.push(InterruptedToolRepair {
+                    agent_turn: interrupted_turn,
+                    call_index: start.index,
+                    tool_call_id: start.id,
+                    invocation_id: start.invocation_id,
+                    missing_start: None,
+                    output: ToolOutput::Text {
+                        text: "tool call was interrupted before a result was persisted".to_owned(),
+                    },
+                });
             }
             if !partial_tool_blocks.is_empty() {
                 let tool_turn = Turn {

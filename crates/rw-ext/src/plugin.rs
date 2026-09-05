@@ -1005,6 +1005,19 @@ pub trait PluginRpcClient: Send + Sync {
         self.request(method, params).await
     }
 
+    /// Calls a tool under host-owned total and idle deadlines.
+    async fn call_tool(
+        &self,
+        _params: rw_plugin_protocol::ToolCallParams,
+        _cancellation: &rw_tools::CancellationToken,
+        _progress: Arc<dyn rw_tools::ToolProgressSink>,
+    ) -> Result<Value, PluginRpcError> {
+        Err(PluginRpcError {
+            code: "unsupported".to_owned(),
+            message: "RPC tool operations are unsupported".to_owned(),
+        })
+    }
+
     async fn notify(&self, method: &str, params: Value) -> Result<(), PluginRpcError> {
         let _ = (method, params);
         Err(PluginRpcError {

@@ -2,7 +2,8 @@
 
 use rw_plugin_protocol::{
     FrameDecoder, ManifestError, PluginManifest, ProviderHttpCapabilityParams,
-    ProviderModelsResponse, RpcFrame, validate_provider_alias_prefix,
+    ProviderModelsResponse, RpcFrame, ToolCallParams, ToolProgressParams,
+    validate_provider_alias_prefix,
 };
 use serde_json::{Value, json};
 
@@ -28,6 +29,18 @@ fn current_fixture_deserializes_through_owned_wire_dtos() {
             .expect("provider HTTP request");
     assert_eq!(http.credential_reference, "fixture-token");
     assert_eq!(http.request.body_base64.as_deref(), Some("e30="));
+
+    let tool: ToolCallParams =
+        serde_json::from_value(protocol_three["tool_call_request"]["params"].clone())
+            .expect("typed tool lifetime");
+    assert_eq!(tool.lifetime.total_ms(), 300_000);
+    assert_eq!(tool.lifetime.idle_ms(), 90_000);
+    let progress: ToolProgressParams =
+        serde_json::from_value(protocol_three["tool_progress"]["params"].clone())
+            .expect("typed tool progress");
+    assert_eq!(progress.request_id, rw_plugin_protocol::RpcId::Number(17));
+    assert_eq!(progress.sequence, 1);
+    assert_eq!(progress.progress.message(), "working");
 }
 
 #[test]
