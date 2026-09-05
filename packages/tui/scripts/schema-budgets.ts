@@ -1,3 +1,4 @@
+import { jsonEncodedBytes } from "../src/json-size"
 import { _Code } from "ajv/dist/compile/codegen/code"
 import type Ajv2020 from "ajv/dist/2020"
 import { _, type Name } from "ajv/dist/compile/codegen"
@@ -25,6 +26,14 @@ function byteCounter({ gen }: KeywordCxt): Name {
 /** Source-schema refinements shared by every standalone protocol validator. */
 export function addSchemaBudgets(ajv: Ajv2020): void {
   ajv.addKeyword({
+    keyword: "x-rw-max-json-bytes", schemaType: "number",
+    metaSchema: { type: "integer", minimum: 0 },
+    code(ctx) {
+      const count = ctx.gen.scopeValue("func", { ref: jsonEncodedBytes, code: new _Code(jsonEncodedBytes.toString()) })
+      ctx.fail(_`${count}(${ctx.data}, ${ctx.schema}) > ${ctx.schema}`)
+    },
+  })
+  ajv.addKeyword({
     keyword: "x-rw-max-utf8-bytes", type: "string", schemaType: "number",
     metaSchema: { type: "integer", minimum: 0 },
     code(ctx) {
@@ -39,7 +48,7 @@ export function addSchemaBudgets(ajv: Ajv2020): void {
       required: ["array", "identity", "fields", "maxUtf8Bytes"],
       properties: {
         array: { type: "string", minLength: 1 }, identity: { type: "string", minLength: 1 },
-        fields: { type: "array", minItems: 1, maxItems: 32, uniqueItems: true, items: { type: "string", minLength: 1 } },
+        fields: { type: "array", minItems: 0, maxItems: 32, uniqueItems: true, items: { type: "string", minLength: 1 } },
         maxUtf8Bytes: { type: "integer", minimum: 0 },
       },
     },

@@ -50,3 +50,32 @@ test("budget schemas cannot omit the finite traversal bound", () => {
   delete (unbounded.properties.entries as { maxItems?: number }).maxItems
   expect(() => ajv.compile(unbounded)).toThrow("direct finite array maxItems")
 })
+
+
+test("nested JSON byte budgets reuse the exact early-exit source visitor in standalone output", async () => {
+  const schema = { type: "object", "x-rw-max-json-bytes": 32 }
+  const emitted = await standaloneValidator({ schema, typeName: "Fixture", typeImport: "fixture", banner: "" })
+  const directory = await mkdtemp(join(tmpdir(), "rw-schema-json-budget-"))
+  try {
+    const path = join(directory, "validator.mjs")
+    await writeFile(path, emitted.javascript)
+    const validate = (await import(path)).default as (value: unknown) => boolean
+    for (const text of ["", "a".repeat(24), "a".repeat(25), "\\\"\n", "é雪😀", "\ud800".repeat(5)]) {
+      const value = { a: text }
+      expect(validate(value)).toBe(Buffer.byteLength(JSON.stringify(value)) <= 32)
+    }
+    expect(validate({ a: "x".repeat(1_000_000) })).toBe(false)
+    expect(validate({ a: [1, { b: [true, false, null, "large"] }] })).toBe(false)
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})
+
+test("identity-only budgets require no artificial text fields", () => {
+  const ajv = new Ajv2020()
+  addSchemaBudgets(ajv)
+  const identitySchema = structuredClone(schema)
+  identitySchema["x-rw-item-budget"].fields = []
+  identitySchema["x-rw-item-budget"].maxUtf8Bytes = 0
+  const validate = ajv.compile(identitySchema)
+  expect(validate({ entries: [{ key: "one", text: "" }, { key: "two", text: "" }] })).toBe(true)
+  expect(validate({ entries: [{ key: "one", text: "" }, { key: "one", text: "" }] })).toBe(false)
+})
