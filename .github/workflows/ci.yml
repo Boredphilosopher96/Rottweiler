@@ -158,6 +158,7 @@ jobs:
       - run: python3 scripts/release_contract.py generate-typescript --check
       - run: python3 scripts/check-dependency-direction.py
       - run: python3 scripts/check-ownership.py
+      - run: python3 scripts/ci_evidence.py --gate source-size --output ci-results/source-size.json -- python3 scripts/check-source-size.py
       - run: python3 scripts/check-toolchain-ownership.py
       - run: python3 scripts/check-network-boundaries.py
       - run: python3 scripts/check-documentation.py

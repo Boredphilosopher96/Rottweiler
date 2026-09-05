@@ -94,6 +94,12 @@ bun install --cwd packages/tui --frozen-lockfile
 scripts/build-release.sh
 ```
 
+After builds and tests finish, preview disposable output with
+`python3 scripts/clean-build-artifacts.py`, then repeat with `--apply` to remove
+Cargo targets and compiled bundles. Session data, verification evidence, and
+installed dependencies are retained. Use `--target-dir PATH` to clean only a
+specific Cargo cache, or `--worktrees` to preview all registered worktrees.
+
 ## Repository map
 
 | Path | Owner |
