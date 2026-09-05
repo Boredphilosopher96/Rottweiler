@@ -173,7 +173,7 @@ mod read_contract_tests {
                 .expect("required")
                 .contains(&serde_json::json!("through"))
         );
-        assert!(!TodoReadSnapshot::decl().contains("through?"));
-        assert!(!TodoReadResult::decl().contains("target?"));
+        assert!(!TodoReadSnapshot::decl(&ts_rs::Config::default()).contains("through?"));
+        assert!(!TodoReadResult::decl(&ts_rs::Config::default()).contains("target?"));
     }
 }
