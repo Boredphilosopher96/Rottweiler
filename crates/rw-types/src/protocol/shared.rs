@@ -253,8 +253,7 @@ pub struct StoredAttachment {
 #[derive(Allocation)]
 pub struct SessionDescriptor {
     pub session_id: SessionId,
-    /// Human-facing session title. Empty only when reading an older peer.
-    #[serde(default)]
+    /// Human-facing session title.
     pub title: String,
     pub workspace_name: String,
     pub model: ModelAlias,
@@ -283,7 +282,6 @@ pub struct CommandDescriptor {
     pub name: String,
     pub description: String,
     pub usage: String,
-    #[serde(default)]
     pub source: CommandSource,
 }
 
@@ -474,7 +472,6 @@ pub struct ModelDescriptor {
     /// material remain behind the provider boundary.
     pub provider: String,
     /// Configured role aliases which currently include this concrete model.
-    #[serde(default)]
     pub aliases: Vec<ModelAlias>,
     pub current: bool,
     pub available: bool,
@@ -682,7 +679,6 @@ impl std::str::FromStr for SessionMode {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct PlanStep {
     pub description: String,
-    #[serde(default)]
     pub files_touched: Vec<String>,
     pub verification: String,
 }
@@ -693,7 +689,6 @@ pub struct PlanArtifact {
     pub title: String,
     pub summary_md: String,
     pub steps: Vec<PlanStep>,
-    #[serde(default)]
     pub open_questions: Vec<String>,
 }
 
@@ -891,7 +886,6 @@ pub struct ContextSnapshot {
     #[ts(type = "string")]
     pub reserved_tokens: u64,
     /// False when zero capacity means unknown rather than exhausted.
-    #[serde(default)]
     pub context_window_known: bool,
     /// Provider-neutral explanation for an unknown context window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -952,15 +946,15 @@ pub struct CostSnapshot {
     #[schemars(with = "String")]
     #[ts(type = "string")]
     pub trailing_minute_ai_credit_micros: u64,
-    #[serde(default, with = "decimal_u64")]
+    #[serde(with = "decimal_u64")]
     #[schemars(with = "String")]
     #[ts(type = "string")]
     pub session_subscription_tokens: u64,
-    #[serde(default, with = "decimal_u64")]
+    #[serde(with = "decimal_u64")]
     #[schemars(with = "String")]
     #[ts(type = "string")]
     pub daily_subscription_tokens: u64,
-    #[serde(default, with = "decimal_u64")]
+    #[serde(with = "decimal_u64")]
     #[schemars(with = "String")]
     #[ts(type = "string")]
     pub trailing_minute_subscription_tokens: u64,
@@ -1004,27 +998,27 @@ pub struct CostSnapshot {
     pub hard_cap_reached: bool,
     pub session_monetary_accounting_complete: bool,
     pub daily_monetary_accounting_complete: bool,
-    #[serde(default, with = "decimal_u64")]
+    #[serde(with = "decimal_u64")]
     #[schemars(with = "String")]
     #[ts(type = "string")]
     pub session_subscription_quota_entries: u64,
-    #[serde(default, with = "decimal_u64")]
+    #[serde(with = "decimal_u64")]
     #[schemars(with = "String")]
     #[ts(type = "string")]
     pub session_cost_unavailable_entries: u64,
-    #[serde(default, with = "decimal_u64")]
+    #[serde(with = "decimal_u64")]
     #[schemars(with = "String")]
     #[ts(type = "string")]
     pub session_non_usd_monetary_entries: u64,
-    #[serde(default, with = "decimal_u64")]
+    #[serde(with = "decimal_u64")]
     #[schemars(with = "String")]
     #[ts(type = "string")]
     pub daily_subscription_quota_entries: u64,
-    #[serde(default, with = "decimal_u64")]
+    #[serde(with = "decimal_u64")]
     #[schemars(with = "String")]
     #[ts(type = "string")]
     pub daily_cost_unavailable_entries: u64,
-    #[serde(default, with = "decimal_u64")]
+    #[serde(with = "decimal_u64")]
     #[schemars(with = "String")]
     #[ts(type = "string")]
     pub daily_non_usd_monetary_entries: u64,
@@ -1269,7 +1263,6 @@ pub struct SubagentResult {
     pub session_id: SessionId,
     pub status: SubagentStatus,
     pub final_text: String,
-    #[serde(default)]
     pub touched_files: Vec<String>,
     pub diff_artifact: Option<DiffArtifact>,
     pub usage: Usage,

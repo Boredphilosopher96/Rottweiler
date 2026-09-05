@@ -184,7 +184,6 @@ pub enum ClientCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         session_id: Option<SessionId>,
-        #[serde(default)]
         refresh: bool,
     },
     ListSettings {

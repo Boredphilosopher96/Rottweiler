@@ -213,3 +213,52 @@ fn event_delivery_is_owned_by_the_protocol_variant() {
     assert_eq!(transient.delivery(), EngineEventDelivery::Transient);
     assert_eq!(durable.delivery(), EngineEventDelivery::Durable);
 }
+
+#[test]
+fn wire_schemas_do_not_supply_values_for_missing_required_fields()
+-> Result<(), Box<dyn std::error::Error>> {
+    fn inspect(value: &serde_json::Value, path: &str) {
+        match value {
+            serde_json::Value::Object(object) => {
+                if let Some(default) = object.get("default")
+                    && (object.contains_key("type") || object.contains_key("$ref") || object.contains_key("anyOf")) {
+                    assert!(default.is_null(), "wire field {path} supplies {default}");
+                }
+                for (key, child) in object {
+                    inspect(child, &format!("{path}/{key}"));
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for (index, child) in values.iter().enumerate() {
+                    inspect(child, &format!("{path}/{index}"));
+                }
+            }
+            _ => {}
+        }
+    }
+    for schema in [
+        serde_json::to_value(schemars::schema_for!(EngineEvent))?,
+        serde_json::to_value(schemars::schema_for!(ClientCommand))?,
+        serde_json::to_value(schemars::schema_for!(super::CommandReply))?,
+    ] {
+        inspect(&schema, "");
+    }
+    Ok(())
+}
+
+#[test]
+fn model_catalog_requires_explicit_collections_and_cache_state()
+-> Result<(), Box<dyn std::error::Error>> {
+    let event = serde_json::json!({
+        "type": "models_listed",
+        "meta": { "protocol_version": 1, "client_id": "client", "request_id": "request", "emitted_at": "2026-01-01T00:00:00Z" },
+        "session_id": null, "models": [], "aliases": [], "providers": [], "cached": false, "truncated": false
+    });
+    serde_json::from_value::<EngineEvent>(event.clone())?;
+    for field in ["models", "aliases", "providers", "cached", "truncated"] {
+        let mut incomplete = event.clone();
+        incomplete.as_object_mut().ok_or("missing event object")?.remove(field);
+        assert!(serde_json::from_value::<EngineEvent>(incomplete).is_err(), "accepted missing {field}");
+    }
+    Ok(())
+}

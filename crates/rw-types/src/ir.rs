@@ -116,7 +116,6 @@ pub enum Block {
 
 /// Metadata whose meaning is independent of a provider adapter.
 #[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
-#[serde(default)]
 #[ts(optional_fields = nullable)]
 #[derive(Allocation)]
 pub struct TurnMeta {

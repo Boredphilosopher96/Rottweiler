@@ -141,13 +141,9 @@ pub enum EngineEvent {
         #[ts(optional)]
         session_id: Option<SessionId>,
         models: Vec<ModelDescriptor>,
-        #[serde(default)]
         aliases: Vec<ModelAliasDescriptor>,
-        #[serde(default)]
         providers: Vec<ProviderDescriptor>,
-        #[serde(default)]
         cached: bool,
-        #[serde(default)]
         truncated: bool,
     },
     SettingsListed {
@@ -445,22 +441,21 @@ pub enum EngineEvent {
         #[ts(type = "string")]
         reserved_tokens: u64,
         /// False when zero capacity means unknown rather than exhausted.
-        #[serde(default)]
         context_window_known: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         context_window_reason: Option<String>,
         stable_prefix_hash: String,
         cache_hit_basis_points: u16,
-        #[serde(default, with = "decimal_u64")]
+        #[serde(with = "decimal_u64")]
         #[schemars(with = "String")]
         #[ts(type = "string")]
         estimated_input_tokens: u64,
-        #[serde(default, with = "decimal_u64")]
+        #[serde(with = "decimal_u64")]
         #[schemars(with = "String")]
         #[ts(type = "string")]
         provider_input_tokens: u64,
-        #[serde(default, with = "decimal_u64")]
+        #[serde(with = "decimal_u64")]
         #[schemars(with = "String")]
         #[ts(type = "string")]
         correction_millionths: u64,
@@ -601,7 +596,7 @@ pub enum EngineEvent {
     ContextItemPinned {
         meta: EventMeta,
         item_id: ContextItemId,
-        #[serde(default, with = "decimal_u64")]
+        #[serde(with = "decimal_u64")]
         #[schemars(with = "String")]
         #[ts(type = "string")]
         effective_after_agent_turn: u64,
@@ -609,7 +604,7 @@ pub enum EngineEvent {
     ContextItemEvicted {
         meta: EventMeta,
         item_id: ContextItemId,
-        #[serde(default, with = "decimal_u64")]
+        #[serde(with = "decimal_u64")]
         #[schemars(with = "String")]
         #[ts(type = "string")]
         effective_after_agent_turn: u64,

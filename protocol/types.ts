@@ -94,7 +94,7 @@ export type StoredAttachment = { name: string, source_path?: string, media_type:
 
 export type SessionDescriptor = { session_id: SessionId,
 /**
- * Human-facing session title. Empty only when reading an older peer.
+ * Human-facing session title.
  */
 title: string, workspace_name: string, model: ModelAlias, driver_client_id?: ClientId | null, shell_active: boolean, };
 

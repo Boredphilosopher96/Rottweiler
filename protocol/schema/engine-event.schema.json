@@ -491,23 +491,19 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/ModelAliasDescriptor"
-          },
-          "default": []
+          }
         },
         "providers": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/ProviderDescriptor"
-          },
-          "default": []
+          }
         },
         "cached": {
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         },
         "truncated": {
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         },
         "type": {
           "type": "string",
@@ -517,7 +513,11 @@
       "required": [
         "type",
         "meta",
-        "models"
+        "models",
+        "aliases",
+        "providers",
+        "cached",
+        "truncated"
       ]
     },
     {
@@ -1739,8 +1739,7 @@
         },
         "context_window_known": {
           "description": "False when zero capacity means unknown rather than exhausted.",
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         },
         "context_window_reason": {
           "type": [
@@ -1758,16 +1757,13 @@
           "maximum": 65535
         },
         "estimated_input_tokens": {
-          "type": "string",
-          "default": "0"
+          "type": "string"
         },
         "provider_input_tokens": {
-          "type": "string",
-          "default": "0"
+          "type": "string"
         },
         "correction_millionths": {
-          "type": "string",
-          "default": "0"
+          "type": "string"
         },
         "type": {
           "type": "string",
@@ -1781,8 +1777,12 @@
         "used_tokens",
         "usable_tokens",
         "reserved_tokens",
+        "context_window_known",
         "stable_prefix_hash",
-        "cache_hit_basis_points"
+        "cache_hit_basis_points",
+        "estimated_input_tokens",
+        "provider_input_tokens",
+        "correction_millionths"
       ]
     },
     {
@@ -2310,8 +2310,7 @@
           "$ref": "#/$defs/ContextItemId"
         },
         "effective_after_agent_turn": {
-          "type": "string",
-          "default": "0"
+          "type": "string"
         },
         "type": {
           "type": "string",
@@ -2321,7 +2320,8 @@
       "required": [
         "type",
         "meta",
-        "item_id"
+        "item_id",
+        "effective_after_agent_turn"
       ]
     },
     {
@@ -2334,8 +2334,7 @@
           "$ref": "#/$defs/ContextItemId"
         },
         "effective_after_agent_turn": {
-          "type": "string",
-          "default": "0"
+          "type": "string"
         },
         "type": {
           "type": "string",
@@ -2345,7 +2344,8 @@
       "required": [
         "type",
         "meta",
-        "item_id"
+        "item_id",
+        "effective_after_agent_turn"
       ]
     },
     {
@@ -3700,8 +3700,7 @@
         },
         "context_window_known": {
           "description": "False when zero capacity means unknown rather than exhausted.",
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         },
         "context_window_reason": {
           "description": "Provider-neutral explanation for an unknown context window.",
@@ -3728,6 +3727,7 @@
         "used_tokens",
         "usable_tokens",
         "reserved_tokens",
+        "context_window_known",
         "cache_breakpoints",
         "items"
       ]
@@ -3863,16 +3863,13 @@
           "type": "string"
         },
         "session_subscription_tokens": {
-          "type": "string",
-          "default": "0"
+          "type": "string"
         },
         "daily_subscription_tokens": {
-          "type": "string",
-          "default": "0"
+          "type": "string"
         },
         "trailing_minute_subscription_tokens": {
-          "type": "string",
-          "default": "0"
+          "type": "string"
         },
         "cache_hit_basis_points": {
           "type": "integer",
@@ -3953,28 +3950,22 @@
           "type": "boolean"
         },
         "session_subscription_quota_entries": {
-          "type": "string",
-          "default": "0"
+          "type": "string"
         },
         "session_cost_unavailable_entries": {
-          "type": "string",
-          "default": "0"
+          "type": "string"
         },
         "session_non_usd_monetary_entries": {
-          "type": "string",
-          "default": "0"
+          "type": "string"
         },
         "daily_subscription_quota_entries": {
-          "type": "string",
-          "default": "0"
+          "type": "string"
         },
         "daily_cost_unavailable_entries": {
-          "type": "string",
-          "default": "0"
+          "type": "string"
         },
         "daily_non_usd_monetary_entries": {
-          "type": "string",
-          "default": "0"
+          "type": "string"
         }
       },
       "required": [
@@ -3987,10 +3978,19 @@
         "daily_ai_credit_micros",
         "trailing_minute_cost_micros_usd",
         "trailing_minute_ai_credit_micros",
+        "session_subscription_tokens",
+        "daily_subscription_tokens",
+        "trailing_minute_subscription_tokens",
         "cache_hit_basis_points",
         "hard_cap_reached",
         "session_monetary_accounting_complete",
-        "daily_monetary_accounting_complete"
+        "daily_monetary_accounting_complete",
+        "session_subscription_quota_entries",
+        "session_cost_unavailable_entries",
+        "session_non_usd_monetary_entries",
+        "daily_subscription_quota_entries",
+        "daily_cost_unavailable_entries",
+        "daily_non_usd_monetary_entries"
       ]
     },
     "TurnAccounting": {
@@ -4474,25 +4474,25 @@
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "model": {
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "synthetic": {
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         },
         "summary": {
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         }
-      }
+      },
+      "required": [
+        "synthetic",
+        "summary"
+      ]
     },
     "PromptTool": {
       "description": "Provider-neutral tool definition included in a prompt dump.",
@@ -4520,9 +4520,8 @@
           "$ref": "#/$defs/SessionId"
         },
         "title": {
-          "description": "Human-facing session title. Empty only when reading an older peer.",
-          "type": "string",
-          "default": ""
+          "description": "Human-facing session title.",
+          "type": "string"
         },
         "workspace_name": {
           "type": "string"
@@ -4546,6 +4545,7 @@
       },
       "required": [
         "session_id",
+        "title",
         "workspace_name",
         "model",
         "shell_active"
@@ -4623,14 +4623,14 @@
           "type": "string"
         },
         "source": {
-          "$ref": "#/$defs/CommandSource",
-          "default": "builtin"
+          "$ref": "#/$defs/CommandSource"
         }
       },
       "required": [
         "name",
         "description",
-        "usage"
+        "usage",
+        "source"
       ]
     },
     "CommandSource": {
@@ -4690,8 +4690,7 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/ModelAlias"
-          },
-          "default": []
+          }
         },
         "current": {
           "type": "boolean"
@@ -4713,6 +4712,7 @@
         "id",
         "display_name",
         "provider",
+        "aliases",
         "current",
         "available",
         "capabilities"
@@ -5853,8 +5853,7 @@
           "type": "array",
           "items": {
             "type": "string"
-          },
-          "default": []
+          }
         },
         "diff_artifact": {
           "anyOf": [
@@ -5884,6 +5883,7 @@
         "session_id",
         "status",
         "final_text",
+        "touched_files",
         "usage",
         "cost",
         "turns",
@@ -5963,14 +5963,14 @@
           "type": "array",
           "items": {
             "type": "string"
-          },
-          "default": []
+          }
         }
       },
       "required": [
         "title",
         "summary_md",
-        "steps"
+        "steps",
+        "open_questions"
       ]
     },
     "PlanStep": {
@@ -5984,8 +5984,7 @@
           "type": "array",
           "items": {
             "type": "string"
-          },
-          "default": []
+          }
         },
         "verification": {
           "type": "string"
@@ -5993,6 +5992,7 @@
       },
       "required": [
         "description",
+        "files_touched",
         "verification"
       ]
     },

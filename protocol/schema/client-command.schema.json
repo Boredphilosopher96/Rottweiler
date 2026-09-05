@@ -837,8 +837,7 @@
           ]
         },
         "refresh": {
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         },
         "type": {
           "type": "string",
@@ -847,7 +846,8 @@
       },
       "required": [
         "type",
-        "meta"
+        "meta",
+        "refresh"
       ]
     },
     {
