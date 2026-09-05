@@ -1,5 +1,6 @@
 //! Descriptor-owned derived database machinery shared by semantic projections.
 
+use super::exclusive_lock::ExclusiveFileLock;
 use super::{journal::JournalReadView, sync_event_file};
 use redb::{Database, StorageBackend};
 use std::{
@@ -29,7 +30,7 @@ pub(crate) enum DerivedDatabaseError {
 pub(crate) struct DerivedDatabase {
     pub(crate) database: Database,
     pub(crate) directory: File,
-    pub(crate) lock: File,
+    pub(crate) lock: ExclusiveFileLock,
     pub(crate) counters: Arc<IoCounters>,
     pub(crate) was_empty: bool,
 }
@@ -54,15 +55,13 @@ impl DerivedDatabase {
         }
         let directory = view.derived_directory()?;
         let lock = open_file(&directory, &format!("{name}.lock"))?;
-        rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).map_err(
-            |error| {
-                if error == rustix::io::Errno::WOULDBLOCK {
-                    DerivedDatabaseError::Busy
-                } else {
-                    io::Error::from(error).into()
-                }
-            },
-        )?;
+        let lock = ExclusiveFileLock::try_acquire(lock).map_err(|error| {
+            if error.kind() == io::ErrorKind::WouldBlock {
+                DerivedDatabaseError::Busy
+            } else {
+                DerivedDatabaseError::Io(error)
+            }
+        })?;
         let file = open_file(&directory, &format!("{name}.redb"))?;
         if reset {
             file.set_len(0)?;
@@ -184,6 +183,36 @@ fn open_file(directory: &File, name: &str) -> Result<File, DerivedDatabaseError>
 mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
+
+    #[test]
+    fn owner_drop_releases_its_lock_even_when_a_fork_inherited_the_description() {
+        let root = tempfile::tempdir().expect("root");
+        let journal = super::super::SessionEventLog::open(root.path(), "session").expect("journal");
+        let view = journal.read_view();
+        let owner =
+            DerivedDatabase::open(&view, "transcript", 1024 * 1024, 16 * 1024 * 1024, false)
+                .expect("owner");
+        // A duplicated descriptor shares exactly the flock description inherited
+        // across fork, including the interval before CLOEXEC can close the child FD.
+        let inherited = owner
+            .lock
+            .descriptor()
+            .try_clone()
+            .expect("inherited description");
+        drop(owner);
+        let replacement =
+            DerivedDatabase::open(&view, "transcript", 1024 * 1024, 16 * 1024 * 1024, false)
+                .expect("owner settlement must release the lock before close");
+        drop(inherited);
+        assert!(
+            matches!(
+                DerivedDatabase::open(&view, "transcript", 1024 * 1024, 16 * 1024 * 1024, false),
+                Err(DerivedDatabaseError::Busy)
+            ),
+            "closing inherited descriptors cannot release the replacement's lock"
+        );
+        drop(replacement);
+    }
 
     #[test]
     fn derived_database_owners_have_independent_locks_and_bounded_extents() {

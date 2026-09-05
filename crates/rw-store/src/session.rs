@@ -4,6 +4,8 @@ mod accounting;
 mod derived_database;
 mod error;
 mod event_log;
+#[cfg(unix)]
+mod exclusive_lock;
 mod index;
 /// Segmented journal storage and bounded read views.
 pub mod journal;

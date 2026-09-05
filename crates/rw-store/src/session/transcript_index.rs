@@ -2,6 +2,7 @@
 
 use super::{
     derived_database::{DerivedDatabase, DerivedDatabaseError, IoCounters},
+    exclusive_lock::ExclusiveFileLock,
     journal::{JournalAdvance, JournalPrefixIdentity, JournalReadView},
 };
 use redb::{
@@ -171,7 +172,7 @@ pub struct TranscriptIndex {
     database: Database,
     counters: Arc<IoCounters>,
     directory: File,
-    _lock: File,
+    _lock: ExclusiveFileLock,
 }
 
 #[derive(Clone, Copy)]
