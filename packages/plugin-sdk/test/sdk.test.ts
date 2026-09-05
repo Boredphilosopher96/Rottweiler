@@ -160,6 +160,7 @@ describe("wire protocol", () => {
       injectMessage: "session/inject_message",
       setStatus: "session/set_status",
       notify: "ui/notify",
+      publishPanel: "ui/publish_panel",
       shutdown: "shutdown",
       exit: "exit",
     })

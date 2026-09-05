@@ -17,7 +17,7 @@ pub struct ExtensionContextRead {
     #[schemars(schema_with = "crate::schema::required_nullable::<SequenceId>")]
     pub expected_sequence: Option<SequenceId>,
     #[serde(deserialize_with = "Option::deserialize")]
-    #[schemars(schema_with = "crate::schema::required_nullable::<ContextItemId>")]
+    #[schemars(schema_with = "nullable_name_schema")]
     pub after_item_id: Option<ContextItemId>,
 }
 
@@ -37,6 +37,7 @@ pub enum ExtensionContextSource {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, TS, Allocation)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionContextItem {
+    #[schemars(schema_with = "name_schema")]
     pub item_id: ContextItemId,
     pub kind: ContextItemKind,
     pub source: ExtensionContextSource,
@@ -58,7 +59,7 @@ pub enum ExtensionContextPage {
         #[schemars(length(max = 128))]
         items: Vec<ExtensionContextItem>,
         #[serde(deserialize_with = "Option::deserialize")]
-        #[schemars(schema_with = "crate::schema::required_nullable::<ContextItemId>")]
+        #[schemars(schema_with = "nullable_name_schema")]
         next_after_item_id: Option<ContextItemId>,
     },
 }
@@ -67,18 +68,22 @@ pub enum ExtensionContextPage {
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExtensionControl {
     PinContext {
+        #[schemars(schema_with = "name_schema")]
         item_id: ContextItemId,
     },
     EvictContext {
+        #[schemars(schema_with = "name_schema")]
         item_id: ContextItemId,
     },
     SelectMode {
+        #[schemars(schema_with = "name_schema")]
         mode: ModeId,
     },
     SelectModel {
+        #[schemars(schema_with = "name_schema")]
         model: ModelAlias,
         #[serde(deserialize_with = "Option::deserialize")]
-        #[schemars(schema_with = "crate::schema::required_nullable::<String>")]
+        #[schemars(schema_with = "nullable_name_schema")]
         provider: Option<String>,
     },
 }
@@ -116,4 +121,19 @@ impl ExtensionControl {
             }
         }
     }
+}
+
+#[allow(clippy::expect_used)]
+fn name_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    serde_json::json!({"type":"string", "minLength":1, "maxLength":MAX_CONTROL_NAME_BYTES,
+        "x-rw-max-utf8-bytes":MAX_CONTROL_NAME_BYTES,
+        "pattern":r"^[^\u0000-\u001f\u007f-\u009f]+$"})
+    .try_into()
+    .expect("name schema")
+}
+#[allow(clippy::expect_used)]
+fn nullable_name_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    serde_json::json!({"anyOf":[name_schema(generator), {"type":"null"}]})
+        .try_into()
+        .expect("nullable name schema")
 }

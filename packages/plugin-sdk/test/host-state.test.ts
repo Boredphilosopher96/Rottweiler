@@ -64,6 +64,7 @@ test("typed controls preserve pending outcomes and reject implicit authority", a
   expect(await session.control(operation)).toEqual({ outcome: "context_choice_required", question_id: "model-switch-1" })
   expect(calls).toEqual([[RPC_METHODS.sessionControl, operation]])
   await expect(session.control({ ...operation, session_id: "other" } as typeof operation)).rejects.toThrow("invalid session control")
+  await expect(session.control({ action: "select_mode", mode: "界".repeat(100) })).rejects.toThrow("invalid session control")
   expect(calls.length).toBe(1)
   const read = { expected_sequence: null, after_item_id: null }
   const badPage = { outcome: "ready", sequence: null, items: [], next_after_item_id: null, prompt: "secret" }
