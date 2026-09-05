@@ -158,6 +158,31 @@
               "$ref": "#/$defs/SessionId"
             },
             "snapshot": {
+              "$ref": "#/$defs/SessionStateSnapshot"
+            },
+            "type": {
+              "type": "string",
+              "const": "session_state_ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "snapshot"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "snapshot": {
               "$ref": "#/$defs/SessionControlsSnapshot"
             },
             "type": {
@@ -3009,6 +3034,310 @@
       "description": "Monotonic per-session sequence encoded as a decimal string on the wire.",
       "type": "string"
     },
+    "SessionStateSnapshot": {
+      "type": "object",
+      "properties": {
+        "through": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "driver_client_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ClientId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model_alias": {
+          "$ref": "#/$defs/ModelAlias"
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "thinking": {
+          "$ref": "#/$defs/ThinkingLevel"
+        },
+        "mode_id": {
+          "$ref": "#/$defs/ModeId"
+        },
+        "active_turn": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionActiveTurn"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "completed_turns": {
+          "type": "string"
+        },
+        "shell": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionShellState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "compaction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionCompactionState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "queued_messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SessionQueuedPreview"
+          },
+          "maxItems": 128
+        },
+        "budget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionBudgetState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "through",
+        "driver_client_id",
+        "title",
+        "model_alias",
+        "provider",
+        "thinking",
+        "mode_id",
+        "active_turn",
+        "completed_turns",
+        "shell",
+        "compaction",
+        "queued_messages",
+        "budget"
+      ]
+    },
+    "ModelAlias": {
+      "description": "Provider-blind model alias resolved by the engine router.",
+      "type": "string"
+    },
+    "ThinkingLevel": {
+      "description": "Provider-neutral thinking effort selected by a model alias or session.",
+      "oneOf": [
+        {
+          "description": "Do not request provider reasoning output.",
+          "type": "string",
+          "const": "off"
+        },
+        {
+          "description": "Prefer the provider's least expensive reasoning mode.",
+          "type": "string",
+          "const": "low"
+        },
+        {
+          "description": "Prefer a balanced reasoning mode.",
+          "type": "string",
+          "const": "medium"
+        },
+        {
+          "description": "Prefer the provider's strongest reasoning mode.",
+          "type": "string",
+          "const": "high"
+        }
+      ]
+    },
+    "ModeId": {
+      "description": "Open identifier of a built-in or extension-provided mode.",
+      "type": "string"
+    },
+    "SessionActiveTurn": {
+      "type": "object",
+      "properties": {
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "started": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "turn_id",
+        "started"
+      ]
+    },
+    "TurnId": {
+      "description": "Stable identifier of a conversation turn.",
+      "type": "string"
+    },
+    "SessionShellState": {
+      "type": "object",
+      "properties": {
+        "shell_id": {
+          "$ref": "#/$defs/ShellId"
+        },
+        "command_preview": {
+          "type": "string",
+          "maxLength": 1024,
+          "x-rw-max-utf8-bytes": 1024
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "shell_id",
+        "command_preview",
+        "truncated"
+      ]
+    },
+    "ShellId": {
+      "description": "Engine-generated identifier of one foreground user shell.",
+      "type": "string"
+    },
+    "SessionCompactionState": {
+      "type": "object",
+      "properties": {
+        "summary_turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "started": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "attempt": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "summary_turn_id",
+        "started",
+        "attempt"
+      ]
+    },
+    "SessionQueuedPreview": {
+      "type": "object",
+      "properties": {
+        "position": {
+          "type": "string"
+        },
+        "preview": {
+          "type": "string",
+          "maxLength": 1024,
+          "x-rw-max-utf8-bytes": 1024
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "position",
+        "preview",
+        "truncated"
+      ]
+    },
+    "SessionBudgetState": {
+      "type": "object",
+      "properties": {
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "level": {
+          "$ref": "#/$defs/BudgetLevel"
+        },
+        "scope": {
+          "$ref": "#/$defs/BudgetScope"
+        },
+        "unit": {
+          "$ref": "#/$defs/BudgetUnit"
+        },
+        "current": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "turn_id",
+        "level",
+        "scope",
+        "unit",
+        "current",
+        "limit"
+      ]
+    },
+    "BudgetLevel": {
+      "description": "Severity of a budget transition.",
+      "type": "string",
+      "enum": [
+        "warning",
+        "spend_rate_alarm",
+        "hard_cap"
+      ]
+    },
+    "BudgetScope": {
+      "description": "Scope whose spend triggered a budget transition.",
+      "type": "string",
+      "enum": [
+        "session",
+        "daily",
+        "trailing_minute"
+      ]
+    },
+    "BudgetUnit": {
+      "description": "Billing unit evaluated by a budget guardrail.",
+      "type": "string",
+      "enum": [
+        "micros_usd",
+        "ai_credit_micros",
+        "tokens"
+      ]
+    },
     "SessionControlsSnapshot": {
       "type": "object",
       "properties": {
@@ -3092,10 +3421,6 @@
     },
     "QuestionId": {
       "description": "Stable identifier of an interactive question.",
-      "type": "string"
-    },
-    "TurnId": {
-      "description": "Stable identifier of a conversation turn.",
       "type": "string"
     },
     "Question": {
@@ -3219,10 +3544,6 @@
       "required": [
         "model"
       ]
-    },
-    "ModelAlias": {
-      "description": "Provider-blind model alias resolved by the engine router.",
-      "type": "string"
     },
     "SessionApproval": {
       "type": "object",
@@ -6252,10 +6573,6 @@
         "current"
       ]
     },
-    "ModeId": {
-      "description": "Open identifier of a built-in or extension-provided mode.",
-      "type": "string"
-    },
     "ModelDescriptor": {
       "description": "One concrete provider/model discovered from a live authenticated catalog.",
       "type": "object",
@@ -7332,33 +7649,6 @@
         "cost"
       ]
     },
-    "BudgetLevel": {
-      "description": "Severity of a budget transition.",
-      "type": "string",
-      "enum": [
-        "warning",
-        "spend_rate_alarm",
-        "hard_cap"
-      ]
-    },
-    "BudgetScope": {
-      "description": "Scope whose spend triggered a budget transition.",
-      "type": "string",
-      "enum": [
-        "session",
-        "daily",
-        "trailing_minute"
-      ]
-    },
-    "BudgetUnit": {
-      "description": "Billing unit evaluated by a budget guardrail.",
-      "type": "string",
-      "enum": [
-        "micros_usd",
-        "ai_credit_micros",
-        "tokens"
-      ]
-    },
     "CompactionReason": {
       "description": "Why a context compaction began.",
       "type": "string",
@@ -7488,35 +7778,6 @@
         "approve",
         "reject"
       ]
-    },
-    "ThinkingLevel": {
-      "description": "Provider-neutral thinking effort selected by a model alias or session.",
-      "oneOf": [
-        {
-          "description": "Do not request provider reasoning output.",
-          "type": "string",
-          "const": "off"
-        },
-        {
-          "description": "Prefer the provider's least expensive reasoning mode.",
-          "type": "string",
-          "const": "low"
-        },
-        {
-          "description": "Prefer a balanced reasoning mode.",
-          "type": "string",
-          "const": "medium"
-        },
-        {
-          "description": "Prefer the provider's strongest reasoning mode.",
-          "type": "string",
-          "const": "high"
-        }
-      ]
-    },
-    "ShellId": {
-      "description": "Engine-generated identifier of one foreground user shell.",
-      "type": "string"
     }
   }
 }

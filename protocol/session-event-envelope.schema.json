@@ -80,6 +80,7 @@
                   "session_replay_completed",
                   "session_review_ready",
                   "session_review_updated",
+                  "session_state_ready",
                   "sessions_listed",
                   "sessions_search_ready",
                   "settings_listed",
