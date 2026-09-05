@@ -159,6 +159,31 @@
           "$ref": "#/$defs/SessionId"
         },
         "result": {
+          "$ref": "#/$defs/SessionChildrenResult"
+        },
+        "type": {
+          "type": "string",
+          "const": "session_children_ready"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "result"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "result": {
           "$ref": "#/$defs/TodoReadResult"
         },
         "type": {
@@ -4305,6 +4330,134 @@
         "blocked"
       ]
     },
+    "SessionChildrenResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "snapshot": {
+              "$ref": "#/$defs/SessionChildrenSnapshot"
+            },
+            "type": {
+              "type": "string",
+              "const": "ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "snapshot"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "through": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SequenceId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SequenceId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "catching_up"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "through",
+            "target"
+          ]
+        }
+      ]
+    },
+    "SessionChildrenSnapshot": {
+      "type": "object",
+      "properties": {
+        "through": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "children": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SessionChildState"
+          },
+          "maxItems": 256
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "through",
+        "children"
+      ],
+      "x-rw-max-json-bytes": 2097152,
+      "x-rw-item-budget": {
+        "array": "children",
+        "identity": "subagent_id",
+        "fields": [],
+        "maxUtf8Bytes": 0
+      }
+    },
+    "SessionChildState": {
+      "type": "object",
+      "properties": {
+        "subagent_id": {
+          "$ref": "#/$defs/SubagentId"
+        },
+        "child_session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "spawned": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "spawned_turn": {
+          "type": "string"
+        },
+        "task_preview": {
+          "type": "string",
+          "maxLength": 1024,
+          "x-rw-max-utf8-bytes": 1024
+        },
+        "task_truncated": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "subagent_id",
+        "child_session_id",
+        "spawned",
+        "spawned_turn",
+        "task_preview",
+        "task_truncated"
+      ]
+    },
+    "SubagentId": {
+      "description": "Stable identifier of a child agent session.",
+      "type": "string"
+    },
     "TodoReadResult": {
       "description": "One bounded read either returns an exact snapshot or reports indexed progress.",
       "oneOf": [
@@ -4730,9 +4883,6 @@
         "turn_id": {
           "$ref": "#/$defs/TurnId"
         },
-        "tool_call_id": {
-          "$ref": "#/$defs/ToolCallId"
-        },
         "invocation_id": {
           "$ref": "#/$defs/ToolInvocationId"
         },
@@ -4765,7 +4915,6 @@
       "required": [
         "source",
         "turn_id",
-        "tool_call_id",
         "invocation_id",
         "name",
         "call_index",
@@ -5637,10 +5786,6 @@
         "title",
         "source"
       ]
-    },
-    "SubagentId": {
-      "description": "Stable identifier of a child agent session.",
-      "type": "string"
     },
     "TranscriptSubagentStatus": {
       "description": "Child lifecycle without retaining its full historical event projection.",

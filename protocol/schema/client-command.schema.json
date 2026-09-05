@@ -126,6 +126,31 @@
         },
         "type": {
           "type": "string",
+          "const": "read_session_children"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "scope"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "scope": {
+          "$ref": "#/$defs/SessionReadScope"
+        },
+        "type": {
+          "type": "string",
           "const": "get_todos"
         }
       },
