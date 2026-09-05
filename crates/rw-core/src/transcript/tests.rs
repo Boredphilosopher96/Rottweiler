@@ -82,8 +82,7 @@ fn commit(
     let view = journal.read_view();
     index
         .apply(
-            before.prefix,
-            &view,
+            &view.prove_advance(before.prefix).expect("transition"),
             before.generation,
             &serde_json::to_vec(&next).expect("checkpoint"),
             false,

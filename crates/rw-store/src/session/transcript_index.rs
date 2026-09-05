@@ -2,7 +2,7 @@
 
 use super::{
     derived_database::{DerivedDatabase, DerivedDatabaseError, IoCounters},
-    journal::{JournalPrefixIdentity, JournalReadView},
+    journal::{JournalAdvance, JournalPrefixIdentity, JournalReadView},
 };
 use redb::{
     Database, ReadableDatabase as _, ReadableTable as _, ReadableTableMetadata as _,
@@ -262,14 +262,15 @@ impl TranscriptIndex {
     /// Fails for stale checkpoints, invalid ordering, limits, or storage errors.
     pub fn apply(
         &mut self,
-        expected: JournalPrefixIdentity,
-        next: &JournalReadView,
+        advance: &JournalAdvance,
         generation: u64,
         state: &[u8],
         rebuilding: bool,
         mutations: &[TranscriptIndexMutation],
     ) -> Result<(), TranscriptIndexError> {
         use std::os::unix::fs::MetadataExt as _;
+        let expected = advance.previous();
+        let next = advance.next();
         let incoming = next.derived_directory()?.metadata()?;
         let owned = self.directory.metadata()?;
         if incoming.dev() != owned.dev() || incoming.ino() != owned.ino() {
@@ -281,9 +282,6 @@ impl TranscriptIndex {
             || generation < head.generation
         {
             return Err(TranscriptIndexError::Stale);
-        }
-        if next.prefix_identity() != expected {
-            next.at_prefix(expected)?;
         }
         if state.len() > MAX_CHECKPOINT_BYTES || mutations.len() > MAX_BATCH_ROWS {
             return Err(TranscriptIndexError::Limit("batch/checkpoint"));

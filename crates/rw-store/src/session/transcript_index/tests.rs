@@ -23,8 +23,9 @@ fn populate(index: &mut TranscriptIndex, view: &JournalReadView, count: u64) {
         let head = index.head().expect("head");
         index
             .apply(
-                head.prefix,
-                view,
+                &(view)
+                    .prove_advance(head.prefix)
+                    .expect("validated transition"),
                 0,
                 b"{}",
                 start + (MAX_BATCH_ROWS as u64) < count,
@@ -48,7 +49,15 @@ fn rejected_batch_rolls_back_rows_and_checkpoint_together() {
         TranscriptIndexMutation::Put(row(7)),
     ];
     assert!(matches!(
-        index.apply(before.prefix, &view, 0, b"uncommitted", false, &mutations),
+        index.apply(
+            &(view)
+                .prove_advance(before.prefix)
+                .expect("validated transition"),
+            0,
+            b"uncommitted",
+            false,
+            &mutations
+        ),
         Err(TranscriptIndexError::Invalid("non-dense append"))
     ));
     assert_eq!(index.head().expect("unchanged head"), before);
@@ -117,8 +126,9 @@ fn qualify_10k_100k_index_work() {
             let started = Instant::now();
             index
                 .apply(
-                    view.prefix_identity(),
-                    &updated_view,
+                    &(updated_view)
+                        .prove_advance(view.prefix_identity())
+                        .expect("validated transition"),
                     0,
                     b"{}",
                     false,
@@ -184,8 +194,9 @@ fn old_materialized_pages_keep_their_revision_after_late_update() {
     revised.payload = b"finished tool output".to_vec();
     index
         .apply(
-            old.prefix_identity(),
-            &next,
+            &(next)
+                .prove_advance(old.prefix_identity())
+                .expect("validated transition"),
             0,
             b"{}",
             false,
@@ -199,8 +210,9 @@ fn old_materialized_pages_keep_their_revision_after_late_update() {
     unversioned.revision = SequenceId(5);
     assert!(matches!(
         index.apply(
-            next.prefix_identity(),
-            &next,
+            &(next)
+                .prove_advance(next.prefix_identity())
+                .expect("validated transition"),
             0,
             b"{}",
             false,
@@ -211,7 +223,15 @@ fn old_materialized_pages_keep_their_revision_after_late_update() {
         ))
     ));
     assert!(matches!(
-        index.apply(old.prefix_identity(), &next, 0, b"{}", false, &[]),
+        index.apply(
+            &(next)
+                .prove_advance(old.prefix_identity())
+                .expect("validated transition"),
+            0,
+            b"{}",
+            false,
+            &[]
+        ),
         Err(TranscriptIndexError::Stale)
     ));
 }
@@ -259,8 +279,9 @@ fn allocation_limits_fail_before_mutation_and_index_lock_is_independent() {
     oversized.payload = vec![0; MAX_ROW_BYTES + 1];
     assert!(matches!(
         index.apply(
-            JournalPrefixIdentity::empty(),
-            &view,
+            &(view)
+                .prove_advance(JournalPrefixIdentity::empty())
+                .expect("validated transition"),
             0,
             b"",
             false,
@@ -293,8 +314,9 @@ fn rebuild_hides_partial_order_and_only_publishes_dense_ordinals() {
     populate(&mut index, &view, 5);
     index
         .apply(
-            view.prefix_identity(),
-            &view,
+            &(view)
+                .prove_advance(view.prefix_identity())
+                .expect("validated transition"),
             1,
             b"repacking",
             true,
@@ -307,8 +329,9 @@ fn rebuild_hides_partial_order_and_only_publishes_dense_ordinals() {
     ));
     index
         .apply(
-            view.prefix_identity(),
-            &view,
+            &(view)
+                .prove_advance(view.prefix_identity())
+                .expect("validated transition"),
             1,
             b"repacking",
             true,
@@ -325,7 +348,15 @@ fn rebuild_hides_partial_order_and_only_publishes_dense_ordinals() {
         )
         .expect("bounded moves");
     index
-        .apply(view.prefix_identity(), &view, 1, b"{}", false, &[])
+        .apply(
+            &(view)
+                .prove_advance(view.prefix_identity())
+                .expect("validated transition"),
+            1,
+            b"{}",
+            false,
+            &[],
+        )
         .expect("publish");
     let page = index.page(0, 5, MAX_PAGE_BYTES).expect("page");
     assert_eq!(page.head.total_rows, 4);
@@ -443,8 +474,9 @@ fn maximum_body_batch_has_bounded_writes_and_every_byte_is_page_reachable() {
         .collect::<Vec<_>>();
     assert!(matches!(
         index.apply(
-            JournalPrefixIdentity::empty(),
-            &view,
+            &(view)
+                .prove_advance(JournalPrefixIdentity::empty())
+                .expect("validated transition"),
             0,
             b"",
             false,
@@ -457,8 +489,9 @@ fn maximum_body_batch_has_bounded_writes_and_every_byte_is_page_reachable() {
         let head = index.head().expect("head");
         index
             .apply(
-                head.prefix,
-                &view,
+                &(view)
+                    .prove_advance(head.prefix)
+                    .expect("validated transition"),
                 0,
                 &vec![0; MAX_CHECKPOINT_BYTES],
                 batch_index < 3,
@@ -489,7 +522,15 @@ fn maximum_body_batch_has_bounded_writes_and_every_byte_is_page_reachable() {
     let rejected = vec![TranscriptIndexMutation::Delete("missing".into()); MAX_BATCH_ROWS + 1];
     let before = index.io_metrics();
     assert!(matches!(
-        index.apply(view.prefix_identity(), &view, 0, b"", true, &rejected),
+        index.apply(
+            &(view)
+                .prove_advance(view.prefix_identity())
+                .expect("validated transition"),
+            0,
+            b"",
+            true,
+            &rejected
+        ),
         Err(TranscriptIndexError::Limit("batch/checkpoint"))
     ));
     assert_eq!(index.io_metrics().bytes_written, before.bytes_written);
@@ -509,8 +550,9 @@ fn identical_prefixes_cannot_publish_into_another_sessions_index() {
     );
     assert!(matches!(
         index.apply(
-            original.prefix,
-            &second.read_view(),
+            &(second.read_view())
+                .prove_advance(original.prefix)
+                .expect("validated transition"),
             0,
             b"foreign",
             false,
@@ -530,8 +572,9 @@ fn identical_prefixes_cannot_publish_into_another_sessions_index() {
     );
     assert!(matches!(
         index.apply(
-            original.prefix,
-            &second.read_view(),
+            &(second.read_view())
+                .prove_advance(original.prefix)
+                .expect("validated transition"),
             0,
             b"foreign",
             false,
@@ -542,8 +585,9 @@ fn identical_prefixes_cannot_publish_into_another_sessions_index() {
     assert_eq!(index.head().expect("unchanged head"), original);
     index
         .apply(
-            original.prefix,
-            &first.read_view(),
+            &(first.read_view())
+                .prove_advance(original.prefix)
+                .expect("validated transition"),
             0,
             b"own",
             false,
@@ -552,7 +596,15 @@ fn identical_prefixes_cannot_publish_into_another_sessions_index() {
         .expect("own journal");
     let head = index.head().expect("head");
     assert!(matches!(
-        index.apply(head.prefix, &second.read_view(), 0, b"foreign", false, &[]),
+        index.apply(
+            &(second.read_view())
+                .prove_advance(head.prefix)
+                .expect("validated transition"),
+            0,
+            b"foreign",
+            false,
+            &[]
+        ),
         Err(TranscriptIndexError::Invalid("foreign journal"))
     ));
     assert_eq!(index.head().expect("unchanged head"), head);
@@ -576,8 +628,7 @@ fn binding_revisions_and_rewind_indexes_follow_atomic_row_changes() {
     updated.payload = b"finished tool".to_vec();
     index
         .apply(
-            prefix,
-            &view,
+            &(view).prove_advance(prefix).expect("validated transition"),
             0,
             b"{}",
             false,
@@ -606,8 +657,7 @@ fn binding_revisions_and_rewind_indexes_follow_atomic_row_changes() {
     updated.payload = b"late diff".to_vec();
     index
         .apply(
-            prefix,
-            &view,
+            &(view).prove_advance(prefix).expect("validated transition"),
             0,
             b"{}",
             false,
@@ -627,8 +677,7 @@ fn binding_revisions_and_rewind_indexes_follow_atomic_row_changes() {
     );
     index
         .apply(
-            prefix,
-            &view,
+            &(view).prove_advance(prefix).expect("validated transition"),
             1,
             b"repair",
             true,
@@ -658,8 +707,7 @@ fn binding_revisions_and_rewind_indexes_follow_atomic_row_changes() {
     );
     index
         .apply(
-            prefix,
-            &view,
+            &(view).prove_advance(prefix).expect("validated transition"),
             1,
             b"{}",
             false,
@@ -731,8 +779,7 @@ fn binding_revisions_and_rewind_indexes_follow_atomic_row_changes() {
     );
     index
         .apply(
-            prefix,
-            &view,
+            &(view).prove_advance(prefix).expect("validated transition"),
             2,
             b"repair",
             true,
@@ -741,8 +788,7 @@ fn binding_revisions_and_rewind_indexes_follow_atomic_row_changes() {
         .expect("delete bound row");
     index
         .apply(
-            prefix,
-            &view,
+            &(view).prove_advance(prefix).expect("validated transition"),
             2,
             b"{}",
             false,
@@ -793,7 +839,13 @@ fn invalidation_overflow_and_invalid_binding_roll_back_atomically() {
         })
         .collect::<Vec<_>>();
     index
-        .apply(prefix, &view, 0, b"{}", false, &updates)
+        .apply(
+            &(view).prove_advance(prefix).expect("validated transition"),
+            0,
+            b"{}",
+            false,
+            &updates,
+        )
         .expect("updates");
     assert!(
         index
@@ -812,8 +864,7 @@ fn invalidation_overflow_and_invalid_binding_roll_back_atomically() {
     let before = index.head().expect("head");
     assert!(matches!(
         index.apply(
-            prefix,
-            &view,
+            &(view).prove_advance(prefix).expect("validated transition"),
             0,
             b"bad",
             false,
@@ -838,8 +889,7 @@ fn invalidation_overflow_and_invalid_binding_roll_back_atomically() {
     duplicate.source = SequenceId(0);
     assert!(matches!(
         index.apply(
-            prefix,
-            &view,
+            &(view).prove_advance(prefix).expect("validated transition"),
             0,
             b"{}",
             false,

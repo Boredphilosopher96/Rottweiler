@@ -1,0 +1,47 @@
+{
+  "scope": "Journal-owned bounded page/prefix transition evidence adopted by semantic transcript catch-up; not bounded cold actor recovery completion.",
+  "runtime": {
+    "rust": "1.97.1 (8bab26f4f 2026-07-14)",
+    "platform": "macOS aarch64",
+    "cargo_target": "/tmp/rw-storage-target"
+  },
+  "contracts": {
+    "max_proof_events": 256,
+    "max_proof_segment_descriptors": 8,
+    "transition": "Opaque JournalAdvance proves an expected prefix and exact target read view. TranscriptIndex checks directory identity and stored head before applying.",
+    "integrity": "Proof reuses bytes checked in the page pass. Later payload reads still verify checksums; proof does not rehash unrelated historical segments."
+  },
+  "checks": [
+    {
+      "command": "CARGO_TARGET_DIR=/tmp/rw-storage-target cargo test -p rw-store -p rw-core --lib",
+      "result": "core330 passed/1 ignored; store170 passed/2 ignored; child-process fixture1 passed",
+      "log": "/tmp/rw-proof-final-tests.log"
+    },
+    {
+      "command": "CARGO_TARGET_DIR=/tmp/rw-storage-target cargo clippy -p rw-store -p rw-core --all-targets -- -D warnings",
+      "result": "pass",
+      "log": "/tmp/rw-proof-clippy-final.log"
+    },
+    {
+      "command": "cargo fmt --all; git diff --check",
+      "result": "pass"
+    }
+  ],
+  "regressions": [
+    "Every initial and returned cursor can derive an exact prefix; mid-page admission is preserved.",
+    "Reject forged identities, backwards transitions and cursors outside the page.",
+    "Empty-tail proof performs zero payload I/O and preserves the full readable origin.",
+    "Proof event/descriptor caps return truthful has_more metadata.",
+    "Proof keeps boundary descriptors through rotation; later corruption is rejected on subsequent reads.",
+    "Existing cross-session identical-prefix rejection, stale publication and transaction rollback tests remain green."
+  ],
+  "qualification": {
+    "profile": "debug diagnostic only",
+    "command": "/private/tmp/rw-storage-target/debug/deps/rw_core-ea6a213a32104096 transcript::tests::qualify_semantic_projection_10k --exact --ignored --nocapture",
+    "output": "\nrunning 1 test\n{\"profile\":\"debug\",\"events\":10000,\"canonical_bytes\":7786670,\"batches\":157,\"build_ms\":7497.168458,\"index_bytes_read\":90432,\"index_bytes_written\":16493824,\"index_syncs\":168}\ntest transcript::tests::qualify_semantic_projection_10k ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 330 filtered out; finished in 7.91s\n\n"
+  },
+  "limits": [
+    "No release-performance, Linux, full-engine cold-recovery or eight-hour soak claim.",
+    "Normal page reads still check the touched segment; the optimization eliminates additional prefix validation payload passes."
+  ]
+}

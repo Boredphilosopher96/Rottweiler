@@ -90,21 +90,16 @@ impl TranscriptProjector {
             return self.advance_rewind(view, checkpoint);
         }
         let before = self.index.head()?;
-        let limits = SessionEventPageLimits::default();
-        let limits = SessionEventPageLimits {
-            max_page_events: EVENTS_PER_BATCH,
-            max_page_bytes: limits.max_line_bytes as u64 + 1,
-            max_scan_bytes: limits.max_line_bytes as u64 * 2,
-            ..limits
-        };
+        let limits = projection_page_limits();
         let after = checkpoint
             .state
             .next_sequence
             .checked_sub(1)
             .map(SequenceId);
-        let page = view
-            .page::<EngineEvent>(after, limits)
+        let verified = view
+            .verified_page::<EngineEvent>(after, limits)
             .map_err(TranscriptIndexError::from)?;
+        let page = &verified.page;
         let mut overlay = BatchRows {
             index: &self.index,
             rows: BTreeMap::new(),
@@ -169,19 +164,21 @@ impl TranscriptProjector {
                 .next_sequence
                 .checked_sub(1)
                 .map(SequenceId);
-            let applied = view
-                .prefix_through(applied_cursor)
+            let advance = verified
+                .proof
+                .advance(before.prefix, applied_cursor)
                 .map_err(TranscriptIndexError::from)?;
             self.index.apply(
-                before.prefix,
-                &applied,
+                &advance,
                 before.generation,
                 &serde_json::to_vec(&checkpoint)?,
                 false,
                 &mutations,
             )?;
         } else {
-            view.at_prefix(before.prefix)
+            verified
+                .proof
+                .verify_prefix(before.prefix)
                 .map_err(TranscriptIndexError::from)?;
         }
         self.progress(view, interpreted)
@@ -206,9 +203,9 @@ impl TranscriptProjector {
             .checked_add(1)
             .ok_or(TranscriptProjectionError::Invalid("generation overflow"))?;
         self.index.apply(
-            before.prefix,
             &view
                 .at_prefix(before.prefix)
+                .and_then(|prefix| prefix.prove_advance(before.prefix))
                 .map_err(TranscriptIndexError::from)?,
             generation,
             &serde_json::to_vec(&checkpoint)?,
@@ -342,8 +339,9 @@ impl TranscriptProjector {
                 .map_err(TranscriptIndexError::from)?
         };
         self.index.apply(
-            before.prefix,
-            &applied,
+            &applied
+                .prove_advance(before.prefix)
+                .map_err(TranscriptIndexError::from)?,
             before.generation,
             &serde_json::to_vec(&checkpoint)?,
             !complete,
@@ -378,5 +376,15 @@ impl TranscriptRowLookup for BatchRows<'_> {
         }
         let prior = self.index.bound_row(binding)?;
         Ok(prior.map(|row| self.rows.get(&row.key).cloned().unwrap_or(row)))
+    }
+}
+
+fn projection_page_limits() -> SessionEventPageLimits {
+    let limits = SessionEventPageLimits::default();
+    SessionEventPageLimits {
+        max_page_events: EVENTS_PER_BATCH,
+        max_page_bytes: limits.max_line_bytes as u64 + 1,
+        max_scan_bytes: limits.max_line_bytes as u64 * 2,
+        ..limits
     }
 }
