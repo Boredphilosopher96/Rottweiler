@@ -19,6 +19,7 @@ pub use read::{
 };
 mod state;
 mod window;
+mod workspace;
 pub use projector::{CanonicalRecovery, RecoveryProgress};
 use rw_store::session::recovery_index::RecoveryIndexError;
 pub use state::{
@@ -27,6 +28,7 @@ pub use state::{
 };
 use thiserror::Error;
 pub use window::RecoveryBoundary;
+pub use workspace::WorkspaceBootstrap;
 
 /// A canonical recovery operation cannot safely continue.
 #[derive(Debug, Error)]
@@ -60,3 +62,6 @@ mod control_tests;
 
 #[cfg(test)]
 mod indexed_read_tests;
+
+#[cfg(test)]
+mod workspace_tests;

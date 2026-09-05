@@ -253,34 +253,12 @@ pub(super) fn reduce(
         PendingEvent::WorkspaceRootsChanged {
             generation, roots, ..
         } => {
-            let control = &head.control;
-            if generation != control.workspace_generation.saturating_add(1)
-                || roots.is_empty()
-                || roots.iter().enumerate().any(|(index, root)| {
-                    root.index as usize != index
-                        || root.machine_local
-                        || root.path != format!("@root/{index}")
-                })
-                || (control.workspace_root_count > 0
-                    && roots.len() != control.workspace_root_count + 1)
-            {
-                return Err(RecoveryError::Invalid("workspace generation"));
-            }
-            let mut hash = blake3::Hasher::new();
-            for (index, root) in roots.iter().enumerate() {
-                if index == control.workspace_root_count
-                    && *hash.finalize().as_bytes() != control.workspace_digest
-                {
-                    return Err(RecoveryError::Invalid("workspace prefix changed"));
-                }
-                let encoded = super::encoding::encode(root, 64 * 1024)?;
-                hash.update(&(encoded.len() as u64).to_le_bytes());
-                hash.update(&encoded);
-            }
-            head.control.workspace_digest = *hash.finalize().as_bytes();
-            head.control.workspace_root_count = roots.len();
-            head.control.workspace_generation = generation;
-            head.control.workspace = Some(sequence);
+            super::workspace::apply_workspace_generation(
+                &mut head.control,
+                sequence,
+                generation,
+                &roots,
+            )?;
         }
         PendingEvent::UserShellStateChanged {
             shell_id,

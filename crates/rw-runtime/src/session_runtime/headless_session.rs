@@ -182,15 +182,18 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
     let log = SessionEventLog::open(&storage_root, &session_id)
         .map_err(|error| miette!("session log could not open: {error}"))?;
     if resuming {
-        // This preliminary projection consumes only the non-policy workspace
-        // generation needed to restore the historical extension roots.
-        let committed = project_session_events(&load_session_events(&log)?)
-            .map_err(|error| miette!("session root projection failed: {error}"))?;
+        let source = log.read_view();
+        let committed = tokio::task::spawn_blocking(move || {
+            rw_core::recovery::WorkspaceBootstrap::read(&source)
+        })
+        .await
+        .map_err(|error| miette!("workspace bootstrap worker failed: {error}"))?
+        .map_err(|error| miette!("workspace bootstrap failed: {error}"))?;
         if let Some(generation) = preview_persisted_workspace_roots(
             &checkpoint_root(&storage_root, &workspace, &session_id),
             &workspace,
             &workspace_roots,
-            committed.workspace_generation,
+            committed.generation,
         )? {
             persisted_workspace_generation = generation.generation;
             workspace_roots = generation.roots;
