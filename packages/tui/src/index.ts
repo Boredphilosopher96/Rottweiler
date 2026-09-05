@@ -1,6 +1,7 @@
 import { writeStartupSplash } from "./startup"
 import { enhancedKeyboardOptions } from "./keybindings"
 import { observedResidentBytes } from "./process-memory"
+import type { ClientStage } from "./client-diagnostics"
 import {
   registerTreeSitterParsersLazily,
   stabilizeTreeSitterClient,
@@ -28,6 +29,12 @@ function emitStartupMarker(markerVariable: string, epochVariable?: string): void
 async function main(): Promise<void> {
   const diagnostics = process.env.ROTTWEILER_CLIENT_TIMINGS === "1"
     ? new (await import("./client-diagnostics")).ClientDiagnostics() : undefined
+  let startupStageStarted = diagnostics?.start() ?? 0
+  const finishStartupStage = (stage: ClientStage): void => {
+    if (diagnostics === undefined) return
+    diagnostics.finish(stage, startupStageStarted)
+    startupStageStarted = diagnostics.start()
+  }
   const expectedSupervisorPid = Number.parseInt(
     process.env.ROTTWEILER_SUPERVISOR_PID ?? "",
     10,
@@ -46,6 +53,7 @@ async function main(): Promise<void> {
   // apparent splash wait on the native backend it is meant to cover.
   const { loadOpenTui } = await import("./opentui")
   const openTui = await loadOpenTui()
+  finishStartupStage("startup_modules")
   const treeSitterSmokeReport = process.env.ROTTWEILER_TREE_SITTER_SMOKE_REPORT
   if (treeSitterSmokeReport !== undefined && treeSitterSmokeReport.length > 0) {
     const { runCompiledTreeSitterSmoke } = await import("./tree-sitter-smoke")
@@ -87,6 +95,7 @@ async function main(): Promise<void> {
     },
   })
 
+  finishStartupStage("startup_renderer")
   let resolveFirstFrame: (() => void) | undefined
   const firstFrame = new Promise<void>((resolve) => {
     resolveFirstFrame = resolve
@@ -104,10 +113,16 @@ async function main(): Promise<void> {
     if (!appMounted) return
     if (!transcriptPainted) {
       transcriptPainted = true
+      finishStartupStage("startup_paint")
       emitStartupMarker("ROTTWEILER_TRANSCRIPT_PAINTED_MARKER")
     }
     if (!composerAcceptedInput || interactiveMarked) return
     interactiveMarked = true
+    finishStartupStage("startup_input")
+    if (diagnostics !== undefined) {
+      const stages = diagnostics.snapshot().stages.filter(({ stage }) => stage.startsWith("startup_"))
+      process.stderr.write(`[rw-startup-timings] ${JSON.stringify(stages)}\n`)
+    }
     emitStartupMarker(
       "ROTTWEILER_INTERACTIVE_MARKER",
       "ROTTWEILER_INTERACTIVE_EPOCH",
@@ -121,6 +136,7 @@ async function main(): Promise<void> {
   })
   renderer.root.add(startupFrame)
   await firstFrame
+  finishStartupStage("startup_first_frame")
 
   const [appModule, platform, runtimeModule, stateModule] = await Promise.all([
     import("./app"),
@@ -128,6 +144,7 @@ async function main(): Promise<void> {
     import("./runtime"),
     import("./state"),
   ])
+  finishStartupStage("startup_app_modules")
   const {
     createDesktopNotificationAdapter,
     createExternalEditorAdapter,
@@ -172,6 +189,7 @@ async function main(): Promise<void> {
   const theme = configuredTheme === "system"
     ? systemThemeFor(terminalThemeMode)
     : themeByName(configuredTheme, terminalThemeMode) ?? themeByName("opencode", terminalThemeMode) ?? kennelTheme
+  finishStartupStage("startup_configuration")
   // OpenTUI workers require real filesystem paths. Bun embeds the selected
   // parser assets inside the executable; materialize a private, bounded runtime
   // after first paint and remove it when the renderer shuts down.
@@ -197,6 +215,7 @@ async function main(): Promise<void> {
       treeSitterParsers,
     ),
   )
+  finishStartupStage("startup_parser_assets")
   void treeSitterClient.initialize().catch(() => {
     // Markdown remains readable if a terminal cannot start a worker. OpenTUI
     // reports the parser failure; the application must stay usable.
@@ -277,6 +296,7 @@ async function main(): Promise<void> {
   startupFrame.destroy()
   renderer.root.add(app)
   appMounted = true
+  finishStartupStage("startup_app_mount")
   // OpenTUI's native allocator can retain released render graphs during very
   // long tool-heavy sessions. The host already supervises this private TUI and
   // replays durable state after an exit, so recycle before allocator residency

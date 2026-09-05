@@ -216,6 +216,13 @@ which detects sustained regressions without treating host-wide scheduler stalls
 as product latency. Every measured sample is reported; neither tier retries,
 trims, nor substitutes a relative baseline.
 
+`ROTTWEILER_CLIENT_TIMINGS=1` enables bounded, payload-free client diagnostics.
+The TUI emits startup stage durations when the composer accepts its first input,
+including native module loading, renderer setup, first frame, application imports,
+configuration, parser asset materialization, mounting, paint, and input delivery.
+These observations attribute latency; acceptance still measures the complete
+process-to-interactive interval with diagnostics disabled.
+
 The required pull-request and `main` TUI smoke applies the same distinction to
 input echo: it measures input dispatch plus render compute with process CPU time
 on shared hosted runners, excluding time while the process is descheduled, and
