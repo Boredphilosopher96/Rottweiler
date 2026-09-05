@@ -38,7 +38,7 @@ test("native tool row keeps identity, expansion and selection across final revis
       ...item, revision: "3", content: {
         ...item.content,
         status: {
-          type: "finished", is_error: false, output: {
+          type: "finished", presentation: null, is_error: false, output: {
             text: "hello", format: "text", complete: true,
             source: { sequence: "3", selector: { type: "tool_output" } }
           }

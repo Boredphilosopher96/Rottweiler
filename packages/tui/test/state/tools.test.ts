@@ -34,7 +34,7 @@ describe("state tools", () => {
       chunk: "running",
     })
     state = reduce(state, {
-      type: "tool_call_finished",
+      type: "tool_call_finished", presentation: null,
       meta: metaAt("4", "2026-01-01T12:00:05.000Z"),
       turn_id: "timed-turn",
       tool_call_id: "timed-tool",
@@ -94,7 +94,7 @@ describe("state tools", () => {
     expect(state.tools["late-tool"]?.timing).toEqual({ kind: "unknown" })
 
     state = reduce(state, {
-      type: "tool_call_finished",
+      type: "tool_call_finished", presentation: null,
       meta: metaAt("3", "2026-01-01T12:00:05.000Z"),
       turn_id: "late-turn",
       tool_call_id: "late-tool",
@@ -125,7 +125,7 @@ describe("state tools", () => {
         call_index: 0,
       })
       state = reduce(state, {
-        type: "tool_call_finished",
+        type: "tool_call_finished", presentation: null,
         meta: meta(`${index * 2 + 2}`),
         turn_id: `${index + 1}`,
         tool_call_id: toolCallId,
@@ -180,7 +180,7 @@ describe("state tools", () => {
       chunk: "src/lib.rs",
     })
     state = reduce(state, {
-      type: "tool_call_finished",
+      type: "tool_call_finished", presentation: null,
       meta: meta("3"),
       turn_id: "8",
       tool_call_id: "late-glob",
@@ -266,7 +266,7 @@ describe("state tools", () => {
       state = reduce(state, { type: "tool_call_started", meta: meta(sequence), turn_id: "1", tool_call_id: "reused", invocation_id: invocation, name: "read", args: {}, call_index: 0 })
     }
     state = reduce(state, { type: "tool_output_delta", meta: meta("3"), turn_id: "1", tool_call_id: "reused", invocation_id: "first", stream: "stdout", chunk: "stale output" })
-    state = reduce(state, { type: "tool_call_finished", meta: meta("4"), turn_id: "1", tool_call_id: "reused", invocation_id: "first", output: { type: "text", text: "stale result" }, is_error: false, call_index: 0 })
+    state = reduce(state, { type: "tool_call_finished", presentation: null, meta: meta("4"), turn_id: "1", tool_call_id: "reused", invocation_id: "first", output: { type: "text", text: "stale result" }, is_error: false, call_index: 0 })
     expect(state.tools.reused?.invocationId).toBe("second")
     expect(state.tools.reused?.status).toBe("running")
     expect(state.tools.reused?.chunks.count).toBe(0)
@@ -312,7 +312,7 @@ describe("state tools", () => {
       },
     })
     state = reduce(state, {
-      type: "tool_call_finished",
+      type: "tool_call_finished", presentation: null,
       meta: meta("3"),
       turn_id: "9",
       tool_call_id: "yolo-write",

@@ -279,7 +279,7 @@ describe("state queries", () => {
         chunk: "live",
       },
       {
-        type: "tool_call_finished",
+        type: "tool_call_finished", presentation: null,
         meta: meta("7"),
         turn_id: "4",
         tool_call_id: "tool-1",

@@ -55,7 +55,7 @@ describe("semantic history navigation", () => {
     final.revision = "3"
     items.push(final)
     app.handleEvent({
-      type: "tool_call_finished", meta: meta("3"), turn_id: "1", tool_call_id: tool.toolCallId,
+      type: "tool_call_finished", presentation: null, meta: meta("3"), turn_id: "1", tool_call_id: tool.toolCallId,
       invocation_id: tool.invocationId, output: { type: "text", text: "canary output" }, is_error: false, call_index: 0
     })
     await waitForHistory(setup, () => app.transcript.mountedCards.has("2"))

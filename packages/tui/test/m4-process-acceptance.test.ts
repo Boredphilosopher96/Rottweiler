@@ -172,7 +172,7 @@ describe("M4 transport and process acceptance", () => {
     })
 
     engine.emit({
-      type: "tool_call_finished",
+      type: "tool_call_finished", presentation: null,
       meta: meta(4),
       turn_id: "turn-approval",
       tool_call_id: "mutating-tool",

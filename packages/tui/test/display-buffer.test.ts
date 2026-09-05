@@ -197,7 +197,7 @@ describe("bounded immutable display streams", () => {
     if (before === undefined) throw new Error("expected running projection")
     before.chunks.read()
     const finished = reduce(running, {
-      type: "tool_call_finished", meta: meta(2), turn_id: "1", tool_call_id: "stream", invocation_id: "stream-1",
+      type: "tool_call_finished", presentation: null, meta: meta(2), turn_id: "1", tool_call_id: "stream", invocation_id: "stream-1",
       output: { type: "text", text: "authoritative final output" }, is_error: false, call_index: 0,
     })
     expect(finished.tools.stream?.chunks).toBe(EMPTY_TOOL_OUTPUT)

@@ -11,9 +11,9 @@ function read(result: TodoReadResult): EngineEvent {
 test("task state is committed independently of failed or transformed tool presentation", () => {
   let state = reduce(createInitialState(), { type: "todo_state_committed", meta: meta("1"), snapshot: snapshot("authoritative") })
   state = reduce(state, { type: "tool_call_started", meta: meta("2"), turn_id: "1", tool_call_id: "todo", invocation_id: "todo-1", name: "todo", args: { action: "replace" }, call_index: 0 })
-  state = reduce(state, { type: "tool_call_finished", meta: meta("3"), turn_id: "1", tool_call_id: "todo", invocation_id: "todo-1", output: { type: "structured", value: snapshot("presentation-only") }, is_error: false, call_index: 0 })
+  state = reduce(state, { type: "tool_call_finished", presentation: null, meta: meta("3"), turn_id: "1", tool_call_id: "todo", invocation_id: "todo-1", output: { type: "structured", value: snapshot("presentation-only") }, is_error: false, call_index: 0 })
   expect(state.todos.snapshot).toEqual(snapshot("authoritative"))
-  state = reduce(state, { type: "tool_call_finished", meta: meta("4"), turn_id: "1", tool_call_id: "failed", invocation_id: "failed", output: { type: "text", text: "Output hook failed after the state commit" }, is_error: true, call_index: 1 })
+  state = reduce(state, { type: "tool_call_finished", presentation: null, meta: meta("4"), turn_id: "1", tool_call_id: "failed", invocation_id: "failed", output: { type: "text", text: "Output hook failed after the state commit" }, is_error: true, call_index: 1 })
   expect(state.todos.snapshot).toEqual(snapshot("authoritative"))
 })
 
@@ -42,7 +42,7 @@ test("task history has one snapshot and uses the same completed tool retention a
   for (let index = 0; index < 300; index++) {
     state = reduce(state, { type: "todo_state_committed", meta: meta(String(++seq)), snapshot: snapshot(String(index)) })
     state = reduce(state, { type: "tool_call_started", meta: meta(String(++seq)), turn_id: String(index), tool_call_id: `todo-${index}`, invocation_id: `todo-${index}`, name: "todo", args: null, call_index: 0 })
-    state = reduce(state, { type: "tool_call_finished", meta: meta(String(++seq)), turn_id: String(index), tool_call_id: `todo-${index}`, invocation_id: `todo-${index}`, output: { type: "text", text: "done" }, is_error: false, call_index: 0 })
+    state = reduce(state, { type: "tool_call_finished", presentation: null, meta: meta(String(++seq)), turn_id: String(index), tool_call_id: `todo-${index}`, invocation_id: `todo-${index}`, output: { type: "text", text: "done" }, is_error: false, call_index: 0 })
   }
   expect(Object.keys(state.tools)).toHaveLength(MAX_RETAINED_TOOL_PROJECTIONS)
   expect(state.todos.snapshot).toEqual(snapshot("299"))

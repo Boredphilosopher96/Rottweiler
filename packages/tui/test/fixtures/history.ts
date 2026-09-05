@@ -95,7 +95,7 @@ export function toolItem(id: number, name: string, argumentsText: string, output
         source: { sequence, selector: { type: "tool_arguments" } }
       }, diff: null,
       status: output === undefined ? { type: "running" } : {
-        type: "finished", is_error: false,
+        type: "finished", presentation: null, is_error: false,
         output: { text: output, format: "text", complete: true, source: { sequence, selector: { type: "tool_output" } } }
       },
     }

@@ -51,7 +51,7 @@ describe("Rottweiler presentation", () => {
     expect(commands.at(-1)).toMatchObject({ type: "list_runtime_services" })
 
     app.handleEvent({
-      type: "tool_call_finished",
+      type: "tool_call_finished", presentation: null,
       meta: {
         protocol_version: PROTOCOL_VERSION,
         session_id: "session-services",
@@ -109,7 +109,7 @@ describe("Rottweiler presentation", () => {
       call_index: 0,
     })
     app.handleEvent({
-      type: "tool_call_finished",
+      type: "tool_call_finished", presentation: null,
       meta: {
         protocol_version: PROTOCOL_VERSION,
         session_id: "session-services",
