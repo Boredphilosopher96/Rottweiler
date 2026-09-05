@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "gate": "rust-tests",
+  "status": "failed",
+  "exit_code": 101,
+  "run_id": "33929264078",
+  "run_attempt": "1",
+  "runner_arch": "ARM64",
+  "runner_os": "macOS",
+  "image_version": "20260829.0321.1",
+  "source_sha": "5b7cee9f39ec70ad1099fede5454f0cde9e5c7b1",
+  "workflow_sha": "5b7cee9f39ec70ad1099fede5454f0cde9e5c7b1",
+  "elapsed_seconds": 204.92971075000003,
+  "artifact_name": "ci-test-macos-15-core-1",
+  "retained_log_tail_bytes": 113211,
+  "failure_diagnostic_present": true,
+  "artifact_json_sha256": "b1b709a08993199ae5e480149c76fba0bce3c3e8b32b959a0344ba638ed618ad",
+  "pr_head_sha": "bd631cadf819a68a9eb86e88ff0f43acb1fb898e",
+  "checkout_note": "GitHub pull-request merge checkout; source_sha identifies the actual tested checkout."
+}
