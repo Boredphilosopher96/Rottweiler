@@ -67,11 +67,33 @@ def main() -> int:
         'return "quota —"',
     )
     require_contains(
-        "crates/rw-store/src/session.rs",
+        "crates/rw-store/src/session/event_log.rs",
         "garbage_collect_empty_sessions",
-        "turn_count",
-        "backfill_unknown_turn_counts",
     )
+    require_contains("crates/rw-store/src/session/index.rs", "turn_count", "transaction.commit()")
+    require_contains(
+        "crates/rw-store/src/session/sqlite_schema.rs",
+        "validate_sessions",
+        "validate_accounting",
+        "UnsupportedSqliteSchema",
+        "turn_count INTEGER NOT NULL DEFAULT 0",
+    )
+    require_contains(
+        "crates/rw-store/src/session/tests/index.rs",
+        "opening_an_unsupported_index_rejects_without_backfill_or_mutation",
+        "read_only_listing_rejects_a_pre_turn_count_index",
+    )
+    require_contains(
+        "crates/rw-store/src/session/sqlite_schema_tests.rs",
+        "derived_rebuild_preserves_authority_and_rolls_back_on_accounting_conflict",
+        "explicit_search_rebuild_can_replace_an_unsupported_derived_schema",
+    )
+    store_sources = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (ROOT / "crates/rw-store/src/session").rglob("*.rs")
+    )
+    for removed in ("backfill_unknown_turn_counts", "ensure_accounting_columns", "remove_legacy_turn_uniqueness", "session_index_has_turn_count"):
+        require(f"fn {removed}(" not in store_sources, f"removed compatibility path {removed} returned")
     require_contains(
         "crates/rw-cli/src/main.rs",
         "UPDATED (UTC)",
