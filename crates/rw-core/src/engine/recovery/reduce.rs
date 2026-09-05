@@ -162,6 +162,9 @@ pub(super) fn reduce(
         PendingEvent::TurnFinished {
             turn, usage, cost, ..
         } => {
+            head.control
+                .accepted
+                .retain(|accepted| accepted.agent_turn != turn);
             head.accounting.record_actuals(&usage.into(), &cost);
             if head
                 .control

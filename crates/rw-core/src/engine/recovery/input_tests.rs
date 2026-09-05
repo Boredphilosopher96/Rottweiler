@@ -57,3 +57,55 @@ fn accepted_attachment_body_survives_before_provider_ir_commit() {
         vec![attachment]
     );
 }
+
+#[test]
+fn terminal_turn_does_not_resurrect_input_that_never_passed_prompt_admission() {
+    let directory = tempfile::tempdir().expect("directory");
+    let mut journal = SegmentedJournal::open(directory.path(), "canonical").expect("journal");
+    let pending = vec![
+        PendingEvent::TurnStarted { turn: 1 },
+        PendingEvent::UserMessageAccepted {
+            turn: 1,
+            content: "blocked input".into(),
+            attachments: Vec::new(),
+        },
+        PendingEvent::TurnFinished {
+            turn: 1,
+            status: crate::engine::AgentTurnStatus::Failed,
+            usage: crate::engine::SessionUsage::default(),
+            cost: rw_types::Cost::Unavailable {
+                reason: "no provider call".into(),
+            },
+        },
+    ];
+    let events = pending
+        .iter()
+        .enumerate()
+        .map(|(index, event)| {
+            event.clone().stamp(rw_types::EventMeta {
+                protocol_version: rw_types::PROTOCOL_VERSION,
+                session_id: rw_types::SessionId("canonical".into()),
+                sequence_id: rw_types::SequenceId(index as u64),
+                emitted_at: "2026-09-04T00:00:00.000Z".into(),
+                caused_by: None,
+            })
+        })
+        .collect::<Vec<_>>();
+    let audit = crate::engine::project_session_events(&events).expect("audit");
+    assert!(audit.conversation.is_empty());
+    append(&mut journal, pending);
+    let modes = ModeRegistry::builtins().expect("modes");
+    let source = journal.read_view();
+    let mut recovery = CanonicalRecovery::open(&source, &modes, None).expect("recovery");
+    catch_up(&mut recovery, &source, &modes);
+    let bootstrap = recovery
+        .snapshot()
+        .expect("snapshot")
+        .bind_source(&source)
+        .expect("source")
+        .bootstrap()
+        .expect("bootstrap");
+    assert_eq!(bootstrap.head.conversation.turns, 0);
+    assert!(bootstrap.controls.accepted_messages.is_empty());
+    assert!(bootstrap.interrupted.is_none());
+}

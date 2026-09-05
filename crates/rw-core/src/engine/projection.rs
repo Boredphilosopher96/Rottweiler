@@ -533,6 +533,7 @@ impl SessionProjector {
                 PendingEvent::TurnFinished {
                     turn, usage, cost, ..
                 } => {
+                    uncommitted_users.remove(turn);
                     if active_turn == Some(*turn) {
                         active_tool_starts.clear();
                         active_turn = None;
