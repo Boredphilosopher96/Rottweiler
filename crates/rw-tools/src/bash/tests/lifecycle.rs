@@ -586,3 +586,45 @@ async fn watchdog_lease_blocks_resumer_until_killed_group_is_absent() {
     resumer.await.expect("resumer task");
     assert!(!sentinel.exists(), "orphan command wrote delayed sentinel");
 }
+
+#[tokio::test]
+async fn any_failed_settlement_keeps_foreground_admission_closed() {
+    #[derive(Default)]
+    struct FailedSettlement(std::sync::atomic::AtomicUsize);
+    #[async_trait]
+    impl CommandExecutor for FailedSettlement {
+        async fn settle_effects(&self) -> Result<(), ToolError> {
+            Err(ToolError::Command("cleanup failed".into()))
+        }
+        async fn run(
+            &self,
+            _: CommandRequest,
+            _: CancellationToken,
+            _: Arc<dyn ToolOutputSink>,
+        ) -> Result<CommandOutcome, ToolError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(CommandOutcome { exit_code: 0 })
+        }
+    }
+    let root = tempdir().expect("workspace");
+    let context = ToolContext::new(root.path()).expect("context");
+    let executor = Arc::new(FailedSettlement::default());
+    let tool = BashTool::new(executor.clone(), ToolLimits::default());
+    assert!(matches!(
+        tool.execute(&context, json!({"command":"printf test"}))
+            .await,
+        Err(ToolError::EffectsUnsettled(_))
+    ));
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_millis(100), tool.settle_effects())
+            .await
+            .expect("failed owner proof returns promptly"),
+        Err(ToolError::EffectsUnsettled(_))
+    ));
+    assert!(matches!(
+        tool.execute(&context, json!({"command":"printf next"}))
+            .await,
+        Err(ToolError::EffectsUnsettled(_))
+    ));
+    assert_eq!(executor.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+}

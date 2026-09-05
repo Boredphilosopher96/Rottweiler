@@ -222,7 +222,9 @@ impl BashTool {
                     ToolError::Command(format!("foreground command task failed: {error}"))
                 })
                 .and_then(std::convert::identity);
-            executor.settle_effects().await?;
+            executor.settle_effects().await.map_err(|error| {
+                ToolError::EffectsUnsettled(format!("foreground command cleanup failed: {error}"))
+            })?;
             foreground
                 .calls
                 .lock()
