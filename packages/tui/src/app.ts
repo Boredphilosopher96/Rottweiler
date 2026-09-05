@@ -148,8 +148,7 @@ import { createThemeBrowserModel } from "./theme-browser"
 import {
 durableSequenceId,
 isRecord,
-isSessionForkedEvent,
-type WireEngineEvent,
+
 } from "./transport"
 import { stabilizeTreeSitterClient } from "./tree-sitter-client"
 import {
@@ -167,7 +166,7 @@ timelineTurnLabel
 export type { PresentationFrameScheduler } from "./presentation"
 
 interface PendingPresentationEvent {
-  readonly event: WireEngineEvent
+  readonly event: EngineEvent
   readonly eventRecord: Record<string, unknown>
   readonly commandRequestId: string | null
   readonly previous: RottweilerState
@@ -1162,10 +1161,10 @@ export class RottweilerApp extends BoxRenderable {
     this.#projectionErrors = {}
   }
 
-  handleEvent(event: WireEngineEvent): void {
+  handleEvent(event: EngineEvent): void {
     if (this.#destroyed) return
     if (durableSequenceId(event) !== null && "meta" in event && isRecord(event.meta)
-      && typeof event.meta.session_id === "string") this.#history?.invalidate(event.meta.session_id)
+      && "session_id" in event.meta && typeof event.meta.session_id === "string") this.#history?.invalidate(event.meta.session_id)
     if (event.type === "session_history_ready" || event.type === "session_replay_completed") {
       this.#history?.invalidate(this.#sessionId)
     }
@@ -1208,7 +1207,7 @@ export class RottweilerApp extends BoxRenderable {
     }
     if (event.type === "session_forked") {
       if (
-        !isSessionForkedEvent(event) ||
+        event.type !== "session_forked" ||
         event.parent_session_id !== this.#sessionId ||
         !this.#projectionRequests.acceptsFork(event.meta.request_id)
       ) return
@@ -1389,7 +1388,7 @@ export class RottweilerApp extends BoxRenderable {
     ) {
       this.composer.focus()
     }
-    if (isSessionForkedEvent(event)) {
+    if (event.type === "session_forked") {
       void this.#transitionToFork(event.child.session_id)
     }
     if (next.pluginNotifications.at(-1) !== previous.pluginNotifications.at(-1)) {
@@ -4283,7 +4282,7 @@ export class RottweilerApp extends BoxRenderable {
     this.composer.restoreDraft(draft.content, draft.attachments)
   }
 
-  #applySubagentEvent(subagentId: string, event: WireEngineEvent): void {
+  #applySubagentEvent(subagentId: string, event: EngineEvent): void {
     const descriptor = this.#subagentDescriptor(subagentId)
     if (descriptor === undefined) return
     const previous = this.#activeChildState ?? initialSubagentState(this.#state, descriptor)
@@ -5250,7 +5249,7 @@ function approvalBinding(diff: unknown): ApprovalBinding | null {
   }
 }
 
-const IMMEDIATE_PRESENTATION_EVENTS = new Set<WireEngineEvent["type"]>([
+const IMMEDIATE_PRESENTATION_EVENTS = new Set<EngineEvent["type"]>([
   "command_acknowledged",
   "context_snapshot_ready",
   "cost_snapshot_ready",
@@ -5327,7 +5326,7 @@ const IMMEDIATE_PRESENTATION_EVENTS = new Set<WireEngineEvent["type"]>([
 ])
 
 export function deferPresentationForEvent(
-  event: { readonly type: WireEngineEvent["type"] },
+  event: { readonly type: EngineEvent["type"] },
 ): boolean {
   return !IMMEDIATE_PRESENTATION_EVENTS.has(event.type)
 }

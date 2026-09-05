@@ -124,7 +124,7 @@ impl DevelopmentClient {
             .await?
             .outcome()
         {
-            CommandOutcome::Accepted => Ok(()),
+            CommandOutcome::Accepted {} => Ok(()),
             CommandOutcome::Rejected { error } => Err(miette!(
                 "plugin development was rejected ({}): {}",
                 error.code,

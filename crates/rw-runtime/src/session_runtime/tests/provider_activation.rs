@@ -160,7 +160,7 @@ async fn engine_switches_to_an_exact_model_route_staged_by_provider_activation()
             })
             .await
             .expect("switch"),
-        rw_core::CommandOutcome::Accepted
+        rw_core::CommandOutcome::Accepted {}
     );
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {

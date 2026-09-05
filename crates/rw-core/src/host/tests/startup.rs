@@ -81,7 +81,7 @@ async fn shutdown_wakes_opening_waiters_and_never_inserts_late_resume() {
             .await
             .expect("shutdown settled")
             .expect("shutdown task"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     assert!(host.session(&session_id).await.is_none());
     assert!(host.registry.lock().await.sessions.is_empty());
@@ -306,7 +306,7 @@ async fn shutdown_never_inserts_a_session_created_after_shutdown_started() {
             .await
             .expect("shutdown settled")
             .expect("shutdown task"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     assert!(host.session(&session_id).await.is_none());
     let registry = host.registry.lock().await;
@@ -352,7 +352,7 @@ async fn descriptors_follow_only_durable_driver_model_and_shell_state() {
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let session = host.session(&session_id).await.expect("ready session");
     assert_eq!(
@@ -388,7 +388,10 @@ async fn descriptors_follow_only_durable_driver_model_and_shell_state() {
         "model-switch acceptance must wait for the durable event and project preference"
     );
     sink.release();
-    assert_eq!(switch.await.expect("switch task"), CommandOutcome::Accepted);
+    assert_eq!(
+        switch.await.expect("switch task"),
+        CommandOutcome::Accepted {}
+    );
     tokio::time::timeout(Duration::from_secs(1), async {
         while session.descriptor().model != ModelAlias("big".to_owned()) {
             tokio::task::yield_now().await;
@@ -423,7 +426,10 @@ async fn descriptors_follow_only_durable_driver_model_and_shell_state() {
     tokio::time::timeout(Duration::from_secs(1), sink.append_started.notified())
         .await
         .expect("shell-active append blocked");
-    assert_eq!(start.await.expect("start task"), CommandOutcome::Accepted);
+    assert_eq!(
+        start.await.expect("start task"),
+        CommandOutcome::Accepted {}
+    );
     assert!(!session.descriptor().shell_active);
     sink.release();
     let shell_id = tokio::time::timeout(Duration::from_secs(1), async {
@@ -472,7 +478,7 @@ async fn descriptors_follow_only_durable_driver_model_and_shell_state() {
     tokio::time::timeout(Duration::from_secs(1), sink.append_started.notified())
         .await
         .expect("shell-inactive append blocked");
-    assert_eq!(end.await.expect("end task"), CommandOutcome::Accepted);
+    assert_eq!(end.await.expect("end task"), CommandOutcome::Accepted {});
     assert!(session.descriptor().shell_active);
     sink.release();
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -500,7 +506,7 @@ async fn descriptors_follow_only_durable_driver_model_and_shell_state() {
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let broker_shell_id = tokio::time::timeout(Duration::from_secs(1), async {
         loop {

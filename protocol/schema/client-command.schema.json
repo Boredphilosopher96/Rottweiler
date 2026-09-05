@@ -20,6 +20,7 @@
           "const": "read_transcript"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -44,6 +45,7 @@
           "const": "read_transcript_content"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -75,6 +77,7 @@
           "const": "create_session"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -108,6 +111,7 @@
           "const": "resume_session"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -142,6 +146,7 @@
           "const": "attach_session"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -172,6 +177,7 @@
           "const": "send_message"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -194,6 +200,7 @@
           "const": "interrupt"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -234,6 +241,7 @@
           "const": "approve_tool"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -266,6 +274,7 @@
           "const": "approve_plan"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -296,6 +305,7 @@
           "const": "answer_question"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -321,6 +331,7 @@
           "const": "switch_mode"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -353,6 +364,7 @@
           "const": "switch_model"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -380,6 +392,7 @@
           "const": "compact"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -414,6 +427,7 @@
           "const": "fork"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -438,6 +452,7 @@
           "const": "rewind"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -459,6 +474,7 @@
           "const": "take_driver"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -482,6 +498,7 @@
           "const": "user_shell_started"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -516,6 +533,7 @@
           "const": "user_shell_ended"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -541,6 +559,7 @@
           "const": "attach_development_plugin"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -562,6 +581,7 @@
           "const": "detach_development_plugin"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -585,6 +605,7 @@
           "const": "pin_context"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -609,6 +630,7 @@
           "const": "evict_context"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -630,6 +652,7 @@
           "const": "get_context"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -650,6 +673,7 @@
           "const": "get_cost"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -670,6 +694,7 @@
           "const": "get_session_review"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -699,6 +724,7 @@
           "const": "review_file"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -732,6 +758,7 @@
           "const": "dump_prompt"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -749,6 +776,7 @@
           "const": "list_sessions"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta"
@@ -773,6 +801,7 @@
           "const": "search_sessions"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -794,6 +823,7 @@
           "const": "list_commands"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -814,6 +844,7 @@
           "const": "list_modes"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -844,6 +875,7 @@
           "const": "list_models"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -864,6 +896,7 @@
           "const": "list_settings"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -890,6 +923,7 @@
           "const": "set_setting"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -912,6 +946,7 @@
           "const": "list_mcp_servers"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -932,6 +967,7 @@
           "const": "list_runtime_services"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -958,6 +994,7 @@
           "const": "add_mcp_http_server"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -998,6 +1035,7 @@
           "const": "add_mcp_stdio_server"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1025,6 +1063,7 @@
           "const": "remove_mcp_server"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1049,6 +1088,7 @@
           "const": "review_mcp_server"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1076,6 +1116,7 @@
           "const": "approve_mcp_server"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1104,6 +1145,7 @@
           "const": "set_mcp_server_enabled"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1126,6 +1168,7 @@
           "const": "list_permissions"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1152,6 +1195,7 @@
           "const": "add_session_permission_rule"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1177,6 +1221,7 @@
           "const": "remove_session_permission_rule"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1201,6 +1246,7 @@
           "const": "remove_queued_message"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1222,6 +1268,7 @@
           "const": "clear_queued_messages"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1245,6 +1292,7 @@
           "const": "rename_session"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1275,6 +1323,7 @@
           "const": "export_session"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1304,6 +1353,7 @@
           "const": "revoke_permission_approval"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1329,6 +1379,7 @@
           "const": "begin_provider_auth"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1353,6 +1404,7 @@
           "const": "configure_builtin_provider"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1380,6 +1432,7 @@
           "const": "complete_provider_auth"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1408,6 +1461,7 @@
           "const": "cancel_provider_auth"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1438,6 +1492,7 @@
           "const": "search_workspace_files"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1468,6 +1523,7 @@
           "const": "preview_workspace_file"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1490,6 +1546,7 @@
           "const": "get_workspace_status"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1518,6 +1575,7 @@
           "const": "get_workspace_diff"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1540,6 +1598,7 @@
           "const": "list_subagents"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1566,6 +1625,7 @@
           "const": "continue_subagent"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1591,6 +1651,7 @@
           "const": "interrupt_subagent"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1615,6 +1676,7 @@
           "const": "close_subagent"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1633,6 +1695,7 @@
           "const": "shutdown_host"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta"
@@ -1657,6 +1720,7 @@
           "$ref": "#/$defs/RequestId"
         }
       },
+      "additionalProperties": false,
       "required": [
         "protocol_version",
         "client_id",
@@ -1702,6 +1766,7 @@
           "minimum": 0
         }
       },
+      "additionalProperties": false,
       "required": [
         "position",
         "max_items",
@@ -1745,6 +1810,7 @@
           "maxItems": 32
         }
       },
+      "additionalProperties": false,
       "required": [
         "session_id",
         "projection_version",
@@ -1770,6 +1836,7 @@
               "const": "first"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -1782,6 +1849,7 @@
               "const": "latest"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -1797,6 +1865,7 @@
               "const": "before"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "item"
@@ -1813,6 +1882,7 @@
               "const": "after"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "item"
@@ -1829,6 +1899,7 @@
               "const": "around"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "item"
@@ -1848,6 +1919,7 @@
               "const": "at_ordinal"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "ordinal",
@@ -1884,6 +1956,7 @@
           "minimum": 0
         }
       },
+      "additionalProperties": false,
       "required": [
         "view",
         "source",
@@ -1902,6 +1975,7 @@
           "$ref": "#/$defs/TranscriptContentSelector"
         }
       },
+      "additionalProperties": false,
       "required": [
         "sequence",
         "selector"
@@ -1918,6 +1992,7 @@
               "const": "conversation"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -1935,6 +2010,7 @@
               "const": "conversation_block"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "index"
@@ -1948,6 +2024,7 @@
               "const": "tool_arguments"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -1960,6 +2037,7 @@
               "const": "tool_output"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -1972,6 +2050,7 @@
               "const": "tool_diff"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -1984,6 +2063,7 @@
               "const": "command_message"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -1996,6 +2076,7 @@
               "const": "shell_command"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -2008,6 +2089,7 @@
               "const": "shell_output"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -2020,6 +2102,7 @@
               "const": "subagent_task"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -2032,6 +2115,7 @@
               "const": "subagent_result"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -2044,6 +2128,7 @@
               "const": "subagent_diff"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -2083,6 +2168,7 @@
           "$ref": "#/$defs/AttachmentData"
         }
       },
+      "additionalProperties": false,
       "required": [
         "name",
         "media_type",
@@ -2103,6 +2189,7 @@
               "const": "text"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "content"
@@ -2119,6 +2206,7 @@
               "const": "inline_base64"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "data"
@@ -2161,6 +2249,7 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "proposal_id",
         "arguments_hash",
@@ -2194,6 +2283,7 @@
           }
         }
       },
+      "additionalProperties": false,
       "required": [
         "question_id",
         "values"
@@ -2221,6 +2311,7 @@
               "const": "turn"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "turn_id"
@@ -2237,6 +2328,7 @@
               "const": "checkpoint"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "checkpoint_id"
@@ -2271,6 +2363,7 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "key",
         "value"

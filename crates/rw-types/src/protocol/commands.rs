@@ -13,6 +13,7 @@ use ts_rs::TS;
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case", optional_fields = nullable)]
+#[serde(deny_unknown_fields)]
 pub enum ClientCommand {
     ReadTranscript {
         meta: CommandMeta,
@@ -617,6 +618,7 @@ read_commands!(
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum CommandReply {
     Command {
         outcome: CommandOutcome,

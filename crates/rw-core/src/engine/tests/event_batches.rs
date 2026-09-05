@@ -74,7 +74,7 @@ async fn opening_batch_is_fully_persisted_before_any_event_is_broadcast() {
     assert!(matches!(
         events.recv().await.expect("command ack"),
         EngineEvent::CommandAcknowledged {
-            outcome: CommandOutcome::Accepted,
+            outcome: CommandOutcome::Accepted {},
             ..
         }
     ));
@@ -142,7 +142,7 @@ async fn malformed_batch_payload_or_sequence_is_rejected_before_broadcast_or_mod
         assert!(matches!(
             events.recv().await.expect("command ack"),
             EngineEvent::CommandAcknowledged {
-                outcome: CommandOutcome::Accepted,
+                outcome: CommandOutcome::Accepted {},
                 ..
             }
         ));

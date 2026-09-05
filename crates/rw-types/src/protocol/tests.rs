@@ -221,7 +221,10 @@ fn wire_schemas_do_not_supply_values_for_missing_required_fields()
         match value {
             serde_json::Value::Object(object) => {
                 if let Some(default) = object.get("default")
-                    && (object.contains_key("type") || object.contains_key("$ref") || object.contains_key("anyOf")) {
+                    && (object.contains_key("type")
+                        || object.contains_key("$ref")
+                        || object.contains_key("anyOf"))
+                {
                     assert!(default.is_null(), "wire field {path} supplies {default}");
                 }
                 for (key, child) in object {
@@ -257,8 +260,14 @@ fn model_catalog_requires_explicit_collections_and_cache_state()
     serde_json::from_value::<EngineEvent>(event.clone())?;
     for field in ["models", "aliases", "providers", "cached", "truncated"] {
         let mut incomplete = event.clone();
-        incomplete.as_object_mut().ok_or("missing event object")?.remove(field);
-        assert!(serde_json::from_value::<EngineEvent>(incomplete).is_err(), "accepted missing {field}");
+        incomplete
+            .as_object_mut()
+            .ok_or("missing event object")?
+            .remove(field);
+        assert!(
+            serde_json::from_value::<EngineEvent>(incomplete).is_err(),
+            "accepted missing {field}"
+        );
     }
     Ok(())
 }

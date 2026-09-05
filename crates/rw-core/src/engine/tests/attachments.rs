@@ -127,7 +127,7 @@ async fn first_image_message_prepares_lazy_model_before_vision_validation() {
             })
             .await
             .expect("attach"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     assert!(!model.prepared.load(Ordering::Acquire));
     let image = Attachment {
@@ -148,7 +148,7 @@ async fn first_image_message_prepares_lazy_model_before_vision_validation() {
             })
             .await
             .expect("image message"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     assert!(model.prepared.load(Ordering::Acquire));
 }

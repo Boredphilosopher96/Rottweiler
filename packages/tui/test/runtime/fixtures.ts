@@ -1,3 +1,4 @@
+import type { EngineEvent } from "../../src/protocol"
 import { PROTOCOL_VERSION, type ClientCommand, type CommandOutcome, type CommandReply } from "../../src/protocol"
 import {
   TuiEngineRuntime,
@@ -6,12 +7,7 @@ import {
   type RuntimeFileSystem
 } from "../../src/runtime"
 import { createInitialState, engineEvent, reduceRottweilerState } from "../../src/state"
-import {
-  isSessionForkedEvent,
-  type EngineStreamRestartMode,
-  type EngineSubscriptionOptions,
-  type WireEngineEvent,
-} from "../../src/transport"
+import { type EngineStreamRestartMode, type EngineSubscriptionOptions } from "../../src/transport"
 
 export class MemoryFiles implements RuntimeFileSystem {
   readonly reads = new Map<string, string>()
@@ -51,7 +47,7 @@ export class TestApp implements RuntimeApp {
     this.connectionProjectionResets += 1
   }
 
-  handleEvent(event: WireEngineEvent): void {
+  handleEvent(event: EngineEvent): void {
     this.state = reduceRottweilerState(this.state, engineEvent(event))
   }
 
@@ -87,7 +83,7 @@ export class ScriptedClient implements RuntimeEngineClient {
     this.subscription = options
     options.onConnection?.({ phase: "reconnecting", attempt: 2 })
     options.onConnection?.({ phase: "connected", attempt: 2 })
-    await options.onEvent({
+    await options.onEvent({ definition_fingerprint: "fixture",
       type: "mode_changed",
       meta: {
         protocol_version: PROTOCOL_VERSION,
@@ -345,7 +341,7 @@ export class CorrelatedForkClient implements RuntimeEngineClient {
           emitted_at: "2026-07-11T00:00:00Z",
         },
         parent_session_id: command.session_id,
-        child: {
+        child: { title: "Fixture",
           session_id: "fork-child",
           workspace_name: "workspace",
           model: "fast",
@@ -401,9 +397,9 @@ export class RestartRecordingClient implements RuntimeEngineClient {
 export class ForkSwitchingApp extends TestApp {
   runtime: TuiEngineRuntime | null = null
 
-  override handleEvent(event: WireEngineEvent): void {
+  override handleEvent(event: EngineEvent): void {
     super.handleEvent(event)
-    if (isSessionForkedEvent(event)) {
+    if (event.type === "session_forked") {
       void this.runtime?.switchSession(event.child.session_id)
     }
   }

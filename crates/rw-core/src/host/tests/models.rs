@@ -29,7 +29,7 @@ async fn accepted_alias_and_concrete_model_switches_persist_in_dispatch_order() 
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     for (request, model) in [("switch-a", "big"), ("switch-b", "openai/b")] {
         assert_eq!(
@@ -44,7 +44,7 @@ async fn accepted_alias_and_concrete_model_switches_persist_in_dispatch_order() 
             )
             .await
             .outcome,
-            CommandOutcome::Accepted
+            CommandOutcome::Accepted {}
         );
         assert_eq!(
             queries
@@ -106,7 +106,7 @@ async fn model_switch_persistence_failure_is_visible_after_the_session_commit() 
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     assert!(matches!(
         host.dispatch(
@@ -175,7 +175,7 @@ async fn pending_switch_is_not_persisted_and_each_context_choice_persists_on_com
             )
             .await
             .outcome,
-            CommandOutcome::Accepted
+            CommandOutcome::Accepted {}
         );
         assert_eq!(
             host.dispatch(
@@ -188,7 +188,7 @@ async fn pending_switch_is_not_persisted_and_each_context_choice_persists_on_com
             )
             .await
             .outcome,
-            CommandOutcome::Accepted
+            CommandOutcome::Accepted {}
         );
         let session = host.session(&session_id).await.expect("session");
         let shell_id = tokio::time::timeout(Duration::from_secs(1), async {
@@ -228,7 +228,7 @@ async fn pending_switch_is_not_persisted_and_each_context_choice_persists_on_com
             )
             .await
             .outcome,
-            CommandOutcome::Accepted
+            CommandOutcome::Accepted {}
         );
         let question_id = tokio::time::timeout(Duration::from_secs(1), async {
             loop {
@@ -267,7 +267,7 @@ async fn pending_switch_is_not_persisted_and_each_context_choice_persists_on_com
             )
             .await
             .outcome,
-            CommandOutcome::Accepted
+            CommandOutcome::Accepted {}
         );
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {

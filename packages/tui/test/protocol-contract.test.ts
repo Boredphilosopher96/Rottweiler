@@ -54,10 +54,10 @@ describe("generated Rust/TypeScript protocol contract", () => {
     expect(roundTripped).toEqual(fixture)
   })
 
-  test("classifies every Rust-authored fixture event as generated protocol", () => {
+  test("projects every Rust-authored fixture event without invalid delivery", () => {
     for (const event of contractFixture.engine_events) {
       const state = reduceRottweilerState(createInitialState(), engineEvent(event))
-      expect(state.protocol.unknownEvents).toBe(0)
+      expect(state.protocol.invalidEvents).toBe(0)
     }
   })
 })

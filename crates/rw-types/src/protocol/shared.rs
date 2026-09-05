@@ -172,6 +172,7 @@ impl From<u64> for SequenceId {
 
 /// Metadata common to commands from all client transports.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(deny_unknown_fields)]
 pub struct CommandMeta {
     pub protocol_version: u16,
     pub client_id: ClientId,
@@ -182,6 +183,7 @@ pub struct CommandMeta {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[ts(optional_fields = nullable)]
 #[derive(Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct EventMeta {
     pub protocol_version: u16,
     pub session_id: SessionId,
@@ -192,6 +194,7 @@ pub struct EventMeta {
 
 /// Metadata for immediate command acknowledgements before session sequencing.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct CommandAckMeta {
     pub protocol_version: u16,
     pub client_id: ClientId,
@@ -213,6 +216,7 @@ pub enum ClientRole {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case")]
 #[derive(Allocation)]
+#[serde(deny_unknown_fields)]
 pub enum AttachmentData {
     Text { content: String },
     InlineBase64 { data: String },
@@ -220,6 +224,7 @@ pub enum AttachmentData {
 
 /// User-provided content attached to a message.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(deny_unknown_fields)]
 pub struct Attachment {
     pub name: String,
     /// Optional normalized workspace-relative source path. Local absolute paths
@@ -234,6 +239,7 @@ pub struct Attachment {
 
 /// Durable content-addressed attachment metadata persisted in the event log.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct StoredAttachment {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -251,6 +257,7 @@ pub struct StoredAttachment {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[ts(optional_fields = nullable)]
 #[derive(Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct SessionDescriptor {
     pub session_id: SessionId,
     /// Human-facing session title.
@@ -278,6 +285,7 @@ pub enum CommandSource {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct CommandDescriptor {
     pub name: String,
     pub description: String,
@@ -287,6 +295,7 @@ pub struct CommandDescriptor {
 
 /// One bounded, credential-free interaction mode exposed to clients.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct ModeDescriptor {
     pub id: ModeId,
     pub description: String,
@@ -295,6 +304,7 @@ pub struct ModeDescriptor {
 
 /// One engine-mediated user setting exposed to interactive clients.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct UserSettingDescriptor {
     pub key: String,
     pub label: String,
@@ -310,17 +320,19 @@ pub struct UserSettingDescriptor {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case")]
 #[derive(Allocation)]
+#[serde(deny_unknown_fields)]
 pub enum McpServerState {
-    Disabled,
-    Connecting,
-    Ready,
-    ApprovalRequired,
+    Disabled {},
+    Connecting {},
+    Ready {},
+    ApprovalRequired {},
     Failed { message: String },
-    Stopping,
+    Stopping {},
 }
 
 /// One server in the live session MCP inventory.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct McpServerDescriptor {
     pub name: String,
     pub enabled: bool,
@@ -333,6 +345,7 @@ pub struct McpServerDescriptor {
 
 /// Exact, redacted configuration identity presented before MCP approval.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct McpApprovalReview {
     pub server: String,
     pub transport: String,
@@ -348,6 +361,7 @@ pub struct McpApprovalReview {
 /// The value is carried on the authenticated command wire but never exposed by
 /// debug formatting.
 #[derive(Clone, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(deny_unknown_fields)]
 pub struct McpEnvironmentEntry {
     pub key: String,
     pub value: String,
@@ -368,6 +382,7 @@ impl fmt::Debug for McpEnvironmentEntry {
 /// Configured-but-idle integrations are deliberately absent. Names are short
 /// executable identities, never command lines, arguments, paths, or output.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeServiceDescriptor {
     pub kind: RuntimeServiceKind,
     pub name: String,
@@ -399,6 +414,7 @@ pub enum PermissionApprovalScope {
 
 /// Stable, typed rule row rendered by permission-management clients.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct PermissionRuleDescriptor {
     /// Opaque stable id accepted by remove operations. Clients never rebuild it.
     pub id: String,
@@ -409,6 +425,7 @@ pub struct PermissionRuleDescriptor {
 /// Opaque remembered approval metadata. Invocation arguments and fingerprints
 /// are deliberately absent.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct PermissionApprovalDescriptor {
     pub id: String,
     pub scope: PermissionApprovalScope,
@@ -418,6 +435,7 @@ pub struct PermissionApprovalDescriptor {
 
 /// Bounded permission inventory for one live session.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct PermissionStateDescriptor {
     pub default: PermissionDecision,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -447,6 +465,7 @@ pub enum ModelCacheBehavior {
 
 /// Provider-neutral capabilities used by model pickers and attachment checks.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct ModelCapabilities {
     pub tool_calling: bool,
     pub vision: bool,
@@ -464,6 +483,7 @@ pub struct ModelCapabilities {
 
 /// One concrete provider/model discovered from a live authenticated catalog.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct ModelDescriptor {
     /// Concrete provider-qualified model id.
     pub id: String,
@@ -483,6 +503,7 @@ pub struct ModelDescriptor {
 
 /// Small provider-blind role mapping shown separately from the live catalog.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct ModelAliasDescriptor {
     pub alias: ModelAlias,
     pub candidates: Vec<String>,
@@ -521,6 +542,7 @@ pub enum ProviderNextAction {
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[ts(tag = "kind", rename_all = "snake_case", optional_fields = nullable)]
 #[derive(Allocation)]
+#[serde(deny_unknown_fields)]
 pub enum ProviderAuthChallenge {
     Oauth {
         authorization_url: String,
@@ -535,6 +557,7 @@ pub enum ProviderAuthChallenge {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderDescriptor {
     pub name: String,
     pub auth_kind: ProviderAuthKind,
@@ -550,6 +573,7 @@ pub struct ProviderDescriptor {
 
 /// One bounded live-catalog projection shared by the host and CLI.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(deny_unknown_fields)]
 pub struct ModelCatalogSnapshot {
     pub aliases: Vec<ModelAliasDescriptor>,
     pub models: Vec<ModelDescriptor>,
@@ -560,6 +584,7 @@ pub struct ModelCatalogSnapshot {
 
 /// Relative workspace path returned by fuzzy file search.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceFileMatch {
     pub path: String,
     pub is_directory: bool,
@@ -567,6 +592,7 @@ pub struct WorkspaceFileMatch {
 
 /// Remote-safe in-band file preview; paths are always workspace-relative.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceFilePreview {
     pub path: String,
     pub media_type: String,
@@ -582,6 +608,7 @@ pub struct WorkspaceFilePreview {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[ts(optional_fields = nullable)]
 #[derive(Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceStatus {
     pub workspace_name: String,
     pub branch: Option<String>,
@@ -591,6 +618,7 @@ pub struct WorkspaceStatus {
 
 /// Bounded current-worktree diff for one exact workspace-relative path.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceDiff {
     pub path: String,
     pub unified_diff: String,
@@ -601,6 +629,7 @@ pub struct WorkspaceDiff {
 /// One stable session workspace root. Durable/wire events use only virtual
 /// `@root/N` paths; canonical host paths stay in private local metadata.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceRootDescriptor {
     pub index: u32,
     pub path: String,
@@ -609,6 +638,7 @@ pub struct WorkspaceRootDescriptor {
 
 /// Optional structured unified diff attached to a mutating-tool approval.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(deny_unknown_fields)]
 pub struct ApprovalBinding {
     pub proposal_id: String,
     pub arguments_hash: String,
@@ -618,6 +648,7 @@ pub struct ApprovalBinding {
 
 /// Optional structured unified diff attached to a mutating-tool approval.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct UnifiedDiff {
     pub proposal_id: String,
     pub path: String,
@@ -677,6 +708,7 @@ impl std::str::FromStr for SessionMode {
 
 /// One verifiable step in a model-submitted plan artifact.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct PlanStep {
     pub description: String,
     pub files_touched: Vec<String>,
@@ -685,6 +717,7 @@ pub struct PlanStep {
 
 /// Durable plan submitted before entering execute mode.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct PlanArtifact {
     pub title: String,
     pub summary_md: String,
@@ -706,6 +739,7 @@ pub enum PlanDecision {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum RewindTarget {
     Turn { turn_id: TurnId },
     Checkpoint { checkpoint_id: String },
@@ -736,6 +770,7 @@ pub enum ReviewFileStatus {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[ts(optional_fields = nullable)]
 #[derive(Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct SessionReviewFile {
     pub path: String,
     pub unified_diff: String,
@@ -748,6 +783,7 @@ pub struct SessionReviewFile {
 
 /// Complete replacement snapshot for the cumulative session review reducer.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct SessionReview {
     pub session_id: SessionId,
     pub files: Vec<SessionReviewFile>,
@@ -781,6 +817,7 @@ pub enum ModelContextTransfer {
 /// Target retained in a durable model-switch interaction until the user chooses
 /// how existing context should cross the model boundary.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct ModelSwitchQuestion {
     pub model: ModelAlias,
     #[serde(default)]
@@ -791,6 +828,7 @@ pub struct ModelSwitchQuestion {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[ts(optional_fields = nullable)]
 #[derive(Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct QuestionOption {
     pub value: String,
     pub label: String,
@@ -803,6 +841,7 @@ pub struct QuestionOption {
 
 /// A typed question sent to an interactive client.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct Question {
     pub id: QuestionId,
     pub prompt: String,
@@ -816,6 +855,7 @@ pub struct Question {
 
 /// One answer returned for a question entry.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct Answer {
     pub question_id: QuestionId,
     pub values: Vec<String>,
@@ -838,6 +878,7 @@ pub enum ContextItemKind {
 
 /// Per-item token and surgery state shown by context inspectors.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct ContextItemSnapshot {
     pub item_id: ContextItemId,
     pub kind: ContextItemKind,
@@ -855,6 +896,7 @@ pub struct ContextItemSnapshot {
 /// Orthogonal surgery markers for one context item.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct ContextItemState {
     pub pinned: bool,
     pub evicted: bool,
@@ -864,12 +906,14 @@ pub struct ContextItemState {
 
 /// One explicit cache boundary after an assembled item.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct CacheBreakpoint {
     pub after_item_id: Option<ContextItemId>,
 }
 
 /// Exact engine-side context breakdown for one assembled request.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct ContextSnapshot {
     pub turn_id: Option<TurnId>,
     pub stable_prefix_hash: String,
@@ -897,6 +941,7 @@ pub struct ContextSnapshot {
 
 /// Usage and billing attributed to one completed agent turn.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct TurnAccounting {
     pub turn_id: TurnId,
     pub attribution: AccountingAttribution,
@@ -918,6 +963,7 @@ pub enum AccountingAttribution {
 
 /// Session-level cost, token, cache, and burn-rate snapshot.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct CostSnapshot {
     pub utc_day: String,
     pub turns: Vec<TurnAccounting>,
@@ -1026,6 +1072,7 @@ pub struct CostSnapshot {
 
 /// Provider-neutral tool definition included in a prompt dump.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct PromptTool {
     pub name: String,
     pub description: String,
@@ -1034,6 +1081,7 @@ pub struct PromptTool {
 
 /// Exact assembled model request exposed for prompt transparency.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct PromptDump {
     pub turn_id: Option<TurnId>,
     pub model_alias: ModelAlias,
@@ -1139,6 +1187,7 @@ pub enum BudgetScope {
 
 /// Provider-reported token accounting normalized by the router.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct Usage {
     #[serde(with = "decimal_u64")]
     #[schemars(with = "String")]
@@ -1200,6 +1249,7 @@ pub enum SubagentActivity {
 
 /// Human-readable child metadata exposed only through its owning parent.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct SubagentDescriptor {
     pub subagent_id: SubagentId,
     pub child_session_id: SessionId,
@@ -1212,6 +1262,7 @@ pub struct SubagentDescriptor {
 
 /// A path affected by an isolated child patch.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct TouchedFile {
     pub path: String,
     pub status: TouchedFileStatus,
@@ -1231,6 +1282,7 @@ pub enum TouchedFileStatus {
 
 /// Complete durable patch returned by an isolated child.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct DiffArtifact {
     pub id: String,
     pub base_commit: String,
@@ -1240,6 +1292,7 @@ pub struct DiffArtifact {
 
 /// Bounded model-facing reference to a full durable child patch retained by the host.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(deny_unknown_fields)]
 pub struct DiffArtifactRef {
     pub artifact_id: String,
     pub base_commit: String,
@@ -1258,6 +1311,7 @@ pub struct DiffArtifactRef {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[ts(optional_fields = nullable)]
 #[derive(Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct SubagentResult {
     pub subagent_id: SubagentId,
     pub session_id: SessionId,
@@ -1279,6 +1333,7 @@ pub struct SubagentResult {
 
 /// A workspace path that a rewind could not restore exactly.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct UnrestorablePath {
     pub path: String,
     pub reason: String,
@@ -1290,6 +1345,7 @@ pub struct UnrestorablePath {
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[ts(tag = "kind", rename_all = "snake_case", optional_fields = nullable)]
 #[derive(Allocation)]
+#[serde(deny_unknown_fields)]
 pub enum Cost {
     Monetary {
         #[serde(with = "decimal_u64")]
@@ -1367,6 +1423,7 @@ pub enum EngineErrorCategory {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[ts(optional_fields = nullable)]
 #[derive(Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct EngineError {
     pub category: EngineErrorCategory,
     pub code: String,
@@ -1380,7 +1437,8 @@ pub struct EngineError {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case")]
 #[derive(Allocation)]
+#[serde(deny_unknown_fields)]
 pub enum CommandOutcome {
-    Accepted,
+    Accepted {},
     Rejected { error: EngineError },
 }

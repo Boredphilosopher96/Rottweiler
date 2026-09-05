@@ -1,3 +1,4 @@
+import type { EngineEvent } from "./protocol"
 import {
   PROTOCOL_VERSION,
   type ClientCommand,
@@ -5,7 +6,7 @@ import {
   type PermissionDecision,
   type PermissionApprovalScope,
 } from "./protocol"
-import { isRecord, type WireEngineEvent } from "./transport"
+import { isRecord } from "./transport"
 
 export type ProjectionKind =
   | "commands"
@@ -265,7 +266,7 @@ export class ProjectionRequestBroker {
     return this.#modelSwitchRequests.delete(requestId)
   }
 
-  acceptsEvent(event: WireEngineEvent): boolean {
+  acceptsEvent(event: EngineEvent): boolean {
     const record = event as unknown as Record<string, unknown>
     const requestId = requestIdFrom(record)
     switch (event.type) {
@@ -315,7 +316,7 @@ export class ProjectionRequestBroker {
     }
   }
 
-  completeEvent(event: WireEngineEvent): ProjectionKind | null {
+  completeEvent(event: EngineEvent): ProjectionKind | null {
     switch (event.type) {
       case "command_descriptors_listed":
         this.clear("commands")

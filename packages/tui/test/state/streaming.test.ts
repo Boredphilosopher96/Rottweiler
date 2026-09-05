@@ -1,3 +1,4 @@
+import type { EngineEvent } from "../../src/protocol"
 import { describe, expect, test } from "bun:test"
 import {
   type Turn
@@ -9,7 +10,7 @@ import {
   MAX_RETAINED_TRANSCRIPT_ENTRIES,
   MAX_RETAINED_TURN_PROJECTIONS
 } from "../../src/state"
-import { type WireEngineEvent } from "../../src/transport"
+
 import { meta, metaAt, reduce } from "./fixtures"
 
 describe("state streaming", () => {
@@ -205,7 +206,7 @@ describe("state streaming", () => {
   })
 
   test("replays the same timing deterministically and never substitutes wall time", () => {
-    const events: WireEngineEvent[] = [
+    const events: EngineEvent[] = [
       {
         type: "turn_started",
         meta: metaAt("1", "2026-01-01T12:00:00.000Z"),

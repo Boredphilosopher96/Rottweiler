@@ -219,7 +219,10 @@ fn project_content(
                 name: prefix(name, 128).to_owned(),
                 message: PreviewBudget(2 * 1024).text(
                     message,
-                    source(meta.sequence_id, TranscriptContentSelector::CommandMessage),
+                    source(
+                        meta.sequence_id,
+                        TranscriptContentSelector::CommandMessage {},
+                    ),
                 ),
             },
         })),
@@ -252,7 +255,7 @@ fn project_content(
                 .map(|text| {
                     PreviewBudget(512).text(
                         text,
-                        source(meta.sequence_id, TranscriptContentSelector::ShellCommand),
+                        source(meta.sequence_id, TranscriptContentSelector::ShellCommand {}),
                     )
                 })
                 .or(prior_command);
@@ -270,7 +273,7 @@ fn project_content(
                         .map(|text| {
                             PreviewBudget(2 * 1024).text(
                                 text,
-                                source(meta.sequence_id, TranscriptContentSelector::ShellOutput),
+                                source(meta.sequence_id, TranscriptContentSelector::ShellOutput {}),
                             )
                         })
                         .or(prior_output),
@@ -346,7 +349,7 @@ fn project_conversation(
                     role: turn.role.clone(),
                     blocks,
                     omitted_blocks,
-                    source: source(meta.sequence_id, TranscriptContentSelector::Conversation),
+                    source: source(meta.sequence_id, TranscriptContentSelector::Conversation {}),
                 },
             }))
         }
@@ -387,10 +390,13 @@ fn project_tool_start(
                     call_index: *call_index,
                     arguments: PreviewBudget(512).json(
                         args,
-                        source(meta.sequence_id, TranscriptContentSelector::ToolArguments),
+                        source(
+                            meta.sequence_id,
+                            TranscriptContentSelector::ToolArguments {},
+                        ),
                     )?,
                     diff: None,
-                    status: TranscriptToolStatus::Running,
+                    status: TranscriptToolStatus::Running {},
                 },
             }))
         }
@@ -425,14 +431,14 @@ fn project_tool_update(
                 return Err(TranscriptProjectionError::Invalid("tool binding kind"));
             };
             if *started_index != *call_index
-                || *status != TranscriptToolStatus::Running
+                || !matches!(status, TranscriptToolStatus::Running {})
                 || started_invocation != invocation_id
             {
                 return Err(TranscriptProjectionError::Invalid(
                     "tool completion identity",
                 ));
             }
-            let reference = source(meta.sequence_id, TranscriptContentSelector::ToolOutput);
+            let reference = source(meta.sequence_id, TranscriptContentSelector::ToolOutput {});
             let mut budget = PreviewBudget(2 * 1024);
             let output = match output {
                 ToolOutput::Text { text } => budget.text(text, reference),
@@ -471,7 +477,7 @@ fn project_tool_update(
             }
             *preview = Some(PreviewBudget(512).json(
                 diff,
-                source(meta.sequence_id, TranscriptContentSelector::ToolDiff),
+                source(meta.sequence_id, TranscriptContentSelector::ToolDiff {}),
             )?);
             Ok(Some(ProjectedRow {
                 prior: Some(prior),
@@ -514,9 +520,9 @@ fn project_child(
                     session_id: child_session_id.clone(),
                     task: PreviewBudget(512).text(
                         task,
-                        source(meta.sequence_id, TranscriptContentSelector::SubagentTask),
+                        source(meta.sequence_id, TranscriptContentSelector::SubagentTask {}),
                     ),
-                    status: TranscriptSubagentStatus::Running,
+                    status: TranscriptSubagentStatus::Running {},
                 },
             }))
         }
@@ -535,7 +541,7 @@ fn project_child(
             };
             if session_id != &result.session_id
                 || result.subagent_id != *subagent_id
-                || *status != TranscriptSubagentStatus::Running
+                || !matches!(status, TranscriptSubagentStatus::Running {})
             {
                 return Err(TranscriptProjectionError::Invalid(
                     "child completion identity",
@@ -548,10 +554,13 @@ fn project_child(
                 diff: result
                     .diff_artifact
                     .as_ref()
-                    .map(|_| source(meta.sequence_id, TranscriptContentSelector::SubagentDiff)),
+                    .map(|_| source(meta.sequence_id, TranscriptContentSelector::SubagentDiff {})),
                 result: PreviewBudget(2 * 1024).text(
                     &result.final_text,
-                    source(meta.sequence_id, TranscriptContentSelector::SubagentResult),
+                    source(
+                        meta.sequence_id,
+                        TranscriptContentSelector::SubagentResult {},
+                    ),
                 ),
             };
             let agent_turn = prior.agent_turn;

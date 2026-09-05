@@ -71,7 +71,7 @@ describe("Rottweiler discovery", () => {
       initialState: {
         ...createInitialState(),
         connection: { phase: "connected", attempt: 0, error: null, gap: null },
-        commands: [{ name: "mcp", description: "Manage MCP servers", usage: "[status]" }],
+        commands: [{ source: "builtin", name: "mcp", description: "Manage MCP servers", usage: "[status]" }],
       },
       onCommand(command) {
         emitted.push(command)
@@ -110,7 +110,7 @@ describe("Rottweiler discovery", () => {
       initialState: {
         ...createInitialState(),
         connection: { phase: "connected", attempt: 0, error: null, gap: null },
-        commands: [{ name: "first", description: "First", usage: "" }],
+        commands: [{ source: "builtin", name: "first", description: "First", usage: "" }],
         models: [{ id: "openai/fast", displayName: "fast", provider: "openai", aliases: ["fast"], current: false, available: true, status: null, vision: false, thinking: false, toolCalling: true }],
       },
       onCommand(command) {
@@ -127,7 +127,7 @@ describe("Rottweiler discovery", () => {
       type: "command_descriptors_listed",
       meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: firstCatalogRequest!.meta.request_id, emitted_at: "2026-01-01T00:00:00Z" },
       session_id: "session-local",
-      commands: [{ name: "second", description: "Second", usage: "" }],
+      commands: [{ source: "builtin", name: "second", description: "Second", usage: "" }],
       truncated: false,
     })
     app.closePicker()
@@ -168,7 +168,7 @@ describe("Rottweiler discovery", () => {
       type: "switch_mode",
       mode: "audit",
     }))
-    app.handleEvent({
+    app.handleEvent({ definition_fingerprint: "fixture",
       type: "mode_changed",
       meta: { protocol_version: PROTOCOL_VERSION, session_id: "session-local", sequence_id: "2", emitted_at: "2026-01-01T00:00:03Z" },
       mode: "audit",
@@ -182,7 +182,7 @@ describe("Rottweiler discovery", () => {
     app.openModelPicker()
     const firstModelsRequest = emitted.find((command) => command.type === "list_models")
     expect(firstModelsRequest?.type).toBe("list_models")
-    app.handleEvent({
+    app.handleEvent({ aliases: [], cached: false, truncated: false,
       type: "models_listed",
       meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: firstModelsRequest!.meta.request_id, emitted_at: "2026-01-01T00:00:02Z" },
       models: [],
@@ -212,7 +212,7 @@ describe("Rottweiler discovery", () => {
     })
     expect(app.picker.visible).toBeFalse()
 
-    app.handleEvent({
+    app.handleEvent({ aliases: [], cached: false, truncated: false,
       type: "models_listed",
       meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: "first-models", emitted_at: "2026-01-01T00:00:01Z" },
       models: [],
@@ -229,7 +229,7 @@ describe("Rottweiler discovery", () => {
     expect(app.picker.title).toContain("Welcome to Rottweiler · connect a provider to start")
 
     app.closePicker()
-    app.handleEvent({
+    app.handleEvent({ aliases: [], cached: false, truncated: false,
       type: "models_listed",
       meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: "refreshed-models", emitted_at: "2026-01-01T00:00:02Z" },
       models: [],
@@ -259,7 +259,7 @@ describe("Rottweiler discovery", () => {
     })
     renderer.root.add(app)
 
-    app.handleEvent({
+    app.handleEvent({ aliases: [], cached: false, truncated: false,
       type: "models_listed",
       meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: "premature-models", emitted_at: "2026-01-01T00:00:00Z" },
       models: [],
@@ -310,7 +310,7 @@ describe("Rottweiler discovery", () => {
     })
     expect(app.state.model).toBe("fast")
 
-    app.handleEvent({
+    app.handleEvent({ aliases: [], cached: false, truncated: false,
       type: "models_listed",
       meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: "reconnected-models", emitted_at: "2026-01-01T00:00:01Z" },
       models: [],
@@ -338,7 +338,7 @@ describe("Rottweiler discovery", () => {
       meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: "typed-sessions", emitted_at: "2026-01-01T00:00:00Z" },
       sessions: [],
     })
-    app.handleEvent({
+    app.handleEvent({ aliases: [], cached: false, truncated: false,
       type: "models_listed",
       meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: "typed-models", emitted_at: "2026-01-01T00:00:01Z" },
       models: [],
@@ -374,7 +374,7 @@ describe("Rottweiler discovery", () => {
     })
     const refresh = emitted.findLast((command) => command.type === "list_models")
     expect(refresh?.type).toBe("list_models")
-    app.handleEvent({
+    app.handleEvent({ aliases: [], cached: false, truncated: false,
       type: "models_listed",
       meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: refresh!.meta.request_id, emitted_at: "2026-01-01T00:00:01Z" },
       models: [{
@@ -432,9 +432,9 @@ describe("Rottweiler discovery", () => {
         emitted_at: "2026-01-01T00:00:00Z",
       },
       session_id: "session-local",
-      commands: [{ name: "fixture", description: "Fixture", usage: "/fixture" }],
+      commands: [{ source: "builtin", name: "fixture", description: "Fixture", usage: "/fixture" }],
       truncated: true,
-    } as const
+    } satisfies EngineEvent
     app.handleEvent(event)
     app.handleEvent(event)
     expect(app.state.errors.filter((error) => error.code === "command_catalog_truncated")).toHaveLength(1)

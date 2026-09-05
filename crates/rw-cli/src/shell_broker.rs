@@ -313,7 +313,7 @@ impl BrokerClient {
         }
         let reply: rw_core::CommandReply = collect_json(response.into_body()).await?;
         match reply.outcome() {
-            CommandOutcome::Accepted => Ok(()),
+            CommandOutcome::Accepted {} => Ok(()),
             CommandOutcome::Rejected { error } => Err(ShellBrokerError::Protocol(format!(
                 "shell completion was rejected: {}",
                 error.code

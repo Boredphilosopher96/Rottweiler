@@ -41,7 +41,7 @@ async fn provider_auth_completion_is_async_and_stale_cancel_keeps_real_attempt()
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let mut events = host
         .subscribe(driver.clone(), Some(session_id.clone()), None)
@@ -58,7 +58,7 @@ async fn provider_auth_completion_is_async_and_stale_cancel_keeps_real_attempt()
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let attempt_id = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
@@ -90,7 +90,7 @@ async fn provider_auth_completion_is_async_and_stale_cancel_keeps_real_attempt()
         .await
         .expect("completion command must not await device polling")
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     assert_eq!(
         host.dispatch(
@@ -104,7 +104,7 @@ async fn provider_auth_completion_is_async_and_stale_cancel_keeps_real_attempt()
         )
         .await
         .outcome,
-        CommandOutcome::Accepted,
+        CommandOutcome::Accepted {},
         "a replayed durable auth prompt must join the in-flight completion"
     );
     assert!(matches!(
@@ -134,7 +134,7 @@ async fn provider_auth_completion_is_async_and_stale_cancel_keeps_real_attempt()
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     assert!(fixture.cancelled.load(Ordering::Acquire));
 }
@@ -182,7 +182,7 @@ async fn provider_auth_poll_is_cancelled_when_another_driver_takes_over() {
     ] {
         assert_eq!(
             host.dispatch(original.clone(), command).await.outcome,
-            CommandOutcome::Accepted
+            CommandOutcome::Accepted {}
         );
     }
     let attempt_id = {
@@ -205,7 +205,7 @@ async fn provider_auth_poll_is_cancelled_when_another_driver_takes_over() {
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     assert_eq!(
         host.dispatch(
@@ -219,7 +219,7 @@ async fn provider_auth_poll_is_cancelled_when_another_driver_takes_over() {
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     tokio::time::timeout(Duration::from_secs(1), async {
         while !fixture.cancelled.load(Ordering::Acquire) {
@@ -315,7 +315,7 @@ async fn cancelled_api_key_request_cannot_interrupt_store_or_overtake_lifecycle(
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let request = tokio::spawn({
         let host = host.clone();
@@ -370,7 +370,7 @@ async fn cancelled_api_key_request_cannot_interrupt_store_or_overtake_lifecycle(
             .await
             .expect("takeover completed")
             .expect("takeover task"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     assert!(mutation.persisted.load(Ordering::Acquire));
 }
@@ -425,7 +425,7 @@ async fn oauth_and_api_key_mutations_share_one_global_store_boundary() {
             )
             .await
             .outcome,
-            CommandOutcome::Accepted
+            CommandOutcome::Accepted {}
         );
     }
     let mut auth_events = host
@@ -443,7 +443,7 @@ async fn oauth_and_api_key_mutations_share_one_global_store_boundary() {
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let attempt_id = {
         let entries = host
@@ -465,7 +465,7 @@ async fn oauth_and_api_key_mutations_share_one_global_store_boundary() {
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     fixture.completion.send_replace(true);
     tokio::time::timeout(Duration::from_secs(1), oauth_mutation.started.notified())
@@ -569,7 +569,7 @@ async fn provider_catalog_refresh_failure_does_not_delay_or_relabel_login() {
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let mut events = host
         .subscribe(driver.clone(), Some(session_id.clone()), None)
@@ -586,7 +586,7 @@ async fn provider_catalog_refresh_failure_does_not_delay_or_relabel_login() {
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let attempt_id = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
@@ -614,7 +614,7 @@ async fn provider_catalog_refresh_failure_does_not_delay_or_relabel_login() {
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     fixture.completion.send_replace(true);
 

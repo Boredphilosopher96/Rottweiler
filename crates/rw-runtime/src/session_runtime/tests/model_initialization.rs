@@ -380,7 +380,7 @@ async fn lazy_first_model_switch_does_not_activate_when_persistence_fails() {
             })
             .await
             .expect("command acknowledgement"),
-        rw_core::CommandOutcome::Accepted
+        rw_core::CommandOutcome::Accepted {}
     );
     assert_eq!(initialize_calls.load(Ordering::Acquire), 1);
     assert_eq!(

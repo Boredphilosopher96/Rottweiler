@@ -1,3 +1,4 @@
+import type { EngineEvent } from "./protocol"
 import type { ClientDiagnostics } from "./client-diagnostics"
 import { CLIENT_COMMAND_EXECUTION } from "./protocol"
 import type { HistoryReader } from "./history/reader"
@@ -18,16 +19,7 @@ import {
   type RottweilerAction,
   type RottweilerState,
 } from "./state"
-import {
-  EngineHttpSseClient,
-  durableSequenceId,
-  isSessionForkedEvent,
-  isRecord,
-  type EngineSubscriptionOptions,
-  type EngineStreamRestartMode,
-  type TransportConnectionUpdate,
-  type WireEngineEvent,
-} from "./transport"
+import { EngineHttpSseClient, durableSequenceId, isRecord, type EngineSubscriptionOptions, type EngineStreamRestartMode, type TransportConnectionUpdate } from "./transport"
 
 const TOKEN_FILE_LIMIT = 64 * 1024
 const CURSOR_FILE_LIMIT = 128
@@ -59,7 +51,7 @@ export interface EngineRuntimeConfig {
 
 export interface RuntimeApp {
   readonly state: RottweilerState
-  handleEvent(event: WireEngineEvent): void
+  handleEvent(event: EngineEvent): void
   setState(state: RottweilerState): void
   setSessionId(sessionId: string): void
   beginInitialReplayBatch?(): void
@@ -588,7 +580,7 @@ export class TuiEngineRuntime {
             }
             const bound = this.#requiredApp()
             if (
-              isSessionForkedEvent(event) &&
+              event.type === "session_forked" &&
               this.#forkRequests.get(event.meta.request_id) === event.parent_session_id
             ) {
               this.#forkRequests.delete(event.meta.request_id)
@@ -1153,8 +1145,8 @@ function isReplayReadOnlyCommand(command: ClientCommand): boolean {
   return CLIENT_COMMAND_EXECUTION[command.type] === "read"
 }
 
-function eventBelongsToSession(event: WireEngineEvent, sessionId: string): boolean {
-  if ("meta" in event && isRecord(event.meta) && typeof event.meta.session_id === "string") {
+function eventBelongsToSession(event: EngineEvent, sessionId: string): boolean {
+  if ("meta" in event && isRecord(event.meta) && "session_id" in event.meta && typeof event.meta.session_id === "string") {
     return event.meta.session_id === sessionId
   }
   if (event.type === "subagent_progress") {

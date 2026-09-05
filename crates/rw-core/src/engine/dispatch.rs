@@ -1456,7 +1456,7 @@ pub(super) async fn handle_actor_command(
                     Ok(()) => {
                         state.queued.remove(index);
                         state.queued_positions.remove(index);
-                        let accepted = CommandOutcome::Accepted;
+                        let accepted = CommandOutcome::Accepted {};
                         send_ack(state, events, &meta, session, accepted.clone());
                         let _ = respond.send(accepted);
                         if let Some(complete) = completion.take() {
@@ -1507,7 +1507,7 @@ pub(super) async fn handle_actor_command(
                     Ok(()) => {
                         state.queued.clear();
                         state.queued_positions.clear();
-                        let accepted = CommandOutcome::Accepted;
+                        let accepted = CommandOutcome::Accepted {};
                         send_ack(state, events, &meta, session, accepted.clone());
                         let _ = respond.send(accepted);
                         if let Some(complete) = completion.take() {
@@ -1548,7 +1548,7 @@ pub(super) async fn handle_actor_command(
                 };
                 match result {
                     Ok(permissions) => {
-                        let accepted = CommandOutcome::Accepted;
+                        let accepted = CommandOutcome::Accepted {};
                         send_ack(state, events, &meta, session, accepted.clone());
                         send_connection_event(
                             events,
@@ -1804,7 +1804,7 @@ pub(super) async fn handle_actor_command(
                 state.transient_cause = None;
                 match result {
                     Ok(event) => {
-                        let accepted = CommandOutcome::Accepted;
+                        let accepted = CommandOutcome::Accepted {};
                         send_ack(state, events, &meta, session, accepted.clone());
                         send_connection_event(events, &meta.client_id, event);
                         let _ = respond.send(accepted);
@@ -1867,7 +1867,7 @@ pub(super) async fn handle_actor_command(
                                 .collect::<Vec<_>>(),
                         );
                         *config = next_config;
-                        let accepted = CommandOutcome::Accepted;
+                        let accepted = CommandOutcome::Accepted {};
                         send_ack(state, events, &meta, session, accepted.clone());
                         let _ = respond.send(accepted);
                         if let Some(complete) = completion.take() {
@@ -1886,7 +1886,7 @@ pub(super) async fn handle_actor_command(
                 }
                 return;
             }
-            let accepted = CommandOutcome::Accepted;
+            let accepted = CommandOutcome::Accepted {};
             send_ack(state, events, &meta, session, accepted.clone());
             let _ = respond.send(accepted);
             match command {

@@ -3,7 +3,7 @@ import type { ClientDiagnostics } from "../client-diagnostics"
 import validateCommandReply from "../../../../protocol/command-reply-validator.js"
 import { CLIENT_COMMAND_EXECUTION, ENGINE_EVENT_DELIVERY, MAX_COMMAND_REPLY_BYTES, PROTOCOL_VERSION } from "../protocol"
 import { boundedJson } from "./json"
-import type { ClientCommand, CommandReply } from "../protocol"
+import type { ClientCommand, CommandReply, EngineEvent } from "../protocol"
 import {
   DEFAULT_BACKOFF_POLICY,
   backoffDelay,
@@ -19,7 +19,6 @@ import {
   normalizeWireEngineEvent,
   type AttachSessionCommand,
   type TransportConnectionUpdate,
-  type WireEngineEvent,
 } from "./types"
 
 export interface EngineTransportOptions {
@@ -44,7 +43,7 @@ export type EngineStreamRestartMode = "immediate" | "backoff"
 export interface EngineSubscriptionOptions {
   readonly attach: AttachSessionCommand
   readonly signal: AbortSignal
-  readonly onEvent: (event: WireEngineEvent) => void | Promise<void>
+  readonly onEvent: (event: EngineEvent) => void | Promise<void>
   readonly onConnection?: (update: TransportConnectionUpdate) => void
   readonly onReconnect?: () => void | Promise<void>
   readonly onReplayCursorAhead?: () => void | Promise<void>
@@ -282,7 +281,7 @@ export class EngineHttpSseClient {
           eventStreamController.signal,
         )) {
           const decodedAt = this.#diagnostics?.start()
-          let value: WireEngineEvent | null
+          let value: EngineEvent | null
           try { value = normalizeWireEngineEvent(parseEventJson(frame.data)) }
           finally { if (decodedAt !== undefined) this.#diagnostics?.finish("event_decode", decodedAt) }
           if (value === null) {

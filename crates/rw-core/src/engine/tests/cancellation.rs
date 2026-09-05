@@ -68,7 +68,7 @@ async fn actor_shutdown_runs_registered_tool_session_cleanup() {
             })
             .await
             .expect("attach"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     assert!(handle.snapshot().await.expect("snapshot").active_background);
     assert!(matches!(

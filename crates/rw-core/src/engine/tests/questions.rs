@@ -126,7 +126,7 @@ async fn ask_user_is_persisted_and_answered_only_through_client_command() {
             })
             .await
             .expect("answer"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let mut durable_answer = false;
     loop {

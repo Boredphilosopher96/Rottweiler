@@ -428,7 +428,7 @@ describe("Rottweiler models", () => {
         session_id: "session-local",
         sequence_id: "1",
         emitted_at: "2026-01-01T00:00:00Z",
-        caused_by: concreteSwitch?.meta.request_id,
+        caused_by: concreteSwitch?.meta.request_id ?? null,
       },
       model: "copilot/gpt-5",
       provider: "copilot",

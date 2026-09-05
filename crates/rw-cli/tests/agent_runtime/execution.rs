@@ -555,7 +555,7 @@ fn supervised_tui_crosses_the_real_host_for_commands_and_tool_approval() {
             .is_some_and(|value| value.contains("approval.txt"))
     );
     assert_eq!(report["toolStatus"], "finished");
-    assert_eq!(report["errors"], json!([]));
+    assert_eq!(report["errors"], json!([]), "{}", report["errorDetails"]);
     assert_eq!(
         fs::read_to_string(run.workspace.join("approval.txt")).expect("approved write output"),
         "ROTTWEILER_FULL_HOST_CANARY\n",

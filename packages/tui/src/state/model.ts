@@ -361,8 +361,6 @@ export interface ShellProjection {
 export interface ProtocolProjection {
   readonly duplicateEvents: number
   readonly invalidEvents: number
-  readonly unknownEvents: number
-  readonly lastUnknownType: string | null
 }
 
 export interface SessionChoice {
@@ -614,8 +612,6 @@ export function createInitialState(): RottweilerState {
     protocol: {
       duplicateEvents: 0,
       invalidEvents: 0,
-      unknownEvents: 0,
-      lastUnknownType: null,
     },
     sessions: [],
     sessionSearch: null,

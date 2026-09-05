@@ -117,7 +117,7 @@ describe("state queries", () => {
       meta: replyMeta("search-1"),
       query: "rott",
       sessions: [
-        {
+        { title: "Fixture",
           session_id: "session-state",
           workspace_name: "Rottweiler",
           model: "fast",
@@ -130,6 +130,7 @@ describe("state queries", () => {
     expect(state.sessions).toEqual([
       {
         sessionId: "session-state",
+        title: "Fixture",
         workspaceName: "Rottweiler",
         model: "fast",
         driverClientId: null,
@@ -699,6 +700,5 @@ describe("state queries", () => {
       meta: meta("4"),
     })
     expect(state.queuedMessages).toEqual([])
-    expect(state.protocol.unknownEvents).toBe(0)
   })
 })

@@ -202,7 +202,7 @@ fn bounded_previews_preserve_utf8_and_complete_source_without_copying_large_valu
     let mut budget = PreviewBudget(513);
     let body = budget.text(
         &text,
-        source(SequenceId(7), TranscriptContentSelector::CommandMessage),
+        source(SequenceId(7), TranscriptContentSelector::CommandMessage {}),
     );
     assert!(!body.complete);
     assert!(body.text.len() <= 513);
@@ -211,7 +211,7 @@ fn bounded_previews_preserve_utf8_and_complete_source_without_copying_large_valu
     let body = budget
         .json(
             &serde_json::json!({"text": text}),
-            source(SequenceId(8), TranscriptContentSelector::ToolArguments),
+            source(SequenceId(8), TranscriptContentSelector::ToolArguments {}),
         )
         .expect("capped serialization");
     assert!(!body.complete);
@@ -222,7 +222,7 @@ fn bounded_previews_preserve_utf8_and_complete_source_without_copying_large_valu
         budget
             .json(
                 &serde_json::json!({}),
-                source(SequenceId(8), TranscriptContentSelector::ToolArguments)
+                source(SequenceId(8), TranscriptContentSelector::ToolArguments {})
             )
             .expect("exact limit")
             .complete
@@ -710,7 +710,7 @@ fn full_content_moves_text_and_reads_utf8_chunks_without_body_copies() {
             message: text,
             unrestorable_paths: vec![],
         },
-        &source(SequenceId(0), TranscriptContentSelector::CommandMessage),
+        &source(SequenceId(0), TranscriptContentSelector::CommandMessage {}),
         bytes,
     )
     .expect("move body into owner");
@@ -765,7 +765,7 @@ fn full_conversation_has_no_reasoning_signature_or_duplicate_tool_ir() {
     );
     let document = TranscriptDocument::from_event(
         event.clone(),
-        &source(SequenceId(7), TranscriptContentSelector::Conversation),
+        &source(SequenceId(7), TranscriptContentSelector::Conversation {}),
         4096,
     )
     .expect("display document");
@@ -814,7 +814,7 @@ fn full_conversation_has_no_reasoning_signature_or_duplicate_tool_ir() {
     assert!(
         TranscriptDocument::from_event(
             event.clone(),
-            &source(SequenceId(8), TranscriptContentSelector::Conversation),
+            &source(SequenceId(8), TranscriptContentSelector::Conversation {}),
             4096
         )
         .is_err()
@@ -822,7 +822,7 @@ fn full_conversation_has_no_reasoning_signature_or_duplicate_tool_ir() {
     assert!(
         TranscriptDocument::from_event(
             event,
-            &source(SequenceId(7), TranscriptContentSelector::ToolOutput),
+            &source(SequenceId(7), TranscriptContentSelector::ToolOutput {}),
             4096
         )
         .is_err()
@@ -835,7 +835,7 @@ fn full_structured_content_is_serialized_once_with_an_allocation_ceiling() {
     if let EngineEvent::ToolCallStarted { args, .. } = &mut event {
         *args = serde_json::json!({"escaped":"\u{0}".repeat(8192)});
     }
-    let reference = source(SequenceId(0), TranscriptContentSelector::ToolArguments);
+    let reference = source(SequenceId(0), TranscriptContentSelector::ToolArguments {});
     assert!(TranscriptDocument::from_event(event.clone(), &reference, 8192).is_err());
     let document =
         TranscriptDocument::from_event(event, &reference, 65536).expect("bounded JSON document");

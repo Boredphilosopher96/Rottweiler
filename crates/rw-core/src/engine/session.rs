@@ -686,7 +686,7 @@ impl SessionHandle {
             })
             .await?;
         match outcome {
-            CommandOutcome::Accepted => {
+            CommandOutcome::Accepted {} => {
                 self.local_attached.store(true, Ordering::Release);
                 Ok(())
             }
@@ -733,7 +733,7 @@ impl SessionHandle {
         command: ClientCommand,
     ) -> Result<CommandOutcome, AgentLoopError> {
         self.dispatch_wait(command).await?;
-        Ok(CommandOutcome::Accepted)
+        Ok(CommandOutcome::Accepted {})
     }
 
     /// Persists a parent-owned child invocation through the parent actor's
@@ -842,7 +842,7 @@ impl SessionHandle {
             .await
             .map_err(|_| AgentLoopError::Closed)?;
         match receive.await.map_err(|_| AgentLoopError::Closed)? {
-            CommandOutcome::Accepted => completed.await.map_err(|_| AgentLoopError::Closed)?,
+            CommandOutcome::Accepted {} => completed.await.map_err(|_| AgentLoopError::Closed)?,
             CommandOutcome::Rejected { error } => {
                 Err(AgentLoopError::InvalidConfiguration(error.message))
             }
@@ -928,7 +928,7 @@ impl SessionHandle {
                 session_id: self.session_id.clone(),
             })
             .await?,
-            CommandOutcome::Accepted
+            CommandOutcome::Accepted {}
         ))
     }
 
@@ -976,7 +976,7 @@ impl SessionHandle {
                 binding,
             })
             .await?,
-            CommandOutcome::Accepted
+            CommandOutcome::Accepted {}
         ))
     }
 
@@ -1000,7 +1000,7 @@ impl SessionHandle {
                 revisions,
             })
             .await?,
-            CommandOutcome::Accepted
+            CommandOutcome::Accepted {}
         ))
     }
 
@@ -1027,7 +1027,7 @@ impl SessionHandle {
                 }],
             })
             .await?,
-            CommandOutcome::Accepted
+            CommandOutcome::Accepted {}
         ))
     }
 

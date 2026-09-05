@@ -247,7 +247,6 @@ describe("authenticated UDS engine transport", () => {
     expect(state.mode).toBe("plan")
     expect(state.model).toBe("fast")
     expect(state.protocol.duplicateEvents).toBe(1)
-    expect(state.protocol.unknownEvents).toBe(0)
     const attaches = engine.commands.filter(
       (command): command is Extract<ClientCommand, { type: "attach_session" }> =>
         command.type === "attach_session",

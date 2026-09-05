@@ -1,7 +1,8 @@
-import type { WireEngineEvent } from "../transport"
+import type { EngineEvent } from "../protocol"
+
 
 export type RottweilerAction =
-  | { readonly type: "engine_event"; readonly event: WireEngineEvent }
+  | { readonly type: "engine_event"; readonly event: EngineEvent }
   | { readonly type: "transport_connecting"; readonly attempt: number }
   | { readonly type: "transport_reconnecting"; readonly attempt: number }
   | { readonly type: "transport_connected"; readonly attempt: number }
@@ -12,7 +13,7 @@ export type RottweilerAction =
     }
   | { readonly type: "transport_closed" }
 
-export const engineEvent = (event: WireEngineEvent): RottweilerAction => ({
+export const engineEvent = (event: EngineEvent): RottweilerAction => ({
   type: "engine_event",
   event,
 })

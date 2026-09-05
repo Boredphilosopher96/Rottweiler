@@ -89,7 +89,7 @@ async fn large_reconnect_pages_pin_cursor_and_preserve_attach_ack_after_lag() {
             })
             .await
             .expect("attach"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let mut sequences = Vec::new();
     timeout(Duration::from_secs(3), async {
@@ -291,7 +291,7 @@ async fn failed_takeover_does_not_mutate_the_driver_lease() {
             })
             .await
             .expect("first attach"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     ));
     assert!(matches!(
         handle
@@ -303,7 +303,7 @@ async fn failed_takeover_does_not_mutate_the_driver_lease() {
             })
             .await
             .expect("second attach"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     ));
     sink.fail_driver_change.store(true, Ordering::SeqCst);
     assert!(matches!(

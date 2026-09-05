@@ -47,6 +47,7 @@ try {
     toolStatus: tool?.status ?? null,
     toolOutput: tool?.output ?? null,
     errors: app.state.errors.map((error) => error.code),
+    errorDetails: app.state.errors.map((error) => error.message),
   }))
 } finally {
   await runtime.stop()

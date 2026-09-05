@@ -67,7 +67,7 @@ impl HistoricalReplayEngine {
                 ));
             }
         };
-        Ok((CommandOutcome::Accepted, vec![event]))
+        Ok((CommandOutcome::Accepted {}, vec![event]))
     }
 }
 
@@ -83,7 +83,7 @@ impl server::ServerEngine for HistoricalReplayEngine {
         } if session_id == &self.session_id && meta.protocol_version == rw_core::PROTOCOL_VERSION
             && meta.request_id.is_valid())
         {
-            return Ok(HostReply::command(CommandOutcome::Accepted));
+            return Ok(HostReply::command(CommandOutcome::Accepted {}));
         }
         Ok(self
             .reads

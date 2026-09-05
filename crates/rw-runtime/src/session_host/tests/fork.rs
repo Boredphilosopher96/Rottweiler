@@ -62,7 +62,7 @@ async fn production_factory_fork_composes_and_resumes_child() {
             })
             .await
             .expect("attach dispatch"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     assert_eq!(
         parent
@@ -79,7 +79,7 @@ async fn production_factory_fork_composes_and_resumes_child() {
             })
             .await
             .expect("parent message"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     loop {
         if matches!(
@@ -105,7 +105,7 @@ async fn production_factory_fork_composes_and_resumes_child() {
             })
             .await
             .expect("switch parent model after fork boundary"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let model_question_id = loop {
         if let rw_core::EngineEvent::QuestionAsked {
@@ -141,7 +141,7 @@ async fn production_factory_fork_composes_and_resumes_child() {
             })
             .await
             .expect("answer parent model context question"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     loop {
         if matches!(
@@ -291,7 +291,7 @@ async fn production_factory_fork_composes_and_resumes_child() {
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let replayed_child = loop {
         if let EngineEvent::SessionForked { child, meta, .. } = replacement_events
@@ -452,7 +452,7 @@ async fn production_factory_fork_composes_and_resumes_child() {
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let replayed_child = loop {
         if let EngineEvent::SessionForked { child, meta, .. } = replacement_events
@@ -596,7 +596,7 @@ async fn session_capacity_rejection_abandons_prepared_fork_journal() {
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let outcome = host
         .dispatch(

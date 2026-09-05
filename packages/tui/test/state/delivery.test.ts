@@ -35,7 +35,7 @@ describe("state delivery", () => {
     expect(replay).toEqual(live)
   })
 
-  test("compares full u64 sequence ids, suppresses duplicates, and advances unknown events", () => {
+  test("compares full u64 sequence ids and suppresses duplicates", () => {
     let state = createInitialState()
     state = reduce(state, {
       type: "mode_changed",
@@ -64,15 +64,6 @@ describe("state delivery", () => {
     expect(state.model).toBe("fast")
     expect(state.protocol).toMatchObject({ duplicateEvents: 1, invalidEvents: 1 })
 
-    const unknown = reduce(createInitialState(), {
-      type: "future_additive_event",
-      meta: meta("1"),
-      additive_field: true,
-    })
-    expect(unknown.lastSequence).toBe("1")
-    expect(unknown.protocol).toMatchObject({
-      unknownEvents: 1,
-      lastUnknownType: "future_additive_event",
-    })
+
   })
 })

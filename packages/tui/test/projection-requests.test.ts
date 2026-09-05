@@ -1,11 +1,12 @@
+import type { EngineEvent } from "../src/protocol"
 import { describe, expect, test } from "bun:test"
 
 import { ProjectionRequestBroker } from "../src/projection-requests"
 import { PROTOCOL_VERSION, type ClientCommand, type CommandOutcome } from "../src/protocol"
-import type { WireEngineEvent } from "../src/transport"
 
-function modelCatalog(requestId: string): WireEngineEvent {
-  return {
+
+function modelCatalog(requestId: string): EngineEvent {
+  return { aliases: [], providers: [], cached: false, truncated: false,
     type: "models_listed",
     meta: {
       protocol_version: PROTOCOL_VERSION,
@@ -17,7 +18,7 @@ function modelCatalog(requestId: string): WireEngineEvent {
   }
 }
 
-function settingsCatalog(requestId: string): WireEngineEvent {
+function settingsCatalog(requestId: string): EngineEvent {
   return {
     type: "settings_listed",
     meta: {
@@ -35,7 +36,7 @@ function mcpApprovalReview(
   requestId: string,
   sessionId: string,
   server: string,
-): WireEngineEvent {
+): EngineEvent {
   return {
     type: "mcp_server_approval_reviewed",
     meta: {
@@ -57,7 +58,7 @@ function mcpApprovalReview(
   }
 }
 
-function mcpCatalog(requestId: string, sessionId = "session-test"): WireEngineEvent {
+function mcpCatalog(requestId: string, sessionId = "session-test"): EngineEvent {
   return {
     type: "mcp_servers_listed",
     meta: {

@@ -99,7 +99,7 @@ describe("runtime subscriptions", () => {
     const running = runtime.start()
     await waitFor(() => client.subscription !== null)
     const emit = async (sequence: string, mode: "plan" | "default") => {
-      await client.subscription?.onEvent({
+      await client.subscription?.onEvent({ definition_fingerprint: "fixture",
         type: "mode_changed",
         meta: {
           protocol_version: PROTOCOL_VERSION,
@@ -242,7 +242,7 @@ describe("runtime subscriptions", () => {
   test("resets the session projection when the durable log rejects its cursor", async () => {
     const client = new CursorAheadClient()
     const app = new TestApp()
-    app.handleEvent({
+    app.handleEvent({ definition_fingerprint: "fixture",
       type: "mode_changed",
       meta: {
         protocol_version: PROTOCOL_VERSION,

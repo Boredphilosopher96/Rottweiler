@@ -296,7 +296,7 @@ async fn hosted_create_and_rename_are_immediately_searchable() {
             })
             .await
             .expect("attach"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let (created, truncated) = factory
         .search_persisted_sessions("New session", 10)
@@ -319,7 +319,7 @@ async fn hosted_create_and_rename_are_immediately_searchable() {
             })
             .await
             .expect("rename"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     loop {
         if matches!(

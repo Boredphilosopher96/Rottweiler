@@ -53,7 +53,7 @@ async fn plugin_machine_capability_preserves_driver_queue_and_durable_order() {
             })
             .await
             .expect("attach TUI"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     assert_eq!(
         handle
@@ -65,7 +65,7 @@ async fn plugin_machine_capability_preserves_driver_queue_and_durable_order() {
             })
             .await
             .expect("start pending turn"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
 
     let plugin = handle
@@ -200,7 +200,7 @@ async fn plugin_machine_capability_preserves_driver_queue_and_durable_order() {
             })
             .await
             .expect("interrupt first turn"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     timeout(Duration::from_secs(3), async {
         loop {

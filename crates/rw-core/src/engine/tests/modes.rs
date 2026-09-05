@@ -92,7 +92,7 @@ async fn discuss_and_plan_tool_sequences_cannot_mutate_the_workspace() {
                 })
                 .await
                 .expect("switch mode"),
-            CommandOutcome::Accepted
+            CommandOutcome::Accepted {}
         );
         assert_eq!(
             handle
@@ -104,7 +104,7 @@ async fn discuss_and_plan_tool_sequences_cannot_mutate_the_workspace() {
                 })
                 .await
                 .expect("turn"),
-            CommandOutcome::Accepted
+            CommandOutcome::Accepted {}
         );
         let turn = collect_turn(&mut events).await;
         assert!(turn.iter().any(|event| matches!(
@@ -185,7 +185,7 @@ prompt = "Execute approved work."
             })
             .await
             .expect("enter plan"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     assert!(matches!(
         handle
@@ -207,7 +207,7 @@ prompt = "Execute approved work."
             })
             .await
             .expect("switch custom mode"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     assert_eq!(
         handle.send_message("inspect").await.expect("turn"),

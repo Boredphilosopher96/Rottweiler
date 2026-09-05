@@ -5,5 +5,5 @@ export { MAX_TODO_ITEMS, MAX_TODO_ID_BYTES, MAX_TODO_CONTENT_BYTES, MAX_TODO_TOT
 export { MAX_COMMAND_ACKS } from "./command-acks"
 export { MAX_COMPACTION_STREAM_BYTES, MAX_RETAINED_TRANSCRIPT_ENTRIES, MAX_RETAINED_TURN_PROJECTIONS } from "./turn-state"
 export { MAX_SHELL_COMMAND_BYTES, MAX_SHELL_OUTPUT_BYTES, MAX_SHELL_OUTPUT_LINES } from "./shell-state"
-export { reduceRottweilerState, reduceWireEvent, projectSessionTitleUpdate, eventHasDurableSequence } from "./reducer"
+export { reduceRottweilerState, reduceWireEvent, projectSessionTitleUpdate } from "./reducer"
 export * from "./display-buffer"

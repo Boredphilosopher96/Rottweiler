@@ -787,7 +787,7 @@ async fn handle_request(
                             };
                             match outcome {
                                 Ok(outcome) => {
-                                    let accepted = outcome.outcome == CommandOutcome::Accepted;
+                                    let accepted = outcome.outcome == CommandOutcome::Accepted {};
                                     let mut response =
                                         json_response(StatusCode::ACCEPTED, outcome.bytes);
                                     if shutdown_requested && accepted {
@@ -1127,7 +1127,7 @@ async fn dispatch_shell_broker(
         .complete_shell(session_id, shell_id, status, captured_output)
         .await
     {
-        Ok(()) => Ok(CommandOutcome::Accepted),
+        Ok(()) => Ok(CommandOutcome::Accepted {}),
         Err(message) => Ok(CommandOutcome::Rejected {
             error: EngineError {
                 category: EngineErrorCategory::Protocol,

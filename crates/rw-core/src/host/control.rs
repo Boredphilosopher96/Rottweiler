@@ -346,7 +346,7 @@ impl EngineHost {
                 }
             };
             let outcome = child.handle().dispatch(attach).await?;
-            if outcome != CommandOutcome::Accepted {
+            if !matches!(outcome, CommandOutcome::Accepted {}) {
                 return Err(HostError::Persistence(
                     "fork child could not attach its authorized driver".to_owned(),
                 ));

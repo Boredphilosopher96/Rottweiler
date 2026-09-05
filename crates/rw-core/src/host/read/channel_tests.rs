@@ -19,7 +19,7 @@ fn request(id: &str, session: &str) -> ClientCommand {
 }
 async fn accepted(command: ClientCommand) -> Result<(CommandOutcome, Vec<EngineEvent>), HostError> {
     assert_eq!(command.meta().client_id, bound().client_id);
-    Ok((CommandOutcome::Accepted, Vec::new()))
+    Ok((CommandOutcome::Accepted {}, Vec::new()))
 }
 fn rejected_with(reply: &HostReply, code: &str) -> bool {
     matches!(&reply.outcome, CommandOutcome::Rejected { error } if error.code == code)
@@ -82,7 +82,7 @@ async fn retained_body_clones_keep_identity_and_client_admission() {
     let admitted = channel
         .dispatch(bound(), request("three", "session"), accepted)
         .await;
-    assert_eq!(admitted.outcome, CommandOutcome::Accepted);
+    assert_eq!(admitted.outcome, CommandOutcome::Accepted {});
 }
 
 #[tokio::test]
@@ -116,5 +116,5 @@ async fn cancelled_backend_releases_all_read_admission() {
     let reply = channel
         .dispatch(bound(), request("pending", "session"), accepted)
         .await;
-    assert_eq!(reply.outcome, CommandOutcome::Accepted);
+    assert_eq!(reply.outcome, CommandOutcome::Accepted {});
 }

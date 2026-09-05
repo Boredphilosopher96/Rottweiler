@@ -36,7 +36,7 @@ impl ServerEngine for StubEngine {
             .expect("received commands")
             .push((bound_client, command.clone()));
         if matches!(command, ClientCommand::ShutdownHost { .. }) {
-            return Ok(rw_core::HostReply::command(CommandOutcome::Accepted));
+            return Ok(rw_core::HostReply::command(CommandOutcome::Accepted {}));
         }
         Ok(rw_core::HostReply::command(CommandOutcome::Rejected {
             error: EngineError {

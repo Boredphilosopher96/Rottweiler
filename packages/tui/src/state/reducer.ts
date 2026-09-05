@@ -1,9 +1,8 @@
 import {
   ENGINE_EVENT_DELIVERY,
   type EngineEvent,
-  type EngineEventDelivery
 } from "../protocol"
-import { MAX_U64, durableSequenceId, isRecord, parseU64, type WireEngineEvent } from "../transport"
+import { MAX_U64, durableSequenceId, isRecord, parseU64 } from "../transport"
 import type { RottweilerAction } from "./actions"
 import { boundedCommandAcks, responseAck } from "./command-acks"
 import { projectCommandResult } from "./command-results"
@@ -18,12 +17,6 @@ import { projectShellEvent } from "./shell-state"
 import { MAX_SUBAGENT_TASK_BYTES, boundedSubagentHistory, nextSubagentArchiveKey, subagentActivity, subagentTerminalSummary } from "./subagents"
 import { UNKNOWN_ACTIVITY_TIMING, closeActivityTiming, deriveTodosFromTools, observeActivityTiming, openActivityTiming, projectTodoOutput, retainRecentTools, updateTool } from "./tool-state"
 import { MAX_COMPACTION_STREAM_BYTES, appendTailText, attachToolToTail, currentTurnId, retainRecentTurns, retainTranscriptEntry, updateTail } from "./turn-state"
-
-function knownEventDelivery(type: string): EngineEventDelivery | null {
-  return Object.hasOwn(ENGINE_EVENT_DELIVERY, type)
-    ? ENGINE_EVENT_DELIVERY[type as EngineEvent["type"]]
-    : null
-}
 
 export function reduceRottweilerState(
   state: RottweilerState = createInitialState(),
@@ -85,24 +78,22 @@ export function reduceRottweilerState(
 
 export function reduceWireEvent(
   state: RottweilerState,
-  event: WireEngineEvent,
+  event: EngineEvent,
   activeSessionId: string | null = null,
 ): RottweilerState {
-  const scope = knownEventDelivery(event.type)
+  const scope = ENGINE_EVENT_DELIVERY[event.type]
   // Transient progress updates retained projections without consuming the durable replay cursor.
   if (scope === "transient") {
-    return applyKnownEvent(state, event as EngineEvent, null, activeSessionId)
+    return applyKnownEvent(state, event, null, activeSessionId)
   }
   if (scope === "connection") {
-    return applyKnownEvent(state, event as EngineEvent, null, activeSessionId)
+    return applyKnownEvent(state, event, null, activeSessionId)
   }
 
   const sequenceText = durableSequenceId(event)
   const sequence = parseU64(sequenceText)
   if (sequence === null || sequenceText === null) {
-    return scope === "durable"
-      ? recordInvalid(state)
-      : recordUnknown(state, event.type)
+    return recordInvalid(state)
   }
 
   const last = parseU64(state.lastSequence)
@@ -147,10 +138,7 @@ export function reduceWireEvent(
     }
     : withCursor
 
-  if (scope === null) {
-    return recordUnknown(ready, event.type)
-  }
-  return applyKnownEvent(ready, event as EngineEvent, sequenceText, activeSessionId)
+  return applyKnownEvent(ready, event, sequenceText, activeSessionId)
 }
 
 export function projectSessionTitleUpdate(
@@ -1189,19 +1177,4 @@ function recordInvalid(state: RottweilerState): RottweilerState {
     ...state,
     protocol: { ...state.protocol, invalidEvents: state.protocol.invalidEvents + 1 },
   }
-}
-
-function recordUnknown(state: RottweilerState, type: string): RottweilerState {
-  return {
-    ...state,
-    protocol: {
-      ...state.protocol,
-      unknownEvents: state.protocol.unknownEvents + 1,
-      lastUnknownType: type,
-    },
-  }
-}
-
-export function eventHasDurableSequence(event: WireEngineEvent): boolean {
-  return "meta" in event && isRecord(event.meta) && typeof event.meta.sequence_id === "string"
 }

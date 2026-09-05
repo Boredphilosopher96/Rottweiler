@@ -27,8 +27,8 @@ async fn concurrent_resume_opens_one_actor_and_capacity_is_atomic() {
         },
     );
     let (left, right) = tokio::join!(left, right);
-    assert_eq!(left.outcome, CommandOutcome::Accepted);
-    assert_eq!(right.outcome, CommandOutcome::Accepted);
+    assert_eq!(left.outcome, CommandOutcome::Accepted {});
+    assert_eq!(right.outcome, CommandOutcome::Accepted {});
     assert_eq!(factory.resumes.load(Ordering::Relaxed), 1);
 
     let rejected = host
@@ -70,7 +70,7 @@ async fn fork_requires_idle_driver_and_returns_typed_child_descriptor() {
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let mut events = host
         .subscribe(driver.clone(), None, None)
@@ -88,7 +88,7 @@ async fn fork_requires_idle_driver_and_returns_typed_child_descriptor() {
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let child = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
@@ -157,7 +157,7 @@ async fn concurrent_fork_waits_for_takeover_and_revalidates_actor_driver() {
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     factory.block_fork.store(true, Ordering::Release);
     let first_fork = tokio::spawn({
@@ -201,11 +201,11 @@ async fn concurrent_fork_waits_for_takeover_and_revalidates_actor_driver() {
     factory.fork_release.notify_one();
     assert_eq!(
         first_fork.await.expect("first fork task"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     assert_eq!(
         takeover.await.expect("takeover task"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     assert_eq!(
         host.dispatch(
@@ -219,7 +219,7 @@ async fn concurrent_fork_waits_for_takeover_and_revalidates_actor_driver() {
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     assert_eq!(
         factory
@@ -250,7 +250,7 @@ async fn empty_log_rejects_sequence_zero_cursor_and_null_cursor_completes_prompt
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
 
     let error = host
@@ -310,7 +310,7 @@ async fn failed_resume_removes_reservation_and_retry_succeeds() {
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     assert_eq!(factory.resumes.load(Ordering::Relaxed), 2);
 }
@@ -328,11 +328,11 @@ async fn bound_identity_and_request_deduplication_fail_closed() {
     };
     assert_eq!(
         host.dispatch(bound.clone(), command.clone()).await.outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     assert_eq!(
         host.dispatch(bound.clone(), command).await.outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let sessions = host.factory.persisted_sessions().await.expect("sessions");
     assert!(sessions.is_empty());

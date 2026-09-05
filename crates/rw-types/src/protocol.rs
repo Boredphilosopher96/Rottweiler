@@ -10,3 +10,6 @@ pub use shared::*;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod strict_tests;

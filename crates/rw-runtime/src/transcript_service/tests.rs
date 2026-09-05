@@ -135,13 +135,13 @@ async fn cancelled_waiters_cannot_release_running_worker_admission() {
 fn catch_up_is_bounded_and_first_middle_latest_are_indexed_current_views() {
     let fixture = Fixture::new(300, "body");
     assert!(matches!(
-        fixture.read(TranscriptPosition::Latest, None, 64 * 1024),
+        fixture.read(TranscriptPosition::Latest {}, None, 64 * 1024),
         TranscriptReadResult::CatchingUp {
             through: Some(SequenceId(255)),
             target: Some(SequenceId(299))
         }
     ));
-    let latest = ready(fixture.read(TranscriptPosition::Latest, None, 64 * 1024));
+    let latest = ready(fixture.read(TranscriptPosition::Latest {}, None, 64 * 1024));
     assert_eq!(latest.first_ordinal, TranscriptOrdinal(290));
     assert_eq!(
         latest.items.last().expect("tail").id,
@@ -156,9 +156,9 @@ fn catch_up_is_bounded_and_first_middle_latest_are_indexed_current_views() {
         64 * 1024,
     ));
     assert_eq!(middle.items[0].ordinal, TranscriptOrdinal(150));
-    assert_eq!(middle.invalidation, TranscriptInvalidation::None);
+    assert_eq!(middle.invalidation, TranscriptInvalidation::None {});
     assert_eq!(middle.view, latest.view);
-    let first = ready(fixture.read(TranscriptPosition::First, Some(latest.view), 64 * 1024));
+    let first = ready(fixture.read(TranscriptPosition::First {}, Some(latest.view), 64 * 1024));
     assert_eq!(first.items[0].id, TranscriptItemId(SequenceId(0)));
 }
 
@@ -183,7 +183,7 @@ async fn offline_reader_uses_the_same_projection_without_a_session_actor() {
     assert_eq!(bootstrap.through_sequence, Some(SequenceId(299)));
     let request = TranscriptRead {
         known_view: None,
-        position: TranscriptPosition::Latest,
+        position: TranscriptPosition::Latest {},
         max_items: 8,
         max_bytes: 64 * 1024,
     };
@@ -205,7 +205,7 @@ async fn offline_reader_uses_the_same_projection_without_a_session_actor() {
 #[test]
 fn byte_limited_latest_keeps_the_last_item_and_before_excludes_its_anchor() {
     let fixture = Fixture::new(12, &"quoted \\\" λ".repeat(200));
-    let latest = ready(fixture.read(TranscriptPosition::Latest, None, 8192));
+    let latest = ready(fixture.read(TranscriptPosition::Latest {}, None, 8192));
     assert!(latest.items.len() < 10);
     assert_eq!(
         latest.items.last().expect("last").id,
@@ -226,7 +226,7 @@ fn byte_limited_latest_keeps_the_last_item_and_before_excludes_its_anchor() {
 #[test]
 fn rewind_changes_ordering_and_recovers_a_removed_stable_anchor() {
     let mut fixture = Fixture::new(10, "body");
-    let old = ready(fixture.read(TranscriptPosition::Latest, None, 64 * 1024));
+    let old = ready(fixture.read(TranscriptPosition::Latest {}, None, 64 * 1024));
     fixture
         .journal
         .append(&EngineEvent::ConversationRewound {
@@ -265,7 +265,7 @@ fn rewind_changes_ordering_and_recovers_a_removed_stable_anchor() {
             replacement: Some(TranscriptItemId(SequenceId(3)))
         }
     ));
-    assert_eq!(page.invalidation, TranscriptInvalidation::All);
+    assert_eq!(page.invalidation, TranscriptInvalidation::All {});
     assert_eq!(page.total_items, TranscriptOrdinal(4));
 }
 
@@ -318,7 +318,7 @@ fn late_tool_final_invalidates_its_stable_item_without_changing_order() {
         .registration
         .publisher
         .publish(fixture.journal.read_view());
-    let before = ready(fixture.read(TranscriptPosition::Latest, None, 64 * 1024));
+    let before = ready(fixture.read(TranscriptPosition::Latest {}, None, 64 * 1024));
     fixture
         .journal
         .append(&EngineEvent::ToolCallFinished {
@@ -338,7 +338,7 @@ fn late_tool_final_invalidates_its_stable_item_without_changing_order() {
         .publisher
         .publish(fixture.journal.read_view());
     let after = ready(fixture.read(
-        TranscriptPosition::Latest,
+        TranscriptPosition::Latest {},
         Some(before.view.clone()),
         64 * 1024,
     ));
@@ -364,7 +364,7 @@ fn malformed_limits_are_rejected_before_projector_or_journal_admission() {
                 &SessionId("semantic".into()),
                 &TranscriptRead {
                     known_view: None,
-                    position: TranscriptPosition::Latest,
+                    position: TranscriptPosition::Latest {},
                     max_items: u32::MAX,
                     max_bytes: 4096,
                 }
@@ -383,7 +383,7 @@ fn incompatible_derived_version_rebuilds_without_changing_canonical_history() {
         rw_store::session::transcript_index::TranscriptIndex::open(&view, 999)
             .expect("old derived version"),
     );
-    let page = ready(fixture.read(TranscriptPosition::Latest, None, 64 * 1024));
+    let page = ready(fixture.read(TranscriptPosition::Latest {}, None, 64 * 1024));
     assert_eq!(page.items.len(), 3);
     assert_eq!(
         page.view.projection_version,
@@ -396,7 +396,7 @@ fn incompatible_derived_version_rebuilds_without_changing_canonical_history() {
 fn complete_content_chunks_reuse_one_canonical_document_and_validate_view_boundaries() {
     let text = "λ🐕\"\n".repeat(1200);
     let fixture = Fixture::new(1, &text);
-    let page = ready(fixture.read(TranscriptPosition::Latest, None, 64 * 1024));
+    let page = ready(fixture.read(TranscriptPosition::Latest {}, None, 64 * 1024));
     let request = rw_types::transcript::TranscriptContentRead {
         view: page.view,
         source: rw_types::transcript::TranscriptContentSource {

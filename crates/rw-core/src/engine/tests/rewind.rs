@@ -226,7 +226,7 @@ async fn invalid_protocol_rewind_is_rejected_without_poisoning_the_session() {
             })
             .await
             .expect("healthy command"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     timeout(Duration::from_secs(1), async {
         loop {

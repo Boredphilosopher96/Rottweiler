@@ -1,3 +1,4 @@
+import type { EngineEvent } from "../../src/protocol"
 import {
   PROTOCOL_VERSION,
   type SubagentResult
@@ -7,7 +8,7 @@ import {
   reduceRottweilerState,
   type RottweilerState
 } from "../../src/state"
-import { type WireEngineEvent } from "../../src/transport"
+
 
 export function meta(sequence: string) {
   return {
@@ -22,7 +23,7 @@ export function metaAt(sequence: string, emittedAt: string) {
   return { ...meta(sequence), emitted_at: emittedAt }
 }
 
-export function reduce(state: RottweilerState, event: WireEngineEvent): RottweilerState {
+export function reduce(state: RottweilerState, event: EngineEvent): RottweilerState {
   return reduceRottweilerState(state, engineEvent(event))
 }
 

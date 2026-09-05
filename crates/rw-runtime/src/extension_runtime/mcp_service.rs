@@ -451,14 +451,14 @@ impl LiveMcpAdmin {
                 .is_approved(&status.id)
                 .map_err(|error| HostError::Query(error.to_string()))?;
             let state = match status.state {
-                rw_mcp::ServerState::Disabled => McpServerState::Disabled,
-                rw_mcp::ServerState::Connecting => McpServerState::Connecting,
-                rw_mcp::ServerState::Ready => McpServerState::Ready,
-                rw_mcp::ServerState::ApprovalRequired => McpServerState::ApprovalRequired,
+                rw_mcp::ServerState::Disabled => McpServerState::Disabled {},
+                rw_mcp::ServerState::Connecting => McpServerState::Connecting {},
+                rw_mcp::ServerState::Ready => McpServerState::Ready {},
+                rw_mcp::ServerState::ApprovalRequired => McpServerState::ApprovalRequired {},
                 rw_mcp::ServerState::Failed { message } => McpServerState::Failed {
                     message: message.chars().take(512).collect(),
                 },
-                rw_mcp::ServerState::Stopping => McpServerState::Stopping,
+                rw_mcp::ServerState::Stopping => McpServerState::Stopping {},
             };
             servers.push(McpServerDescriptor {
                 name: status.id.into_inner(),

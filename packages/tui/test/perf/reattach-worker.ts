@@ -1,8 +1,9 @@
+import type { EngineEvent } from "../../src/protocol"
 import { writeFileSync } from "node:fs"
 
 import { createEngineRuntimeFromEnvironment, type RuntimeApp } from "../../src/runtime"
 import { createInitialState, engineEvent, reduceRottweilerState } from "../../src/state"
-import type { WireEngineEvent } from "../../src/transport"
+
 
 const targetSequence = process.env.ROTTWEILER_TEST_TARGET_SEQUENCE ?? "never"
 const reportFile = process.env.ROTTWEILER_TEST_REPORT_FILE
@@ -15,7 +16,7 @@ class WorkerApp implements RuntimeApp {
 
   setSessionId(_sessionId: string): void {}
 
-  handleEvent(event: WireEngineEvent): void {
+  handleEvent(event: EngineEvent): void {
     this.state = reduceRottweilerState(this.state, engineEvent(event))
     if (
       "meta" in event &&

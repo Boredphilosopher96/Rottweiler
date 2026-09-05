@@ -14,6 +14,7 @@
           "const": "command"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "outcome"
@@ -36,6 +37,7 @@
           "const": "read"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "outcome",
@@ -55,6 +57,7 @@
               "const": "accepted"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -70,6 +73,7 @@
               "const": "rejected"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "error"
@@ -95,6 +99,7 @@
         },
         "details": true
       },
+      "additionalProperties": false,
       "required": [
         "category",
         "code",
@@ -135,6 +140,7 @@
               "const": "transcript_page_ready"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -159,6 +165,7 @@
               "const": "transcript_content_ready"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -190,6 +197,7 @@
               "const": "command_acknowledged"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -213,6 +221,7 @@
               "const": "context_snapshot_ready"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -237,6 +246,7 @@
               "const": "cost_snapshot_ready"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -261,6 +271,7 @@
               "const": "session_review_ready"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -291,6 +302,7 @@
               "const": "session_review_updated"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -317,6 +329,7 @@
               "const": "prompt_dump_ready"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -349,6 +362,7 @@
               "const": "session_history_ready"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -379,6 +393,7 @@
               "const": "session_replay_completed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -405,6 +420,7 @@
               "const": "session_forked"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -430,6 +446,7 @@
               "const": "session_exported"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -454,6 +471,7 @@
               "const": "sessions_listed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -480,6 +498,7 @@
               "const": "subagents_listed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -510,6 +529,7 @@
               "const": "sessions_search_ready"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -541,6 +561,7 @@
               "const": "command_descriptors_listed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -572,6 +593,7 @@
               "const": "modes_listed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -625,6 +647,7 @@
               "const": "models_listed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -655,6 +678,7 @@
               "const": "settings_listed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -682,6 +706,7 @@
               "const": "mcp_servers_listed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -709,6 +734,7 @@
               "const": "runtime_services_listed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -733,6 +759,7 @@
               "const": "mcp_server_approval_reviewed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -757,6 +784,7 @@
               "const": "permissions_listed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -793,6 +821,7 @@
               "const": "provider_auth_started"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -823,6 +852,7 @@
               "const": "provider_configured"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -863,6 +893,7 @@
               "const": "provider_auth_finished"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -897,6 +928,7 @@
               "const": "provider_activation_finished"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -929,6 +961,7 @@
               "const": "workspace_files_found"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -954,6 +987,7 @@
               "const": "workspace_file_preview_ready"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -978,6 +1012,7 @@
               "const": "workspace_status_ready"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1002,6 +1037,7 @@
               "const": "workspace_diff_ready"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1020,6 +1056,7 @@
               "const": "host_shutdown"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta"
@@ -1039,6 +1076,7 @@
               "const": "session_created"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1068,6 +1106,7 @@
               "const": "workspace_roots_changed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1090,6 +1129,7 @@
               "const": "driver_changed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1119,6 +1159,7 @@
               "const": "message_queued"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1141,6 +1182,7 @@
               "const": "queued_message_removed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1158,6 +1200,7 @@
               "const": "queued_messages_cleared"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta"
@@ -1186,6 +1229,7 @@
               "const": "user_message_accepted"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1229,6 +1273,7 @@
               "const": "session_title_updated"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1256,6 +1301,7 @@
               "const": "plugin_message_injected"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1282,6 +1328,7 @@
               "const": "plugin_status_changed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1310,6 +1357,7 @@
               "const": "ui_notification"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1335,6 +1383,7 @@
               "const": "conversation_turn_committed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1365,6 +1414,7 @@
               "const": "conversation_rewound"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1387,6 +1437,7 @@
               "const": "turn_started"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1410,6 +1461,7 @@
               "const": "text_delta"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1440,6 +1492,7 @@
               "const": "thinking_delta"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1470,6 +1523,7 @@
               "const": "citation_delta"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1501,6 +1555,7 @@
               "const": "tool_progress"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "session_id",
@@ -1539,6 +1594,7 @@
               "const": "tool_call_started"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1593,6 +1649,7 @@
               "const": "tool_approval_needed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1629,6 +1686,7 @@
               "const": "tool_diff_ready"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1664,6 +1722,7 @@
               "const": "tool_output_delta"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1705,6 +1764,7 @@
               "const": "tool_call_finished"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1739,6 +1799,7 @@
               "const": "question_asked"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1770,6 +1831,7 @@
               "const": "question_answered"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1795,6 +1857,7 @@
               "const": "provider_call_accounted"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1825,6 +1888,7 @@
               "const": "turn_finished"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1885,6 +1949,7 @@
               "const": "context_usage_updated"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1929,6 +1994,7 @@
               "const": "budget_status_changed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1954,6 +2020,7 @@
               "const": "compaction_started"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -1980,6 +2047,7 @@
               "const": "compaction_attempt_started"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "session_id",
@@ -2010,6 +2078,7 @@
               "const": "compaction_text_delta"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "session_id",
@@ -2041,6 +2110,7 @@
               "const": "compaction_thinking_delta"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "session_id",
@@ -2070,6 +2140,7 @@
               "const": "compaction_attempt_finished"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -2098,8 +2169,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null
+              ]
             },
             "cost": {
               "anyOf": [
@@ -2109,14 +2179,14 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null
+              ]
             },
             "type": {
               "type": "string",
               "const": "compaction_finished"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -2138,6 +2208,7 @@
               "const": "compaction_failed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -2164,6 +2235,7 @@
               "const": "subagent_spawned"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -2189,6 +2261,7 @@
               "const": "subagent_finished"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -2225,6 +2298,7 @@
               "const": "subagent_progress"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "parent_session_id",
@@ -2250,6 +2324,7 @@
               "const": "tool_output_pruned"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -2275,6 +2350,7 @@
               "const": "mode_changed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -2300,6 +2376,7 @@
               "const": "permission_mode_changed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta"
@@ -2319,6 +2396,7 @@
               "const": "plan_submitted"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -2348,6 +2426,7 @@
               "const": "plan_reviewed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -2388,6 +2467,7 @@
               "const": "model_changed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -2409,6 +2489,7 @@
               "const": "model_context_cleared"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -2432,6 +2513,7 @@
               "const": "context_item_pinned"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -2456,6 +2538,7 @@
               "const": "context_item_evicted"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -2499,6 +2582,7 @@
               "const": "user_shell_state_changed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -2529,6 +2613,7 @@
               "const": "hook_failed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -2561,6 +2646,7 @@
               "const": "command_finished"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -2589,6 +2675,7 @@
               "const": "guard_triggered"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -2611,6 +2698,7 @@
               "const": "error"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "meta",
@@ -2639,6 +2727,7 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "protocol_version",
         "client_id",
@@ -2671,6 +2760,7 @@
               "const": "ready"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "page"
@@ -2704,6 +2794,7 @@
               "const": "catching_up"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -2719,6 +2810,7 @@
               "const": "ordering_changed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "view"
@@ -2751,6 +2843,7 @@
           "$ref": "#/$defs/TranscriptInvalidation"
         }
       },
+      "additionalProperties": false,
       "required": [
         "view",
         "first_ordinal",
@@ -2797,6 +2890,7 @@
           "maxItems": 32
         }
       },
+      "additionalProperties": false,
       "required": [
         "session_id",
         "projection_version",
@@ -2842,6 +2936,7 @@
           "$ref": "#/$defs/TranscriptContent"
         }
       },
+      "additionalProperties": false,
       "required": [
         "id",
         "ordinal",
@@ -2880,6 +2975,7 @@
               "const": "turn_summary"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "turn_id",
@@ -2911,6 +3007,7 @@
               "const": "conversation"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "role",
@@ -2954,6 +3051,7 @@
               "const": "tool"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "invocation_id",
@@ -2977,6 +3075,7 @@
               "const": "command"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "name",
@@ -3021,6 +3120,7 @@
               "const": "shell"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "active"
@@ -3046,6 +3146,7 @@
               "const": "subagent"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "subagent_id",
@@ -3088,6 +3189,7 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "input_tokens",
         "output_tokens",
@@ -3113,6 +3215,7 @@
               "const": "monetary"
             }
           },
+          "additionalProperties": false,
           "required": [
             "kind",
             "amount_micros",
@@ -3142,6 +3245,7 @@
               "const": "ai_credits"
             }
           },
+          "additionalProperties": false,
           "required": [
             "kind",
             "credits_micros"
@@ -3167,6 +3271,7 @@
               "const": "subscription_quota"
             }
           },
+          "additionalProperties": false,
           "required": [
             "kind"
           ]
@@ -3182,6 +3287,7 @@
               "const": "unavailable"
             }
           },
+          "additionalProperties": false,
           "required": [
             "kind",
             "reason"
@@ -3213,6 +3319,7 @@
               "const": "text"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "body"
@@ -3229,6 +3336,7 @@
               "const": "reasoning"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "body"
@@ -3245,6 +3353,7 @@
               "const": "image"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "source"
@@ -3261,6 +3370,7 @@
               "const": "citation"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "body"
@@ -3285,6 +3395,7 @@
           "$ref": "#/$defs/TranscriptContentSource"
         }
       },
+      "additionalProperties": false,
       "required": [
         "text",
         "format",
@@ -3311,6 +3422,7 @@
           "$ref": "#/$defs/TranscriptContentSelector"
         }
       },
+      "additionalProperties": false,
       "required": [
         "sequence",
         "selector"
@@ -3327,6 +3439,7 @@
               "const": "conversation"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -3344,6 +3457,7 @@
               "const": "conversation_block"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "index"
@@ -3357,6 +3471,7 @@
               "const": "tool_arguments"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -3369,6 +3484,7 @@
               "const": "tool_output"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -3381,6 +3497,7 @@
               "const": "tool_diff"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -3393,6 +3510,7 @@
               "const": "command_message"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -3405,6 +3523,7 @@
               "const": "shell_command"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -3417,6 +3536,7 @@
               "const": "shell_output"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -3429,6 +3549,7 @@
               "const": "subagent_task"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -3441,6 +3562,7 @@
               "const": "subagent_result"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -3453,6 +3575,7 @@
               "const": "subagent_diff"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -3474,6 +3597,7 @@
               "const": "running"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -3492,6 +3616,7 @@
               "const": "finished"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "is_error",
@@ -3515,6 +3640,7 @@
               "const": "running"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -3548,6 +3674,7 @@
               "const": "finished"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "status",
@@ -3578,6 +3705,7 @@
               "const": "unspecified"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -3593,6 +3721,7 @@
               "const": "exact"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "item"
@@ -3619,6 +3748,7 @@
               "const": "replaced"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "requested"
@@ -3636,6 +3766,7 @@
               "const": "none"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -3648,6 +3779,7 @@
               "const": "all"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -3666,6 +3798,7 @@
               "const": "items"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "items"
@@ -3707,6 +3840,7 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "view",
         "source",
@@ -3766,6 +3900,7 @@
           }
         }
       },
+      "additionalProperties": false,
       "required": [
         "stable_prefix_hash",
         "used_tokens",
@@ -3790,7 +3925,8 @@
             }
           ]
         }
-      }
+      },
+      "additionalProperties": false
     },
     "ContextItemId": {
       "description": "Stable identifier of one assembled context item.",
@@ -3826,6 +3962,7 @@
           "$ref": "#/$defs/ContextItemState"
         }
       },
+      "additionalProperties": false,
       "required": [
         "item_id",
         "kind",
@@ -3865,6 +4002,7 @@
           "type": "boolean"
         }
       },
+      "additionalProperties": false,
       "required": [
         "pinned",
         "evicted",
@@ -4012,6 +4150,7 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "utc_day",
         "turns",
@@ -4054,6 +4193,7 @@
           "$ref": "#/$defs/Cost"
         }
       },
+      "additionalProperties": false,
       "required": [
         "turn_id",
         "attribution",
@@ -4085,6 +4225,7 @@
           }
         }
       },
+      "additionalProperties": false,
       "required": [
         "session_id",
         "files"
@@ -4119,6 +4260,7 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "path",
         "unified_diff",
@@ -4187,6 +4329,7 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "model_alias",
         "turns",
@@ -4217,6 +4360,7 @@
           "$ref": "#/$defs/TurnMeta"
         }
       },
+      "additionalProperties": false,
       "required": [
         "role",
         "blocks",
@@ -4237,6 +4381,7 @@
               "const": "text"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "text"
@@ -4259,6 +4404,7 @@
               "const": "thinking"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "content"
@@ -4279,6 +4425,7 @@
               "const": "tool_call"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "id",
@@ -4303,6 +4450,7 @@
               "const": "tool_result"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "id",
@@ -4324,6 +4472,7 @@
               "const": "image"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "media_type",
@@ -4353,6 +4502,7 @@
               "const": "citation"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "uri"
@@ -4378,6 +4528,7 @@
               "const": "text"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "text"
@@ -4392,6 +4543,7 @@
               "const": "structured"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "value"
@@ -4411,6 +4563,7 @@
               "const": "mixed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "parts"
@@ -4432,6 +4585,7 @@
               "const": "text"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "text"
@@ -4446,6 +4600,7 @@
               "const": "structured"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "value"
@@ -4465,6 +4620,7 @@
               "const": "image"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "media_type",
@@ -4487,6 +4643,7 @@
               "const": "inline_base64"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "data"
@@ -4503,6 +4660,7 @@
               "const": "url"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "url"
@@ -4533,6 +4691,7 @@
           "type": "boolean"
         }
       },
+      "additionalProperties": false,
       "required": [
         "synthetic",
         "summary"
@@ -4550,6 +4709,7 @@
         },
         "input_schema": true
       },
+      "additionalProperties": false,
       "required": [
         "name",
         "description",
@@ -4587,6 +4747,7 @@
           "type": "boolean"
         }
       },
+      "additionalProperties": false,
       "required": [
         "session_id",
         "title",
@@ -4621,6 +4782,7 @@
           "$ref": "#/$defs/SubagentActivity"
         }
       },
+      "additionalProperties": false,
       "required": [
         "subagent_id",
         "child_session_id",
@@ -4670,6 +4832,7 @@
           "$ref": "#/$defs/CommandSource"
         }
       },
+      "additionalProperties": false,
       "required": [
         "name",
         "description",
@@ -4704,6 +4867,7 @@
           "type": "boolean"
         }
       },
+      "additionalProperties": false,
       "required": [
         "id",
         "description",
@@ -4752,6 +4916,7 @@
           "$ref": "#/$defs/ModelCapabilities"
         }
       },
+      "additionalProperties": false,
       "required": [
         "id",
         "display_name",
@@ -4793,6 +4958,7 @@
           "default": null
         }
       },
+      "additionalProperties": false,
       "required": [
         "tool_calling",
         "vision",
@@ -4826,6 +4992,7 @@
           "type": "boolean"
         }
       },
+      "additionalProperties": false,
       "required": [
         "alias",
         "candidates",
@@ -4865,6 +5032,7 @@
           ]
         }
       },
+      "additionalProperties": false,
       "required": [
         "name",
         "auth_kind",
@@ -4922,6 +5090,7 @@
           "type": "boolean"
         }
       },
+      "additionalProperties": false,
       "required": [
         "key",
         "label",
@@ -4963,6 +5132,7 @@
           "minimum": 0
         }
       },
+      "additionalProperties": false,
       "required": [
         "name",
         "enabled",
@@ -4984,6 +5154,7 @@
               "const": "disabled"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -4996,6 +5167,7 @@
               "const": "connecting"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -5008,6 +5180,7 @@
               "const": "ready"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -5020,6 +5193,7 @@
               "const": "approval_required"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -5035,6 +5209,7 @@
               "const": "failed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "message"
@@ -5048,6 +5223,7 @@
               "const": "stopping"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -5065,6 +5241,7 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "kind",
         "name"
@@ -5109,6 +5286,7 @@
           "type": "boolean"
         }
       },
+      "additionalProperties": false,
       "required": [
         "server",
         "transport",
@@ -5166,6 +5344,7 @@
           "type": "boolean"
         }
       },
+      "additionalProperties": false,
       "required": [
         "default",
         "effective_rules",
@@ -5219,6 +5398,7 @@
           "$ref": "#/$defs/PermissionDecision"
         }
       },
+      "additionalProperties": false,
       "required": [
         "id",
         "pattern",
@@ -5242,6 +5422,7 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "id",
         "scope",
@@ -5278,6 +5459,7 @@
               "const": "oauth"
             }
           },
+          "additionalProperties": false,
           "required": [
             "kind",
             "authorization_url",
@@ -5298,6 +5480,7 @@
               "const": "device_flow"
             }
           },
+          "additionalProperties": false,
           "required": [
             "kind",
             "verification_uri",
@@ -5317,6 +5500,7 @@
           "type": "boolean"
         }
       },
+      "additionalProperties": false,
       "required": [
         "path",
         "is_directory"
@@ -5342,6 +5526,7 @@
           "type": "boolean"
         }
       },
+      "additionalProperties": false,
       "required": [
         "path",
         "media_type",
@@ -5364,6 +5549,7 @@
               "const": "text"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "content"
@@ -5380,6 +5566,7 @@
               "const": "inline_base64"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "data"
@@ -5410,6 +5597,7 @@
           "type": "boolean"
         }
       },
+      "additionalProperties": false,
       "required": [
         "workspace_name",
         "changed_paths",
@@ -5433,6 +5621,7 @@
           "type": "boolean"
         }
       },
+      "additionalProperties": false,
       "required": [
         "path",
         "unified_diff",
@@ -5470,6 +5659,7 @@
           ]
         }
       },
+      "additionalProperties": false,
       "required": [
         "protocol_version",
         "session_id",
@@ -5493,6 +5683,7 @@
           "type": "boolean"
         }
       },
+      "additionalProperties": false,
       "required": [
         "index",
         "path",
@@ -5522,6 +5713,7 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "name",
         "media_type",
@@ -5540,6 +5732,7 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "path",
         "reason"
@@ -5628,6 +5821,7 @@
           "type": "boolean"
         }
       },
+      "additionalProperties": false,
       "required": [
         "proposal_id",
         "path",
@@ -5681,6 +5875,7 @@
           ]
         }
       },
+      "additionalProperties": false,
       "required": [
         "id",
         "prompt",
@@ -5725,6 +5920,7 @@
           ]
         }
       },
+      "additionalProperties": false,
       "required": [
         "value",
         "label"
@@ -5765,6 +5961,7 @@
           "default": null
         }
       },
+      "additionalProperties": false,
       "required": [
         "model"
       ]
@@ -5783,6 +5980,7 @@
           }
         }
       },
+      "additionalProperties": false,
       "required": [
         "question_id",
         "values"
@@ -5815,6 +6013,7 @@
           "minimum": 0
         }
       },
+      "additionalProperties": false,
       "required": [
         "session_id",
         "turn_id",
@@ -5836,6 +6035,7 @@
           "$ref": "#/$defs/Cost"
         }
       },
+      "additionalProperties": false,
       "required": [
         "usage",
         "cost"
@@ -5922,6 +6122,7 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "subagent_id",
         "session_id",
@@ -5954,6 +6155,7 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "id",
         "base_commit",
@@ -5972,6 +6174,7 @@
           "$ref": "#/$defs/TouchedFileStatus"
         }
       },
+      "additionalProperties": false,
       "required": [
         "path",
         "status"
@@ -6010,6 +6213,7 @@
           }
         }
       },
+      "additionalProperties": false,
       "required": [
         "title",
         "summary_md",
@@ -6034,6 +6238,7 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "description",
         "files_touched",

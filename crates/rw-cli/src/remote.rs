@@ -590,7 +590,7 @@ async fn shutdown_authenticated_host_inner(
         .await?
         .outcome()
     {
-        CommandOutcome::Accepted => Ok(()),
+        CommandOutcome::Accepted {} => Ok(()),
         CommandOutcome::Rejected { error } => Err(format!(
             "remote engine rejected host shutdown: {}",
             error.code

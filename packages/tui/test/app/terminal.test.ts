@@ -179,7 +179,7 @@ describe("Rottweiler terminal", () => {
             emitted_at: "2026-08-19T00:00:00Z",
           },
           parent_session_id: options.attach.session_id,
-          child: {
+          child: { title: "Fixture",
             session_id: "historical-child",
             workspace_name: "Historical fork",
             model: "fast",

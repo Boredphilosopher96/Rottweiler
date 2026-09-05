@@ -8,6 +8,7 @@ use ts_rs::TS;
 
 /// Host-assigned logical call identity plus a distinct provider attempt.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderCallIdentity {
     /// Session which owns the provider request.
     pub session_id: SessionId,
@@ -23,6 +24,7 @@ pub struct ProviderCallIdentity {
 
 /// Provider-reported actuals; a missing or ambiguous terminal is never represented as zero.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderCallActuals {
     /// Normalized input, output, cache and reasoning usage.
     pub usage: Usage,

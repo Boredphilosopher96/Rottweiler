@@ -113,7 +113,7 @@ async fn plan_submission_requires_review_and_pins_approved_artifact() {
             })
             .await
             .expect("turn"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let turn = collect_turn(&mut events).await;
     assert!(turn.iter().any(|event| matches!(
@@ -141,7 +141,7 @@ async fn plan_submission_requires_review_and_pins_approved_artifact() {
             })
             .await
             .expect("review"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let snapshot = handle.snapshot().await.expect("snapshot");
     assert_eq!(snapshot.mode, SessionMode::Execute);
@@ -161,7 +161,7 @@ async fn plan_submission_requires_review_and_pins_approved_artifact() {
             })
             .await
             .expect("second plan mode"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     assert!(
         handle
@@ -184,7 +184,7 @@ async fn plan_submission_requires_review_and_pins_approved_artifact() {
                     })
                     .await
                     .expect("discuss"),
-                CommandOutcome::Accepted
+                CommandOutcome::Accepted {}
             );
         }
         assert!(matches!(
@@ -227,7 +227,7 @@ async fn plan_submission_requires_review_and_pins_approved_artifact() {
             })
             .await
             .expect("approve second plan"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let second = handle.snapshot().await.expect("second approved snapshot");
     assert_eq!(second.mode, SessionMode::Execute);

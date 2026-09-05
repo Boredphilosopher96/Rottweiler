@@ -49,7 +49,7 @@ fn sessions_verify_checks_the_journal_and_rejects_unsupported_layout() {
         .expect("reject command");
     assert!(!output.status.success());
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("events.jsonl is not a segmented journal"),
+        String::from_utf8_lossy(&output.stderr).contains("unexpected events.jsonl file"),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );

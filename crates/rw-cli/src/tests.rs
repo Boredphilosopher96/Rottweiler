@@ -74,7 +74,7 @@ impl crate::server::ServerEngine for ProviderMutationProbe {
         _command: rw_core::ClientCommand,
     ) -> std::result::Result<rw_core::HostReply, String> {
         Ok(rw_core::HostReply::command(
-            rw_core::CommandOutcome::Accepted,
+            rw_core::CommandOutcome::Accepted {},
         ))
     }
 

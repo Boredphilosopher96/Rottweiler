@@ -91,6 +91,7 @@ describe("Rottweiler mutations", () => {
         protocol_version: PROTOCOL_VERSION,
         client_id: "restart-client",
         request_id: "restart-session",
+        emitted_at: "2026-01-01T00:00:00Z",
       },
       sessions: [{
         session_id: "session-restarted",
@@ -135,7 +136,7 @@ describe("Rottweiler mutations", () => {
         emitted_at: "2026-01-01T00:00:00Z",
       },
       parent_session_id: "session-actions",
-      child: {
+      child: { title: "Fixture",
         session_id: "session-actions-first-child",
         workspace_name: "Rottweiler fork",
         model: "fast",
@@ -201,7 +202,7 @@ describe("Rottweiler mutations", () => {
         emitted_at: "2026-01-01T00:00:00Z",
       },
       parent_session_id: "session-parent",
-      child: {
+      child: { title: "Fixture",
         session_id: "session-child",
         workspace_name: "Rottweiler fork",
         model: "fast",
@@ -216,6 +217,7 @@ describe("Rottweiler mutations", () => {
       parentSessionId: "session-parent",
       child: {
         sessionId: "session-child",
+        title: "Fixture",
         workspaceName: "Rottweiler fork",
         model: "fast",
         driverClientId: null,
@@ -234,14 +236,15 @@ describe("Rottweiler mutations", () => {
         emitted_at: "2026-01-01T00:00:01Z",
       },
       parent_session_id: "another-parent",
-      child: {
+      at_turn: "1",
+      child: { title: "Fixture",
         session_id: "wrong-child",
         workspace_name: "Wrong",
         model: "fast",
         driver_client_id: null,
         shell_active: false,
       },
-      at_turn: null,
+
     })
     expect(transitions).toEqual(["session-child"])
   })
@@ -266,7 +269,7 @@ describe("Rottweiler mutations", () => {
             emitted_at: "2026-01-01T00:00:00Z",
           },
           parent_session_id: command.session_id,
-          child: {
+          child: { title: "Fixture",
             session_id: "fork-child",
             workspace_name: "workspace",
             model: "fast",

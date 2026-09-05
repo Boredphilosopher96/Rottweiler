@@ -315,7 +315,7 @@ impl RuntimeSessionFactory {
             if result.protocol_version != rw_core::PROTOCOL_VERSION
                 || UtcTimestamp::parse(result.command_ack_emitted_at.clone()).is_err()
                 || UtcTimestamp::parse(result.fork_event_emitted_at.clone()).is_err()
-                || result.outcome != rw_core::CommandOutcome::Accepted
+                || !matches!(result.outcome, rw_core::CommandOutcome::Accepted {})
                 || result.acknowledged_session_id != journal.parent.session_id
                 || result.parent_session_id != journal.parent.session_id
                 || result.child.session_id != journal.child_session_id

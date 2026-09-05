@@ -640,7 +640,7 @@ async fn live_admin_adds_reviews_approves_enables_and_calls_without_restart() {
         .await
         .expect("live enable and persist");
     assert!(enabled[0].enabled);
-    assert!(matches!(enabled[0].state, McpServerState::Ready));
+    assert!(matches!(enabled[0].state, McpServerState::Ready {}));
     assert_eq!(manager.deferred_tool_index().await[0].name, "echo");
     assert!(
         manager
@@ -766,7 +766,7 @@ async fn live_admin_stdio_validation_and_enabled_removal_are_fail_closed() {
     assert_eq!(inventory.len(), 1);
     assert!(!inventory[0].enabled);
     assert!(!inventory[0].approved);
-    assert!(matches!(inventory[0].state, McpServerState::Disabled));
+    assert!(matches!(inventory[0].state, McpServerState::Disabled {}));
     let review = admin.review("docs").await.expect("stdio review");
     assert_eq!(review.transport, "stdio");
     assert_eq!(review.endpoint, None);

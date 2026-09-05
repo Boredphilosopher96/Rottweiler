@@ -49,7 +49,7 @@ fn read(id: &str) -> ClientCommand {
         session_id: SessionId("history".into()),
         read: TranscriptRead {
             known_view: None,
-            position: TranscriptPosition::Latest,
+            position: TranscriptPosition::Latest {},
             max_items: 4,
             max_bytes: 64 * 1024,
         },
@@ -87,7 +87,7 @@ async fn historical_availability_is_not_raw_replay_and_pages_are_direct_authenti
         if matches!(&events[..], [EngineEvent::TranscriptPageReady {
             result: TranscriptReadResult::CatchingUp { .. }, .. }])));
     let CommandReply::Read {
-        outcome: CommandOutcome::Accepted,
+        outcome: CommandOutcome::Accepted {},
         events: page_events,
     } = &replies[1]
     else {
@@ -143,7 +143,7 @@ async fn historical_attachment_cannot_gain_driver_or_mutation_capability() {
             )
             .await
             .expect("attach reply");
-        assert_eq!(reply.outcome == CommandOutcome::Accepted, accepted);
+        assert_eq!(reply.outcome == CommandOutcome::Accepted {}, accepted);
     }
     let reply = engine
         .dispatch(

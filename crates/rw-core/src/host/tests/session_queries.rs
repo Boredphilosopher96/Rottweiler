@@ -30,7 +30,7 @@ async fn export_session_requires_an_absolute_path_and_current_driver() {
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
 
     let mut events = host
@@ -54,7 +54,7 @@ async fn export_session_requires_an_absolute_path_and_current_driver() {
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let exported_path = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
@@ -149,7 +149,7 @@ async fn rename_persists_and_lists_a_session_without_its_driver_lease() {
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     assert_eq!(
         host.dispatch(
@@ -163,7 +163,7 @@ async fn rename_persists_and_lists_a_session_without_its_driver_lease() {
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let past_session = host.ready_session(&past).await.expect("past session");
     assert_eq!(
@@ -192,7 +192,7 @@ async fn rename_persists_and_lists_a_session_without_its_driver_lease() {
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let title_event = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
@@ -243,7 +243,7 @@ async fn rename_persists_and_lists_a_session_without_its_driver_lease() {
         )
         .await;
     let rw_types::CommandReply::Read {
-        outcome: CommandOutcome::Accepted,
+        outcome: CommandOutcome::Accepted {},
         events,
     } = serde_json::from_slice(&reply.bytes).expect("typed read reply")
     else {

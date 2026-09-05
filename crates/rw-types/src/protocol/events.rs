@@ -43,6 +43,7 @@ pub const TRANSIENT_ENGINE_EVENT_TYPES: &[&str] = &[
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case", optional_fields = nullable)]
 #[derive(Allocation)]
+#[serde(deny_unknown_fields)]
 pub enum EngineEvent {
     TranscriptPageReady {
         meta: CommandAckMeta,
@@ -517,9 +518,7 @@ pub enum EngineEvent {
         #[schemars(with = "String")]
         #[ts(type = "string")]
         reclaimed_tokens: u64,
-        #[serde(default)]
         usage: Option<Usage>,
-        #[serde(default)]
         cost: Option<Cost>,
     },
     CompactionFailed {

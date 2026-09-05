@@ -11,7 +11,7 @@ import {
 import {
   isRecord,
   isWireEngineEvent,
-  type WireEngineEvent,
+
 } from "./transport"
 import { boundedUiText } from "./ui-presentation"
 
@@ -64,11 +64,11 @@ function safeSubagentIdentifier(value: string): boolean {
 export function childEngineEvent(
   value: unknown,
   expectedSessionId: string,
-): WireEngineEvent | null {
+): EngineEvent | null {
   if (!isWireEngineEvent(value)) return null
   const delivery: Readonly<Record<string, string>> = ENGINE_EVENT_DELIVERY
   const session = delivery[value.type] === "transient" && "session_id" in value ? value.session_id
-    : "meta" in value && isRecord(value.meta) ? value.meta.session_id : undefined
+    : "meta" in value && "session_id" in value.meta ? value.meta.session_id : undefined
   return session === expectedSessionId ? value : null
 }
 

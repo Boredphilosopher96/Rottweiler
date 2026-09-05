@@ -48,7 +48,7 @@ async fn shell_gate_and_model_alias_are_durable_and_fail_closed() {
             })
             .await
             .expect("attach"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     assert_eq!(
         handle
@@ -59,7 +59,7 @@ async fn shell_gate_and_model_alias_are_durable_and_fail_closed() {
             })
             .await
             .expect("shell start"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let active = handle
         .snapshot()
@@ -163,7 +163,7 @@ async fn shell_gate_and_model_alias_are_durable_and_fail_closed() {
             })
             .await
             .expect("switch model"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let durable = handle
         .event_sink
@@ -207,7 +207,7 @@ async fn shell_gate_and_model_alias_are_durable_and_fail_closed() {
             })
             .await
             .expect("answer model context question"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     assert_eq!(
         handle.snapshot().await.expect("model snapshot").model_alias,
@@ -239,7 +239,7 @@ async fn shell_gate_and_model_alias_are_durable_and_fail_closed() {
             })
             .await
             .expect("switch provider"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     assert_eq!(
         handle
@@ -260,7 +260,7 @@ async fn shell_gate_and_model_alias_are_durable_and_fail_closed() {
             })
             .await
             .expect("switch concrete model"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let concrete = handle.snapshot().await.expect("concrete model snapshot");
     assert_eq!(concrete.model_alias, "openai/live-model");

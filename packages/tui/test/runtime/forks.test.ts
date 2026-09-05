@@ -92,7 +92,7 @@ describe("runtime forks", () => {
         emitted_at: "2026-07-11T00:00:00Z",
       },
       parent_session_id: "fork-parent",
-      child: {
+      child: { title: "Fixture",
         session_id: "fork-child",
         workspace_name: "workspace",
         model: "fast",

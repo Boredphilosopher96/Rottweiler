@@ -48,7 +48,7 @@ async fn model_switch_context_choices_are_explicit_and_reach_the_provider_bounda
                 })
                 .await
                 .expect("attach"),
-            CommandOutcome::Accepted
+            CommandOutcome::Accepted {}
         );
     }
 
@@ -63,7 +63,7 @@ async fn model_switch_context_choices_are_explicit_and_reach_the_provider_bounda
                 })
                 .await
                 .expect("switch model"),
-            CommandOutcome::Accepted
+            CommandOutcome::Accepted {}
         );
         handle
             .event_sink
@@ -110,7 +110,7 @@ async fn model_switch_context_choices_are_explicit_and_reach_the_provider_bounda
                 })
                 .await
                 .expect("answer model context question"),
-            CommandOutcome::Accepted
+            CommandOutcome::Accepted {}
         );
         next_matching(&mut events, |event| {
             matches!(
@@ -187,7 +187,7 @@ async fn model_switch_context_choices_are_explicit_and_reach_the_provider_bounda
             })
             .await
             .expect("continue after summary"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     collect_turn(&mut summary_events).await;
     let summary_requests = summary_model.requests();
@@ -243,7 +243,7 @@ async fn model_switch_context_choices_are_explicit_and_reach_the_provider_bounda
             })
             .await
             .expect("continue with full context"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     collect_turn(&mut full_events).await;
     let full_prompt =
@@ -292,7 +292,7 @@ async fn model_switch_context_choices_are_explicit_and_reach_the_provider_bounda
             })
             .await
             .expect("continue without context"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     collect_turn(&mut fresh_events).await;
     let fresh_prompt =
@@ -364,7 +364,7 @@ async fn pending_model_switch_question_recovers_and_can_be_answered() {
             })
             .await
             .expect("attach recovered"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let mut subscription = handle.subscribe().expect("subscription");
     assert_eq!(
@@ -380,7 +380,7 @@ async fn pending_model_switch_question_recovers_and_can_be_answered() {
             })
             .await
             .expect("answer recovered question"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     next_matching(
         &mut subscription,

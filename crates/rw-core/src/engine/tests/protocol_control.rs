@@ -65,7 +65,7 @@ async fn protocol_ack_lease_observer_and_takeover_are_one_durable_event_stream()
             })
             .await
             .expect("attach"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let created = driver_events.recv().await.expect("session created");
     assert!(matches!(
@@ -85,7 +85,7 @@ async fn protocol_ack_lease_observer_and_takeover_are_one_durable_event_stream()
         driver_events.recv().await.expect("attach ack"),
         EngineEvent::CommandAcknowledged {
             meta: CommandAckMeta { emitted_at, .. },
-            outcome: CommandOutcome::Accepted,
+            outcome: CommandOutcome::Accepted {},
             ..
         } if emitted_at == "2026-01-02T03:04:05.006Z"
     ));
@@ -103,7 +103,7 @@ async fn protocol_ack_lease_observer_and_takeover_are_one_durable_event_stream()
             })
             .await
             .expect("observer attach"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     assert!(matches!(
         observer_events.recv().await.expect("observer durable gap"),
@@ -133,7 +133,7 @@ async fn protocol_ack_lease_observer_and_takeover_are_one_durable_event_stream()
             })
             .await
             .expect("take driver"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let changed = loop {
         let event = observer_events.recv().await.expect("driver changed");
@@ -192,7 +192,7 @@ async fn queued_message_mutations_are_durable_broadcast_and_reject_stale_targets
                 })
                 .await
                 .expect("attach"),
-            CommandOutcome::Accepted
+            CommandOutcome::Accepted {}
         );
     }
 
@@ -229,7 +229,7 @@ async fn queued_message_mutations_are_durable_broadcast_and_reject_stale_targets
             })
             .await
             .expect("remove queued message"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     for receiver in [&mut driver_events, &mut observer_events] {
         let removed = next_matching(receiver, |event| {
@@ -303,7 +303,7 @@ async fn queued_message_mutations_are_durable_broadcast_and_reject_stale_targets
             })
             .await
             .expect("clear queued messages"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     for receiver in [&mut driver_events, &mut observer_events] {
         let cleared = next_matching(receiver, |event| {
@@ -426,7 +426,7 @@ async fn typed_permission_inventory_is_observer_safe_and_mutations_are_driver_ga
                 })
                 .await
                 .expect("attach"),
-            CommandOutcome::Accepted
+            CommandOutcome::Accepted {}
         );
     }
 
@@ -438,7 +438,7 @@ async fn typed_permission_inventory_is_observer_safe_and_mutations_are_driver_ga
             })
             .await
             .expect("observer list"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let listed = next_permission_state(&mut observer_events).await;
     assert_eq!(listed.default, PermissionDecision::Ask);
@@ -462,7 +462,7 @@ async fn typed_permission_inventory_is_observer_safe_and_mutations_are_driver_ga
             })
             .await
             .expect("driver permission mode"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let mode_changed = next_matching(&mut driver_events, |kind| {
         matches!(kind, PendingEvent::PermissionModeChanged { .. })
@@ -482,7 +482,7 @@ async fn typed_permission_inventory_is_observer_safe_and_mutations_are_driver_ga
             })
             .await
             .expect("driver list active mode"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let active_mode = next_permission_state(&mut driver_events).await;
     assert_eq!(
@@ -519,7 +519,7 @@ async fn typed_permission_inventory_is_observer_safe_and_mutations_are_driver_ga
             })
             .await
             .expect("driver add"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let added = next_permission_state(&mut driver_events).await;
     let added_rule = added
@@ -536,7 +536,7 @@ async fn typed_permission_inventory_is_observer_safe_and_mutations_are_driver_ga
             })
             .await
             .expect("driver remove"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let removed = next_permission_state(&mut driver_events).await;
     assert!(
@@ -556,7 +556,7 @@ async fn typed_permission_inventory_is_observer_safe_and_mutations_are_driver_ga
             })
             .await
             .expect("driver revoke"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let revoked = next_permission_state(&mut driver_events).await;
     assert!(revoked.approvals.is_empty());

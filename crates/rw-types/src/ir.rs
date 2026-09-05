@@ -53,6 +53,7 @@ pub enum Role {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case")]
 #[derive(Allocation)]
+#[serde(deny_unknown_fields)]
 pub enum ImageRef {
     InlineBase64 { data: String },
     Url { url: String },
@@ -63,6 +64,7 @@ pub enum ImageRef {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case")]
 #[derive(Allocation)]
+#[serde(deny_unknown_fields)]
 pub enum ToolOutputPart {
     Text { text: String },
     Structured { value: Value },
@@ -74,6 +76,7 @@ pub enum ToolOutputPart {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case")]
 #[derive(Allocation)]
+#[serde(deny_unknown_fields)]
 pub enum ToolOutput {
     Text { text: String },
     Structured { value: Value },
@@ -85,6 +88,7 @@ pub enum ToolOutput {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case", optional_fields = nullable)]
 #[derive(Allocation)]
+#[serde(deny_unknown_fields)]
 pub enum Block {
     Text {
         text: String,
@@ -118,6 +122,7 @@ pub enum Block {
 #[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[ts(optional_fields = nullable)]
 #[derive(Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct TurnMeta {
     pub created_at: Option<String>,
     pub model: Option<String>,
@@ -127,6 +132,7 @@ pub struct TurnMeta {
 
 /// One conversation turn in the internal message representation.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct Turn {
     pub role: Role,
     pub blocks: Vec<Block>,

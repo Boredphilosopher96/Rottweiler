@@ -1,3 +1,4 @@
+import type { EngineEvent } from "../protocol"
 import {
   FuzzyPickerRenderable,
   type PickerItem
@@ -14,9 +15,7 @@ import {
 import {
   type RottweilerState
 } from "../state"
-import {
-  type WireEngineEvent
-} from "../transport"
+
 import {
   modelAliasDescription,
   modelAvailabilityLabel,
@@ -309,7 +308,7 @@ export class ProviderUiController {
       }
     }
   }
-  afterEvent(event: WireEngineEvent, eventRecord: Readonly<Record<string, unknown>>, commandRequestId: string | null, next: RottweilerState): void {
+  afterEvent(event: EngineEvent, eventRecord: Readonly<Record<string, unknown>>, commandRequestId: string | null, next: RottweilerState): void {
     if (event.type === "models_listed") {
       const activationCatalog = this.#host.requests.consumeProviderActivationModels(
         commandRequestId,

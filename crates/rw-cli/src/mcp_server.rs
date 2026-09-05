@@ -139,7 +139,7 @@ fn require_accepted(
     safe_message: &'static str,
 ) -> Result<(), BridgeError> {
     match outcome {
-        CommandOutcome::Accepted => Ok(()),
+        CommandOutcome::Accepted {} => Ok(()),
         CommandOutcome::Rejected { .. } => Err(BridgeError::safe(safe_message)),
     }
 }

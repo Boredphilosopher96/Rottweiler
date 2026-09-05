@@ -19,7 +19,7 @@ async fn list_commands_routes_to_the_explicit_sessions_assembled_registry() {
             )
             .await
             .outcome,
-            CommandOutcome::Accepted
+            CommandOutcome::Accepted {}
         );
     }
     for name in ["palette-first", "palette-second"] {
@@ -33,7 +33,7 @@ async fn list_commands_routes_to_the_explicit_sessions_assembled_registry() {
             )
             .await;
         let rw_types::CommandReply::Read {
-            outcome: CommandOutcome::Accepted,
+            outcome: CommandOutcome::Accepted {},
             events,
         } = serde_json::from_slice(&reply.bytes).expect("typed read reply")
         else {
@@ -92,7 +92,7 @@ async fn list_modes_returns_a_bounded_connection_scoped_live_catalog() {
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let reply = host
         .dispatch(
@@ -104,7 +104,7 @@ async fn list_modes_returns_a_bounded_connection_scoped_live_catalog() {
         )
         .await;
     let rw_types::CommandReply::Read {
-        outcome: CommandOutcome::Accepted,
+        outcome: CommandOutcome::Accepted {},
         events,
     } = serde_json::from_slice(&reply.bytes).expect("typed read reply")
     else {

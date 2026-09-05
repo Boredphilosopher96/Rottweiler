@@ -33,7 +33,7 @@ async fn active_read_identity_survives_ledger_eviction_pressure() {
                 },
             )
             .await;
-        assert_eq!(reply.outcome, CommandOutcome::Accepted);
+        assert_eq!(reply.outcome, CommandOutcome::Accepted {});
     }
     let conflict = host
         .dispatch(
@@ -101,7 +101,7 @@ async fn reads_are_direct_fresh_and_keep_admission_until_body_clones_drop() {
     };
     let first = host.dispatch(bound.clone(), query.clone()).await;
     let rw_types::CommandReply::Read {
-        outcome: CommandOutcome::Accepted,
+        outcome: CommandOutcome::Accepted {},
         events,
     } = serde_json::from_slice(&first.bytes).expect("typed reply")
     else {
@@ -114,7 +114,7 @@ async fn reads_are_direct_fresh_and_keep_admission_until_body_clones_drop() {
     let retained = first.bytes.clone();
     drop(first);
     let second = host.dispatch(bound.clone(), query.clone()).await;
-    assert_eq!(second.outcome, CommandOutcome::Accepted);
+    assert_eq!(second.outcome, CommandOutcome::Accepted {});
     let busy = host.dispatch(bound.clone(), query.clone()).await;
     assert!(
         matches!(busy.outcome, CommandOutcome::Rejected { error } if error.code == "read_busy")
@@ -132,7 +132,7 @@ async fn reads_are_direct_fresh_and_keep_admission_until_body_clones_drop() {
         .await;
     assert_eq!(
         control.outcome,
-        CommandOutcome::Accepted,
+        CommandOutcome::Accepted {},
         "read pressure reserves control progress"
     );
     drop(retained);
@@ -189,7 +189,7 @@ async fn read_admission_is_global_and_independent_of_the_request_ledger() {
                 },
             )
             .await;
-        assert_eq!(reply.outcome, CommandOutcome::Accepted);
+        assert_eq!(reply.outcome, CommandOutcome::Accepted {});
         retained.push(reply.bytes);
     }
     let bound = BoundClient {
@@ -205,7 +205,7 @@ async fn read_admission_is_global_and_independent_of_the_request_ledger() {
     retained.pop();
     assert_eq!(
         host.dispatch(bound, query).await.outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
 }
 
@@ -263,7 +263,7 @@ async fn client_event_fanout_cleans_up_each_subscription() {
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     expect_results(&mut first, "fanout-both").await;
     expect_results(&mut second, "fanout-both").await;
@@ -306,7 +306,7 @@ async fn client_event_fanout_cleans_up_each_subscription() {
         )
         .await
         .outcome,
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     expect_results(&mut second, "fanout-second").await;
 
@@ -409,7 +409,7 @@ async fn connection_results_survive_slow_subscriber_backpressure() {
                 .await
                 .expect("dispatch completed after subscriber resumed")
                 .expect("dispatch task"),
-            CommandOutcome::Accepted
+            CommandOutcome::Accepted {}
         );
     }
     eprintln!(
@@ -524,7 +524,7 @@ async fn stalled_subscription_does_not_block_active_sibling() {
                 .await
                 .expect("dispatch completed after subscriptions closed")
                 .expect("dispatch task"),
-            CommandOutcome::Accepted
+            CommandOutcome::Accepted {}
         );
     }
     assert_eq!(delivered, Ok((COMMANDS, COMMANDS)));

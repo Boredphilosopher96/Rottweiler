@@ -513,7 +513,7 @@ async fn live_plugin_reload_swaps_only_successful_generations_and_detach_restore
             })
             .await
             .expect("driver attach"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     let attach = |request: &str| ClientCommand::AttachDevelopmentPlugin {
         meta: protocol_meta("plugin-dev", request),
@@ -523,7 +523,7 @@ async fn live_plugin_reload_swaps_only_successful_generations_and_detach_restore
 
     assert_eq!(
         handle.dispatch(attach("dev-attach")).await.expect("attach"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     assert!(has_command(&handle, "development-marker"));
 
@@ -537,7 +537,7 @@ async fn live_plugin_reload_swaps_only_successful_generations_and_detach_restore
             })
             .await
             .expect("add workspace root while development plugin is attached"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     assert!(has_command(&handle, "generation-marker"));
     assert!(has_command(&handle, "development-marker"));
@@ -563,7 +563,7 @@ async fn live_plugin_reload_swaps_only_successful_generations_and_detach_restore
             })
             .await
             .expect("detach"),
-        CommandOutcome::Accepted
+        CommandOutcome::Accepted {}
     );
     assert!(!has_command(&handle, "development-marker"));
     assert!(has_command(&handle, "generation-marker"));

@@ -370,8 +370,6 @@ describe("Rottweiler providers-sessions", () => {
         caused_by: "rename-2",
       },
       title: "Auth refactor",
-      usage: null,
-      cost: null,
     })
     expect(app.picker.title).toContain("Sessions")
     expect(app.picker.select.options[1]?.name).toBe("Auth refactor")
@@ -659,7 +657,7 @@ describe("Rottweiler providers-sessions", () => {
         session_id: "session-local",
         sequence_id: "1",
         emitted_at: "2026-01-01T00:00:00Z",
-        caused_by: lastRequest,
+        caused_by: lastRequest ?? null,
       },
       model: "fast",
     })

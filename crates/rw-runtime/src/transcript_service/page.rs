@@ -98,7 +98,7 @@ fn bounded_page(
     };
     let mut bytes = encoded_size(&page)?;
     if bytes >= maximum {
-        page.invalidation = TranscriptInvalidation::All;
+        page.invalidation = TranscriptInvalidation::All {};
         bytes = encoded_size(&page)?;
     }
     if matches!(window, Window::Before(_)) {
@@ -154,28 +154,28 @@ fn invalidation(
     current: &TranscriptView,
 ) -> Result<TranscriptInvalidation, HostError> {
     let Some(known) = known else {
-        return Ok(TranscriptInvalidation::All);
+        return Ok(TranscriptInvalidation::All {});
     };
     if known.session_id != current.session_id {
         return Err(invalid("transcript view belongs to another session"));
     }
     if known == current {
-        return Ok(TranscriptInvalidation::None);
+        return Ok(TranscriptInvalidation::None {});
     }
     journal.at_prefix(prefix(known)?).map_err(storage)?;
     if known.generation != current.generation
         || known.projection_version != current.projection_version
     {
-        return Ok(TranscriptInvalidation::All);
+        return Ok(TranscriptInvalidation::All {});
     }
     let Some(through) = known.through else {
-        return Ok(TranscriptInvalidation::All);
+        return Ok(TranscriptInvalidation::All {});
     };
     let Some(keys) = index
         .changed_keys(through, MAX_PAGE_ROWS)
         .map_err(storage)?
     else {
-        return Ok(TranscriptInvalidation::All);
+        return Ok(TranscriptInvalidation::All {});
     };
     let items = keys
         .into_iter()
@@ -203,14 +203,14 @@ fn position(
 ) -> Result<(Window, TranscriptAnchor), HostError> {
     let count = u64::try_from(maximum).map_err(|_| invalid("item limit"))?;
     match position {
-        TranscriptPosition::First => Ok((Window::From(0), TranscriptAnchor::Unspecified)),
-        TranscriptPosition::Latest => Ok((
+        TranscriptPosition::First {} => Ok((Window::From(0), TranscriptAnchor::Unspecified {})),
+        TranscriptPosition::Latest {} => Ok((
             Window::Before(head.total_rows),
-            TranscriptAnchor::Unspecified,
+            TranscriptAnchor::Unspecified {},
         )),
         TranscriptPosition::AtOrdinal { ordinal, .. } => Ok((
             Window::From(ordinal.0.min(head.total_rows.saturating_sub(1))),
-            TranscriptAnchor::Unspecified,
+            TranscriptAnchor::Unspecified {},
         )),
         TranscriptPosition::Before { item }
         | TranscriptPosition::After { item }

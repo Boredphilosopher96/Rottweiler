@@ -790,7 +790,7 @@ fn contract_fixture() -> ContractFixture {
                     emitted_at: "2026-01-01T00:00:00Z".to_owned(),
                 },
                 session_id: Some(SessionId("session-fixture".to_owned())),
-                outcome: CommandOutcome::Accepted,
+                outcome: CommandOutcome::Accepted {},
             },
             EngineEvent::RuntimeServicesListed {
                 meta: CommandAckMeta {

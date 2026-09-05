@@ -59,27 +59,25 @@ describe("generated engine event validation", () => {
     }
   })
 
-  test("preserves the unknown discriminator policy and additive object fields", () => {
+  test("rejects unsupported discriminators and undeclared object fields", () => {
     const unknown = { type: "future_event", meta: { sequence_id: "42" }, payload: [1] }
-    expect(normalizeWireEngineEvent(unknown)).toBe(unknown)
+    expect(normalizeWireEngineEvent(unknown)).toBeNull()
     const event = contractFixture.engine_events[0]
     if (event === undefined) throw new Error("empty event fixture")
     const known = { ...event, additive_field: true }
-    expect(normalizeWireEngineEvent(known)).toBe(known)
+    expect(normalizeWireEngineEvent(known)).toBeNull()
     for (const invalid of [null, [], {}, { type: 1 }]) expect(normalizeWireEngineEvent(invalid)).toBeNull()
   })
 
-  test("additive metadata cannot turn transient or connection events into durable events", () => {
+  test("rejects undeclared metadata on transient and connection events", () => {
     const transient = contractFixture.engine_events.find((event) => event.type === "compaction_attempt_started")
     const connection = contractFixture.engine_events.find((event) => event.type === "command_acknowledged")
     if (transient === undefined || connection === undefined) throw new Error("missing event fixtures")
     for (const meta of [null, { sequence_id: "99" }]) {
       const event = { ...transient, meta }
-      expect(normalizeWireEngineEvent(event)).toBe(event)
-      expect(durableSequenceId(event)).toBeNull()
+      expect(normalizeWireEngineEvent(event)).toBeNull()
     }
     const event = { ...connection, meta: { ...connection.meta, sequence_id: "99" } }
-    expect(normalizeWireEngineEvent(event)).toBe(event)
-    expect(durableSequenceId(event)).toBeNull()
+    expect(normalizeWireEngineEvent(event)).toBeNull()
   })
 })

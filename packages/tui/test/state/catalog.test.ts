@@ -28,11 +28,9 @@ describe("state catalog", () => {
       provider: "github_copilot",
       attempt_id: "attempt-auth",
       challenge: {
-        kind: "device_code",
+        kind: "device_flow",
         verification_uri: "https://github.com/login/device",
         user_code: "ABCD-EFGH",
-        expires_in_seconds: 900,
-        poll_interval_seconds: 5,
       },
       warnings: [],
     })
@@ -54,7 +52,7 @@ describe("state catalog", () => {
         emitted_at: "2026-01-01T00:00:00Z",
       },
       session_id: "session",
-      commands: [{ name: "fixture", description: "Fixture", usage: "" }],
+      commands: [{ source: "builtin", name: "fixture", description: "Fixture", usage: "" }],
       truncated: true,
     })
     expect(state.commandsTruncated).toBeTrue()
@@ -85,7 +83,7 @@ describe("state catalog", () => {
   })
 
   test("projects the unique concrete current model before the first turn", () => {
-    const state = reduce(createInitialState(), {
+    const state = reduce(createInitialState(), { cached: false, truncated: false,
       type: "models_listed",
       meta: {
         protocol_version: PROTOCOL_VERSION,
@@ -133,14 +131,14 @@ describe("state catalog", () => {
         emitted_at: "2026-01-01T00:00:00Z",
       },
       sessions: [
-        {
+        { title: "Fixture",
           session_id: "other-session",
           workspace_name: "Rottweiler",
           model: "other-model",
           driver_client_id: "other-client",
           shell_active: false,
         },
-        {
+        { title: "Fixture",
           session_id: "active-session",
           workspace_name: "Rottweiler",
           model: "active-model",
@@ -159,7 +157,7 @@ describe("state catalog", () => {
       model: "anthropic/claude-sonnet-4-5",
       provider: "anthropic",
     })
-    const refreshed = reduce(durable, {
+    const refreshed = reduce(durable, { cached: false, truncated: false,
       type: "models_listed",
       meta: {
         protocol_version: PROTOCOL_VERSION,
@@ -206,7 +204,7 @@ describe("state catalog", () => {
         request_id: "sessions",
         emitted_at: "2026-01-01T00:00:00Z",
       },
-      sessions: [{
+      sessions: [{ title: "Fixture",
         session_id: "fresh-session",
         workspace_name: "Rottweiler",
         model: "fast",
@@ -215,7 +213,7 @@ describe("state catalog", () => {
       }],
     })
     expect(withDescriptor.model).toBe("fast")
-    const resolved = reduce(withDescriptor, {
+    const resolved = reduce(withDescriptor, { cached: false, truncated: false,
       type: "models_listed",
       meta: {
         protocol_version: PROTOCOL_VERSION,
@@ -240,7 +238,7 @@ describe("state catalog", () => {
     })
 
     expect(state.lastSequence).toBe("1")
-    expect(state.protocol).toMatchObject({ unknownEvents: 0, invalidEvents: 0 })
+    expect(state.protocol).toMatchObject({ invalidEvents: 0 })
   })
 
   test("preserves typed model-switch context choices for the interaction dock", () => {
@@ -317,7 +315,7 @@ describe("state catalog", () => {
         emitted_at: "2026-01-01T00:00:00Z",
       },
       sessions: [
-        {
+        { title: "Fixture",
           session_id: "session",
           workspace_name: "Rottweiler",
           model: "model",
@@ -361,8 +359,6 @@ describe("state catalog", () => {
       type: "session_title_updated",
       meta: meta("0"),
       title: "Auth refactor",
-      usage: null,
-      cost: null,
     })
 
     expect(renamed.sessions.map((session) => [session.sessionId, session.title])).toEqual([
@@ -397,7 +393,6 @@ describe("state catalog", () => {
     expect(state.pluginNotifications).toEqual([
       { pluginId: "formatter", title: "Format complete", message: "src/main.rs" },
     ])
-    expect(state.protocol.unknownEvents).toBe(0)
   })
 
   test("projects live workspace-root generations using only virtual paths", () => {

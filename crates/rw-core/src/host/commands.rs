@@ -28,7 +28,7 @@ impl EngineHost {
             } => {
                 let result = self.queries.read_transcript(&session_id, read).await?;
                 Ok((
-                    CommandOutcome::Accepted,
+                    CommandOutcome::Accepted {},
                     Some(session_id.clone()),
                     vec![EngineEvent::TranscriptPageReady {
                         meta: ack_meta(&meta, &*self.clock),
@@ -47,7 +47,7 @@ impl EngineHost {
                     .read_transcript_content(&session_id, read)
                     .await?;
                 Ok((
-                    CommandOutcome::Accepted,
+                    CommandOutcome::Accepted {},
                     Some(session_id.clone()),
                     vec![EngineEvent::TranscriptContentReady {
                         meta: ack_meta(&meta, &*self.clock),
@@ -74,7 +74,7 @@ impl EngineHost {
                         role: ClientRole::Driver,
                     })
                     .await?;
-                if outcome == CommandOutcome::Accepted {
+                if matches!(outcome, CommandOutcome::Accepted {}) {
                     session.set_driver(Some(meta.client_id.clone()));
                 }
                 Ok((
@@ -106,7 +106,7 @@ impl EngineHost {
                         role: role.clone(),
                     })
                     .await?;
-                if outcome == CommandOutcome::Accepted && role == ClientRole::Driver {
+                if matches!(outcome, CommandOutcome::Accepted {}) && role == ClientRole::Driver {
                     session.set_driver(Some(meta.client_id.clone()));
                 }
                 Ok((
@@ -130,7 +130,7 @@ impl EngineHost {
                 }
                 sessions.sort_by(|left, right| left.session_id.0.cmp(&right.session_id.0));
                 Ok((
-                    CommandOutcome::Accepted,
+                    CommandOutcome::Accepted {},
                     None,
                     vec![EngineEvent::SessionsListed {
                         meta: ack_meta(&meta, &*self.clock),
@@ -149,7 +149,7 @@ impl EngineHost {
                     .search_persisted_sessions(&query, limit)
                     .await?;
                 Ok((
-                    CommandOutcome::Accepted,
+                    CommandOutcome::Accepted {},
                     None,
                     vec![EngineEvent::SessionsSearchReady {
                         meta: ack_meta(&meta, &*self.clock),
@@ -216,7 +216,7 @@ impl EngineHost {
                 let descriptors = session.handle().command_descriptors();
                 let (commands, truncated) = wire_command_catalog(descriptors.iter().cloned());
                 Ok((
-                    CommandOutcome::Accepted,
+                    CommandOutcome::Accepted {},
                     Some(session_id.clone()),
                     vec![EngineEvent::CommandDescriptorsListed {
                         meta: ack_meta(&meta, &*self.clock),
@@ -253,7 +253,7 @@ impl EngineHost {
                         }),
                 );
                 Ok((
-                    CommandOutcome::Accepted,
+                    CommandOutcome::Accepted {},
                     Some(session_id.clone()),
                     vec![EngineEvent::ModesListed {
                         meta: ack_meta(&meta, &*self.clock),
@@ -300,7 +300,7 @@ impl EngineHost {
                     resolved.as_deref(),
                 );
                 Ok((
-                    CommandOutcome::Accepted,
+                    CommandOutcome::Accepted {},
                     None,
                     vec![EngineEvent::ModelsListed {
                         meta: ack_meta(&meta, &*self.clock),
@@ -317,7 +317,7 @@ impl EngineHost {
                 let session = self.ready_session(&session_id).await?;
                 let settings = self.queries.user_settings(&session.descriptor()).await?;
                 Ok((
-                    CommandOutcome::Accepted,
+                    CommandOutcome::Accepted {},
                     Some(session_id.clone()),
                     vec![EngineEvent::SettingsListed {
                         meta: ack_meta(&meta, &*self.clock),
@@ -350,7 +350,7 @@ impl EngineHost {
                 .await
                 .map_err(|_| HostError::Query("user setting task failed".to_owned()))??;
                 Ok((
-                    CommandOutcome::Accepted,
+                    CommandOutcome::Accepted {},
                     Some(session_id.clone()),
                     vec![EngineEvent::SettingsListed {
                         meta: ack_meta(&meta, &*self.clock),
@@ -368,7 +368,7 @@ impl EngineHost {
                 })?;
                 let servers = mcp.list().await?;
                 Ok((
-                    CommandOutcome::Accepted,
+                    CommandOutcome::Accepted {},
                     Some(session_id.clone()),
                     vec![EngineEvent::McpServersListed {
                         meta: ack_meta(&meta, &*self.clock),
@@ -384,7 +384,7 @@ impl EngineHost {
                     None => Vec::new(),
                 };
                 Ok((
-                    CommandOutcome::Accepted,
+                    CommandOutcome::Accepted {},
                     Some(session_id.clone()),
                     vec![EngineEvent::RuntimeServicesListed {
                         meta: ack_meta(&meta, &*self.clock),
@@ -419,7 +419,7 @@ impl EngineHost {
                 .await
                 .map_err(|_| HostError::Query("MCP add task failed".to_owned()))??;
                 Ok((
-                    CommandOutcome::Accepted,
+                    CommandOutcome::Accepted {},
                     Some(session_id.clone()),
                     vec![EngineEvent::McpServersListed {
                         meta: ack_meta(&meta, &*self.clock),
@@ -456,7 +456,7 @@ impl EngineHost {
                 .await
                 .map_err(|_| HostError::Query("MCP add task failed".to_owned()))??;
                 Ok((
-                    CommandOutcome::Accepted,
+                    CommandOutcome::Accepted {},
                     Some(session_id.clone()),
                     vec![EngineEvent::McpServersListed {
                         meta: ack_meta(&meta, &*self.clock),
@@ -490,7 +490,7 @@ impl EngineHost {
                 .await
                 .map_err(|_| HostError::Query("MCP remove task failed".to_owned()))??;
                 Ok((
-                    CommandOutcome::Accepted,
+                    CommandOutcome::Accepted {},
                     Some(session_id.clone()),
                     vec![EngineEvent::McpServersListed {
                         meta: ack_meta(&meta, &*self.clock),
@@ -521,7 +521,7 @@ impl EngineHost {
                     .review(&name)
                     .await?;
                 Ok((
-                    CommandOutcome::Accepted,
+                    CommandOutcome::Accepted {},
                     Some(session_id.clone()),
                     vec![EngineEvent::McpServerApprovalReviewed {
                         meta: ack_meta(&meta, &*self.clock),
@@ -556,7 +556,7 @@ impl EngineHost {
                 .await
                 .map_err(|_| HostError::Query("MCP approval task failed".to_owned()))??;
                 Ok((
-                    CommandOutcome::Accepted,
+                    CommandOutcome::Accepted {},
                     Some(session_id.clone()),
                     vec![EngineEvent::McpServersListed {
                         meta: ack_meta(&meta, &*self.clock),
@@ -591,7 +591,7 @@ impl EngineHost {
                 .await
                 .map_err(|_| HostError::Query("MCP enablement task failed".to_owned()))??;
                 Ok((
-                    CommandOutcome::Accepted,
+                    CommandOutcome::Accepted {},
                     Some(session_id.clone()),
                     vec![EngineEvent::McpServersListed {
                         meta: ack_meta(&meta, &*self.clock),
@@ -707,7 +707,7 @@ impl EngineHost {
                 }
                 opening_guard.disarm();
                 Ok((
-                    CommandOutcome::Accepted,
+                    CommandOutcome::Accepted {},
                     Some(session_id.clone()),
                     vec![EngineEvent::ProviderAuthStarted {
                         meta: ack_meta(&meta, &*self.clock),
@@ -752,7 +752,7 @@ impl EngineHost {
                 .await
                 .map_err(|_| HostError::Query("provider configuration task failed".to_owned()))??;
                 Ok((
-                    CommandOutcome::Accepted,
+                    CommandOutcome::Accepted {},
                     Some(session_id.clone()),
                     vec![EngineEvent::ProviderConfigured {
                         meta: ack_meta(&meta, &*self.clock),
@@ -808,7 +808,7 @@ impl EngineHost {
                         // command as an idempotent subscription to the already-running
                         // poll/callback instead of turning a healthy login into a
                         // protocol error.
-                        return Ok((CommandOutcome::Accepted, Some(session_id), Vec::new()));
+                        return Ok((CommandOutcome::Accepted {}, Some(session_id), Vec::new()));
                     }
                     Some(other) => {
                         self.provider_auth
@@ -853,7 +853,7 @@ impl EngineHost {
                     )
                     .await;
                 });
-                Ok((CommandOutcome::Accepted, Some(session_id), Vec::new()))
+                Ok((CommandOutcome::Accepted {}, Some(session_id), Vec::new()))
             }
             ClientCommand::CancelProviderAuth {
                 meta,
@@ -901,7 +901,7 @@ impl EngineHost {
                 };
                 cancel_provider_auth_attempts(vec![pending]);
                 Ok((
-                    CommandOutcome::Accepted,
+                    CommandOutcome::Accepted {},
                     Some(session_id.clone()),
                     vec![EngineEvent::ProviderAuthFinished {
                         meta: ack_meta(&meta, &*self.clock),
@@ -939,7 +939,7 @@ impl EngineHost {
                     .export_session(&session.descriptor(), format, &output_path, force)
                     .await?;
                 Ok((
-                    CommandOutcome::Accepted,
+                    CommandOutcome::Accepted {},
                     Some(session_id.clone()),
                     vec![EngineEvent::SessionExported {
                         meta: ack_meta(&meta, &*self.clock),
@@ -960,7 +960,7 @@ impl EngineHost {
                     .search_workspace_files(&session.descriptor(), &query, limit)
                     .await?;
                 Ok((
-                    CommandOutcome::Accepted,
+                    CommandOutcome::Accepted {},
                     Some(session_id.clone()),
                     vec![EngineEvent::WorkspaceFilesFound {
                         meta: ack_meta(&meta, &*self.clock),
@@ -982,7 +982,7 @@ impl EngineHost {
                     .preview_workspace_file(&session.descriptor(), &path, max_bytes)
                     .await?;
                 Ok((
-                    CommandOutcome::Accepted,
+                    CommandOutcome::Accepted {},
                     Some(session_id.clone()),
                     vec![EngineEvent::WorkspaceFilePreviewReady {
                         meta: ack_meta(&meta, &*self.clock),
@@ -995,7 +995,7 @@ impl EngineHost {
                 let session = self.ready_session(&session_id).await?;
                 let status = self.queries.workspace_status(&session.descriptor()).await?;
                 Ok((
-                    CommandOutcome::Accepted,
+                    CommandOutcome::Accepted {},
                     Some(session_id.clone()),
                     vec![EngineEvent::WorkspaceStatusReady {
                         meta: ack_meta(&meta, &*self.clock),
@@ -1016,7 +1016,7 @@ impl EngineHost {
                     .workspace_diff(&session.descriptor(), &path, max_bytes)
                     .await?;
                 Ok((
-                    CommandOutcome::Accepted,
+                    CommandOutcome::Accepted {},
                     Some(session_id.clone()),
                     vec![EngineEvent::WorkspaceDiffReady {
                         meta: ack_meta(&meta, &*self.clock),
@@ -1039,7 +1039,7 @@ impl EngineHost {
                     .list(&session_id)
                     .await?;
                 Ok((
-                    CommandOutcome::Accepted,
+                    CommandOutcome::Accepted {},
                     Some(session_id.clone()),
                     vec![EngineEvent::SubagentsListed {
                         meta: ack_meta(&meta, &*self.clock),
@@ -1066,7 +1066,7 @@ impl EngineHost {
                     })?
                     .continue_child(&session_id, &subagent_id, content)
                     .await?;
-                Ok((CommandOutcome::Accepted, Some(session_id), Vec::new()))
+                Ok((CommandOutcome::Accepted {}, Some(session_id), Vec::new()))
             }
             ClientCommand::InterruptSubagent {
                 meta,
@@ -1085,7 +1085,7 @@ impl EngineHost {
                     })?
                     .interrupt(&session_id, &subagent_id)
                     .await?;
-                Ok((CommandOutcome::Accepted, Some(session_id), Vec::new()))
+                Ok((CommandOutcome::Accepted {}, Some(session_id), Vec::new()))
             }
             ClientCommand::CloseSubagent {
                 meta,
@@ -1104,12 +1104,12 @@ impl EngineHost {
                     })?
                     .close(&session_id, &subagent_id)
                     .await?;
-                Ok((CommandOutcome::Accepted, Some(session_id), Vec::new()))
+                Ok((CommandOutcome::Accepted {}, Some(session_id), Vec::new()))
             }
             ClientCommand::ShutdownHost { meta } => {
                 self.shutdown_sessions().await?;
                 Ok((
-                    CommandOutcome::Accepted,
+                    CommandOutcome::Accepted {},
                     None,
                     vec![EngineEvent::HostShutdown {
                         meta: ack_meta(&meta, &*self.clock),
@@ -1152,7 +1152,7 @@ impl EngineHost {
                 } else {
                     session.handle().dispatch(command).await?
                 };
-                if outcome == CommandOutcome::Accepted {
+                if matches!(outcome, CommandOutcome::Accepted {}) {
                     // TakeDriver persists its lease before returning Accepted.
                     // Shell commands acknowledge before their durable event,
                     // so that descriptor field is updated by

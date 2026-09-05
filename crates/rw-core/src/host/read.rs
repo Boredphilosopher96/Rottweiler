@@ -448,7 +448,7 @@ mod tests {
             .expect("released bytes");
         let small = HostReply::encode(
             CommandReply::Read {
-                outcome: CommandOutcome::Accepted,
+                outcome: CommandOutcome::Accepted {},
                 events: Vec::new(),
             },
             Some(lease),

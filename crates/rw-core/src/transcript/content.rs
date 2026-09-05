@@ -39,7 +39,7 @@ impl TranscriptDocument {
         }
         match (&source.selector, event) {
             (
-                TranscriptContentSelector::Conversation,
+                TranscriptContentSelector::Conversation {},
                 EngineEvent::ConversationTurnCommitted { turn, .. },
             ) => {
                 if turn.role == Role::Tool {
@@ -70,47 +70,47 @@ impl TranscriptDocument {
                 }
             }
             (
-                TranscriptContentSelector::ToolArguments,
+                TranscriptContentSelector::ToolArguments {},
                 EngineEvent::ToolCallStarted { args, .. },
             ) => Self::json(&args, max_bytes),
             (
-                TranscriptContentSelector::ToolOutput,
+                TranscriptContentSelector::ToolOutput {},
                 EngineEvent::ToolCallFinished { output, .. },
             ) => match output {
                 ToolOutput::Text { text } => Self::text(text, max_bytes),
                 _ => Self::json(&output, max_bytes),
             },
-            (TranscriptContentSelector::ToolDiff, EngineEvent::ToolDiffReady { diff, .. }) => {
+            (TranscriptContentSelector::ToolDiff {}, EngineEvent::ToolDiffReady { diff, .. }) => {
                 Self::json(&diff, max_bytes)
             }
             (
-                TranscriptContentSelector::CommandMessage,
+                TranscriptContentSelector::CommandMessage {},
                 EngineEvent::CommandFinished { message, .. },
             ) => Self::text(message, max_bytes),
             (
-                TranscriptContentSelector::ShellCommand,
+                TranscriptContentSelector::ShellCommand {},
                 EngineEvent::UserShellStateChanged {
                     command: Some(command),
                     ..
                 },
             ) => Self::text(command, max_bytes),
             (
-                TranscriptContentSelector::ShellOutput,
+                TranscriptContentSelector::ShellOutput {},
                 EngineEvent::UserShellStateChanged {
                     captured_output: Some(output),
                     ..
                 },
             ) => Self::text(output, max_bytes),
             (
-                TranscriptContentSelector::SubagentTask,
+                TranscriptContentSelector::SubagentTask {},
                 EngineEvent::SubagentSpawned { task, .. },
             ) => Self::text(task, max_bytes),
             (
-                TranscriptContentSelector::SubagentResult,
+                TranscriptContentSelector::SubagentResult {},
                 EngineEvent::SubagentFinished { result, .. },
             ) => Self::text(result.final_text, max_bytes),
             (
-                TranscriptContentSelector::SubagentDiff,
+                TranscriptContentSelector::SubagentDiff {},
                 EngineEvent::SubagentFinished { result, .. },
             ) => Self::text(
                 result

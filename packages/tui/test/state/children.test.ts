@@ -34,8 +34,6 @@ describe("state children", () => {
       meta: meta("4"),
       subagent_id: "child-b",
       result: childResult("child-b", "session-child-b", "Provider notes"),
-      output: { type: "text", text: "Provider notes" },
-      is_error: false,
     })
 
     expect(state.subagentOrder).toEqual(["child-b", "child-a"])
@@ -193,7 +191,7 @@ describe("state children", () => {
         args: ["not", "an", "object"],
         expected: "using tool · bash",
       },
-    ] as const
+    ]
     for (const [index, item] of cases.entries()) {
       state = reduce(state, {
         type: "subagent_progress",
@@ -257,8 +255,6 @@ describe("state children", () => {
         meta: meta(String(sequence++)),
         subagent_id: subagentId,
         result: childResult(subagentId, childSessionId, status, status),
-        output: { type: "text", text: status },
-        is_error: true,
       })
       expect(state.subagents[subagentId]?.status).toBe(status)
     }
@@ -281,8 +277,6 @@ describe("state children", () => {
       type: "subagent_finished",
       meta: meta("3"),
       subagent_id: "large-child",
-      is_error: false,
-      output: { type: "text", text: "Large change complete" },
       result: {
         ...childResult("large-child", "large-session", "Large change complete"),
         touched_files: ["large.bin"],
@@ -329,8 +323,6 @@ describe("state children", () => {
           type: "subagent_finished",
           meta: meta(String(sequence++)),
           subagent_id: "continuable-child",
-          is_error: false,
-          output: { type: "text", text: `completed ${index}` },
           result: {
             ...childResult(
               "continuable-child",

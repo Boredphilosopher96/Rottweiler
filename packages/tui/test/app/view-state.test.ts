@@ -190,7 +190,7 @@ describe("Rottweiler view-state", () => {
         cache_write_tokens: "0",
         reasoning_tokens: "0",
       },
-      cost: { type: "unavailable", reason: "fixture" },
+      cost: { kind: "unavailable", reason: "fixture" },
     })
     expect(commands.slice(-3).map((command) => command.type)).toEqual([
       "get_workspace_status",
