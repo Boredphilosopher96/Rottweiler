@@ -15,6 +15,11 @@ export const MAX_COMMAND_REPLY_BYTES = 8388608 as const;
 export const MAX_CLIENT_READS = 2 as const;
 export const MAX_CLIENT_CONTROLS = 8 as const;
 export const MAX_UI_SURFACE_BYTES = 65536 as const;
+export const MAX_PENDING_TOOL_INVOCATIONS = 128 as const;
+export const MAX_PENDING_TOOL_ARGUMENT_BYTES = 1048576 as const;
+export const MAX_PENDING_TOOL_PREPARED_BYTES = 8388608 as const;
+export const MAX_TOOL_CALL_ID_BYTES = 1024 as const;
+export const MAX_TOOL_NAME_BYTES = 256 as const;
 export const MAX_TODO_ITEMS = 128 as const;
 export const MAX_TODO_ID_BYTES = 256 as const;
 export const MAX_TODO_CONTENT_BYTES = 4096 as const;
@@ -336,7 +341,9 @@ cost: Cost, };
 
 export type TurnAccounting = { turn_id: TurnId, attribution: AccountingAttribution, usage: Usage, cost: Cost, };
 
-export type CostSnapshot = { utc_day: string, turns: Array<TurnAccounting>, session_usage: Usage, session_cost_micros_usd: string, session_ai_credit_micros: string, daily_cost_micros_usd: string, daily_ai_credit_micros: string, trailing_minute_cost_micros_usd: string, trailing_minute_ai_credit_micros: string, session_subscription_tokens: string, daily_subscription_tokens: string, trailing_minute_subscription_tokens: string, cache_hit_basis_points: number, session_cost_cap_micros_usd: string | null, daily_cost_cap_micros_usd: string | null, session_ai_credit_cap_micros: string | null, daily_ai_credit_cap_micros: string | null, session_token_cap: string | null, daily_token_cap: string | null, spend_rate_alarm_micros_usd_per_minute: string | null, ai_credit_rate_alarm_micros_per_minute: string | null, token_rate_alarm_per_minute: string | null, hard_cap_reached: boolean, session_monetary_accounting_complete: boolean, daily_monetary_accounting_complete: boolean, session_subscription_quota_entries: string, session_cost_unavailable_entries: string, session_non_usd_monetary_entries: string, daily_subscription_quota_entries: string, daily_cost_unavailable_entries: string, daily_non_usd_monetary_entries: string, };
+export type CostSnapshot = { utc_day: string, subscription_quota: SubscriptionQuotaSummary | null, session_usage: Usage, session_cost_micros_usd: string, session_ai_credit_micros: string, daily_cost_micros_usd: string, daily_ai_credit_micros: string, trailing_minute_cost_micros_usd: string, trailing_minute_ai_credit_micros: string, session_subscription_tokens: string, daily_subscription_tokens: string, trailing_minute_subscription_tokens: string, cache_hit_basis_points: number, session_cost_cap_micros_usd: string | null, daily_cost_cap_micros_usd: string | null, session_ai_credit_cap_micros: string | null, daily_ai_credit_cap_micros: string | null, session_token_cap: string | null, daily_token_cap: string | null, spend_rate_alarm_micros_usd_per_minute: string | null, ai_credit_rate_alarm_micros_per_minute: string | null, token_rate_alarm_per_minute: string | null, hard_cap_reached: boolean, session_monetary_accounting_complete: boolean, daily_monetary_accounting_complete: boolean, session_subscription_quota_entries: string, session_cost_unavailable_entries: string, session_non_usd_monetary_entries: string, daily_subscription_quota_entries: string, daily_cost_unavailable_entries: string, daily_non_usd_monetary_entries: string, };
+
+export type SubscriptionQuotaSummary = { used: string, unit: string, };
 
 export type PromptTool = { name: string, description: string, input_schema: JsonValue, };
 

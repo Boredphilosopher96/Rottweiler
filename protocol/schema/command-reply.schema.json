@@ -4328,11 +4328,15 @@
         "utc_day": {
           "type": "string"
         },
-        "turns": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/TurnAccounting"
-          }
+        "subscription_quota": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SubscriptionQuotaSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "session_usage": {
           "$ref": "#/$defs/Usage"
@@ -4464,7 +4468,6 @@
       "additionalProperties": false,
       "required": [
         "utc_day",
-        "turns",
         "session_usage",
         "session_cost_micros_usd",
         "session_ai_credit_micros",
@@ -4487,39 +4490,26 @@
         "daily_non_usd_monetary_entries"
       ]
     },
-    "TurnAccounting": {
-      "description": "Usage and billing attributed to one completed agent turn.",
+    "SubscriptionQuotaSummary": {
       "type": "object",
       "properties": {
-        "turn_id": {
-          "$ref": "#/$defs/TurnId"
+        "used": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[0-9]+(?:\\.[0-9]+)?$"
         },
-        "attribution": {
-          "$ref": "#/$defs/AccountingAttribution"
-        },
-        "usage": {
-          "$ref": "#/$defs/Usage"
-        },
-        "cost": {
-          "$ref": "#/$defs/Cost"
+        "unit": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-rw-max-utf8-bytes": 128
         }
       },
       "additionalProperties": false,
       "required": [
-        "turn_id",
-        "attribution",
-        "usage",
-        "cost"
-      ]
-    },
-    "AccountingAttribution": {
-      "description": "Runtime role to which usage and cost are attributed.",
-      "type": "string",
-      "enum": [
-        "main",
-        "compaction",
-        "subagent",
-        "title"
+        "used",
+        "unit"
       ]
     },
     "SessionReview": {
@@ -6841,6 +6831,16 @@
         "attribution",
         "call_id",
         "attempt"
+      ]
+    },
+    "AccountingAttribution": {
+      "description": "Runtime role to which usage and cost are attributed.",
+      "type": "string",
+      "enum": [
+        "main",
+        "compaction",
+        "subagent",
+        "title"
       ]
     },
     "ProviderCallActuals": {
