@@ -173,6 +173,10 @@ printf 'only exact ancestor entries\n'
 }
 
 async fn compile_source_host(root: &Path, host: &Path) {
+    let temporary = tempfile::Builder::new()
+        .prefix("compiler-")
+        .tempdir_in(root)
+        .expect("compiler temporary directory");
     let entry =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/plugin-host/src/index.ts");
     let mut compiler = tokio::process::Command::new("bun")
@@ -181,7 +185,7 @@ async fn compile_source_host(root: &Path, host: &Path) {
         .arg("--outfile")
         .arg(host)
         .current_dir(root)
-        .env("TMPDIR", root)
+        .env("TMPDIR", temporary.path())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
