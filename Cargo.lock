@@ -2848,6 +2848,7 @@ name = "rw-intel"
 version = "0.1.4"
 dependencies = [
  "async-trait",
+ "blake3",
  "ignore",
  "rw-types",
  "serde",

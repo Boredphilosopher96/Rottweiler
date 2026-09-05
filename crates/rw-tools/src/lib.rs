@@ -74,7 +74,7 @@ pub use rw_sandbox::{
 };
 pub use rw_types::{DiffArtifact, TouchedFile, TouchedFileStatus};
 pub use search::{GlobInput, GlobTool, GrepInput, GrepTool, LsInput, LsTool};
-pub use symbols::{SymbolsInput, SymbolsTool, WorkspaceSymbolIndex};
+pub use symbols::{SymbolsInput, SymbolsTool, WorkspaceIndexPool, WorkspaceSymbolIndex};
 pub use web::{
     ConfiguredSearchApi, FetchRequest, FetchResponse, WebFetchInput, WebFetchTool, WebFetcher,
     WebSearchInput, WebSearchRequest, WebSearchResponse, WebSearchResult, WebSearchSource,

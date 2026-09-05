@@ -704,3 +704,53 @@ retire a worker. Compiled state is immutable; mutable instance state never cross
 calls or sessions. The pool is explicit application state, avoiding process-global
 IO objects tied to an unrelated Tokio runtime. Native RPC plugins retain their
 separate ambient-effect settlement requirements.
+
+
+---
+
+## ADR-034: Runtime-owned symbol indexes have a shared byte budget
+
+**Decision.** A runtime owns one workspace index pool. Canonical root and trust
+scope identify a shared index; a different worktree or trust scope gets a distinct
+index. Child sessions and live root changes use that same pool. Dead registrations
+are weak and pruned on admission, with a maximum of 128 live root/scope pairs.
+
+All root indexes share a 64 MiB charge for retained symbol vectors, names, paths
+and entry metadata. Per-file and file-count limits also apply to direct updates.
+Old revisions are evicted under pressure, and incomplete coverage is reported as
+truncated. Query selection retains only the requested best matches and clones
+only those results. Native trees and source text do not remain resident between
+updates. One parse/read owner per pool bounds transient source and parser work.
+
+**Alternatives.** Keeping a native tree for every indexed file makes source-byte
+limits an inaccurate memory contract. A separate budget per session multiplies
+memory with session count. Estimating native tree allocations from source length
+would claim an unsupported bound. The chosen design keeps content digests and
+symbols; unchanged descriptor metadata avoids reads, and unchanged content avoids
+parsing. Changed files are parsed afresh. A small measured hot-tree cache can be
+added later only with a separate native-memory accounting contract.
+
+**Freshness.** A shared single-flight reconciliation owner scans on first use and
+when its two-second freshness interval has elapsed. It checks additions, deletions,
+renames and external edits. Unchanged files use descriptor size, modification time
+and, on Unix, inode/device/change-time identity. Changed reads compare descriptor
+metadata before and after reading; raced reads fail without advancing freshness.
+Built-in mutations still update the shared index directly. Monotonic generations
+identify content replacement and eviction. Scans and queries run outside async
+executor threads in runtime/tool call paths. Each scan admits at most 100,000
+entries and 64 directory levels, with partial coverage reported at either cap.
+Syntax traversal uses a tree cursor rather than allocating a vector of siblings
+for each visited node. No watcher readiness flags live in
+individual tools or LSP facades.
+
+**Limits.** This charge is owned index data, not a claim about process RSS or
+Tree-sitter allocator overhead. Tree-sitter is temporary and parses at most the
+per-file input cap under shared admission. Reconciliation is on demand, so an
+external edit may remain cached within the stated freshness interval. LSP process
+state remains session-scoped because its sandbox and document state carry separate
+authority. Resource-limited symbol results are explicitly partial.
+
+**Validation.** Concurrent-root budget pressure, eviction/drop refunds, trust and
+worktree isolation, shared index identity, external edit/add/delete reconciliation,
+unchanged generations, bounded ranked queries and production tool composition are
+covered by tests. Performance qualification remains separate from these invariants.

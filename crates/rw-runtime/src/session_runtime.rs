@@ -886,6 +886,7 @@ pub enum HostedProviderMode {
 
 pub(crate) struct HostedSessionComposition {
     pub wasm_workers: Arc<rw_ext::WasmWorkerPool>,
+    pub index_pool: Arc<rw_tools::WorkspaceIndexPool>,
     pub journal_reads: Arc<JournalReads>,
     pub workspace: PathBuf,
     pub additional_workspaces: Vec<PathBuf>,
@@ -1305,6 +1306,7 @@ pub async fn run(options: RunOptions) -> Result<()> {
     initialize_private_storage_root(&storage_root).into_diagnostic()?;
     collect_abandoned_empty_sessions(&storage_root)?;
     let journal_reads = JournalReads::new(&storage_root)?;
+    let index_pool = Arc::new(rw_tools::WorkspaceIndexPool::default());
     let loaded_config = config_loader.load().into_diagnostic()?;
     for warning in loaded_config.warnings() {
         eprintln!("warning: {}", warning.message());
@@ -1566,8 +1568,10 @@ pub async fn run(options: RunOptions) -> Result<()> {
         .filter_map(|(root, trusted)| trusted.then_some(root.clone()))
         .collect::<Vec<_>>();
     let derived_project_trusted = trusted_lsp_roots.first().copied().unwrap_or(false);
+    let tool_index_pool = Arc::clone(&index_pool);
     let mut built_tools = tokio::task::spawn_blocking(move || {
         build_tools(BuildToolsInput {
+            index_pool: tool_index_pool,
             workspace_roots: &tool_workspace_roots,
             trusted_lsp_roots: &trusted_lsp_roots,
             question_asker,
@@ -1929,6 +1933,7 @@ pub async fn run(options: RunOptions) -> Result<()> {
         .await?;
     wasm_startup_notifications.extend(extension_startup_notifications(&extension_catalog));
     let workspace_root_controller = Arc::new(RuntimeWorkspaceRootController {
+        index_pool: Arc::clone(&index_pool),
         journal_reads: Arc::clone(&journal_reads),
         checkpoint_root,
         storage_root: storage_root.clone(),
@@ -2504,8 +2509,10 @@ pub(crate) async fn compose_hosted_actor(
         .filter_map(|(root, trusted)| trusted.then_some(root.clone()))
         .collect::<Vec<_>>();
     let derived_project_trusted = trusted_lsp_roots.first().copied().unwrap_or(false);
+    let tool_index_pool = Arc::clone(&options.index_pool);
     let mut built_tools = tokio::task::spawn_blocking(move || {
         build_tools(BuildToolsInput {
+            index_pool: tool_index_pool,
             workspace_roots: &tool_workspace_roots,
             trusted_lsp_roots: &trusted_lsp_roots,
             question_asker: tool_question_asker,
@@ -2761,6 +2768,7 @@ pub(crate) async fn compose_hosted_actor(
         .await?;
     wasm_startup_notifications.extend(extension_startup_notifications(&extension_catalog));
     let workspace_root_controller = Arc::new(RuntimeWorkspaceRootController {
+        index_pool: Arc::clone(&options.index_pool),
         journal_reads: Arc::clone(&options.journal_reads),
         checkpoint_root: checkpoint_root(&options.storage_root, &workspace, &session_id),
         storage_root: options.storage_root.clone(),
@@ -5325,6 +5333,7 @@ struct RuntimeFolderTrustController {
 
 #[allow(clippy::struct_excessive_bools)]
 struct RuntimeWorkspaceRootController {
+    index_pool: Arc<rw_tools::WorkspaceIndexPool>,
     journal_reads: Arc<JournalReads>,
     checkpoint_root: PathBuf,
     storage_root: PathBuf,
@@ -5410,6 +5419,7 @@ impl RuntimeWorkspaceRootController {
             )?;
         let child_project_trusted = trusted_roots.first().copied().unwrap_or(false);
         let built = build_tools(BuildToolsInput {
+            index_pool: Arc::clone(&self.index_pool),
             workspace_roots: &roots,
             trusted_lsp_roots: &trusted_roots,
             question_asker: Arc::clone(&self.question_asker),
@@ -5500,6 +5510,7 @@ impl RuntimeWorkspaceRootController {
             .map(Arc::new)
             .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
         let workspace_controller = Arc::new(RuntimeWorkspaceRootController {
+            index_pool: Arc::clone(&self.index_pool),
             journal_reads: Arc::clone(&self.journal_reads),
             checkpoint_root: child_checkpoint_root.clone(),
             storage_root: storage_root.to_path_buf(),
@@ -5578,6 +5589,7 @@ impl RuntimeWorkspaceRootController {
                 },
             )?;
         let built = build_tools(BuildToolsInput {
+            index_pool: Arc::clone(&self.index_pool),
             workspace_roots: roots,
             trusted_lsp_roots: &trusted_lsp_roots,
             question_asker: Arc::clone(&self.question_asker),
@@ -10639,6 +10651,7 @@ fn compose_runtime_hooks(
 }
 
 struct BuildToolsInput<'a> {
+    index_pool: Arc<rw_tools::WorkspaceIndexPool>,
     workspace_roots: &'a [PathBuf],
     trusted_lsp_roots: &'a [bool],
     question_asker: Arc<dyn QuestionAsker>,
@@ -11506,6 +11519,7 @@ impl WebSearcher for ReplayingConfiguredWebSearcher {
 #[allow(clippy::too_many_lines)]
 fn build_tools(input: BuildToolsInput<'_>) -> Result<BuiltTools> {
     let BuildToolsInput {
+        index_pool,
         workspace_roots,
         trusted_lsp_roots,
         question_asker,
@@ -11526,7 +11540,8 @@ fn build_tools(input: BuildToolsInput<'_>) -> Result<BuiltTools> {
         .first()
         .ok_or_else(|| miette!("tool composition requires a primary workspace"))?;
     let symbols = Arc::new(
-        WorkspaceSymbolIndex::new(workspace_roots)
+        index_pool
+            .workspace(workspace_roots, trusted_lsp_roots)
             .map_err(|error| miette!("symbol index could not start: {error}"))?,
     );
     let limits = ToolLimits::default();
@@ -11892,13 +11907,11 @@ impl WebSearcher for RuntimeWebSearcher {
 struct LazySymbolsTool {
     inner: SymbolsTool,
     index: Arc<WorkspaceSymbolIndex>,
-    initialized: tokio::sync::Mutex<bool>,
 }
 
 struct MultiRootCodeIntelligence {
     providers: Vec<Arc<CodeIntelligence>>,
     symbols: Arc<WorkspaceSymbolIndex>,
-    indexed: tokio::sync::Mutex<bool>,
     _scratch: PrivateScratch,
 }
 
@@ -11963,7 +11976,6 @@ impl MultiRootCodeIntelligence {
         Ok(Self {
             providers,
             symbols,
-            indexed: tokio::sync::Mutex::new(false),
             _scratch: scratch,
         })
     }
@@ -11985,16 +11997,11 @@ impl MultiRootCodeIntelligence {
     }
 
     async fn ensure_indexed(&self) -> std::result::Result<(), String> {
-        let mut indexed = self.indexed.lock().await;
-        if !*indexed {
-            let symbols = Arc::clone(&self.symbols);
-            tokio::task::spawn_blocking(move || symbols.index_workspaces())
-                .await
-                .map_err(|error| error.to_string())?
-                .map_err(|error| error.to_string())?;
-            *indexed = true;
-        }
-        Ok(())
+        let symbols = Arc::clone(&self.symbols);
+        tokio::task::spawn_blocking(move || symbols.ensure_current())
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())
     }
 
     fn virtualize_path(root_index: usize, path: &mut PathBuf) {
@@ -12120,7 +12127,6 @@ impl LazySymbolsTool {
         Self {
             inner: SymbolsTool::new(Arc::clone(&index), limits),
             index,
-            initialized: tokio::sync::Mutex::new(false),
         }
     }
 }
@@ -12136,16 +12142,14 @@ impl Tool for LazySymbolsTool {
         context: &ToolContext,
         input: serde_json::Value,
     ) -> std::result::Result<ToolResult, ToolError> {
-        let mut initialized = self.initialized.lock().await;
-        if !*initialized {
-            let index = Arc::clone(&self.index);
-            tokio::task::spawn_blocking(move || index.index_workspaces())
-                .await
-                .map_err(|error| ToolError::Intelligence(error.to_string()))?
-                .map_err(|error| ToolError::Intelligence(error.to_string()))?;
-            *initialized = true;
+        if context.cancellation.is_cancelled() {
+            return Err(ToolError::Cancelled);
         }
-        drop(initialized);
+        let index = Arc::clone(&self.index);
+        tokio::task::spawn_blocking(move || index.ensure_current())
+            .await
+            .map_err(|error| ToolError::Intelligence(error.to_string()))?
+            .map_err(|error| ToolError::Intelligence(error.to_string()))?;
         self.inner.execute(context, input).await
     }
 }
@@ -14934,6 +14938,7 @@ mod tests {
         let session_id = SessionId("unavailable-concrete-resume".to_owned());
         let options = |resume, requested_model| HostedSessionComposition {
             wasm_workers: rw_ext::WasmWorkerPool::new(),
+            index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
             journal_reads: JournalReads::new(&storage).expect("journal reads"),
             workspace: workspace.clone(),
             additional_workspaces: Vec::new(),
@@ -18203,6 +18208,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn build_tools_registers_intelligence_and_only_configured_live_websearch() {
         let root = tempdir().expect("workspace");
         let private = tempdir().expect("private");
@@ -18216,6 +18222,7 @@ mod tests {
             header_credentials: BTreeMap::new(),
         };
         let built = build_tools(BuildToolsInput {
+            index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
             workspace_roots: &[root.path().to_path_buf()],
             trusted_lsp_roots: &[false],
             question_asker: Arc::new(HeadlessQuestionAsker),
@@ -18262,6 +18269,7 @@ mod tests {
                 .expect("offline execution lease"),
         );
         let offline = build_tools(BuildToolsInput {
+            index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
             workspace_roots: &[root.path().to_path_buf()],
             trusted_lsp_roots: &[false],
             question_asker: Arc::new(HeadlessQuestionAsker),
@@ -18287,6 +18295,7 @@ mod tests {
                 .expect("replay execution lease"),
         );
         let replay_native = build_tools(BuildToolsInput {
+            index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
             workspace_roots: &[root.path().to_path_buf()],
             trusted_lsp_roots: &[false],
             question_asker: Arc::new(HeadlessQuestionAsker),
@@ -18467,6 +18476,7 @@ mod tests {
         );
 
         let built = build_tools(BuildToolsInput {
+            index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
             workspace_roots: &[root.path().to_path_buf()],
             trusted_lsp_roots: &[false],
             question_asker: Arc::new(HeadlessQuestionAsker),
@@ -20205,6 +20215,7 @@ mod tests {
                 .with_project_approval_file(approvals),
         );
         let controller = RuntimeWorkspaceRootController {
+            index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
             journal_reads: JournalReads::new(&private).expect("journal reads"),
             checkpoint_root: checkpoint_root.clone(),
             storage_root: private.clone(),
@@ -20547,6 +20558,7 @@ mod tests {
         }
 
         let pending = RuntimeWorkspaceRootController {
+            index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
             journal_reads: JournalReads::new(&private).expect("journal reads"),
             checkpoint_root: checkpoint_root.clone(),
             storage_root: private.clone(),

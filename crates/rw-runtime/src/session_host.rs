@@ -234,6 +234,7 @@ impl RuntimeHostOptions {
 #[derive(Clone)]
 pub struct RuntimeSessionFactory {
     wasm_workers: Arc<rw_ext::WasmWorkerPool>,
+    index_pool: Arc<rw_tools::WorkspaceIndexPool>,
     journal_reads: Arc<crate::journal_reads::JournalReads>,
     options: Arc<RuntimeHostOptions>,
     allowed_workspaces: Arc<Vec<PathBuf>>,
@@ -415,6 +416,7 @@ impl RuntimeSessionFactory {
         });
         let factory = Self {
             wasm_workers: rw_ext::WasmWorkerPool::new(),
+            index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
             journal_reads: crate::journal_reads::JournalReads::new(&options.storage_root)
                 .map_err(|error| HostError::Persistence(error.to_string()))?,
             options: Arc::new(options),
@@ -1589,6 +1591,7 @@ impl RuntimeSessionFactory {
         let requested_model = self.requested_model_for_compose(&workspace, model, resume)?;
         let runtime = compose_hosted_actor(HostedSessionComposition {
             wasm_workers: Arc::clone(&self.wasm_workers),
+            index_pool: Arc::clone(&self.index_pool),
             journal_reads: Arc::clone(&self.journal_reads),
             workspace: workspace.clone(),
             additional_workspaces: Vec::new(),
