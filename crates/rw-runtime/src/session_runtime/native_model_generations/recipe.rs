@@ -4,7 +4,7 @@ use super::super::{
     prompt_model::PromptRecordingModel, prompt_shapes::PromptShapeJournal,
     provider_activation::lazy_live_provider_model, provider_catalog::PersistingHostedCatalogSource,
 };
-use super::{NativeModelGeneration, NativeModelInput};
+use super::{NativeChildComposer, NativeModelGeneration, NativeModelInput};
 use rw_core::{
     AgentLoopError, Config, ModelCatalogSource, ModelDriver, ProviderFactory,
     ProviderModelCatalogSource,
@@ -33,10 +33,46 @@ pub(in crate::session_runtime) struct NativeModelRecipe {
     pub active_sources: Arc<RwLock<BTreeSet<PathBuf>>>,
 }
 impl NativeModelRecipe {
+    /// Each child owns its model selection and provider activation state. Only
+    /// the immutable configuration and generation-managed endpoints are shared.
+    pub(in crate::session_runtime) fn child_composer(
+        &self,
+        providers: Vec<(String, Arc<dyn rw_providers::Provider>)>,
+    ) -> Arc<NativeChildComposer> {
+        match &self.provider {
+            NativeProviderRecipe::Live {
+                credentials,
+                pricing,
+                config,
+            } => {
+                let factory = ProviderFactory::system(credentials, pricing.clone())
+                    .with_extension_providers(providers);
+                let config = config.clone();
+                let user_config = credentials.with_file_name("config.toml");
+                let redactor = self.redactor.clone();
+                Arc::new(move |workspace, alias| {
+                    lazy_live_provider_model(
+                        factory.clone(),
+                        config.clone(),
+                        user_config.clone(),
+                        workspace.join(".rottweiler/config.toml"),
+                        alias.to_owned(),
+                        redactor.clone(),
+                    )
+                })
+            }
+            NativeProviderRecipe::Fixed(provider) => {
+                let provider = Arc::clone(provider);
+                Arc::new(move |_, _| Arc::clone(&provider))
+            }
+        }
+    }
+
     pub(in crate::session_runtime) fn compose(
         &self,
         input: NativeModelInput,
     ) -> Result<NativeModelGeneration, AgentLoopError> {
+        let children = self.child_composer(input.providers.clone());
         let (provider, catalog): (Arc<dyn ModelDriver>, Option<Arc<dyn ModelCatalogSource>>) =
             match &self.provider {
                 NativeProviderRecipe::Live {
@@ -88,6 +124,7 @@ impl NativeModelRecipe {
         Ok(NativeModelGeneration {
             model,
             provider,
+            children,
             catalog,
             redactor: self.redactor.clone(),
         })

@@ -21,6 +21,9 @@ pub(super) use recipe::{NativeModelRecipe, NativeProviderRecipe};
 pub(crate) type NativeModelComposer =
     dyn Fn(NativeModelInput) -> Result<NativeModelGeneration, AgentLoopError> + Send + Sync;
 
+pub(crate) type NativeChildComposer =
+    dyn Fn(&std::path::Path, &str) -> Arc<dyn ModelDriver> + Send + Sync;
+
 pub(crate) struct NativeModelInput {
     pub providers: Vec<(String, Arc<dyn Provider>)>,
     pub tools: Arc<ToolRegistry>,
@@ -34,6 +37,7 @@ pub(crate) struct NativeModelInput {
 pub(crate) struct NativeModelGeneration {
     pub model: Arc<dyn ModelDriver>,
     pub provider: Arc<dyn ModelDriver>,
+    pub children: Arc<NativeChildComposer>,
     pub catalog: Option<Arc<dyn ModelCatalogSource>>,
     pub redactor: FixtureRedactor,
 }

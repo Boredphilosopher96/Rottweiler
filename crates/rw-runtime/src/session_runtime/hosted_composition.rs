@@ -593,10 +593,18 @@ pub(crate) async fn compose_hosted_actor(
         instruction_roots: Arc::clone(&instruction_workspace_roots),
         active_sources: Arc::clone(&active_nested_instruction_sources),
     };
+    let children = recipe.child_composer(
+        plugin_runtime
+            .iter()
+            .flat_map(|runtime| runtime.providers.iter())
+            .map(|(prefix, provider)| (prefix.clone(), Arc::clone(provider)))
+            .collect(),
+    );
     let model_generations = NativeModelGenerations::new(
         NativeModelGeneration {
             model: Arc::clone(&model),
             provider: provider_model,
+            children,
             catalog: model_catalog,
             redactor: engine_redactor.clone(),
         },

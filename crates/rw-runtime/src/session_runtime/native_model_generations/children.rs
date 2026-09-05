@@ -27,6 +27,8 @@ impl SessionResources for ChildLease {
 impl NativeModelGenerations {
     pub(in crate::session_runtime) fn capture_child(
         owner: &Weak<Self>,
+        workspace: &std::path::Path,
+        alias: &str,
     ) -> Result<ChildNativeModel, AgentLoopError> {
         let owner = owner.upgrade().ok_or(AgentLoopError::Closed)?;
         let mut state = owner.lock();
@@ -34,13 +36,15 @@ impl NativeModelGenerations {
             return Err(busy());
         }
         state.children = state.children.checked_add(1).ok_or_else(busy)?;
-        let provider = Arc::clone(&state.current.provider);
+        let compose = Arc::clone(&state.current.children);
         let redactor = state.current.redactor.clone();
         drop(state);
+        let resources = Arc::new(ChildLease(owner));
+        let provider = compose(workspace, alias);
         Ok(ChildNativeModel {
             provider,
             redactor,
-            resources: Arc::new(ChildLease(owner)),
+            resources,
         })
     }
 }

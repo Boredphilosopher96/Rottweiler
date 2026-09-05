@@ -25,6 +25,7 @@ fn generation(name: &'static str) -> NativeModelGeneration {
     let model: Arc<dyn ModelDriver> = Arc::new(Model(name));
     NativeModelGeneration {
         provider: Arc::clone(&model),
+        children: Arc::new(move |_, _| Arc::new(Model(name))),
         model,
         catalog: None,
         redactor: FixtureRedactor::default(),
@@ -46,7 +47,12 @@ fn input(root: &std::path::Path) -> NativeModelInput {
 #[tokio::test]
 async fn child_configuration_retains_its_generation_through_shutdown_and_drop() {
     let owner = owner();
-    let child = NativeModelGenerations::capture_child(&owner.child_source()).expect("child");
+    let child = NativeModelGenerations::capture_child(
+        &owner.child_source(),
+        std::path::Path::new("/workspace"),
+        "first",
+    )
+    .expect("child");
     assert!(child.provider.has_model_alias("first"));
     assert!(owner.begin_replacement().is_err());
     let resource = Arc::clone(&child.resources);
@@ -70,7 +76,14 @@ fn replacement_closes_admission_and_publishes_model_source_together() {
     let replacement = owner.begin_replacement().expect("exclusive replacement");
     assert!(owner.generation() > old_generation);
     assert!(source.resolve().is_err());
-    assert!(NativeModelGenerations::capture_child(&owner.child_source()).is_err());
+    assert!(
+        NativeModelGenerations::capture_child(
+            &owner.child_source(),
+            std::path::Path::new("/workspace"),
+            "first"
+        )
+        .is_err()
+    );
     assert!(owner.begin_replacement().is_err());
     let candidate = replacement
         .prepare(input(root.path()))
@@ -91,7 +104,12 @@ fn replacement_closes_admission_and_publishes_model_source_together() {
         first.has_model_alias("first"),
         "captured drivers never change underneath consumers"
     );
-    let child = NativeModelGenerations::capture_child(&owner.child_source()).expect("new child");
+    let child = NativeModelGenerations::capture_child(
+        &owner.child_source(),
+        std::path::Path::new("/workspace"),
+        "first",
+    )
+    .expect("new child");
     assert!(child.provider.has_model_alias("second"));
 }
 
@@ -102,8 +120,64 @@ fn abandoned_replacement_stays_closed_without_a_strong_source_cycle() {
     let weak = Arc::downgrade(&owner);
     drop(owner.begin_replacement().expect("exclusive replacement"));
     assert!(source.resolve().is_err());
-    assert!(NativeModelGenerations::capture_child(&weak).is_err());
+    assert!(
+        NativeModelGenerations::capture_child(&weak, std::path::Path::new("/workspace"), "first")
+            .is_err()
+    );
     drop(owner);
     assert!(weak.upgrade().is_none());
     assert!(source.resolve().is_err());
+}
+
+#[tokio::test]
+async fn live_child_model_selection_is_private_to_each_session() {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::RwLock;
+    let root = tempfile::tempdir().expect("root");
+    let mut config = rw_core::Config::default();
+    config.providers = BTreeMap::from([(
+        "local".into(),
+        rw_types::config::ProviderConfig {
+            kind: "openai_compatible".into(),
+            base_url: Some("http://127.0.0.1:1/v1".into()),
+            auth_scheme: Some(rw_types::config::ProviderAuthScheme::None),
+            ..Default::default()
+        },
+    )]);
+    config.models.aliases = BTreeMap::from([
+        ("first".into(), vec!["local/first-model".into()]),
+        ("second".into(), vec!["local/second-model".into()]),
+    ]);
+    config.models.default = "first".into();
+    let recipe = NativeModelRecipe {
+        provider: NativeProviderRecipe::Live {
+            credentials: root.path().join("credentials.json"),
+            pricing: rw_providers::PricingTable::default(),
+            config,
+        },
+        redactor: FixtureRedactor::default(),
+        prompt_shapes: None,
+        catalog_path: root.path().join("catalog.json"),
+        instruction_roots: Arc::new(RwLock::new(vec![root.path().to_owned()])),
+        active_sources: Arc::new(RwLock::new(BTreeSet::new())),
+    };
+    let compose = recipe.child_composer(Vec::new());
+    let first = compose(root.path(), "first");
+    let second = compose(root.path(), "second");
+    first
+        .prepare_model("first")
+        .await
+        .expect("first preparation requires no network");
+    first.commit_prepared_model("first");
+    second
+        .prepare_model("second")
+        .await
+        .expect("second preparation requires no network");
+    second.commit_prepared_model("second");
+    assert!(first.has_model_alias("first"));
+    assert!(!first.has_model_alias("second"));
+    assert!(second.has_model_alias("second"));
+    assert!(!second.has_model_alias("first"));
+    first.settle_effects().await.expect("first settled");
+    second.settle_effects().await.expect("second settled");
 }
