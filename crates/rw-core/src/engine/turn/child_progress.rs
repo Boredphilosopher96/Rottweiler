@@ -61,8 +61,8 @@ impl ChildProgressSlot {
             .prepared_bytes()
             .and_then(|bytes| {
                 bytes
-                    .checked_add(event.subagent_id.0.len())?
-                    .checked_add(event.child_session_id.0.len())?
+                    .checked_add(event.subagent_id.0.capacity())?
+                    .checked_add(event.child_session_id.0.capacity())?
                     .checked_add(std::mem::size_of::<AdmittedProgress>())
             })
             .and_then(|bytes| u32::try_from(bytes).ok());
@@ -76,23 +76,24 @@ impl ChildProgressSlot {
             }
             event.event = serde_json::Value::Null;
             // A prior pending slot already owns enough for its scalar marker.
-            if let Some(previous) = pending.take() {
-                *pending = Some(AdmittedProgress {
-                    event,
-                    _permit: previous._permit,
-                });
+            if let Some(previous) = pending.as_mut() {
+                previous.event.child_sequence = event.child_sequence;
+                previous.event.event = serde_json::Value::Null;
                 return Ok(());
             }
             let bytes = std::mem::size_of::<AdmittedProgress>()
-                + event.subagent_id.0.len()
-                + event.child_session_id.0.len();
+                + event.subagent_id.0.capacity()
+                + event.child_session_id.0.capacity();
             let bytes = u32::try_from(bytes).map_err(|_| {
                 ToolError::Output("child progress identity exceeds admission".into())
             })?;
             match self.budget.clone().try_acquire_many_owned(bytes) {
                 Ok(permit) => permit,
                 // No display allocation is required for durable progress to finish.
-                Err(_) => return Ok(()),
+                Err(_) => {
+                    self.missed.store(true, Ordering::Relaxed);
+                    return Ok(());
+                }
             }
         };
         *pending = Some(AdmittedProgress {
@@ -179,6 +180,33 @@ mod tests {
         assert!(budget.available_permits() < 4096);
         drop(marker);
         drop(first.take());
+        assert_eq!(budget.available_permits(), 4096);
+    }
+    #[test]
+    fn dropped_marker_requires_invalidation_when_memory_returns() {
+        let budget = Arc::new(Semaphore::new(4096));
+        let occupied = budget
+            .clone()
+            .try_acquire_many_owned(4096)
+            .expect("occupied budget");
+        let slot = ChildProgressSlot::new(budget.clone());
+        slot.publish(event(1, "lost".into()), |_| panic!("no marker fits"))
+            .expect("nonblocking loss");
+        drop(occupied);
+        let mut queued = false;
+        slot.publish(event(2, "new delta".into()), |_| {
+            queued = true;
+            true
+        })
+        .expect("recover source");
+        assert!(queued);
+        let marker = slot.take().expect("queued marker");
+        assert_eq!(marker.event.child_sequence, Some(2));
+        assert!(
+            marker.event.event.is_null(),
+            "a delta cannot repair the missing source"
+        );
+        drop(marker);
         assert_eq!(budget.available_permits(), 4096);
     }
 }
