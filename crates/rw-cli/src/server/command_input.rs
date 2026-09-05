@@ -115,7 +115,12 @@ impl CommandIngress {
 
 pub(super) struct ParsedCommand {
     pub(super) command: ClientCommand,
-    pub(super) lease: InputLease,
+    pub(super) lease: RetainedInput,
+}
+/// Decoding concurrency ends before semantic dispatch. The retained command
+/// allocation remains charged until the dispatch future relinquishes it.
+pub(super) struct RetainedInput {
+    _bytes: OwnedSemaphorePermit,
 }
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum DecodeError {
@@ -186,7 +191,15 @@ pub(super) async fn decode(
         drop(bytes);
         let unused = lease.bytes.num_permits().saturating_sub(retained);
         drop(lease.bytes.split(unused));
-        Ok(ParsedCommand { command, lease })
+        let retained = RetainedInput {
+            _bytes: lease.bytes,
+        };
+        drop(lease._slot);
+        drop(lease._client);
+        Ok(ParsedCommand {
+            command,
+            lease: retained,
+        })
     })
     .await
     .map_err(|_| DecodeError::Invalid("command decoder failed"))?
@@ -222,7 +235,7 @@ mod tests {
             .expect("credits returned");
     }
     #[tokio::test]
-    async fn valid_urgent_input_retains_and_releases_client_admission() {
+    async fn decoded_input_releases_decoder_slots_but_retains_allocation() {
         let ingress = CommandIngress::default();
         let client = ClientId("client".into());
         let body = hyper::body::Bytes::from_static(br#"{"type":"shutdown_host","meta":{"protocol_version":1,"client_id":"client","request_id":"request"}}"#);
@@ -234,12 +247,15 @@ mod tests {
         let second = ingress
             .acquire(&client, "urgent", Some(1))
             .expect("second input");
-        assert!(ingress.acquire(&client, "urgent", Some(1)).is_err());
-        drop(parsed);
-        ingress
+        let third = ingress
             .acquire(&client, "urgent", Some(1))
-            .expect("parsed input returned credit");
+            .expect("dispatch does not own a decoder slot");
+        assert!(ingress.acquire(&client, "urgent", Some(1)).is_err());
         drop(second);
+        drop(third);
+        assert!(ingress.urgent.bytes.available_permits() < 4 * 1024);
+        drop(parsed);
+        assert_eq!(ingress.urgent.bytes.available_permits(), 4 * 1024);
         assert!(matches!(
             ingress.acquire(&client, "urgent", Some(URGENT_BODY_LIMIT + 1)),
             Err(AdmissionError::BodyLimit)

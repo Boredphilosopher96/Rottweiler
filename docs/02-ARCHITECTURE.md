@@ -167,7 +167,8 @@ The signed updater follows the same boundary: `rw-core` owns exact-byte threshol
 HTTP command clients declare the source-owned normal or urgent command lane. The
 transport validates the declaration against the decoded command, reserves input
 bytes before collection, and shape-checks JSON before typed allocation. Ordinary
-input has a 96 MiB pool and urgent input a separate 4 MiB pool; body/header deadlines
+decoder slots return before semantic dispatch; retained command bytes remain charged
+until dispatch relinquishes them. Normal input has a 96 MiB pool and urgent input a separate 4 MiB pool; body/header deadlines
 and a connection cap bound incomplete requests. Runtime client identities and
 capabilities are authenticated together with a runtime-scoped key, without retaining
 a registration for every connection ever opened.
