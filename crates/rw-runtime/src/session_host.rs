@@ -245,7 +245,7 @@ impl RuntimeHostOptions {
 #[derive(Clone)]
 pub struct RuntimeSessionFactory {
     receipt_io: Arc<tokio::sync::Mutex<()>>,
-    plugin_activation: Arc<crate::extension_runtime::PluginActivationBudget>,
+    plugin_runtime_budget: Arc<crate::extension_runtime::PluginRuntimeBudget>,
     wasm_workers: Arc<rw_ext::WasmWorkerPool>,
     index_pool: Arc<rw_tools::WorkspaceIndexPool>,
     journal_service: Arc<crate::journal_service::JournalService>,
@@ -441,7 +441,9 @@ impl RuntimeSessionFactory {
             transcripts: crate::transcript_service::TranscriptReader::new(Arc::clone(
                 &journal_service,
             )),
-            plugin_activation: Arc::new(crate::extension_runtime::PluginActivationBudget::default()),
+            plugin_runtime_budget: Arc::new(
+                crate::extension_runtime::PluginRuntimeBudget::default(),
+            ),
             wasm_workers: rw_ext::WasmWorkerPool::new(),
             index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
             journal_service,
@@ -711,7 +713,7 @@ impl RuntimeSessionFactory {
     ) -> Result<HostedSession, HostError> {
         let requested_model = self.requested_model_for_compose(&workspace, model, resume)?;
         let runtime = compose_hosted_actor(HostedSessionComposition {
-            plugin_activation: Arc::clone(&self.plugin_activation),
+            plugin_runtime_budget: Arc::clone(&self.plugin_runtime_budget),
             wasm_workers: Arc::clone(&self.wasm_workers),
             index_pool: Arc::clone(&self.index_pool),
             journal_service: Arc::clone(&self.journal_service),

@@ -619,7 +619,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
     let plugin_redactor = Arc::new(crate::extension_runtime::SharedPluginRedactor::new(
         fixture_redactor.clone(),
     ));
-    let plugin_activation = Arc::new(crate::extension_runtime::PluginActivationBudget::default());
+    let plugin_runtime_budget = Arc::new(crate::extension_runtime::PluginRuntimeBudget::default());
     let plugin_runtime = (if executable_catalog.plugins.is_empty() || inspection {
         None
     } else {
@@ -629,7 +629,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
             &workspace_roots,
             &std::env::current_exe().into_diagnostic()?,
             &plugin_redactor,
-            &plugin_activation,
+            &plugin_runtime_budget,
         )?;
         for pending in &runtime.pending {
             tracing::warn!("plugin {pending}");
@@ -868,11 +868,14 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
         .as_ref()
         .filter(|runtime| !runtime.event_routers.is_empty())
     {
-        Arc::new(PluginFanoutEventSink::new(
-            durable_sink.clone(),
-            runtime.event_routers.clone(),
-            engine_redactor.clone(),
-        ))
+        Arc::new(
+            PluginFanoutEventSink::new(
+                durable_sink.clone(),
+                runtime.event_routers.clone(),
+                engine_redactor.clone(),
+            )
+            .map_err(|error| miette!("plugin event delivery admission: {error}"))?,
+        )
     } else {
         durable_sink.clone()
     };
@@ -1077,7 +1080,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
                 storage_root.clone(),
                 std::env::current_exe().into_diagnostic()?,
                 Arc::clone(&plugin_redactor),
-                Arc::clone(&plugin_activation),
+                Arc::clone(&plugin_runtime_budget),
             ),
         )
     };
@@ -1125,7 +1128,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
     let todo = built_tools.todo.clone();
     let lifetime = super::headless_lifetime::own(
         actor.clone(),
-        Arc::clone(&plugin_activation),
+        Arc::clone(&plugin_runtime_budget),
         Arc::clone(&wasm_workers),
         Arc::clone(&provider_admission),
         Arc::clone(&journal_service),

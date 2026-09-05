@@ -23,17 +23,17 @@ use thiserror::Error;
 
 use crate::{HookDirective, HookError, HookHandler, HookInvocation};
 
+use rw_plugin_protocol::{
+    ExtensionEventKind, HookEvent, MAX_CAPABILITIES_PER_KIND, MAX_NAME_BYTES,
+    MAX_RPC_MESSAGE_BYTES, METHOD_HOOK_INVOKE, ManifestError, PluginCapabilities,
+    PluginHookCapability, PluginManifest, PluginPush, PluginToolCapability, PluginToolEffect,
+};
 #[cfg(test)]
 use rw_plugin_protocol::{
     FrameDecoder, FrameError, MAX_FRAME_BYTES, MAX_MANIFEST_BYTES, MAX_VERSION_BYTES,
     METHOD_PROVIDER_COMPLETE, METHOD_PROVIDER_EVENT, METHOD_PROVIDER_HTTP,
     METHOD_PROVIDER_HTTP_CANCEL, METHOD_PROVIDER_HTTP_EVENT, METHOD_PROVIDER_MODELS,
     METHOD_TOOL_CALL, METHOD_UI_NOTIFY, PROTOCOL_VERSION, PluginProviderCapability,
-};
-use rw_plugin_protocol::{
-    HookEvent, MAX_CAPABILITIES_PER_KIND, MAX_NAME_BYTES, MAX_RPC_MESSAGE_BYTES,
-    METHOD_HOOK_INVOKE, ManifestError, PluginCapabilities, PluginHookCapability, PluginManifest,
-    PluginPush, PluginToolCapability, PluginToolEffect,
 };
 
 /// Converts a protocol hook declaration into rw-ext's runtime registration.
@@ -818,14 +818,14 @@ impl CapabilityEnforcer {
     /// # Errors
     ///
     /// Returns a violation when the event was not declared.
-    pub fn check_event(&self, event: &str) -> Result<(), CapabilityEnforcementError> {
+    pub fn check_event(&self, event: ExtensionEventKind) -> Result<(), CapabilityEnforcementError> {
         self.check(
             CapabilityKind::Event,
-            event,
+            event.as_str(),
             self.capabilities
                 .event_subscriptions
                 .iter()
-                .any(|declared| declared == event),
+                .any(|declared| *declared == event),
         )
     }
 
@@ -1086,7 +1086,7 @@ mod tests {
                     capabilities: vec!["models".to_owned()],
                     credential_references: vec!["provider-token".to_owned()],
                 }],
-                event_subscriptions: vec!["ToolCallFinished".to_owned()],
+                event_subscriptions: vec![ExtensionEventKind::ToolCallFinished],
                 push: vec![PluginPush::UiNotify],
                 ..PluginCapabilities::default()
             },
@@ -1152,7 +1152,7 @@ mod tests {
                 }],
                 "hooks": [{"name":"pre_tool", "class": "policy","failure_policy":"fail-closed"}],
                 "providers": [{"alias-prefix":"fixture/"}],
-                "event_subscriptions": ["TurnFinished"]
+                "event_subscriptions": ["turn_finished"]
             }
         });
         let bytes = serde_json::to_vec(&fixture).expect("fixture JSON");

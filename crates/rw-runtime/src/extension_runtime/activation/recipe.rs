@@ -31,7 +31,7 @@ pub(in crate::extension_runtime) struct ActivationRecipe {
     pub helper: PathBuf,
     pub redactor: Arc<SharedPluginRedactor>,
     pub push_handler: Arc<SessionPluginPushHandler>,
-    pub budget: Arc<super::PluginActivationBudget>,
+    pub budget: Arc<super::PluginRuntimeBudget>,
     #[cfg(test)]
     pub launcher: Option<Arc<dyn PluginLauncher>>,
 }

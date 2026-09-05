@@ -506,27 +506,39 @@ impl PluginEventRouter {
     pub fn new(endpoint: Arc<dyn PluginEndpoint>) -> Self {
         Self { endpoint }
     }
-    /// Publishes an event only when it appears in the immutable subscription snapshot.
+    /// Calls one subscribed event handler under the ordinary fixed RPC deadline.
     ///
     /// # Errors
-    ///
-    /// Returns an RPC error for an undeclared event or failed notification delivery.
-    pub async fn publish(&self, event: &str, payload: Value) -> Result<(), PluginRpcError> {
-        let connection = self.endpoint.connect(&CancellationToken::default()).await?;
+    /// Rejects invalid notices, undeclared subscriptions and unsettled RPC failures.
+    pub async fn deliver(
+        &self,
+        notice: ExtensionEventNotice,
+        cancellation: &CancellationToken,
+    ) -> Result<ExtensionEventOutcome, PluginRpcError> {
+        notice
+            .validate()
+            .map_err(|message| rpc_error("invalid_event", message))?;
+        let connection = self.endpoint.connect(cancellation).await?;
         connection
             .enforcer()
-            .check_event(event)
+            .check_event(notice.event)
             .map_err(|error| rpc_error("capability_violation", &error.to_string()))?;
-        connection
+        let response = connection
             .client()
-            .notify(
+            .request_cancellable(
                 METHOD_EVENT_PUBLISH,
-                serde_json::to_value(EventPublishParams {
-                    event: event.to_owned(),
-                    payload,
-                })
-                .map_err(|error| rpc_error("invalid_request", &error.to_string()))?,
+                serde_json::to_value(notice)
+                    .map_err(|_| rpc_error("invalid_event", "event encoding failed"))?,
+                cancellation,
             )
-            .await
+            .await?;
+        serde_json::from_value(response)
+            .map_err(|_| rpc_error("invalid_event_outcome", "invalid event outcome"))
+    }
+
+    /// # Errors
+    /// Returns failed native/process proof after cancellation or caller drop.
+    pub async fn settle_effects(&self) -> Result<(), PluginRpcError> {
+        self.endpoint.settle_effects().await
     }
 }

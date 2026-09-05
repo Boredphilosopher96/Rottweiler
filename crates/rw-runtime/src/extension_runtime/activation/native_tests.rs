@@ -77,7 +77,7 @@ async fn aborted_first_use_waits_for_real_sandboxed_process_handoff_and_reap() {
         admitted: Notify::new(),
         release: Semaphore::new(0),
     });
-    let budget = Arc::new(PluginActivationBudget::default());
+    let budget = Arc::new(PluginRuntimeBudget::default());
     let endpoint = Arc::new(DormantPluginEndpoint::new(ActivationRecipe {
         approval: ActivationApproval::Configured,
         metadata: PluginEndpointMetadata::new(manifest).expect("metadata"),

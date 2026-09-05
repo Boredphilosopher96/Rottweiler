@@ -311,3 +311,20 @@ are expected to close without weakening any invariant above.
 - Run a provider in the WASM component tier. Its current ABI accepts hooks only;
   provider streaming, cancellation, host-mediated authentication, and
   recordable framing remain on the trusted native RPC tier (ADR-025).
+
+### Durable subscription ownership
+
+Extension event delivery uses the closed `ExtensionEventKind` catalog and a
+host-bound namespace. One worker per plugin reads canonical journal pages from
+its acknowledged cursor. The actor only coalesces wakeups after durable commit.
+The callback returns state mutations; the actor commits them with the exact
+source acknowledgement using compare-and-swap revision authority. Failed
+callbacks or revision conflicts leave that cursor unacknowledged. Recovery may
+repeat external effects, so handlers must make those effects idempotent.
+
+The application plugin budget admits at most 64 delivery workers. Preparation
+is serialized; retained event sources and projected requests share 64MiB.
+Source bytes remain charged through the last reader. Callback and host-command
+traffic use separate bounded lanes, and source admission is revoked when the
+callback settles. Shared journal decoding owns its own input admission; the
+encoded line limit is not a claim about arbitrary JSON heap amplification.

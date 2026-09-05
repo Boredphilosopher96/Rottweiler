@@ -41,16 +41,16 @@ struct Fixture {
     endpoint: Arc<DormantPluginEndpoint>,
     launcher: Arc<DelayedLauncher>,
     process: Arc<RollbackProcess>,
-    budget: Arc<PluginActivationBudget>,
+    budget: Arc<PluginRuntimeBudget>,
 }
 impl Fixture {
     fn new() -> Self {
-        Self::with_budget(Arc::new(PluginActivationBudget::default()))
+        Self::with_budget(Arc::new(PluginRuntimeBudget::default()))
     }
-    fn with_budget(budget: Arc<PluginActivationBudget>) -> Self {
+    fn with_budget(budget: Arc<PluginRuntimeBudget>) -> Self {
         Self::with_approval(budget, ActivationApproval::Configured)
     }
-    fn with_approval(budget: Arc<PluginActivationBudget>, approval: ActivationApproval) -> Self {
+    fn with_approval(budget: Arc<PluginRuntimeBudget>, approval: ActivationApproval) -> Self {
         let root = tempfile::tempdir().expect("root");
         #[cfg(unix)]
         {
@@ -295,7 +295,7 @@ async fn source_and_provider_metadata_registration_performs_no_activation() {
 
 #[tokio::test]
 async fn cancelling_queued_generation_releases_its_slots_without_native_launch() {
-    let budget = Arc::new(PluginActivationBudget::default());
+    let budget = Arc::new(PluginRuntimeBudget::default());
     let first = Fixture::with_budget(Arc::clone(&budget));
     let second = Fixture::with_budget(Arc::clone(&budget));
     let queued = Fixture::with_budget(Arc::clone(&budget));
@@ -361,7 +361,7 @@ async fn zero_ten_and_fifty_installed_plugins_remain_inert() {
                 rollback_plugin(fixture.root.path(), &format!("installed_{count}_{index}")).0
             })
             .collect::<Vec<_>>();
-        let budget = Arc::new(PluginActivationBudget::default());
+        let budget = Arc::new(PluginRuntimeBudget::default());
         let runtime = crate::extension_runtime::PluginSessionRuntime::compose(
             &configs,
             fixture.root.path(),
@@ -382,7 +382,7 @@ async fn zero_ten_and_fifty_installed_plugins_remain_inert() {
 async fn development_approval_is_generation_local_and_uses_the_prepared_identity() {
     use rw_ext::ApprovalStore as _;
     let fixture = Fixture::with_approval(
-        Arc::new(PluginActivationBudget::default()),
+        Arc::new(PluginRuntimeBudget::default()),
         ActivationApproval::SessionDevelopment,
     );
     let store = PrivatePluginApprovalStore::open(fixture.root.path()).expect("persistent store");
@@ -409,7 +409,7 @@ async fn development_approval_is_generation_local_and_uses_the_prepared_identity
 
 #[tokio::test]
 async fn rejected_activation_does_not_close_another_ready_generation() {
-    let budget = Arc::new(PluginActivationBudget::default());
+    let budget = Arc::new(PluginRuntimeBudget::default());
     let first = Fixture::with_budget(Arc::clone(&budget));
     let second = Fixture::with_budget(Arc::clone(&budget));
     first.launcher.release.add_permits(1);

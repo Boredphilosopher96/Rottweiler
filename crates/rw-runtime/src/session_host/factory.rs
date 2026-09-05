@@ -28,7 +28,7 @@ impl SessionFactory for RuntimeSessionFactory {
     async fn shutdown(&self) -> Result<(), HostError> {
         use futures_util::FutureExt as _;
         let plugins = self
-            .plugin_activation
+            .plugin_runtime_budget
             .close()
             .map_err(|error| HostError::Persistence(error.to_string()));
         let (wasm, admission, journal) = tokio::join!(

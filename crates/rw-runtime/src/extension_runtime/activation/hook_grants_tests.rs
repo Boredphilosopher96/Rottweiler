@@ -1,6 +1,6 @@
 #![allow(clippy::expect_used)]
 use crate::extension_runtime::{
-    PluginActivationBudget, PluginSessionRuntime, SharedPluginRedactor, tests::rollback_plugin,
+    PluginRuntimeBudget, PluginSessionRuntime, SharedPluginRedactor, tests::rollback_plugin,
 };
 use rw_ext::{HookClass, HookDispatcher, HookEffect, HookEvent, HookFailurePolicy};
 use rw_plugin_protocol::{PluginHookCapability, PluginToolCapability, PluginToolEffect};
@@ -9,7 +9,7 @@ use std::sync::Arc;
 #[tokio::test]
 async fn native_hook_registration_uses_sibling_tools_process_write_authority() {
     let root = tempfile::tempdir().expect("fixture root");
-    let budget = Arc::new(PluginActivationBudget::default());
+    let budget = Arc::new(PluginRuntimeBudget::default());
     let redactor = Arc::new(SharedPluginRedactor::new(
         rw_providers::FixtureRedactor::default(),
     ));

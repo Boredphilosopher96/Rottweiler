@@ -1,6 +1,6 @@
 //! Headless execution retains every cleanup owner across errors and caller drop.
 use crate::{
-    extension_runtime::PluginActivationBudget, provider_admission::DurableProviderAdmission,
+    extension_runtime::PluginRuntimeBudget, provider_admission::DurableProviderAdmission,
     session_resources::RuntimeSessionResources,
 };
 use futures_util::FutureExt as _;
@@ -10,7 +10,7 @@ type Proof = Result<(), Arc<str>>;
 
 pub(super) fn own(
     actor: rw_core::SessionHandle,
-    plugins: Arc<PluginActivationBudget>,
+    plugins: Arc<PluginRuntimeBudget>,
     wasm: Arc<rw_ext::WasmWorkerPool>,
     admission: Arc<DurableProviderAdmission>,
     journal: Arc<crate::journal_service::JournalService>,

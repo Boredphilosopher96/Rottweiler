@@ -8,6 +8,10 @@ use rw_types::extension_contract::{
     ExtensionSessionSnapshot, ExtensionStateCommitOutcome, ExtensionStateSnapshot,
     ExtensionStateTransaction,
 };
+use rw_types::extension_events::{
+    ExtensionEventChunk, ExtensionEventKind, ExtensionEventNotice, ExtensionEventOutcome,
+    ExtensionEventRead,
+};
 use rw_types::hook_contract::{HookClass, HookDirective, HookEvent, HookFailurePolicy, HookInput};
 use ts_rs::{TS, TypeVisitor};
 
@@ -56,8 +60,17 @@ pub(super) fn generate(root: &Path, check: bool) -> Result<(), String> {
     extension.visit::<ExtensionStateSnapshot>();
     extension.visit::<ExtensionStateCommitOutcome>();
     extension.visit::<ExtensionSessionSnapshot>();
+    extension.visit::<ExtensionEventKind>();
+    extension.visit::<ExtensionEventNotice>();
+    extension.visit::<ExtensionEventOutcome>();
+    extension.visit::<ExtensionEventRead>();
+    extension.visit::<ExtensionEventChunk>();
     write_types(root, "extension-contract", extension, check)?;
     for (name, schema) in [
+        ("extension-event-kind", schema::<ExtensionEventKind>()),
+        ("extension-event-notice", schema::<ExtensionEventNotice>()),
+        ("extension-event-outcome", schema::<ExtensionEventOutcome>()),
+        ("extension-event-chunk", schema::<ExtensionEventChunk>()),
         (
             "extension-state-transaction",
             schema::<ExtensionStateTransaction>(),

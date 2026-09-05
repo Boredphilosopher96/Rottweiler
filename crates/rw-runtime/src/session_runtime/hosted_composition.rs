@@ -472,7 +472,7 @@ pub(crate) async fn compose_hosted_actor(
             &workspace_roots,
             &std::env::current_exe().into_diagnostic()?,
             &plugin_redactor,
-            &options.plugin_activation,
+            &options.plugin_runtime_budget,
         )?);
         for pending in &runtime.pending {
             tracing::warn!("plugin {pending}");
@@ -661,11 +661,14 @@ pub(crate) async fn compose_hosted_actor(
         .as_ref()
         .filter(|runtime| !runtime.event_routers.is_empty())
     {
-        Arc::new(PluginFanoutEventSink::new(
-            durable_sink.clone(),
-            runtime.event_routers.clone(),
-            engine_redactor.clone(),
-        ))
+        Arc::new(
+            PluginFanoutEventSink::new(
+                durable_sink.clone(),
+                runtime.event_routers.clone(),
+                engine_redactor.clone(),
+            )
+            .map_err(|error| miette!("plugin event delivery admission: {error}"))?,
+        )
     } else {
         durable_sink.clone()
     };
@@ -863,7 +866,7 @@ pub(crate) async fn compose_hosted_actor(
             options.storage_root.clone(),
             std::env::current_exe().into_diagnostic()?,
             Arc::clone(&plugin_redactor),
-            Arc::clone(&options.plugin_activation),
+            Arc::clone(&options.plugin_runtime_budget),
         ),
     );
     let initial_thinking = configured_session_thinking(&options.config, &persisted_model_alias);

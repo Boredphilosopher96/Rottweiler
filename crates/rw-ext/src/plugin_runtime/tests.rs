@@ -52,7 +52,7 @@ fn manifest() -> PluginManifest {
                 capabilities: Vec::new(),
                 credential_references: Vec::new(),
             }],
-            event_subscriptions: vec!["TurnFinished".to_owned()],
+            event_subscriptions: vec![rw_plugin_protocol::ExtensionEventKind::TurnFinished],
             push: vec![PluginPush::UiNotify],
         },
     }

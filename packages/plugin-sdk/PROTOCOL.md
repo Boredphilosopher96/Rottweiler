@@ -50,7 +50,7 @@ Manifest capability arrays contain tools, commands, hooks, provider alias prefix
 subscriptions, and plugin-to-host push methods. Tool effects are exactly `reads-fs`, `writes-fs`,
 `network`, and `exec`; the host permission engine and process sandbox enforce the immutable
 approved declaration. Hooks declare `fail-open` or `fail-closed` and use the generated default
-handler timeout. Events are notifications. Pushes are requests and require an explicit declaration.
+handler timeout. Event delivery and pushes use correlated requests. Pushes require an explicit declaration.
 
 The generated `RPC_METHODS` object is the canonical method catalog. The
 generated wire fixture contains exact examples.
@@ -177,3 +177,34 @@ requests before invoking a handler. Unknown content variants, foreign object
 fields, and missing required fields are rejected. Provider request and event
 JSON schemas are included in the package. `cargo xtask codegen` generates the
 plugin and client projections from their Rust owners.
+
+## Durable event delivery
+
+`event_subscriptions` names members of the generated `ExtensionEventKind` catalog.
+Private namespace transactions and host accounting/control records are excluded.
+The host sends one `event/publish` request at a time per plugin with an exact
+session/sequence cursor, observed state revision, event kind and redacted content.
+Handlers return `{ mutations: [...] }`; the host commits the state mutations and
+that exact acknowledgement atomically. A callback cannot acknowledge another
+cursor or namespace. Concurrent state changes produce a revision conflict and
+pause delivery at the unacknowledged event.
+
+The reader catches up from durable acknowledgement using bounded journal pages.
+Append only coalesces a wakeup; it never queues event payloads on the actor.
+Restart resumes from the saved cursor. External effects therefore have
+at-least-once semantics and handlers must make such effects idempotent.
+Rewind restores namespace state while retaining physical delivery high-water;
+fork inherits state and starts child delivery after its inherited journal prefix.
+
+Inline redacted JSON is limited to 256KiB. Larger events use an immutable source
+of at most 32MiB. A plugin declaring `event/read` can call
+`context.readSource(offset, maxBytes)` for chunks of at most 64KiB. Only the
+active delivery cursor authorizes reads; the host revokes new reads when the
+callback settles. Existing source readers retain their charged allocation.
+Content is redacted JSON; the outer cursor, event kind and revision provide
+correlation independently of any redacted strings inside the content.
+
+Event callbacks use the fixed five-second request deadline. Cancellation stops
+new admission; shutdown waits for accepted reads, callbacks and actor transactions
+and requires endpoint effect settlement. A failed proof keeps the endpoint and
+its resource admission retained.

@@ -60,11 +60,6 @@ use super::nested_instructions::NestedInstructionsModel;
 use super::nested_instructions::completed_file_tool_paths;
 use super::nested_instructions::register_nested_instruction_guard;
 use super::nested_instructions::resolve_instruction_tool_path;
-use super::plugin_event_fanout::PLUGIN_EVENT_QUEUE_CAPACITY;
-use super::plugin_event_fanout::PLUGIN_EVENT_SUSTAINED_OVERFLOW;
-use super::plugin_event_fanout::PluginEventPublisher;
-use super::plugin_event_fanout::PluginFanoutWorker;
-use super::plugin_event_fanout::plugin_event_payload;
 use super::prompt_model::HistoricalPromptTool;
 use super::prompt_model::PromptRecordingModel;
 use super::prompt_model::historical_tool_registry;
@@ -1049,34 +1044,5 @@ fn checkpoint_two_edits(store: &CheckpointStore, session: &str, workspace: &Path
             )
             .expect("checkpoint");
         std::fs::write(workspace.join("file.txt"), format!("{prefix}-{suffix}")).expect("edit");
-    }
-}
-
-struct BlockedPluginEventPublisher;
-
-struct FailingPluginEventPublisher;
-
-#[async_trait]
-impl PluginEventPublisher for BlockedPluginEventPublisher {
-    async fn publish(
-        &self,
-        _event: &str,
-        _payload: serde_json::Value,
-    ) -> std::result::Result<(), rw_ext::PluginRpcError> {
-        std::future::pending().await
-    }
-}
-
-#[async_trait]
-impl PluginEventPublisher for FailingPluginEventPublisher {
-    async fn publish(
-        &self,
-        _event: &str,
-        _payload: serde_json::Value,
-    ) -> std::result::Result<(), rw_ext::PluginRpcError> {
-        Err(rw_ext::PluginRpcError {
-            code: "fixture_failure".to_owned(),
-            message: "fixture delivery failed".to_owned(),
-        })
     }
 }

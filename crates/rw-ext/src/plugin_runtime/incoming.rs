@@ -569,6 +569,20 @@ pub(super) fn validate_push_params(method: &str, params: &Value) -> Result<(), P
     let object = params
         .as_object()
         .ok_or_else(|| rpc_error("invalid_push", "plugin push parameters must be an object"))?;
+    if method == METHOD_EVENT_READ {
+        let read: rw_plugin_protocol::ExtensionEventRead =
+            serde_json::from_value(params.clone())
+                .map_err(|_| rpc_error("invalid_event_read", "invalid event read parameters"))?;
+        if read.max_bytes == 0
+            || read.max_bytes > rw_types::extension_events::MAX_EXTENSION_EVENT_CHUNK_BYTES
+        {
+            return Err(rpc_error(
+                "invalid_event_read",
+                "event read size exceeds limit",
+            ));
+        }
+        return Ok(());
+    }
     if method == METHOD_EXTENSION_STATE_COMMIT {
         let transaction: rw_types::extension_contract::ExtensionStateTransaction =
             serde_json::from_value(params.clone())

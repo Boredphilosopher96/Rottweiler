@@ -3,6 +3,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 pub use rw_operation_contract::{OperationLifetime, ProgressAmount, ToolProgress};
+pub use rw_types::extension_events::{
+    ExtensionEventChunk, ExtensionEventKind, ExtensionEventNotice, ExtensionEventOutcome,
+    ExtensionEventRead,
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -76,6 +80,7 @@ pub const METHOD_PROVIDER_HTTP: &str = "provider/http";
 pub const METHOD_PROVIDER_HTTP_EVENT: &str = "provider/http_event";
 pub const METHOD_PROVIDER_HTTP_CANCEL: &str = "provider/http_cancel";
 pub const METHOD_EVENT_PUBLISH: &str = "event/publish";
+pub const METHOD_EVENT_READ: &str = "event/read";
 pub const METHOD_SESSION_QUERY: &str = "session/query";
 pub const METHOD_EXTENSION_STATE_READ: &str = "extension/state_read";
 pub const METHOD_EXTENSION_STATE_COMMIT: &str = "extension/state_commit";
@@ -314,7 +319,7 @@ pub struct PluginCapabilities {
     #[serde(default)]
     pub providers: Vec<PluginProviderCapability>,
     #[serde(default)]
-    pub event_subscriptions: Vec<String>,
+    pub event_subscriptions: Vec<ExtensionEventKind>,
     #[serde(default)]
     pub push: Vec<PluginPush>,
 }
@@ -384,6 +389,8 @@ pub struct PluginProviderCapability {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum PluginPush {
+    #[serde(rename = "event/read")]
+    EventRead,
     #[serde(rename = "session/query")]
     SessionQuery,
     #[serde(rename = "extension/state_read")]
@@ -402,6 +409,7 @@ impl PluginPush {
     #[must_use]
     pub const fn method(self) -> &'static str {
         match self {
+            Self::EventRead => METHOD_EVENT_READ,
             Self::SessionQuery => METHOD_SESSION_QUERY,
             Self::ExtensionStateRead => METHOD_EXTENSION_STATE_READ,
             Self::ExtensionStateCommit => METHOD_EXTENSION_STATE_COMMIT,
@@ -614,10 +622,9 @@ impl PluginCapabilities {
                 });
             }
         }
-        validate_unique_named(
+        validate_unique(
             "event subscription",
-            self.event_subscriptions.iter().map(String::as_str),
-            NameKind::Event,
+            self.event_subscriptions.iter().map(|kind| kind.as_str()),
         )?;
         validate_unique("push method", self.push.iter().map(|push| push.method()))?;
         Ok(())
@@ -629,7 +636,6 @@ enum NameKind {
     Plugin,
     Tool,
     Command,
-    Event,
 }
 
 fn validate_name(name: &str, kind: NameKind, field: &'static str) -> Result<(), ManifestError> {
@@ -640,14 +646,6 @@ fn validate_name(name: &str, kind: NameKind, field: &'static str) -> Result<(), 
         NameKind::Tool => name
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'),
-        NameKind::Event => {
-            name.bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-                && name
-                    .bytes()
-                    .next()
-                    .is_some_and(|byte| byte.is_ascii_uppercase())
-        }
     };
     if name.is_empty() || name.len() > MAX_NAME_BYTES || !valid_bytes {
         return Err(ManifestError::InvalidField {
@@ -895,13 +893,6 @@ pub struct ProviderCreditParams {
 pub struct ProviderEventParams {
     pub request_id: RpcId,
     pub event: Value,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct EventPublishParams {
-    pub event: String,
-    pub payload: Value,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -7,7 +7,12 @@ mod mcp_service;
 pub(crate) use mcp_service::*;
 
 mod activation;
-pub(crate) use activation::PluginActivationBudget;
+mod budget;
+pub(crate) use budget::PluginRuntimeBudget;
+pub(crate) mod delivery_budget;
+pub(crate) use delivery_budget::PluginDeliveryBudget;
+mod event_source;
+pub(crate) use event_source::{PluginEventSource, PluginEventSources};
 
 mod development;
 pub(crate) use development::*;
@@ -46,8 +51,9 @@ use rw_mcp::{
     McpManager, McpServerConfig, McpTransportConfig, OverflowSpool, ServerState,
 };
 use rw_plugin_protocol::{
-    METHOD_EXTENSION_STATE_COMMIT, METHOD_EXTENSION_STATE_READ, METHOD_SESSION_INJECT_MESSAGE,
-    METHOD_SESSION_QUERY, METHOD_SESSION_SET_STATUS, METHOD_UI_NOTIFY, PluginManifest,
+    METHOD_EVENT_READ, METHOD_EXTENSION_STATE_COMMIT, METHOD_EXTENSION_STATE_READ,
+    METHOD_SESSION_INJECT_MESSAGE, METHOD_SESSION_QUERY, METHOD_SESSION_SET_STATUS,
+    METHOD_UI_NOTIFY, PluginManifest,
 };
 use rw_store::config::ConfigLoader;
 use rw_store::credentials::{CredentialManager, CredentialReference};
@@ -300,8 +306,8 @@ fn plugin_http_error(code: &str, message: &str) -> PluginRpcError {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct PluginSessionRuntime {
+    delivery: Arc<PluginDeliveryBudget>,
     endpoints: Vec<Arc<dyn rw_ext::PluginEndpoint>>,
     push_handlers: Vec<(String, Arc<SessionPluginPushHandler>)>,
     pub(crate) tools: Vec<Arc<dyn Tool>>,
@@ -311,20 +317,43 @@ pub(crate) struct PluginSessionRuntime {
         Arc<dyn CommandHandler<SessionCommandContext, SessionCommandOutput>>,
     )>,
     pub(crate) providers: Vec<(String, Arc<dyn rw_providers::Provider>)>,
-    pub(crate) event_routers: Vec<(std::collections::BTreeSet<String>, Arc<PluginEventRouter>)>,
+    pub(crate) event_routers: Vec<PluginEventRegistration>,
     pub(crate) pending: Vec<String>,
 }
 
+#[derive(Clone)]
+pub(crate) struct PluginEventRegistration {
+    pub(crate) plugin_id: String,
+    pub(crate) subscriptions: BTreeSet<rw_plugin_protocol::ExtensionEventKind>,
+    pub(crate) router: Arc<PluginEventRouter>,
+    pub(crate) handler: Arc<SessionPluginPushHandler>,
+    pub(crate) budget: Arc<PluginDeliveryBudget>,
+}
+
 impl PluginSessionRuntime {
+    fn new(budget: &Arc<PluginRuntimeBudget>) -> Self {
+        Self {
+            delivery: Arc::clone(&budget.delivery),
+            endpoints: Vec::new(),
+            push_handlers: Vec::new(),
+            tools: Vec::new(),
+            hooks: Vec::new(),
+            commands: Vec::new(),
+            providers: Vec::new(),
+            event_routers: Vec::new(),
+            pending: Vec::new(),
+        }
+    }
+
     pub(crate) fn compose(
         configs: &[crate::extension_config::DiscoveredPlugin],
         private_root: &Path,
         workspace_roots: &[PathBuf],
         helper: &Path,
         redactor: &Arc<SharedPluginRedactor>,
-        budget: &Arc<PluginActivationBudget>,
+        budget: &Arc<PluginRuntimeBudget>,
     ) -> Result<Self> {
-        let mut runtime = Self::default();
+        let mut runtime = Self::new(budget);
         for config in configs.iter().filter(|config| config.enabled) {
             let manifest = match config.load_manifest() {
                 Ok(manifest) => manifest,
@@ -419,15 +448,18 @@ impl PluginSessionRuntime {
         }
         self.register_providers(config, manifest, &endpoint);
         if !manifest.capabilities.event_subscriptions.is_empty() {
-            self.event_routers.push((
-                manifest
+            self.event_routers.push(PluginEventRegistration {
+                plugin_id: config.name.clone(),
+                subscriptions: manifest
                     .capabilities
                     .event_subscriptions
                     .iter()
-                    .cloned()
+                    .copied()
                     .collect(),
-                Arc::new(PluginEventRouter::new(endpoint.clone())),
-            ));
+                router: Arc::new(PluginEventRouter::new(endpoint.clone())),
+                handler: Arc::clone(&push_handler),
+                budget: Arc::clone(&self.delivery),
+            });
         }
         self.endpoints.push(endpoint);
         self.push_handlers.push((config.name.clone(), push_handler));
@@ -502,7 +534,9 @@ fn plugin_command_descriptor(
 }
 
 #[derive(Default)]
-struct SessionPluginPushHandler {
+pub(crate) struct SessionPluginPushHandler {
+    pub(crate) event_sources: Arc<PluginEventSources>,
+    attached: tokio::sync::Notify,
     binding: std::sync::RwLock<Option<(String, rw_core::PluginSessionCapability)>>,
 }
 
@@ -512,6 +546,20 @@ impl SessionPluginPushHandler {
             .binding
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((session_id, capability));
+        self.attached.notify_waiters();
+    }
+
+    pub(crate) async fn capability(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> std::result::Result<rw_core::PluginSessionCapability, PluginRpcError> {
+        loop {
+            let attached = self.attached.notified();
+            if let Ok(capability) = self.bound(&serde_json::json!({})) {
+                return Ok(capability);
+            }
+            tokio::select! { ()=attached=>{}, ()=cancellation.cancelled()=>return Err(plugin_push_error("cancelled","plugin attachment cancelled")), }
+        }
     }
 
     fn bound(
@@ -549,6 +597,14 @@ impl PushHandler for SessionPluginPushHandler {
     ) -> std::result::Result<serde_json::Value, PluginRpcError> {
         let capability = self.bound(&params)?;
         match method {
+            METHOD_EVENT_READ => {
+                let read = serde_json::from_value(params).map_err(|_| {
+                    plugin_push_error("invalid_event_read", "invalid event source parameters")
+                })?;
+                serde_json::to_value(self.event_sources.read(&read)?).map_err(|_| {
+                    plugin_push_error("event_read_failed", "event source encoding failed")
+                })
+            }
             METHOD_SESSION_QUERY => plugin_push_result(capability.query().await),
             METHOD_EXTENSION_STATE_READ => plugin_push_result(capability.read_state().await),
             METHOD_EXTENSION_STATE_COMMIT => {

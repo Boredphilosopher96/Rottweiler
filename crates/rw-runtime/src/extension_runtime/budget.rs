@@ -1,4 +1,4 @@
-//! Application-wide activation and resident-process accounting.
+//! Application-wide plugin preparation, activation, residency and event delivery accounting.
 use std::{sync::Arc, time::Duration};
 
 use rw_ext::PluginRpcError;
@@ -18,16 +18,18 @@ pub(super) const ACTIVATION_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Shared by every configured plugin generation in one application host.
 /// Construction starts no workers and allocates no filesystem resources.
-pub(crate) struct PluginActivationBudget {
+pub(crate) struct PluginRuntimeBudget {
+    pub(crate) delivery: Arc<super::PluginDeliveryBudget>,
     waiters: Arc<Semaphore>,
     starts: Arc<Semaphore>,
     execution: Arc<Semaphore>,
     residents: Arc<Semaphore>,
     pub(super) preparation: Arc<SourcePreparationBudget>,
 }
-impl Default for PluginActivationBudget {
+impl Default for PluginRuntimeBudget {
     fn default() -> Self {
         Self {
+            delivery: Arc::new(super::PluginDeliveryBudget::default()),
             waiters: Arc::new(Semaphore::new(MAX_WAITERS)),
             starts: Arc::new(Semaphore::new(MAX_STARTING)),
             execution: Arc::new(Semaphore::new(PARALLEL_STARTS)),
@@ -36,8 +38,9 @@ impl Default for PluginActivationBudget {
         }
     }
 }
-impl PluginActivationBudget {
+impl PluginRuntimeBudget {
     pub(crate) fn close(&self) -> Result<(), PluginRpcError> {
+        let delivery = self.delivery.close();
         self.waiters.close();
         self.starts.close();
         self.execution.close();
@@ -47,11 +50,11 @@ impl PluginActivationBudget {
             || self.execution.available_permits() != PARALLEL_STARTS
             || self.residents.available_permits() != MAX_RESIDENT_PROCESSES
         {
-            return Err(super::unsettled(
+            return Err(super::activation::unsettled(
                 "plugin activation capacity remains owned at application shutdown",
             ));
         }
-        Ok(())
+        delivery
     }
 
     pub(super) fn waiter(&self) -> Result<OwnedSemaphorePermit, PluginRpcError> {

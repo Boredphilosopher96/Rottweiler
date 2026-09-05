@@ -567,7 +567,7 @@ async fn hosted_resume_with_unavailable_concrete_model_keeps_control_plane_usabl
     );
     let options = |resume, requested_model| HostedSessionComposition {
         provider_admission: Arc::clone(&provider_admission),
-        plugin_activation: Arc::new(crate::extension_runtime::PluginActivationBudget::default()),
+        plugin_runtime_budget: Arc::new(crate::extension_runtime::PluginRuntimeBudget::default()),
         wasm_workers: rw_ext::WasmWorkerPool::new(),
         index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
         journal_service: JournalService::new(&storage).expect("journal reads"),

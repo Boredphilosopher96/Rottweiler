@@ -695,7 +695,7 @@ mod tests {
                 "event-subscriber.ts",
                 json!({
                     "name":"conformance-event-subscriber", "version":"1.0.0", "protocol":3,
-                    "capabilities":{"event_subscriptions":["TurnFinished"],"push":["session/set_status"]}
+                    "capabilities":{"event_subscriptions":["turn_finished"],"push":["session/set_status"]}
                 }),
             ),
             (

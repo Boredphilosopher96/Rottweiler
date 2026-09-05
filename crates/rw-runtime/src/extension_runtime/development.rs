@@ -46,7 +46,7 @@ pub(crate) struct RuntimeSessionExtensionController {
     private_root: PathBuf,
     helper: PathBuf,
     redactor: Arc<SharedPluginRedactor>,
-    activation: Arc<PluginActivationBudget>,
+    activation: Arc<PluginRuntimeBudget>,
     state: tokio::sync::Mutex<DevelopmentExtensionState>,
     operation: tokio::sync::Mutex<()>,
     failed: std::sync::atomic::AtomicBool,
@@ -57,7 +57,7 @@ impl RuntimeSessionExtensionController {
         private_root: PathBuf,
         helper: PathBuf,
         redactor: Arc<SharedPluginRedactor>,
-        activation: Arc<PluginActivationBudget>,
+        activation: Arc<PluginRuntimeBudget>,
     ) -> Self {
         Self {
             private_root,
@@ -181,7 +181,7 @@ impl RuntimeSessionExtensionController {
                 launcher: None,
             }),
         );
-        let mut candidate = PluginSessionRuntime::default();
+        let mut candidate = PluginSessionRuntime::new(&self.activation);
         candidate
             .register_endpoint(plugin, manifest, Arc::clone(&endpoint), push_handler)
             .map_err(development_error)?;

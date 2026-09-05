@@ -53,7 +53,7 @@ function fixtureDefinition(secret = "handler-secret"): PluginDefinition {
         commands: [{ name: "fixture", description: "fixture command" }],
         hooks: [{ name: "pre_tool", class: "policy", failure_policy: "fail-closed" }],
         providers: [{ "alias-prefix": "fixture/" }],
-        event_subscriptions: ["TurnFinished"],
+        event_subscriptions: ["turn_finished"],
         push: ["ui/notify", "session/set_status"],
       },
     },
@@ -74,8 +74,9 @@ function fixtureDefinition(secret = "handler-secret"): PluginDefinition {
           yield { type: "finished", reason: "stop" }
         },
       },
-      events: { TurnFinished: async ({ payload }, { push }) => {
-        if (typeof payload.session_id === "string") await push.setStatus(payload.session_id, "done")
+      events: { turn_finished: async ({ cursor }, { push }) => {
+        await push.setStatus(cursor.session_id, "done")
+        return { mutations: [] }
       } },
     },
   })
@@ -150,6 +151,7 @@ describe("wire protocol", () => {
       providerHttpEvent: "provider/http_event",
       providerHttpCancel: "provider/http_cancel",
       eventPublish: "event/publish",
+      eventRead: "event/read",
       sessionQuery: "session/query",
       stateRead: "extension/state_read",
       stateCommit: "extension/state_commit",
@@ -203,7 +205,7 @@ describe("wire protocol", () => {
       typeof message === "object" && message !== null && "id" in message && message.id === 5
     ))
     await request(server, 6, RPC_METHODS.eventPublish, {
-      event: "TurnFinished", payload: { session_id: "s" },
+      cursor: { session_id: "s", sequence: "4" }, event: "turn_finished", state_revision: null, content: { storage: "inline", data: { type: "turn_finished" } },
     })
     expect(messages).toHaveLength(11)
     expect(messages[0]).toMatchObject({ id: 1, result: { protocol: 3 } })
@@ -218,7 +220,7 @@ describe("wire protocol", () => {
       { jsonrpc: "2.0", method: "provider/event", params: { request_id: 5, event: { type: "text_delta", text: "fixture/model" } } },
       { jsonrpc: "2.0", method: "provider/event", params: { request_id: 5, event: { type: "finished", reason: "stop" } } },
     ])
-    expect(messages[10]).toEqual({ jsonrpc: "2.0", id: 6, result: null })
+    expect(messages[10]).toEqual({ jsonrpc: "2.0", id: 6, result: { mutations: [] } })
   })
 
   test("runs the pre_tool policy and custom-tool conformance plugin over stdio", async () => {
@@ -253,21 +255,28 @@ describe("wire protocol", () => {
   })
 
   test("runs event and incrementally streamed provider conformance plugins over stdio", async () => {
-    const eventWire = [
-      { jsonrpc: "2.0", id: 1, method: "initialize", params: initializeParams },
-      { jsonrpc: "2.0", method: "event/publish", params: { event: "TurnFinished", payload: { session_id: "s" } } },
-      { jsonrpc: "2.0", id: 2, method: "shutdown", params: {} },
-    ].map((line) => JSON.stringify(line)).join("\n") + "\n"
-    const eventChild = Bun.spawnSync(
-      ["bun", join(import.meta.dir, "../fixtures/conformance/event-subscriber.ts")],
-      { stdin: encoder.encode(eventWire), stdout: "pipe", stderr: "pipe", timeout: 5_000 },
-    )
-    expect(eventChild.exitCode).toBe(0)
-    const eventResponses = eventChild.stdout.toString().trim().split("\n").map((line) => JSON.parse(line) as JsonValue)
-    expect(eventResponses[1]).toEqual({
-      jsonrpc: "2.0", id: "plugin-push-1", method: "session/set_status",
-      params: { session_id: "s", status: "turn complete" },
-    })
+    const eventChild = Bun.spawn(["bun", join(import.meta.dir, "../fixtures/conformance/event-subscriber.ts")], { stdin: "pipe", stdout: "pipe", stderr: "pipe" })
+    const eventReader = readBoundedLines(readableStreamBytes(eventChild.stdout))[Symbol.asyncIterator]()
+    const nextEventResponse = async () => {
+      const response = await eventReader.next()
+      if (response.done) throw new Error("event plugin ended before response")
+      return JSON.parse(response.value)
+    }
+    try {
+      eventChild.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: initializeParams }) + "\n")
+      expect(await nextEventResponse()).toMatchObject({ id: 1, result: { protocol: 3 } })
+      eventChild.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "event/publish", params: {
+        cursor: { session_id: "s", sequence: "4" }, event: "turn_finished", state_revision: null, content: { storage: "inline", data: { type: "turn_finished" } },
+      } }) + "\n")
+      const push = await nextEventResponse()
+      expect(push).toEqual({ jsonrpc: "2.0", id: "plugin-push-1", method: "session/set_status", params: { session_id: "s", status: "turn complete" } })
+      eventChild.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: push.id, result: null }) + "\n")
+      expect(await nextEventResponse()).toEqual({ jsonrpc: "2.0", id: 2, result: { mutations: [] } })
+      eventChild.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 3, method: "shutdown", params: {} }) + "\n")
+      expect(await nextEventResponse()).toMatchObject({ id: 3, result: null })
+      eventChild.stdin.end()
+      expect(await eventChild.exited).toBe(0)
+    } finally { eventChild.kill(); await eventChild.exited }
 
     const providerWire = [
       { jsonrpc: "2.0", id: 1, method: "initialize", params: initializeParams },
@@ -628,10 +637,10 @@ describe("bounded transport and manifests", () => {
     expect(() => definePlugin({
       manifest: {
         name: "event", version: "1", protocol: 3,
-        capabilities: { event_subscriptions: ["turnFinished"] },
+        capabilities: { event_subscriptions: ["turnFinished" as never] },
       },
-      handlers: { events: { turnFinished: () => undefined } },
-    })).toThrow("canonical event")
+      handlers: {},
+    })).toThrow("unknown event subscription")
     expect(() => definePlugin({
       manifest: {
         name: "provider", version: "1", protocol: 3,

@@ -13,8 +13,8 @@ use rw_plugin_protocol::{
     MAX_HOOK_PAYLOAD_BYTES, MAX_IN_FLIGHT_REQUESTS, MAX_MANIFEST_BYTES, MAX_NAME_BYTES,
     MAX_OPERATION_DURATION_MS, MAX_PLUGIN_MODEL_TOKENS, MAX_PLUGIN_PRICE_MICROS_USD,
     MAX_PROVIDER_STREAMS, MAX_RPC_MESSAGE_BYTES, MAX_SCHEMA_BYTES, MAX_SCHEMA_DEPTH,
-    MAX_VERSION_BYTES, METHOD_COMMAND_EXECUTE, METHOD_EVENT_PUBLISH, METHOD_EXIT,
-    METHOD_EXTENSION_STATE_COMMIT, METHOD_EXTENSION_STATE_READ, METHOD_HOOK_INVOKE,
+    MAX_VERSION_BYTES, METHOD_COMMAND_EXECUTE, METHOD_EVENT_PUBLISH, METHOD_EVENT_READ,
+    METHOD_EXIT, METHOD_EXTENSION_STATE_COMMIT, METHOD_EXTENSION_STATE_READ, METHOD_HOOK_INVOKE,
     METHOD_INITIALIZE, METHOD_PROVIDER_COMPLETE, METHOD_PROVIDER_CREDIT, METHOD_PROVIDER_EVENT,
     METHOD_PROVIDER_HTTP, METHOD_PROVIDER_HTTP_CANCEL, METHOD_PROVIDER_HTTP_EVENT,
     METHOD_PROVIDER_MODELS, METHOD_SESSION_INJECT_MESSAGE, METHOD_SESSION_QUERY,
@@ -65,7 +65,11 @@ export interface ProviderDeclaration {
   readonly "credential-references"?: readonly string[]
 }
 
+import type { ExtensionEventKind } from "./extension-contract"
+export type { ExtensionEventKind, ExtensionEventNotice, ExtensionEventOutcome, ExtensionEventRead, ExtensionEventChunk } from "./extension-contract"
+
 export type PluginPushMethod =
+  | "event/read"
   | "session/query"
   | "extension/state_read"
   | "extension/state_commit"
@@ -78,7 +82,7 @@ export interface PluginCapabilities {
   readonly commands?: readonly CommandDeclaration[]
   readonly hooks?: readonly HookDeclaration[]
   readonly providers?: readonly ProviderDeclaration[]
-  readonly event_subscriptions?: readonly string[]
+  readonly event_subscriptions?: readonly ExtensionEventKind[]
   readonly push?: readonly PluginPushMethod[]
 }
 
@@ -203,11 +207,6 @@ export interface ProviderHttpResponse {
 
 export type ProviderStream = AsyncIterable<ProviderEvent>
 
-export interface EventPublishParams {
-  readonly event: string
-  readonly payload: JsonObject
-}
-
 export type RpcId = number | string
 
 export interface RpcRequest {
@@ -261,6 +260,7 @@ const FIXTURE_TEMPLATE: &str = r#"{
     "providerHttpEvent": "provider/http_event",
     "providerHttpCancel": "provider/http_cancel",
     "eventPublish": "event/publish",
+    "eventRead": "event/read",
     "injectMessage": "session/inject_message",
     "setStatus": "session/set_status",
     "notify": "ui/notify",
@@ -517,6 +517,7 @@ fn methods() -> Value {
         "providerHttpEvent": METHOD_PROVIDER_HTTP_EVENT,
         "providerHttpCancel": METHOD_PROVIDER_HTTP_CANCEL,
         "eventPublish": METHOD_EVENT_PUBLISH,
+        "eventRead": METHOD_EVENT_READ,
         "sessionQuery": METHOD_SESSION_QUERY,
         "stateRead": METHOD_EXTENSION_STATE_READ,
         "stateCommit": METHOD_EXTENSION_STATE_COMMIT,
@@ -582,6 +583,7 @@ export const RPC_METHODS = Object.freeze({{\n\
   providerHttpEvent: \"{METHOD_PROVIDER_HTTP_EVENT}\",\n\
   providerHttpCancel: \"{METHOD_PROVIDER_HTTP_CANCEL}\",\n\
   eventPublish: \"{METHOD_EVENT_PUBLISH}\",\n\
+  eventRead: \"{METHOD_EVENT_READ}\",\n\
   sessionQuery: \"{METHOD_SESSION_QUERY}\",\n\
   stateRead: \"{METHOD_EXTENSION_STATE_READ}\",\n\
   stateCommit: \"{METHOD_EXTENSION_STATE_COMMIT}\",\n\

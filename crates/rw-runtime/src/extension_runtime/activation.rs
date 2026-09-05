@@ -1,10 +1,9 @@
 //! One owned activation and retirement operation per immutable plugin generation.
-mod budget;
 mod recipe;
 
+use super::PluginRuntimeBudget;
+use super::budget::{ACTIVATION_DEADLINE, ActivationLease};
 use async_trait::async_trait;
-pub(crate) use budget::PluginActivationBudget;
-use budget::{ACTIVATION_DEADLINE, ActivationLease};
 use futures_util::FutureExt as _;
 use recipe::ActivationResources;
 pub(super) use recipe::{ActivationApproval, ActivationRecipe};
@@ -341,7 +340,7 @@ fn error(code: &str, message: &str) -> PluginRpcError {
 fn cancelled() -> PluginRpcError {
     error("cancelled", "plugin generation is closed")
 }
-fn unsettled(message: &str) -> PluginRpcError {
+pub(super) fn unsettled(message: &str) -> PluginRpcError {
     error("effects_unsettled", message)
 }
 

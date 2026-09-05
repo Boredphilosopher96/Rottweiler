@@ -1,3 +1,7 @@
+import { eventSourceReader, type EventHandlerContext } from "./host-events"
+import validateEventNotice from "./generated/extension-event-notice-validator.js"
+import validateEventOutcome from "./generated/extension-event-outcome-validator.js"
+import validateEventKind from "./generated/extension-event-kind-validator.js"
 import { hostStateContext, type HostSessionApi, type HostStateApi } from "./host-state"
 import { invokeHook, type HookHandlers } from "./hooks"
 import validateProviderRequest from "./generated/provider-request-validator.js"
@@ -12,7 +16,9 @@ import {
   PROTOCOL_LIMITS,
   RPC_METHODS,
   type CommandExecuteParams,
-  type EventPublishParams,
+  type ExtensionEventNotice,
+  type ExtensionEventOutcome,
+  type ExtensionEventKind,
   type HookInput,
   type InjectMessageResult,
   type JsonObject,
@@ -80,7 +86,7 @@ export type CommandHandler = (
   params: CommandExecuteParams,
   context: HandlerContext,
 ) => JsonValue | Promise<JsonValue>
-export type EventHandler = (params: EventPublishParams, context: HandlerContext) => void | Promise<void>
+export type EventHandler = (params: ExtensionEventNotice, context: EventHandlerContext) => ExtensionEventOutcome | Promise<ExtensionEventOutcome>
 export type ProviderHandler = (
   params: ProviderCompleteParams,
   context: HandlerContext,
@@ -94,7 +100,7 @@ export interface PluginHandlers {
   readonly tools?: Readonly<Record<string, ToolHandler>>
   readonly commands?: Readonly<Record<string, CommandHandler>>
   readonly hooks?: HookHandlers
-  readonly events?: Readonly<Record<string, EventHandler>>
+  readonly events?: Readonly<Partial<Record<ExtensionEventKind, EventHandler>>>
   readonly providers?: Readonly<Record<string, ProviderHandler>>
   readonly providerModels?: Readonly<Record<string, ProviderModelsHandler>>
   readonly shutdown?: (signal: AbortSignal) => void | Promise<void>
@@ -213,14 +219,12 @@ function requireRpcKeys(value: object, label: string, allowed: readonly string[]
   }
 }
 
-type CanonicalNameKind = "plugin" | "tool" | "command" | "event"
+type CanonicalNameKind = "plugin" | "tool" | "command"
 
 function requireCanonicalName(value: string, kind: CanonicalNameKind, label: string): void {
   const expression = kind === "tool"
     ? /^[a-z0-9_]+$/
-    : kind === "event"
-      ? /^[A-Z][A-Za-z0-9_]*$/
-      : /^[a-z0-9_.-]+$/
+    : /^[a-z0-9_.-]+$/
   if (byteLength(value) > PROTOCOL_LIMITS.maxNameBytes || !expression.test(value)) {
     throw new Error(`${label} must be a bounded canonical ${kind} name`)
   }
@@ -288,7 +292,7 @@ function validateManifest(manifest: PluginManifest): void {
   requireUnique(push, "push")
   const validPush = new Set<PluginPushMethod>([
     RPC_METHODS.injectMessage, RPC_METHODS.setStatus, RPC_METHODS.notify,
-    RPC_METHODS.sessionQuery, RPC_METHODS.stateRead, RPC_METHODS.stateCommit,
+    RPC_METHODS.sessionQuery, RPC_METHODS.stateRead, RPC_METHODS.stateCommit, RPC_METHODS.eventRead,
   ])
   if (push.some((method) => !validPush.has(method))) throw new Error("unknown push capability")
 
@@ -345,7 +349,7 @@ function validateManifest(manifest: PluginManifest): void {
       throw new Error(`tool ${tool.name} has invalid or duplicate capabilities`)
     }
   }
-  for (const event of manifest.capabilities.event_subscriptions ?? []) requireCanonicalName(event, "event", "event subscription")
+  for (const event of manifest.capabilities.event_subscriptions ?? []) { if (!validateEventKind(event)) throw new Error("unknown event subscription") }
   for (const hook of manifest.capabilities.hooks ?? []) {
     const hookName = hook.name
     const validHooks = new Set([
@@ -615,6 +619,10 @@ export class PluginServer {
       return
     }
     const isNotification = !own(candidate, "id")
+    if (candidate.method === RPC_METHODS.eventPublish && isNotification) {
+      this.#debug("event delivery requires a correlated request")
+      return
+    }
     if (candidate.method === RPC_METHODS.providerHttpEvent && isNotification) {
       try {
         this.#handleProviderHttpEvent(candidate.params)
@@ -802,8 +810,11 @@ export class PluginServer {
       const params = this.#eventParams(rawParams)
       const handler = this.definition.handlers.events?.[params.event]
       if (handler === undefined) throw new SafeRpcError(-32601, "event is not subscribed")
-      await this.#runHandler((context) => handler(params, context))
-      return null
+      return this.#runHandler(async context => {
+        const result = await handler(params, { ...context, readSource: eventSourceReader(params, (method, request) => this.#push(method, request, context.signal)) })
+        if (!validateEventOutcome(result)) throw new SafeRpcError(-32603, "invalid event outcome")
+        return result as JsonValue
+      })
     }
     if (method === RPC_METHODS.providerModels) {
       const params = this.#providerModelsParams(rawParams)
@@ -984,13 +995,10 @@ export class PluginServer {
     return raw
   }
 
-  #eventParams(raw: unknown): EventPublishParams {
-    const value = object(raw)
-    requireRpcKeys(value, "event/publish params", ["event", "payload"])
-    return {
-      event: string(value.event, "event"),
-      payload: object(value.payload, "event payload"),
-    }
+  #eventParams(raw: unknown): ExtensionEventNotice {
+    if (!validateEventNotice(raw)) throw new SafeRpcError(-32602, "invalid extension event notice")
+    if (raw.content.storage === "inline" && byteLength(JSON.stringify(raw.content.data)) > 256 * 1024) throw new SafeRpcError(-32602, "extension inline event exceeds byte limit")
+    return raw
   }
 
   #providerParams(raw: unknown): ProviderCompleteParams {

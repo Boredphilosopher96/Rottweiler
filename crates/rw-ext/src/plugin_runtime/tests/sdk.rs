@@ -46,7 +46,20 @@ async fn typescript_tool_hook_event_push_and_provider_cross_rust_host() {
     let pushes = Arc::new(RecordingPush::default());
     let event_host = approved_fixture_host(&event_config, &sdk, pushes.clone()).await;
     PluginEventRouter::new(ready_endpoint(&event_host))
-        .publish("TurnFinished", json!({"session_id":"s"}))
+        .deliver(
+            rw_plugin_protocol::ExtensionEventNotice {
+                cursor: rw_types::extension_contract::ExtensionDeliveryCursor {
+                    session_id: rw_types::SessionId("s".into()),
+                    sequence: rw_types::SequenceId(4),
+                },
+                event: rw_plugin_protocol::ExtensionEventKind::TurnFinished,
+                state_revision: None,
+                content: rw_types::extension_events::ExtensionEventContent::Inline {
+                    data: json!({"type":"turn_finished"}),
+                },
+            },
+            &CancellationToken::new(),
+        )
         .await
         .expect("publish event");
     tokio::time::timeout(Duration::from_secs(2), async {
