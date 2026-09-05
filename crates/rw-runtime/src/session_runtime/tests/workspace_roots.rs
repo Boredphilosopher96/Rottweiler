@@ -710,7 +710,13 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
 }
 
 fn verify_captured_catalog(controller: &RuntimeWorkspaceRootController, roots: &[PathBuf]) {
-    let command = roots[1].join(".agents/commands/captured-catalog.md");
+    // User declarations have stable execution authority while this test changes
+    // their contents; editing a project declaration would invalidate its trust
+    // fingerprint and test trust revocation instead of catalog capture.
+    let command = controller
+        .extension_user_rottweiler
+        .join("commands/captured-catalog.md");
+    std::fs::create_dir_all(command.parent().expect("command directory")).expect("user commands");
     std::fs::write(
         &command,
         "---\ndescription: Captured declaration\n---\nUse the captured recipe",
