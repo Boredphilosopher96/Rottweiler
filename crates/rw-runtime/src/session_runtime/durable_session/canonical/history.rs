@@ -39,12 +39,12 @@ impl SessionHistory for DurableEventSink {
         let reads = Arc::clone(&self.reads);
         self.reads
             .run(Some(admission), move |admission| {
-                let lease = admission
+                let mut lease = admission
                     .take()
                     .ok_or_else(|| persistence("history capture already started"))?
                     .capture(&session)
                     .map_err(persistence)?;
-                let history = owner.snapshot(&lease, &publication)?;
+                let history = owner.snapshot(&mut lease, &publication)?;
                 let cut = history.head().conversation;
                 let through = history.head().next_sequence.checked_sub(1).map(SequenceId);
                 Ok(Arc::new(CapturedHistory {
