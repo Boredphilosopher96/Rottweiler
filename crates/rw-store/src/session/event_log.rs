@@ -88,6 +88,17 @@ impl SessionEventLog {
         self.journal.append_batch(events)
     }
 
+    /// Appends canonical bytes at their expected sequence with one durable sync.
+    ///
+    /// # Errors
+    /// Rejects changed prefixes, unsafe descriptors, and failed durable I/O.
+    pub fn append_prepared(
+        &mut self,
+        prepared: journal::PreparedJournalAppend,
+    ) -> Result<(), SessionStoreError> {
+        self.journal.append_prepared(prepared)
+    }
+
     /// Loads a small bounded journal; streaming consumers use `read_view`.
     ///
     /// # Errors

@@ -1,5 +1,7 @@
 //! Bounded immutable journal segments and descriptor-pinned read views (ADR-029).
 
+mod append;
+pub use append::{JournalAppendPlan, PreparedJournalAppend};
 mod catalog;
 mod proof;
 use catalog::SegmentCatalog;
@@ -387,28 +389,6 @@ impl Directory {
     }
 }
 
-#[derive(Default)]
-struct BoundedBatch {
-    bytes: Vec<u8>,
-    exceeded: bool,
-}
-
-impl std::io::Write for BoundedBatch {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        if bytes.len() > MAX_SEGMENT_BYTES - self.bytes.len() {
-            self.exceeded = true;
-            return Err(std::io::Error::other(
-                "journal batch exceeds its byte limit",
-            ));
-        }
-        self.bytes.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 /// Exclusive append owner. Sealed segment identities form its sparse index.
 #[derive(Debug)]
 pub struct SegmentedJournal {
@@ -574,6 +554,39 @@ impl SegmentedJournal {
             first_sequence = self.next_sequence,
             events = tracing::field::Empty, bytes = tracing::field::Empty);
         let _entered = span.enter();
+        let (prepared, envelopes) = {
+            let _serialize =
+                tracing::trace_span!(target: "rw_performance", "journal.serialize").entered();
+            append::encode_owned(self.next_sequence, events)?
+        };
+        span.record("events", prepared.count);
+        span.record("bytes", prepared.bytes.len());
+        self.write_prepared(prepared)?;
+        Ok(envelopes)
+    }
+
+    /// Writes an encoded batch only at its captured expected sequence.
+    ///
+    /// # Errors
+    /// Rejects a changed writer prefix, unsafe descriptors, or failed writes/syncs.
+    pub fn append_prepared(
+        &mut self,
+        prepared: PreparedJournalAppend,
+    ) -> Result<(), SessionStoreError> {
+        let _span = tracing::trace_span!(target: "rw_performance", "journal.append",
+            session_id = ?self.directory.path.parent().and_then(Path::file_name),
+            first_sequence = prepared.first, events = prepared.count, bytes = prepared.bytes.len())
+        .entered();
+        self.write_prepared(prepared)
+    }
+
+    fn write_prepared(&mut self, prepared: PreparedJournalAppend) -> Result<(), SessionStoreError> {
+        if prepared.first != self.next_sequence {
+            return Err(SessionStoreError::UnexpectedEventSequence {
+                expected: SequenceId(self.next_sequence),
+                actual: SequenceId(prepared.first),
+            });
+        }
         if self.poisoned {
             return Err(SessionStoreError::EventWriterPoisoned);
         }
@@ -581,46 +594,14 @@ impl SegmentedJournal {
             self.poisoned = true;
             return Err(error);
         }
-        let (bytes, envelopes) = {
-            let _serialize =
-                tracing::trace_span!(target: "rw_performance", "journal.serialize").entered();
-            let mut bounded = BoundedBatch::default();
-            let mut envelopes = Vec::new();
-            for event in events {
-                let sequence = self
-                    .next_sequence
-                    .checked_add(envelopes.len() as u64)
-                    .ok_or(SessionStoreError::SequenceOverflow)?;
-                let envelope = EventEnvelope {
-                    schema_version: EVENT_SCHEMA_VERSION,
-                    sequence: SequenceId(sequence),
-                    event,
-                };
-                let serialized = serde_json::to_writer(&mut bounded, &envelope);
-                if bounded.exceeded {
-                    return Err(SessionStoreError::EventRecordTooLarge {
-                        max_line_bytes: MAX_SEGMENT_BYTES,
-                    });
-                }
-                serialized?;
-                if bounded.bytes.len() == MAX_SEGMENT_BYTES {
-                    return Err(SessionStoreError::EventRecordTooLarge {
-                        max_line_bytes: MAX_SEGMENT_BYTES,
-                    });
-                }
-                bounded.bytes.push(b'\n');
-                envelopes.push(envelope);
-            }
-            (bounded.bytes, envelopes)
-        };
-        span.record("events", envelopes.len());
-        span.record("bytes", bytes.len());
-        let next_sequence = self
-            .next_sequence
-            .checked_add(envelopes.len() as u64)
-            .ok_or(SessionStoreError::SequenceOverflow)?;
-        if envelopes.is_empty() {
-            return Ok(envelopes);
+        let PreparedJournalAppend {
+            bytes,
+            next: next_sequence,
+            count,
+            ..
+        } = prepared;
+        if count == 0 {
+            return Ok(());
         }
         if self.active_bytes > 0
             && self.active_bytes + bytes.len() as u64 > SEGMENT_TARGET_BYTES as u64
@@ -664,7 +645,7 @@ impl SegmentedJournal {
         self.poisoned = true;
         self.active_state = super::event_file_snapshot(&self.active)?;
         self.poisoned = false;
-        Ok(envelopes)
+        Ok(())
     }
 
     fn seal(&mut self) -> Result<(), SessionStoreError> {

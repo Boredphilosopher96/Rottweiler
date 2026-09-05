@@ -73,6 +73,11 @@ where
 }
 #[test]
 fn slow_sync_is_attributed_to_durability_without_recording_payloads() {
+    const PROBE: &str = "RW_JOURNAL_TELEMETRY_PROBE";
+    if std::env::var_os(PROBE).is_none() {
+        run_isolated_probe(PROBE);
+        return;
+    }
     let root = tempfile::tempdir().expect("root");
     let mut journal = SegmentedJournal::open(root.path(), "trace-session").expect("journal");
     let records = Arc::new(Mutex::new(Vec::new()));
@@ -122,5 +127,44 @@ fn slow_sync_is_attributed_to_durability_without_recording_payloads() {
             assert!(!value.contains("DO-NOT-RECORD-PAYLOAD"));
             assert!(!value.contains(&root.path().to_string_lossy().to_string()));
         }
+    }
+}
+
+fn run_isolated_probe(marker: &str) {
+    use std::process::{Command, Stdio};
+    let output = tempfile::tempfile().expect("probe output");
+    let mut child = Command::new(std::env::current_exe().expect("test executable"))
+        .arg("session::journal::telemetry_tests::slow_sync_is_attributed_to_durability_without_recording_payloads")
+        .arg("--exact")
+        .arg("--nocapture")
+        .env(marker, "1")
+        .stdout(Stdio::from(output.try_clone().expect("stdout")))
+        .stderr(Stdio::from(output.try_clone().expect("stderr")))
+        .spawn()
+        .expect("isolated tracing probe");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("tracing probe did not settle before its deadline: {result:?}");
+            }
+        }
+    };
+    if !status.success() {
+        use std::io::{Read, Seek};
+        let mut output = output;
+        output.rewind().expect("rewind probe output");
+        let mut diagnostic = String::new();
+        output
+            .take(64 * 1024)
+            .read_to_string(&mut diagnostic)
+            .expect("read probe output");
+        panic!("isolated tracing probe failed: {status}\n{diagnostic}");
     }
 }
