@@ -76,6 +76,18 @@ impl TranscriptProjector {
         &self.index
     }
 
+    /// Read the bounded live-preview checkpoint at the published semantic prefix.
+    ///
+    /// # Errors
+    /// Rejects incomplete rewinds or corrupt checkpoint metadata.
+    pub fn tail_state(&self) -> Result<super::TailState, TranscriptProjectionError> {
+        let checkpoint = self.checkpoint()?;
+        if checkpoint.rewind.is_some() {
+            return Err(TranscriptIndexError::Rebuilding.into());
+        }
+        Ok(checkpoint.state.tail)
+    }
+
     /// Interpret one bounded raw page or one bounded hidden rewind transaction.
     /// The caller may cancel between calls; persisted checkpoints resume exactly.
     ///
@@ -104,8 +116,9 @@ impl TranscriptProjector {
             index: &self.index,
             rows: BTreeMap::new(),
             bindings: BTreeMap::new(),
+            cells: BTreeMap::new(),
+            mutations: Vec::with_capacity(EVENTS_PER_BATCH * 2),
         };
-        let mut mutations = Vec::with_capacity(EVENTS_PER_BATCH * 2);
         let mut interpreted = 0;
         let mut charged_bytes = 0;
         for envelope in &page.events {
@@ -127,7 +140,7 @@ impl TranscriptProjector {
                         .iter()
                         .map(TranscriptIndexMutation::charged_bytes)
                         .sum::<usize>();
-                    if mutations.len() + changes.len() > MAX_BATCH_ROWS
+                    if overlay.mutations.len() + changes.len() > MAX_BATCH_ROWS
                         || charged_bytes + change_bytes > MAX_BATCH_BYTES
                     {
                         if interpreted == 0 {
@@ -138,10 +151,9 @@ impl TranscriptProjector {
                         break;
                     }
                     charged_bytes += change_bytes;
-                    for change in &changes {
+                    for change in changes {
                         overlay.apply(change);
                     }
-                    mutations.extend(changes);
                     checkpoint.state = state;
                     interpreted += 1;
                 }
@@ -158,6 +170,7 @@ impl TranscriptProjector {
                 }
             }
         }
+        let mutations = overlay.mutations;
         if interpreted > 0 {
             let applied_cursor = checkpoint
                 .state
@@ -222,6 +235,10 @@ impl TranscriptProjector {
         } else {
             serde_json::from_slice(&head.state)?
         };
+        checkpoint
+            .state
+            .tail
+            .validate(checkpoint.state.next_sequence)?;
         if checkpoint.state.next_sequence != head.prefix.next_sequence
             || checkpoint.rewind.is_some() != head.rebuilding
             || (!head.rebuilding && checkpoint.state.next_ordinal != head.total_rows)
@@ -331,6 +348,7 @@ impl TranscriptProjector {
                 .ok_or(TranscriptProjectionError::Invalid("sequence overflow"))?;
             checkpoint.state.next_ordinal = before.total_rows;
             checkpoint.state.active_turn = Some(pending.target);
+            checkpoint.state.tail.reset(pending.sequence.0);
             view.prefix_through(Some(pending.sequence))
                 .map_err(TranscriptIndexError::from)?
         } else {
@@ -352,32 +370,53 @@ impl TranscriptProjector {
 }
 
 struct BatchRows<'a> {
+    cells: BTreeMap<u16, usize>,
+    mutations: Vec<TranscriptIndexMutation>,
     index: &'a TranscriptIndex,
-    rows: BTreeMap<String, TranscriptIndexRow>,
+    rows: BTreeMap<String, usize>,
     bindings: BTreeMap<String, String>,
 }
 impl BatchRows<'_> {
-    fn apply(&mut self, change: &TranscriptIndexMutation) {
-        match change {
+    fn apply(&mut self, change: TranscriptIndexMutation) {
+        let position = self.mutations.len();
+        match &change {
             TranscriptIndexMutation::Put(row) => {
-                self.rows.insert(row.key.clone(), row.clone());
+                self.rows.insert(row.key.clone(), position);
             }
             TranscriptIndexMutation::Bind { binding, key } => {
                 self.bindings.insert(binding.clone(), key.clone());
             }
-            TranscriptIndexMutation::Delete(_)
-            | TranscriptIndexMutation::Move { .. }
-            | TranscriptIndexMutation::PutAuxiliary { .. } => {}
+            TranscriptIndexMutation::PutAuxiliary { key, .. } => {
+                self.cells.insert(*key, position);
+            }
+            TranscriptIndexMutation::Delete(_) | TranscriptIndexMutation::Move { .. } => {}
+        }
+        self.mutations.push(change);
+    }
+    fn row(&self, key: &str) -> Option<TranscriptIndexRow> {
+        let position = self.rows.get(key)?;
+        match &self.mutations[*position] {
+            TranscriptIndexMutation::Put(row) => Some(row.clone()),
+            _ => None,
         }
     }
 }
 impl TranscriptRowLookup for BatchRows<'_> {
+    fn auxiliary_cell(&self, key: u16) -> Result<Option<Vec<u8>>, TranscriptIndexError> {
+        let Some(position) = self.cells.get(&key) else {
+            return self.index.auxiliary_cell(key);
+        };
+        match &self.mutations[*position] {
+            TranscriptIndexMutation::PutAuxiliary { payload, .. } => Ok(Some(payload.clone())),
+            _ => Err(TranscriptIndexError::Invalid("auxiliary overlay identity")),
+        }
+    }
     fn bound_row(&self, binding: &str) -> Result<Option<TranscriptIndexRow>, TranscriptIndexError> {
         if let Some(key) = self.bindings.get(binding) {
-            return Ok(self.rows.get(key).cloned());
+            return Ok(self.row(key));
         }
         let prior = self.index.bound_row(binding)?;
-        Ok(prior.map(|row| self.rows.get(&row.key).cloned().unwrap_or(row)))
+        Ok(prior.map(|row| self.row(&row.key).unwrap_or(row)))
     }
 }
 

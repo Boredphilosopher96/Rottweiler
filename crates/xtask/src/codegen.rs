@@ -173,6 +173,14 @@ fn generate_typescript() -> Result<String, XtaskError> {
     output.push_str(&rw_types::transcript::TRANSCRIPT_PROJECTION_VERSION.to_string());
     output.push_str(" as const;\n\n");
     for (name, value) in [
+        (
+            "TRANSCRIPT_TAIL_TEXT_BYTES",
+            rw_types::transcript_tail::TRANSCRIPT_TAIL_TEXT_BYTES,
+        ),
+        (
+            "TRANSCRIPT_TAIL_TOOL_BYTES",
+            rw_types::transcript_tail::TRANSCRIPT_TAIL_TOOL_BYTES,
+        ),
         ("MAX_ATTACHMENTS_PER_MESSAGE", MAX_ATTACHMENTS_PER_MESSAGE),
         ("MAX_TEXT_ATTACHMENT_BYTES", MAX_TEXT_ATTACHMENT_BYTES),
         ("MAX_IMAGE_ATTACHMENT_BYTES", MAX_IMAGE_ATTACHMENT_BYTES),

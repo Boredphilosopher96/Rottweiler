@@ -16,7 +16,9 @@ use std::io::{self, Write};
 use thiserror::Error;
 
 mod projector;
+mod tail;
 pub use projector::{TranscriptProjectionProgress, TranscriptProjector};
+pub use tail::TailState;
 mod content;
 pub use content::{TranscriptDocument, TranscriptDocumentChunk};
 
@@ -27,6 +29,7 @@ pub struct TranscriptProjectionState {
     pub next_sequence: u64,
     pub next_ordinal: u64,
     pub active_turn: Option<u64>,
+    pub tail: TailState,
 }
 
 /// An event either yields a bounded atomic update or requires a hidden rewind job.
@@ -60,8 +63,16 @@ pub trait TranscriptRowLookup {
     /// # Errors
     /// Fails when the projection is incomplete or storage cannot be read.
     fn bound_row(&self, binding: &str) -> Result<Option<TranscriptIndexRow>, TranscriptIndexError>;
+    /// Read a bounded opaque cell from the current transaction overlay.
+    ///
+    /// # Errors
+    /// Rejects an invalid slot or storage failure.
+    fn auxiliary_cell(&self, key: u16) -> Result<Option<Vec<u8>>, TranscriptIndexError>;
 }
 impl TranscriptRowLookup for TranscriptIndex {
+    fn auxiliary_cell(&self, key: u16) -> Result<Option<Vec<u8>>, TranscriptIndexError> {
+        Self::auxiliary_cell(self, key)
+    }
     fn bound_row(&self, binding: &str) -> Result<Option<TranscriptIndexRow>, TranscriptIndexError> {
         Self::bound_row(self, binding)
     }
@@ -165,7 +176,7 @@ pub fn project_transcript_event(
         state.active_turn = Some(turn_number(turn_id)?);
     }
     let projected = project_content(event, &state, rows)?;
-    let mut mutations = Vec::with_capacity(2);
+    let mut mutations = tail::project(event, &mut state.tail, rows)?;
     if let Some(ProjectedRow {
         prior,
         content,

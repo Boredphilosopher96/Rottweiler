@@ -34,6 +34,7 @@ pub mod session_state;
 pub mod todo;
 pub mod tool_admission;
 pub mod transcript;
+pub mod transcript_tail;
 pub mod release_contract {
     include!("generated/release_contract.rs");
 }

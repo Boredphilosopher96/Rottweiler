@@ -142,7 +142,7 @@ impl TranscriptIndexMutation {
     #[must_use]
     pub fn charged_bytes(&self) -> usize {
         match self {
-            Self::PutAuxiliary { payload, .. } => payload.capacity() + 16,
+            Self::PutAuxiliary { payload, .. } => payload.capacity() + std::mem::size_of::<Self>(),
             Self::Put(row) => row.payload.len() + row.key.len() + 48,
             Self::Delete(key) => key.len() + 48,
             Self::Bind { binding, key } => binding.len() + key.len() + 48,

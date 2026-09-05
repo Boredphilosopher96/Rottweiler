@@ -5,7 +5,7 @@ use rw_store::session::journal::SegmentedJournal;
 use rw_types::{EventMeta, PROTOCOL_VERSION, SessionId, ToolCallId, Turn, TurnMeta};
 use tempfile::tempdir;
 
-fn meta(sequence: u64) -> EventMeta {
+pub(super) fn meta(sequence: u64) -> EventMeta {
     EventMeta {
         protocol_version: PROTOCOL_VERSION,
         session_id: SessionId("semantic".into()),
@@ -14,7 +14,7 @@ fn meta(sequence: u64) -> EventMeta {
         caused_by: None,
     }
 }
-fn turn(sequence: u64, agent_turn: u64, role: Role, blocks: Vec<Block>) -> EngineEvent {
+pub(super) fn turn(sequence: u64, agent_turn: u64, role: Role, blocks: Vec<Block>) -> EngineEvent {
     EngineEvent::ConversationTurnCommitted {
         meta: meta(sequence),
         agent_turn,
@@ -25,7 +25,7 @@ fn turn(sequence: u64, agent_turn: u64, role: Role, blocks: Vec<Block>) -> Engin
         },
     }
 }
-fn start(sequence: u64, call_index: u32) -> EngineEvent {
+pub(super) fn start(sequence: u64, call_index: u32) -> EngineEvent {
     EngineEvent::ToolCallStarted {
         meta: meta(sequence),
         turn_id: TurnId("1".into()),
@@ -36,7 +36,7 @@ fn start(sequence: u64, call_index: u32) -> EngineEvent {
         call_index,
     }
 }
-fn finish(sequence: u64, call_index: u32, text: &str) -> EngineEvent {
+pub(super) fn finish(sequence: u64, call_index: u32, text: &str) -> EngineEvent {
     EngineEvent::ToolCallFinished {
         presentation: None,
         meta: meta(sequence),
@@ -278,6 +278,7 @@ fn rewind_is_a_distinct_unpublished_operation_and_invalid_sequences_do_not_advan
         next_sequence: 10,
         next_ordinal: 4,
         active_turn: Some(2),
+        tail: TailState::default(),
     };
     let event = EngineEvent::ConversationRewound {
         meta: meta(10),

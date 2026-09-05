@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 /// Version of the rebuildable semantic transcript projection.
-pub const TRANSCRIPT_PROJECTION_VERSION: u32 = 4;
+pub const TRANSCRIPT_PROJECTION_VERSION: u32 = 5;
 /// Maximum retained text bytes across previews in one semantic item.
 pub const TRANSCRIPT_PREVIEW_TEXT_BYTES: usize = 4 * 1024;
 /// Maximum inline conversation block descriptors in one semantic item.
