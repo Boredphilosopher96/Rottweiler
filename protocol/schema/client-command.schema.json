@@ -14,6 +14,73 @@
         },
         "type": {
           "type": "string",
+          "const": "get_ui_catalog"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
+          "const": "get_ui_panels"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "request": {
+          "$ref": "#/$defs/UiActionRequest"
+        },
+        "type": {
+          "type": "string",
+          "const": "invoke_ui_action"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "request"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
           "const": "get_todos"
         }
       },
@@ -1760,6 +1827,109 @@
       "description": "Stable identifier of an engine session.",
       "type": "string"
     },
+    "UiActionRequest": {
+      "description": "Action arguments and command selection remain in the approved host registry.",
+      "type": "object",
+      "properties": {
+        "owner": {
+          "$ref": "#/$defs/UiContributionOwner"
+        },
+        "contribution_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_.-]+$",
+          "x-rw-max-utf8-bytes": 128
+        },
+        "action_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_.-]+$",
+          "x-rw-max-utf8-bytes": 128
+        },
+        "target": {
+          "$ref": "#/$defs/UiActionTarget"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "owner",
+        "contribution_id",
+        "action_id",
+        "target"
+      ]
+    },
+    "UiContributionOwner": {
+      "type": "object",
+      "properties": {
+        "extension": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-rw-max-utf8-bytes": 128
+        },
+        "generation": {
+          "$ref": "#/$defs/UiGenerationId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "extension",
+        "generation"
+      ]
+    },
+    "UiGenerationId": {
+      "description": "An application-minted endpoint epoch; restarting the same artifact creates a\ndifferent generation. It is a correlation identifier, never permission.",
+      "type": "string",
+      "minLength": 32,
+      "maxLength": 32,
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "UiActionTarget": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "invocation_id": {
+              "$ref": "#/$defs/ToolInvocationId"
+            },
+            "surface": {
+              "type": "string",
+              "const": "tool"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "surface",
+            "invocation_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "revision": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "surface": {
+              "type": "string",
+              "const": "panel"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "surface",
+            "revision"
+          ]
+        }
+      ]
+    },
+    "ToolInvocationId": {
+      "description": "Host-owned identity of one tool execution, independent of provider call IDs.",
+      "type": "string"
+    },
     "TranscriptRead": {
       "type": "object",
       "properties": {
@@ -2172,10 +2342,6 @@
           ]
         }
       ]
-    },
-    "ToolInvocationId": {
-      "description": "Host-owned identity of one tool execution, independent of provider call IDs.",
-      "type": "string"
     },
     "ModelAlias": {
       "description": "Provider-blind model alias resolved by the engine router.",

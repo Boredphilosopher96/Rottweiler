@@ -18,8 +18,8 @@
         {
           "type": "string",
           "minLength": 1,
-          "maxLength": 256,
-          "x-rw-max-utf8-bytes": 256,
+          "maxLength": 261,
+          "x-rw-max-utf8-bytes": 261,
           "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
         },
         {
