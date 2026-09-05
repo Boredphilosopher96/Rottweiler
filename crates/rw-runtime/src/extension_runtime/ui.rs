@@ -355,7 +355,7 @@ impl UiRegistry for RuntimeUiRegistry {
                 })
                 .map(|panel| &panel.presentation),
         }
-        .ok_or_else(|| core_error(error("UI action source is unavailable")))?;
+        .ok_or_else(|| core_error(&error("UI action source is unavailable")))?;
         if presentation.owner != request.owner
             || presentation.descriptor.id != request.contribution_id
             || !presentation
@@ -364,7 +364,7 @@ impl UiRegistry for RuntimeUiRegistry {
                 .iter()
                 .any(|action| action.id == request.action_id)
         {
-            return Err(core_error(error("UI action source identity differs")));
+            return Err(core_error(&error("UI action source identity differs")));
         }
         let declaration = registration
             .endpoint
@@ -374,19 +374,19 @@ impl UiRegistry for RuntimeUiRegistry {
             .ui
             .iter()
             .find(|entry| entry.id() == request.contribution_id)
-            .ok_or_else(|| core_error(error("UI contribution is not declared")))?;
+            .ok_or_else(|| core_error(&error("UI contribution is not declared")))?;
         if !matches!(
             (&request.target, declaration),
             (UiActionTarget::Tool { .. }, UiContribution::Tool { .. })
                 | (UiActionTarget::Panel { .. }, UiContribution::Panel { .. })
         ) {
-            return Err(core_error(error("UI action target kind differs")));
+            return Err(core_error(&error("UI action target kind differs")));
         }
         let action = declaration
             .actions()
             .iter()
             .find(|action| action.id == request.action_id)
-            .ok_or_else(|| core_error(error("UI action is not declared")))?;
+            .ok_or_else(|| core_error(&error("UI action is not declared")))?;
         let mut commands = CommandRegistry::new();
         commands
             .register(
@@ -397,7 +397,7 @@ impl UiRegistry for RuntimeUiRegistry {
             )
             .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
         let arguments = serde_json::to_string(&action.arguments)
-            .map_err(|_| core_error(error("UI action arguments are invalid")))?;
+            .map_err(|_| core_error(&error("UI action arguments are invalid")))?;
         commands
             .bind(&action.command, arguments)
             .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))
