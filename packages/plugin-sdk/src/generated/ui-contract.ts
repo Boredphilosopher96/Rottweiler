@@ -3,5 +3,7 @@ export type JsonValue = number | string | boolean | Array<JsonValue> | { [key in
 export type UiAction = { id: string, label: string, command: string, arguments: JsonValue, };
 export type UiContribution = { "surface": "tool", id: string, tool_name: string, title: string, fields: Array<UiField>, actions: Array<UiAction>, } | { "surface": "panel", id: string, title: string, fields: Array<UiField>, actions: Array<UiAction>, };
 export type UiField = { "kind": "text", id: string, label: string, path: Array<UiSelectorStep>, } | { "kind": "badge", id: string, label: string, path: Array<UiSelectorStep>, } | { "kind": "list", id: string, label: string, path: Array<UiSelectorStep>, max_items: number, } | { "kind": "table", id: string, label: string, path: Array<UiSelectorStep>, columns: Array<UiTableColumn>, max_rows: number, };
+export type UiPanelUpdate = { id: string, data: JsonValue, };
+export type UiPanelUpdated = { revision: number, };
 export type UiSelectorStep = { "step": "field", name: string, } | { "step": "index", index: number, };
 export type UiTableColumn = { label: string, path: Array<UiSelectorStep>, };

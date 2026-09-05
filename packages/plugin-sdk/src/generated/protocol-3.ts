@@ -26,6 +26,7 @@ stateCommit: "extension/state_commit",
 injectMessage: "session/inject_message",
 setStatus: "session/set_status",
 notify: "ui/notify",
+publishPanel: "ui/publish_panel",
 shutdown: "shutdown",
 exit: "exit",
 } as const)
@@ -115,6 +116,7 @@ export type PluginPushMethod =
   | "session/inject_message"
   | "session/set_status"
   | "ui/notify"
+  | "ui/publish_panel"
 
 import type { UiContribution } from "./ui-contract"
 export type { UiContribution } from "./ui-contract"

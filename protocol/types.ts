@@ -13,6 +13,7 @@ export const MAX_TOTAL_ATTACHMENT_BYTES = 10485760 as const;
 export const MAX_MCP_SERVER_ID_BYTES = 96 as const;
 export const MAX_COMMAND_REPLY_BYTES = 8388608 as const;
 export const MAX_CLIENT_READS = 2 as const;
+export const MAX_CLIENT_CONTROLS = 8 as const;
 export const MAX_UI_SURFACE_BYTES = 65536 as const;
 export const MAX_TODO_ITEMS = 128 as const;
 export const MAX_TODO_ID_BYTES = 256 as const;
