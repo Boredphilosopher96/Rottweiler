@@ -201,7 +201,17 @@ impl UiDisplayDescriptor {
 /// A self-contained, host-produced surface. A canonical tool result retains this
 /// descriptor so historical rendering does not consult a different live plugin.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema, TS, PrepareAllocation)]
-#[schemars(extend("x-rw-max-json-bytes" = MAX_UI_SURFACE_BYTES))]
+#[schemars(extend(
+    "x-rw-max-json-bytes" = MAX_UI_SURFACE_BYTES,
+    "x-rw-array-pair" = serde_json::json!({
+        "left": ["descriptor", "fields"], "right": ["projected", "fields"],
+        "identity": "id", "discriminator": "kind", "maxItems": crate::extension_ui::MAX_UI_FIELDS,
+        "collections": [
+            {"tag": "list", "values": "values", "limit": "max_items"},
+            {"tag": "table", "values": "rows", "limit": "max_rows", "width": "columns"}
+        ]
+    })
+))]
 #[serde(deny_unknown_fields)]
 pub struct UiPresentation {
     pub owner: UiContributionOwner,

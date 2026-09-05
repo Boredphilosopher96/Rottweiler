@@ -1,3 +1,4 @@
+import { addArrayPair } from "./schema-array-pair"
 import { jsonEncodedBytes } from "../src/json-size"
 import { _Code } from "ajv/dist/compile/codegen/code"
 import type Ajv2020 from "ajv/dist/2020"
@@ -25,6 +26,7 @@ function byteCounter({ gen }: KeywordCxt): Name {
 
 /** Source-schema refinements shared by every standalone protocol validator. */
 export function addSchemaBudgets(ajv: Ajv2020): void {
+  addArrayPair(ajv)
   ajv.addKeyword({
     keyword: "x-rw-max-json-bytes", schemaType: "number",
     metaSchema: { type: "integer", minimum: 0 },

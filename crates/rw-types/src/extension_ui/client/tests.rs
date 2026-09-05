@@ -97,3 +97,56 @@ fn decoded_surface_and_catalog_reject_retention_overflow_and_duplicate_fields() 
             .is_err()
     );
 }
+
+#[test]
+fn presentation_requires_positional_identity_kind_and_declared_collection_shape() {
+    let owner = serde_json::json!({
+        "extension": "example", "generation": "01010101010101010101010101010101"
+    });
+    let presentation = serde_json::json!({
+        "owner": owner,
+        "descriptor": {
+            "id": "details", "title": "Details", "surface": {"surface": "panel"},
+            "fields": [
+                {"kind":"list", "id":"items", "label":"Items", "max_items":1},
+                {"kind":"table", "id":"rows", "label":"Rows", "max_rows":1,"columns":["First","Second"]}
+            ],
+            "actions": []
+        },
+        "projected": {"truncated":false, "fields":[
+            {"kind":"list", "id":"items", "values":["one"]},
+            {"kind":"table", "id":"rows", "rows":[["one","two"]]}
+        ]}
+    });
+    assert!(serde_json::from_value::<UiPresentation>(presentation.clone()).is_ok());
+    for (pointer, replacement) in [
+        ("/projected/fields/0/id", json!("other")),
+        ("/projected/fields/0/values", json!(["one", "two"])),
+        ("/projected/fields/1/rows", json!([["one"]])),
+        (
+            "/projected/fields/1/rows",
+            json!([["one", "two"], ["one", "two"]]),
+        ),
+    ] {
+        let mut malformed = presentation.clone();
+        *malformed
+            .pointer_mut(pointer)
+            .unwrap_or_else(|| panic!("fixture pointer")) = replacement;
+        assert!(serde_json::from_value::<UiPresentation>(malformed).is_err());
+    }
+    let mut reversed = presentation;
+    reversed["projected"]["fields"]
+        .as_array_mut()
+        .unwrap_or_else(|| panic!("fields"))
+        .reverse();
+    assert!(serde_json::from_value::<UiPresentation>(reversed).is_err());
+    let schema = serde_json::to_value(schemars::schema_for!(UiPresentation))
+        .unwrap_or_else(|error| panic!("schema: {error}"));
+    assert_eq!(schema["x-rw-array-pair"]["identity"], "id");
+    assert_eq!(
+        schema["x-rw-array-pair"]["collections"]
+            .as_array()
+            .map(Vec::len),
+        Some(2)
+    );
+}
