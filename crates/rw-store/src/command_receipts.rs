@@ -118,11 +118,18 @@ impl CommandReceipts {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let existing: Option<(String, Option<Vec<u8>>)> = transaction.query_row(
-            "SELECT fingerprint, CASE WHEN length(completion)<=?2 THEN completion ELSE NULL END FROM command_receipts WHERE operation_id=?1",
-            params![operation.0, 16 * 1024 * 1024_i64], |row| Ok((row.get(0)?, row.get(1)?)),
+        let existing: Option<(Option<String>, Option<i64>, Option<Vec<u8>>)> = transaction.query_row(
+            "SELECT CASE WHEN length(fingerprint)=64 THEN fingerprint ELSE NULL END, length(completion), CASE WHEN length(completion)<=?2 THEN completion ELSE NULL END FROM command_receipts WHERE operation_id=?1",
+            params![operation.0, 16 * 1024 * 1024_i64], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).optional()?;
-        if let Some((stored, completion)) = existing {
+        if let Some((stored, length, completion)) = existing {
+            let stored = stored.ok_or(ReceiptError::Invalid)?;
+            validate(operation, &stored)?;
+            if length.is_some_and(|length| length > 16 * 1024 * 1024 || length < 0)
+                || length.is_some() != completion.is_some()
+            {
+                return Err(ReceiptError::Invalid);
+            }
             if stored != fingerprint {
                 return Err(ReceiptError::Conflict);
             }
@@ -250,6 +257,33 @@ mod tests {
             })
         ));
     }
+    #[test]
+    fn oversized_stored_completion_is_invalid_not_pending() {
+        let root = tempfile::tempdir().expect("root");
+        let mut store =
+            CommandReceipts::open(&root.path().join("operations.sqlite")).expect("open");
+        let id = RequestId("operation".into());
+        store.admit(&id, &fingerprint()).expect("admit");
+        store
+            .connection
+            .execute(
+                "UPDATE command_receipts SET completion=zeroblob(?1)",
+                [16 * 1024 * 1024_i64 + 1],
+            )
+            .expect("oversized stored completion");
+        assert!(matches!(
+            store.admit(&id, &fingerprint()),
+            Err(ReceiptError::Invalid)
+        ));
+        store
+            .connection
+            .execute(
+                "UPDATE command_receipts SET completion=NULL, fingerprint=zeroblob(1000000)",
+                [],
+            )
+            .expect_err("STRICT rejects a blob fingerprint");
+    }
+
     #[test]
     fn foreign_database_is_rejected_without_rewriting_it() {
         let root = tempfile::tempdir().expect("root");
