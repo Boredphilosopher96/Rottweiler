@@ -898,3 +898,46 @@ fn invalidation_overflow_and_invalid_binding_roll_back_atomically() {
         Err(TranscriptIndexError::Invalid("duplicate row source"))
     ));
 }
+
+#[test]
+fn descending_pages_keep_the_actual_tail_under_byte_and_row_bounds() {
+    let root = tempdir().expect("root");
+    let mut journal = SegmentedJournal::open(root.path(), "reverse-page").expect("journal");
+    journal.append_batch(0..10).expect("events");
+    let view = journal.read_view();
+    let mut index = TranscriptIndex::open(&view, 1).expect("index");
+    populate(&mut index, &view, 10);
+    let one_charge = row(9).payload.len() + row(9).key.len() + 48;
+    let tail = index
+        .page_ending_before(10, 10, one_charge)
+        .expect("byte bounded tail");
+    assert_eq!(
+        tail.rows.iter().map(|row| row.ordinal).collect::<Vec<_>>(),
+        [9]
+    );
+    assert_eq!(tail.retained_bytes, one_charge);
+    let before = index.page_ending_before(5, 3, 4096).expect("before");
+    assert_eq!(
+        before
+            .rows
+            .iter()
+            .map(|row| row.ordinal)
+            .collect::<Vec<_>>(),
+        [2, 3, 4]
+    );
+    assert!(
+        index
+            .page_ending_before(0, 3, 4096)
+            .expect("start")
+            .rows
+            .is_empty()
+    );
+    assert_eq!(
+        index
+            .page_ending_before(u64::MAX, 2, 4096)
+            .expect("future bound")
+            .rows[1]
+            .ordinal,
+        9
+    );
+}

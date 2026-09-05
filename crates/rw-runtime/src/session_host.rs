@@ -246,6 +246,7 @@ pub struct RuntimeSessionFactory {
     wasm_workers: Arc<rw_ext::WasmWorkerPool>,
     index_pool: Arc<rw_tools::WorkspaceIndexPool>,
     journal_reads: Arc<crate::journal_reads::JournalReads>,
+    transcripts: Arc<crate::transcript_service::TranscriptReader>,
     options: Arc<RuntimeHostOptions>,
     allowed_workspaces: Arc<Vec<PathBuf>>,
     model_catalog: Arc<CachedModelCatalog>,
@@ -424,11 +425,15 @@ impl RuntimeSessionFactory {
             inner: Arc::new(live_source),
             cache_path: catalog_cache_path,
         });
+        let journal_reads = crate::journal_reads::JournalReads::new(&options.storage_root)
+            .map_err(|error| HostError::Persistence(error.to_string()))?;
         let factory = Self {
+            transcripts: crate::transcript_service::TranscriptReader::new(Arc::clone(
+                &journal_reads,
+            )),
             wasm_workers: rw_ext::WasmWorkerPool::new(),
             index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
-            journal_reads: crate::journal_reads::JournalReads::new(&options.storage_root)
-                .map_err(|error| HostError::Persistence(error.to_string()))?,
+            journal_reads,
             options: Arc::new(options),
             allowed_workspaces: Arc::new(allowed),
             model_catalog: Arc::new(CachedModelCatalog::with_initial(source, initial_catalog)),

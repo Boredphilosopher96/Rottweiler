@@ -11,6 +11,46 @@ use super::{
 
 #[async_trait]
 impl HostQueryService for RuntimeSessionFactory {
+    async fn read_transcript(
+        &self,
+        session: &rw_types::SessionId,
+        read: rw_types::transcript::TranscriptRead,
+    ) -> Result<rw_types::transcript::TranscriptReadResult, HostError> {
+        let factory = self.clone();
+        let session = session.clone();
+        self.transcripts
+            .blocking(move |transcripts| {
+                let metadata =
+                    super::load_session_metadata_any(&factory.options.storage_root, &session.0)
+                        .map_err(|_| {
+                            HostError::Persistence("session metadata is unavailable".into())
+                        })?;
+                factory.authorize_workspace_path(&metadata.workspace)?;
+                transcripts.read(&session, &read)
+            })
+            .await
+    }
+
+    async fn read_transcript_content(
+        &self,
+        session: &rw_types::SessionId,
+        read: rw_types::transcript::TranscriptContentRead,
+    ) -> Result<rw_types::transcript::TranscriptContentPage, HostError> {
+        let factory = self.clone();
+        let session = session.clone();
+        self.transcripts
+            .blocking(move |transcripts| {
+                let metadata =
+                    super::load_session_metadata_any(&factory.options.storage_root, &session.0)
+                        .map_err(|_| {
+                            HostError::Persistence("session metadata is unavailable".into())
+                        })?;
+                factory.authorize_workspace_path(&metadata.workspace)?;
+                transcripts.read_content(&session, &read)
+            })
+            .await
+    }
+
     async fn command_descriptors(&self) -> Result<Vec<CommandDescriptor>, HostError> {
         let registry = builtin_command_registry().map_err(HostError::from)?;
         Ok(registry

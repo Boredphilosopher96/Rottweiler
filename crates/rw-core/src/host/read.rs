@@ -3,8 +3,8 @@
 use super::{BoundClient, DedupeRegistry, DedupeState, EngineHost, HostError, rejected};
 use bytes::Bytes;
 use rw_types::{
-    ClientCommand, ClientId, CommandExecution, CommandOutcome, CommandReply, EngineEventDelivery,
-    MAX_COMMAND_REPLY_BYTES, RequestId,
+    ClientCommand, ClientId, CommandExecution, CommandOutcome, CommandReply, EngineEvent,
+    EngineEventDelivery, MAX_COMMAND_REPLY_BYTES, RequestId,
 };
 use std::{
     collections::HashMap,
@@ -224,11 +224,85 @@ impl EngineHost {
             CommandExecution::Control => {
                 HostReply::command(self.dispatch_control(bound, command).await)
             }
-            CommandExecution::Read => self.dispatch_read(bound, command).await,
+            CommandExecution::Read => {
+                self.read_channel
+                    .dispatch(bound, command, |command| async {
+                        self.execute_inner(command)
+                            .await
+                            .map(|(outcome, _, events)| (outcome, events))
+                    })
+                    .await
+            }
         }
     }
-    async fn dispatch_read(&self, bound: BoundClient, command: ClientCommand) -> HostReply {
-        let mut lease = match self.read_admission.acquire(&bound.client_id) {
+}
+
+/// Read-only dispatch capability with bounded identity, concurrency and response-byte ownership.
+#[derive(Clone)]
+pub struct HostReadChannel {
+    dedupe: Arc<Mutex<DedupeRegistry>>,
+    admission: Arc<ReadAdmission>,
+    max_retained_ids: usize,
+}
+impl HostReadChannel {
+    /// Construct a standalone read channel; it cannot dispatch mutations.
+    ///
+    /// # Errors
+    /// Rejects a zero identity capacity.
+    pub fn new(max_retained_ids: usize) -> Result<Self, HostError> {
+        if max_retained_ids == 0 {
+            return Err(HostError::Protocol(
+                "read identity capacity must be positive".into(),
+            ));
+        }
+        Ok(Self::shared(
+            Arc::new(Mutex::new(DedupeRegistry::default())),
+            max_retained_ids,
+        ))
+    }
+
+    pub(super) fn shared(dedupe: Arc<Mutex<DedupeRegistry>>, max_retained_ids: usize) -> Self {
+        Self {
+            dedupe,
+            admission: Arc::new(ReadAdmission::default()),
+            max_retained_ids,
+        }
+    }
+
+    /// Admit one source-classified read before invoking its backend. The returned
+    /// bytes retain the identity and allocation leases through transport release.
+    pub async fn dispatch<F, R>(
+        &self,
+        bound: BoundClient,
+        mut command: ClientCommand,
+        query: F,
+    ) -> HostReply
+    where
+        F: FnOnce(ClientCommand) -> R,
+        R: std::future::Future<Output = Result<(CommandOutcome, Vec<EngineEvent>), HostError>>,
+    {
+        command.meta_mut().client_id = bound.client_id.clone();
+        if command.execution() != CommandExecution::Read {
+            return HostReply::command(rejected(
+                "read_only",
+                "read channel cannot execute controls",
+            ));
+        }
+        if command.meta().protocol_version != rw_types::PROTOCOL_VERSION
+            || !command.meta().request_id.is_valid()
+        {
+            return HostReply::encode(
+                CommandReply::Read {
+                    outcome: rejected(
+                        "command_metadata",
+                        "unsupported protocol or invalid request identity",
+                    ),
+                    events: Vec::new(),
+                },
+                None,
+            );
+        }
+        let mut lease = match self.admission.acquire(&bound.client_id) {
             Ok(lease) => lease,
             Err(error) => {
                 return HostReply::encode(
@@ -240,8 +314,7 @@ impl EngineHost {
                 );
             }
         };
-        let identity =
-            serde_json::to_vec(&command).map(|bytes| blake3::hash(&bytes).to_hex().to_string());
+        let identity = command_hash(&command);
         let Ok(hash) = identity else {
             return HostReply::encode(
                 CommandReply::Read {
@@ -252,38 +325,7 @@ impl EngineHost {
             );
         };
         let key = (bound.client_id, command.meta().request_id.clone());
-        let conflict = {
-            let mut ledger = self
-                .dedupe
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let conflict = match ledger.entries.get(&key) {
-                Some(DedupeState::Read { payload_hash, .. }) => payload_hash != &hash,
-                Some(_) => true,
-                None => false,
-            };
-            if !conflict {
-                if let Some(DedupeState::Read { active, .. }) = ledger.entries.get_mut(&key) {
-                    *active += 1;
-                } else {
-                    ledger.entries.insert(
-                        key.clone(),
-                        DedupeState::Read {
-                            payload_hash: hash,
-                            active: 1,
-                        },
-                    );
-                    ledger.order.push_back(key.clone());
-                }
-                lease.identity = Some(ReadIdentityLease {
-                    ledger: Arc::clone(&self.dedupe),
-                    key,
-                    limit: self.config.max_deduplicated_requests,
-                });
-                super::trim_dedupe(&mut ledger, self.config.max_deduplicated_requests);
-            }
-            conflict
-        };
+        let conflict = self.claim_identity(key, hash, &mut lease);
         if conflict {
             return HostReply::encode(
                 CommandReply::Read {
@@ -296,8 +338,8 @@ impl EngineHost {
                 Some(lease),
             );
         }
-        let (outcome, events) = match self.execute_inner(command).await {
-            Ok((outcome, _, events))
+        let (outcome, events) = match query(command).await {
+            Ok((outcome, events))
                 if events
                     .iter()
                     .all(|event| event.delivery() == EngineEventDelivery::Connection) =>
@@ -315,7 +357,53 @@ impl EngineHost {
         };
         HostReply::encode(CommandReply::Read { outcome, events }, Some(lease))
     }
+    fn claim_identity(
+        &self,
+        key: (ClientId, RequestId),
+        hash: String,
+        lease: &mut ReadLease,
+    ) -> bool {
+        let mut ledger = self
+            .dedupe
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let conflict = match ledger.entries.get(&key) {
+            Some(DedupeState::Read { payload_hash, .. }) => payload_hash != &hash,
+            Some(_) => true,
+            None => false,
+        };
+        if !conflict {
+            if let Some(DedupeState::Read { active, .. }) = ledger.entries.get_mut(&key) {
+                *active += 1;
+            } else {
+                ledger.entries.insert(
+                    key.clone(),
+                    DedupeState::Read {
+                        payload_hash: hash,
+                        active: 1,
+                    },
+                );
+                ledger.order.push_back(key.clone());
+            }
+            lease.identity = Some(ReadIdentityLease {
+                ledger: Arc::clone(&self.dedupe),
+                key,
+                limit: self.max_retained_ids,
+            });
+            super::trim_dedupe(&mut ledger, self.max_retained_ids);
+        }
+        conflict
+    }
 }
+
+pub(super) fn command_hash(command: &ClientCommand) -> Result<String, serde_json::Error> {
+    let mut hasher = blake3::Hasher::new();
+    serde_json::to_writer(&mut hasher, command)?;
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+#[cfg(test)]
+mod channel_tests;
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]

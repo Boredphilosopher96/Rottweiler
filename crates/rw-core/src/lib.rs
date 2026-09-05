@@ -65,9 +65,9 @@ pub use engine::{
 pub use host::{
     BoundClient, CompletedForkOperation, CreateSessionRequest, EngineHost, EngineHostConfig,
     ForkOperationKey, ForkOperationState, ForkSessionRequest, HostError, HostMcpService,
-    HostQueryService, HostReply, HostRuntimeService, HostSubagentService, HostedSession,
-    PreparedForkOperation, ProviderApiKeySubmission, ProviderAuthAttempt, ProviderAuthCompletion,
-    SessionFactory, SubagentReplay,
+    HostQueryService, HostReadChannel, HostReply, HostRuntimeService, HostSubagentService,
+    HostedSession, PreparedForkOperation, ProviderApiKeySubmission, ProviderAuthAttempt,
+    ProviderAuthCompletion, SessionFactory, SubagentReplay,
 };
 pub use init::{
     DEFAULT_INIT_FILE_BUDGET_BYTES, InitDepth, InitError, InitPlan, MAX_INIT_SCAN_ENTRIES,

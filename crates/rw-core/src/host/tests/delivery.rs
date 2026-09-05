@@ -2,8 +2,15 @@ use super::*;
 
 #[tokio::test]
 async fn active_read_identity_survives_ledger_eviction_pressure() {
-    let (mut host, _) = host(1);
-    host.config.max_deduplicated_requests = 1;
+    let host = EngineHost::new(
+        EngineHostConfig {
+            max_sessions: 1,
+            max_deduplicated_requests: 1,
+        },
+        Arc::new(StubFactory::new()),
+        Arc::new(StubQueries::default()),
+    )
+    .expect("host with bounded ledger");
     let bound = BoundClient {
         client_id: ClientId("retained-read".into()),
     };

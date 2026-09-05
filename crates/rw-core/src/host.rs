@@ -6,7 +6,7 @@ mod events;
 mod lifecycle;
 mod provider_completion;
 mod read;
-pub use read::HostReply;
+pub use read::{HostReadChannel, HostReply};
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -365,7 +365,7 @@ pub struct EngineHost {
     clock: Arc<dyn EventClock>,
     registry: Arc<tokio::sync::Mutex<HostRegistry>>,
     dedupe: Arc<Mutex<DedupeRegistry>>,
-    read_admission: Arc<read::ReadAdmission>,
+    read_channel: HostReadChannel,
     control_admission: Arc<tokio::sync::Semaphore>,
     client_events: Arc<Mutex<ClientEventRegistry>>,
     provider_auth: Arc<PendingProviderAuths>,
@@ -400,14 +400,17 @@ impl EngineHost {
                 "host capacities must be greater than zero".to_owned(),
             ));
         }
+        let dedupe = Arc::new(Mutex::new(DedupeRegistry::default()));
+        let read_channel =
+            HostReadChannel::shared(Arc::clone(&dedupe), config.max_deduplicated_requests);
         Ok(Self {
             config,
             factory,
             queries,
             clock: Arc::new(SystemEventClock),
             registry: Arc::new(tokio::sync::Mutex::new(HostRegistry::default())),
-            dedupe: Arc::new(Mutex::new(DedupeRegistry::default())),
-            read_admission: Arc::new(read::ReadAdmission::default()),
+            dedupe,
+            read_channel,
             control_admission: Arc::new(tokio::sync::Semaphore::new(64)),
             client_events: Arc::new(Mutex::new(ClientEventRegistry::default())),
             provider_auth: Arc::new(PendingProviderAuths::default()),

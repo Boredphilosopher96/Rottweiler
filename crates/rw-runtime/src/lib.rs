@@ -21,10 +21,12 @@ mod session_runtime;
 mod source_plugin;
 mod storage_root;
 mod subagent_metadata;
+mod transcript_service;
 mod workflow_runtime;
 
 pub use extension_runtime::PrivatePluginApprovalStore;
 pub use session_host::{RuntimeHostOptions, RuntimeSessionFactory};
+pub use transcript_service::{TranscriptReader, reader::TranscriptBootstrap};
 
 /// Durable session replay, search, and export APIs.
 pub mod session_history {

@@ -46,6 +46,9 @@ pub enum TranscriptIndexError {
     /// Unsafe descriptor, corrupt metadata or a violated ordinal invariant.
     #[error("invalid transcript index: {0}")]
     Invalid(&'static str),
+    /// The derived representation belongs to a different semantic projection version.
+    #[error("transcript projection version {actual} does not match {expected}")]
+    IncompatibleVersion { expected: u32, actual: u32 },
     /// The caller exceeded an allocation or transaction bound.
     #[error("transcript index limit exceeded: {0}")]
     Limit(&'static str),
@@ -171,6 +174,12 @@ pub struct TranscriptIndex {
     _lock: File,
 }
 
+#[derive(Clone, Copy)]
+enum ReadWindow {
+    From(u64),
+    Before(u64),
+}
+
 impl TranscriptIndex {
     /// Open a descriptor-native derived index with a fixed cache. Expensive
     /// automatic repair is disabled; callers explicitly rebuild invalid indexes.
@@ -231,7 +240,10 @@ impl TranscriptIndex {
         }
         let head = index.head()?;
         if head.version != version {
-            return Err(TranscriptIndexError::Invalid("projection version"));
+            return Err(TranscriptIndexError::IncompatibleVersion {
+                expected: version,
+                actual: head.version,
+            });
         }
         view.at_prefix(head.prefix)?;
         Ok(index)
@@ -372,7 +384,20 @@ impl TranscriptIndex {
         max_rows: usize,
         max_bytes: usize,
     ) -> Result<TranscriptIndexPage, TranscriptIndexError> {
-        self.read_page(first, max_rows, max_bytes, false)
+        self.read_page(ReadWindow::From(first), max_rows, max_bytes, false)
+    }
+
+    /// Read the rows immediately before an exclusive ordinal, including a byte-bounded tail.
+    ///
+    /// # Errors
+    /// Fails for invalid limits, incomplete generations or corrupt rows.
+    pub fn page_ending_before(
+        &self,
+        end: u64,
+        max_rows: usize,
+        max_bytes: usize,
+    ) -> Result<TranscriptIndexPage, TranscriptIndexError> {
+        self.read_page(ReadWindow::Before(end), max_rows, max_bytes, false)
     }
 
     /// Read a bounded working window while core repairs a hidden generation.
@@ -385,12 +410,12 @@ impl TranscriptIndex {
         max_rows: usize,
         max_bytes: usize,
     ) -> Result<TranscriptIndexPage, TranscriptIndexError> {
-        self.read_page(first, max_rows, max_bytes, true)
+        self.read_page(ReadWindow::From(first), max_rows, max_bytes, true)
     }
 
     fn read_page(
         &self,
-        first: u64,
+        window: ReadWindow,
         max_rows: usize,
         max_bytes: usize,
         maintenance: bool,
@@ -407,7 +432,19 @@ impl TranscriptIndex {
         let table = read.open_table(ROWS).map_err(storage)?;
         let mut rows = Vec::with_capacity(max_rows);
         let mut retained_bytes = 0;
-        for entry in table.range(first..).map_err(storage)?.take(max_rows) {
+        let bounds = match window {
+            ReadWindow::From(first) => {
+                (std::ops::Bound::Included(first), std::ops::Bound::Unbounded)
+            }
+            ReadWindow::Before(end) => (std::ops::Bound::Unbounded, std::ops::Bound::Excluded(end)),
+        };
+        let mut range = table.range::<u64>(bounds).map_err(storage)?;
+        for _ in 0..max_rows {
+            let entry = match window {
+                ReadWindow::From(_) => range.next(),
+                ReadWindow::Before(_) => range.next_back(),
+            };
+            let Some(entry) = entry else { break };
             let (ordinal, value) = entry.map_err(storage)?;
             let row = owned_row(ordinal.value(), value.value())?;
             let charge = row.payload.len() + row.key.len() + 48;
@@ -419,6 +456,9 @@ impl TranscriptIndex {
             }
             retained_bytes += charge;
             rows.push(row);
+        }
+        if matches!(window, ReadWindow::Before(_)) {
+            rows.reverse();
         }
         Ok(TranscriptIndexPage {
             head,

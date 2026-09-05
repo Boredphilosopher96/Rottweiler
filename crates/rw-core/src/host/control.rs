@@ -16,9 +16,8 @@ impl EngineHost {
     ) -> CommandOutcome {
         command.meta_mut().client_id = bound.client_id.clone();
         let meta = command.meta().clone();
-        let payload_hash = match serde_json::to_vec(&command) {
-            Ok(bytes) => blake3::hash(&bytes).to_hex().to_string(),
-            Err(_) => return rejected("command_serialization", "command could not serialize"),
+        let Ok(payload_hash) = super::read::command_hash(&command) else {
+            return rejected("command_serialization", "command could not serialize");
         };
         let key = (bound.client_id.clone(), meta.request_id.clone());
         let session_id_hint = command.session_id().cloned();
