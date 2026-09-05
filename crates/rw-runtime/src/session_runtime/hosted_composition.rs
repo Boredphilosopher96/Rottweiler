@@ -489,18 +489,8 @@ pub(crate) async fn compose_hosted_actor(
         built_tools.registry = Arc::new(registry);
     }
 
-    let plugin_resources = crate::session_resources::RuntimeSessionResources::own_cleanup(
-        native_extensions.clone(),
-        {
-            let owner = native_extensions.clone();
-            async move {
-                owner
-                    .shutdown()
-                    .await
-                    .map_err(|error| Arc::<str>::from(error.to_string()))
-            }
-        },
-    );
+    let plugin_resources =
+        crate::session_resources::RuntimeSessionResources::native(native_extensions.clone());
 
     let mut provider_recipe = None;
     let mut initial_catalog_seed = None;
@@ -949,7 +939,6 @@ pub(crate) async fn compose_hosted_actor(
         event_capacity: DEFAULT_EVENT_CAPACITY,
     })
     .map_err(display_agent_error)?;
-    native_extensions.bind(handle.plugin_binding())?;
     let subagents: Arc<dyn HostSubagentService> = Arc::new(HostedSubagentController {
         parent: handle.clone(),
         orchestrator,

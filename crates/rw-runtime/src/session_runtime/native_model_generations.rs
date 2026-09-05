@@ -132,6 +132,10 @@ struct ModelGenerationResources {
 }
 #[async_trait]
 impl rw_core::SessionResources for ModelGenerationResources {
+    fn bind_session(&self, binding: rw_core::PluginSessionBinding) -> Result<(), AgentLoopError> {
+        self.resources.bind_session(binding)
+    }
+
     async fn shutdown(&self) -> Result<(), AgentLoopError> {
         self.resources.shutdown().await
     }

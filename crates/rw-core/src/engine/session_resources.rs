@@ -5,6 +5,8 @@ use async_trait::async_trait;
 
 #[async_trait]
 pub trait SessionResources: Send + Sync {
+    /// Binds session-scoped capabilities before the actor can execute callbacks.
+    fn bind_session(&self, binding: super::PluginSessionBinding) -> Result<(), AgentLoopError>;
     async fn shutdown(&self) -> Result<(), AgentLoopError>;
 }
 
@@ -13,6 +15,9 @@ pub struct NoopSessionResources;
 
 #[async_trait]
 impl SessionResources for NoopSessionResources {
+    fn bind_session(&self, _binding: super::PluginSessionBinding) -> Result<(), AgentLoopError> {
+        Ok(())
+    }
     async fn shutdown(&self) -> Result<(), AgentLoopError> {
         Ok(())
     }

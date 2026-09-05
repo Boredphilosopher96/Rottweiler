@@ -18,6 +18,10 @@ impl Drop for ChildLease {
 }
 #[async_trait]
 impl SessionResources for ChildLease {
+    fn bind_session(&self, _binding: rw_core::PluginSessionBinding) -> Result<(), AgentLoopError> {
+        Ok(())
+    }
+
     async fn shutdown(&self) -> Result<(), AgentLoopError> {
         // Actor shutdown settles its model before releasing resources. The
         // admission remains retained until every actor configuration is dropped.

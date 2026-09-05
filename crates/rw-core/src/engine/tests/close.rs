@@ -196,6 +196,10 @@ struct ResourcesProbe {
 }
 #[async_trait]
 impl crate::SessionResources for ResourcesProbe {
+    fn bind_session(&self, _binding: crate::PluginSessionBinding) -> Result<(), AgentLoopError> {
+        Ok(())
+    }
+
     async fn shutdown(&self) -> Result<(), AgentLoopError> {
         self.entered.notify_one();
         self.release.notified().await;
@@ -454,4 +458,43 @@ async fn actor_close_waits_for_journal_ownership_and_propagates_failed_proof() {
             .expect("close task");
         assert_eq!(result.is_err(), fail);
     }
+}
+
+struct RejectBinding;
+#[async_trait]
+impl crate::SessionResources for RejectBinding {
+    fn bind_session(&self, _binding: crate::PluginSessionBinding) -> Result<(), AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "session resource binding rejected".into(),
+        ))
+    }
+    async fn shutdown(&self) -> Result<(), AgentLoopError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn failed_resource_binding_prevents_actor_startup() {
+    let root = tempfile::tempdir().expect("root");
+    let sink = Arc::new(RecordingSink::default());
+    let mut configuration = config(
+        root.path(),
+        Arc::new(ScriptedModel::new(Vec::new())),
+        Arc::new(ToolRegistry::new()),
+        PermissionDecision::Allow,
+        HookDispatcher::new(),
+    );
+    configuration.event_sink = sink.clone();
+    configuration.resources = Arc::new(RejectBinding);
+    let error = match SessionActor::spawn(configuration) {
+        Ok(_) => panic!("unbound actor must not start"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("session resource binding rejected")
+    );
+    tokio::task::yield_now().await;
+    assert!(sink.events.lock().expect("events").is_empty());
 }

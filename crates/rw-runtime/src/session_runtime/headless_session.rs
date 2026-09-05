@@ -650,18 +650,9 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
         actor_tools = Arc::new(registry);
     }
 
-    let plugin_resources = crate::session_resources::RuntimeSessionResources::own_cleanup(
-        native_extensions.clone(),
-        {
-            let owner = native_extensions.clone();
-            async move {
-                owner
-                    .shutdown()
-                    .await
-                    .map_err(|error| Arc::<str>::from(error.to_string()))
-            }
-        },
-    );
+    let plugin_resources =
+        crate::session_resources::RuntimeSessionResources::native(native_extensions.clone());
+
     let mut provider_recipe = None;
     let (model, engine_redactor): (Arc<dyn ModelDriver>, FixtureRedactor) = if inspection {
         let cache_support = inspection_profile
@@ -1183,7 +1174,6 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
         },
     );
     let prepared = async {
-        native_extensions.bind(actor.plugin_binding())?;
         let Some(turn) = prompt_dump_turn else {
             return Ok::<_, miette::Report>(None);
         };

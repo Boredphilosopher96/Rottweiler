@@ -116,6 +116,7 @@ impl SessionActor {
             mode_registry: Arc::clone(&mode_registry),
             model: Arc::clone(&config.model),
         };
+        config.resources.bind_session(handle.plugin_binding())?;
         // Startup input has one owner; route/workspace configuration clones must
         // not retain a second lifetime conversation after actor initialization.
         let recovered = std::mem::take(&mut config.recovered);

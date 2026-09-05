@@ -39,7 +39,7 @@ async fn deadline_retains_and_polls_resources_transferred_out_of_the_registry() 
         }
     };
     let resources =
-        RuntimeSessionResources::start(registry.clone(), work, Duration::from_millis(20));
+        RuntimeSessionResources::start(registry.clone(), work, Duration::from_millis(20), None);
     resources.request();
     entered.notified().await;
     assert!(registry.lock().expect("registry").is_none());
@@ -87,6 +87,7 @@ async fn dropping_the_resource_handle_starts_owned_cleanup() {
             }
         },
         Duration::from_secs(1),
+        None,
     );
     drop(resources);
     tokio::time::timeout(Duration::from_secs(1), completed.notified())
