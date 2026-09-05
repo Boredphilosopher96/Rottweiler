@@ -1,6 +1,7 @@
 //! Semantic transcript previews. Canonical journal records retain complete bodies.
 
 use crate::{Role, SequenceId, SessionId, SubagentId, SubagentStatus};
+use rw_memory_derive::PrepareAllocation as Allocation;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -13,13 +14,14 @@ pub const TRANSCRIPT_PREVIEW_TEXT_BYTES: usize = 4 * 1024;
 pub const TRANSCRIPT_PREVIEW_BLOCKS: usize = 16;
 
 /// Stable item identity, independent of its current logical ordinal.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct TranscriptItemId(pub SequenceId);
 
 /// A closed selector into one canonical event. It never names a filesystem path.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum TranscriptContentSelector {
     Conversation,
     ConversationBlock { index: u32 },
@@ -35,7 +37,7 @@ pub enum TranscriptContentSelector {
 }
 
 /// Body location within the exact journal prefix carried by its enclosing view.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct TranscriptContentSource {
     pub sequence: SequenceId,
     pub selector: TranscriptContentSelector,
@@ -45,13 +47,14 @@ pub struct TranscriptContentSource {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum TranscriptPreviewFormat {
     Text,
     Json,
 }
 
 /// A bounded prefix with an authoritative source for the complete body.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct TranscriptBodyPreview {
     pub text: String,
     pub format: TranscriptPreviewFormat,
@@ -63,6 +66,7 @@ pub struct TranscriptBodyPreview {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum TranscriptConversationBlock {
     Text { body: TranscriptBodyPreview },
     Reasoning { body: TranscriptBodyPreview },
@@ -74,6 +78,7 @@ pub enum TranscriptConversationBlock {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum TranscriptToolStatus {
     Running,
     Finished {
@@ -86,6 +91,7 @@ pub enum TranscriptToolStatus {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum TranscriptSubagentStatus {
     Running,
     Finished {
@@ -100,6 +106,7 @@ pub enum TranscriptSubagentStatus {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum TranscriptContent {
     TurnSummary {
         turn_id: crate::TurnId,
@@ -140,7 +147,7 @@ pub enum TranscriptContent {
 }
 
 /// Logical row position, distinct from a canonical event sequence.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct TranscriptOrdinal(
     #[serde(with = "crate::protocol::decimal_u64")]
     #[schemars(with = "String")]
@@ -149,7 +156,7 @@ pub struct TranscriptOrdinal(
 );
 
 /// Current semantic ordering generation, changed by rewind.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct TranscriptGeneration(
     #[serde(with = "crate::protocol::decimal_u64")]
     #[schemars(with = "String")]
@@ -158,7 +165,7 @@ pub struct TranscriptGeneration(
 );
 
 /// Exact canonical prefix interpreted by a complete semantic view.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct TranscriptView {
     pub session_id: SessionId,
     pub projection_version: u32,
@@ -196,7 +203,7 @@ pub struct TranscriptRead {
     pub max_bytes: u32,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct TranscriptItem {
     pub id: TranscriptItemId,
     pub ordinal: TranscriptOrdinal,
@@ -208,6 +215,7 @@ pub struct TranscriptItem {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum TranscriptInvalidation {
     None,
     All,
@@ -217,6 +225,7 @@ pub enum TranscriptInvalidation {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum TranscriptAnchor {
     Unspecified,
     Exact {
@@ -228,7 +237,7 @@ pub enum TranscriptAnchor {
     },
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct TranscriptPage {
     pub view: TranscriptView,
     pub first_ordinal: TranscriptOrdinal,
@@ -241,6 +250,7 @@ pub struct TranscriptPage {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum TranscriptReadResult {
     Ready {
         page: TranscriptPage,
@@ -262,7 +272,7 @@ pub struct TranscriptContentRead {
     pub max_bytes: u32,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct TranscriptContentPage {
     pub view: TranscriptView,
     pub source: TranscriptContentSource,

@@ -1,3 +1,4 @@
+use rw_memory_derive::PrepareAllocation as Allocation;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -6,6 +7,7 @@ use ts_rs::TS;
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "kebab-case")]
 #[ts(rename_all = "kebab-case")]
+#[derive(Allocation)]
 pub enum PermissionModeDescriptor {
     Strict,
     AutoSafe,

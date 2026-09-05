@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+rw-memory-derive = { path = "../rw-memory-derive" }
 rw-operation-contract.workspace = true
 schemars.workspace = true
 serde.workspace = true

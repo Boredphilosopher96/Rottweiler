@@ -1,5 +1,6 @@
 //! Typed configuration schema shared by the engine and SDK consumers.
 
+use rw_memory_derive::PrepareAllocation as Allocation;
 use std::collections::BTreeMap;
 
 use schemars::JsonSchema;
@@ -212,6 +213,7 @@ impl Default for ModelConfig {
 /// Provider-neutral thinking effort selected by a model alias or session.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum ThinkingLevel {
     /// Do not request provider reasoning output.
     #[default]
@@ -633,6 +635,7 @@ impl Default for WebSearchConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum PermissionDecision {
     /// Ask the active driver for approval.
     #[default]

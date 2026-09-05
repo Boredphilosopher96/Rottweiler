@@ -6,6 +6,7 @@ members = [
     "crates/rw-ext",
     "crates/rw-intel",
     "crates/rw-mcp",
+    "crates/rw-memory-derive",
     "crates/rw-operation-contract",
     "crates/rw-plugin-protocol",
     "crates/rw-providers",

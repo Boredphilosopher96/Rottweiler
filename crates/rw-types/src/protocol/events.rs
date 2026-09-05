@@ -12,6 +12,7 @@ use super::{
     WorkspaceRootDescriptor, WorkspaceStatus, decimal_u64,
 };
 use crate::{ProviderCallActuals, ProviderCallIdentity, ToolCallId, ToolInvocationId, ToolOutput};
+use rw_memory_derive::PrepareAllocation as Allocation;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -41,6 +42,7 @@ pub const TRANSIENT_ENGINE_EVENT_TYPES: &[&str] = &[
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case", optional_fields = nullable)]
+#[derive(Allocation)]
 pub enum EngineEvent {
     TranscriptPageReady {
         meta: CommandAckMeta,

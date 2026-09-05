@@ -144,6 +144,11 @@ impl ToolProgress {
     pub fn message(&self) -> &str {
         &self.message
     }
+    /// Requested owned string allocation, including unused capacity.
+    #[must_use]
+    pub const fn retained_message_capacity(&self) -> usize {
+        self.message.capacity()
+    }
     #[must_use]
     pub const fn amount(&self) -> Option<ProgressAmount> {
         self.amount

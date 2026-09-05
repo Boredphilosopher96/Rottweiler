@@ -1,3 +1,4 @@
+use rw_memory_derive::PrepareAllocation as Allocation;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -51,7 +52,9 @@ mod decimal_option_u64 {
 macro_rules! string_id {
     ($name:ident, $doc:literal) => {
         #[doc = $doc]
-        #[derive(Clone, Debug, Deserialize, Eq, Hash, JsonSchema, PartialEq, Serialize, TS)]
+        #[derive(
+            Clone, Debug, Deserialize, Eq, Hash, JsonSchema, PartialEq, Serialize, TS, Allocation,
+        )]
         pub struct $name(pub String);
     };
 }
@@ -60,7 +63,7 @@ macro_rules! string_id {
 pub const MAX_SESSION_ID_BYTES: usize = 128;
 
 /// Stable identifier of an engine session.
-#[derive(Clone, Debug, Deserialize, Eq, Hash, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct SessionId(pub String);
 
 /// A session identifier failed the canonical path-component grammar.
@@ -141,7 +144,18 @@ string_id!(
 
 /// Monotonic per-session sequence encoded as a decimal string on the wire.
 #[derive(
-    Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize, TS,
+    Clone,
+    Copy,
+    Debug,
+    Deserialize,
+    Eq,
+    JsonSchema,
+    Ord,
+    PartialEq,
+    PartialOrd,
+    Serialize,
+    TS,
+    Allocation,
 )]
 pub struct SequenceId(
     #[serde(with = "decimal_u64")]
@@ -167,6 +181,7 @@ pub struct CommandMeta {
 /// Metadata common to persisted and streamed events.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[ts(optional_fields = nullable)]
+#[derive(Allocation)]
 pub struct EventMeta {
     pub protocol_version: u16,
     pub session_id: SessionId,
@@ -176,7 +191,7 @@ pub struct EventMeta {
 }
 
 /// Metadata for immediate command acknowledgements before session sequencing.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct CommandAckMeta {
     pub protocol_version: u16,
     pub client_id: ClientId,
@@ -197,6 +212,7 @@ pub enum ClientRole {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum AttachmentData {
     Text { content: String },
     InlineBase64 { data: String },
@@ -217,7 +233,7 @@ pub struct Attachment {
 }
 
 /// Durable content-addressed attachment metadata persisted in the event log.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct StoredAttachment {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -234,6 +250,7 @@ pub struct StoredAttachment {
 /// One active or resumable session returned by the engine host.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[ts(optional_fields = nullable)]
+#[derive(Allocation)]
 pub struct SessionDescriptor {
     pub session_id: SessionId,
     /// Human-facing session title. Empty only when reading an older peer.
@@ -249,6 +266,7 @@ pub struct SessionDescriptor {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum CommandSource {
     #[default]
     Builtin,
@@ -260,7 +278,7 @@ pub enum CommandSource {
     Mcp,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct CommandDescriptor {
     pub name: String,
     pub description: String,
@@ -270,7 +288,7 @@ pub struct CommandDescriptor {
 }
 
 /// One bounded, credential-free interaction mode exposed to clients.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct ModeDescriptor {
     pub id: ModeId,
     pub description: String,
@@ -278,7 +296,7 @@ pub struct ModeDescriptor {
 }
 
 /// One engine-mediated user setting exposed to interactive clients.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct UserSettingDescriptor {
     pub key: String,
     pub label: String,
@@ -293,6 +311,7 @@ pub struct UserSettingDescriptor {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum McpServerState {
     Disabled,
     Connecting,
@@ -303,7 +322,7 @@ pub enum McpServerState {
 }
 
 /// One server in the live session MCP inventory.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct McpServerDescriptor {
     pub name: String,
     pub enabled: bool,
@@ -315,7 +334,7 @@ pub struct McpServerDescriptor {
 }
 
 /// Exact, redacted configuration identity presented before MCP approval.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct McpApprovalReview {
     pub server: String,
     pub transport: String,
@@ -350,7 +369,7 @@ impl fmt::Debug for McpEnvironmentEntry {
 ///
 /// Configured-but-idle integrations are deliberately absent. Names are short
 /// executable identities, never command lines, arguments, paths, or output.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct RuntimeServiceDescriptor {
     pub kind: RuntimeServiceKind,
     pub name: String,
@@ -362,6 +381,7 @@ pub struct RuntimeServiceDescriptor {
 )]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum RuntimeServiceKind {
     Lsp,
     Linter,
@@ -373,13 +393,14 @@ pub enum RuntimeServiceKind {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum PermissionApprovalScope {
     Session,
     Project,
 }
 
 /// Stable, typed rule row rendered by permission-management clients.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct PermissionRuleDescriptor {
     /// Opaque stable id accepted by remove operations. Clients never rebuild it.
     pub id: String,
@@ -389,7 +410,7 @@ pub struct PermissionRuleDescriptor {
 
 /// Opaque remembered approval metadata. Invocation arguments and fingerprints
 /// are deliberately absent.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct PermissionApprovalDescriptor {
     pub id: String,
     pub scope: PermissionApprovalScope,
@@ -398,7 +419,7 @@ pub struct PermissionApprovalDescriptor {
 }
 
 /// Bounded permission inventory for one live session.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct PermissionStateDescriptor {
     pub default: PermissionDecision,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -419,6 +440,7 @@ pub struct PermissionStateDescriptor {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum ModelCacheBehavior {
     None,
     Explicit,
@@ -426,7 +448,7 @@ pub enum ModelCacheBehavior {
 }
 
 /// Provider-neutral capabilities used by model pickers and attachment checks.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct ModelCapabilities {
     pub tool_calling: bool,
     pub vision: bool,
@@ -443,7 +465,7 @@ pub struct ModelCapabilities {
 }
 
 /// One concrete provider/model discovered from a live authenticated catalog.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct ModelDescriptor {
     /// Concrete provider-qualified model id.
     pub id: String,
@@ -463,7 +485,7 @@ pub struct ModelDescriptor {
 }
 
 /// Small provider-blind role mapping shown separately from the live catalog.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct ModelAliasDescriptor {
     pub alias: ModelAlias,
     pub candidates: Vec<String>,
@@ -475,6 +497,7 @@ pub struct ModelAliasDescriptor {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum ProviderAuthKind {
     ApiKey,
     Oauth,
@@ -486,6 +509,7 @@ pub enum ProviderAuthKind {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum ProviderNextAction {
     Configure,
     Authenticate,
@@ -499,6 +523,7 @@ pub enum ProviderNextAction {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[ts(tag = "kind", rename_all = "snake_case", optional_fields = nullable)]
+#[derive(Allocation)]
 pub enum ProviderAuthChallenge {
     Oauth {
         authorization_url: String,
@@ -512,6 +537,7 @@ pub enum ProviderAuthChallenge {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[allow(clippy::struct_excessive_bools)]
+#[derive(Allocation)]
 pub struct ProviderDescriptor {
     pub name: String,
     pub auth_kind: ProviderAuthKind,
@@ -536,14 +562,14 @@ pub struct ModelCatalogSnapshot {
 }
 
 /// Relative workspace path returned by fuzzy file search.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct WorkspaceFileMatch {
     pub path: String,
     pub is_directory: bool,
 }
 
 /// Remote-safe in-band file preview; paths are always workspace-relative.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct WorkspaceFilePreview {
     pub path: String,
     pub media_type: String,
@@ -558,6 +584,7 @@ pub struct WorkspaceFilePreview {
 /// Workspace status for the TUI status line and file picker.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[ts(optional_fields = nullable)]
+#[derive(Allocation)]
 pub struct WorkspaceStatus {
     pub workspace_name: String,
     pub branch: Option<String>,
@@ -566,7 +593,7 @@ pub struct WorkspaceStatus {
 }
 
 /// Bounded current-worktree diff for one exact workspace-relative path.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct WorkspaceDiff {
     pub path: String,
     pub unified_diff: String,
@@ -576,7 +603,7 @@ pub struct WorkspaceDiff {
 
 /// One stable session workspace root. Durable/wire events use only virtual
 /// `@root/N` paths; canonical host paths stay in private local metadata.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct WorkspaceRootDescriptor {
     pub index: u32,
     pub path: String,
@@ -593,7 +620,7 @@ pub struct ApprovalBinding {
 }
 
 /// Optional structured unified diff attached to a mutating-tool approval.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct UnifiedDiff {
     pub proposal_id: String,
     pub path: String,
@@ -652,7 +679,7 @@ impl std::str::FromStr for SessionMode {
 }
 
 /// One verifiable step in a model-submitted plan artifact.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct PlanStep {
     pub description: String,
     #[serde(default)]
@@ -661,7 +688,7 @@ pub struct PlanStep {
 }
 
 /// Durable plan submitted before entering execute mode.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct PlanArtifact {
     pub title: String,
     pub summary_md: String,
@@ -674,6 +701,7 @@ pub struct PlanArtifact {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum PlanDecision {
     Approve,
     Reject,
@@ -692,6 +720,7 @@ pub enum RewindTarget {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum ReviewFileDecision {
     Accept,
     Revert,
@@ -701,6 +730,7 @@ pub enum ReviewFileDecision {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum ReviewFileStatus {
     Pending,
     Accepted,
@@ -710,6 +740,7 @@ pub enum ReviewFileStatus {
 /// One deterministic workspace-relative entry in a cumulative session review.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[ts(optional_fields = nullable)]
+#[derive(Allocation)]
 pub struct SessionReviewFile {
     pub path: String,
     pub unified_diff: String,
@@ -721,7 +752,7 @@ pub struct SessionReviewFile {
 }
 
 /// Complete replacement snapshot for the cumulative session review reducer.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct SessionReview {
     pub session_id: SessionId,
     pub files: Vec<SessionReviewFile>,
@@ -731,6 +762,7 @@ pub struct SessionReview {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum QuestionResponseKind {
     Text,
     SelectOne,
@@ -741,6 +773,7 @@ pub enum QuestionResponseKind {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum ModelContextTransfer {
     /// Compact the current conversation, then give the summary to the new model.
     PassSummary,
@@ -752,7 +785,7 @@ pub enum ModelContextTransfer {
 
 /// Target retained in a durable model-switch interaction until the user chooses
 /// how existing context should cross the model boundary.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct ModelSwitchQuestion {
     pub model: ModelAlias,
     #[serde(default)]
@@ -762,6 +795,7 @@ pub struct ModelSwitchQuestion {
 /// A selectable response to an engine question.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[ts(optional_fields = nullable)]
+#[derive(Allocation)]
 pub struct QuestionOption {
     pub value: String,
     pub label: String,
@@ -773,7 +807,7 @@ pub struct QuestionOption {
 }
 
 /// A typed question sent to an interactive client.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct Question {
     pub id: QuestionId,
     pub prompt: String,
@@ -786,7 +820,7 @@ pub struct Question {
 }
 
 /// One answer returned for a question entry.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct Answer {
     pub question_id: QuestionId,
     pub values: Vec<String>,
@@ -796,6 +830,7 @@ pub struct Answer {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum ContextItemKind {
     System,
     ToolDefinitions,
@@ -807,7 +842,7 @@ pub enum ContextItemKind {
 }
 
 /// Per-item token and surgery state shown by context inspectors.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct ContextItemSnapshot {
     pub item_id: ContextItemId,
     pub kind: ContextItemKind,
@@ -824,7 +859,7 @@ pub struct ContextItemSnapshot {
 
 /// Orthogonal surgery markers for one context item.
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct ContextItemState {
     pub pinned: bool,
     pub evicted: bool,
@@ -833,13 +868,13 @@ pub struct ContextItemState {
 }
 
 /// One explicit cache boundary after an assembled item.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct CacheBreakpoint {
     pub after_item_id: Option<ContextItemId>,
 }
 
 /// Exact engine-side context breakdown for one assembled request.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct ContextSnapshot {
     pub turn_id: Option<TurnId>,
     pub stable_prefix_hash: String,
@@ -867,7 +902,7 @@ pub struct ContextSnapshot {
 }
 
 /// Usage and billing attributed to one completed agent turn.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct TurnAccounting {
     pub turn_id: TurnId,
     pub attribution: AccountingAttribution,
@@ -879,6 +914,7 @@ pub struct TurnAccounting {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum AccountingAttribution {
     Main,
     Compaction,
@@ -887,7 +923,7 @@ pub enum AccountingAttribution {
 }
 
 /// Session-level cost, token, cache, and burn-rate snapshot.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct CostSnapshot {
     pub utc_day: String,
     pub turns: Vec<TurnAccounting>,
@@ -995,7 +1031,7 @@ pub struct CostSnapshot {
 }
 
 /// Provider-neutral tool definition included in a prompt dump.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct PromptTool {
     pub name: String,
     pub description: String,
@@ -1003,7 +1039,7 @@ pub struct PromptTool {
 }
 
 /// Exact assembled model request exposed for prompt transparency.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct PromptDump {
     pub turn_id: Option<TurnId>,
     pub model_alias: ModelAlias,
@@ -1031,6 +1067,7 @@ pub enum TranscriptFormat {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum ToolCapability {
     ReadFilesystem,
     WriteFilesystem,
@@ -1042,6 +1079,7 @@ pub enum ToolCapability {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum ToolOutputStream {
     Stdout,
     Stderr,
@@ -1051,6 +1089,7 @@ pub enum ToolOutputStream {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum TurnStatus {
     Completed,
     Interrupted,
@@ -1064,6 +1103,7 @@ pub enum TurnStatus {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum CompactionReason {
     Automatic,
     Manual,
@@ -1074,6 +1114,7 @@ pub enum CompactionReason {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum BudgetUnit {
     MicrosUsd,
     AiCreditMicros,
@@ -1084,6 +1125,7 @@ pub enum BudgetUnit {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum BudgetLevel {
     Warning,
     SpendRateAlarm,
@@ -1094,6 +1136,7 @@ pub enum BudgetLevel {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum BudgetScope {
     Session,
     Daily,
@@ -1101,7 +1144,7 @@ pub enum BudgetScope {
 }
 
 /// Provider-reported token accounting normalized by the router.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct Usage {
     #[serde(with = "decimal_u64")]
     #[schemars(with = "String")]
@@ -1129,6 +1172,7 @@ pub struct Usage {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum SubagentStatus {
     Completed,
     Failed,
@@ -1141,6 +1185,7 @@ pub enum SubagentStatus {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum SubagentIsolation {
     /// Run in a private detached Git worktree and return a diff artifact.
     #[default]
@@ -1153,13 +1198,14 @@ pub enum SubagentIsolation {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum SubagentActivity {
     Running,
     Idle,
 }
 
 /// Human-readable child metadata exposed only through its owning parent.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct SubagentDescriptor {
     pub subagent_id: SubagentId,
     pub child_session_id: SessionId,
@@ -1171,7 +1217,7 @@ pub struct SubagentDescriptor {
 }
 
 /// A path affected by an isolated child patch.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct TouchedFile {
     pub path: String,
     pub status: TouchedFileStatus,
@@ -1181,6 +1227,7 @@ pub struct TouchedFile {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum TouchedFileStatus {
     Added,
     Modified,
@@ -1189,7 +1236,7 @@ pub enum TouchedFileStatus {
 }
 
 /// Complete durable patch returned by an isolated child.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct DiffArtifact {
     pub id: String,
     pub base_commit: String,
@@ -1216,6 +1263,7 @@ pub struct DiffArtifactRef {
 /// Predictable result returned from `spawn_agent` and workflow agent steps.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[ts(optional_fields = nullable)]
+#[derive(Allocation)]
 pub struct SubagentResult {
     pub subagent_id: SubagentId,
     pub session_id: SessionId,
@@ -1237,7 +1285,7 @@ pub struct SubagentResult {
 }
 
 /// A workspace path that a rewind could not restore exactly.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 pub struct UnrestorablePath {
     pub path: String,
     pub reason: String,
@@ -1248,6 +1296,7 @@ pub struct UnrestorablePath {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[ts(tag = "kind", rename_all = "snake_case", optional_fields = nullable)]
+#[derive(Allocation)]
 pub enum Cost {
     Monetary {
         #[serde(with = "decimal_u64")]
@@ -1310,6 +1359,7 @@ impl Cost {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum EngineErrorCategory {
     Provider,
     Tool,
@@ -1323,6 +1373,7 @@ pub enum EngineErrorCategory {
 /// Actionable client-safe error payload.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[ts(optional_fields = nullable)]
+#[derive(Allocation)]
 pub struct EngineError {
     pub category: EngineErrorCategory,
     pub code: String,
@@ -1335,6 +1386,7 @@ pub struct EngineError {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum CommandOutcome {
     Accepted,
     Rejected { error: EngineError },
