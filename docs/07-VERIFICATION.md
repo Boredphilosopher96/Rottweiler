@@ -367,7 +367,7 @@ Candidate artifacts remain available fourteen days. Missing private runners
 leave soak qualification incomplete.
 
 
-Per-PR: fmt · clippy `-D warnings` · unit+integration (replay, network-denied) · client and plugin protocol codegen checks (`rw-types` and `rw-plugin-protocol` → committed projections) · semantic ownership, toolchain ownership, dependency-direction, and guarded-network-boundary checks · `bun test` + typecheck in `packages/tui` · TUI goldens · security tests · perf smoke (startup + latency) · `cargo deny`/`audit` · docs build.
+Per-PR: fmt · clippy `-D warnings` · unit+integration (replay, network-denied) · client and plugin protocol codegen checks (`cargo xtask codegen --check` validates committed projections from `rw-types`, `rw-providers`, and `rw-plugin-protocol`) · semantic ownership, toolchain ownership, dependency-direction, and guarded-network-boundary checks · `bun test` + typecheck in `packages/tui` · TUI goldens · security tests · perf smoke (startup + latency) · `cargo deny`/`audit` · docs build.
 Weekly/manual risk evidence: `cargo llvm-cov` records workspace line coverage
 without imposing an unreviewed percentage, while bounded `cargo-mutants`
 campaigns must catch mutations in permission, trust, signed-update, and plugin
@@ -375,7 +375,7 @@ capability boundaries. Evidence is retained per exact run. Establish a required
 coverage threshold only after reviewing the first protected measurements;
 lowering a later threshold requires the same review as a performance waiver.
 Manual protected performance: isolated Linux build artifacts plus macOS binaries built directly on the measurement host to avoid download provenance distortion · 500-sample full p99 gates on fixed native hosted Linux X64 and macOS ARM64 images · M4/M8/TUI performance and release-size evidence.
-Nightly: full perf suite · real eight-hour supervised soak with retained baseline evidence · fuzzers · the non-optional Terminal-Bench subset on v1+ development lines · macOS + Linux release matrix · real WSL2 acceptance on GitHub-hosted Windows Server 2025. Pre-v1 nightlies explicitly record that the v1 capability claim is deferred instead of calling a retired or unconfigured provider.
+Nightly: full perf suite · real eight-hour supervised soak with retained baseline evidence · fuzzers · the non-optional Terminal-Bench subset on v1+ development lines · macOS + Linux release matrix · real WSL2 acceptance on GitHub-hosted Windows Server 2025. Pre-v1 nightlies omit Terminal-Bench capability qualification.
 Pre-release: the manually dispatched non-publishing preflight validates
 repository-owned public signing inputs, measured baselines, protected
 configuration, and the current 14-day dogfood ledger before invoking the exact

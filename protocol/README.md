@@ -9,8 +9,8 @@ cargo xtask codegen --check
 ```
 
 The first command refreshes committed artifacts. The second exits non-zero when
-the generated output differs, and is the CI drift gate. Protocol structs allow
-unknown object fields so additive schema evolution remains backward compatible.
+the generated output differs, and is the CI drift gate. Protocol objects reject
+unknown fields, unsupported variants, and missing required fields.
 
 Durable sessions use the separately versioned public JSONL envelope documented
 in [`session-log.md`](session-log.md). Its machine-readable envelope is
