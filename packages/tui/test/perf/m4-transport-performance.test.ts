@@ -91,9 +91,9 @@ describe("M4 transport performance gate", () => {
     await waitFor(async () => engine.eventStreamRequests === 1)
     for (let index = 0; index < engine.eventCount; index += 1) {
       await client.postCommand({
-        type: "list_models",
+        type: "switch_mode",
         session_id: attach.session_id,
-        refresh: false,
+        mode: index % 2 === 0 ? "plan" : "execute",
         meta: {
           protocol_version: PROTOCOL_VERSION,
           client_id: "m4-perf-client",
@@ -205,7 +205,7 @@ class TimedEventEngine {
           }),
         )
       }
-      writeJson(response, 202, { type: "accepted" })
+      writeJson(response, 202, { type: "command", outcome: { type: "accepted" } })
       return
     }
     if (url.pathname !== "/v1/events") {

@@ -302,7 +302,9 @@ fn project_conversation(
                 if matches!(block, Block::ToolCall { .. } | Block::ToolResult { .. }) {
                     continue;
                 }
-                if matches!(block, Block::Thinking { content, .. } if content.is_empty()) {
+                if matches!(block, Block::Thinking { content, .. }
+                    if !content.split("[REDACTED]").any(|part| !part.trim().is_empty()))
+                {
                     continue;
                 }
                 if matches!(block, Block::Text { text } if text.is_empty()) {
@@ -541,6 +543,12 @@ fn project_child(
             }
             *status = TranscriptSubagentStatus::Finished {
                 status: result.status.clone(),
+                touched_file_count: u32::try_from(result.touched_files.len())
+                    .map_err(|_| TranscriptProjectionError::Invalid("child file count"))?,
+                diff: result
+                    .diff_artifact
+                    .as_ref()
+                    .map(|_| source(meta.sequence_id, TranscriptContentSelector::SubagentDiff)),
                 result: PreviewBudget(2 * 1024).text(
                     &result.final_text,
                     source(meta.sequence_id, TranscriptContentSelector::SubagentResult),

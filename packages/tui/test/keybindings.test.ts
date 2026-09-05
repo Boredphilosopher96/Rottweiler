@@ -1,3 +1,4 @@
+import { emptyHistoryReader, historyReaderFor, conversationItem, toolItem } from "./fixtures/history"
 import { toolOutputBuffer } from "../src/state/display-buffer"
 import { afterEach, describe, expect, test } from "bun:test"
 import { parseKeypress, type KeyEvent } from "@opentui/core"
@@ -177,7 +178,7 @@ describe("standard TUI keyboard safety", () => {
     const setup = await createTestRenderer({ width: 88, height: 18, useThread: false })
     renderer = setup.renderer
     const commands: ClientCommand[] = []
-    const app = createRottweilerApp(renderer, {
+    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader,
       initialState: {
         ...createInitialState(),
         turns: { active: { turnId: "active", status: "running", usage: null, cost: null, timing: { kind: "unknown" } } },
@@ -201,7 +202,7 @@ describe("standard TUI keyboard safety", () => {
   test("surfaces a rejected double-Escape interrupt", async () => {
     const setup = await createTestRenderer({ width: 88, height: 18, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, {
+    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader,
       initialState: {
         ...createInitialState(),
         turns: { active: { turnId: "active", status: "running", usage: null, cost: null, timing: { kind: "unknown" } } },
@@ -232,7 +233,7 @@ describe("standard TUI keyboard safety", () => {
     const setup = await createTestRenderer({ width: 88, height: 18, useThread: false })
     renderer = setup.renderer
     let editorCalls = 0
-    const app = createRottweilerApp(renderer, {
+    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader,
       platform: "darwin",
       editor: {
         async compose(draft) {
@@ -266,7 +267,7 @@ describe("standard TUI keyboard safety", () => {
     const setup = await createTestRenderer({ width: 88, height: 18, useThread: false })
     renderer = setup.renderer
     let editorCalls = 0
-    const app = createRottweilerApp(renderer, {
+    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader,
       platform: "darwin",
       editor: {
         async compose(draft) {
@@ -290,7 +291,7 @@ describe("standard TUI keyboard safety", () => {
   test("cycles accepted prompt history without stealing multiline cursor movement", async () => {
     const setup = await createTestRenderer({ width: 88, height: 18, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, {
+    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader,
       onCommand() {
         return { type: "accepted" }
       },
@@ -323,7 +324,7 @@ describe("standard TUI keyboard safety", () => {
   test("restores the unsent draft after cycling slash-command history", async () => {
     const setup = await createTestRenderer({ width: 88, height: 18, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, {
+    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader,
       onCommand() {
         return { type: "accepted" }
       },
@@ -367,7 +368,7 @@ describe("Vim TUI interaction", () => {
   test("protects the composer in normal mode and provides basic Vim editing", async () => {
     const setup = await createTestRenderer({ width: 88, height: 18, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, { keybindings: { preset: "vim" } })
+    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader, keybindings: { preset: "vim" } })
     renderer.root.add(app)
     await setup.renderOnce()
 
@@ -396,60 +397,31 @@ describe("Vim TUI interaction", () => {
       kittyKeyboard: true,
     })
     renderer = setup.renderer
-    const tool = {
-      toolCallId: "vim-keyboard-block",
-      invocationId: "vim-keyboard-block",
-      turnId: "1",
-      name: "read",
-      args: { path: "vim.txt" },
-      status: "finished" as const,
-      capabilities: ["read_filesystem" as const],
-      rationale: null,
-      diff: null,
-      chunks: toolOutputBuffer([]),
-      output: { type: "text" as const, text: "vim output" },
-      isError: false,
-      callIndex: 0,
-      timing: { kind: "unknown" as const },
-    }
-    const app = createRottweilerApp(renderer, {
+
+    const app = createRottweilerApp(renderer, { historyReader: historyReaderFor([toolItem(1, "read", '{"path":"vim.txt"}', "vim output")]),
       keybindings: { preset: "vim" },
-      initialState: {
-        ...createInitialState(),
-        transcript: [{
-          sequenceId: "1",
-          agentTurn: "1",
-          turn: {
-            role: "tool",
-            blocks: [{ type: "tool_result", id: tool.toolCallId, output: tool.output, is_error: false }],
-            meta: { synthetic: false, summary: false },
-          },
-        }],
-        tools: { [tool.toolCallId]: tool },
-      },
+
     })
     renderer.root.add(app)
-    await setup.renderOnce()
-    const block = [...app.transcript.mountedCards.values()]
-      .flatMap((card) => card.getChildren())
-      .find((child): child is ToolBlockRenderable => child instanceof ToolBlockRenderable)
+    await setup.flush()
+    const block = app.transcript.mountedCards.get("1")
     app.transcript.selectNextBlock()
 
     setup.mockInput.pressEnter()
-    expect(block?.body.visible).toBeFalse()
+    expect(block?.markdown.visible).toBeFalse()
     expect(app.composer.value).toBe("")
 
     setup.mockInput.pressTab()
     expect(app.composer.hintText.plainText).toContain("NORMAL")
     setup.mockInput.pressEnter()
-    expect(block?.body.visible).toBeTrue()
+    expect(block?.markdown.visible).toBeTrue()
   })
 
   test("leaves insert mode before double Escape interrupts", async () => {
     const setup = await createTestRenderer({ width: 88, height: 18, useThread: false })
     renderer = setup.renderer
     const commands: ClientCommand[] = []
-    const app = createRottweilerApp(renderer, {
+    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader,
       keybindings: { preset: "vim" },
       initialState: {
         ...createInitialState(),
@@ -476,7 +448,7 @@ describe("Vim TUI interaction", () => {
     const setup = await createTestRenderer({ width: 100, height: 28, useThread: false })
     renderer = setup.renderer
     const commands: ClientCommand[] = []
-    const app = createRottweilerApp(renderer, {
+    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader,
       initialState: {
         ...createInitialState(),
         turns: { active: { turnId: "active", status: "running", usage: null, cost: null, timing: { kind: "unknown" } } },
@@ -519,7 +491,7 @@ describe("Vim TUI interaction", () => {
   test("uses two-stage Escape and restores focus from the command palette", async () => {
     const setup = await createTestRenderer({ width: 92, height: 22, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, {
+    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader,
       keybindings: { preset: "vim" },
       initialState: {
         ...createInitialState(),
@@ -549,25 +521,17 @@ describe("Vim TUI interaction", () => {
   test("switches normal focus to retained transcript navigation without editing", async () => {
     const setup = await createTestRenderer({ width: 80, height: 16, useThread: false })
     renderer = setup.renderer
-    const transcript = Array.from({ length: 40 }, (_, index) => ({
-      sequenceId: String(index + 1),
-      agentTurn: String(index + 1),
-      turn: {
-        role: "assistant" as const,
-        blocks: [{ type: "text" as const, text: `Retained line ${index}` }],
-        meta: { synthetic: false, summary: false },
-      },
-    }))
-    const app = createRottweilerApp(renderer, {
+
+    const app = createRottweilerApp(renderer, { historyReader: historyReaderFor(Array.from({ length: 40 }, (_, index) => conversationItem(index + 1, "assistant", `Retained line ${index}`))),
       keybindings: { preset: "vim" },
-      initialState: { ...createInitialState(), transcript },
+
     })
     renderer.root.add(app)
-    await setup.renderOnce()
+    await setup.flush()
     app.transcript.setScrollOffset(0)
     setup.mockInput.pressTab()
     setup.mockInput.pressKey("j")
-    await setup.renderOnce()
+    await setup.flush()
 
     expect(app.composer.value).toBe("")
     expect(app.transcript.scroller.scrollTop).toBeGreaterThan(0)
@@ -579,7 +543,7 @@ describe("Vim TUI interaction", () => {
     renderer = setup.renderer
     const commands: ClientCommand[] = []
     const base = createInitialState()
-    const app = createRottweilerApp(renderer, {
+    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader,
       keybindings: { preset: "vim" },
       initialState: {
         ...base,

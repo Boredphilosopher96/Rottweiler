@@ -2484,7 +2484,6 @@ pub(super) async fn handle_actor_command(
                 | ClientCommand::GetWorkspaceStatus { .. }
                 | ClientCommand::GetWorkspaceDiff { .. }
                 | ClientCommand::ListSubagents { .. }
-                | ClientCommand::ReplaySubagent { .. }
                 | ClientCommand::ContinueSubagent { .. }
                 | ClientCommand::InterruptSubagent { .. }
                 | ClientCommand::CloseSubagent { .. }

@@ -27,11 +27,9 @@ use rw_types::{
     CommandOutcome, EngineError, EngineErrorCategory, EngineEvent, McpApprovalReview,
     McpEnvironmentEntry, McpServerDescriptor, ModeDescriptor, ModelAlias, ModelCatalogSnapshot,
     ProviderAuthAttemptId, ProviderAuthChallenge, RequestId, RuntimeServiceDescriptor, SequenceId,
-    SessionDescriptor, SessionId, ShellId, SubagentDescriptor, SubagentId, SubagentReplayItem,
-    TranscriptFormat, TurnId, WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview,
-    WorkspaceStatus,
+    SessionDescriptor, SessionId, ShellId, SubagentDescriptor, SubagentId, TranscriptFormat,
+    TurnId, WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceStatus,
 };
-use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 
@@ -42,8 +40,6 @@ use crate::{
 
 const HOST_EVENT_CAPACITY: usize = 256;
 const HOST_EVENT_STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
-const SUBAGENT_REPLAY_BATCH_EVENTS: usize = 128;
-const SUBAGENT_REPLAY_BATCH_BYTES: usize = 128 * 1024;
 const MAX_WIRE_COMMANDS: usize = 512;
 const MAX_WIRE_COMMAND_CATALOG_BYTES: usize = 48 * 1024;
 const MAX_WIRE_MODES: usize = 128;
@@ -632,73 +628,6 @@ impl EngineHost {
                 .await?
         };
         Ok(session.descriptor())
-    }
-}
-
-fn subagent_replay_batches(
-    meta: &CommandMeta,
-    session_id: &SessionId,
-    subagent_id: &SubagentId,
-    child_session_id: &SessionId,
-    replay: Vec<(SequenceId, Value)>,
-    clock: &dyn EventClock,
-) -> Vec<EngineEvent> {
-    let ack = ack_meta(meta, clock);
-    let mut batches = Vec::new();
-    let mut current = Vec::new();
-    let mut current_bytes = 0usize;
-    for (child_sequence, event) in replay {
-        let event_bytes =
-            serde_json::to_vec(&event).map_or(SUBAGENT_REPLAY_BATCH_BYTES, |v| v.len());
-        if !current.is_empty()
-            && (current.len() >= SUBAGENT_REPLAY_BATCH_EVENTS
-                || current_bytes.saturating_add(event_bytes) > SUBAGENT_REPLAY_BATCH_BYTES)
-        {
-            batches.push(EngineEvent::SubagentReplayBatch {
-                meta: ack.clone(),
-                session_id: session_id.clone(),
-                subagent_id: subagent_id.clone(),
-                child_session_id: child_session_id.clone(),
-                events: std::mem::take(&mut current),
-            });
-            current_bytes = 0;
-        }
-        current_bytes = current_bytes.saturating_add(event_bytes);
-        current.push(SubagentReplayItem {
-            child_sequence,
-            event,
-        });
-    }
-    if !current.is_empty() {
-        batches.push(EngineEvent::SubagentReplayBatch {
-            meta: ack,
-            session_id: session_id.clone(),
-            subagent_id: subagent_id.clone(),
-            child_session_id: child_session_id.clone(),
-            events: current,
-        });
-    }
-    debug_assert!(batches.len().saturating_add(2) <= HOST_EVENT_CAPACITY);
-    batches
-}
-
-fn subagent_replay_completed(
-    meta: &CommandMeta,
-    session_id: &SessionId,
-    subagent_id: &SubagentId,
-    replay: &SubagentReplay,
-    clock: &dyn EventClock,
-) -> EngineEvent {
-    EngineEvent::SubagentReplayCompleted {
-        meta: ack_meta(meta, clock),
-        session_id: session_id.clone(),
-        subagent_id: subagent_id.clone(),
-        through_sequence: replay.through_sequence,
-        next_cursor: replay.next_cursor,
-        tail_sequence: replay.tail_sequence,
-        has_more: replay.has_more,
-        events_before_page: replay.events_before_page,
-        truncated: replay.truncated,
     }
 }
 

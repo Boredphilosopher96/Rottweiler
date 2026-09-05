@@ -1,3 +1,4 @@
+import type { DocumentSnapshot } from "../history/document"
 import {
   BoxRenderable,
   ScrollBoxRenderable,
@@ -8,7 +9,8 @@ import {
 import { getScrollAcceleration, presentTool } from "../render"
 import type { ToolProjection } from "../state"
 import type { RottweilerTheme } from "../theme"
-import { toolDisplayName, toolOutputContent } from "./transcript"
+import { toolDisplayName } from "./transcript"
+import { toolOutputContent } from "./transcript/blocks"
 
 /** Read-only, full-height presentation for one tool's complete output. */
 export class OutputViewerRenderable extends BoxRenderable {
@@ -17,6 +19,7 @@ export class OutputViewerRenderable extends BoxRenderable {
   readonly body: TextRenderable
   readonly hint: TextRenderable
   #toolCallId: string | null = null
+  #documentPage: DocumentSnapshot["page"] = null
 
   constructor(ctx: RenderContext, theme: RottweilerTheme) {
     super(ctx, {
@@ -82,8 +85,23 @@ export class OutputViewerRenderable extends BoxRenderable {
     return this.#toolCallId
   }
 
+  showDocument(snapshot: DocumentSnapshot): void {
+    if (!snapshot.open) return
+    const changed = this.#documentPage !== snapshot.page
+    this.#documentPage = snapshot.page
+    this.#toolCallId = null
+    this.visible = true
+    const page = snapshot.page
+    this.header.content = page === null ? "Content" : `Content · bytes ${page.offset + 1}–${page.next_offset ?? page.total_bytes} of ${page.total_bytes}`
+    if (changed) this.body.content = page?.text ?? ""
+    this.hint.content = snapshot.error ?? (snapshot.loading ? "Loading content…"
+      : `${snapshot.previous ? "← previous · " : ""}${page?.next_offset != null ? "next → · " : ""}Esc to close`)
+    if (changed) this.scroller.scrollTo(0)
+  }
+
   /** Open at the beginning of the complete output. */
   open(tool: ToolProjection): void {
+    this.#documentPage = null
     this.#toolCallId = tool.toolCallId
     this.update(tool)
     this.visible = true
@@ -101,8 +119,11 @@ export class OutputViewerRenderable extends BoxRenderable {
 
   closePresentation(): void {
     this.#toolCallId = null
+    this.#documentPage = null
     this.scroller.blur()
     this.visible = false
+    this.body.content = ""
+    this.header.content = ""
   }
 
   focusPresentation(): void {

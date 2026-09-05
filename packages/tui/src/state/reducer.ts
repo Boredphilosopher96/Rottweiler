@@ -454,8 +454,6 @@ function applyKnownEvent(
         commandAcks: responseAck(state, event.meta.request_id, event.type, null),
       }
     case "subagents_listed":
-    case "subagent_replay_batch":
-    case "subagent_replay_completed":
       return {
         ...state,
         commandAcks: responseAck(state, event.meta.request_id, event.type, event.session_id),

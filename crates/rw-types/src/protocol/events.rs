@@ -6,10 +6,10 @@ use super::{
     PermissionStateDescriptor, PlanArtifact, PlanDecision, PromptDump, ProviderAuthAttemptId,
     ProviderAuthChallenge, ProviderAuthKind, ProviderDescriptor, Question, QuestionId,
     ReviewFileDecision, RuntimeServiceDescriptor, SequenceId, SessionDescriptor, SessionId,
-    SessionReview, ShellId, StoredAttachment, SubagentDescriptor, SubagentId, SubagentReplayItem,
-    SubagentResult, ToolCapability, ToolOutputStream, TurnId, TurnStatus, UnifiedDiff,
-    UnrestorablePath, Usage, UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch,
-    WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus, decimal_u64,
+    SessionReview, ShellId, StoredAttachment, SubagentDescriptor, SubagentId, SubagentResult,
+    ToolCapability, ToolOutputStream, TurnId, TurnStatus, UnifiedDiff, UnrestorablePath, Usage,
+    UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview,
+    WorkspaceRootDescriptor, WorkspaceStatus, decimal_u64,
 };
 use crate::{ProviderCallActuals, ProviderCallIdentity, ToolCallId, ToolInvocationId, ToolOutput};
 use schemars::JsonSchema;
@@ -114,33 +114,6 @@ pub enum EngineEvent {
         meta: CommandAckMeta,
         session_id: SessionId,
         subagents: Vec<SubagentDescriptor>,
-    },
-    SubagentReplayBatch {
-        meta: CommandAckMeta,
-        session_id: SessionId,
-        subagent_id: SubagentId,
-        child_session_id: SessionId,
-        events: Vec<SubagentReplayItem>,
-    },
-    SubagentReplayCompleted {
-        meta: CommandAckMeta,
-        session_id: SessionId,
-        subagent_id: SubagentId,
-        /// Last child sequence included in this page, if the page is non-empty.
-        through_sequence: Option<SequenceId>,
-        /// Cursor to pass as `after_sequence` for the next forward page.
-        next_cursor: Option<SequenceId>,
-        /// Durable tail observed by the descriptor-stable page scan.
-        tail_sequence: Option<SequenceId>,
-        /// Whether another forward page remains after `next_cursor`.
-        has_more: bool,
-        /// Number of durable child events preceding the first event in this page.
-        #[serde(with = "decimal_u64")]
-        #[schemars(with = "String")]
-        #[ts(type = "string")]
-        events_before_page: u64,
-        /// Whether the requested view omitted events before or after this page.
-        truncated: bool,
     },
     SessionsSearchReady {
         meta: CommandAckMeta,
@@ -706,8 +679,6 @@ impl EngineEvent {
             | Self::SessionExported { .. }
             | Self::SessionsListed { .. }
             | Self::SubagentsListed { .. }
-            | Self::SubagentReplayBatch { .. }
-            | Self::SubagentReplayCompleted { .. }
             | Self::SessionsSearchReady { .. }
             | Self::CommandDescriptorsListed { .. }
             | Self::ModesListed { .. }
@@ -801,8 +772,6 @@ impl EngineEvent {
             | Self::SessionExported { .. }
             | Self::SessionsListed { .. }
             | Self::SubagentsListed { .. }
-            | Self::SubagentReplayBatch { .. }
-            | Self::SubagentReplayCompleted { .. }
             | Self::SessionsSearchReady { .. }
             | Self::CommandDescriptorsListed { .. }
             | Self::ModesListed { .. }

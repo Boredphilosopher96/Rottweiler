@@ -113,8 +113,16 @@ fn m9_rw_replay_renders_a_persisted_envelope_log_through_production_tui() {
     let actual: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(report).expect("replay report"))
             .expect("valid replay report");
-    assert_eq!(actual["completedThrough"], "8", "replay completion cursor");
-    assert_eq!(actual["lastSequence"], "8", "durable replay cursor");
+    assert_eq!(actual["historyThrough"], "8", "available committed prefix");
+    assert_eq!(actual["mountedItems"], 4, "semantic history rows");
+    assert!(
+        actual["completedThrough"].is_null(),
+        "history is not raw replay"
+    );
+    assert!(
+        actual["lastSequence"].is_null(),
+        "availability cannot advance durable cursor"
+    );
     assert_eq!(actual["invalidEvents"], 0, "replay protocol validation");
 
     let expected: serde_json::Value = serde_json::from_str(include_str!(
@@ -124,7 +132,7 @@ fn m9_rw_replay_renders_a_persisted_envelope_log_through_production_tui() {
     for field in ["frame", "styledDigest", "styledSpanCount"] {
         assert_eq!(
             actual[field], expected[field],
-            "replay visual contract: {field}"
+            "replay visual contract: {field}; actual={actual}"
         );
     }
 }

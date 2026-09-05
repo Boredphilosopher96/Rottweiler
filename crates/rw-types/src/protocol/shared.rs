@@ -1170,13 +1170,6 @@ pub struct SubagentDescriptor {
     pub activity: SubagentActivity,
 }
 
-/// One ordered durable child event carried inside a bounded replay batch.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
-pub struct SubagentReplayItem {
-    pub child_sequence: SequenceId,
-    pub event: Value,
-}
-
 /// A path affected by an isolated child patch.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 pub struct TouchedFile {

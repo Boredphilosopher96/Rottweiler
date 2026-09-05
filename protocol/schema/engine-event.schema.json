@@ -378,113 +378,6 @@
         "meta": {
           "$ref": "#/$defs/CommandAckMeta"
         },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "subagent_id": {
-          "$ref": "#/$defs/SubagentId"
-        },
-        "child_session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "events": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/SubagentReplayItem"
-          }
-        },
-        "type": {
-          "type": "string",
-          "const": "subagent_replay_batch"
-        }
-      },
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "subagent_id",
-        "child_session_id",
-        "events"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "subagent_id": {
-          "$ref": "#/$defs/SubagentId"
-        },
-        "through_sequence": {
-          "description": "Last child sequence included in this page, if the page is non-empty.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SequenceId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "next_cursor": {
-          "description": "Cursor to pass as `after_sequence` for the next forward page.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SequenceId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "tail_sequence": {
-          "description": "Durable tail observed by the descriptor-stable page scan.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SequenceId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "has_more": {
-          "description": "Whether another forward page remains after `next_cursor`.",
-          "type": "boolean"
-        },
-        "events_before_page": {
-          "description": "Number of durable child events preceding the first event in this page.",
-          "type": "string"
-        },
-        "truncated": {
-          "description": "Whether the requested view omitted events before or after this page.",
-          "type": "boolean"
-        },
-        "type": {
-          "type": "string",
-          "const": "subagent_replay_completed"
-        }
-      },
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "subagent_id",
-        "has_more",
-        "events_before_page",
-        "truncated"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
         "query": {
           "type": "string"
         },
@@ -3436,6 +3329,18 @@
           "required": [
             "type"
           ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "subagent_diff"
+            }
+          },
+          "required": [
+            "type"
+          ]
         }
       ]
     },
@@ -3508,6 +3413,21 @@
             "result": {
               "$ref": "#/$defs/TranscriptBodyPreview"
             },
+            "touched_file_count": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "diff": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TranscriptContentSource"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "type": {
               "type": "string",
               "const": "finished"
@@ -3516,7 +3436,8 @@
           "required": [
             "type",
             "status",
-            "result"
+            "result",
+            "touched_file_count"
           ]
         }
       ]
@@ -4687,20 +4608,6 @@
       "enum": [
         "running",
         "idle"
-      ]
-    },
-    "SubagentReplayItem": {
-      "description": "One ordered durable child event carried inside a bounded replay batch.",
-      "type": "object",
-      "properties": {
-        "child_sequence": {
-          "$ref": "#/$defs/SequenceId"
-        },
-        "event": true
-      },
-      "required": [
-        "child_sequence",
-        "event"
       ]
     },
     "CommandDescriptor": {

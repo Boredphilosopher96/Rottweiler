@@ -154,7 +154,13 @@ describe("M4 transport and process acceptance", () => {
       diff: null,
     })
 
-    await waitFor(async () => engine.commands.some((command) => command.type === "approve_tool"))
+    try {
+      await waitFor(async () => engine.commands.some((command) => command.type === "approve_tool"))
+    } catch (error) {
+      child.kill()
+      await child.exited
+      throw new Error(`approval did not settle; commands=${engine.commands.map(command => command.type).join(",")}; stderr=${await new Response(child.stderr).text()}`, { cause: error })
+    }
     const approval = engine.commands.find((command) => command.type === "approve_tool")
     expect(approval).toMatchObject({
       type: "approve_tool",

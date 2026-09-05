@@ -68,7 +68,7 @@ pub use host::{
     ForkOperationKey, ForkOperationState, ForkSessionRequest, HostError, HostMcpService,
     HostQueryService, HostReadChannel, HostReply, HostRuntimeService, HostSubagentService,
     HostedSession, PreparedForkOperation, ProviderApiKeySubmission, ProviderAuthAttempt,
-    ProviderAuthCompletion, SessionFactory, SubagentReplay,
+    ProviderAuthCompletion, SessionFactory,
 };
 pub use init::{
     DEFAULT_INIT_FILE_BUDGET_BYTES, InitDepth, InitError, InitPlan, MAX_INIT_SCAN_ENTRIES,

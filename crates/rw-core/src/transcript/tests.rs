@@ -887,8 +887,13 @@ fn child_completion_retains_one_row_and_authoritative_full_result() {
             session_id: child_session,
             status: rw_types::SubagentStatus::Completed,
             final_text: "complete output ".repeat(1000),
-            touched_files: vec![],
-            diff_artifact: None,
+            touched_files: vec!["changed.rs".into()],
+            diff_artifact: Some(rw_types::DiffArtifact {
+                id: "child-diff".into(),
+                base_commit: "base".into(),
+                touched_files: vec![],
+                unified_diff: "-old\n+🦀 new\n".repeat(1024),
+            }),
             usage: rw_types::Usage {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -911,7 +916,13 @@ fn child_completion_retains_one_row_and_authoritative_full_result() {
         (SequenceId(0), SequenceId(1))
     );
     let TranscriptContent::Subagent {
-        status: TranscriptSubagentStatus::Finished { result, status },
+        status:
+            TranscriptSubagentStatus::Finished {
+                result,
+                status,
+                touched_file_count,
+                diff,
+            },
         ..
     } = decode(&page.rows[0]).expect("child result")
     else {
@@ -920,6 +931,22 @@ fn child_completion_retains_one_row_and_authoritative_full_result() {
     assert_eq!(status, rw_types::SubagentStatus::Completed);
     assert!(!result.complete);
     assert_eq!(result.source.sequence, SequenceId(1));
+    assert_eq!(touched_file_count, 1);
+    let patch_source = diff.expect("canonical patch source");
+    assert_eq!(patch_source.sequence, SequenceId(1));
+    let patch = TranscriptDocument::from_event(event.clone(), &patch_source, 65536).expect("patch");
+    let mut offset = 0;
+    let mut joined = String::new();
+    loop {
+        let chunk = patch.chunk(offset, 113).expect("bounded patch chunk");
+        assert!(chunk.text.len() <= 113);
+        joined.push_str(chunk.text);
+        let Some(next) = chunk.next_offset else {
+            break;
+        };
+        offset = next;
+    }
+    assert_eq!(joined, "-old\n+🦀 new\n".repeat(1024));
     let document = TranscriptDocument::from_event(event, &result.source, 65536)
         .expect("authoritative full result");
     assert_eq!(
@@ -1049,4 +1076,30 @@ fn turn_summaries_preserve_exact_actuals_without_receipt_duplication_and_obey_re
         .expect("rewound summary");
     assert_eq!(page.rows.len(), 1);
     assert_eq!(page.rows[0].source, SequenceId(1));
+}
+
+#[test]
+fn signature_only_conversation_has_no_visible_row() {
+    for content in ["", "[REDACTED]", "  [REDACTED]\n[REDACTED]  "] {
+        let event = turn(
+            1,
+            1,
+            Role::Assistant,
+            vec![Block::Thinking {
+                content: content.into(),
+                signature: Some("PRIVATE-CONTINUATION".into()),
+            }],
+        );
+        assert!(project_conversation(&event).expect("projection").is_none());
+    }
+    let event = turn(
+        2,
+        1,
+        Role::Assistant,
+        vec![Block::Thinking {
+            content: "Visible reasoning".into(),
+            signature: Some("PRIVATE-CONTINUATION".into()),
+        }],
+    );
+    assert!(project_conversation(&event).expect("projection").is_some());
 }

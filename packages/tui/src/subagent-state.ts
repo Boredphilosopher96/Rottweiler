@@ -1,5 +1,6 @@
 import {
   MAX_ATTACHMENTS_PER_MESSAGE,
+  ENGINE_EVENT_DELIVERY,
   type Attachment,
   type EngineEvent,
 } from "./protocol"
@@ -7,7 +8,6 @@ import {
   createInitialState,
   type RottweilerState,
 } from "./state"
-import { MAX_BUFFERED_SUBAGENT_LIVE_BYTES } from "./subagent-replay"
 import {
   isRecord,
   isWireEngineEvent,
@@ -16,7 +16,6 @@ import {
 import { boundedUiText } from "./ui-presentation"
 
 const MAX_SUBAGENT_ID_LENGTH = 256
-const MAX_CHILD_TRANSCRIPT_ENTRIES = 256
 const MAX_CHILD_PROJECTION_ENTRIES = 512
 
 export interface ComposerDraft {
@@ -67,17 +66,10 @@ export function childEngineEvent(
   expectedSessionId: string,
 ): WireEngineEvent | null {
   if (!isWireEngineEvent(value)) return null
-  const record = value as unknown as Record<string, unknown>
-  if (!isRecord(record.meta) || record.meta.session_id !== expectedSessionId) return null
-  return value
-}
-
-export function wireEventBytes(event: WireEngineEvent): number {
-  try {
-    return Buffer.byteLength(JSON.stringify(event))
-  } catch {
-    return MAX_BUFFERED_SUBAGENT_LIVE_BYTES + 1
-  }
+  const delivery: Readonly<Record<string, string>> = ENGINE_EVENT_DELIVERY
+  const session = delivery[value.type] === "transient" && "session_id" in value ? value.session_id
+    : "meta" in value && isRecord(value.meta) ? value.meta.session_id : undefined
+  return session === expectedSessionId ? value : null
 }
 
 export function mergeComposerDraft(
@@ -102,7 +94,7 @@ export function mergeComposerDraft(
 export function boundSubagentState(state: RottweilerState): RottweilerState {
   return {
     ...state,
-    transcript: state.transcript.slice(-MAX_CHILD_TRANSCRIPT_ENTRIES),
+    transcript: [],
     turns: boundProjectionRecord(state.turns),
     tools: boundProjectionRecord(state.tools),
     questions: boundProjectionRecord(state.questions),

@@ -3,7 +3,7 @@ import { BoxRenderable, TextRenderable, type RenderContext } from "@opentui/core
 import type { RottweilerState, SubagentProjection } from "../state"
 import type { RottweilerTheme } from "../theme"
 import { truncateToCells } from "../render/text"
-import { subagentGlyph } from "./transcript"
+import { subagentGlyph } from "./transcript/blocks"
 
 const MAX_TRAY_SUBAGENTS = 6
 const FALLBACK_TRAY_CONTENT_WIDTH = 96

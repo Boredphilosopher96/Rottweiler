@@ -1,3 +1,4 @@
+import { conversationItem, toolItem, historyReaderFor, emptyHistoryReader } from "../fixtures/history"
 import { createStreamingTail } from "../../src/state/model"
 import { toolOutputBuffer } from "../../src/state/display-buffer"
 import { afterEach, describe, expect, test } from "bun:test"
@@ -8,9 +9,9 @@ import {
 } from "@opentui/core/testing"
 
 import { createRottweilerApp, type RottweilerApp } from "../../src/app"
-import type { EngineEvent } from "../../src/protocol"
+import type { TranscriptItem } from "../../src/protocol"
 import type { RottweilerState, ToolProjection } from "../../src/state"
-import { createInitialState, engineEvent, reduceRottweilerState } from "../../src/state"
+import { createInitialState } from "../../src/state"
 
 const usage = {
   input_tokens: "1200",
@@ -28,36 +29,6 @@ function fixtureState(): RottweilerState {
     connection: { phase: "connected", attempt: 0, error: null, gap: null },
     mode: "execute",
     model: "fast",
-    transcript: [
-      {
-        sequenceId: "1",
-        agentTurn: "1",
-        turn: {
-          role: "user",
-          blocks: [{ type: "text", text: "Add reconnect-safe streaming to the TUI." }],
-          meta: { synthetic: false, summary: false },
-        },
-      },
-      {
-        sequenceId: "2",
-        agentTurn: "1",
-        turn: {
-          role: "assistant",
-          blocks: [
-            {
-              type: "text",
-              text: "## Done\n\nThe event stream now resumes from the last durable sequence.",
-            },
-            {
-              type: "citation",
-              uri: "https://example.invalid/contract",
-              title: "Protocol contract",
-            },
-          ],
-          meta: { synthetic: false, summary: false, model: "fixture-fast" },
-        },
-      },
-    ],
     turns: {
       "1": { turnId: "1", status: "completed", usage, cost: money, timing: { kind: "unknown" } },
     },
@@ -201,94 +172,24 @@ function pendingTool(diff: boolean): ToolProjection {
   }
 }
 
-function replayFixtureState(): RottweilerState {
-  const eventMeta = (sequence: string) => ({
-    protocol_version: 1,
-    session_id: "session-golden-replay",
-    sequence_id: sequence,
-    emitted_at: `2026-01-01T00:00:0${sequence}Z`,
-  })
-  const events: EngineEvent[] = [
-    { type: "mode_changed", meta: eventMeta("1"), mode: "execute", definition_fingerprint: "fixture" },
-    { type: "model_changed", meta: eventMeta("2"), model: "fast" },
-    {
-      type: "conversation_turn_committed",
-      meta: eventMeta("3"),
-      agent_turn: "1",
-      turn: {
-        role: "user",
-        blocks: [{ type: "text", text: "Replay the saved session without changing it." }],
-        meta: { synthetic: false, summary: false },
-      },
-    },
-    { type: "turn_started", meta: eventMeta("4"), turn_id: "2" },
-    {
-      type: "tool_call_started",
-      meta: eventMeta("5"),
-      turn_id: "2",
-      tool_call_id: "historical-read",
-      invocation_id: "historical-read",
-      name: "read",
-      args: { path: "PROJECT.md" },
-      call_index: 0,
-    },
-    {
-      type: "tool_call_finished",
-      meta: eventMeta("6"),
-      turn_id: "2",
-      tool_call_id: "historical-read",
-      invocation_id: "historical-read",
-      output: { type: "text", text: "Historical PROJECT.md contents" },
-      is_error: false,
-      call_index: 0,
-    },
-    {
-      type: "conversation_turn_committed",
-      meta: eventMeta("7"),
-      agent_turn: "2",
-      turn: {
-        role: "tool",
-        blocks: [{
-          type: "tool_result",
-          id: "historical-read",
-          output: { type: "text", text: "Historical PROJECT.md contents" },
-          is_error: false,
-        }],
-        meta: { synthetic: false, summary: false },
-      },
-    },
-    {
-      type: "conversation_turn_committed",
-      meta: eventMeta("8"),
-      agent_turn: "2",
-      turn: {
-        role: "assistant",
-        blocks: [
-          {
-            type: "text",
-            text: "## Historical result\n\nThe saved event log rendered through the retained TUI.",
-          },
-        ],
-        meta: { synthetic: false, summary: false, model: "fixture-fast" },
-      },
-    },
-    {
-      type: "turn_finished",
-      meta: eventMeta("9"),
-      turn_id: "2",
-      status: "completed",
-      usage,
-      cost: money,
-    },
+function historicalItems(): TranscriptItem[] {
+  return [
+    conversationItem(3, "user", "Replay the saved session without changing it."),
+    toolItem(5, "read", '{"path":"PROJECT.md"}', "Historical PROJECT.md contents"),
+    conversationItem(8, "assistant", "## Historical result\n\nThe saved event log rendered through the retained TUI."),
+    { id: "9", ordinal: "3", revision: "9", agent_turn: "2",
+      content: { type: "turn_summary", turn_id: "2", status: "completed", usage, cost: money } },
   ]
-  const replayed = events.reduce(
-    (state, event) => reduceRottweilerState(state, engineEvent(event)),
-    createInitialState(),
-  )
-  return {
-    ...replayed,
-    connection: { phase: "connected", attempt: 0, error: null, gap: null },
-  }
+}
+
+function conversationItems(): TranscriptItem[] {
+  const answer = conversationItem(2, "assistant", "## Done\n\nThe event stream now resumes from the last durable sequence.")
+  if (answer.content.type === "conversation") answer.content.blocks.push({
+    type: "citation", body: { text: "Protocol contract — https://example.invalid/contract", format: "text", complete: true, source: { sequence: "2", selector: { type: "conversation_block", index: 1 } } },
+  })
+  return [conversationItem(1, "user", "Add reconnect-safe streaming to the TUI."), answer,
+    { id: "3", ordinal: "2", revision: "3", agent_turn: "1",
+      content: { type: "turn_summary", turn_id: "1", status: "completed", usage, cost: money } }]
 }
 
 function toolsFixtureState(): RottweilerState {
@@ -378,6 +279,7 @@ function toolsFixtureState(): RottweilerState {
 interface ScreenScenario {
   readonly name: string
   readonly state: RottweilerState
+  readonly history?: readonly TranscriptItem[]
   readonly setup?: (app: RottweilerApp) => void
   readonly replaySessionId?: string
 }
@@ -385,7 +287,7 @@ interface ScreenScenario {
 function scenarios(): ScreenScenario[] {
   const base = fixtureState()
   return [
-    { name: "01-ready", state: { ...createInitialState(), connection: base.connection } },
+    { name: "01-ready", history: [], state: { ...createInitialState(), connection: base.connection } },
     { name: "02-conversation", state: base },
     {
       name: "03-streaming-thinking-citations",
@@ -560,11 +462,12 @@ function scenarios(): ScreenScenario[] {
     },
     {
       name: "17-historical-session-replay",
-      state: replayFixtureState(),
+      state: { ...createInitialState(), connection: base.connection },
+      history: historicalItems(),
       replaySessionId: "session-golden-replay",
       setup: (app) => {
         app.handleEvent({
-          type: "session_replay_completed",
+          type: "session_history_ready",
           meta: {
             protocol_version: 1,
             client_id: "golden-client",
@@ -628,7 +531,14 @@ describe("M4 golden screens", () => {
       renderer = setup.renderer
       treeSitter = new MockTreeSitterClient({ autoResolveTimeout: 0 })
       treeSitter.setMockResult({ highlights: [] })
-      const app = createRottweilerApp(renderer, {
+      const items = scenario.history ?? conversationItems()
+      let reads = 0
+      const source = historyReaderFor(items)
+      const app = createRottweilerApp(renderer, { historyReader: { ...source, page: async (...args) => {
+        const result = await source.page(...args)
+        reads += 1
+        return result
+      } },
         initialState: scenario.state,
         requestId: () => "golden-request",
         treeSitterClient: treeSitter,
@@ -638,6 +548,8 @@ describe("M4 golden screens", () => {
       })
       renderer.root.add(app)
       scenario.setup?.(app)
+      await setup.waitFor(() => reads > 0)
+      await setup.renderOnce()
       await setup.waitFor(() => treeSitter?.isHighlighting() === false)
       await setup.flush()
       const frame = setup
@@ -665,7 +577,7 @@ describe("M4 golden screens", () => {
   test("Tools workspace keeps exact production cells at 110 by 32", async () => {
     const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, {
+    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader,
       initialState: toolsFixtureState(),
       nowMs: () => TOOLS_FIXTURE_NOW_MS,
     })
@@ -690,7 +602,7 @@ describe("M4 golden screens", () => {
   test("Tools workspace removes its rail below 100 columns", async () => {
     const setup = await createTestRenderer({ width: 99, height: 32, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, {
+    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader,
       initialState: toolsFixtureState(),
       nowMs: () => TOOLS_FIXTURE_NOW_MS,
     })
@@ -707,7 +619,7 @@ describe("M4 golden screens", () => {
   test("Tools workspace keeps a usable scroller on a short terminal", async () => {
     const setup = await createTestRenderer({ width: 110, height: 11, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, {
+    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader,
       initialState: toolsFixtureState(),
       nowMs: () => TOOLS_FIXTURE_NOW_MS,
     })

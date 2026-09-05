@@ -109,6 +109,16 @@ impl TranscriptDocument {
                 TranscriptContentSelector::SubagentResult,
                 EngineEvent::SubagentFinished { result, .. },
             ) => Self::text(result.final_text, max_bytes),
+            (
+                TranscriptContentSelector::SubagentDiff,
+                EngineEvent::SubagentFinished { result, .. },
+            ) => Self::text(
+                result
+                    .diff_artifact
+                    .ok_or_else(|| invalid("child has no patch"))?
+                    .unified_diff,
+                max_bytes,
+            ),
             _ => Err(invalid("content selector does not match source")),
         }
     }

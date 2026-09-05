@@ -6,7 +6,7 @@ import {
   createInitialState, engineEvent, reduceRottweilerState, toolOutputBuffer, utf8Prefix,
   type ToolProjection,
 } from "../src/state"
-import { toolOutputContent, toolOutputPreview } from "../src/components/transcript"
+import { toolOutputContent, toolOutputPreview } from "../src/components/transcript/blocks"
 import { projectToolActivity } from "../src/render/tools-workspace-presentation"
 import { PROTOCOL_VERSION, type EngineEvent } from "../src/protocol"
 

@@ -4,21 +4,20 @@ import { createTestRenderer } from "@opentui/core/testing"
 
 import { createRottweilerApp } from "../src/app"
 import { commandResultMarkdown } from "../src/render"
-import { createEngineRuntimeFromEnvironment, type TuiEngineRuntime } from "../src/runtime"
+import { createEngineRuntimeFromEnvironment } from "../src/runtime"
 
 const reportFile = process.env.ROTTWEILER_TEST_REPORT_FILE
 if (reportFile === undefined) throw new Error("ROTTWEILER_TEST_REPORT_FILE is required")
 
 const setup = await createTestRenderer({ width: 100, height: 28, useThread: false })
-let runtime: TuiEngineRuntime | null = null
-const app = createRottweilerApp(setup.renderer, {
+const runtime = await createEngineRuntimeFromEnvironment()
+if (runtime === null) throw new Error("supervised engine runtime was not configured")
+const app = createRottweilerApp(setup.renderer, { historyReader: runtime.historyReader,
   onCommand(command) {
-    return runtime?.sendCommand(command) ?? null
+    return runtime.sendCommand(command)
   },
 })
 setup.renderer.root.add(app)
-runtime = await createEngineRuntimeFromEnvironment()
-if (runtime === null) throw new Error("supervised engine runtime was not configured")
 runtime.bind(app)
 const running = runtime.start()
 
@@ -69,5 +68,7 @@ async function waitFor(label: string, predicate: () => boolean, timeoutMs = 10_0
   while (!predicate()) {
     if (Bun.nanoseconds() >= deadline) throw new Error(`full-host roundtrip timed out waiting for ${label}`)
     await Bun.sleep(2)
+    await setup.renderOnce()
+    await setup.flush()
   }
 }

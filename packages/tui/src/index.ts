@@ -212,6 +212,18 @@ async function main(): Promise<void> {
     onComposerInput: (value) => {
       if (transcriptPainted && value.length > 0) composerAcceptedInput = true
     },
+    historyReader: {
+      page: async (sessionId, read, signal) => {
+        const { runtime } = await runtimeBootstrap
+        if (runtime === null) throw new Error("engine runtime is unavailable")
+        return runtime.historyReader.page(sessionId, read, signal)
+      },
+      content: async (sessionId, read, signal) => {
+        const { runtime } = await runtimeBootstrap
+        if (runtime === null) throw new Error("engine runtime is unavailable")
+        return runtime.historyReader.content(sessionId, read, signal)
+      },
+    },
     onCommand: async (command) => {
       const bootstrap = await runtimeBootstrap
       return (await bootstrap.runtime?.sendCommand(command)) ?? null

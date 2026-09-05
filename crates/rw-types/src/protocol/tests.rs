@@ -179,35 +179,6 @@ fn mcp_stdio_management_commands_have_stable_redacted_wire_shapes()
 }
 
 #[test]
-fn subagent_replay_completion_exposes_page_and_tail_state() -> Result<(), Box<dyn std::error::Error>>
-{
-    let event = EngineEvent::SubagentReplayCompleted {
-        meta: CommandAckMeta {
-            protocol_version: 1,
-            client_id: ClientId("driver".to_owned()),
-            request_id: RequestId("replay".to_owned()),
-            emitted_at: "2026-01-01T00:00:00Z".to_owned(),
-        },
-        session_id: SessionId("parent".to_owned()),
-        subagent_id: SubagentId("child".to_owned()),
-        through_sequence: Some(SequenceId(15)),
-        next_cursor: Some(SequenceId(15)),
-        tail_sequence: Some(SequenceId(30)),
-        has_more: true,
-        events_before_page: 8,
-        truncated: true,
-    };
-    let wire = serde_json::to_value(event)?;
-    assert_eq!(wire["through_sequence"], "15");
-    assert_eq!(wire["next_cursor"], "15");
-    assert_eq!(wire["tail_sequence"], "30");
-    assert_eq!(wire["has_more"], true);
-    assert_eq!(wire["events_before_page"], "8");
-    assert_eq!(wire["truncated"], true);
-    Ok(())
-}
-
-#[test]
 fn event_delivery_is_owned_by_the_protocol_variant() {
     let connection = EngineEvent::SessionExported {
         meta: CommandAckMeta {

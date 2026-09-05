@@ -331,12 +331,6 @@ pub enum ClientCommand {
         meta: CommandMeta,
         session_id: SessionId,
     },
-    ReplaySubagent {
-        meta: CommandMeta,
-        session_id: SessionId,
-        subagent_id: SubagentId,
-        after_sequence: Option<SequenceId>,
-    },
     ContinueSubagent {
         meta: CommandMeta,
         session_id: SessionId,
@@ -424,7 +418,6 @@ impl ClientCommand {
             | Self::GetWorkspaceStatus { meta, .. }
             | Self::GetWorkspaceDiff { meta, .. }
             | Self::ListSubagents { meta, .. }
-            | Self::ReplaySubagent { meta, .. }
             | Self::ContinueSubagent { meta, .. }
             | Self::InterruptSubagent { meta, .. }
             | Self::CloseSubagent { meta, .. }
@@ -496,7 +489,6 @@ impl ClientCommand {
             | Self::CompleteProviderAuth { session_id, .. }
             | Self::CancelProviderAuth { session_id, .. }
             | Self::ListSubagents { session_id, .. }
-            | Self::ReplaySubagent { session_id, .. }
             | Self::ContinueSubagent { session_id, .. }
             | Self::InterruptSubagent { session_id, .. }
             | Self::CloseSubagent { session_id, .. } => Some(session_id),
@@ -567,7 +559,6 @@ impl ClientCommand {
             | Self::GetWorkspaceStatus { meta, .. }
             | Self::GetWorkspaceDiff { meta, .. }
             | Self::ListSubagents { meta, .. }
-            | Self::ReplaySubagent { meta, .. }
             | Self::ContinueSubagent { meta, .. }
             | Self::InterruptSubagent { meta, .. }
             | Self::CloseSubagent { meta, .. }
@@ -621,7 +612,6 @@ read_commands!(
     GetWorkspaceStatus,
     GetWorkspaceDiff,
     ListSubagents,
-    ReplaySubagent,
 );
 
 /// Direct response on the authenticated command channel. Read data never enters SSE or mutation dedupe.

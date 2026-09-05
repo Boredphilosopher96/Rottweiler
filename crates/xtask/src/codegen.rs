@@ -28,11 +28,11 @@ use rw_types::{
     ReviewFileDecision, ReviewFileStatus, RewindTarget, Role, RuntimeServiceDescriptor,
     RuntimeServiceKind, SequenceId, SessionDescriptor, SessionId, SessionReview, SessionReviewFile,
     ShellId, StoredAttachment, SubagentActivity, SubagentDescriptor, SubagentId, SubagentIsolation,
-    SubagentReplayItem, SubagentResult, SubagentStatus, TRANSIENT_ENGINE_EVENT_TYPES, ToolCallId,
-    ToolCapability, ToolInvocationId, ToolOutput, ToolOutputPart, ToolOutputStream, ToolProgress,
-    TouchedFile, TouchedFileStatus, TranscriptFormat, Turn, TurnAccounting, TurnId, TurnMeta,
-    TurnStatus, UnifiedDiff, UnrestorablePath, Usage, UserSettingDescriptor, WorkspaceDiff,
-    WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus,
+    SubagentResult, SubagentStatus, TRANSIENT_ENGINE_EVENT_TYPES, ToolCallId, ToolCapability,
+    ToolInvocationId, ToolOutput, ToolOutputPart, ToolOutputStream, ToolProgress, TouchedFile,
+    TouchedFileStatus, TranscriptFormat, Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus,
+    UnifiedDiff, UnrestorablePath, Usage, UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch,
+    WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
@@ -191,7 +191,6 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(SubagentIsolation);
     declaration!(SubagentActivity);
     declaration!(SubagentDescriptor);
-    declaration!(SubagentReplayItem);
     declaration!(SubagentStatus);
     declaration!(TouchedFileStatus);
     declaration!(TouchedFile);

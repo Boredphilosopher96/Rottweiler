@@ -1,151 +1,72 @@
-import { afterEach, describe, expect, test } from "bun:test"
-import { readFile } from "node:fs/promises"
-import { fileURLToPath } from "node:url"
-import {
-  createTestRenderer,
-  MockTreeSitterClient,
-  type TestRenderer,
-} from "@opentui/core/testing"
-
+import { expect, test } from "bun:test"
+import { createTestRenderer, MockTreeSitterClient } from "@opentui/core/testing"
 import { createRottweilerApp } from "../../src/app"
-import { PROTOCOL_VERSION, type EngineEvent } from "../../src/protocol"
+import { PROTOCOL_VERSION, type CommandReply, type EngineEvent } from "../../src/protocol"
 import { TuiEngineRuntime } from "../../src/runtime"
-import { EngineHttpSseClient, isWireEngineEvent } from "../../src/transport"
-import {
-  AuthenticatedMockEngine,
-  encodeSseJson,
-  splitBytes,
-} from "../support/mock-engine"
+import { EngineHttpSseClient } from "../../src/transport"
+import { conversationItem, historyReaderFor, toolItem, waitForHistory } from "../fixtures/history"
+import { AuthenticatedMockEngine, encodeSseJson, splitBytes } from "../support/mock-engine"
 
 const SESSION_ID = "session-m9-replay-golden"
-const FIXTURE = fileURLToPath(new URL("../fixtures/m9-replay-events.jsonl", import.meta.url))
 
-describe("M9 persisted replay golden", () => {
-  let renderer: TestRenderer | undefined
-  let treeSitter: MockTreeSitterClient | undefined
-  let engine: AuthenticatedMockEngine | undefined
-
-  afterEach(async () => {
-    renderer?.destroy()
-    renderer = undefined
-    await treeSitter?.destroy()
-    treeSitter = undefined
-    await engine?.stop()
-    engine = undefined
+test("authenticated observer reads semantic pages without replaying lifetime events", async () => {
+  const ready = {
+    type: "session_history_ready",
+    meta: { protocol_version: PROTOCOL_VERSION, client_id: "minted-client", request_id: "history-ready", emitted_at: "2026-01-01T00:00:10Z" },
+    session_id: SESSION_ID, through_sequence: "8",
+  } satisfies EngineEvent
+  const source = historyReaderFor([
+    conversationItem(2, "user", "Inspect the persisted project plan."),
+    toolItem(4, "read", '{"path":"PROJECT.md"}', "The canonical project plan."),
+    conversationItem(7, "assistant", "## Persisted replay verified\n\nRead through the authenticated observer channel."),
+  ])
+  const engine = new AuthenticatedMockEngine([
+    { chunks: splitBytes(encodeSseJson(ready), [1, 7, 31, 2, 127, 5]), holdOpen: true },
+  ], async command => {
+    if (command.type !== "read_transcript") return { type: "command", outcome: { type: "accepted" } }
+    return { type: "read", outcome: { type: "accepted" }, events: [{ type: "transcript_page_ready",
+      meta: { ...command.meta, emitted_at: "2026-01-01T00:00:10Z" }, session_id: command.session_id,
+      result: await source.page(command.session_id, command.read, new AbortController().signal),
+    }] } satisfies CommandReply
   })
-
-  test("authenticated observer replay renders the persisted event log", async () => {
-    const events = await readPersistedEvents()
-    const completed = {
-      type: "session_replay_completed",
-      meta: {
-        protocol_version: PROTOCOL_VERSION,
-        client_id: "m9-replay-client",
-        request_id: "m9-replay-completed",
-        emitted_at: "2026-01-01T00:00:10Z",
-      },
-      session_id: SESSION_ID,
-      through_sequence: "9",
-    } satisfies EngineEvent
-    const bytes = Buffer.concat([...events, completed].map((event) => encodeSseJson(event)))
-    engine = new AuthenticatedMockEngine([
-      { chunks: splitBytes(bytes, [1, 7, 31, 2, 127, 5, 509]), holdOpen: true },
-    ])
-    await engine.start()
-
-    const setup = await createTestRenderer({ width: 112, height: 32, useThread: false })
-    renderer = setup.renderer
-    treeSitter = new MockTreeSitterClient({ autoResolveTimeout: 0 })
-    treeSitter.setMockResult({ highlights: [] })
-    const app = createRottweilerApp(renderer, {
-      sessionId: SESSION_ID,
-      replaySessionId: SESSION_ID,
-      treeSitterClient: treeSitter,
-    })
-    renderer.root.add(app)
-
-    const client = new EngineHttpSseClient({
-      socketPath: engine.socketPath,
-      bootstrapToken: engine.bootstrapToken,
-    })
-    const runtime = new TuiEngineRuntime(
-      {
-        socketPath: engine.socketPath,
-        bootstrapToken: engine.bootstrapToken,
-        sessionId: SESSION_ID,
-        lastSeenSequence: null,
-        lastSeenFile: null,
-        replayMode: true,
-      },
-      client,
-      undefined,
-      () => "m9-runtime-request",
-    )
-    runtime.bind(app)
-    const running = runtime.start()
-    try {
-      await waitFor(() => app.state.replay.completedThrough === "9")
-      await setup.waitFor(() => treeSitter?.isHighlighting() === false)
-      await setup.flush()
-
-      expect(engine.commands).toHaveLength(1)
-      expect(engine.commands[0]).toMatchObject({
-        type: "attach_session",
-        session_id: SESSION_ID,
-        role: "observer",
-        last_seen_sequence: null,
-      })
-      expect(app.state.lastSequence).toBe("9")
-      expect(app.state.transcript).toHaveLength(2)
-
-      const frame = setup
-        .captureCharFrame()
-        .split("\n")
-        .map((line) => line.trimEnd())
-        .join("\n")
-      const styled = setup.captureSpans().lines.map((line) =>
-        line.spans
-          .filter((span) => span.text.trim().length > 0)
-          .map((span) => [span.text, span.fg.toInts(), span.bg.toInts(), span.attributes]),
-      )
-      expect(
-        JSON.stringify({
-          frame,
-          styledDigest: stableDigest(JSON.stringify(styled)),
-          styledSpanCount: styled.reduce((total, line) => total + line.length, 0),
-        }),
-      ).toMatchSnapshot()
-    } finally {
-      await runtime.stop()
-      await running
+  await engine.start()
+  const setup = await createTestRenderer({ width: 112, height: 32, useThread: false })
+  const treeSitter = new MockTreeSitterClient({ autoResolveTimeout: 0 })
+  treeSitter.setMockResult({ highlights: [] })
+  let nextRequest = 0
+  const runtime = new TuiEngineRuntime({ socketPath: engine.socketPath, bootstrapToken: engine.bootstrapToken,
+    sessionId: SESSION_ID, lastSeenSequence: null, lastSeenFile: null, replayMode: true,
+  }, new EngineHttpSseClient({ socketPath: engine.socketPath, bootstrapToken: engine.bootstrapToken }), undefined,
+  () => `m9-runtime-${nextRequest++}`)
+  const app = createRottweilerApp(setup.renderer, { historyReader: runtime.historyReader,
+    sessionId: SESSION_ID, replaySessionId: SESSION_ID, treeSitterClient: treeSitter })
+  setup.renderer.root.add(app)
+  runtime.bind(app)
+  const running = runtime.start()
+  try {
+    await waitForHistory(setup, () => app.state.historyReady !== null && app.transcript.mountedEntryCount === 3 && !treeSitter.isHighlighting())
+    expect(engine.commands).toContainEqual(expect.objectContaining({ type: "attach_session", session_id: SESSION_ID, role: "observer", last_seen_sequence: null }))
+    expect(engine.commands.filter(command => command.type === "read_transcript")).not.toHaveLength(0)
+    for (const command of engine.commands) if (command.type === "read_transcript") {
+      expect(command.read.max_items).toBeLessThanOrEqual(32)
+      expect(command.read.max_bytes).toBeLessThanOrEqual(256 * 1024)
     }
-  })
+    expect(app.state.lastSequence).toBeNull()
+    expect(app.state.replay.completedThrough).toBeNull()
+    expect(app.state.transcript).toHaveLength(0)
+    expect(app.state.protocol.invalidEvents).toBe(0)
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("Persisted replay verified")
+    expect(frame).toContain("read · done")
+    app.transcript.selectNextBlock()
+    app.transcript.toggleSelectedBlock()
+    await waitForHistory(setup, () => !treeSitter.isHighlighting())
+    expect(setup.captureCharFrame()).toContain("The canonical project plan.")
+  } finally {
+    await runtime.stop()
+    await running
+    setup.renderer.destroy()
+    await treeSitter.destroy()
+    await engine.stop()
+  }
 })
-
-async function readPersistedEvents(): Promise<EngineEvent[]> {
-  const lines = (await readFile(FIXTURE, "utf8")).trim().split("\n")
-  return lines.map((line, index) => {
-    const value: unknown = JSON.parse(line)
-    if (!isWireEngineEvent(value) || value.type === "session_replay_completed") {
-      throw new Error(`invalid persisted replay event at line ${index + 1}`)
-    }
-    return value as EngineEvent
-  })
-}
-
-async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
-  const deadline = performance.now() + timeoutMs
-  while (!predicate()) {
-    if (performance.now() >= deadline) throw new Error("timed out waiting for persisted replay")
-    await Bun.sleep(5)
-  }
-}
-
-function stableDigest(value: string): string {
-  let hash = 2_166_136_261
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index)
-    hash = Math.imul(hash, 16_777_619)
-  }
-  return (hash >>> 0).toString(16).padStart(8, "0")
-}

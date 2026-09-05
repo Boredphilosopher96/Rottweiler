@@ -1,3 +1,6 @@
+import { DocumentController } from "./history/document"
+import { HistoryPresentation } from "./history/presentation"
+import type { HistoryReader } from "./history/reader"
 import {
   BoxRenderable,
   CliRenderEvents,
@@ -126,20 +129,12 @@ import {
   type ToolProjection,
 } from "./state"
 import {
-  createSubagentReplayState,
-  transitionSubagentReplay,
-  type SubagentReplayEffect,
-  type SubagentReplayInput,
-  type SubagentReplayState,
-} from "./subagent-replay"
-import {
   boundSubagentState,
   childEngineEvent,
   childPassiveInteractionState,
   initialSubagentState,
   mergeComposerDraft,
   sanitizeSubagentDescriptor,
-  wireEventBytes,
   type ComposerDraft,
   type SubagentDescriptor,
 } from "./subagent-state"
@@ -186,6 +181,7 @@ import {
 } from "./ui-presentation"
 
 export interface RottweilerAppOptions {
+  readonly historyReader: HistoryReader
   readonly initialEvent?: EngineEvent
   readonly initialState?: RottweilerState
   readonly sessionId?: string
@@ -414,6 +410,8 @@ export class RottweilerApp extends BoxRenderable {
   banner!: StateBannerRenderable
   main!: BoxRenderable
 
+  readonly #document: DocumentController
+  readonly #history: HistoryPresentation
   #state: RottweilerState
   #workspaceRoots: RottweilerState["workspaceRoots"] | undefined
   #options: Required<
@@ -447,9 +445,9 @@ export class RottweilerApp extends BoxRenderable {
   #projectionRequests: ProjectionRequestBroker
   #pickerController: PickerController
   #subagentListError: string | null = null
-  #subagentReplays = new Map<string, SubagentReplayState<WireEngineEvent>>()
   #subagentDescriptors: readonly SubagentDescriptor[] = []
-  #subagentStates = new Map<string, RottweilerState>()
+  #activeChildState: RottweilerState | null = null
+  #historicalChild: { readonly sessionId: string; readonly task: string } | null = null
   #activeSubagentReadOnly = false
   #parentComposerDraft: ComposerDraft = { content: "", attachments: [] }
   #subagentComposerDrafts = new Map<string, ComposerDraft>()
@@ -557,6 +555,14 @@ export class RottweilerApp extends BoxRenderable {
     })
   }
   #onGlobalKey = (key: KeyEvent) => {
+    if (this.outputViewer.visible && this.#document?.snapshot.open
+      && !key.ctrl && !key.meta && !key.shift && (key.name === "left" || key.name === "right")) {
+      if (key.name === "left") void this.#document.previous()
+      else void this.#document.next()
+      key.preventDefault()
+      key.stopPropagation()
+      return
+    }
     this.#pendingClientState = null
     const focusOwner = this.#visibleFocusOwner()
     const plainEscape = keyStrokeFromEvent(key) === "escape"
@@ -565,7 +571,7 @@ export class RottweilerApp extends BoxRenderable {
       plainEscape &&
       this.#activeSubagentId !== null &&
       !this.#pickerVisible() &&
-      this.#outputViewerToolCallId === null &&
+      !this.outputViewer.visible &&
       !this.#reviewOpen
     ) {
       if (this.#keybindings.preset === "vim" && this.#inputMode === "insert") {
@@ -585,7 +591,7 @@ export class RottweilerApp extends BoxRenderable {
     if (
       plainEscape &&
       !this.#pickerVisible() &&
-      this.#outputViewerToolCallId === null &&
+      !this.outputViewer.visible &&
       !this.#reviewOpen &&
       this.#isInterruptible()
     ) {
@@ -606,7 +612,7 @@ export class RottweilerApp extends BoxRenderable {
     if (
       focusOwner === "composer" &&
       !this.#pickerVisible() &&
-      this.#outputViewerToolCallId === null &&
+      !this.outputViewer.visible &&
       !this.#reviewOpen &&
       !key.ctrl &&
       !key.meta &&
@@ -691,7 +697,7 @@ export class RottweilerApp extends BoxRenderable {
     }
   }
 
-  constructor(ctx: RenderContext, options: RottweilerAppOptions = {}) {
+  constructor(ctx: RenderContext, options: RottweilerAppOptions) {
     const theme = options.theme ?? kennelTheme
     super(ctx, {
       id: "rottweiler-app",
@@ -712,6 +718,15 @@ export class RottweilerApp extends BoxRenderable {
       externalUrl: options.externalUrl ?? noExternalUrl,
       textClipboard: options.textClipboard ?? noTextClipboard,
     }
+    this.#history = new HistoryPresentation(options.historyReader, snapshot => {
+      if (!this.#destroyed && this.transcript !== undefined) this.transcript.setHistory(snapshot)
+    })
+    this.#document = new DocumentController(options.historyReader, this.#history.controller.cache, snapshot => {
+        if (!this.#destroyed && this.outputViewer !== undefined) {
+          if (snapshot.open) this.outputViewer.showDocument(snapshot)
+          else this.outputViewer.closePresentation()
+        }
+      })
     this.#projectionRequests = new ProjectionRequestBroker({
       clientId: () => this.#options.clientId,
       sessionId: () => this.#sessionId,
@@ -891,6 +906,32 @@ export class RottweilerApp extends BoxRenderable {
       onOpenSubagent: (subagentId) => {
         void this.#enterSubagent(subagentId)
       },
+      onOpenChild: child => {
+        if (this.#subagentDescriptor(child.subagent_id)?.child_session_id === child.session_id) {
+          void this.#enterSubagent(child.subagent_id)
+          return
+        }
+        this.#saveComposerDraft()
+        this.#historicalChild = { sessionId: child.session_id, task: boundedUiText(child.task.text, 512) }
+        this.#activeSubagentId = child.subagent_id
+        this.#activeChildState = createInitialState()
+        this.#restoreComposerDraft(child.subagent_id)
+        this.setState(this.#state)
+        this.#focusForInputMode()
+      },
+      onOpenContent: source => {
+        const view = this.#history?.controller.snapshot.page?.view
+        if (view === undefined || this.#document === null) return
+        this.#outputViewerToolCallId = null
+        void this.#document.open(view, source)
+        this.setState(this.#state)
+        this.outputViewer.focusPresentation()
+      },
+      onHistoryAnchor: anchor => this.#history.controller.setAnchor(anchor),
+      onHistorySeek: ordinal => { void this.#history?.controller.seek(ordinal) },
+      onHistoryAround: item => { void this.#history?.controller.around(item) },
+      onHistoryBoundary: boundary => { void this.#history?.controller.load({ type: boundary }) },
+      onHistoryFollowing: following => this.#history?.controller.setFollowing(following),
       onOpenToolOutput: (toolCallId) => this.#openToolOutput(toolCallId),
     })
     this.toolsWorkspace = new ToolsWorkspaceRenderable(this.ctx, theme, {
@@ -1155,9 +1196,9 @@ export class RottweilerApp extends BoxRenderable {
     if (sessionId !== this.#sessionId) {
       this.#projectionRequests.clearForSessionChange()
       this.#subagentListError = null
-      this.#subagentReplays.clear()
       this.#subagentDescriptors = []
-      this.#subagentStates.clear()
+      this.#activeChildState = null
+      this.#historicalChild = null
       this.#parentComposerDraft = { content: "", attachments: [] }
       this.#subagentComposerDrafts.clear()
       this.#activeSubagentId = null
@@ -1199,6 +1240,11 @@ export class RottweilerApp extends BoxRenderable {
 
   handleEvent(event: WireEngineEvent): void {
     if (this.#destroyed) return
+    if (durableSequenceId(event) !== null && "meta" in event && isRecord(event.meta)
+      && typeof event.meta.session_id === "string") this.#history?.invalidate(event.meta.session_id)
+    if (event.type === "session_history_ready" || event.type === "session_replay_completed") {
+      this.#history?.invalidate(this.#sessionId)
+    }
     const eventRecord = event as unknown as Record<string, unknown>
     const commandRequestId =
       isRecord(eventRecord.meta) && typeof eventRecord.meta.request_id === "string"
@@ -1218,51 +1264,9 @@ export class RottweilerApp extends BoxRenderable {
         .filter((descriptor): descriptor is SubagentDescriptor => descriptor !== null)
       if (
         this.#activeSubagentId !== null &&
-        this.#subagentDescriptor(this.#activeSubagentId) === undefined
+        this.#subagentDescriptor(this.#activeSubagentId) === undefined && this.#historicalChild === null
       ) this.#leaveSubagent()
       else this.setState(this.#state)
-      return
-    }
-    if (event.type === "subagent_replay_batch") {
-      const replay = event as Extract<EngineEvent, { type: "subagent_replay_batch" }>
-      if (replay.session_id !== this.#sessionId) return
-      if (commandRequestId === null) return
-      const events = replay.events.flatMap((item) => {
-        const childEvent = childEngineEvent(item.event, replay.child_session_id)
-        return childEvent === null
-          ? []
-          : [{
-              sequence: item.child_sequence,
-              eventSequence: durableSequenceId(childEvent),
-              event: childEvent,
-            }]
-      })
-      this.#transitionSubagentReplay(replay.subagent_id, {
-        type: "replayBatch",
-        requestId: commandRequestId,
-        childSessionId: replay.child_session_id,
-        events,
-      })
-      return
-    }
-    if (event.type === "subagent_replay_completed") {
-      const completed = event as Extract<EngineEvent, { type: "subagent_replay_completed" }>
-      if (completed.session_id !== this.#sessionId) return
-      if (commandRequestId === null) return
-      const descriptor = this.#subagentDescriptor(completed.subagent_id)
-      if (descriptor === undefined) return
-      this.#transitionSubagentReplay(completed.subagent_id, {
-        type: "replayCompleted",
-        requestId: commandRequestId,
-        childSessionId: descriptor.child_session_id,
-        throughSequence: completed.through_sequence ?? null,
-        nextCursor: completed.next_cursor ?? null,
-        tailSequence: completed.tail_sequence ?? null,
-        hasMore: completed.has_more,
-        eventsBeforePage: completed.events_before_page,
-        truncated: completed.truncated,
-      })
-      if (this.#activeSubagentId === completed.subagent_id) this.setState(this.#state)
       return
     }
     if (event.type === "subagent_progress") {
@@ -1272,14 +1276,8 @@ export class RottweilerApp extends BoxRenderable {
       if (descriptor === undefined || descriptor.child_session_id !== progress.child_session_id) return
       const childEvent = childEngineEvent(progress.event, progress.child_session_id)
       if (childEvent !== null) {
-        this.#transitionSubagentReplay(progress.subagent_id, {
-          type: "liveProgress",
-          childSessionId: progress.child_session_id,
-          childSequence: progress.child_sequence ?? null,
-          eventSequence: durableSequenceId(childEvent),
-          event: childEvent,
-          bytes: wireEventBytes(progress),
-        })
+        this.#history?.invalidate(progress.child_session_id)
+        if (this.#activeSubagentId === progress.subagent_id) this.#applySubagentEvent(progress.subagent_id, childEvent)
       }
       const existing = this.#state.subagents[progress.subagent_id]
       if (existing === undefined || existing.childSessionId !== progress.child_session_id) return
@@ -1811,7 +1809,7 @@ export class RottweilerApp extends BoxRenderable {
   applyPendingRecycleScroll(): void {
     const state = this.#pendingClientState
     if (state === null) return
-    const transcriptReady = state.scrollTop === 0 || this.#presentedState().transcript.length > 0
+    const transcriptReady = state.scrollTop === 0 || this.transcript.mountedEntryCount > 0
     if (state.tools.expanded.length > 0 || state.tools.selectedId !== null || state.toolsScrollTop > 0) {
       this.#updateToolsWorkspace(this.#presentedState(), true)
     }
@@ -1867,6 +1865,10 @@ export class RottweilerApp extends BoxRenderable {
       presented,
       viewingSubagent ? childDescriptor?.agent || "Child agent" : "Rottweiler",
     )
+    if (this.#history !== null) {
+      this.#history.present(childDescriptor?.child_session_id ?? this.#historicalChild?.sessionId ?? this.#sessionId)
+      this.transcript.setHistory(this.#history.controller.snapshot)
+    }
     this.#updateToolsWorkspace(presented)
     const viewedTool = this.#outputViewerToolCallId === null
       ? undefined
@@ -1896,12 +1898,12 @@ export class RottweilerApp extends BoxRenderable {
     this.composer.setQueuedMessages(
       viewingSubagent || this.#primaryView === "tools" ? [] : state.queuedMessages,
     )
-    const subagentReadOnly = this.#isActiveSubagentRunning()
+    const subagentReadOnly = this.#historicalChild !== null || this.#isActiveSubagentRunning()
     const subagentBecameWritable = this.#activeSubagentReadOnly && !subagentReadOnly
     this.#activeSubagentReadOnly = subagentReadOnly
     const composerVisible =
       !state.replay.active &&
-      this.#outputViewerToolCallId === null &&
+      !this.outputViewer.visible &&
       !subagentReadOnly &&
       (!this.interactionPanel.visible || this.interactionPanel.usesComposer)
     if (!composerVisible) this.composer.editor.blur()
@@ -1950,14 +1952,10 @@ export class RottweilerApp extends BoxRenderable {
     if (this.#pickerController.kind !== null) {
       this.#pickerController.refresh()
     }
-    if (
-      (state.connection.phase === "reconnecting" || state.connection.phase === "disconnected") &&
-      state.connection.phase !== previousConnectionPhase
-    ) this.#markSubagentReplayTransportLost()
-    else if (
-      state.connection.phase === "connected" &&
-      (previousConnectionPhase === "reconnecting" || previousConnectionPhase === "disconnected")
-    ) this.#recoverSubagentReplays()
+    if (state.connection.phase === "connected" && previousConnectionPhase !== "connected") {
+      this.#history?.invalidate(childDescriptor?.child_session_id ?? this.#historicalChild?.sessionId ?? this.#sessionId)
+    }
+
   }
 
   openCommandPicker(): void {
@@ -2692,6 +2690,7 @@ export class RottweilerApp extends BoxRenderable {
   #openToolOutput(toolCallId: string): void {
     const tool = this.#presentedState().tools[toolCallId]
     if (tool === undefined) return
+    this.#document?.close()
     this.#outputViewerToolCallId = toolCallId
     this.outputViewer.open(tool)
     this.setState(this.#state)
@@ -2798,6 +2797,8 @@ export class RottweilerApp extends BoxRenderable {
   override destroy(): void {
     if (this.#destroyed) return
     this.#destroyed = true
+    this.#document?.close()
+    this.#history?.dispose()
     this.#presentation.destroy()
     this.#clearPendingShellTimer()
     this.#clearPluginNotificationTimer()
@@ -2852,18 +2853,18 @@ export class RottweilerApp extends BoxRenderable {
 
   #keybindingContext(): KeybindingContext {
     if (this.#keybindings.preset === "standard") {
-      return this.#outputViewerToolCallId !== null || this.#reviewOpen ? "review" : "standard"
+      return this.outputViewer.visible || this.#reviewOpen ? "review" : "standard"
     }
     if (this.#modalPickerVisible()) {
       return this.#inputMode === "insert" ? "picker_insert" : "picker_normal"
     }
-    if (this.#outputViewerToolCallId !== null || this.#reviewOpen) return "review"
+    if (this.outputViewer.visible || this.#reviewOpen) return "review"
     return this.#inputMode === "insert" ? "vim_insert" : "vim_normal"
   }
 
   #handleKeybindingAction(action: KeybindingAction): boolean {
     if (action === "close_overlay") {
-      if (this.#outputViewerToolCallId !== null) {
+      if (this.outputViewer.visible) {
         this.#closeOutputViewer()
         return true
       }
@@ -2937,7 +2938,7 @@ export class RottweilerApp extends BoxRenderable {
       case "open_external_editor":
         if (
           this.#pickerVisible() ||
-          this.#outputViewerToolCallId !== null ||
+          this.outputViewer.visible ||
           this.#reviewOpen
         ) return false
         void this.composer.openExternalEditor()
@@ -5132,106 +5133,20 @@ export class RottweilerApp extends BoxRenderable {
     if (descriptor === undefined) return
     this.#saveComposerDraft()
     this.#activeSubagentId = subagentId
+    this.#historicalChild = null
     this.#restoreComposerDraft(subagentId)
     this.#subagentErrorBaseline = this.#state.errors.at(-1)
-    if (!this.#subagentStates.has(subagentId)) {
-      this.#subagentStates.set(subagentId, initialSubagentState(this.#state, descriptor))
-    }
+    this.#activeChildState = initialSubagentState(this.#state, descriptor)
     this.setState(this.#state)
-    const effects = this.#transitionSubagentReplay(subagentId, {
-      type: "enter",
-      childSessionId: descriptor.child_session_id,
-    })
-    if (effects.some((effect) => effect.type === "resetProjection")) this.setState(this.#state)
     this.#focusForInputMode()
-  }
-
-  async #requestSubagentReplayPage(
-    subagentId: string,
-    afterSequence: string | null,
-  ): Promise<void> {
-    const meta = this.#projectionRequests.meta()
-    this.#transitionSubagentReplay(subagentId, {
-      type: "requestIssued",
-      requestId: meta.request_id,
-      afterSequence,
-    })
-    try {
-      const outcome = await this.#projectionRequests.emit({
-        type: "replay_subagent",
-        meta,
-        session_id: this.#sessionId,
-        subagent_id: subagentId,
-        after_sequence: afterSequence,
-      })
-      if (outcome?.type === "rejected") {
-        const effects = this.#transitionSubagentReplay(subagentId, {
-          type: "rejected",
-          requestId: meta.request_id,
-          failure: "rejected",
-        })
-        if (effects.some((effect) => effect.type === "replayFailed")) this.#projectRejection(outcome)
-      } else if (outcome == null) {
-        const effects = this.#transitionSubagentReplay(subagentId, {
-          type: "rejected",
-          requestId: meta.request_id,
-          failure: "unavailable",
-        })
-        if (effects.some((effect) => effect.type === "replayFailed")) {
-          const presentation = presentError({
-            category: "protocol",
-            code: "subagent_replay_unavailable",
-            message: "Couldn't load the child transcript because the engine connection is unavailable.",
-            requestId: meta.request_id,
-          })
-          this.#projectClientError(
-            "subagent_replay_unavailable",
-            presentation.text,
-            true,
-          )
-        }
-      }
-    } catch (error) {
-      const effects = this.#transitionSubagentReplay(subagentId, {
-        type: "rejected",
-        requestId: meta.request_id,
-        failure: "exception",
-      })
-      if (effects.some((effect) => effect.type === "replayFailed")) {
-        this.#projectClientError(
-          "subagent_replay_failed",
-          presentError({
-            category: "protocol",
-            code: "subagent_replay_failed",
-            message: safeErrorMessage(error),
-            requestId: meta.request_id,
-          }).text,
-          true,
-        )
-      }
-    }
-  }
-
-  #markSubagentReplayTransportLost(): void {
-    for (const subagentId of this.#subagentReplays.keys()) {
-      this.#transitionSubagentReplay(subagentId, { type: "transportLost" })
-    }
-  }
-
-  #recoverSubagentReplays(): void {
-    for (const subagentId of [...this.#subagentReplays.keys()]) {
-      if (this.#subagentDescriptor(subagentId) === undefined) {
-        this.#subagentReplays.delete(subagentId)
-        continue
-      }
-      this.#transitionSubagentReplay(subagentId, { type: "reconnected" })
-    }
   }
 
   #leaveSubagent(): void {
     if (this.#activeSubagentId === null) return
     this.#saveComposerDraft()
     this.#activeSubagentId = null
+    this.#historicalChild = null
+    this.#activeChildState = null
     this.#restoreComposerDraft(null)
     this.#subagentActionId = null
     this.#subagentErrorBaseline = undefined
@@ -5277,54 +5192,13 @@ export class RottweilerApp extends BoxRenderable {
   #applySubagentEvent(subagentId: string, event: WireEngineEvent): void {
     const descriptor = this.#subagentDescriptor(subagentId)
     if (descriptor === undefined) return
-    const previous = this.#subagentStates.get(subagentId) ?? initialSubagentState(this.#state, descriptor)
+    const previous = this.#activeChildState ?? initialSubagentState(this.#state, descriptor)
     const next = boundSubagentState(reduceRottweilerState(previous, engineEvent(event)))
-    this.#subagentStates.set(subagentId, next)
+    this.#activeChildState = next
     this.#subagentErrorBaseline = this.#state.errors.at(-1)
     if (event.type === "turn_finished") this.#setSubagentActivity(subagentId, "idle")
     else if (event.type === "turn_started") this.#setSubagentActivity(subagentId, "running")
     this.#presentation.markDirty(deferPresentationForEvent(event))
-  }
-
-  #transitionSubagentReplay(
-    subagentId: string,
-    input: SubagentReplayInput<WireEngineEvent>,
-  ): readonly SubagentReplayEffect<WireEngineEvent>[] {
-    const descriptor = this.#subagentDescriptor(subagentId)
-    const current = this.#subagentReplays.get(subagentId) ?? createSubagentReplayState(
-      descriptor?.child_session_id ?? "",
-      this.#lastAppliedSubagentSequence(subagentId),
-    )
-    const transition = transitionSubagentReplay(current, input)
-    this.#subagentReplays.set(subagentId, transition.state)
-    for (const effect of transition.effects) {
-      switch (effect.type) {
-        case "requestPage":
-          void this.#requestSubagentReplayPage(subagentId, effect.afterSequence)
-          break
-        case "applyEvents":
-        case "drainBuffer":
-          for (const event of effect.events) this.#applySubagentEvent(subagentId, event)
-          break
-        case "resetProjection":
-          if (descriptor !== undefined) {
-            this.#subagentStates.set(subagentId, initialSubagentState(this.#state, descriptor))
-          }
-          break
-        case "noticeRestart":
-          this.#projectClientError("subagent_replay_gap", effect.reason, true)
-          break
-        case "bufferProgress":
-        case "replayFailed":
-        case "none":
-          break
-      }
-    }
-    return transition.effects
-  }
-
-  #lastAppliedSubagentSequence(subagentId: string): string | null {
-    return this.#subagentStates.get(subagentId)?.lastSequence ?? null
   }
 
   #subagentDescriptor(subagentId: string): SubagentDescriptor | undefined {
@@ -5344,19 +5218,24 @@ export class RottweilerApp extends BoxRenderable {
 
   #presentedState(): RottweilerState {
     if (this.#activeSubagentId === null) return this.#state
+    if (this.#activeChildState !== null) return this.#activeChildState
     const descriptor = this.#subagentDescriptor(this.#activeSubagentId)
     if (descriptor === undefined) return this.#state
-    return this.#subagentStates.get(this.#activeSubagentId) ?? initialSubagentState(this.#state, descriptor)
+    return this.#activeChildState ?? initialSubagentState(this.#state, descriptor)
   }
 
   #updateSubagentBanner(state: RottweilerState): void {
     if (this.#activeSubagentId === null) return
+    if (this.#historicalChild !== null) {
+      this.banner.visible = true
+      this.banner.content = `Child transcript · ${this.#historicalChild.task} · Esc parent`
+      return
+    }
     const descriptor = this.#subagentDescriptor(this.#activeSubagentId)
     if (descriptor === undefined) return
     const approval = Object.values(state.tools).some((tool) => tool.status === "awaiting_approval")
-    const replay = this.#subagentReplays.get(this.#activeSubagentId)
-    const replaying = replay?.status === "replaying"
-    const retainedHistory = replay?.historyTruncatedAt
+    const history = this.#history?.controller.snapshot
+    const replaying = history?.loading ?? false
     const latestError = this.#state.errors.at(-1)
     const hasErrorContext = latestError !== undefined && latestError !== this.#subagentErrorBaseline
     const projection = this.#state.subagents[this.#activeSubagentId] ?? Object.values(
@@ -5387,9 +5266,7 @@ export class RottweilerApp extends BoxRenderable {
       : null
     const context = errorPresentation !== null
       ? errorPresentation.text
-      : retainedHistory !== undefined && !replaying
-        ? `recent activity · ${retainedHistory} earlier events retained`
-        : null
+      : history?.error ?? null
     this.banner.visible = true
     this.banner.fg = errorPresentation !== null
       ? this.#theme[errorPresentation.severity]
@@ -5490,9 +5367,6 @@ export class RottweilerApp extends BoxRenderable {
     this.#subagentDescriptors = this.#subagentDescriptors.filter(
       (subagent) => subagent.subagent_id !== subagentId,
     )
-    this.#transitionSubagentReplay(subagentId, { type: "close" })
-    this.#subagentReplays.delete(subagentId)
-    this.#subagentStates.delete(subagentId)
     this.#subagentComposerDrafts.delete(subagentId)
     this.setState(this.#state)
     this.#requestSubagents()
@@ -6053,7 +5927,8 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #closeOutputViewer(): void {
-    if (this.#outputViewerToolCallId === null) return
+    if (!this.outputViewer.visible) return
+    this.#document?.close()
     this.#outputViewerToolCallId = null
     this.outputViewer.closePresentation()
     this.setState(this.#state)
@@ -6416,12 +6291,11 @@ const IMMEDIATE_PRESENTATION_EVENTS = new Set<WireEngineEvent["type"]>([
   "session_review_updated",
   "prompt_dump_ready",
   "session_replay_completed",
+  "session_history_ready",
   "session_forked",
   "session_exported",
   "sessions_listed",
   "subagents_listed",
-  "subagent_replay_batch",
-  "subagent_replay_completed",
   "command_descriptors_listed",
   "models_listed",
   "modes_listed",
@@ -6494,7 +6368,7 @@ export function deferPresentationForEvent(
 /** Build the retained OpenTUI application tree. */
 export function createRottweilerApp(
   renderer: RenderContext,
-  options: RottweilerAppOptions = {},
+  options: RottweilerAppOptions,
 ): RottweilerApp {
   return new RottweilerApp(renderer, options)
 }

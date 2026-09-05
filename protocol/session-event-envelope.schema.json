@@ -81,8 +81,6 @@
                   "sessions_listed",
                   "sessions_search_ready",
                   "settings_listed",
-                  "subagent_replay_batch",
-                  "subagent_replay_completed",
                   "subagents_listed",
                   "transcript_content_ready",
                   "transcript_page_ready",

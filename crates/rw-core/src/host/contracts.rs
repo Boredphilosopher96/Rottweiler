@@ -4,8 +4,8 @@ use super::{
     McpServerDescriptor, ModelAlias, ModelCatalogSnapshot, Pin, ProviderApiKey,
     ProviderAuthChallenge, RequestId, RuntimeServiceDescriptor, RwLock, SequenceId,
     SessionDescriptor, SessionHandle, SessionId, SubagentDescriptor, SubagentId, TranscriptFormat,
-    TurnId, Value, WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceStatus,
-    async_trait, fmt,
+    TurnId, WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceStatus, async_trait,
+    fmt,
 };
 
 /// Transport-authenticated client identity. The host overwrites every
@@ -468,19 +468,6 @@ pub trait HostRuntimeService: Send + Sync + 'static {
     async fn list(&self) -> Result<Vec<RuntimeServiceDescriptor>, HostError>;
 }
 
-/// One bounded, validated child-log replay owned by a parent session.
-#[derive(Clone, Debug, PartialEq)]
-pub struct SubagentReplay {
-    pub child_session_id: SessionId,
-    pub events: Vec<(SequenceId, Value)>,
-    pub through_sequence: Option<SequenceId>,
-    pub next_cursor: Option<SequenceId>,
-    pub tail_sequence: Option<SequenceId>,
-    pub has_more: bool,
-    pub events_before_page: u64,
-    pub truncated: bool,
-}
-
 /// Session-scoped child-agent control. Implementations must enforce exact
 /// parent ownership and must never expose a child as a generic hosted session.
 #[async_trait]
@@ -489,13 +476,6 @@ pub trait HostSubagentService: Send + Sync + 'static {
         &self,
         parent_session_id: &SessionId,
     ) -> Result<Vec<SubagentDescriptor>, HostError>;
-
-    async fn replay(
-        &self,
-        parent_session_id: &SessionId,
-        subagent_id: &SubagentId,
-        after_sequence: Option<SequenceId>,
-    ) -> Result<SubagentReplay, HostError>;
 
     async fn continue_child(
         &self,

@@ -1,0 +1,55 @@
+import { HistoryController, type HistorySnapshot } from "./controller"
+import type { HistoryReader } from "./reader"
+
+/** Coalesce source invalidations without cancelling a page read that is making progress. */
+export class HistoryPresentation {
+  readonly controller: HistoryController
+  readonly #changed: (snapshot: HistorySnapshot) => void
+  #dirty = false
+  #timer: ReturnType<typeof setTimeout> | null = null
+  #disposed = false
+  #nextReadAt = 0
+
+  constructor(reader: HistoryReader, changed: (snapshot: HistorySnapshot) => void) {
+    this.#changed = changed
+    this.controller = new HistoryController(reader, () => {
+      this.#changed(this.controller.snapshot)
+      this.#schedule()
+    })
+  }
+
+  present(sessionId: string): void {
+    if (this.#disposed || this.controller.snapshot.sessionId === sessionId) return
+    this.#dirty = false
+    this.#clearTimer()
+    this.#nextReadAt = performance.now() + 100
+    void this.controller.open(sessionId)
+  }
+
+  invalidate(sessionId: string): void {
+    if (this.#disposed || this.controller.snapshot.sessionId !== sessionId) return
+    this.#dirty = true
+    this.#schedule()
+  }
+
+  dispose(): void {
+    this.#disposed = true
+    this.#clearTimer()
+    this.controller.dispose()
+  }
+
+  #schedule(): void {
+    if (this.#disposed || !this.#dirty || this.#timer !== null || this.controller.snapshot.loading) return
+    this.#timer = setTimeout(() => {
+      this.#timer = null
+      this.#dirty = false
+      this.#nextReadAt = performance.now() + 100
+      void this.controller.refresh()
+    }, Math.max(0, this.#nextReadAt - performance.now()))
+  }
+
+  #clearTimer(): void {
+    if (this.#timer !== null) clearTimeout(this.#timer)
+    this.#timer = null
+  }
+}

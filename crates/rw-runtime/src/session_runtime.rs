@@ -40,7 +40,7 @@ use rw_core::{
     SESSION_EVENT_VERSION, SequenceId, SessionActor, SessionActorConfig, SessionCommandAction,
     SessionCommandContext, SessionCommandOutput, SessionEventReadView, SessionEventSink,
     SessionReplayLimits, SpawnAgentTool, StartupNotification, SubagentLimits,
-    SubagentMetadataStore, SubagentObserver, SubagentOrchestrator, SubagentReplay,
+    SubagentMetadataStore, SubagentObserver, SubagentOrchestrator,
     SubagentSessionFactory, SystemEventClock, ToolOutputStream, TurnStatus, Usage,
     WorktreeSubagentSessionFactory, base_agent_system_turn, builtin_command_registry,
     builtin_hook_dispatcher, load_instruction_stack, load_nested_instruction_stack,
@@ -947,17 +947,11 @@ pub(crate) struct HostedActorRuntime {
     pub shell_active: bool,
 }
 
-const MAX_SUBAGENT_REPLAY_PAGE_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_SUBAGENT_REPLAY_PAGE_EVENTS: usize = 16_000;
-const MAX_SUBAGENT_REPLAY_LINE_BYTES: usize = 16 * 1024 * 1024;
-const MAX_SUBAGENT_REPLAY_SCAN_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_SUBAGENT_REPLAY_SCAN_EVENTS: u64 = 1_000_000;
 const SUBAGENT_PROGRESS_QUEUE_CAPACITY: usize = 512;
 const SUBAGENT_PROGRESS_BATCH_EVENTS: usize = 64;
 const SUBAGENT_PROGRESS_BATCH_INTERVAL: Duration = Duration::from_millis(8);
 
 struct HostedSubagentController {
-    journal_reads: Arc<JournalReads>,
     parent: rw_core::SessionHandle,
     orchestrator: SubagentOrchestrator,
 }
@@ -1062,90 +1056,6 @@ async fn forward_subagent_progress(
     }
 }
 
-fn load_bounded_subagent_replay(
-    journal_reads: &JournalReads,
-    child_session_id: &SessionId,
-    after_sequence: Option<SequenceId>,
-) -> Result<SubagentReplay, HostError> {
-    let limits = SessionEventPageLimits {
-        max_page_bytes: MAX_SUBAGENT_REPLAY_PAGE_BYTES,
-        max_page_events: MAX_SUBAGENT_REPLAY_PAGE_EVENTS,
-        max_line_bytes: MAX_SUBAGENT_REPLAY_LINE_BYTES,
-        max_scan_bytes: MAX_SUBAGENT_REPLAY_SCAN_BYTES,
-        max_scan_events: MAX_SUBAGENT_REPLAY_SCAN_EVENTS,
-    };
-    let lease = journal_reads
-        .capture(&child_session_id.0)
-        .map_err(|_| HostError::Persistence("child session replay is unavailable".to_owned()))?;
-    let page = if let Some(after_sequence) = after_sequence {
-        lease.view.page::<EngineEvent>(Some(after_sequence), limits)
-    } else {
-        lease.view.tail_page::<EngineEvent>(limits)
-    }
-    .map_err(|_| HostError::Persistence("child session replay is unavailable".to_owned()))?;
-    let through_sequence = page.events.last().map(|envelope| envelope.sequence);
-    let mut events = Vec::with_capacity(page.events.len());
-    for envelope in page.events {
-        let meta = envelope.event.meta().ok_or_else(|| {
-            HostError::Persistence("child session log contains a transient event".to_owned())
-        })?;
-        if meta.session_id != *child_session_id || meta.sequence_id != envelope.sequence {
-            return Err(HostError::Persistence(
-                "child session replay identity is invalid".to_owned(),
-            ));
-        }
-        if after_sequence.is_some_and(|after| envelope.sequence.0 <= after.0) {
-            continue;
-        }
-        let event = serde_json::to_value(envelope.event).map_err(|_| {
-            HostError::Persistence("child session replay could not serialize".to_owned())
-        })?;
-        events.push((envelope.sequence, event));
-    }
-    Ok(SubagentReplay {
-        child_session_id: child_session_id.clone(),
-        events,
-        through_sequence,
-        next_cursor: page.next_cursor,
-        tail_sequence: page.tail_sequence,
-        has_more: page.has_more,
-        events_before_page: page.events_before_page,
-        truncated: page.events_before_page
-            > after_sequence.map_or(0, |cursor| cursor.0.saturating_add(1))
-            || page.has_more,
-    })
-}
-
-async fn load_bounded_subagent_replay_retry(
-    journal_reads: &Arc<JournalReads>,
-    child_session_id: &SessionId,
-    after_sequence: Option<SequenceId>,
-) -> Result<SubagentReplay, HostError> {
-    const READY_TIMEOUT: Duration = Duration::from_secs(2);
-    let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
-    let mut delay = Duration::from_millis(10);
-    loop {
-        let reads = Arc::clone(journal_reads);
-        let child = child_session_id.clone();
-        let replay = tokio::task::spawn_blocking(move || {
-            load_bounded_subagent_replay(&reads, &child, after_sequence)
-        })
-        .await
-        .map_err(|_| HostError::Persistence("child journal reader failed".to_owned()))?;
-        match replay {
-            Ok(replay) => return Ok(replay),
-            Err(HostError::Persistence(message))
-                if message == "child session replay is unavailable"
-                    && tokio::time::Instant::now() < deadline =>
-            {
-                tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(Duration::from_millis(100));
-            }
-            Err(error) => return Err(error),
-        }
-    }
-}
-
 #[async_trait]
 impl SubagentObserver for HostedSubagentObserver {
     async fn spawned(
@@ -1206,25 +1116,6 @@ impl HostSubagentService for HostedSubagentController {
     ) -> Result<Vec<rw_core::SubagentDescriptor>, HostError> {
         self.ensure_parent(parent_session_id)?;
         Ok(self.orchestrator.list_for_parent(parent_session_id))
-    }
-
-    async fn replay(
-        &self,
-        parent_session_id: &SessionId,
-        subagent_id: &rw_core::SubagentId,
-        after_sequence: Option<SequenceId>,
-    ) -> Result<SubagentReplay, HostError> {
-        self.ensure_parent(parent_session_id)?;
-        let descriptor = self
-            .orchestrator
-            .descriptor_for_parent(parent_session_id, subagent_id)
-            .map_err(|error| HostError::Protocol(error.to_string()))?;
-        load_bounded_subagent_replay_retry(
-            &self.journal_reads,
-            &descriptor.child_session_id,
-            after_sequence,
-        )
-        .await
     }
 
     async fn continue_child(
@@ -3119,7 +3010,6 @@ pub(crate) async fn compose_hosted_actor(
         plugins.bind_push(&handle)?;
     }
     let subagents: Arc<dyn HostSubagentService> = Arc::new(HostedSubagentController {
-        journal_reads: Arc::clone(&options.journal_reads),
         parent: handle.clone(),
         orchestrator,
     });
@@ -12773,82 +12663,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn subagent_replay_is_cursor_bounded_and_validates_child_identity() {
-        let storage = TempDir::new().expect("storage");
-        let child = SessionId("child-replay".to_owned());
-        let mut log = SessionEventLog::open(storage.path(), &child.0).expect("child log");
-        for sequence in 0..=1 {
-            log.append(EngineEvent::SessionCreated {
-                meta: EventMeta {
-                    protocol_version: SESSION_EVENT_VERSION,
-                    session_id: child.clone(),
-                    sequence_id: SequenceId(sequence),
-                    emitted_at: "2026-01-01T00:00:00Z".to_owned(),
-                    caused_by: None,
-                },
-                driver_client_id: rw_core::ClientId("child-driver".to_owned()),
-            })
-            .expect("append child event");
-        }
-        drop(log);
-
-        let replay = load_bounded_subagent_replay(
-            &JournalReads::new(storage.path()).expect("journal reads"),
-            &child,
-            Some(SequenceId(0)),
-        )
-        .expect("bounded replay");
-        assert_eq!(replay.child_session_id, child);
-        assert_eq!(replay.through_sequence, Some(SequenceId(1)));
-        assert_eq!(replay.next_cursor, Some(SequenceId(1)));
-        assert_eq!(replay.tail_sequence, Some(SequenceId(1)));
-        assert!(!replay.has_more);
-        assert_eq!(replay.events_before_page, 1);
-        assert!(!replay.truncated);
-        assert_eq!(replay.events.len(), 1);
-        assert_eq!(replay.events[0].0, SequenceId(1));
-
-        let at_tail = load_bounded_subagent_replay(
-            &JournalReads::new(storage.path()).expect("journal reads"),
-            &child,
-            Some(SequenceId(1)),
-        )
-        .expect("empty tail page");
-        assert!(at_tail.events.is_empty());
-        assert_eq!(at_tail.through_sequence, None);
-        assert_eq!(at_tail.next_cursor, Some(SequenceId(1)));
-        assert_eq!(at_tail.tail_sequence, Some(SequenceId(1)));
-        assert!(!at_tail.has_more);
-        assert_eq!(at_tail.events_before_page, 2);
-        assert!(!at_tail.truncated);
-
-        let invalid_storage = TempDir::new().expect("invalid storage");
-        let mut invalid =
-            SessionEventLog::open(invalid_storage.path(), &child.0).expect("invalid child log");
-        invalid
-            .append(EngineEvent::SessionCreated {
-                meta: EventMeta {
-                    protocol_version: SESSION_EVENT_VERSION,
-                    session_id: SessionId("foreign-child".to_owned()),
-                    sequence_id: SequenceId(0),
-                    emitted_at: "2026-01-01T00:00:00Z".to_owned(),
-                    caused_by: None,
-                },
-                driver_client_id: rw_core::ClientId("child-driver".to_owned()),
-            })
-            .expect("append invalid event");
-        drop(invalid);
-        assert!(
-            load_bounded_subagent_replay(
-                &JournalReads::new(invalid_storage.path()).expect("journal reads"),
-                &child,
-                None
-            )
-            .is_err()
-        );
-    }
-
     #[tokio::test]
     #[ignore = "manual long-session reattach benchmark"]
     async fn durable_event_sink_long_gap_metrics() {
@@ -12904,115 +12718,6 @@ mod tests {
             gap_elapsed.as_micros(),
             gap.len()
         );
-    }
-
-    #[tokio::test]
-    async fn subagent_replay_waits_for_a_delayed_durable_child_log() {
-        let storage = TempDir::new().expect("storage");
-        let root = storage.path().to_path_buf();
-        let child = SessionId("delayed-child-replay".to_owned());
-        let writer_child = child.clone();
-        let writer_root = root.clone();
-        let writer = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(40)).await;
-            let mut log = SessionEventLog::open(&writer_root, &writer_child.0).expect("child log");
-            log.append(EngineEvent::SessionCreated {
-                meta: EventMeta {
-                    protocol_version: SESSION_EVENT_VERSION,
-                    session_id: writer_child,
-                    sequence_id: SequenceId(0),
-                    emitted_at: "2026-01-01T00:00:00Z".to_owned(),
-                    caused_by: None,
-                },
-                driver_client_id: rw_core::ClientId("child-driver".to_owned()),
-            })
-            .expect("append child event");
-        });
-
-        let replay = load_bounded_subagent_replay_retry(
-            &JournalReads::new(&root).expect("journal reads"),
-            &child,
-            None,
-        )
-        .await
-        .expect("replay waits for log readiness");
-        writer.await.expect("writer");
-        assert_eq!(replay.events.len(), 1);
-        assert_eq!(replay.through_sequence, Some(SequenceId(0)));
-    }
-
-    #[test]
-    fn subagent_initial_tail_and_forward_pages_handle_large_child_logs() {
-        let storage = TempDir::new().expect("storage");
-        let child = SessionId("large-child-replay".to_owned());
-        let mut log = SessionEventLog::open(storage.path(), &child.0).expect("child log");
-        let payload = "x".repeat(420);
-        log.append_batch((0..20_050).map(|sequence| EngineEvent::UiNotification {
-            meta: EventMeta {
-                protocol_version: SESSION_EVENT_VERSION,
-                session_id: child.clone(),
-                sequence_id: SequenceId(sequence),
-                emitted_at: "2026-01-01T00:00:00Z".to_owned(),
-                caused_by: None,
-            },
-            plugin_id: "fixture".to_owned(),
-            title: sequence.to_string(),
-            message: payload.clone(),
-        }))
-        .expect("append large child history");
-        let log_bytes = log.read_view().total_bytes();
-        assert!(log_bytes > 8 * 1024 * 1024);
-        drop(log);
-
-        let initial = load_bounded_subagent_replay(
-            &JournalReads::new(storage.path()).expect("journal reads"),
-            &child,
-            None,
-        )
-        .expect("recent tail inspection");
-        assert_eq!(initial.tail_sequence, Some(SequenceId(20_049)));
-        assert_eq!(initial.through_sequence, Some(SequenceId(20_049)));
-        assert_eq!(initial.next_cursor, Some(SequenceId(20_049)));
-        assert!(!initial.has_more);
-        assert!(initial.events_before_page > 0);
-        assert!(initial.truncated);
-        assert!(initial.events.len() < 20_050);
-        assert_eq!(
-            initial.events.first().map(|(sequence, _)| *sequence),
-            Some(SequenceId(initial.events_before_page))
-        );
-
-        let mut cursor = Some(SequenceId(0));
-        let mut expected = 1_u64;
-        let mut pages = 0;
-        loop {
-            let page = load_bounded_subagent_replay(
-                &JournalReads::new(storage.path()).expect("journal reads"),
-                &child,
-                cursor,
-            )
-            .expect("forward replay page");
-            pages += 1;
-            assert_eq!(page.events_before_page, expected);
-            assert_eq!(page.tail_sequence, Some(SequenceId(20_049)));
-            for (sequence, _) in &page.events {
-                assert_eq!(*sequence, SequenceId(expected));
-                expected += 1;
-            }
-            assert_eq!(
-                page.through_sequence,
-                page.events.last().map(|(sequence, _)| *sequence)
-            );
-            assert_eq!(page.next_cursor, page.through_sequence.or(cursor));
-            if !page.has_more {
-                assert!(!page.truncated);
-                break;
-            }
-            assert!(page.truncated);
-            cursor = page.next_cursor;
-        }
-        assert!(pages > 1);
-        assert_eq!(expected, 20_050);
     }
 
     struct RejectMetadataRemove;

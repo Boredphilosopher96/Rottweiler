@@ -1,3 +1,4 @@
+import { emptyHistoryReader, historyReaderFor, conversationItem } from "../fixtures/history"
 import { createStreamingTail } from "../../src/state/model"
 import { afterAll, afterEach, describe, expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs"
@@ -90,19 +91,12 @@ describe("M4 executable TUI performance budgets", () => {
     mockTreeSitter.setMockResult({ highlights: [] })
     treeSitter = mockTreeSitter
     const payload = "x".repeat(1_018)
-    const transcript = Array.from({ length: 10_240 }, (_, index) => ({
-      sequenceId: String(index + 1),
-      agentTurn: String(index + 1),
-      turn: {
-        role: "assistant" as const,
-        blocks: [{ type: "text" as const, text: `${String(index).padStart(5, "0")} ${payload}` }],
-        meta: { synthetic: false, summary: false },
-      },
-    }))
-    expect(transcript.reduce((bytes, entry) => bytes + entry.turn.blocks.reduce((sum, block) => sum + Buffer.byteLength(block.text), 0), 0)).toBe(10 * 1_024 * 1_024)
+    const history = Array.from({ length: 10_240 }, (_, index) =>
+      conversationItem(index + 1, "assistant", `${String(index).padStart(5, "0")} ${payload}`))
+    expect(history.reduce((bytes, item) => bytes + (item.content.type === "conversation"
+      ? item.content.blocks.reduce((sum, block) => sum + (block.type === "text" ? Buffer.byteLength(block.body.text) : 0), 0) : 0), 0)).toBe(10 * 1_024 * 1_024)
     const base: RottweilerState = {
       ...createInitialState(),
-      transcript,
       streamingTail: createStreamingTail({
         turnId: "10241",
         text: "",
@@ -112,7 +106,7 @@ describe("M4 executable TUI performance budgets", () => {
         finished: null,
       }),
     }
-    const app = createRottweilerApp(renderer, {
+    const app = createRottweilerApp(renderer, { historyReader: historyReaderFor(history),
       initialState: base,
       treeSitterClient: mockTreeSitter,
     })
@@ -169,7 +163,7 @@ describe("M4 executable TUI performance budgets", () => {
       gatherStats: true,
     })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer)
+    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader })
     renderer.root.add(app)
     await setup.renderOnce()
     app.composer.focus()
@@ -227,19 +221,9 @@ describe("M4 executable TUI performance budgets", () => {
       gatherStats: true,
     })
     renderer = setup.renderer
-    const transcript = Array.from({ length: 40 }, (_, index) => ({
-      sequenceId: String(index + 1),
-      agentTurn: String(index + 1),
-      turn: {
-        role: "assistant" as const,
-        blocks: [{
-          type: "text" as const,
-          text: `Result ${index}\n\n\`\`\`typescript\nconst value${index} = ${index}\n\`\`\``,
-        }],
-        meta: { synthetic: false, summary: false },
-      },
-    }))
-    let state: RottweilerState = { ...createInitialState(), transcript }
+    const history = Array.from({ length: 40 }, (_, index) => conversationItem(index + 1, "assistant",
+      `Result ${index}\n\n\`\`\`typescript\nconst value${index} = ${index}\n\`\`\``))
+    let state: RottweilerState = createInitialState()
     const meta = (sequence: number) => ({
       protocol_version: PROTOCOL_VERSION,
       session_id: "tool-output-performance",
@@ -263,7 +247,7 @@ describe("M4 executable TUI performance budgets", () => {
         call_index: index,
       }))
     }
-    const app = createRottweilerApp(renderer, { initialState: state, treeSitterClient: treeSitter })
+    const app = createRottweilerApp(renderer, { historyReader: historyReaderFor(history), initialState: state, treeSitterClient: treeSitter })
     renderer.root.add(app)
     await setup.flush()
     expect(app.transcript.mountedEntryCount).toBe(16)
@@ -326,7 +310,7 @@ describe("M4 executable TUI performance budgets", () => {
         call_index: index,
       }))
     }
-    const app = createRottweilerApp(renderer, { initialState: state })
+    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader, initialState: state })
     renderer.root.add(app)
     app.showToolsView()
     await setup.renderOnce()
@@ -386,7 +370,7 @@ describe("M4 executable TUI performance budgets", () => {
       gatherStats: true,
     })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, { keybindings: { preset: "vim" } })
+    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader, keybindings: { preset: "vim" } })
     renderer.root.add(app)
     await setup.renderOnce()
     setup.mockInput.pressKey("i")

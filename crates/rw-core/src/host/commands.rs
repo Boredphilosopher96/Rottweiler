@@ -5,8 +5,8 @@ use super::{
     ProviderAuthOwner, SessionId, SessionSlot, ack_meta, bounded_provider_auth_prompt,
     cancel_provider_auth_attempts, ensure_session_driver, overlay_model_catalog_current,
     pending_provider_auth_id, provider_auth_attempt_id, remove_provider_auth_reservation,
-    sanitized_provider_auth_error, subagent_replay_batches, subagent_replay_completed,
-    validate_provider_auth_name, watch, wire_command_catalog, wire_mode_catalog,
+    sanitized_provider_auth_error, validate_provider_auth_name, watch, wire_command_catalog,
+    wire_mode_catalog,
 };
 
 impl EngineHost {
@@ -1047,42 +1047,6 @@ impl EngineHost {
                         subagents,
                     }],
                 ))
-            }
-            ClientCommand::ReplaySubagent {
-                meta,
-                session_id,
-                subagent_id,
-                after_sequence,
-            } => {
-                let session = self.ready_session(&session_id).await?;
-                let _lifecycle = Arc::clone(&session.lifecycle).lock_owned().await;
-                ensure_session_driver(&session, &meta.client_id).await?;
-                let replay = session
-                    .subagents()
-                    .ok_or_else(|| {
-                        HostError::Query(
-                            "child-agent control is unavailable for this session".to_owned(),
-                        )
-                    })?
-                    .replay(&session_id, &subagent_id, after_sequence)
-                    .await?;
-                let completion = subagent_replay_completed(
-                    &meta,
-                    &session_id,
-                    &subagent_id,
-                    &replay,
-                    &*self.clock,
-                );
-                let mut events = subagent_replay_batches(
-                    &meta,
-                    &session_id,
-                    &subagent_id,
-                    &replay.child_session_id,
-                    replay.events,
-                    &*self.clock,
-                );
-                events.push(completion);
-                Ok((CommandOutcome::Accepted, Some(session_id), events))
             }
             ClientCommand::ContinueSubagent {
                 meta,

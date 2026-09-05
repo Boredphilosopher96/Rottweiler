@@ -463,13 +463,13 @@ async fn main() -> Result<()> {
         }) => mcp_cli::login(&server, cli.dangerously_trust || dangerously_trust).await?,
         Some(Command::Replay { session, jsonl }) => {
             let storage_root = configuration_root_path()?;
-            let events = session_history::load_events(&storage_root, &session)?;
             if jsonl {
+                let events = session_history::load_events(&storage_root, &session)?;
                 io::stdout()
                     .write_all(&session_history::replay_jsonl(&events)?)
                     .into_diagnostic()?;
             } else {
-                run_history_replay(&storage_root, &session, events).await?;
+                run_history_replay(&storage_root, &session).await?;
             }
         }
         Some(Command::Export {

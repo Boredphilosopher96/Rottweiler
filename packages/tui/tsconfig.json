@@ -2,7 +2,9 @@
   "compilerOptions": {
     "allowImportingTsExtensions": true,
     "exactOptionalPropertyTypes": true,
-    "lib": ["ESNext"],
+    "lib": [
+      "ESNext"
+    ],
     "module": "Preserve",
     "moduleResolution": "Bundler",
     "noEmit": true,
@@ -12,7 +14,15 @@
     "skipLibCheck": true,
     "strict": true,
     "target": "ES2022",
-    "types": ["bun"]
+    "types": [
+      "bun"
+    ]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/generate-event-validator.ts", "../../protocol/**/*.ts"]
+  "include": [
+    "src/**/*.ts",
+    "test/**/*.ts",
+    "scripts/generate-event-validator.ts",
+    "../../protocol/**/*.ts",
+    "scripts/tui-visual-harness.ts"
+  ]
 }

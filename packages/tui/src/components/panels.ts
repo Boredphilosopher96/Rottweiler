@@ -1476,7 +1476,8 @@ export class StateBannerRenderable extends TextRenderable {
       this.fg = this.#theme.info
       const progress =
         state.replay.completedThrough === null
-          ? "loading historical events…"
+          ? state.historyReady?.sessionId === state.replay.sessionId
+            ? "history available" : "loading history…"
           : `complete through event ${state.replay.completedThrough}`
       this.content = `Replay · ${state.replay.sessionId ?? "historical session"} · read-only · ${progress}`
     } else if (state.compaction.active) {
