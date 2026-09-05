@@ -1,3 +1,4 @@
+import { bindSelectableClick } from "./selectable-click"
 import { DISPLAY_TRUNCATION_MARKER } from "../state/display-buffer"
 import type { TranscriptClientState } from "../recycle-state"
 import {
@@ -381,19 +382,10 @@ export class ToolBlockRenderable extends BoxRenderable {
         this.toggle()
       }
     }
-    // Toggle only after a deliberate click. Mouse-down must remain available
-    // to start a text selection, and a completed header drag must not reflow
-    // the card underneath the selection gesture.
-    this.header.onMouseUp = () => {
-      const selection = this.ctx.getSelection()
-      if (selection === null || selection.getSelectedText().trim() === "") this.toggle()
-    }
-    this.truncationMarker.onMouseUp = () => {
-      const selection = this.ctx.getSelection()
-      if (selection === null || selection.getSelectedText().trim() === "") {
-        this.#rendering?.onOpenToolOutput?.(this.#tool.toolCallId)
-      }
-    }
+    bindSelectableClick(ctx, this.header, () => this.toggle())
+    bindSelectableClick(ctx, this.truncationMarker, () => {
+      this.#rendering?.onOpenToolOutput?.(this.#tool.toolCallId)
+    })
     this.add(this.header)
     this.#bodyContainer.add(this.body)
     this.#bodyContainer.add(this.truncationMarker)
