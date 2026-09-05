@@ -55,6 +55,12 @@ impl SessionEventReadView for Journal {
 }
 #[async_trait]
 impl SessionEventSink for Journal {
+    async fn todo_state(&self) -> Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "delivery fixture does not expose task state".into(),
+        ))
+    }
+
     async fn source_rewind_target(
         &self,
         _expected: SequenceId,
