@@ -51,9 +51,10 @@ impl ProviderOperations {
             if let Ok(result) = wait.await {
                 result
             } else {
-                tracing::error!("provider cleanup owner exited without effect settlement proof");
-                // A panicked cleanup owner cannot report safe completion.
-                std::future::pending::<Result<(), ProviderError>>().await
+                Err(ProviderError::new(
+                    ProviderErrorKind::EffectsUnsettled,
+                    "provider cleanup owner exited without effect settlement proof",
+                ))
             }
         }
         .boxed()
@@ -67,6 +68,14 @@ impl ProviderOperations {
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for previous in operations
+            .iter()
+            .filter(|operation| operation.started.load(Ordering::Acquire))
+        {
+            if let Some(Err(error)) = previous.completion.clone().now_or_never() {
+                return Err(error);
+            }
+        }
         if operations.len() >= MAX_OPERATIONS {
             return Err(ProviderError::new(
                 ProviderErrorKind::InvalidRequest,
@@ -113,7 +122,7 @@ impl ProviderOperations {
         }))
     }
 
-    pub(crate) async fn settle(&self) {
+    pub(crate) async fn settle(&self) -> Result<(), ProviderError> {
         loop {
             let pending = self
                 .0
@@ -124,12 +133,10 @@ impl ProviderOperations {
                 .map(|operation| operation.completion.clone())
                 .collect::<Vec<_>>();
             if pending.is_empty() {
-                return;
+                return Ok(());
             }
             for result in futures_util::future::join_all(pending).await {
-                if let Err(error) = result {
-                    tracing::error!(%error, "provider effects settled but accounting remains unresolved");
-                }
+                result?;
             }
         }
     }
@@ -161,20 +168,24 @@ impl Cleanup {
                     accounting.invoked,
                 )
             };
-            if invoked {
-                self.operation.provider.settle_effects().await;
-            }
-            let result = if let Some(attempt) = attempt {
-                attempt.settle(outcome).await
-            } else {
+            let result = async {
+                if invoked {
+                    self.operation.provider.settle_effects().await?;
+                }
+                if let Some(attempt) = attempt {
+                    attempt.settle(outcome).await?;
+                }
                 Ok(())
-            };
+            }
+            .await;
             // Completed entries retire themselves, even if no next request arrives.
-            self.operations
-                .0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .retain(|operation| !Arc::ptr_eq(operation, &self.operation));
+            if result.is_ok() {
+                self.operations
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .retain(|operation| !Arc::ptr_eq(operation, &self.operation));
+            }
             let _ = self.finished.send(result);
         });
     }
@@ -195,7 +206,7 @@ impl OwnedProviderStream {
             cleanup.operation.started.store(true, Ordering::Release);
         }
         // A panicking destructor drops the local cleanup sender. Its registered
-        // proof stays pending; it cannot be mistaken for an active invocation.
+        // failed proof remains registered; it cannot look like an active invocation.
         self.inner.take();
         if let Some(cleanup) = cleanup {
             cleanup.begin();
@@ -305,10 +316,11 @@ mod tests {
             }
             std::future::pending().await
         }
-        async fn settle_effects(&self) {
+        async fn settle_effects(&self) -> std::result::Result<(), crate::ProviderError> {
             self.cleanup_started.notify_one();
             self.release.notified().await;
             self.settled.store(true, Ordering::Release);
+            Ok(())
         }
     }
 
@@ -353,10 +365,12 @@ mod tests {
             drop(stream);
         });
         assert!(task.await.unwrap_err().is_panic());
-        assert!(
-            tokio::time::timeout(Duration::from_millis(30), operations.settle())
-                .await
-                .is_err()
+        let proof = tokio::time::timeout(Duration::from_secs(1), operations.settle())
+            .await
+            .expect("failed proof returns without hanging");
+        assert_eq!(
+            proof.expect_err("cleanup is unproven").kind,
+            ProviderErrorKind::EffectsUnsettled
         );
         assert!(!provider.settled.load(Ordering::Acquire));
         assert_eq!(operations.0.lock().unwrap().len(), 1);
@@ -385,7 +399,10 @@ mod tests {
         );
         assert!(!provider.settled.load(Ordering::Acquire));
         provider.release.notify_one();
-        settlement.await.expect("settlement task");
+        settlement
+            .await
+            .expect("settlement task")
+            .expect("effects settled");
         assert!(provider.settled.load(Ordering::Acquire));
         assert!(operations.0.lock().expect("registry").is_empty());
     }
@@ -416,7 +433,7 @@ mod tests {
         for provider in providers {
             provider.release.notify_one();
         }
-        operations.settle().await;
+        operations.settle().await.expect("effects settled");
         assert!(operations.0.lock().expect("registry").is_empty());
     }
 }

@@ -115,8 +115,11 @@ impl ProviderRouter {
     }
 
     /// Waits for abandoned invocation owners, including ones no longer in a catalog.
-    pub async fn settle_effects(&self) {
-        self.operations.settle().await;
+    ///
+    /// # Errors
+    /// Returns an error when native effects or durable accounting remain unproven.
+    pub async fn settle_effects(&self) -> Result<(), ProviderError> {
+        self.operations.settle().await
     }
 
     /// Creates a router from provider-qualified alias chains.
@@ -378,7 +381,10 @@ impl ProviderRouter {
                             }
                             Err(error) => {
                                 drop(provider_stream);
-                                operations.settle().await;
+                                if let Err(unsettled) = operations.settle().await {
+                                    yield Err(unsettled);
+                                    return;
+                                }
                                 if semantic_emitted || !error.is_retryable() {
                                     yield Err(error);
                                     return;

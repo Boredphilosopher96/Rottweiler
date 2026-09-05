@@ -54,7 +54,8 @@ async fn dropped_hook_request_settles_parent_and_child_effects() {
     assert!(task.await.expect_err("dropped caller").is_cancelled());
     tokio::time::timeout(Duration::from_secs(4), client.settle_effects())
         .await
-        .expect("drop settlement");
+        .expect("drop settlement")
+        .expect("effects settled");
     assert_conflicting_writes_are_safe(&root).await;
 }
 
@@ -124,7 +125,8 @@ async fn dropped_provider_stream_settles_real_parent_and_child_effects() {
     drop(stream);
     tokio::time::timeout(Duration::from_secs(4), client.settle_effects())
         .await
-        .expect("provider local effects settled");
+        .expect("provider local effects settled")
+        .expect("effects settled");
     assert_conflicting_writes_are_safe(&root).await;
 }
 

@@ -372,9 +372,10 @@ impl Recorder {
 
 #[async_trait]
 impl Provider for Recorder {
-    async fn settle_effects(&self) {
-        self.inner.settle_effects().await;
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ProviderError> {
+        self.inner.settle_effects().await?;
         self.writer.settle().await;
+        Ok(())
     }
 
     fn name(&self) -> &str {

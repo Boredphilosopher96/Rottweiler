@@ -88,7 +88,7 @@ async fn helper_reuses_compilation_with_fresh_invocations() {
     assert_eq!(pool.stats().process_starts, 1);
     assert_eq!(pool.stats().component_loads, 1);
     assert_eq!(pool.stats().cache_hits, 10);
-    pool.shutdown().await;
+    assert!(pool.shutdown().await.is_ok());
 }
 
 #[tokio::test]
@@ -114,7 +114,7 @@ async fn helper_rejects_malformed_components_and_recovers() {
     .expect("valid proxy");
     valid.validate().await.expect("replacement worker");
     assert_eq!(pool.stats().process_starts, 2);
-    pool.shutdown().await;
+    assert!(pool.shutdown().await.is_ok());
 }
 
 #[tokio::test]
@@ -159,7 +159,7 @@ async fn cache_is_bounded_and_manifest_and_limits_are_part_of_identity() {
     assert_eq!(pool.stats().component_loads, 3);
     first.validate().await.expect("recent generation retained");
     assert_eq!(pool.stats().component_loads, 3);
-    pool.shutdown().await;
+    assert!(pool.shutdown().await.is_ok());
 }
 
 #[tokio::test]
@@ -186,7 +186,7 @@ async fn guest_trap_retires_its_worker_and_allows_a_fresh_generation() {
         assert_eq!(result.failures().len(), 1);
     }
     assert_eq!(pool.stats().process_starts, 2);
-    pool.shutdown().await;
+    assert!(pool.shutdown().await.is_ok());
 }
 
 #[tokio::test]
@@ -259,6 +259,6 @@ async fn worker_capacity_measurement() {
             "{}",
             serde_json::json!({"workers":workers,"helper":helper,"cold_us":cold_us,"warm_us":warm_us,"concurrent_16_us":concurrent_us,"warm_workers_rss_kib":rss_kib,"process_starts":pool.stats().process_starts,"component_loads":pool.stats().component_loads,"cache_hits":pool.stats().cache_hits})
         );
-        pool.shutdown().await;
+        assert!(pool.shutdown().await.is_ok());
     }
 }

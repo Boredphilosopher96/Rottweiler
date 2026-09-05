@@ -144,8 +144,11 @@ impl WasmProcessHook {
 
 #[async_trait]
 impl HookHandler for WasmProcessHook {
-    async fn settle_effects(&self) {
-        self.generation.settle().await;
+    async fn settle_effects(&self) -> Result<(), HookError> {
+        self.generation
+            .settle()
+            .await
+            .map_err(|error| HookError::new("effects_unsettled", error.to_string()))
     }
 
     async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError> {

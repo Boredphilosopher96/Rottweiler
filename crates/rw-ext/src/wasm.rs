@@ -243,6 +243,10 @@ impl WasmHookHost {
 #[cfg(feature = "wasm-runtime")]
 #[async_trait]
 impl HookHandler for WasmHookHost {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::HookError> {
+        Ok(())
+    }
+
     async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError> {
         if invocation.cancellation().is_cancelled() {
             return Err(HookError::new("cancelled", "WASM hook was cancelled"));

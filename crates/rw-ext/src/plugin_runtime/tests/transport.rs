@@ -181,7 +181,7 @@ async fn credit_refunds_original_wire_bytes_after_rust_json_normalization() {
         assert_eq!(refund.events, 1);
     }
     drop(stream);
-    client.settle_effects().await;
+    client.settle_effects().await.expect("effects settled");
 }
 
 #[tokio::test]

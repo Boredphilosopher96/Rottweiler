@@ -774,6 +774,7 @@ fn anthropic_stream_error(value: &Value) -> ProviderError {
         }
     };
     let message = match kind {
+        ProviderErrorKind::EffectsUnsettled => "provider effects remain unsettled",
         ProviderErrorKind::ContextOverflow => "Anthropic context window exceeded",
         ProviderErrorKind::Authentication => "Anthropic authentication error",
         ProviderErrorKind::InvalidRequest => "Anthropic invalid request",

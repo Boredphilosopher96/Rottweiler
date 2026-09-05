@@ -9,8 +9,8 @@ use std::{
 
 use async_trait::async_trait;
 use rw_ext::{
-    CapabilityViolation, LaunchedPluginProcess, PluginLauncher, PluginProcessConfig,
-    PluginProcessError, PluginSandboxProfile, SupervisedPluginProcess,
+    CapabilityViolation, LaunchedPluginProcess, PluginLaunchError, PluginLauncher,
+    PluginProcessConfig, PluginProcessError, PluginSandboxProfile, SupervisedPluginProcess,
 };
 use rw_plugin_protocol::PluginToolEffect;
 use rw_tools::{
@@ -23,6 +23,10 @@ use tokio::{
 };
 
 const MAX_PLUGIN_STDERR_BYTES: u64 = 256 * 1024;
+const PLUGIN_HANDOFF_PROOF_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[cfg(all(test, unix))]
+mod handoff_tests;
 
 /// A launcher that refuses ambient networking and executes only through the
 /// native Rottweiler sandbox helper. The approved manifest remains the sole
@@ -56,8 +60,9 @@ impl PluginLauncher for SandboxedPluginLauncher {
         &self,
         config: &PluginProcessConfig,
         profile: &PluginSandboxProfile,
-    ) -> Result<LaunchedPluginProcess, PluginProcessError> {
-        let (child, proxy) = spawn_sandboxed_plugin(config, profile, &self.scratch, &self.helper)?;
+    ) -> Result<LaunchedPluginProcess, PluginLaunchError> {
+        let (child, proxy) = spawn_sandboxed_plugin(config, profile, &self.scratch, &self.helper)
+            .map_err(PluginLaunchError::Rejected)?;
         attach_supervisor(child, proxy, config).await
     }
 }
@@ -211,7 +216,7 @@ async fn attach_supervisor(
     mut child: Child,
     proxy: Option<SupervisedEgressProxy>,
     config: &PluginProcessConfig,
-) -> Result<LaunchedPluginProcess, PluginProcessError> {
+) -> Result<LaunchedPluginProcess, PluginLaunchError> {
     let process_group = child.id();
     let stdin = child.stdin.take();
     let stdout = child.stdout.take();
@@ -223,14 +228,33 @@ async fn attach_supervisor(
         violation: Arc::new(Mutex::new(None)),
         _proxy: proxy,
     });
+    let mut handoff = PendingPluginHandoff {
+        process: Arc::clone(&process),
+        settled: false,
+    };
     let (Some(stdin), Some(stdout), Some(stderr)) = (stdin, stdout, stderr) else {
         // A failed handoff still owns the process and every descendant.
         let _ = process.kill_tree();
-        if let Err(error) = process.settle_effects().await {
-            tracing::error!(%error, "failed plugin launch has unproven settlement");
-            std::future::pending::<()>().await;
+        let proof =
+            tokio::time::timeout(PLUGIN_HANDOFF_PROOF_TIMEOUT, process.settle_effects()).await;
+        match proof {
+            Ok(Ok(())) => {
+                handoff.settled = true;
+                return Err(PluginLaunchError::Rejected(error(
+                    "plugin stdio is unavailable",
+                )));
+            }
+            Ok(Err(error)) => {
+                return Err(PluginLaunchError::EffectsUnsettled {
+                    message: error.to_string(),
+                });
+            }
+            Err(_) => {
+                return Err(PluginLaunchError::EffectsUnsettled {
+                    message: "plugin launch cleanup proof deadline expired".to_owned(),
+                });
+            }
         }
-        return Err(error("plugin stdio is unavailable"));
     };
     if let Some(denials) = denials {
         let weak = Arc::downgrade(&process);
@@ -256,13 +280,28 @@ async fn attach_supervisor(
         });
     }
     let process: Arc<dyn SupervisedPluginProcess> = process;
-    Ok(LaunchedPluginProcess {
+    let launched = LaunchedPluginProcess {
         stdin: Box::pin(stdin),
         stdout: Box::pin(BufReader::new(stdout)),
         stderr: Box::pin(BufReader::new(stderr.take(MAX_PLUGIN_STDERR_BYTES))),
         process,
         executable_identity: config.executable_identity().clone(),
-    })
+    };
+    handoff.settled = true;
+    Ok(launched)
+}
+
+struct PendingPluginHandoff {
+    process: Arc<PluginChild>,
+    settled: bool,
+}
+impl Drop for PendingPluginHandoff {
+    fn drop(&mut self) {
+        if !self.settled {
+            let _ = self.process.kill_tree();
+            std::mem::forget(Arc::clone(&self.process));
+        }
+    }
 }
 
 struct PluginChild {
@@ -523,7 +562,7 @@ mod tests {
             &self,
             config: &PluginProcessConfig,
             profile: &PluginSandboxProfile,
-        ) -> Result<LaunchedPluginProcess, PluginProcessError> {
+        ) -> Result<LaunchedPluginProcess, PluginLaunchError> {
             let launched = self.inner.launch(config, profile).await?;
             *self.process.lock().expect("process lock") = Some(Arc::clone(&launched.process));
             Ok(launched)

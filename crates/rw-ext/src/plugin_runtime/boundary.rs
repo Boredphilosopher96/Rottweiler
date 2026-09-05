@@ -146,6 +146,16 @@ impl PluginProviderHttpHandler for DenyPluginProviderHttpHandler {
 }
 
 /// Injected process launcher. Production launchers must sandbox before direct exec.
+/// A rejected launch has no remaining locally owned effects. An unproven
+/// launch must retain its native ownership and the caller's resource charge.
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum PluginLaunchError {
+    #[error(transparent)]
+    Rejected(PluginProcessError),
+    #[error("plugin launch effects are unsettled: {message}")]
+    EffectsUnsettled { message: String },
+}
+
 #[async_trait]
 pub trait PluginLauncher: Send + Sync {
     /// Launches by direct exec. Implementations must revalidate and return the exact executable
@@ -158,7 +168,7 @@ pub trait PluginLauncher: Send + Sync {
         &self,
         config: &PluginProcessConfig,
         profile: &PluginSandboxProfile,
-    ) -> Result<LaunchedPluginProcess, PluginProcessError>;
+    ) -> Result<LaunchedPluginProcess, PluginLaunchError>;
 }
 
 /// Host-owned handler for declared plugin-to-host push requests.
@@ -286,6 +296,8 @@ pub fn approve_plugin_launch(
 
 #[derive(Debug, Error)]
 pub enum PluginHostError {
+    #[error("plugin effects are unsettled: {message}")]
+    EffectsUnsettled { message: String },
     #[error(transparent)]
     ApprovalStore(#[from] crate::plugin::ApprovalStoreError),
     #[error(transparent)]
@@ -298,4 +310,13 @@ pub enum PluginHostError {
     Protocol(String),
     #[error(transparent)]
     Rpc(#[from] PluginRpcError),
+}
+
+impl From<PluginLaunchError> for PluginHostError {
+    fn from(error: PluginLaunchError) -> Self {
+        match error {
+            PluginLaunchError::Rejected(error) => Self::Process(error),
+            PluginLaunchError::EffectsUnsettled { message } => Self::EffectsUnsettled { message },
+        }
+    }
 }

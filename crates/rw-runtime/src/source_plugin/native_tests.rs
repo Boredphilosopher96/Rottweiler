@@ -3,7 +3,7 @@ use super::*;
 use crate::{extension_config::ExecutableConfigOrigin, plugin_process::SandboxedPluginLauncher};
 use async_trait::async_trait;
 use rw_ext::{
-    LaunchedPluginProcess, PluginProcessError, PluginSandboxProfile, SupervisedPluginProcess,
+    LaunchedPluginProcess, PluginLaunchError, PluginSandboxProfile, SupervisedPluginProcess,
 };
 use std::{process::Stdio, sync::Mutex};
 
@@ -17,7 +17,7 @@ impl PluginLauncher for RecordingLauncher {
         &self,
         config: &PluginProcessConfig,
         profile: &PluginSandboxProfile,
-    ) -> std::result::Result<LaunchedPluginProcess, PluginProcessError> {
+    ) -> std::result::Result<LaunchedPluginProcess, PluginLaunchError> {
         let child = self.inner.launch(config, profile).await?;
         self.processes
             .lock()

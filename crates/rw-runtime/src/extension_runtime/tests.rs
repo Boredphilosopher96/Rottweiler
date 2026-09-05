@@ -60,11 +60,13 @@ impl PluginLauncher for FailSecondPluginLauncher {
         &self,
         config: &rw_ext::PluginProcessConfig,
         _profile: &rw_ext::PluginSandboxProfile,
-    ) -> std::result::Result<rw_ext::LaunchedPluginProcess, rw_ext::PluginProcessError> {
+    ) -> std::result::Result<rw_ext::LaunchedPluginProcess, rw_ext::PluginLaunchError> {
         if self.launches.fetch_add(1, Ordering::AcqRel) == 1 {
-            return Err(rw_ext::PluginProcessError {
-                message: "seeded second plugin startup failure".to_owned(),
-            });
+            return Err(rw_ext::PluginLaunchError::Rejected(
+                rw_ext::PluginProcessError {
+                    message: "seeded second plugin startup failure".to_owned(),
+                },
+            ));
         }
         let (host_stdin, plugin_input) = tokio::io::duplex(4096);
         let (plugin_output, host_stdout) = tokio::io::duplex(4096);

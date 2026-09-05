@@ -1,5 +1,13 @@
 use super::*;
 
+async fn close_connection(state: &ReaderState, reason: PluginRpcError) {
+    cancel_active_provider_http(&state.active_provider_http);
+    state.termination.begin();
+    let reason = state.termination.wait().await.err().unwrap_or(reason);
+    fail_pending(&state.pending, reason.clone()).await;
+    fail_provider_streams(&state.provider_streams, &reason);
+}
+
 pub(super) async fn reader_loop(mut stdout: PluginStdout, state: ReaderState) {
     let mut buffer = [0_u8; 8192];
     let mut decoder = FrameDecoder::default();
@@ -9,63 +17,35 @@ pub(super) async fn reader_loop(mut stdout: PluginStdout, state: ReaderState) {
             Ok(count) => count,
         };
         let Ok(frames) = decoder.push(&buffer[..count]) else {
-            cancel_active_provider_http(&state.active_provider_http);
-            state.termination.begin();
-            state.termination.wait().await;
-            fail_pending(
-                &state.pending,
+            close_connection(
+                &state,
                 rpc_error(
                     "invalid_frame",
                     "plugin emitted an invalid or oversized frame",
                 ),
             )
             .await;
-            fail_provider_streams(
-                &state.provider_streams,
-                &rpc_error(
-                    "invalid_frame",
-                    "plugin emitted an invalid or oversized frame",
-                ),
-            );
             return;
         };
         for frame in frames {
-            let continue_reading =
-                process_incoming_frame(frame.frame, frame.wire_bytes, &state).await;
-            if !continue_reading {
-                cancel_active_provider_http(&state.active_provider_http);
-                state.termination.begin();
-                state.termination.wait().await;
-                fail_pending(
-                    &state.pending,
+            if !process_incoming_frame(frame.frame, frame.wire_bytes, &state).await {
+                close_connection(
+                    &state,
                     rpc_error(
                         "protocol_violation",
                         "plugin RPC stream violated correlation or capabilities",
                     ),
                 )
                 .await;
-                fail_provider_streams(
-                    &state.provider_streams,
-                    &rpc_error(
-                        "protocol_violation",
-                        "plugin RPC stream violated correlation or capabilities",
-                    ),
-                );
                 return;
             }
         }
     }
-    state.termination.begin();
-    state.termination.wait().await;
-    fail_pending(
-        &state.pending,
+    close_connection(
+        &state,
         rpc_error("connection_closed", "plugin RPC connection closed"),
     )
     .await;
-    fail_provider_streams(
-        &state.provider_streams,
-        &rpc_error("connection_closed", "plugin RPC connection closed"),
-    );
 }
 
 pub(super) fn cancel_active_provider_http(active: &ActiveProviderHttp) {
@@ -138,7 +118,11 @@ async fn process_incoming_frame(frame: RpcFrame, wire_bytes: usize, state: &Read
             };
             if matches!(failure.error.code, -32004 | -32800) {
                 state.termination.begin();
-                state.termination.wait().await;
+                if let Err(error) = state.termination.wait().await {
+                    fail_pending(&state.pending, error.clone()).await;
+                    fail_provider_streams(&state.provider_streams, &error);
+                    return false;
+                }
             }
             let provider = state
                 .provider_streams

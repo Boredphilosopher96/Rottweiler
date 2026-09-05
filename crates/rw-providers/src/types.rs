@@ -421,6 +421,8 @@ pub enum ProviderEvent {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderErrorKind {
+    /// Local effects or their accounting could not be proven settled; never retry.
+    EffectsUnsettled,
     /// Missing or rejected credentials.
     Authentication,
     /// Provider rate limit.
@@ -546,7 +548,9 @@ pub trait Provider: Send + Sync {
     /// Waits for host-owned effects abandoned by a dropped invocation or stream.
     /// The default is valid only when dropping futures also drops all local work.
     /// This never proves that a remote HTTP service stopped work or billing.
-    async fn settle_effects(&self) {}
+    async fn settle_effects(&self) -> Result<(), ProviderError> {
+        Ok(())
+    }
 
     /// Stable provider key used by qualified model ids.
     fn name(&self) -> &str;

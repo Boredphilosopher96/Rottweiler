@@ -124,7 +124,8 @@ async fn typescript_tool_hook_event_push_and_provider_cross_rust_host() {
     drop(cancelled);
     tokio::time::timeout(Duration::from_secs(4), provider.settle_effects())
         .await
-        .expect("cancelled provider effect settlement");
+        .expect("cancelled provider effect settlement")
+        .expect("effects settled");
     assert!(provider_host.client.closed.load(Ordering::Acquire));
     assert!(
         provider_host

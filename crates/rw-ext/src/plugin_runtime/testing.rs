@@ -58,14 +58,17 @@ impl SupervisedPluginProcess for TestChildProcess {
 
 #[cfg(test)]
 #[async_trait]
+#[allow(clippy::expect_used)]
 impl PluginLauncher for TestDirectLauncher {
     async fn launch(
         &self,
         config: &PluginProcessConfig,
         _profile: &PluginSandboxProfile,
-    ) -> Result<LaunchedPluginProcess, PluginProcessError> {
+    ) -> Result<LaunchedPluginProcess, PluginLaunchError> {
         use std::os::unix::process::CommandExt;
-        config.validate_executable_identity()?;
+        config
+            .validate_executable_identity()
+            .map_err(PluginLaunchError::Rejected)?;
         let mut command = tokio::process::Command::new(config.executable());
         command
             .args(config.argv())
@@ -80,18 +83,14 @@ impl PluginLauncher for TestDirectLauncher {
             }
         }
         command.as_std_mut().process_group(0);
-        let mut child = command.spawn().map_err(|error| PluginProcessError {
-            message: error.to_string(),
+        let mut child = command.spawn().map_err(|error| {
+            PluginLaunchError::Rejected(PluginProcessError {
+                message: error.to_string(),
+            })
         })?;
-        let stdin = child.stdin.take().ok_or_else(|| PluginProcessError {
-            message: "missing stdin".to_owned(),
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| PluginProcessError {
-            message: "missing stdout".to_owned(),
-        })?;
-        let stderr = child.stderr.take().ok_or_else(|| PluginProcessError {
-            message: "missing stderr".to_owned(),
-        })?;
+        let stdin = child.stdin.take().expect("fixture piped stdin");
+        let stdout = child.stdout.take().expect("fixture piped stdout");
+        let stderr = child.stderr.take().expect("fixture piped stderr");
         let pid = child.id();
         Ok(LaunchedPluginProcess {
             stdin: Box::pin(stdin),

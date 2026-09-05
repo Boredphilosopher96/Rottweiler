@@ -1343,6 +1343,7 @@ fn openai_stream_error(value: &Value) -> ProviderError {
         .find_map(classify_openai_error_code)
         .unwrap_or(ProviderErrorKind::Protocol);
     let message = match kind {
+        ProviderErrorKind::EffectsUnsettled => "provider effects remain unsettled",
         ProviderErrorKind::ContextOverflow => "OpenAI context window exceeded",
         ProviderErrorKind::Authentication => "OpenAI-compatible authentication error",
         ProviderErrorKind::InvalidRequest => "OpenAI-compatible invalid request",

@@ -32,8 +32,11 @@ impl RpcToolAdapter {
 
 #[async_trait]
 impl Tool for RpcToolAdapter {
-    async fn settle_effects(&self) {
-        self.client.settle_effects().await;
+    async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
+        self.client
+            .settle_effects()
+            .await
+            .map_err(|error| ToolError::EffectsUnsettled(error.to_string()))
     }
     fn descriptor(&self) -> ToolDescriptor {
         let process_effects = self.enforcer.process_tool_effects();
@@ -349,8 +352,10 @@ fn common_plugin_limit(
 
 #[async_trait]
 impl Provider for RpcProviderAdapter {
-    async fn settle_effects(&self) {
-        self.client.settle_effects().await;
+    async fn settle_effects(&self) -> std::result::Result<(), rw_providers::ProviderError> {
+        self.client.settle_effects().await.map_err(|error| {
+            ProviderError::new(ProviderErrorKind::EffectsUnsettled, error.to_string())
+        })
     }
 
     fn name(&self) -> &str {

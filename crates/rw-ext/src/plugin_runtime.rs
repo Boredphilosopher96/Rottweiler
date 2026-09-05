@@ -118,10 +118,10 @@ async fn return_stream_credit(
             () = credit.closed.cancelled() => return,
             () = tokio::time::sleep_until(deadline) => {
                 termination.begin();
-                termination.wait().await;
+                let failure = termination.wait().await.err().unwrap_or_else(|| rpc_error("timeout", "provider operation exceeded its total deadline"));
                 if let Ok(mut streams) = streams.lock()
                     && let Some(stream) = streams.remove(&id) {
-                        let _ = stream.terminal.send(Some(Err(rpc_error("timeout", "provider operation exceeded its total deadline"))));
+                        let _ = stream.terminal.send(Some(Err(failure)));
                 }
                 return;
             }
@@ -210,24 +210,28 @@ impl RequestTermination {
         });
     }
 
-    async fn wait(&self) {
+    async fn wait(&self) -> Result<(), PluginRpcError> {
         let completion = self
             .completion
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         let Some(mut completion) = completion else {
-            return;
+            return Ok(());
         };
         loop {
-            let result = completion.borrow_and_update().clone();
-            match result {
-                Some(Ok(())) => return,
-                Some(Err(_)) => std::future::pending::<()>().await,
-                None => {}
+            if let Some(result) = completion.borrow_and_update().clone() {
+                return result.map_err(|error| PluginRpcError {
+                    code: "effects_unsettled".to_owned(),
+                    message: error.to_string(),
+                });
             }
             if completion.changed().await.is_err() {
-                std::future::pending::<()>().await;
+                return Err(PluginRpcError {
+                    code: "effects_unsettled".to_owned(),
+                    message: "plugin cleanup owner exited without effect settlement proof"
+                        .to_owned(),
+                });
             }
         }
     }
@@ -462,7 +466,7 @@ impl JsonRpcPluginClient {
         }) {
             self.termination.begin();
         }
-        self.termination.wait().await;
+        self.termination.wait().await?;
         self.pending.lock().await.remove(&id);
         guard.armed = false;
         drop(permit);
@@ -497,11 +501,14 @@ impl JsonRpcPluginClient {
         }
         self.termination.begin();
         let result = match tokio::time::timeout(timeout, self.termination.wait()).await {
-            Ok(()) => Ok(()),
-            Err(_) => Err(PluginHostError::Process(PluginProcessError {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(PluginHostError::EffectsUnsettled {
+                message: error.to_string(),
+            }),
+            Err(_) => Err(PluginHostError::EffectsUnsettled {
                 message: "plugin effect settlement remains unproven after shutdown deadline"
                     .to_owned(),
-            })),
+            }),
         };
         if result.is_ok() {
             self.shutdown_complete.store(true, Ordering::Release);
@@ -727,8 +734,8 @@ impl Drop for JsonRpcProviderEventStream {
 
 #[async_trait]
 impl PluginRpcClient for JsonRpcPluginClient {
-    async fn settle_effects(&self) {
-        self.termination.wait().await;
+    async fn settle_effects(&self) -> std::result::Result<(), crate::PluginRpcError> {
+        self.termination.wait().await
     }
     async fn request(&self, method: &str, params: Value) -> Result<Value, PluginRpcError> {
         self.request_cancellable(method, params, &CancellationToken::default())
@@ -799,12 +806,11 @@ async fn writer_loop(
         };
         if !written.is_ok_and(|result| result.is_ok()) {
             termination.begin();
-            termination.wait().await;
-            fail_pending(
-                &pending,
-                rpc_error("write_failed", "plugin RPC stdin failed or stalled"),
-            )
-            .await;
+            let failure =
+                termination.wait().await.err().unwrap_or_else(|| {
+                    rpc_error("write_failed", "plugin RPC stdin failed or stalled")
+                });
+            fail_pending(&pending, failure).await;
             return;
         }
         frame.complete();

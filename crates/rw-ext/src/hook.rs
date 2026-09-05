@@ -243,7 +243,7 @@ pub trait HookHandler: Send + Sync {
     async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError>;
 
     /// Waits for effects owned outside a cancelled invocation future.
-    async fn settle_effects(&self) {}
+    async fn settle_effects(&self) -> Result<(), HookError>;
 }
 
 /// One recorded handler failure.
@@ -354,7 +354,7 @@ async fn invoke_registered_hook(
             }
         }
     };
-    registered.handler.settle_effects().await;
+    registered.handler.settle_effects().await?;
     result
 }
 
@@ -370,12 +370,19 @@ pub struct HookDispatcher {
 
 impl HookDispatcher {
     /// Joins external cleanup after a caller drops a dispatch future.
-    pub async fn settle_effects(&self, event: HookEvent) {
+    ///
+    /// # Errors
+    /// Returns the first failed effect proof after checking every registered handler.
+    pub async fn settle_effects(&self, event: HookEvent) -> Result<(), HookError> {
+        let mut failure = None;
         if let Some(hooks) = self.hooks.get(&event) {
             for hook in hooks {
-                hook.handler.settle_effects().await;
+                if let Err(error) = hook.handler.settle_effects().await {
+                    failure.get_or_insert(error);
+                }
             }
         }
+        failure.map_or(Ok(()), Err)
     }
 
     #[must_use]
@@ -617,6 +624,10 @@ mod tests {
 
     #[async_trait]
     impl HookHandler for NeverReturns {
+        async fn settle_effects(&self) -> std::result::Result<(), crate::HookError> {
+            Ok(())
+        }
+
         async fn invoke(
             &self,
             _invocation: HookInvocation<'_>,
@@ -627,6 +638,10 @@ mod tests {
 
     #[async_trait]
     impl HookHandler for CleanupOnCancellation {
+        async fn settle_effects(&self) -> std::result::Result<(), crate::HookError> {
+            Ok(())
+        }
+
         async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError> {
             invocation.cancellation().cancelled().await;
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -637,6 +652,10 @@ mod tests {
 
     #[async_trait]
     impl HookHandler for Record {
+        async fn settle_effects(&self) -> std::result::Result<(), crate::HookError> {
+            Ok(())
+        }
+
         async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError> {
             self.calls
                 .lock()

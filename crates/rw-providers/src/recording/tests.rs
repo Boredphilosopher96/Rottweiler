@@ -951,7 +951,7 @@ async fn writer_error_is_reported_by_stream_and_once_by_flush_barrier() {
             ..
         }))
     ));
-    recorder.settle_effects().await;
+    assert!(recorder.settle_effects().await.is_ok());
     let first_error = recorder
         .flush()
         .await

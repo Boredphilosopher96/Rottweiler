@@ -163,7 +163,7 @@ impl PluginLauncher for TrackingDirectLauncher {
         &self,
         config: &PluginProcessConfig,
         profile: &PluginSandboxProfile,
-    ) -> Result<LaunchedPluginProcess, PluginProcessError> {
+    ) -> Result<LaunchedPluginProcess, PluginLaunchError> {
         let launched = TestDirectLauncher.launch(config, profile).await?;
         *self.0.lock().expect("tracking launcher") = Some(Arc::clone(&launched.process));
         Ok(launched)
@@ -305,8 +305,10 @@ impl PluginLauncher for MemoryLauncher {
         &self,
         config: &PluginProcessConfig,
         profile: &PluginSandboxProfile,
-    ) -> Result<LaunchedPluginProcess, PluginProcessError> {
-        config.validate_executable_identity()?;
+    ) -> Result<LaunchedPluginProcess, PluginLaunchError> {
+        config
+            .validate_executable_identity()
+            .map_err(PluginLaunchError::Rejected)?;
         assert_eq!(profile.capabilities, self.manifest.capabilities);
         let (host_stdin, plugin_input) = tokio::io::duplex(64 * 1024);
         let (plugin_output, host_stdout) = tokio::io::duplex(64 * 1024);

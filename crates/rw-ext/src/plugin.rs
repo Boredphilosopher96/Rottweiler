@@ -986,7 +986,9 @@ pub type PluginProviderEventStream =
 #[async_trait]
 pub trait PluginRpcClient: Send + Sync {
     /// Waits for teardown started by a cancelled or dropped request.
-    async fn settle_effects(&self) {}
+    async fn settle_effects(&self) -> Result<(), PluginRpcError> {
+        Ok(())
+    }
 
     async fn request(&self, method: &str, params: Value) -> Result<Value, PluginRpcError>;
 
@@ -1069,8 +1071,11 @@ pub enum RpcHookResponse {
 
 #[async_trait]
 impl HookHandler for RpcHookHandler {
-    async fn settle_effects(&self) {
-        self.client.settle_effects().await;
+    async fn settle_effects(&self) -> std::result::Result<(), crate::HookError> {
+        self.client
+            .settle_effects()
+            .await
+            .map_err(|error| HookError::new("effects_unsettled", error.to_string()))
     }
     async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError> {
         let hook = PluginHook::from(invocation.event());
