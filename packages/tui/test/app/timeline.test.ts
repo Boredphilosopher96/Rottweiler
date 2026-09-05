@@ -160,8 +160,8 @@ describe("Rottweiler semantic timeline", () => {
 
   test("insufficient draft capacity refuses before rewind dispatch and keeps the current draft", async () => {
     const reader = history("x")
-    const result = await setup({ ...reader, content: async (session, read, signal) => ({
-      ...await reader.content(session, read, signal), text: "x".repeat(4096), total_bytes: 16 * 1024 * 1024, next_offset: 4096,
+    const result = await setup({ ...reader, content: async (session, read, signal, allocation) => ({
+      ...await reader.content(session, read, signal, allocation), text: "x".repeat(4096), total_bytes: 16 * 1024 * 1024, next_offset: 4096,
     }) })
     result.app.composer.value = "keep this draft"
     await selectAction(result, "edit")

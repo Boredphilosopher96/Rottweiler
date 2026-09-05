@@ -1,3 +1,4 @@
+import type { ReplyAllocation } from "./transport/reply-allocation"
 import type { EngineEvent } from "./protocol"
 import type { ClientDiagnostics } from "./client-diagnostics"
 import { CLIENT_COMMAND_EXECUTION } from "./protocol"
@@ -60,7 +61,7 @@ export interface RuntimeApp {
 }
 
 export interface RuntimeEngineClient {
-  postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandReply>
+  postCommand(command: ClientCommand, signal?: AbortSignal, allocation?: ReplyAllocation): Promise<CommandReply>
   submitProviderApiKey?(
     sessionId: string,
     provider: string,
@@ -174,16 +175,16 @@ export class TuiEngineRuntime {
       }
       return event.result
     },
-    page: async ({ sessionId, scope }, read, signal) => {
-      const reply = await this.#readSession({ type: "read_transcript", meta: this.#meta(), session_id: sessionId, scope, read }, signal)
+    page: async ({ sessionId, scope }, read, signal, allocation) => {
+      const reply = await this.#readSession({ type: "read_transcript", meta: this.#meta(), session_id: sessionId, scope, read }, signal, allocation)
       const event = reply.events[0]
       if (reply.events.length !== 1 || event?.type !== "transcript_page_ready" || event.session_id !== sessionId) {
         throw new EngineRuntimeError("transcript page reply is missing its result")
       }
       return event.result
     },
-    content: async ({ sessionId, scope }, read, signal) => {
-      const reply = await this.#readSession({ type: "read_transcript_content", meta: this.#meta(), session_id: sessionId, scope, read }, signal)
+    content: async ({ sessionId, scope }, read, signal, allocation) => {
+      const reply = await this.#readSession({ type: "read_transcript_content", meta: this.#meta(), session_id: sessionId, scope, read }, signal, allocation)
       const event = reply.events[0]
       if (reply.events.length !== 1 || event?.type !== "transcript_content_ready" || event.session_id !== sessionId) {
         throw new EngineRuntimeError("transcript content reply is missing its result")
@@ -777,6 +778,7 @@ export class TuiEngineRuntime {
   async #readSession(
     command: Extract<ClientCommand, { type: "read_transcript" | "read_transcript_content" | "get_todos" | "get_ui_catalog" | "get_ui_panels" }>,
     signal: AbortSignal,
+    allocation?: ReplyAllocation,
   ): Promise<Extract<CommandReply, { type: "read" }>> {
     await this.#ready
     if (!this.#driverReady || this.#subscriptionController === null) {
@@ -785,7 +787,7 @@ export class TuiEngineRuntime {
     const generation = this.#sessionGeneration
     const lifetime = AbortSignal.any([signal, this.#subscriptionController.signal])
     lifetime.throwIfAborted()
-    const reply = await this.#client.postCommand(command, lifetime)
+    const reply = await this.#client.postCommand(command, lifetime, allocation)
     lifetime.throwIfAborted()
     if (generation !== this.#sessionGeneration) throw new DOMException("session changed", "AbortError")
     if (reply.type !== "read") throw new EngineRuntimeError("session read has no typed reply")

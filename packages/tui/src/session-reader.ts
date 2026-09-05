@@ -1,3 +1,4 @@
+import type { ReplyAllocation } from "./transport/reply-allocation"
 import type { TranscriptContentPage, TranscriptContentRead, TranscriptRead, TranscriptReadResult, TodoReadResult, UiCatalog, UiPanels, SessionReadScope, SessionReadAncestor } from "./protocol"
 import { MAX_SESSION_READ_ANCESTORS } from "./protocol"
 
@@ -22,6 +23,6 @@ export interface SessionReader {
   uiCatalog(sessionId: string, signal: AbortSignal): Promise<UiCatalog>
   uiPanels(sessionId: string, signal: AbortSignal): Promise<UiPanels>
   todos(target: SessionReadTarget, signal: AbortSignal): Promise<TodoReadResult>
-  page(target: SessionReadTarget, read: TranscriptRead, signal: AbortSignal): Promise<TranscriptReadResult>
-  content(target: SessionReadTarget, read: TranscriptContentRead, signal: AbortSignal): Promise<TranscriptContentPage>
+  page(target: SessionReadTarget, read: TranscriptRead, signal: AbortSignal, allocation: ReplyAllocation): Promise<TranscriptReadResult>
+  content(target: SessionReadTarget, read: TranscriptContentRead, signal: AbortSignal, allocation: ReplyAllocation): Promise<TranscriptContentPage>
 }

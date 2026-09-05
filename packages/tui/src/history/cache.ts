@@ -8,6 +8,8 @@ export interface CacheLease<Value> {
 
 /** Admission before source collection/decoding; cancellation keeps credit until settlement. */
 export interface CacheReservation<Value> {
+  /** Grow the admitted allocation before collecting or decoding more input. */
+  admit(bytes: number): void
   commit(key: string, value: Value): CacheLease<Value>
   release(): void
 }
@@ -46,6 +48,8 @@ export class ClientCache<Value> {
     }
     this.#limits = limits
   }
+
+  get capacityBytes(): number { return this.#limits.bytes }
 
   get usage(): CacheUsage {
     return {
@@ -98,7 +102,25 @@ export class ClientCache<Value> {
     this.#bytes += maximumBytes
     this.#entries += 1
     let active = true
+    const admit = (required: number) => {
+      if (!active) throw new Error("cache reservation is released")
+      if (!Number.isSafeInteger(required) || required < 0 || required > this.#limits.bytes) throw new Error("read exceeds the client cache allowance")
+      if (required <= maximumBytes) return
+      let available = this.#limits.bytes - this.#bytes
+      const evictions: string[] = []
+      for (const [key, entry] of this.#resident) {
+        if (available >= required - maximumBytes) break
+        if (entry.readers !== 0) continue
+        evictions.push(key)
+        available += entry.bytes
+      }
+      if (available < required - maximumBytes) throw new Error("client cache is full with active readers")
+      for (const key of evictions) this.remove(key)
+      this.#bytes += required - maximumBytes
+      maximumBytes = required
+    }
     return {
+      admit,
       release: () => {
         if (!active) return
         active = false

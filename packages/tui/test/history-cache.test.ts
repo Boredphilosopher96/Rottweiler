@@ -104,3 +104,20 @@ describe("aggregate client cache", () => {
     expect(retainedJsonBytes("🐕", 1000)).toBe(28)
   })
 })
+
+
+test("growing input credit evicts only unpinned values and a refused growth changes nothing", () => {
+  const cache = new ClientCache<{ text: string }>({ bytes: 5000, entries: 4 })
+  expect(cache.insert("pinned", { text: "p".repeat(500) })).toBe(true)
+  const pinned = cache.lease("pinned")!
+  expect(cache.insert("idle", { text: "i".repeat(500) })).toBe(true)
+  const incoming = cache.reserve(1000)!
+  incoming.admit(3500)
+  expect(cache.lease("idle")).toBeNull()
+  const before = cache.usage
+  expect(() => incoming.admit(4500)).toThrow("active readers")
+  expect(cache.usage).toEqual(before)
+  expect(pinned.value.text).toHaveLength(500)
+  incoming.release(); pinned.release(); cache.clear()
+  expect(cache.usage.bytes).toBe(0)
+})

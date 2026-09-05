@@ -415,7 +415,7 @@ export class SessionUiController {
     let draft: DraftSubmission | null = null
     try {
       if (turn.view.through === null) throw new Error("The selected source has no committed history prefix.")
-      if (action !== "rewind") draft = await readTimelineDraft(this.#host.sessionReader, turn, this.#host.drafts, scope, request.signal)
+      if (action !== "rewind") draft = await readTimelineDraft(this.#host.sessionReader, turn, this.#host.drafts, scope, request.signal, this.#host.historyCache)
       request.signal.throwIfAborted()
       if (this.#host.destroyed || this.#host.sessionId !== turn.view.session_id || this.#host.draftScope !== scope) {
         draft?.settle(true); return

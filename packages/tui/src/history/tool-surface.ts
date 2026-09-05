@@ -26,7 +26,7 @@ export async function readToolSurface(
     let total: number | null = null
     for (let pageIndex = 0; ; pageIndex++) {
       if (pageIndex > Math.ceil(MAX_UI_SURFACE_BYTES / (CHUNK_BYTES - 3))) throw new Error("tool surface has too many content pages")
-      const page = await reader.content(target, { view, source, offset, max_bytes: CHUNK_BYTES }, signal)
+      const page = await reader.content(target, { view, source, offset, max_bytes: CHUNK_BYTES }, signal, { admit: bytes => { if (bytes > DECODE_CHARGE) throw new Error("tool surface chunk exceeds its allocation allowance") } })
       signal.throwIfAborted()
       const length = Buffer.byteLength(page.text)
       if (JSON.stringify([page.view, page.source]) !== sourceKey || page.offset !== offset

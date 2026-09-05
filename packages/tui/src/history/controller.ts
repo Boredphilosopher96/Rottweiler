@@ -1,3 +1,4 @@
+import { CacheRead } from "./read-allocation"
 import type { UiSurfaceModel, UiPanelModel } from "../ui/presentation"
 import type { ClientDiagnostics } from "../client-diagnostics"
 import type { UiCatalog, TranscriptContentPage, TranscriptItemId, TranscriptPage, TranscriptPosition, TranscriptView } from "../protocol"
@@ -151,11 +152,14 @@ export class HistoryController {
     if (position.type === "first" || position.type === "latest" || position.type === "at_ordinal") session.anchor = null
     this.#changed()
     let retired: CacheLease<HistoryCacheValue> | null = null
+    let incoming: CacheRead<HistoryCacheValue> | null = null
     try {
       for (; ;) {
+        incoming?.release()
+        incoming = new CacheRead(this.cache)
         const result = await this.#reader.page(target, {
           known_view: session.view, position, max_items: HISTORY_PAGE_ITEMS, max_bytes: HISTORY_PAGE_BYTES,
-        }, request.signal)
+        }, request.signal, incoming)
         if (!this.#current(request, sessionId)) return
         if (result.type === "catching_up") {
           // Yield between bounded server batches; input and cancellation retain a turn.
@@ -180,9 +184,7 @@ export class HistoryController {
         if (session.view !== null && (page.view.generation !== session.view.generation
           || page.invalidation.type !== "none")) this.#invalidate(session)
         const key = `${this.#cacheNamespace}:${sessionId}:page:${++this.#revision}`
-        if (!this.cache.insert(key, { kind: "page", page })) throw new Error("history cache is full with active readers")
-        const lease = this.cache.lease(key)
-        if (lease === null) throw new Error("admitted history page is unavailable")
+        const lease = incoming.commit(key, { kind: "page", page })
         retired = this.#active
         this.#active = lease
         session.activeKey = key
@@ -201,6 +203,7 @@ export class HistoryController {
     } catch (error) {
       if (this.#current(request, sessionId)) this.#error = error instanceof Error ? error.message : "history read failed"
     } finally {
+      incoming?.release()
       if (this.#current(request, sessionId)) {
         this.#loading = false
         this.#request = null

@@ -50,7 +50,7 @@ test("source reads reserve all text before continuation and merge without discar
   await timeline.open(directSessionRead("s"))
   const drafts = new ComposerDraftStore()
   drafts.set("parent", { content: "new draft", attachments: [] })
-  const pending = await readTimelineDraft(reader, timeline.choices[0]!, drafts, "parent", new AbortController().signal)
+  const pending = await readTimelineDraft(reader, timeline.choices[0]!, drafts, "parent", new AbortController().signal, timeline.history.cache)
   expect(pending.draft.content).toBe(text)
   expect(calls).toEqual([0, 4096, 8192])
   expect(drafts.usage.pending).toBe(1)
@@ -66,7 +66,7 @@ test("draft capacity rejection prevents the next content allocation and preserve
   await timeline.open(directSessionRead("s"))
   const drafts = new ComposerDraftStore(2000)
   drafts.set("parent", { content: "keep", attachments: [] })
-  await expect(readTimelineDraft(reader, timeline.choices[0]!, drafts, "parent", new AbortController().signal)).rejects.toThrow("Draft capacity")
+  await expect(readTimelineDraft(reader, timeline.choices[0]!, drafts, "parent", new AbortController().signal, timeline.history.cache)).rejects.toThrow("Draft capacity")
   expect(calls).toEqual([0])
   expect(drafts.get("parent").content).toBe("keep")
   expect(drafts.usage.pending).toBe(0)
@@ -89,7 +89,7 @@ test("source mismatch, stalled chunks, and cancellation release read reservation
       }
       return page
     } }
-    await expect(readTimelineDraft(broken, timeline.choices[0]!, drafts, "parent", abort.signal)).rejects.toThrow()
+    await expect(readTimelineDraft(broken, timeline.choices[0]!, drafts, "parent", abort.signal, timeline.history.cache)).rejects.toThrow()
     expect(drafts.usage.bytes).toBe(0)
     expect(drafts.usage.pending).toBe(0)
     timeline.dispose()

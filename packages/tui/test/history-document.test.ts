@@ -52,6 +52,7 @@ test("close aborts an in-flight document and its late reply cannot retain conten
   const pending = controller.open(directSessionRead(view.session_id), view, source)
   controller.close()
   expect(signal?.aborted).toBe(true)
+  expect(cache.usage.bytes).toBeGreaterThan(0)
   finish()
   await pending
   expect(controller.snapshot.open).toBe(false)

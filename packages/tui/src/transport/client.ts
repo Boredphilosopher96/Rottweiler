@@ -1,3 +1,4 @@
+import type { ReplyAllocation } from "./reply-allocation"
 import { EngineProtocolError, EngineTransportError } from "./errors"
 import type { ClientDiagnostics } from "../client-diagnostics"
 import validateCommandReply from "../../../../protocol/command-reply-validator.js"
@@ -101,11 +102,11 @@ export class EngineHttpSseClient {
     validateBackoffPolicy(this.#backoff)
   }
 
-  postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandReply> {
-    return this.#reads.run(command, signal, (request, lifetime) => this.#postCommand(request, lifetime))
+  postCommand(command: ClientCommand, signal?: AbortSignal, allocation?: ReplyAllocation): Promise<CommandReply> {
+    return this.#reads.run(command, signal, (request, lifetime) => this.#postCommand(request, lifetime, allocation))
   }
 
-  async #postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandReply> {
+  async #postCommand(command: ClientCommand, signal?: AbortSignal, allocation?: ReplyAllocation): Promise<CommandReply> {
     signal?.throwIfAborted()
     const auth = await this.#ensureClientAuth(signal)
     signal?.throwIfAborted()
@@ -132,7 +133,7 @@ export class EngineHttpSseClient {
       await response.body?.cancel()
       throw new EngineProtocolError("engine command reply must use application/json")
     }
-    const reply: unknown = await boundedJson(response, MAX_COMMAND_REPLY_BYTES, this.#diagnostics, signal)
+    const reply: unknown = await boundedJson(response, MAX_COMMAND_REPLY_BYTES, this.#diagnostics, signal, allocation)
     const validatedAt = this.#diagnostics?.start()
     try {
       if (!validateCommandReply(reply)) {

@@ -1,3 +1,4 @@
+import { CacheRead } from "./read-allocation"
 import type { ComposerDraftStore, DraftSubmission, DraftTextReservation } from "../composer-drafts"
 import type { TranscriptContentSource, TranscriptView } from "../protocol"
 import { HistoryController, type HistoryCacheValue } from "./controller"
@@ -60,9 +61,10 @@ const READ_BYTES = 4096
 
 /** Complete source text is admitted before joining; previews are never mutation input. */
 export async function readTimelineDraft(reader: Pick<SessionReader, "page" | "content">, choice: TimelineChoice, drafts: ComposerDraftStore,
-  scope: string, signal: AbortSignal): Promise<DraftSubmission> {
+  scope: string, signal: AbortSignal, cache: ClientCache<HistoryCacheValue>): Promise<DraftSubmission> {
   let reservation: DraftTextReservation | null = null
   const chunks: string[] = []
+  const incoming = new CacheRead(cache)
   try {
     signal.throwIfAborted()
     if (choice.source === null) {
@@ -75,7 +77,7 @@ export async function readTimelineDraft(reader: Pick<SessionReader, "page" | "co
     for (;;) {
       const page = await reader.content(choice.target, {
         view: choice.view, source: choice.source, offset, max_bytes: READ_BYTES,
-      }, signal)
+      }, signal, incoming)
       signal.throwIfAborted()
       const bytes = Buffer.byteLength(page.text)
       if (JSON.stringify(page.view) !== JSON.stringify(choice.view)
@@ -102,6 +104,7 @@ export async function readTimelineDraft(reader: Pick<SessionReader, "page" | "co
       offset = page.next_offset
     }
   } finally {
+    incoming.release()
     chunks.length = 0
     reservation?.cancel()
   }

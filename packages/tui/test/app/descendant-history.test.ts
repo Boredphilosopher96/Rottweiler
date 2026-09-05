@@ -22,9 +22,9 @@ test("historical nested child navigation carries exact ancestry across history, 
   const pages = new Map([["parent", [child("2", "child")]], ["child", [child("4", "grand")]], ["grand", [grand]]])
   const app = createRottweilerApp(setup.renderer, { sessionId: "parent", replaySessionId: "parent", treeSitterClient: new MockTreeSitterClient(), sessionReader: {
     ...emptySessionReader,
-    page: async (target, read, signal) => {
+    page: async (target, read, signal, allocation) => {
       reads.push({ kind: "page", target })
-      return sessionReaderFor(pages.get(target.sessionId) ?? []).page(target, read, signal)
+      return sessionReaderFor(pages.get(target.sessionId) ?? []).page(target, read, signal, allocation)
     },
     todos: async target => {
       reads.push({ kind: "todos", target })

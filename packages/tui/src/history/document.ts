@@ -1,3 +1,4 @@
+import { CacheRead } from "./read-allocation"
 import type { UiActionLease } from "../ui/actions"
 import { readToolSurface } from "./tool-surface"
 import type { UiSurfaceModel } from "../ui/presentation"
@@ -64,11 +65,14 @@ export class DocumentController {
     this.#sourceOpen = true
     this.#loading = true
     this.#changed(this.snapshot)
+    let incoming: CacheRead<HistoryCacheValue> | null = null
     try {
       for (;;) {
+        incoming?.release()
+        incoming = new CacheRead(this.#cache)
         const result = await this.#reader.page(target, {
           known_view: null, position: { type: "latest" }, max_items: 1, max_bytes: HISTORY_PAGE_BYTES,
-        }, request.signal)
+        }, request.signal, incoming)
         if (this.#sourceRequest !== request || request.signal.aborted) return
         if (result.type !== "ready") {
           await new Promise<void>(resolve => setTimeout(resolve, 0))
@@ -86,6 +90,7 @@ export class DocumentController {
         this.#error = error instanceof Error ? error.message : "Tool content read failed."
       }
     } finally {
+      incoming?.release()
       if (this.#sourceRequest === request) {
         this.#sourceRequest = null
         this.#loading = false
@@ -148,6 +153,7 @@ export class DocumentController {
     this.#error = null
     this.#changed(this.snapshot)
     let retired: CacheLease<HistoryCacheValue> | null = null
+    let incoming: CacheRead<HistoryCacheValue> | null = null
     try {
       if (index >= MAX_CHUNKS) throw new Error("document exceeds the bounded content index")
       const key = `document:${selection.key}:${offset}`
@@ -157,9 +163,10 @@ export class DocumentController {
         if (this.#request !== request || request.signal.aborted) { lease.release(); return }
       }
       if (lease === null) {
+        incoming = new CacheRead(this.#cache)
         const page = await this.#reader.content(selection.target, {
           view: selection.view, source: selection.source, offset, max_bytes: CHUNK_BYTES,
-        }, request.signal)
+        }, request.signal, incoming)
         if (this.#request !== request || request.signal.aborted) return
         const bytes = Buffer.byteLength(page.text)
         if (JSON.stringify([selection.target, page.view, page.source]) !== selection.key || page.offset !== offset
@@ -169,8 +176,7 @@ export class DocumentController {
             : page.next_offset !== offset + bytes || bytes === 0)) {
           throw new Error("document reply violates its source or byte range")
         }
-        if (!this.#cache.insert(key, { kind: "document", page })) throw new Error("content cache is full with active readers")
-        lease = this.#cache.lease(key)
+        lease = incoming.commit(key, { kind: "document", page })
       }
       if (lease === null || (lease.value.kind !== "document" && lease.value.kind !== "surface")) {
         lease?.release()
@@ -185,6 +191,7 @@ export class DocumentController {
         this.#error = error instanceof Error ? error.message : "content read failed"
       }
     } finally {
+      incoming?.release()
       if (this.#request === request) {
         this.#request = null
         this.#loading = false
