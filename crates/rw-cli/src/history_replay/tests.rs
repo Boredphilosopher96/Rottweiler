@@ -431,7 +431,7 @@ async fn tail_reads_are_direct_and_reject_a_foreign_root() {
             expected: None,
             part: TranscriptTailPart::Text {},
             max_items: 1,
-            max_bytes: TRANSCRIPT_TAIL_MIN_PAGE_BYTES as u32,
+            max_bytes: u32::try_from(TRANSCRIPT_TAIL_MIN_PAGE_BYTES).expect("byte limit"),
         },
     };
     let reply = engine

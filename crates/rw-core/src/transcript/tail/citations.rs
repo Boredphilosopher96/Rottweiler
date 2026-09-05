@@ -7,16 +7,20 @@ use rw_types::citation_admission::{
 };
 use serde::Serialize;
 
+#[derive(Serialize)]
+struct Citation<'a> {
+    uri: &'a str,
+    title: Option<&'a str>,
+}
+
 pub(super) fn append(
     state: &mut TailState,
     source: u64,
     uri: &str,
-    title: &Option<String>,
+    title: Option<&str>,
     rows: &impl TranscriptRowLookup,
 ) -> Result<Vec<TranscriptIndexMutation>, TranscriptProjectionError> {
-    let bytes = uri
-        .len()
-        .saturating_add(title.as_ref().map_or(0, String::len));
+    let bytes = uri.len().saturating_add(title.map_or(0, str::len));
     if state.citation_count >= MAX_TURN_CITATIONS
         || bytes > MAX_CITATION_TEXT_BYTES
         || state.citation_utf8_bytes.saturating_add(bytes) > MAX_TURN_CITATION_TEXT_BYTES
@@ -24,11 +28,6 @@ pub(super) fn append(
         return Err(TranscriptProjectionError::Invalid(
             "tail citation admission",
         ));
-    }
-    #[derive(Serialize)]
-    struct Citation<'a> {
-        uri: &'a str,
-        title: &'a Option<String>,
     }
     let offset = state.citation_encoded_bytes;
     let mut writer =

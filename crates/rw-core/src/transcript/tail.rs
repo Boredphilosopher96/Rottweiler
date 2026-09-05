@@ -16,15 +16,16 @@ mod tools;
 pub use read::{read_transcript_tail, validate_tail_read};
 
 const TEXT_FIRST: u16 = 0;
-const THINKING_FIRST: u16 = (TRANSCRIPT_TAIL_TEXT_BYTES / MAX_AUXILIARY_CELL_BYTES) as u16;
+const THINKING_FIRST: u16 = const_slot(TRANSCRIPT_TAIL_TEXT_BYTES / MAX_AUXILIARY_CELL_BYTES);
 const CITATION_INDEX_FIRST: u16 = 2 * THINKING_FIRST;
 const CITATION_DATA_FIRST: u16 = CITATION_INDEX_FIRST + 2;
 const CITATION_ENCODED_LIMIT: usize = MAX_TURN_CITATION_TEXT_BYTES * 6 + MAX_TURN_CITATIONS * 128;
 const TOOL_INDEX: u16 =
-    CITATION_DATA_FIRST + CITATION_ENCODED_LIMIT.div_ceil(MAX_AUXILIARY_CELL_BYTES) as u16;
+    CITATION_DATA_FIRST + const_slot(CITATION_ENCODED_LIMIT.div_ceil(MAX_AUXILIARY_CELL_BYTES));
 const TOOL_DATA_FIRST: u16 = TOOL_INDEX + 1;
-const TOOL_CELLS: u16 = (TRANSCRIPT_TAIL_TOOL_BYTES / MAX_AUXILIARY_CELL_BYTES) as u16;
-const TOOL_PROVIDER_FIRST: u16 = TOOL_DATA_FIRST + TOOL_CELLS * MAX_PENDING_TOOL_INVOCATIONS as u16;
+const TOOL_CELLS: u16 = const_slot(TRANSCRIPT_TAIL_TOOL_BYTES / MAX_AUXILIARY_CELL_BYTES);
+const TOOL_PROVIDER_FIRST: u16 =
+    TOOL_DATA_FIRST + TOOL_CELLS * const_slot(MAX_PENDING_TOOL_INVOCATIONS);
 const _: () = assert!(
     TOOL_PROVIDER_FIRST as usize + MAX_PENDING_TOOL_INVOCATIONS <= MAX_AUXILIARY_CELLS as usize
 );
@@ -105,10 +106,10 @@ pub(super) fn project(
         EngineEvent::ConversationTurnCommitted { turn, .. }
             if matches!(turn.role, Role::Assistant | Role::Tool) =>
         {
-            state.clear_response(source)
+            state.clear_response(source);
         }
         EngineEvent::CompactionStarted { .. } | EngineEvent::CompactionFinished { .. } => {
-            state.clear_response(source)
+            state.clear_response(source);
         }
         EngineEvent::TextDelta { turn_id, text, .. } => {
             require_turn(state, turn_id)?;
@@ -137,7 +138,7 @@ pub(super) fn project(
             ..
         } => {
             require_turn(state, turn_id)?;
-            return citations::append(state, source, uri, title, rows);
+            return citations::append(state, source, uri, title.as_deref(), rows);
         }
         EngineEvent::ToolCallStarted { .. }
         | EngineEvent::ToolCallFinished { .. }
@@ -223,3 +224,12 @@ mod read_tests;
 
 #[cfg(test)]
 mod chunk_tests;
+
+const fn const_slot(value: usize) -> u16 {
+    assert!(value <= 65535);
+    let bytes = value.to_le_bytes();
+    u16::from_le_bytes([bytes[0], bytes[1]])
+}
+fn slot(value: usize) -> Result<u16, TranscriptProjectionError> {
+    u16::try_from(value).map_err(|_| TranscriptProjectionError::Invalid("tail slot range"))
+}

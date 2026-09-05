@@ -3,7 +3,7 @@ use super::{
     CITATION_DATA_FIRST, CITATION_INDEX_FIRST, MAX_AUXILIARY_CELL_BYTES,
     MAX_PENDING_TOOL_INVOCATIONS, TEXT_FIRST, THINKING_FIRST, TOOL_CELLS, TOOL_DATA_FIRST,
     TOOL_INDEX, TOOL_PROVIDER_FIRST, TailState, TranscriptProjectionError, index_cell, read_u32,
-    read_u64,
+    read_u64, slot,
 };
 use rw_store::session::transcript_index::TranscriptIndex;
 use rw_types::transcript::{
@@ -17,6 +17,14 @@ use rw_types::transcript_tail::{
 };
 use rw_types::{SequenceId, SessionId, ToolCallId, TurnId};
 use serde::Deserialize;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Citation {
+    uri: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    title: Option<String>,
+}
 
 /// Read one bounded component page at the index's exact applied prefix.
 ///
@@ -111,7 +119,7 @@ fn fill_page(
                 items.push(item);
                 position += 1;
             }
-            *next_offset = (position < state.citation_count).then_some(position as u16);
+            *next_offset = (position < state.citation_count).then_some(slot(position)?);
         }
         TranscriptTailContent::Tools {
             offset,
@@ -147,7 +155,7 @@ fn fill_page(
                 }
                 position += 1;
             }
-            *next_offset = (position < MAX_PENDING_TOOL_INVOCATIONS).then_some(position as u16);
+            *next_offset = (position < MAX_PENDING_TOOL_INVOCATIONS).then_some(slot(position)?);
         }
         TranscriptTailContent::Text { .. } | TranscriptTailContent::Thinking { .. } => {}
     }
@@ -191,7 +199,7 @@ fn read_citation(
 ) -> Result<TranscriptTailCitation, TranscriptProjectionError> {
     let metadata = index_cell(
         index,
-        CITATION_INDEX_FIRST + (position / 128) as u16,
+        CITATION_INDEX_FIRST + slot(position / 128)?,
         state.epoch,
         128,
     )?;
@@ -204,8 +212,8 @@ fn read_citation(
         return Err(invalid("tail citation extent"));
     }
     let leading = start % MAX_AUXILIARY_CELL_BYTES;
-    let first = CITATION_DATA_FIRST + (start / MAX_AUXILIARY_CELL_BYTES) as u16;
-    let cells = (leading + len).div_ceil(MAX_AUXILIARY_CELL_BYTES) as u16;
+    let first = CITATION_DATA_FIRST + slot(start / MAX_AUXILIARY_CELL_BYTES)?;
+    let cells = slot((leading + len).div_ceil(MAX_AUXILIARY_CELL_BYTES))?;
     let encoded = index.auxiliary_range(
         first,
         cells,
@@ -214,13 +222,6 @@ fn read_citation(
     let encoded = encoded
         .get(leading..leading + len)
         .ok_or_else(|| invalid("tail citation cell range"))?;
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Citation {
-        uri: String,
-        #[serde(deserialize_with = "Option::deserialize")]
-        title: Option<String>,
-    }
     let citation: Citation = serde_json::from_slice(encoded)?;
     if citation
         .uri
@@ -263,7 +264,7 @@ fn read_tool(
         return Err(invalid("tail invocation row kind"));
     };
     let provider = index
-        .auxiliary_cell(TOOL_PROVIDER_FIRST + slot as u16)?
+        .auxiliary_cell(TOOL_PROVIDER_FIRST + super::slot(slot)?)?
         .ok_or_else(|| invalid("tail provider identifier"))?;
     if provider.len() > rw_types::tool_admission::MAX_TOOL_CALL_ID_BYTES {
         return Err(invalid("tail provider identifier bytes"));
@@ -277,7 +278,7 @@ fn read_tool(
     }
     let output = read_text(
         index,
-        TOOL_DATA_FIRST + slot as u16 * TOOL_CELLS,
+        TOOL_DATA_FIRST + super::slot(slot)? * TOOL_CELLS,
         len,
         entry[12] & 2 != 0,
     )?;

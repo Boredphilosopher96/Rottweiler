@@ -32,7 +32,7 @@ pub(super) fn project(
     (root, journal, projector)
 }
 fn bytes(projector: &TranscriptProjector, first: u16, len: usize) -> Vec<u8> {
-    let count = len.div_ceil(MAX_AUXILIARY_CELL_BYTES) as u16;
+    let count = u16::try_from(len.div_ceil(MAX_AUXILIARY_CELL_BYTES)).expect("cell count");
     let result = projector
         .index()
         .auxiliary_range(first, count, len)

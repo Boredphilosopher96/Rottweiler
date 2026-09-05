@@ -9,8 +9,8 @@ fn request(part: TranscriptTailPart) -> TranscriptTailRead {
     TranscriptTailRead {
         expected: None,
         part,
-        max_items: TRANSCRIPT_TAIL_PAGE_ITEMS as u16,
-        max_bytes: TRANSCRIPT_TAIL_MIN_PAGE_BYTES as u32,
+        max_items: u16::try_from(TRANSCRIPT_TAIL_PAGE_ITEMS).expect("item limit"),
+        max_bytes: u32::try_from(TRANSCRIPT_TAIL_MIN_PAGE_BYTES).expect("byte limit"),
     }
 }
 fn ready(

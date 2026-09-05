@@ -386,11 +386,11 @@ struct BatchRows<'a> {
 }
 impl BatchRows<'_> {
     fn apply(&mut self, change: TranscriptIndexMutation) {
-        if let TranscriptIndexMutation::PutAuxiliary { key, .. } = &change {
-            if let Some(position) = self.cells.get(key) {
-                self.mutations[*position] = change;
-                return;
-            }
+        if let TranscriptIndexMutation::PutAuxiliary { key, .. } = &change
+            && let Some(position) = self.cells.get(key)
+        {
+            self.mutations[*position] = change;
+            return;
         }
         let position = self.mutations.len();
         match &change {

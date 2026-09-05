@@ -50,25 +50,7 @@ impl TranscriptDocument {
             (
                 TranscriptContentSelector::ConversationBlock { index },
                 EngineEvent::ConversationTurnCommitted { turn, .. },
-            ) => {
-                if turn.role == Role::Tool {
-                    return Err(invalid("hidden tool conversation"));
-                }
-                let block = turn
-                    .blocks
-                    .into_iter()
-                    .nth(*index as usize)
-                    .ok_or_else(|| invalid("content block index"))?;
-                match block {
-                    Block::Text { text } | Block::Thinking { content: text, .. } => {
-                        Self::text(text, max_bytes)
-                    }
-                    Block::Image { .. } | Block::Citation { .. } => Self::json(&block, max_bytes),
-                    Block::ToolCall { .. } | Block::ToolResult { .. } => {
-                        Err(invalid("hidden tool IR block"))
-                    }
-                }
-            }
+            ) => Self::conversation_block(turn, *index, max_bytes),
             (
                 TranscriptContentSelector::ToolArguments {},
                 EngineEvent::ToolCallStarted { args, .. },
@@ -132,6 +114,30 @@ impl TranscriptDocument {
                 max_bytes,
             ),
             _ => Err(invalid("content selector does not match source")),
+        }
+    }
+
+    fn conversation_block(
+        turn: Turn,
+        index: u32,
+        max_bytes: usize,
+    ) -> Result<Self, TranscriptProjectionError> {
+        if turn.role == Role::Tool {
+            return Err(invalid("hidden tool conversation"));
+        }
+        let block = turn
+            .blocks
+            .into_iter()
+            .nth(index as usize)
+            .ok_or_else(|| invalid("content block index"))?;
+        match block {
+            Block::Text { text } | Block::Thinking { content: text, .. } => {
+                Self::text(text, max_bytes)
+            }
+            Block::Image { .. } | Block::Citation { .. } => Self::json(&block, max_bytes),
+            Block::ToolCall { .. } | Block::ToolResult { .. } => {
+                Err(invalid("hidden tool IR block"))
+            }
         }
     }
 

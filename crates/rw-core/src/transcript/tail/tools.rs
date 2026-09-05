@@ -23,36 +23,18 @@ pub(super) fn project(
         meta, tool_call_id, ..
     } = event
     {
-        if tool_call_id.0.len() > rw_types::tool_admission::MAX_TOOL_CALL_ID_BYTES {
-            return Err(TranscriptProjectionError::Invalid(
-                "tail provider identifier bound",
-            ));
-        }
-        let slot = (0..MAX_PENDING_TOOL_INVOCATIONS)
-            .find(|slot| cell[8 + slot * 16 + 12] & 1 == 0)
-            .ok_or(TranscriptProjectionError::Invalid(
-                "tail pending tool admission",
-            ))?;
-        let entry = 8 + slot * 16;
-        cell[entry..entry + 16].fill(0);
-        cell[entry..entry + 8].copy_from_slice(&meta.sequence_id.0.to_le_bytes());
-        cell[entry + 12] = 1;
-        state.tools_count += 1;
-        return Ok(vec![
-            TranscriptIndexMutation::PutAuxiliary {
-                key: TOOL_INDEX,
-                payload: cell,
-            },
-            TranscriptIndexMutation::PutAuxiliary {
-                key: TOOL_PROVIDER_FIRST + slot as u16,
-                payload: tool_call_id.0.as_bytes().to_vec(),
-            },
-        ]);
+        return start(state, cell, meta.sequence_id.0, tool_call_id);
     }
-    let invocation = match event {
-        EngineEvent::ToolCallFinished { invocation_id, .. }
-        | EngineEvent::ToolOutputDelta { invocation_id, .. } => invocation_id,
-        _ => return Err(TranscriptProjectionError::Invalid("tail tool event")),
+    let (EngineEvent::ToolCallFinished {
+        invocation_id: invocation,
+        ..
+    }
+    | EngineEvent::ToolOutputDelta {
+        invocation_id: invocation,
+        ..
+    }) = event
+    else {
+        return Err(TranscriptProjectionError::Invalid("tail tool event"));
     };
     let row = rows
         .bound_row(&super::super::entity_binding("tool", &[&invocation.0]))?
@@ -83,7 +65,7 @@ pub(super) fn project(
     }
     let bytes = read_u32(&cell[entry + 8..entry + 12]) as usize;
     let mut writer = chunks::CellAppender::new(
-        TOOL_DATA_FIRST + slot as u16 * TOOL_CELLS,
+        TOOL_DATA_FIRST + super::slot(slot)? * TOOL_CELLS,
         bytes,
         TRANSCRIPT_TAIL_TOOL_BYTES,
         rows,
@@ -111,7 +93,11 @@ pub(super) fn project(
         .write_all(prefix.as_bytes())
         .map_err(|_| TranscriptProjectionError::Invalid("tool preview bytes"))?;
     let (next, mut mutations) = writer.finish()?;
-    cell[entry + 8..entry + 12].copy_from_slice(&(next as u32).to_le_bytes());
+    cell[entry + 8..entry + 12].copy_from_slice(
+        &u32::try_from(next)
+            .map_err(|_| TranscriptProjectionError::Invalid("tool preview extent"))?
+            .to_le_bytes(),
+    );
     cell[entry + 12] = 1 | if prefix.len() < chunk.len() { 2 } else { 0 };
     cell[entry + 13] = stream_id;
     mutations.push(TranscriptIndexMutation::PutAuxiliary {
@@ -119,4 +105,37 @@ pub(super) fn project(
         payload: cell,
     });
     Ok(mutations)
+}
+
+fn start(
+    state: &mut TailState,
+    mut cell: Vec<u8>,
+    source: u64,
+    tool_call_id: &rw_types::ToolCallId,
+) -> Result<Vec<TranscriptIndexMutation>, TranscriptProjectionError> {
+    if tool_call_id.0.len() > rw_types::tool_admission::MAX_TOOL_CALL_ID_BYTES {
+        return Err(TranscriptProjectionError::Invalid(
+            "tail provider identifier bound",
+        ));
+    }
+    let slot = (0..MAX_PENDING_TOOL_INVOCATIONS)
+        .find(|slot| cell[8 + slot * 16 + 12] & 1 == 0)
+        .ok_or(TranscriptProjectionError::Invalid(
+            "tail pending tool admission",
+        ))?;
+    let entry = 8 + slot * 16;
+    cell[entry..entry + 16].fill(0);
+    cell[entry..entry + 8].copy_from_slice(&source.to_le_bytes());
+    cell[entry + 12] = 1;
+    state.tools_count += 1;
+    Ok(vec![
+        TranscriptIndexMutation::PutAuxiliary {
+            key: TOOL_INDEX,
+            payload: cell,
+        },
+        TranscriptIndexMutation::PutAuxiliary {
+            key: TOOL_PROVIDER_FIRST + super::slot(slot)?,
+            payload: tool_call_id.0.as_bytes().to_vec(),
+        },
+    ])
 }
