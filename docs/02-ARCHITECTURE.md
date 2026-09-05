@@ -409,6 +409,14 @@ resolve(alias) → [candidate models] → adapter → provider
   replaces only its derived tables in one transaction; accounting and independent
   authoritative tables survive. An unreadable database is never deleted as a
   search-repair shortcut.
+- Accounting facts and their time-prefix aggregates commit in one writer transaction.
+  Session and global aggregates use a 49-level binary time index with exact u128
+  sums; as-of and trailing-window reads visit a fixed number of nodes and convert
+  only the selected totals to u64. A missing derived index rebuilds in resumable
+  pages of at most 128 facts. Queries reject incomplete coverage. Accounting
+  dispositions admit at most 1 MiB of encoded JSON before serialization; reads
+  apply the same bound before allocating a database payload. Rewind and search
+  rebuild never erase charged facts.
 - `checkpoints/` — content-addressed blobs (BLAKE3) + per-turn manifests of touched files. Rewind = restore manifest.
 - Config precedence: built-in defaults ← `~/.rottweiler/config.toml` ← `.rottweiler/config.toml` ← env ← CLI flags. **Exception**: security-sensitive keys (`[permissions]`, safe-list, `[network]`/proxy, telemetry opt-in, update channel) are ignored at project level with a warning (05 Layer 0). Schema in `rw-types`, `rw config check` validates and prints effective config with provenance per key.
 

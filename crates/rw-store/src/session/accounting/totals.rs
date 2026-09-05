@@ -10,7 +10,7 @@ const TIME_ROOT: u64 = 1 << TIME_BITS;
 const FIELD_COUNT: usize = 7;
 const NODE_BYTES: usize = FIELD_COUNT * 16;
 const REBUILD_PAGE: i64 = 128;
-const MAX_COST_BYTES: i64 = 1024 * 1024;
+const MAX_COST_BYTES: usize = 1024 * 1024;
 const USD: usize = 0;
 const CREDITS: usize = 1;
 const TOKENS: usize = 2;
@@ -190,6 +190,29 @@ pub(super) fn require_complete(connection: &Connection) -> Result<(), SessionSto
     }
     Ok(())
 }
+pub(super) fn validate_cost(cost: &Cost) -> Result<(), SessionStoreError> {
+    struct Capacity(usize);
+    impl std::io::Write for Capacity {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_sub(bytes.len())
+                .ok_or_else(|| std::io::Error::other("accounting payload limit"))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    serde_json::to_writer(&mut Capacity(MAX_COST_BYTES), cost).map_err(|error| {
+        if error.is_io() {
+            SessionStoreError::AccountingEntryTooLarge
+        } else {
+            error.into()
+        }
+    })
+}
+
 /// Called only after a new authority row is inserted in the same transaction.
 pub(super) fn record(
     connection: &Connection,
@@ -231,7 +254,11 @@ fn catch_up_page(connection: &mut Connection) -> Result<bool, SessionStoreError>
     let mut statement = transaction.prepare(
         "SELECT rowid, CASE WHEN length(CAST(session_id AS BLOB))<=128 THEN session_id END, CASE WHEN length(CAST(emitted_at_utc AS BLOB))=24 THEN emitted_at_utc END, CASE WHEN length(CAST(cost_json AS BLOB))<=?2 THEN cost_json END FROM turn_accounting WHERE rowid>?1 ORDER BY rowid LIMIT ?3"
     )?;
-    let mut rows = statement.query(params![through, MAX_COST_BYTES, REBUILD_PAGE])?;
+    let mut rows = statement.query(params![
+        through,
+        i64::try_from(MAX_COST_BYTES).map_err(|_| SessionStoreError::LimitOverflow)?,
+        REBUILD_PAGE
+    ])?;
     let mut last = through;
     while let Some(row) = rows.next()? {
         last = row.get(0)?;

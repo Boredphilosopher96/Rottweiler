@@ -167,3 +167,27 @@ fn decoded_utc_boundaries_enforce_their_calendar_invariant() {
     assert!(serde_json::from_str::<UtcDayKey>("\"2026-02-29\"").is_err());
     assert!(serde_json::from_str::<UtcTimestamp>("\"2024-02-29T00:00:00.000Z\"").is_ok());
 }
+
+#[test]
+fn accounting_rejects_oversized_dispositions_before_persisting() {
+    let root = tempfile::tempdir().expect("root");
+    let ledger = AccountingLedger::open(root.path()).expect("ledger");
+    let fact = entry(
+        "chosen",
+        0,
+        "2026-09-05T01:00:00.000Z",
+        Cost::Unavailable {
+            reason: "\0".repeat(MAX_COST_BYTES / 6 + 1),
+        },
+    );
+    assert!(matches!(
+        ledger.record(&fact),
+        Err(SessionStoreError::AccountingEntryTooLarge)
+    ));
+    assert!(
+        ledger
+            .entries_for_session("chosen")
+            .expect("facts")
+            .is_empty()
+    );
+}

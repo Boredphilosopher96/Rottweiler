@@ -227,7 +227,7 @@ pub struct AccountingLedger {
 }
 
 impl AccountingLedger {
-    /// Opens the shared database using the current accounting schema.
+    /// Opens the shared database using the declared accounting schema.
     /// Unsupported accounting layouts are rejected without modifying their rows.
     ///
     /// # Errors
@@ -438,7 +438,7 @@ pub(super) fn validate_accounting_entry(
     if entry.emitted_at_utc.utc_day() != entry.utc_day {
         return Err(SessionStoreError::InvalidAccountingTimestamp);
     }
-    Ok(())
+    totals::validate_cost(&entry.cost)
 }
 
 fn validate_utc_day(value: &str) -> Result<(), SessionStoreError> {

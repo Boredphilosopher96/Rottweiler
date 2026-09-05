@@ -11,7 +11,7 @@ pub enum SessionStoreError {
         /// Table whose authoritative or derived layout requires explicit recovery.
         table: &'static str,
     },
-    /// A session uses the unsupported lifetime-file journal layout.
+    /// An unrecognized event file is present in the session directory.
     #[error("invalid session journal layout: unexpected events.jsonl file")]
     UnsupportedJournalLayout,
     /// Session ids are path components and must use the restricted alphabet.
@@ -107,6 +107,9 @@ pub enum SessionStoreError {
     /// The derived bounded totals do not cover all retained accounting facts.
     #[error("accounting totals require projection recovery")]
     IncompleteAccountingTotals,
+    /// A canonical accounting disposition exceeds its serialized allocation allowance.
+    #[error("accounting entry exceeds its payload allowance")]
+    AccountingEntryTooLarge,
     /// The bounded totals projection has invalid arithmetic, rows or coverage.
     #[error("accounting totals projection is corrupt")]
     CorruptAccountingTotals,
