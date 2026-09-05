@@ -3,6 +3,7 @@ import type { ClientDiagnostics } from "../client-diagnostics"
 import validateCommandReply from "../../../../protocol/command-reply-validator.js"
 import { CLIENT_COMMAND_EXECUTION, ENGINE_EVENT_DELIVERY, MAX_COMMAND_REPLY_BYTES, PROTOCOL_VERSION } from "../protocol"
 import { boundedJson } from "./json"
+import { ClientReadAdmission } from "./read-admission"
 import type { ClientCommand, CommandReply, EngineEvent } from "../protocol"
 import {
   DEFAULT_BACKOFF_POLICY,
@@ -69,6 +70,7 @@ export class EngineHttpSseClient {
   readonly #scheduler: BackoffScheduler
   readonly #sse: SseParserOptions
   readonly #fetch: typeof fetch
+  readonly #reads: ClientReadAdmission
   #clientAuth: ClientAuth | null = null
   #clientAuthRequest: Promise<ClientAuth> | null = null
   #activeEventStream: ActiveEventStream | null = null
@@ -81,6 +83,7 @@ export class EngineHttpSseClient {
       throw new TypeError("engine bootstrap token must not be empty")
     }
     this.#diagnostics = options.diagnostics
+    this.#reads = new ClientReadAdmission(options.diagnostics)
     this.#socketPath = options.socketPath
     this.#bootstrapToken =
       typeof options.bootstrapToken === "string"
@@ -98,11 +101,14 @@ export class EngineHttpSseClient {
     validateBackoffPolicy(this.#backoff)
   }
 
-  async postCommand(
-    command: ClientCommand,
-    signal?: AbortSignal,
-  ): Promise<CommandReply> {
+  postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandReply> {
+    return this.#reads.run(command, signal, (request, lifetime) => this.#postCommand(request, lifetime))
+  }
+
+  async #postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandReply> {
+    signal?.throwIfAborted()
     const auth = await this.#ensureClientAuth(signal)
+    signal?.throwIfAborted()
     const authenticatedCommand: ClientCommand = {
       ...command,
       meta: { ...command.meta, client_id: auth.clientId },
@@ -118,6 +124,7 @@ export class EngineHttpSseClient {
       if (response.status === 401 || response.status === 403) {
         this.#clientAuth = null
       }
+      await response.body?.cancel()
       throw new EngineTransportError("engine command rejected", response.status)
     }
     const contentType = response.headers.get("Content-Type")?.split(";", 1)[0]?.trim().toLowerCase()

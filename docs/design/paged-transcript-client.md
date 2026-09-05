@@ -54,3 +54,11 @@ Renderer handoff is governed by `AppClientState` and its private size limit. Int
 Measurements are wall-clock durations. Nested stages are not additive, and asynchronous syntax parsing or terminal I/O may run outside the measured call. Process CPU and end-to-end input latency remain separate measurements.
 
 See [Terminal workspace](terminal-workspace.md) for interaction and visual ownership.
+
+## Client read admission
+
+The HTTP transport owns one FIFO for every direct read, including history, catalogs, workspace inspection, and service views. `MAX_CLIENT_READS` is generated from the Rust protocol owner and limits active reads through complete reply-body consumption and validation. Actor controls and mutations bypass this FIFO.
+
+Active and waiting requests share a 32-entry, 1 MiB retained-request allowance. Admission measures a bounded JSON traversal before cloning the request; the charge covers the immutable snapshot and worst-case JSON escaping and encoding. Caller mutation cannot change an admitted request. Queue overflow rejects the request without dispatch. Aborting a waiting request removes it immediately; an active request retains admission until its HTTP operation settles. Runtime stop and session changes abort their owned reads.
+
+Opt-in local diagnostics record `read_queue_age` in fixed counters and histogram buckets. Measurements contain no command names, session IDs, or payloads.

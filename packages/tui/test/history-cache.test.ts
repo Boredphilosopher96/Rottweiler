@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { ClientCache, retainedJsonBytes } from "../src/history/cache"
+import { ClientCache } from "../src/history/cache"
+import { retainedJsonBytes } from "../src/retained-json"
 
 describe("aggregate client cache", () => {
   test("parent, child, artifact and body entries compete for one allowance", () => {

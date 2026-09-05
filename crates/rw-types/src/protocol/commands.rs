@@ -636,5 +636,8 @@ impl CommandReply {
         }
     }
 }
+/// Maximum in-flight reads per authenticated client, held through reply body release.
+pub const MAX_CLIENT_READS: usize = 2;
+
 /// Maximum encoded command reply, including its envelope.
 pub const MAX_COMMAND_REPLY_BYTES: usize = 8 * 1024 * 1024;

@@ -1,13 +1,9 @@
-import type {
-  ClientCommand as GeneratedClientCommand,
-  EngineEvent as GeneratedEngineEvent,
-} from "../../../protocol/types"
-
 export {
   ENGINE_EVENT_DELIVERY,
   CLIENT_COMMAND_EXECUTION,
   TRANSCRIPT_PROJECTION_VERSION,
   MAX_COMMAND_REPLY_BYTES,
+  MAX_CLIENT_READS,
   MAX_ATTACHMENTS_PER_MESSAGE,
   MAX_IMAGE_ATTACHMENT_BYTES,
   MAX_MCP_SERVER_ID_BYTES,
@@ -17,6 +13,8 @@ export {
   PROTOCOL_VERSION,
 } from "../../../protocol/types"
 export type {
+  ClientCommand,
+  EngineEvent,
   Answer,
   Attachment,
   AttachmentData,
@@ -95,11 +93,3 @@ export type {
   Usage,
   UnifiedDiff,
 } from "../../../protocol/types"
-
-/**
- * The TUI only consumes protocol types generated from the Rust source of truth.
- * Keeping this boundary in one module makes that ownership explicit and gives
- * the future transport client a stable local import.
- */
-export type ClientCommand = GeneratedClientCommand
-export type EngineEvent = GeneratedEngineEvent

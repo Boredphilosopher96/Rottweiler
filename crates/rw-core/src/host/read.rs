@@ -4,7 +4,7 @@ use super::{BoundClient, DedupeRegistry, DedupeState, EngineHost, HostError, rej
 use bytes::Bytes;
 use rw_types::{
     ClientCommand, ClientId, CommandExecution, CommandOutcome, CommandReply, EngineEvent,
-    EngineEventDelivery, MAX_COMMAND_REPLY_BYTES, RequestId,
+    EngineEventDelivery, MAX_CLIENT_READS, MAX_COMMAND_REPLY_BYTES, RequestId,
 };
 use std::{
     collections::HashMap,
@@ -14,7 +14,6 @@ use std::{
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 const MAX_ACTIVE_READS: usize = 8;
-const MAX_CLIENT_READS: usize = 2;
 const REPLY_BYTE_UNIT: usize = 1024;
 const MAX_RETAINED_REPLY_UNITS: usize = 32 * 1024;
 

@@ -12,6 +12,7 @@ export const MAX_IMAGE_ATTACHMENT_BYTES = 5242880 as const;
 export const MAX_TOTAL_ATTACHMENT_BYTES = 10485760 as const;
 export const MAX_MCP_SERVER_ID_BYTES = 96 as const;
 export const MAX_COMMAND_REPLY_BYTES = 8388608 as const;
+export const MAX_CLIENT_READS = 2 as const;
 export const MCP_SERVER_ID_PATTERN = "^[A-Za-z0-9._-]{1,96}$" as const;
 
 export type ToolCallId = string;

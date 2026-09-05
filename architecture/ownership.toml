@@ -16,7 +16,7 @@ symbols = ["SessionId::validate", "RequestId::is_valid", "MAX_REQUEST_ID_BYTES",
 [[owner]]
 id = "client-command-contract"
 path = "crates/rw-types/src/protocol/commands.rs"
-symbols = ["ClientCommand::session_id", "ClientCommand::execution", "CommandReply", "MAX_COMMAND_REPLY_BYTES"]
+symbols = ["ClientCommand::session_id", "ClientCommand::execution", "CommandReply", "MAX_COMMAND_REPLY_BYTES", "MAX_CLIENT_READS"]
 
 [[owner]]
 id = "engine-event-contract"

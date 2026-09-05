@@ -674,7 +674,7 @@ export class TuiEngineRuntime {
         },
         signal,
       )
-      if (resume?.type === "accepted" || resume === null) {
+      if (resume.type === "accepted") {
         if (this.#config.replayMode) {
           return
         }
@@ -686,7 +686,7 @@ export class TuiEngineRuntime {
           },
           signal,
         )
-        if (takeover?.type === "accepted" || takeover === null) {
+        if (takeover.type === "accepted") {
           return
         }
         if (!isTransientSessionPreparationRejection(takeover)) {
@@ -741,8 +741,10 @@ export class TuiEngineRuntime {
 
   async #postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandOutcome> {
     const generation = this.#sessionGeneration
-    const reply = await this.#client.postCommand(command, signal)
-    if (reply.type === "read" && generation === this.#sessionGeneration && !signal?.aborted) {
+    const lifetime = signal === undefined ? this.#controller.signal : AbortSignal.any([signal, this.#controller.signal])
+    lifetime.throwIfAborted()
+    const reply = await this.#client.postCommand(command, lifetime)
+    if (reply.type === "read" && generation === this.#sessionGeneration && !lifetime.aborted) {
       for (const event of reply.events) this.#requiredApp().handleEvent(event)
     }
     return reply.outcome

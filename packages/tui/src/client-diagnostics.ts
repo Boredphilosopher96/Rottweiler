@@ -1,6 +1,6 @@
 /** Fixed local measurements; no session IDs, command names or payloads enter this owner. */
 export const CLIENT_STAGES = [
-  "event_decode", "reply_decode", "reply_validation", "reducer", "presentation", "presentation_queue_age",
+  "event_decode", "reply_decode", "reply_validation", "read_queue_age", "reducer", "presentation", "presentation_queue_age",
   "history_admission", "history_update", "history_layout", "history_queue_age",
 ] as const
 export type ClientStage = typeof CLIENT_STAGES[number]
