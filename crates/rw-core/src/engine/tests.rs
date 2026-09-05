@@ -37,4 +37,5 @@ mod subagents;
 mod subscription;
 mod titles;
 mod todos;
+mod tool_admission;
 mod tool_order;

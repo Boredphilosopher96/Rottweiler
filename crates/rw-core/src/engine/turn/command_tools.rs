@@ -36,6 +36,11 @@ pub(super) async fn apply_command_tool_calls(
     if calls.is_empty() {
         return Ok(());
     }
+    let mut admission = super::tool_admission::PendingToolBudget::default();
+    for (index, call) in calls.iter().enumerate() {
+        admission.start(&format!("command-prelude-{turn}-{index}"), &call.name)?;
+        admission.arguments(&call.arguments)?;
+    }
     let mut placeholders = BTreeSet::new();
     for call in &calls {
         let occurrences = messages
@@ -60,6 +65,10 @@ pub(super) async fn apply_command_tool_calls(
             index,
         })
         .collect();
+    let pending = super::tool_admission::AdmittedToolBatch::new(
+        pending,
+        runtime.config.secret_redactor.as_ref(),
+    )?;
     let executions = execute_tool_calls(
         turn,
         runtime.tasks,

@@ -72,11 +72,11 @@ impl DoomLoopGuard {
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-#[tracing::instrument(target = "rw_performance", level = "trace", name = "tool.batch", skip_all, fields(session_id = config.session_id.0.as_str(), turn, calls = calls.len()))]
+#[tracing::instrument(target = "rw_performance", level = "trace", name = "tool.batch", skip_all, fields(session_id = config.session_id.0.as_str(), turn, calls = calls.calls.len()))]
 pub(super) async fn execute_tool_calls(
     turn: u64,
     tasks: &task_ownership::ActorTasks,
-    calls: Vec<PendingToolCall>,
+    calls: super::tool_admission::AdmittedToolBatch,
     config: &Arc<SessionActorConfig>,
     context: &ToolContext,
     cancellation: &CancellationToken,
@@ -84,8 +84,9 @@ pub(super) async fn execute_tool_calls(
     signals: &mpsc::UnboundedSender<TurnSignal>,
     mode: SessionMode,
 ) -> Vec<ToolExecution> {
+    let super::tool_admission::AdmittedToolBatch { calls, mut budget } = calls;
     let mut prepared = Vec::with_capacity(calls.len());
-    for call in calls {
+    for (call, displayed) in calls {
         prepared.push(
             prepare_tool_call(
                 turn,
@@ -96,6 +97,8 @@ pub(super) async fn execute_tool_calls(
                 signals,
                 context,
                 mode,
+                &mut budget,
+                displayed,
             )
             .await,
         );

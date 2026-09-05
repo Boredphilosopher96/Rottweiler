@@ -178,6 +178,26 @@ fn generate_typescript() -> Result<String, XtaskError> {
             "MAX_UI_SURFACE_BYTES",
             rw_types::extension_ui::MAX_UI_SURFACE_BYTES,
         ),
+        (
+            "MAX_PENDING_TOOL_INVOCATIONS",
+            rw_types::tool_admission::MAX_PENDING_TOOL_INVOCATIONS,
+        ),
+        (
+            "MAX_PENDING_TOOL_ARGUMENT_BYTES",
+            rw_types::tool_admission::MAX_PENDING_TOOL_ARGUMENT_BYTES,
+        ),
+        (
+            "MAX_PENDING_TOOL_PREPARED_BYTES",
+            rw_types::tool_admission::MAX_PENDING_TOOL_PREPARED_BYTES,
+        ),
+        (
+            "MAX_TOOL_CALL_ID_BYTES",
+            rw_types::tool_admission::MAX_TOOL_CALL_ID_BYTES,
+        ),
+        (
+            "MAX_TOOL_NAME_BYTES",
+            rw_types::tool_admission::MAX_TOOL_NAME_BYTES,
+        ),
         ("MAX_TODO_ITEMS", rw_types::todo::MAX_TODO_ITEMS),
         ("MAX_TODO_ID_BYTES", rw_types::todo::MAX_TODO_ID_BYTES),
         (

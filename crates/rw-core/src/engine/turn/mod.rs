@@ -16,6 +16,7 @@ mod start;
 mod subagent_events;
 mod title;
 mod todos;
+mod tool_admission;
 mod tool_execution;
 mod tool_requests;
 mod tool_scheduling;

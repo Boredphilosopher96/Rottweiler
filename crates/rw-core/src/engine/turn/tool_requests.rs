@@ -343,11 +343,9 @@ pub(super) async fn prepare_tool_call(
     signals: &mpsc::UnboundedSender<TurnSignal>,
     context: &ToolContext,
     mode: SessionMode,
+    admission: &mut super::tool_admission::PendingToolBudget,
+    displayed_arguments: Value,
 ) -> PreparedToolCall {
-    let displayed_arguments = redacted_json(
-        call.arguments.clone().unwrap_or(Value::Null),
-        config.secret_redactor.as_ref(),
-    );
     send_event(
         signals,
         PendingEvent::ToolCallStarted {
@@ -457,6 +455,9 @@ pub(super) async fn prepare_tool_call(
     } else {
         hook_arguments
     };
+    if let Err(error) = admission.replace(call.arguments.as_ref(), &arguments) {
+        return PreparedToolCall::Complete(failed_execution(call, error));
+    }
     call.arguments = Some(arguments.clone());
     let Some(security) = resolve_tool_security(config, &call.name, &arguments) else {
         let name = call.name.clone();

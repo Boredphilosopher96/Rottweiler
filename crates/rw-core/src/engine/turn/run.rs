@@ -451,6 +451,8 @@ pub(super) async fn run_turn(
         };
         let mut selected_route = None;
         let mut calls = Vec::<PendingToolCall>::new();
+        let mut tool_admission = super::tool_admission::PendingToolBudget::default();
+        let mut tool_admission_failed = false;
         let mut finish_reason = None;
         let mut iteration_usage = SessionUsage::default();
         let mut stream_failed = false;
@@ -626,6 +628,14 @@ pub(super) async fn run_turn(
                         );
                         status = AgentTurnStatus::Failed;
                         stream_failed = true;
+                        tool_admission_failed = true;
+                        break;
+                    }
+                    if let Err(message) = tool_admission.start(&id, &name) {
+                        send_event(&signals, PendingEvent::Error { message });
+                        status = AgentTurnStatus::Failed;
+                        stream_failed = true;
+                        tool_admission_failed = true;
                         break;
                     }
                     calls.push(PendingToolCall {
@@ -639,7 +649,30 @@ pub(super) async fn run_turn(
                         index: calls.len(),
                     });
                 }
-                ProviderEvent::ToolCallArgumentsDelta { .. } => {}
+                ProviderEvent::ToolCallArgumentsDelta { id, json_fragment } => {
+                    if !calls
+                        .iter()
+                        .any(|call| call.id == id && call.arguments.is_none())
+                    {
+                        send_event(
+                            &signals,
+                            PendingEvent::Error {
+                                message: "tool arguments require an open tool call".into(),
+                            },
+                        );
+                        status = AgentTurnStatus::Failed;
+                        stream_failed = true;
+                        tool_admission_failed = true;
+                        break;
+                    }
+                    if let Err(message) = tool_admission.delta(&json_fragment) {
+                        send_event(&signals, PendingEvent::Error { message });
+                        status = AgentTurnStatus::Failed;
+                        stream_failed = true;
+                        tool_admission_failed = true;
+                        break;
+                    }
+                }
                 ProviderEvent::ToolCallEnd { id, arguments } => {
                     if let Some(call) = calls.iter_mut().find(|call| call.id == id) {
                         if call.arguments.is_some() {
@@ -651,6 +684,14 @@ pub(super) async fn run_turn(
                             );
                             status = AgentTurnStatus::Failed;
                             stream_failed = true;
+                            tool_admission_failed = true;
+                            break;
+                        }
+                        if let Err(message) = tool_admission.arguments(&arguments) {
+                            send_event(&signals, PendingEvent::Error { message });
+                            status = AgentTurnStatus::Failed;
+                            stream_failed = true;
+                            tool_admission_failed = true;
                             break;
                         }
                         call.arguments = Some(arguments.clone());
@@ -668,6 +709,7 @@ pub(super) async fn run_turn(
                         );
                         status = AgentTurnStatus::Failed;
                         stream_failed = true;
+                        tool_admission_failed = true;
                         break;
                     }
                 }
@@ -831,6 +873,34 @@ pub(super) async fn run_turn(
         if provider_overflow_recovered {
             continue 'iterations;
         }
+        let admitted_calls = if !stream_failed
+            && !budget_stop
+            && !calls.is_empty()
+            && finish_reason == Some(FinishReason::ToolCalls)
+        {
+            match super::tool_admission::AdmittedToolBatch::new(
+                std::mem::take(&mut calls),
+                config.secret_redactor.as_ref(),
+            ) {
+                Ok(batch) => Some(batch),
+                Err(message) => {
+                    send_event(&signals, PendingEvent::Error { message });
+                    status = AgentTurnStatus::Failed;
+                    stream_failed = true;
+                    tool_admission_failed = true;
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if tool_admission_failed {
+            // The batch never reached tool admission; retain text but no orphan tool calls.
+            assistant
+                .blocks
+                .retain(|block| !matches!(block, Block::ToolCall { .. }));
+            calls.clear();
+        }
         let assistant_turn = if assistant.blocks.is_empty() {
             None
         } else {
@@ -895,7 +965,9 @@ pub(super) async fn run_turn(
             status = AgentTurnStatus::Failed;
             break;
         }
-        if calls.is_empty() || calls.iter().any(|call| call.arguments.is_none()) {
+        if admitted_calls.as_ref().is_none_or(|batch| {
+            batch.calls.is_empty() || batch.calls.iter().any(|(call, _)| call.arguments.is_none())
+        }) {
             send_event(
                 &signals,
                 PendingEvent::Error {
@@ -905,6 +977,10 @@ pub(super) async fn run_turn(
             status = AgentTurnStatus::Failed;
             break;
         }
+        let Some(calls) = admitted_calls else {
+            status = AgentTurnStatus::Failed;
+            break;
+        };
         let executions = execute_tool_calls(
             turn,
             &tasks,
