@@ -80,3 +80,20 @@ export function attachToolToTail(
       : [...tail.toolInvocationIds, invocationId],
   }))
 }
+
+/** Retire membership when its completed projection leaves the live cache. */
+export function syncTailTools(
+  current: StreamingTail | null,
+  turnId: string,
+  invocationId: string,
+  tools: RottweilerState["tools"],
+): StreamingTail {
+  return updateTail(current, turnId, (tail) => {
+    const ids = tail.toolInvocationIds
+    const retained = ids.every((id) => Object.hasOwn(tools, id))
+      ? ids : ids.filter((id) => Object.hasOwn(tools, id))
+    const toolInvocationIds = retained.includes(invocationId)
+      ? retained : [...retained, invocationId]
+    return toolInvocationIds === ids ? tail : { ...tail, toolInvocationIds }
+  })
+}

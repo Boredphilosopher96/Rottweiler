@@ -16,7 +16,7 @@ import { projectSession, projectSessionReview, providerQualifiedRoute } from "./
 import { projectShellEvent } from "./shell-state"
 import { MAX_SUBAGENT_TASK_BYTES, boundedSubagentHistory, nextSubagentArchiveKey, subagentActivity, subagentTerminalSummary } from "./subagents"
 import { UNKNOWN_ACTIVITY_TIMING, closeActivityTiming, observeActivityTiming, openActivityTiming, retainRecentTools, updateTool } from "./tool-state"
-import { MAX_COMPACTION_STREAM_BYTES, appendTailText, attachToolToTail, currentTurnId, retainRecentTurns, updateTail } from "./turn-state"
+import { MAX_COMPACTION_STREAM_BYTES, appendTailText, attachToolToTail, currentTurnId, retainRecentTurns, syncTailTools, updateTail } from "./turn-state"
 
 export function reduceRottweilerState(
   state: RottweilerState = createInitialState(),
@@ -786,16 +786,12 @@ function applyKnownEvent(
         callIndex: event.call_index,
         timing: openActivityTiming(event.meta.emitted_at),
       }
+      const tools = retainRecentTools(state.tools, event.invocation_id, tool)
       return {
         ...state,
         errors: [],
-        tools: retainRecentTools(state.tools, event.invocation_id, tool),
-        streamingTail: updateTail(state.streamingTail, event.turn_id, (tail) => ({
-          ...tail,
-          toolInvocationIds: tail.toolInvocationIds.includes(event.invocation_id)
-            ? tail.toolInvocationIds
-            : [...tail.toolInvocationIds, event.invocation_id],
-        })),
+        tools,
+        streamingTail: syncTailTools(state.streamingTail, event.turn_id, event.invocation_id, tools),
       }
     }
     case "tool_approval_needed": {
@@ -904,10 +900,11 @@ function applyKnownEvent(
         callIndex: event.call_index,
         timing: closeActivityTiming(existing?.timing, event.meta.emitted_at),
       }
+      const tools = retainRecentTools(state.tools, event.invocation_id, tool)
       return {
         ...state,
-        tools: retainRecentTools(state.tools, event.invocation_id, tool),
-        streamingTail: attachToolToTail(state.streamingTail, event.turn_id, event.invocation_id),
+        tools,
+        streamingTail: syncTailTools(state.streamingTail, event.turn_id, event.invocation_id, tools),
       }
     }
     case "question_asked":
