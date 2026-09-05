@@ -2,6 +2,7 @@
 
 pub mod catalog_cache;
 pub mod checkpoint;
+pub mod command_receipts;
 pub mod config;
 pub mod credentials;
 pub mod memory;
