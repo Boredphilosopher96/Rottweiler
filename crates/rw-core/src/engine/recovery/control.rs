@@ -30,6 +30,7 @@ pub struct RecoveredMessage {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RecoveryControlPayloads {
     pub title: Option<String>,
+    pub resolved_model: Option<String>,
     pub todos: rw_types::todo::TodoSnapshot,
     pub model: Option<RecoveredModelSelection>,
     pub permission_mode: Option<PermissionModeDescriptor>,
@@ -123,6 +124,12 @@ impl CanonicalHistory {
                 .map_err(|_| RecoveryError::Invalid("task snapshot"))?;
             result.todos = snapshot;
         }
+        result.resolved_model = self
+            .head
+            .conversation
+            .resolved_model_source
+            .map(|sequence| self.resolved_model(&mut reader, sequence))
+            .transpose()?;
         reader.selection(control, &mut result)?;
         reader.workspace_and_plans(control, &mut result)?;
         for queued in &control.queued {
@@ -187,6 +194,25 @@ impl CanonicalHistory {
         }
         result.source_bytes = reader.bytes;
         Ok(result)
+    }
+    fn resolved_model(
+        &self,
+        reader: &mut ControlReader<'_>,
+        sequence: SequenceId,
+    ) -> Result<String, RecoveryError> {
+        let (_, source) = self.source_turn(sequence)?.ok_or(RecoveryError::Invalid(
+            "resolved model is not an effective source",
+        ))?;
+        if !source.has_resolved_model {
+            return Err(RecoveryError::Invalid("resolved model source metadata"));
+        }
+        let PendingEvent::ConversationTurnCommitted { turn, .. } = reader.event(sequence)? else {
+            return Err(RecoveryError::Invalid("resolved model source selector"));
+        };
+        turn.meta
+            .model
+            .filter(|model| model.contains('/'))
+            .ok_or(RecoveryError::Invalid("resolved model source metadata"))
     }
 }
 

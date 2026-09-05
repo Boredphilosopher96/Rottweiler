@@ -92,6 +92,9 @@ impl CanonicalRecovery {
                     if item.role != rw_types::Role::System {
                         continue;
                     }
+                    if item.has_resolved_model {
+                        to.resolved_model_source = Some(item.sequence);
+                    }
                     to.serialized_bytes = to
                         .serialized_bytes
                         .checked_add(item.serialized_bytes)

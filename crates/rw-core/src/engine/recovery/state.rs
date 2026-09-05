@@ -17,6 +17,7 @@ pub(super) const MAX_QUESTIONS: usize = 64;
 /// Exact visible canonical conversation. Bodies remain in the authoritative journal.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ConversationCut {
+    pub resolved_model_source: Option<SequenceId>,
     pub generation: u64,
     pub turns: u64,
     pub serialized_bytes: u64,
@@ -34,6 +35,7 @@ pub enum TurnSourceKind {
 /// Admission metadata and exact source selector for one canonical conversation turn.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ConversationSource {
+    pub has_resolved_model: bool,
     pub sequence: SequenceId,
     pub kind: TurnSourceKind,
     pub agent_turn: u64,

@@ -33,7 +33,7 @@ pub(in crate::engine) async fn commit_prepared_model_switch(
         .map(|_| ());
     if result.is_ok() {
         if clear_context {
-            state.conversation.retain(|turn| turn.role == Role::System);
+            state.clear_conversation_except_system();
             state.context_surgery.clear();
             state.pruned_tool_outputs.clear();
         }

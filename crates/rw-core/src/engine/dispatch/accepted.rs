@@ -176,7 +176,7 @@ pub(super) async fn apply_accepted(
             if result.is_ok() {
                 state.pending_plan = None;
                 if let Some(turn) = context_turn {
-                    state.conversation.push(turn);
+                    state.append_conversation(turn);
                 }
                 if let Some(definition) = execute_definition {
                     state.approved_plan = Some(artifact);
@@ -264,7 +264,7 @@ pub(super) async fn apply_accepted(
             .await
             .map(|_| ());
             if result.is_ok() {
-                state.conversation.push(context);
+                state.append_conversation(context);
                 state.active_shell = None;
             }
             if let Some(complete) = completion.take() {

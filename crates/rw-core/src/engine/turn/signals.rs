@@ -323,7 +323,7 @@ pub(in crate::engine) async fn handle_turn_signal(
             for (_, pending) in std::mem::take(&mut state.pending_questions) {
                 let _ = pending.respond.send(String::new());
             }
-            state.conversation = outcome.conversation;
+            state.replace_conversation(outcome.conversation);
             state.context_surgery = outcome.context_surgery;
             state.pruned_tool_outputs = outcome.pruned_tool_outputs;
             state.budgeter = outcome.budgeter;
@@ -374,7 +374,7 @@ pub(in crate::engine) async fn handle_turn_signal(
                 state.running = None;
                 active_turn.store(0, Ordering::Release);
                 if result.is_ok() {
-                    state.conversation = conversation;
+                    state.replace_conversation(conversation);
                     state.context_surgery = context_surgery;
                     if let Some(model_switch) = model_switch {
                         result = match config.model.prepare_model(&model_switch.model.0).await {

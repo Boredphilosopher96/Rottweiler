@@ -176,7 +176,15 @@ impl CanonicalHistory {
             }
             let turn = source.turn(&row)?;
             let actual_bytes = serialized_size(&turn)?;
-            if turn.role != row.role || actual_bytes != row.serialized_bytes {
+            if turn.role != row.role
+                || actual_bytes != row.serialized_bytes
+                || turn
+                    .meta
+                    .model
+                    .as_ref()
+                    .is_some_and(|model| model.contains('/'))
+                    != row.has_resolved_model
+            {
                 return Err(RecoveryError::Invalid("canonical source metadata"));
             }
             observed_bytes = observed_bytes

@@ -83,3 +83,6 @@ mod accounting_tests;
 
 #[cfg(test)]
 mod page_tests;
+
+#[cfg(test)]
+mod model_tests;

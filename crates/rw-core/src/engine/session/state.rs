@@ -155,6 +155,7 @@ pub(in crate::engine) struct ActorState {
     pub(in crate::engine) title_generation_started: bool,
     pub(in crate::engine) event_clock: Arc<dyn EventClock>,
     pub(in crate::engine) conversation: Vec<Turn>,
+    pub(in crate::engine) resolved_model: Option<String>,
     pub(in crate::engine) queued: VecDeque<String>,
     pub(in crate::engine) queued_positions: VecDeque<u64>,
     pub(in crate::engine) running: Option<RunningTurn>,
@@ -273,6 +274,7 @@ impl ActorState {
             title_generation_started: recovered.title.is_some(),
             session_title: recovered.title,
             event_clock,
+            resolved_model: resolved_model(&recovered.conversation),
             conversation: recovered.conversation,
             queued: recovered.queued_messages.into_iter().collect(),
             queued_positions,
@@ -326,3 +328,30 @@ impl ActorState {
 
 #[cfg(test)]
 mod tests;
+
+fn resolved_model(conversation: &[Turn]) -> Option<String> {
+    conversation.iter().rev().find_map(|turn| {
+        turn.meta
+            .model
+            .as_ref()
+            .filter(|model| model.contains('/'))
+            .cloned()
+    })
+}
+impl ActorState {
+    pub(in crate::engine) fn replace_conversation(&mut self, conversation: Vec<Turn>) {
+        self.resolved_model = resolved_model(&conversation);
+        self.conversation = conversation;
+    }
+    pub(in crate::engine) fn append_conversation(&mut self, turn: Turn) {
+        if let Some(model) = turn.meta.model.as_ref().filter(|model| model.contains('/')) {
+            self.resolved_model = Some(model.clone());
+        }
+        self.conversation.push(turn);
+    }
+    pub(in crate::engine) fn clear_conversation_except_system(&mut self) {
+        self.conversation
+            .retain(|turn| turn.role == rw_types::Role::System);
+        self.resolved_model = resolved_model(&self.conversation);
+    }
+}

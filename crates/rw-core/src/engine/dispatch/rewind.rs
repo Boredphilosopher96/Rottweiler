@@ -78,7 +78,7 @@ pub(super) async fn rewind_state(
         state.poisoned = true;
         return Err(error);
     }
-    state.conversation = historical.conversation;
+    state.replace_conversation(historical.conversation);
     state.context_surgery = historical.context_surgery;
     state.pruned_tool_outputs = historical.pruned_tool_outputs;
     state.budgeter = historical.budgeter;

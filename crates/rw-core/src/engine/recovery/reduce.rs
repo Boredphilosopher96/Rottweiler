@@ -479,6 +479,14 @@ fn append_turn(
     turn: &Turn,
 ) -> Result<(), RecoveryError> {
     let cut = head.compacting.as_mut().unwrap_or(&mut head.conversation);
+    let has_resolved_model = turn
+        .meta
+        .model
+        .as_ref()
+        .is_some_and(|model| model.contains('/'));
+    if has_resolved_model {
+        cut.resolved_model_source = Some(sequence);
+    }
     let bytes = serialized_size(turn)?;
     let decoded_bytes = super::encoding::turn_decode_bytes(turn)?;
     let tokens = LocalTokenEstimator::turn(turn);
@@ -497,6 +505,7 @@ fn append_turn(
     rows.put(
         key(CONVERSATION, cut.generation, cut.turns),
         &ConversationSource {
+            has_resolved_model,
             sequence,
             kind,
             agent_turn,
