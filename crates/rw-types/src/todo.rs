@@ -143,6 +143,7 @@ mod tests {
 
 #[cfg(test)]
 mod read_contract_tests {
+    #![allow(clippy::expect_used)]
     use super::{TodoReadResult, TodoReadSnapshot};
     use ts_rs::TS;
     #[test]
