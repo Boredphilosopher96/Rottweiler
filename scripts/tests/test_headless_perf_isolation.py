@@ -177,60 +177,77 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
             gate.index("if smoke and start_p50 >= 80"),
         )
 
-    def test_prebuilt_gate_keeps_metrics_schema_and_writes_ordered_evidence(self) -> None:
+    def prepared_gate(self, binary_source):
         from test_native_candidate import NativeCandidateTests, packager, native_candidate
         fixture = NativeCandidateTests()
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            for relative in ("crates/rw-cli/tests/perf_gate.sh", "scripts/native_candidate.py",
-                             "scripts/artifact_bundle.py", "scripts/release_contract.py"):
-                destination = fixture.repo / relative
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(REPO / relative, destination)
-            gate = fixture.repo / "crates/rw-cli/tests/perf_gate.sh"
-            binary = fixture.stage / "bin/rw"
-            binary.write_text("#!/bin/sh\nprintf 'ready\\n'\nprintf 'rw_perf_zero_latency_turn_us=1000\\n' >&2\n")
-            packager.package(fixture.stage, fixture.archive, 1700000000)
-            fixture.identity["source"] = native_candidate.source_identity(fixture.repo)
-            fixture.publish()
-            site = root / "site"
-            site.mkdir()
-            (site / "sitecustomize.py").write_text(
-                "import time\ntime.sleep = lambda _seconds: None\n", encoding="utf-8"
-            )
-            output = root / "results" / "headless.json"
-            env = {
-                **os.environ,
-                "GITHUB_ACTIONS": "true",
-                "PYTHONPATH": str(site),
-                "ROTTWEILER_PERF_OUTPUT": str(output),
-                "ROTTWEILER_PERF_SAMPLES": "100",
-                "RUNNER_TEMP": str(root),
-            }
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        for relative in ("crates/rw-cli/tests/perf_gate.sh", "scripts/native_candidate.py",
+                         "scripts/artifact_bundle.py", "scripts/release_contract.py", "scripts/perf_process.py"):
+            destination = fixture.repo / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(REPO / relative, destination)
+        gate = fixture.repo / "crates/rw-cli/tests/perf_gate.sh"
+        binary = fixture.stage / "bin/rw"
+        binary.write_text(binary_source)
+        packager.package(fixture.stage, fixture.archive, 1700000000)
+        fixture.identity["source"] = native_candidate.source_identity(fixture.repo)
+        fixture.publish()
+        site = root / "site"
+        site.mkdir()
+        (site / "sitecustomize.py").write_text(
+            "import time\ntime.sleep = lambda _seconds: None\n", encoding="utf-8"
+        )
+        output = root / "results" / "headless.json"
+        env = {
+            **os.environ,
+            "GITHUB_ACTIONS": "true",
+            "PYTHONPATH": str(site),
+            "ROTTWEILER_PERF_OUTPUT": str(output),
+            "ROTTWEILER_PERF_SAMPLES": "100",
+            "RUNNER_TEMP": str(root),
+        }
+        return fixture, gate, output, env
 
-            subprocess.run([str(gate), str(fixture.root)], cwd=fixture.repo, env=env, check=True)
+    def test_prebuilt_gate_keeps_metrics_schema_and_writes_ordered_evidence(self) -> None:
+        from test_native_candidate import native_candidate
+        fixture, gate, output, env = self.prepared_gate(
+            "#!/bin/sh\nprintf 'ready\\n'\nprintf 'rw_perf_zero_latency_turn_us=100\\n' >&2\n"
+        )
+        subprocess.run([str(gate), str(fixture.root)], cwd=fixture.repo, env=env, check=True)
+        metrics = json.loads(output.read_text())
+        self.assertEqual(set(metrics), {"schema_version", "metrics"})
+        evidence = json.loads(output.with_name("headless.evidence.json").read_text())
+        self.assertEqual(set(evidence), {
+            "schema_version", "sample_count", "samples", "runner", "candidate", "status", "phase", "error"
+        })
+        self.assertEqual(evidence["candidate"]["engine_sha256"], native_candidate.hash_file(fixture.stage / "bin/rw"))
+        self.assertEqual(evidence["sample_count"], 100)
+        self.assertEqual(evidence["status"], "pass")
+        self.assertEqual(evidence["phase"], "complete")
+        self.assertIsNone(evidence["error"])
+        self.assertEqual([sample["index"] for sample in evidence["samples"]], list(range(100)))
+        self.assertTrue(all(set(sample) == {"index", "headless_print_us", "turn_overhead_us"}
+                            for sample in evidence["samples"]))
 
-            metrics = json.loads(output.read_text(encoding="utf-8"))
-            self.assertEqual(set(metrics), {"schema_version", "metrics"})
-            evidence_path = output.with_name("headless.evidence.json")
-            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
-            self.assertEqual(
-                set(evidence), {"schema_version", "sample_count", "samples", "runner", "candidate"}
-            )
-            self.assertEqual(evidence["candidate"]["engine_sha256"], native_candidate.hash_file(binary))
-            self.assertEqual(evidence["sample_count"], 100)
-            self.assertEqual(
-                [sample["index"] for sample in evidence["samples"]], list(range(100))
-            )
-            self.assertTrue(
-                all(
-                    set(sample)
-                    == {"index", "headless_print_us", "turn_overhead_us"}
-                    for sample in evidence["samples"]
-                )
-            )
+    def test_invalid_sample_retains_prior_observations_and_failing_phase(self):
+        fixture, gate, output, env = self.prepared_gate(
+            "#!/bin/sh\nprintf 'ready\\n'\n"
+            "case \"$HOME\" in *home-2) printf 'rw_perf_zero_latency_turn_us=-1\\n' >&2;;\n"
+            "*) printf 'rw_perf_zero_latency_turn_us=100\\n' >&2;; esac\n"
+        )
+        run = subprocess.run([str(gate), str(fixture.root)], cwd=fixture.repo, env=env, capture_output=True)
+        self.assertNotEqual(run.returncode, 0)
+        self.assertFalse(output.exists())
+        evidence = json.loads(output.with_name("headless.evidence.json").read_text())
+        self.assertEqual(evidence["status"], "fail")
+        self.assertEqual(evidence["phase"], "sampling")
+        self.assertIn("invalid or duplicate performance marker", evidence["error"])
+        self.assertEqual([sample["index"] for sample in evidence["samples"]], [0, 1])
+        self.assertEqual(evidence["candidate"]["source"], fixture.identity["source"])
 
 
 if __name__ == "__main__":

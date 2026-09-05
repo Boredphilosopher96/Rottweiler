@@ -26,12 +26,12 @@ import pathlib
 import platform
 import stat
 import statistics
-import subprocess
 import sys
 import time
 
 repo = pathlib.Path(sys.argv[1])
 sys.path.insert(0, str(repo / "scripts"))
+from perf_process import run_sample
 from release_contract import load_contract
 from native_candidate import verify as verify_candidate
 
@@ -77,7 +77,7 @@ def one(index):
         "PATH": os.environ["PATH"],
     }
     started = time.perf_counter_ns()
-    run = subprocess.run(
+    run = run_sample(
         [
             str(binary),
             "-p", "perf",
@@ -88,9 +88,6 @@ def one(index):
         ],
         cwd=repo,
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
     )
     elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000
     if run.returncode != 0 or run.stdout.strip() != b"ready":
@@ -101,11 +98,15 @@ def one(index):
     for line in run.stderr.decode().splitlines():
         if line.startswith("rw_perf_"):
             key, value = line.split("=", 1)
+            if key in markers or not value.isascii() or not value.isdecimal():
+                raise ValueError("invalid or duplicate performance marker")
             markers[key] = int(value) / 1000
     try:
         turn_ms = markers["rw_perf_zero_latency_turn_us"]
     except KeyError as error:
         raise SystemExit(f"missing performance marker: {error}") from error
+    if not math.isfinite(turn_ms) or turn_ms <= 0 or turn_ms > elapsed_ms:
+        raise ValueError("performance turn marker is outside its process interval")
     return elapsed_ms, turn_ms
 
 smoke = os.environ.get("ROTTWEILER_PERF_SMOKE") == "1"
@@ -116,49 +117,21 @@ if sample_count < minimum_samples or sample_count > 5000:
         f"ROTTWEILER_PERF_SAMPLES must be between {minimum_samples} and 5000"
     )
 
-# Fixed hosted runners can still be busy with image-provisioning work when a
-# job begins; a fat-LTO link also leaves Apple runners hot while macOS may
-# inspect the newly installed executable. Give every measurement host one
-# fixed cooling/inspection interval, then use five fixed fresh-process warmups.
-# Smoke mode reduces only the measured sample count; it keeps identical host
-# conditioning so its p99 enforces the same absolute contract instead of
-# measuring cold-runner noise.
-# Measured results are never retried or trimmed, and even smoke mode retains
-# the 100-sample floor required for a meaningful empirical p99.
-time.sleep(60)
-for index in range(-5, 0):
-    one(index)
-samples = [one(index) for index in range(sample_count)]
-starts = sorted(sample[0] for sample in samples)
-turns = sorted(sample[1] for sample in samples)
-p95_index = math.ceil(len(samples) * 0.95) - 1
-p99_index = math.ceil(len(samples) * 0.99) - 1
-start_p50 = statistics.median(starts)
-start_p99 = starts[p99_index]
-turn_p50 = statistics.median(turns)
-turn_p99 = turns[p99_index]
-binary_bytes = binary.stat().st_size
-if output is not None:
+def bounded(value, limit=128):
+    return value[:limit] if isinstance(value, str) else None
+
+def write_evidence(status, phase, error=None):
+    if output is None:
+        return
     output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_name(f".{output.name}.tmp")
-    temporary.write_text(json.dumps({
-        "schema_version": 1,
-        "metrics": {
-            "engine_binary_bytes": binary_bytes,
-            "headless_print_p99_us": math.ceil(start_p99 * 1000),
-            "turn_overhead_p99_us": math.ceil(turn_p99 * 1000),
-        },
-    }, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(output)
-
-    def bounded(value, limit=128):
-        return value[:limit] if isinstance(value, str) else None
-
     evidence = output.with_name(f"{output.stem}.evidence{output.suffix}")
     evidence_temporary = evidence.with_name(f".{evidence.name}.tmp")
     evidence_temporary.write_text(json.dumps({
         "schema_version": 1,
         "sample_count": sample_count,
+        "status": status,
+        "phase": phase,
+        "error": error,
         "samples": [
             {
                 "index": index,
@@ -183,33 +156,87 @@ if output is not None:
         },
     }, sort_keys=True) + "\n", encoding="utf-8")
     evidence_temporary.replace(evidence)
-print(
-    f"samples={sample_count}; "
-    f"headless_print_ms p50={start_p50:.3f} "
-    f"p95={starts[p95_index]:.3f} p99={start_p99:.3f} max={starts[-1]:.3f}; "
-    f"zero_latency_turn_ms p50={turn_p50:.3f} "
-    f"p95={turns[p95_index]:.3f} p99={turn_p99:.3f} max={turns[-1]:.3f}"
-)
-if smoke and start_p50 >= 80:
-    raise SystemExit(f"headless print-mode smoke p50 {start_p50:.3f}ms exceeds 80ms")
-if smoke and turn_p50 >= 20:
-    raise SystemExit(f"zero-latency full-turn smoke p50 {turn_p50:.3f}ms exceeds 20ms")
-protected_start_limit_ms = 200 if sys.platform == "darwin" else 80
-protected_turn_limit_ms = 60
-if not smoke and start_p99 >= protected_start_limit_ms:
-    raise SystemExit(
-        f"headless print-mode p99 {start_p99:.3f}ms exceeds "
-        f"{protected_start_limit_ms}ms"
+
+samples = []
+phase = "conditioning"
+write_evidence("running", phase)
+
+# Fixed hosted runners can still be busy with image-provisioning work when a
+# job begins; a fat-LTO link also leaves Apple runners hot while macOS may
+# inspect the newly installed executable. Give every measurement host one
+# fixed cooling/inspection interval, then use five fixed fresh-process warmups.
+# Smoke mode reduces only the measured sample count; it keeps identical host
+# conditioning so its p99 enforces the same absolute contract instead of
+# measuring cold-runner noise.
+# Measured results are never retried or trimmed, and even smoke mode retains
+# the 100-sample floor required for a meaningful empirical p99.
+try:
+    time.sleep(60)
+    phase = "warmup"
+    write_evidence("running", phase)
+    for index in range(-5, 0):
+        one(index)
+    phase = "sampling"
+    for index in range(sample_count):
+        samples.append(one(index))
+        write_evidence("running", phase)
+    phase = "budgets"
+    write_evidence("running", phase)
+    starts = sorted(sample[0] for sample in samples)
+    turns = sorted(sample[1] for sample in samples)
+    p95_index = math.ceil(len(samples) * 0.95) - 1
+    p99_index = math.ceil(len(samples) * 0.99) - 1
+    start_p50 = statistics.median(starts)
+    start_p99 = starts[p99_index]
+    turn_p50 = statistics.median(turns)
+    turn_p99 = turns[p99_index]
+    binary_bytes = binary.stat().st_size
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        temporary = output.with_name(f".{output.name}.tmp")
+        temporary.write_text(json.dumps({
+            "schema_version": 1,
+            "metrics": {
+                "engine_binary_bytes": binary_bytes,
+                "headless_print_p99_us": math.ceil(start_p99 * 1000),
+                "turn_overhead_p99_us": math.ceil(turn_p99 * 1000),
+            },
+        }, sort_keys=True) + "\n", encoding="utf-8")
+        temporary.replace(output)
+
+
+    print(
+        f"samples={sample_count}; "
+        f"headless_print_ms p50={start_p50:.3f} "
+        f"p95={starts[p95_index]:.3f} p99={start_p99:.3f} max={starts[-1]:.3f}; "
+        f"zero_latency_turn_ms p50={turn_p50:.3f} "
+        f"p95={turns[p95_index]:.3f} p99={turn_p99:.3f} max={turns[-1]:.3f}"
     )
-if not smoke and turn_p99 >= protected_turn_limit_ms:
-    raise SystemExit(
-        f"zero-latency full-turn p99 {turn_p99:.3f}ms exceeds "
-        f"{protected_turn_limit_ms}ms"
-    )
-release_platform = load_contract().resolve_platform(platform.system(), platform.machine())
-binary_limit = release_platform.product_budgets.engine_less_than_bytes
-if binary_bytes >= binary_limit:
-    raise SystemExit(
-        f"release binary size {binary_bytes} exceeds {binary_limit // 1_000_000}MB"
-    )
+    if smoke and start_p50 >= 80:
+        raise SystemExit(f"headless print-mode smoke p50 {start_p50:.3f}ms exceeds 80ms")
+    if smoke and turn_p50 >= 20:
+        raise SystemExit(f"zero-latency full-turn smoke p50 {turn_p50:.3f}ms exceeds 20ms")
+    protected_start_limit_ms = 200 if sys.platform == "darwin" else 80
+    protected_turn_limit_ms = 60
+    if not smoke and start_p99 >= protected_start_limit_ms:
+        raise SystemExit(
+            f"headless print-mode p99 {start_p99:.3f}ms exceeds "
+            f"{protected_start_limit_ms}ms"
+        )
+    if not smoke and turn_p99 >= protected_turn_limit_ms:
+        raise SystemExit(
+            f"zero-latency full-turn p99 {turn_p99:.3f}ms exceeds "
+            f"{protected_turn_limit_ms}ms"
+        )
+    release_platform = load_contract().resolve_platform(platform.system(), platform.machine())
+    binary_limit = release_platform.product_budgets.engine_less_than_bytes
+    if binary_bytes >= binary_limit:
+        raise SystemExit(
+            f"release binary size {binary_bytes} exceeds {binary_limit // 1_000_000}MB"
+        )
+    write_evidence("pass", "complete")
+except BaseException as error:
+    write_evidence("fail", phase, str(error)[-4096:])
+    raise
+
 PY

@@ -22,6 +22,8 @@ class CommandConnection:
     def send_request(self, method, path, headers, body) -> None:
         assert method == "POST" and path == "/v1/command"
         self.command = json.loads(body)
+        if self.command["type"] == "list_models":
+            assert self.command["refresh"] is False
 
     def read_response(self):
         command = self.command

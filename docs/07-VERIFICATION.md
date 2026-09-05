@@ -223,6 +223,12 @@ configuration, parser asset materialization, mounting, paint, and input delivery
 These observations attribute latency; acceptance still measures the complete
 process-to-interactive interval with diagnostics disabled.
 
+Each headless sample owns a separate process group, a five-second deadline, and
+64 KiB per output stream. A timeout or output flood kills that group and reaps
+the leader before the gate returns. Evidence records the active phase and each
+completed sample as it runs, including failures during warmup or sampling.
+Malformed, duplicate, negative, and out-of-interval timing markers fail the gate.
+
 The required pull-request and `main` TUI smoke applies the same distinction to
 input echo: it measures input dispatch plus render compute with process CPU time
 on shared hosted runners, excluding time while the process is descheduled, and

@@ -56,6 +56,8 @@ def measure_socket_channels(
             value["session_id"] = session_id
         if kind == "resume_session":
             value.update(role="observer", last_seen_sequence=None)
+        if kind == "list_models":
+            value["refresh"] = False
         return json.dumps(value, separators=(",", ":")).encode("utf-8")
 
     def read_reply() -> bytes:
