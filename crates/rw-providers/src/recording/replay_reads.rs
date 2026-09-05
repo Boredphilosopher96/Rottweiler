@@ -172,20 +172,19 @@ async fn prove(job: &Job) -> Result<(), ProviderError> {
             changed.await;
         }
     };
-    match tokio::time::timeout(PROOF_TIMEOUT, wait).await {
-        Ok(result) => result,
-        Err(_) => {
-            job.failed.store(true, Ordering::Release);
-            Err(unsettled("replay read settlement timed out"))
-        }
+    if let Ok(result) = tokio::time::timeout(PROOF_TIMEOUT, wait).await {
+        result
+    } else {
+        job.failed.store(true, Ordering::Release);
+        Err(unsettled("replay read settlement timed out"))
     }
 }
 fn read_fixture(path: PathBuf) -> Result<Vec<u8>, ProviderError> {
     let mut file = std::fs::File::open(path).map_err(|_| {
         ProviderError::new(ProviderErrorKind::ReplayMiss, "replay fixture unavailable")
     })?;
-    let len =
-        usize::try_from(file.metadata().map_err(io_error)?.len()).map_err(|_| size_error())?;
+    let len = usize::try_from(file.metadata().map_err(|error| io_error(&error))?.len())
+        .map_err(|_| size_error())?;
     if len > MAX_FIXTURE_BYTES {
         return Err(size_error());
     }
@@ -198,7 +197,7 @@ fn read_fixture(path: PathBuf) -> Result<Vec<u8>, ProviderError> {
             Ok(0) => break,
             Ok(count) => used += count,
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(io_error(error)),
+            Err(error) => return Err(io_error(&error)),
         }
     }
     if used > len {
@@ -213,7 +212,7 @@ fn size_error() -> ProviderError {
         "replay fixture exceeds encoded byte admission or changed during read",
     )
 }
-fn io_error(error: std::io::Error) -> ProviderError {
+fn io_error(error: &std::io::Error) -> ProviderError {
     ProviderError::new(
         ProviderErrorKind::Protocol,
         format!("could not read replay fixture: {error}"),

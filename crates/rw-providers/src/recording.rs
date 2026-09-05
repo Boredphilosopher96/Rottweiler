@@ -232,6 +232,16 @@ impl std::fmt::Debug for Recorder {
 }
 
 impl Recorder {
+    fn ensure_admission(&self) -> Result<(), ProviderError> {
+        if self.settlement_failed.load(Ordering::Acquire) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::EffectsUnsettled,
+                "recorded provider admission is closed after failed settlement",
+            ));
+        }
+        Ok(())
+    }
+
     /// Wraps a live provider. Each request is written as one deterministic JSON fixture.
     #[must_use]
     pub fn new(
@@ -351,12 +361,7 @@ impl Provider for Recorder {
     }
 
     async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
-        if self.settlement_failed.load(Ordering::Acquire) {
-            return Err(ProviderError::new(
-                ProviderErrorKind::EffectsUnsettled,
-                "recorded provider admission is closed after failed settlement",
-            ));
-        }
+        self.ensure_admission()?;
 
         // Reserving bounded writer capacity happens before assigning an
         // occurrence or contacting the provider. Backpressure therefore
