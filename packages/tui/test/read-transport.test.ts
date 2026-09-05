@@ -75,6 +75,18 @@ describe("byte-owned fragmented JSON decoding", () => {
     await expect(boundedJson(response, 64)).rejects.toThrow("byte limit")
     expect(cancelled).toBe(true)
   })
+  test("preserves cancellation when fetch closes the body after response headers", async () => {
+    const lifetime = new AbortController()
+    const reason = new DOMException("history selection changed", "AbortError")
+    const response = new Response(new ReadableStream<Uint8Array>({
+      pull(controller) { lifetime.abort(reason); controller.close() },
+    }), { headers: { "content-length": "226" } })
+    await expect(boundedJson(response, 1024, undefined, lifetime.signal)).rejects.toBe(reason)
+  })
+  test("rejects truncated non-cancelled replies even when their prefix is valid JSON", async () => {
+    const response = new Response("{}", { headers: { "content-length": "226" } })
+    await expect(boundedJson(response, 1024)).rejects.toThrow("Content-Length")
+  })
   test("rejects declared overflow and malformed UTF-8", async () => {
     let cancelled = false
     const declared = new Response(new ReadableStream<Uint8Array>({

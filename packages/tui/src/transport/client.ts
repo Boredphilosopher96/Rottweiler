@@ -132,7 +132,7 @@ export class EngineHttpSseClient {
       await response.body?.cancel()
       throw new EngineProtocolError("engine command reply must use application/json")
     }
-    const reply: unknown = await boundedJson(response, MAX_COMMAND_REPLY_BYTES, this.#diagnostics)
+    const reply: unknown = await boundedJson(response, MAX_COMMAND_REPLY_BYTES, this.#diagnostics, signal)
     const validatedAt = this.#diagnostics?.start()
     try {
       if (!validateCommandReply(reply)) {
