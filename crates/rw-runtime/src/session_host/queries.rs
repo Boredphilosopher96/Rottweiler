@@ -11,6 +11,29 @@ use super::{
 
 #[async_trait]
 impl HostQueryService for RuntimeSessionFactory {
+    async fn todos(
+        &self,
+        session: &rw_types::SessionId,
+    ) -> Result<rw_types::todo::TodoReadResult, HostError> {
+        let factory = self.clone();
+        let requested = session.clone();
+        crate::todo_service::read_todos(
+            Arc::clone(&self.journal_service),
+            session.clone(),
+            move || {
+                let metadata =
+                    super::load_session_metadata_any(&factory.options.storage_root, &requested.0)
+                        .map_err(|_| {
+                        HostError::Persistence("session metadata is unavailable".into())
+                    })?;
+                factory
+                    .authorize_workspace_path(&metadata.workspace)
+                    .map(|_| ())
+            },
+        )
+        .await
+    }
+
     async fn read_transcript(
         &self,
         session: &rw_types::SessionId,

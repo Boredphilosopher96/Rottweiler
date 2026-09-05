@@ -22,7 +22,12 @@ fn put(ordinal: u64, payload: &[u8]) -> RecoveryMutation {
 fn consistent_snapshot_retains_prefix_rows_and_lock_across_commit_and_owner_drop() {
     let root = tempdir().expect("root");
     let mut journal = SegmentedJournal::open(root.path(), "snapshot").expect("journal");
-    let mut index = RecoveryIndex::open(&journal.read_view(), 1).expect("index");
+    let mut index = RecoveryIndex::open(
+        &journal.read_view(),
+        crate::session::recovery_index::RecoveryProjection::Conversation,
+        1,
+    )
+    .expect("index");
     journal.append_batch([1_u64]).expect("append");
     let first = journal
         .read_view()
@@ -60,16 +65,29 @@ fn consistent_snapshot_retains_prefix_rows_and_lock_across_commit_and_owner_drop
     );
     drop(index);
     assert!(matches!(
-        RecoveryIndex::open(&journal.read_view(), 1),
+        RecoveryIndex::open(
+            &journal.read_view(),
+            crate::session::recovery_index::RecoveryProjection::Conversation,
+            1
+        ),
         Err(RecoveryIndexError::Busy)
     ));
     drop(new);
     assert!(matches!(
-        RecoveryIndex::rebuild(&journal.read_view(), 1),
+        RecoveryIndex::rebuild(
+            &journal.read_view(),
+            crate::session::recovery_index::RecoveryProjection::Conversation,
+            1
+        ),
         Err(RecoveryIndexError::Busy)
     ));
     drop(old);
-    let reopened = RecoveryIndex::open(&journal.read_view(), 1).expect("reopen");
+    let reopened = RecoveryIndex::open(
+        &journal.read_view(),
+        crate::session::recovery_index::RecoveryProjection::Conversation,
+        1,
+    )
+    .expect("reopen");
     assert_eq!(
         reopened.head().expect("head").prefix,
         second.next().prefix_identity()
@@ -81,7 +99,12 @@ fn stale_and_foreign_transitions_preserve_rows_and_checkpoint() {
     let root = tempdir().expect("root");
     let mut journal = SegmentedJournal::open(root.path(), "mine").expect("journal");
     let mut foreign = SegmentedJournal::open(root.path(), "foreign").expect("foreign");
-    let mut index = RecoveryIndex::open(&journal.read_view(), 1).expect("index");
+    let mut index = RecoveryIndex::open(
+        &journal.read_view(),
+        crate::session::recovery_index::RecoveryProjection::Conversation,
+        1,
+    )
+    .expect("index");
     let empty = index.read().expect("empty");
     assert!(matches!(
         empty.bind_source(&foreign.read_view()),
@@ -124,7 +147,12 @@ fn stale_and_foreign_transitions_preserve_rows_and_checkpoint() {
 fn byte_and_row_admission_precedes_storage_mutation() {
     let root = tempdir().expect("root");
     let journal = SegmentedJournal::open(root.path(), "limits").expect("journal");
-    let mut index = RecoveryIndex::open(&journal.read_view(), 1).expect("index");
+    let mut index = RecoveryIndex::open(
+        &journal.read_view(),
+        crate::session::recovery_index::RecoveryProjection::Conversation,
+        1,
+    )
+    .expect("index");
     let advance = journal
         .read_view()
         .prove_advance(JournalPrefixIdentity::empty())
@@ -171,7 +199,12 @@ fn byte_and_row_admission_precedes_storage_mutation() {
 fn pages_seek_by_key_and_report_truthful_byte_boundaries() {
     let root = tempdir().expect("root");
     let journal = SegmentedJournal::open(root.path(), "pages").expect("journal");
-    let mut index = RecoveryIndex::open(&journal.read_view(), 1).expect("index");
+    let mut index = RecoveryIndex::open(
+        &journal.read_view(),
+        crate::session::recovery_index::RecoveryProjection::Conversation,
+        1,
+    )
+    .expect("index");
     let advance = journal
         .read_view()
         .prove_advance(JournalPrefixIdentity::empty())
@@ -214,7 +247,12 @@ fn incompatible_schema_requires_explicit_derived_rebuild_without_raw_changes() {
     let mut journal = SegmentedJournal::open(root.path(), "version").expect("journal");
     journal.append_batch([1_u64, 2]).expect("append");
     let view = journal.read_view();
-    let mut index = RecoveryIndex::open(&view, 1).expect("index");
+    let mut index = RecoveryIndex::open(
+        &view,
+        crate::session::recovery_index::RecoveryProjection::Conversation,
+        1,
+    )
+    .expect("index");
     index
         .apply(
             &view
@@ -226,10 +264,19 @@ fn incompatible_schema_requires_explicit_derived_rebuild_without_raw_changes() {
         .expect("apply");
     drop(index);
     assert!(matches!(
-        RecoveryIndex::open(&view, 2),
+        RecoveryIndex::open(
+            &view,
+            crate::session::recovery_index::RecoveryProjection::Conversation,
+            2
+        ),
         Err(RecoveryIndexError::Invalid("projection version"))
     ));
-    let rebuilt = RecoveryIndex::rebuild(&view, 2).expect("explicit rebuild");
+    let rebuilt = RecoveryIndex::rebuild(
+        &view,
+        crate::session::recovery_index::RecoveryProjection::Conversation,
+        2,
+    )
+    .expect("explicit rebuild");
     assert_eq!(
         rebuilt.head().expect("head").prefix,
         JournalPrefixIdentity::empty()

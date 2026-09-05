@@ -42,7 +42,11 @@ impl CanonicalRecovery {
         inherited_journal_through: Option<SequenceId>,
     ) -> Result<Self, RecoveryError> {
         let recovery = Self {
-            index: RecoveryIndex::open(source, VERSION)?,
+            index: RecoveryIndex::open(
+                source,
+                rw_store::session::recovery_index::RecoveryProjection::Conversation,
+                VERSION,
+            )?,
             fingerprint: registry_fingerprint(modes),
             inherited_journal_through,
         };
@@ -59,7 +63,11 @@ impl CanonicalRecovery {
         inherited_journal_through: Option<SequenceId>,
     ) -> Result<Self, RecoveryError> {
         Ok(Self {
-            index: RecoveryIndex::rebuild(source, VERSION)?,
+            index: RecoveryIndex::rebuild(
+                source,
+                rw_store::session::recovery_index::RecoveryProjection::Conversation,
+                VERSION,
+            )?,
             fingerprint: registry_fingerprint(modes),
             inherited_journal_through,
         })

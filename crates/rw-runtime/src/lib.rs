@@ -25,6 +25,7 @@ mod session_runtime;
 mod source_plugin;
 mod storage_root;
 mod subagent_metadata;
+mod todo_service;
 mod transcript_service;
 mod workflow_runtime;
 

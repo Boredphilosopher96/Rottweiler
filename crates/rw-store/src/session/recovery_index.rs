@@ -110,6 +110,21 @@ fn storage(error: impl Into<redb::Error>) -> RecoveryIndexError {
     RecoveryIndexError::Storage(error.into())
 }
 
+/// Independent source-derived state owners share descriptor and transaction rules.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecoveryProjection {
+    Conversation,
+    Tasks,
+}
+impl RecoveryProjection {
+    const fn directory_name(self) -> &'static str {
+        match self {
+            Self::Conversation => "recovery",
+            Self::Tasks => "tasks",
+        }
+    }
+}
+
 /// Independent canonical recovery owner; display projections use their own database.
 pub struct RecoveryIndex {
     owner: Arc<DerivedDatabase>,
@@ -119,25 +134,39 @@ impl RecoveryIndex {
     ///
     /// # Errors
     /// Rejects incompatible, unsafe, corrupt, foreign or concurrently owned state.
-    pub fn open(view: &JournalReadView, version: u32) -> Result<Self, RecoveryIndexError> {
-        Self::open_inner(view, version, false)
+    pub fn open(
+        view: &JournalReadView,
+        projection: RecoveryProjection,
+        version: u32,
+    ) -> Result<Self, RecoveryIndexError> {
+        Self::open_inner(view, projection, version, false)
     }
 
     /// Explicitly discard only this derived index before a bounded canonical rebuild.
     ///
     /// # Errors
     /// Rejects unsafe descriptors and concurrent writers; canonical data is never changed.
-    pub fn rebuild(view: &JournalReadView, version: u32) -> Result<Self, RecoveryIndexError> {
-        Self::open_inner(view, version, true)
+    pub fn rebuild(
+        view: &JournalReadView,
+        projection: RecoveryProjection,
+        version: u32,
+    ) -> Result<Self, RecoveryIndexError> {
+        Self::open_inner(view, projection, version, true)
     }
 
     fn open_inner(
         view: &JournalReadView,
+        projection: RecoveryProjection,
         version: u32,
         reset: bool,
     ) -> Result<Self, RecoveryIndexError> {
-        let owner =
-            DerivedDatabase::open(view, "recovery", CACHE_BYTES, MAX_DATABASE_BYTES, reset)?;
+        let owner = DerivedDatabase::open(
+            view,
+            projection.directory_name(),
+            CACHE_BYTES,
+            MAX_DATABASE_BYTES,
+            reset,
+        )?;
         let index = Self {
             owner: Arc::new(owner),
         };

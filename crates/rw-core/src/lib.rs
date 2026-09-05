@@ -14,6 +14,8 @@ pub mod provider_admission;
 mod provider_factory;
 mod subscription_credentials;
 #[cfg(unix)]
+pub mod todo_projection;
+#[cfg(unix)]
 pub mod transcript;
 mod update;
 

@@ -20,7 +20,11 @@ impl WorkspaceBootstrap {
     /// # Errors
     /// Rejects unsafe indexes, invalid source identities, or malformed root transitions.
     pub fn read(source: &JournalReadView) -> Result<Self, RecoveryError> {
-        let index = RecoveryIndex::open(source, super::projector::VERSION)?;
+        let index = RecoveryIndex::open(
+            source,
+            rw_store::session::recovery_index::RecoveryProjection::Conversation,
+            super::projector::VERSION,
+        )?;
         let stored = index.head()?;
         let mut head = if stored.checkpoint.is_empty() {
             if stored.prefix.next_sequence != 0 {

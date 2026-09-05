@@ -21,6 +21,16 @@ pub(crate) struct JournalService {
     admission: Arc<Semaphore>,
 }
 
+pub(crate) struct JournalReadAdmission {
+    service: Arc<JournalService>,
+    permit: OwnedSemaphorePermit,
+}
+impl JournalReadAdmission {
+    pub(crate) fn capture(self, session: &str) -> Result<JournalReadLease> {
+        self.service.capture_admitted(session, self.permit)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct JournalReadLease {
     pub(crate) view: JournalReadView,
@@ -128,10 +138,28 @@ impl JournalService {
         })
     }
 
+    pub(crate) fn admit_read(self: &Arc<Self>) -> Result<JournalReadAdmission> {
+        let permit = Arc::clone(&self.admission)
+            .try_acquire_owned()
+            .map_err(|_| miette!("journal read admission is exhausted"))?;
+        Ok(JournalReadAdmission {
+            service: Arc::clone(self),
+            permit,
+        })
+    }
+
     pub(crate) fn capture(&self, session: &str) -> Result<JournalReadLease> {
         let permit = Arc::clone(&self.admission)
             .try_acquire_owned()
             .map_err(|_| miette!("journal read admission is exhausted"))?;
+        self.capture_admitted(session, permit)
+    }
+
+    fn capture_admitted(
+        &self,
+        session: &str,
+        permit: OwnedSemaphorePermit,
+    ) -> Result<JournalReadLease> {
         let owner = self
             .active
             .lock()
