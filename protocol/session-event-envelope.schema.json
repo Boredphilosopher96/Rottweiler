@@ -72,6 +72,7 @@
                   "provider_auth_started",
                   "provider_configured",
                   "runtime_services_listed",
+                  "session_controls_ready",
                   "session_exported",
                   "session_forked",
                   "session_history_ready",

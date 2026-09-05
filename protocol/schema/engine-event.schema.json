@@ -37,6 +37,31 @@
         "session_id": {
           "$ref": "#/$defs/SessionId"
         },
+        "snapshot": {
+          "$ref": "#/$defs/SessionControlsSnapshot"
+        },
+        "type": {
+          "type": "string",
+          "const": "session_controls_ready"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "snapshot"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
         "catalog": {
           "$ref": "#/$defs/UiCatalog"
         },
@@ -1648,6 +1673,39 @@
         "invocation_id": {
           "$ref": "#/$defs/ToolInvocationId"
         },
+        "decision": {
+          "$ref": "#/$defs/ApprovalDecision"
+        },
+        "type": {
+          "type": "string",
+          "const": "tool_approval_resolved"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "turn_id",
+        "tool_call_id",
+        "invocation_id",
+        "decision"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "tool_call_id": {
+          "$ref": "#/$defs/ToolCallId"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/ToolInvocationId"
+        },
         "name": {
           "type": "string"
         },
@@ -2829,6 +2887,379 @@
       "description": "Monotonic per-session sequence encoded as a decimal string on the wire.",
       "type": "string"
     },
+    "SessionControlsSnapshot": {
+      "type": "object",
+      "properties": {
+        "through": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "controls": {
+          "$ref": "#/$defs/SessionControls"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "through",
+        "controls"
+      ]
+    },
+    "SessionControls": {
+      "type": "object",
+      "properties": {
+        "questions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SessionQuestion"
+          },
+          "maxItems": 64
+        },
+        "approvals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SessionApproval"
+          },
+          "maxItems": 128
+        },
+        "pending_plan": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanArtifact"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "questions",
+        "approvals",
+        "pending_plan"
+      ]
+    },
+    "SessionQuestion": {
+      "type": "object",
+      "properties": {
+        "question_id": {
+          "$ref": "#/$defs/QuestionId"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "questions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Question"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "question_id",
+        "turn_id",
+        "questions"
+      ]
+    },
+    "QuestionId": {
+      "description": "Stable identifier of an interactive question.",
+      "type": "string"
+    },
+    "TurnId": {
+      "description": "Stable identifier of a conversation turn.",
+      "type": "string"
+    },
+    "Question": {
+      "description": "A typed question sent to an interactive client.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/QuestionId"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "response_kind": {
+          "$ref": "#/$defs/QuestionResponseKind"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/QuestionOption"
+          }
+        },
+        "model_switch": {
+          "description": "Present only when this question gates a model switch.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelSwitchQuestion"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "prompt",
+        "response_kind",
+        "options"
+      ]
+    },
+    "QuestionResponseKind": {
+      "description": "Shape of a response accepted for an interactive question.",
+      "type": "string",
+      "enum": [
+        "text",
+        "select_one",
+        "select_many"
+      ]
+    },
+    "QuestionOption": {
+      "description": "A selectable response to an engine question.",
+      "type": "object",
+      "properties": {
+        "value": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model_context_transfer": {
+          "description": "Present only for the three typed model-context transfer choices.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelContextTransfer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "label"
+      ]
+    },
+    "ModelContextTransfer": {
+      "description": "Explicit handling of existing conversation context when changing models.",
+      "oneOf": [
+        {
+          "description": "Compact the current conversation, then give the summary to the new model.",
+          "type": "string",
+          "const": "pass_summary"
+        },
+        {
+          "description": "Keep the complete current conversation for the new model.",
+          "type": "string",
+          "const": "pass_full_context"
+        },
+        {
+          "description": "Retain only system/project instructions and start a fresh conversation.",
+          "type": "string",
+          "const": "start_without_context"
+        }
+      ]
+    },
+    "ModelSwitchQuestion": {
+      "description": "Target retained in a durable model-switch interaction until the user chooses\nhow existing context should cross the model boundary.",
+      "type": "object",
+      "properties": {
+        "model": {
+          "$ref": "#/$defs/ModelAlias"
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "model"
+      ]
+    },
+    "ModelAlias": {
+      "description": "Provider-blind model alias resolved by the engine router.",
+      "type": "string"
+    },
+    "SessionApproval": {
+      "type": "object",
+      "properties": {
+        "invocation_id": {
+          "$ref": "#/$defs/ToolInvocationId"
+        },
+        "tool_call_id": {
+          "$ref": "#/$defs/ToolCallId"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "name": {
+          "type": "string"
+        },
+        "args": true,
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolCapability"
+          }
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "diff": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UnifiedDiff"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "invocation_id",
+        "tool_call_id",
+        "turn_id",
+        "name",
+        "args",
+        "capabilities",
+        "rationale",
+        "diff"
+      ]
+    },
+    "ToolInvocationId": {
+      "description": "Host-owned identity of one tool execution, independent of provider call IDs.",
+      "type": "string"
+    },
+    "ToolCallId": {
+      "description": "Stable identifier assigned to a model tool call.",
+      "type": "string"
+    },
+    "ToolCapability": {
+      "description": "Capabilities used by the permission engine for a tool invocation.",
+      "type": "string",
+      "enum": [
+        "read_filesystem",
+        "write_filesystem",
+        "network",
+        "execute"
+      ]
+    },
+    "UnifiedDiff": {
+      "description": "Optional structured unified diff attached to a mutating-tool approval.",
+      "type": "object",
+      "properties": {
+        "proposal_id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "unified_diff": {
+          "type": "string"
+        },
+        "arguments_hash": {
+          "type": "string"
+        },
+        "base_hash": {
+          "type": "string"
+        },
+        "diff_hash": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "proposal_id",
+        "path",
+        "unified_diff",
+        "arguments_hash",
+        "base_hash",
+        "diff_hash",
+        "truncated"
+      ]
+    },
+    "PlanArtifact": {
+      "description": "Durable plan submitted before entering execute mode.",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "summary_md": {
+          "type": "string"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PlanStep"
+          }
+        },
+        "open_questions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "summary_md",
+        "steps",
+        "open_questions"
+      ]
+    },
+    "PlanStep": {
+      "description": "One verifiable step in a model-submitted plan artifact.",
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "files_touched": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "verification": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "description",
+        "files_touched",
+        "verification"
+      ]
+    },
     "UiCatalog": {
       "type": "object",
       "properties": {
@@ -3750,10 +4181,6 @@
       "description": "Stable item identity, independent of its current logical ordinal.",
       "$ref": "#/$defs/SequenceId"
     },
-    "TurnId": {
-      "description": "Stable identifier of a conversation turn.",
-      "type": "string"
-    },
     "TranscriptContent": {
       "description": "Bounded, renderer-independent content of one stable logical transcript row.",
       "oneOf": [
@@ -4400,10 +4827,6 @@
           ]
         }
       ]
-    },
-    "ToolInvocationId": {
-      "description": "Host-owned identity of one tool execution, independent of provider call IDs.",
-      "type": "string"
     },
     "TranscriptToolStatus": {
       "description": "Tool invocation lifecycle independent of provider call/result IR placement.",
@@ -5254,10 +5677,6 @@
         "estimated_tokens"
       ]
     },
-    "ModelAlias": {
-      "description": "Provider-blind model alias resolved by the engine router.",
-      "type": "string"
-    },
     "Turn": {
       "description": "One conversation turn in the internal message representation.",
       "type": "object",
@@ -5424,10 +5843,6 @@
           ]
         }
       ]
-    },
-    "ToolCallId": {
-      "description": "Stable identifier assigned to a model tool call.",
-      "type": "string"
     },
     "ToolOutput": {
       "description": "Provider-neutral output produced by a tool.",
@@ -6757,51 +7172,14 @@
         "total"
       ]
     },
-    "ToolCapability": {
-      "description": "Capabilities used by the permission engine for a tool invocation.",
+    "ApprovalDecision": {
+      "description": "A driver's decision at the permission chokepoint.",
       "type": "string",
       "enum": [
-        "read_filesystem",
-        "write_filesystem",
-        "network",
-        "execute"
-      ]
-    },
-    "UnifiedDiff": {
-      "description": "Optional structured unified diff attached to a mutating-tool approval.",
-      "type": "object",
-      "properties": {
-        "proposal_id": {
-          "type": "string"
-        },
-        "path": {
-          "type": "string"
-        },
-        "unified_diff": {
-          "type": "string"
-        },
-        "arguments_hash": {
-          "type": "string"
-        },
-        "base_hash": {
-          "type": "string"
-        },
-        "diff_hash": {
-          "type": "string"
-        },
-        "truncated": {
-          "type": "boolean"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "proposal_id",
-        "path",
-        "unified_diff",
-        "arguments_hash",
-        "base_hash",
-        "diff_hash",
-        "truncated"
+        "allow_once",
+        "allow_session",
+        "allow_project",
+        "deny"
       ]
     },
     "ToolOutputStream": {
@@ -6810,132 +7188,6 @@
       "enum": [
         "stdout",
         "stderr"
-      ]
-    },
-    "QuestionId": {
-      "description": "Stable identifier of an interactive question.",
-      "type": "string"
-    },
-    "Question": {
-      "description": "A typed question sent to an interactive client.",
-      "type": "object",
-      "properties": {
-        "id": {
-          "$ref": "#/$defs/QuestionId"
-        },
-        "prompt": {
-          "type": "string"
-        },
-        "response_kind": {
-          "$ref": "#/$defs/QuestionResponseKind"
-        },
-        "options": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/QuestionOption"
-          }
-        },
-        "model_switch": {
-          "description": "Present only when this question gates a model switch.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ModelSwitchQuestion"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "id",
-        "prompt",
-        "response_kind",
-        "options"
-      ]
-    },
-    "QuestionResponseKind": {
-      "description": "Shape of a response accepted for an interactive question.",
-      "type": "string",
-      "enum": [
-        "text",
-        "select_one",
-        "select_many"
-      ]
-    },
-    "QuestionOption": {
-      "description": "A selectable response to an engine question.",
-      "type": "object",
-      "properties": {
-        "value": {
-          "type": "string"
-        },
-        "label": {
-          "type": "string"
-        },
-        "description": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "model_context_transfer": {
-          "description": "Present only for the three typed model-context transfer choices.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ModelContextTransfer"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "value",
-        "label"
-      ]
-    },
-    "ModelContextTransfer": {
-      "description": "Explicit handling of existing conversation context when changing models.",
-      "oneOf": [
-        {
-          "description": "Compact the current conversation, then give the summary to the new model.",
-          "type": "string",
-          "const": "pass_summary"
-        },
-        {
-          "description": "Keep the complete current conversation for the new model.",
-          "type": "string",
-          "const": "pass_full_context"
-        },
-        {
-          "description": "Retain only system/project instructions and start a fresh conversation.",
-          "type": "string",
-          "const": "start_without_context"
-        }
-      ]
-    },
-    "ModelSwitchQuestion": {
-      "description": "Target retained in a durable model-switch interaction until the user chooses\nhow existing context should cross the model boundary.",
-      "type": "object",
-      "properties": {
-        "model": {
-          "$ref": "#/$defs/ModelAlias"
-        },
-        "provider": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "model"
       ]
     },
     "Answer": {
@@ -7175,61 +7427,6 @@
         "modified",
         "deleted",
         "type_changed"
-      ]
-    },
-    "PlanArtifact": {
-      "description": "Durable plan submitted before entering execute mode.",
-      "type": "object",
-      "properties": {
-        "title": {
-          "type": "string"
-        },
-        "summary_md": {
-          "type": "string"
-        },
-        "steps": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/PlanStep"
-          }
-        },
-        "open_questions": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "title",
-        "summary_md",
-        "steps",
-        "open_questions"
-      ]
-    },
-    "PlanStep": {
-      "description": "One verifiable step in a model-submitted plan artifact.",
-      "type": "object",
-      "properties": {
-        "description": {
-          "type": "string"
-        },
-        "files_touched": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "verification": {
-          "type": "string"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "description",
-        "files_touched",
-        "verification"
       ]
     },
     "PlanDecision": {

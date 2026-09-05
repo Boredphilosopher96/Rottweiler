@@ -14,6 +14,27 @@
         },
         "type": {
           "type": "string",
+          "const": "get_session_controls"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
           "const": "get_ui_catalog"
         }
       },
