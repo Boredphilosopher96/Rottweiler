@@ -10,7 +10,7 @@ use rw_types::{
 use std::{fs, io::Write, path::Path, time::Duration};
 
 const MAX_RECEIPT_BYTES: usize = 16 * 1024 * 1024;
-const APPLICATION_ID: u32 = 0x52574f50;
+const APPLICATION_ID: u32 = 0x5257_4f50;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReceiptError {
@@ -32,7 +32,7 @@ pub struct CommandReceipts {
 impl CommandReceipts {
     /// Opens private authoritative receipts and rejects foreign database schemas.
     /// # Errors
-    /// Rejects unsafe storage, invalid schema, and unavailable SQLite state.
+    /// Rejects unsafe storage, invalid schema, and unavailable `SQLite` state.
     pub fn open(path: &Path) -> Result<Self, ReceiptError> {
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
