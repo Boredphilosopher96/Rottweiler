@@ -76,6 +76,7 @@ export class ScriptedClient implements RuntimeEngineClient {
 
   async postCommand(command: ClientCommand): Promise<CommandReply> {
     this.commands.push(command)
+    if (command.type === "get_session_controls") return controlsReply(command)
     return { type: "command", outcome: this.outcomes.shift() ?? { type: "accepted" } }
   }
 
@@ -126,6 +127,7 @@ export class BlockingPreparationClient implements RuntimeEngineClient {
 
   async postCommand(command: ClientCommand): Promise<CommandReply> {
     this.commands.push(command)
+    if (command.type === "get_session_controls") return controlsReply(command)
     if (command.type === "resume_session") {
       this.#markResumeStarted()
       await this.#resumeGate
@@ -150,6 +152,7 @@ export class SwitchingClient implements RuntimeEngineClient {
 
   async postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandReply> {
     this.commands.push(command)
+    if (command.type === "get_session_controls") return controlsReply(command)
     if (command.type === "resume_session" && this.rejectedSessions.has(command.session_id)) {
       return {
         type: "command", outcome: {
@@ -215,6 +218,7 @@ export class DelayedConnectionClient implements RuntimeEngineClient {
 
   async postCommand(command: ClientCommand): Promise<CommandReply> {
     this.commands.push(command)
+    if (command.type === "get_session_controls") return controlsReply(command)
     return { type: "command", outcome: { type: "accepted" } }
   }
 
@@ -246,6 +250,7 @@ export class ReconnectingProjectionClient implements RuntimeEngineClient {
 
   async postCommand(command: ClientCommand): Promise<CommandReply> {
     this.commands.push(command)
+    if (command.type === "get_session_controls") return controlsReply(command)
     return { type: "command", outcome: { type: "accepted" } }
   }
 
@@ -273,6 +278,7 @@ export class CursorAheadClient implements RuntimeEngineClient {
 
   async postCommand(command: ClientCommand): Promise<CommandReply> {
     this.commands.push(command)
+    if (command.type === "get_session_controls") return controlsReply(command)
     return { type: "command", outcome: { type: "accepted" } }
   }
 
@@ -308,6 +314,7 @@ export class BlockingShutdownClient implements RuntimeEngineClient {
 
   async postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandReply> {
     this.commands.push(command)
+    if (command.type === "get_session_controls") return controlsReply(command)
     await new Promise<void>((resolve) => {
       if (signal?.aborted) resolve()
       else signal?.addEventListener("abort", () => resolve(), { once: true })
@@ -330,6 +337,7 @@ export class CorrelatedForkClient implements RuntimeEngineClient {
 
   async postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandReply> {
     this.commands.push(command)
+    if (command.type === "get_session_controls") return controlsReply(command)
     if (command.type === "fork") {
       const current = this.subscriptions.at(-1)
       await current?.onEvent({
@@ -376,6 +384,7 @@ export class RestartRecordingClient implements RuntimeEngineClient {
 
   async postCommand(command: ClientCommand): Promise<CommandReply> {
     this.commands.push(command)
+    if (command.type === "get_session_controls") return controlsReply(command)
     return { type: "command", outcome: { type: "accepted" } }
   }
 
@@ -413,4 +422,12 @@ export async function waitFor(predicate: () => boolean): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 1))
   }
   throw new Error("test condition was not reached")
+}
+
+function controlsReply(command: Extract<ClientCommand, { type: "get_session_controls" }>): CommandReply {
+  return { type: "read", outcome: { type: "accepted" }, events: [{ type: "session_controls_ready",
+    meta: { ...command.meta, emitted_at: "2026-01-01T00:00:00Z" }, session_id: command.session_id,
+    snapshot: { through: "5", controls: { questions: [], approvals: [], pending_plan: null } },
+  }] }
+
 }

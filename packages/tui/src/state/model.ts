@@ -1,3 +1,4 @@
+import { emptyControlFence, type ControlFence } from "./controls"
 import { citationBytes } from "./live-admission"
 import type { ToolDisplay } from "./tool-display"
 import { emptyTodos, type TodoState } from "./todos"
@@ -359,6 +360,7 @@ export interface RottweilerState {
   readonly connection: ConnectionProjection
   readonly replay: ReplayProjection
   readonly historyReady: { readonly sessionId: string; readonly through: string | null } | null
+  readonly controls: ControlFence
   readonly lastSequence: string | null
   readonly hasActivity: boolean
   readonly latestShell: ShellActivityProjection | null
@@ -425,6 +427,7 @@ export function createInitialState(): RottweilerState {
     },
     replay: { active: false, sessionId: null, completedThrough: null },
     historyReady: null,
+    controls: emptyControlFence(),
     lastSequence: null,
     hasActivity: false,
     latestShell: null,

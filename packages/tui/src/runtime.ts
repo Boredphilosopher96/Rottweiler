@@ -1,3 +1,4 @@
+import { SessionControlReader } from "./runtime-controls"
 import type { ReplyAllocation } from "./transport/reply-allocation"
 import type { EngineEvent } from "./protocol"
 import type { ClientDiagnostics } from "./client-diagnostics"
@@ -150,6 +151,33 @@ export class EngineRuntimeError extends Error {
  * synchronous; durable cursor persistence is coalesced in the background.
  */
 export class TuiEngineRuntime {
+  readonly #controls = new SessionControlReader(
+    async (sessionId, signal, allocation) => {
+      const generation = this.#sessionGeneration
+      const reply = await this.#client.postCommand({ type: "get_session_controls", meta: this.#meta(), session_id: sessionId }, signal, allocation)
+      signal.throwIfAborted()
+      if (generation !== this.#sessionGeneration) throw new DOMException("session changed", "AbortError")
+      const event = reply.type === "read" ? reply.events[0] : undefined
+      if (reply.outcome.type === "rejected" || reply.type !== "read" || reply.events.length !== 1
+        || event?.type !== "session_controls_ready" || event.session_id !== sessionId) {
+        throw new EngineRuntimeError("session controls reply is missing its session-bound result")
+      }
+      return event
+    },
+    event => {
+      const app = this.#requiredApp(), before = app.state.controls
+      app.handleEvent(event)
+      return app.state.controls !== before
+    },
+    (error, sessionId) => {
+      if (sessionId !== this.#sessionId) return
+      const app = this.#requiredApp()
+      app.setState({ ...app.state, errors: [...app.state.errors.slice(-63), {
+        category: "protocol", code: "session_controls_unavailable", message: safeErrorMessage(error), retryable: true,
+      }] })
+    },
+  )
+
   readonly sessionReader: SessionReader = {
     uiCatalog: async (sessionId, signal) => {
       const reply = await this.#readSession({ type: "get_ui_catalog", meta: this.#meta(), session_id: sessionId }, signal)
@@ -282,6 +310,7 @@ export class TuiEngineRuntime {
       }
     } finally {
       await this.#handoff?.close()
+    await this.#controls.settle()
     }
   }
 
@@ -391,6 +420,7 @@ export class TuiEngineRuntime {
     this.#transitionController?.abort(this.#controller.signal.reason)
     this.#subscriptionController?.abort(this.#controller.signal.reason)
     await this.#handoff?.close()
+    await this.#controls.settle()
   }
 
   /**
@@ -730,6 +760,7 @@ export class TuiEngineRuntime {
   }
 
   async #requestInitialProjections(sessionId: string, signal: AbortSignal): Promise<void> {
+    void this.#controls.refresh(sessionId, signal)
     const commands: ClientCommand[] = [
       { type: "list_models", refresh: false, meta: this.#meta(), session_id: sessionId },
       { type: "list_modes", meta: this.#meta(), session_id: sessionId },

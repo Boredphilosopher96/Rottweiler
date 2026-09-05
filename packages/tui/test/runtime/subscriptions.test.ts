@@ -221,6 +221,7 @@ describe("runtime subscriptions", () => {
     expect(reconnectedTypes).toEqual([
       "take_driver",
       "list_models",
+      "get_session_controls",
       "list_modes",
       "list_sessions",
       "get_context",

@@ -1,3 +1,4 @@
+import { readControls, resolvedApproval, isControlEvent, coveredByControlSnapshot, preserveSnapshotControls } from "./controls"
 import { assertLiveAdmission, citationBytes } from "./live-admission"
 import { retainedCompletedDiff } from "./tool-display"
 import { prepareToolDisplay } from "./tool-display"
@@ -123,7 +124,8 @@ export function reduceWireEvent(
     }
   }
 
-  assertLiveAdmission(state, event)
+  const coveredControl = coveredByControlSnapshot(state, sequenceText)
+  if (!coveredControl || event.type !== "question_asked") assertLiveAdmission(state, event)
   const withCursor: RottweilerState = {
     ...state,
     lastSequence: sequenceText,
@@ -142,7 +144,9 @@ export function reduceWireEvent(
     }
     : withCursor
 
-  return applyKnownEvent(ready, event, sequenceText, activeSessionId)
+  const projected = applyKnownEvent(ready, event, sequenceText, activeSessionId)
+  if (coveredControl) return preserveSnapshotControls(state, projected, event)
+  return isControlEvent(event) ? { ...projected, controls: { ...projected.controls, observedThrough: sequenceText } } : projected
 }
 
 export function projectSessionTitleUpdate(
@@ -172,6 +176,13 @@ function applyKnownEvent(
     case "transcript_page_ready":
     case "transcript_content_ready":
       return state
+    case "session_controls_ready":
+      return activeSessionId !== null && event.session_id !== activeSessionId ? state : readControls(state, event.snapshot)
+    case "tool_approval_resolved": {
+      const tool = state.tools[event.invocation_id]
+      if (tool?.status !== "awaiting_approval" || tool.toolCallId !== event.tool_call_id || tool.turnId !== event.turn_id) return state
+      return { ...state, tools: updateTool(state.tools, event.invocation_id, resolvedApproval(tool)) }
+    }
     case "command_acknowledged":
       return {
         ...state,

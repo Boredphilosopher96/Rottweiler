@@ -823,7 +823,7 @@ export class RottweilerApp extends BoxRenderable {
     }
     this.#notify(previous, next)
     if (
-      event.type === "question_asked" &&
+      event.type === "question_asked" && next.questions[event.question_id] !== undefined &&
       Array.isArray(eventRecord.questions) &&
       isRecord(eventRecord.questions[0]) &&
       eventRecord.questions[0].response_kind === "text"

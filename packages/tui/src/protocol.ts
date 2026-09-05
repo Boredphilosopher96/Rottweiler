@@ -28,6 +28,8 @@ export {
   PROTOCOL_VERSION,
 } from "../../../protocol/types"
 export type {
+  SessionControlsSnapshot,
+  SessionControls,
   UiPresentation,
   UiCatalog,
   UiCatalogEntry,

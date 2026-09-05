@@ -5,7 +5,7 @@ import { tmpdir } from "node:os"
 import { fileURLToPath } from "node:url"
 import { join } from "node:path"
 
-import { PROTOCOL_VERSION, type ClientCommand, type EngineEvent } from "../src/protocol"
+import { PROTOCOL_VERSION, CLIENT_COMMAND_EXECUTION, type SessionControlsSnapshot, type ClientCommand, type EngineEvent } from "../src/protocol"
 import { EngineHttpSseClient } from "../src/transport"
 import { AuthenticatedMockEngine, encodeSseJson } from "./support/mock-engine"
 
@@ -81,7 +81,15 @@ describe("M4 transport and process acceptance", () => {
   }, 10_000)
 
   test("supervised TUI approves a mutating tool through the real panel and driver transport", async () => {
-    const engine = new AuthenticatedMockEngine([{ chunks: [], holdOpen: true }])
+    let controls: SessionControlsSnapshot = { through: null, controls: { questions: [], approvals: [], pending_plan: null } }
+    const engine = new AuthenticatedMockEngine([{ chunks: [], holdOpen: true }], command => {
+      if (command.type === "get_session_controls") return { type: "read", outcome: { type: "accepted" }, events: [{
+        type: "session_controls_ready", session_id: command.session_id,
+        meta: { ...command.meta, emitted_at: "2026-07-10T00:00:00Z" }, snapshot: controls,
+      }] }
+      return CLIENT_COMMAND_EXECUTION[command.type] === "read" ? { type: "read", outcome: { type: "accepted" }, events: [] }
+        : { type: "command", outcome: { type: "accepted" } }
+    })
     await engine.start()
     cleanups.push(() => engine.stop())
     const directory = await mkdtemp(join(tmpdir(), "rw-tui-approval-"))
@@ -141,6 +149,10 @@ describe("M4 transport and process acceptance", () => {
       args: { path: "src/main.rs" },
       call_index: 0,
     })
+    controls = { through: "3", controls: { questions: [], pending_plan: null, approvals: [{
+      turn_id: "turn-approval", tool_call_id: "mutating-tool", invocation_id: "mutating-tool", name: "write",
+      args: { path: "src/main.rs" }, capabilities: ["write_filesystem"], rationale: "Apply the deterministic acceptance fixture", diff: null,
+    }] } }
     engine.emit({
       type: "tool_approval_needed",
       meta: meta(3),
@@ -171,9 +183,12 @@ describe("M4 transport and process acceptance", () => {
       meta: { client_id: engine.clientId },
     })
 
+    controls = { through: "4", controls: { questions: [], approvals: [], pending_plan: null } }
+    engine.emit({ type: "tool_approval_resolved", meta: meta(4), turn_id: "turn-approval",
+      tool_call_id: "mutating-tool", invocation_id: "mutating-tool", decision: "allow_once" })
     engine.emit({
       type: "tool_call_finished", presentation: null,
-      meta: meta(4),
+      meta: meta(5),
       turn_id: "turn-approval",
       tool_call_id: "mutating-tool",
       invocation_id: "mutating-tool",
@@ -183,7 +198,7 @@ describe("M4 transport and process acceptance", () => {
     })
     engine.emit({
       type: "turn_finished",
-      meta: meta(5),
+      meta: meta(6),
       turn_id: "turn-approval",
       status: "completed",
       usage: {
@@ -196,6 +211,7 @@ describe("M4 transport and process acceptance", () => {
       cost: { kind: "subscription_quota", used: "15", unit: "tokens" },
     })
 
+    controls = { ...controls, through: "6" }
     await waitFor(async () => (await readOptional(reportFile)) !== null)
     const exitCode = await child.exited
     const stderr = await new Response(child.stderr).text()
