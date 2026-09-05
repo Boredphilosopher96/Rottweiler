@@ -5,19 +5,19 @@ use rw_plugin_protocol::{PluginHookCapability, PluginToolCapability, PluginToolE
 use std::sync::Arc;
 
 #[tokio::test]
-async fn native_hook_registration_uses_sibling_tools_process_write_authority() {
+async fn native_hooks_do_not_receive_sibling_tool_effect_authority() {
     let root = tempfile::tempdir().expect("fixture root");
     let budget = Arc::new(PluginRuntimeBudget::default());
     let redactor = Arc::new(SharedPluginRedactor::new(
         rw_providers::FixtureRedactor::default(),
     ));
-    for (index, (event, class, writes, allowed)) in [
-        (HookEvent::PreTool, HookClass::Policy, true, true),
-        (HookEvent::PostTool, HookClass::Transform, true, true),
-        (HookEvent::PreTool, HookClass::Observer, true, false),
-        (HookEvent::SessionStart, HookClass::Policy, true, false),
-        (HookEvent::SessionEnd, HookClass::Observer, true, false),
-        (HookEvent::SessionStart, HookClass::Observer, false, true),
+    for (index, (event, class, writes)) in [
+        (HookEvent::PreTool, HookClass::Policy, true),
+        (HookEvent::PostTool, HookClass::Transform, true),
+        (HookEvent::PreTool, HookClass::Observer, true),
+        (HookEvent::SessionStart, HookClass::Policy, true),
+        (HookEvent::SessionEnd, HookClass::Observer, true),
+        (HookEvent::SessionStart, HookClass::Observer, false),
     ]
     .into_iter()
     .enumerate()
@@ -25,7 +25,7 @@ async fn native_hook_registration_uses_sibling_tools_process_write_authority() {
         let (config, mut manifest) = rollback_plugin(root.path(), &format!("grants_{index}"));
         manifest.capabilities.tools.push(PluginToolCapability {
             name: "sibling_tool".to_owned(),
-            description: "One tool controls the process filesystem grants".to_owned(),
+            description: "One tool declares host-mediated filesystem effects".to_owned(),
             schema: serde_json::json!({"type":"object"}),
             caps: if writes {
                 vec![PluginToolEffect::WritesFilesystem]
@@ -62,27 +62,16 @@ async fn native_hook_registration_uses_sibling_tools_process_write_authority() {
         let runtime = owner.current();
         let mut dispatcher = HookDispatcher::new();
         let (registration, handler) = runtime.hooks[0].clone();
-        assert_eq!(
-            registration.effect(),
-            if writes {
-                HookEffect::WorkspaceMutating
-            } else {
-                HookEffect::ReadOnly
-            }
-        );
-        assert_eq!(
-            registration
+        assert_eq!(registration.effect(), HookEffect::ReadOnly);
+        assert!(
+            !registration
                 .required_capabilities()
-                .contains(&rw_types::ToolCapability::WriteFilesystem),
-            writes
+                .contains(&rw_types::ToolCapability::WriteFilesystem)
         );
-        assert_eq!(
-            dispatcher.register_shared(registration, handler).is_ok(),
-            allowed
-        );
-        if allowed && writes {
-            assert!(dispatcher.has_workspace_mutating_tool_hook(event, "unrelated_tool"));
-        }
+        dispatcher
+            .register_shared(registration, handler)
+            .expect("code-only hook registration");
+        assert!(!dispatcher.has_workspace_mutating_tool_hook(event, "unrelated_tool"));
         owner.shutdown().await.expect("inert shutdown");
     }
     budget

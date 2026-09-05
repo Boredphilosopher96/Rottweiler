@@ -731,16 +731,6 @@ impl CapabilityEnforcer {
             .any(|approved| approved == declaration)
     }
 
-    /// Returns the effective authority held by the shared plugin process.
-    ///
-    /// A plugin process is one sandbox principal, so every tool adapter must
-    /// present this union to the permission and checkpoint chokepoints rather
-    /// than claiming only its handler's narrower declaration.
-    #[must_use]
-    pub fn process_tool_effects(&self) -> BTreeSet<PluginToolEffect> {
-        crate::plugin_endpoint::declared_process_effects(&self.capabilities)
-    }
-
     /// Verifies a command declaration, terminating the process on violation.
     ///
     /// # Errors

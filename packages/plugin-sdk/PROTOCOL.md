@@ -56,14 +56,26 @@ safely execute unapproved code.
 
 Manifest capability arrays contain tools, commands, hooks, provider alias prefixes, event
 subscriptions, and plugin-to-host push methods. Tool effects are exactly `reads-fs`, `writes-fs`,
-`network`, and `exec`; the host permission engine and process sandbox enforce the immutable
-approved declaration. Hooks declare `fail-open` or `fail-closed` and use the generated default
+`network`, and `exec`. Native workers can access their code, runtime libraries, and private
+scratch. They cannot directly access the workspace, connect to a network, create child
+processes, or use application launch delegation. The host enforces tool effects at each
+invocation. Hooks declare `fail-open` or `fail-closed` and use the generated default
 handler timeout. Event delivery and pushes use correlated requests. Pushes require an explicit declaration.
 
 The generated `RPC_METHODS` object is the canonical method catalog. The
 generated wire fixture contains exact examples.
 
-`tool/call` returns `{ "content": string, "data": JSON, "truncated"?: boolean }`.
+`tool/call` returns `{ "content": string, "data": JSON, "truncated": boolean }`.
+A tool handler's `effects.callTool(name, input)` sends `effect/tool_call` with the
+exact pending host request identity. Filesystem and HTTP operations must fit both
+the tool declaration and the outer invocation's approved capabilities. Writes
+must fit the outer checkpoint's canonical paths; HTTP redirects retain the same
+approved domain limit. The host admits one nested operation at a time and at most
+128 per invocation. Progress cannot extend its total deadline. Tool completion
+waits for every admitted nested effect to settle. Expired, cancelled, completed,
+and unrelated requests confer no authority. Process, orchestration, MCP,
+interactive, and recursively delegated tools return an explicit denial.
+Hooks and providers do not receive a tool effect scope.
 Provider declarations opt into catalog RPC with
 `"capabilities": ["models"]`; this declaration is part of the approved manifest fingerprint.
 Other bounded canonical capability strings are retained in that fingerprint but confer no host

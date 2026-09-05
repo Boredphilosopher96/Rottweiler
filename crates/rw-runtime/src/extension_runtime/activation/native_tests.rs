@@ -69,7 +69,8 @@ async fn aborted_first_use_waits_for_real_sandboxed_process_handoff_and_reap() {
     let launcher = Arc::new(HeldNativeLaunch {
         inner: crate::plugin_process::SandboxedPluginLauncher::new(
             scratch.path(),
-            &std::env::current_exe().expect("helper"),
+            &crate::plugin_process::helper_executable()
+                .expect("fixture sandbox helper prerequisite"),
         )
         .expect("native sandbox launcher"),
         _scratch: scratch,
@@ -84,7 +85,8 @@ async fn aborted_first_use_waits_for_real_sandboxed_process_handoff_and_reap() {
         config,
         private_root: root.path().to_path_buf(),
         workspace_roots: vec![root.path().to_path_buf()],
-        helper: std::env::current_exe().expect("helper"),
+        helper: crate::plugin_process::helper_executable()
+            .expect("fixture sandbox helper prerequisite"),
         redactor: Arc::new(SharedPluginRedactor::new(
             rw_providers::FixtureRedactor::default(),
         )),

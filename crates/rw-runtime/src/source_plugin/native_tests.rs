@@ -57,7 +57,8 @@ async fn source_resolver_seals_current_host_output_after_native_helpers_settle()
     let launcher = Arc::new(RecordingLauncher {
         inner: SandboxedPluginLauncher::new(
             scratch.path(),
-            &std::env::current_exe().expect("helper"),
+            &crate::plugin_process::helper_executable()
+                .expect("fixture sandbox helper prerequisite"),
         )
         .expect("native sandbox launcher"),
         processes: Mutex::new(Vec::new()),
@@ -129,8 +130,12 @@ async fn preparation_directory_grants_do_not_read_siblings_or_recur() {
     fs::write(root.join("sibling/hidden"), "private content\n").expect("nested secret");
     let scratch = Arc::new(crate::extension_runtime::PrivateMcpScratch::create().expect("scratch"));
     let launcher: Arc<dyn PluginLauncher> = Arc::new(
-        SandboxedPluginLauncher::new(scratch.path(), &std::env::current_exe().expect("helper"))
-            .expect("sandbox launcher"),
+        SandboxedPluginLauncher::new(
+            scratch.path(),
+            &crate::plugin_process::helper_executable()
+                .expect("fixture sandbox helper prerequisite"),
+        )
+        .expect("sandbox launcher"),
     );
     let config = PluginProcessConfig::new("/bin/sh")
         .and_then(|config| config.with_cwd(&package))

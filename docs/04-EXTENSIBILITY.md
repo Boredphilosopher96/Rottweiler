@@ -275,6 +275,13 @@ failed proof after retirement leaves admission closed; no stale adapter can
 silently resume. Session state and delivery acknowledgements remain canonical
 across process replacement, while live UI ownership receives a fresh identity.
 
+Native execution is code-only: runtime/code reads and private scratch writes are
+available, while workspace access, networking, child processes, and application
+launch delegation are denied. Tool handlers request filesystem or HTTP work through
+an invocation-correlated host scope. Approval and checkpoint coverage come from the
+outer engine tool call; sibling tools, hooks, and providers do not expand that scope.
+Nested process, orchestration, MCP, and interactive operations are denied.
+
 The separate executable target pins its executable, explicit interpreter entrypoints, adjacent dependency descriptors, manifest, code root, origin, environment names, and domains by canonical path, length, and BLAKE3 identity. Eval, module-runner, package-runner, and `PATH`-resolved forms are rejected.
 
 The Rust host and TypeScript SDK consume the same generated contract projections. Provider plugins emit request-correlated `provider/event` notifications within host-issued event/byte credit windows. Four streams share a bounded process budget; each has a fixed five-minute total deadline and reserved terminal storage. Dropping a consumer initiates whole-process teardown, and the invoked provider remains owned until local effects settle. Control and response traffic has a separate bounded queue with priority between data writes. Catalog and host-HTTP requests are separately bounded and negotiated. `packages/plugin-sdk/PROTOCOL.md` explains the wire contract; its schema and fixture are projections of `rw-plugin-protocol`, not additional owners.

@@ -86,7 +86,8 @@ impl Fixture {
             config,
             private_root: root.path().to_path_buf(),
             workspace_roots: vec![root.path().to_path_buf()],
-            helper: std::env::current_exe().expect("helper"),
+            helper: crate::plugin_process::helper_executable()
+                .expect("fixture sandbox helper prerequisite"),
             redactor: Arc::new(SharedPluginRedactor::new(
                 rw_providers::FixtureRedactor::default(),
             )),

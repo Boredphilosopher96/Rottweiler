@@ -47,20 +47,20 @@ impl Tool for RpcToolAdapter {
         true
     }
     fn descriptor(&self) -> ToolDescriptor {
-        let process_effects = self.endpoint.metadata().process_tool_effects();
         ToolDescriptor {
             name: self.declaration.name.clone(),
             description: self.declaration.description.clone(),
             input_schema: self.declaration.schema.clone(),
-            capabilities: CapabilityManifest::new(process_effects.iter().copied().map(tool_effect)),
+            capabilities: CapabilityManifest::new(
+                self.declaration.caps.iter().copied().map(tool_effect),
+            ),
         }
     }
 
     fn mutation_scope(&self, _input: &Value) -> MutationScope {
         if self
-            .endpoint
-            .metadata()
-            .process_tool_effects()
+            .declaration
+            .caps
             .contains(&rw_plugin_protocol::PluginToolEffect::WritesFilesystem)
         {
             MutationScope::OpaqueWorkspace

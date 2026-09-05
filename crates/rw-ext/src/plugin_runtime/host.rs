@@ -40,18 +40,13 @@ fn approved_plugin_profile(
             "plugin cwd is outside its owned runtime root".to_owned(),
         ));
     }
-    let reads_workspace = expected_manifest.capabilities.tools.iter().any(|tool| {
-        tool.caps
-            .contains(&rw_plugin_protocol::PluginToolEffect::ReadsFilesystem)
-    });
-    if !reads_workspace
-        && config
-            .code_root()
-            .is_some_and(|code_root| roots.contains(&code_root.canonical_path))
-    {
+    if config.code_root().is_some_and(|code_root| {
+        roots
+            .iter()
+            .any(|root| root.starts_with(&code_root.canonical_path))
+    }) {
         return Err(PluginHostError::Approval(
-            "plugin code root must be a strict workspace descendant unless reads-fs is declared"
-                .to_owned(),
+            "plugin code root cannot expose an approved workspace root".to_owned(),
         ));
     }
     let requests_network = !expected_manifest.capabilities.providers.is_empty()

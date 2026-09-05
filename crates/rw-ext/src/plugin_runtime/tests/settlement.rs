@@ -174,7 +174,7 @@ async fn approved_handshake_registers_custom_tool_and_reaps_on_shutdown() {
     let tool = registry.resolve("fixture_tool").expect("resolved tool");
     assert_eq!(
         tool.descriptor().capabilities,
-        CapabilityManifest::new([ToolCapability::ReadFilesystem, ToolCapability::Network,])
+        CapabilityManifest::new([ToolCapability::ReadFilesystem])
     );
     let context = ToolContext::new(root.path()).expect("tool context");
     let result = tool

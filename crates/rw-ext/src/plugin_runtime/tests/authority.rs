@@ -154,7 +154,7 @@ fn code_root_rejects_escape_symlink_and_directory_replacement() {
 }
 
 #[tokio::test]
-async fn no_reads_manifest_rejects_workspace_root_as_code_root() {
+async fn manifest_rejects_workspace_root_as_code_root() {
     let root = TempDir::new().expect("tempdir");
     let config = PluginProcessConfig::new(PathBuf::from("/bin/sh"))
         .expect("shell")
@@ -184,7 +184,11 @@ async fn no_reads_manifest_rejects_workspace_root_as_code_root() {
     let Err(error) = result else {
         panic!("workspace root cannot be relabeled as intrinsic code");
     };
-    assert!(error.to_string().contains("strict workspace descendant"));
+    assert!(
+        error
+            .to_string()
+            .contains("cannot expose an approved workspace root")
+    );
 }
 
 #[test]

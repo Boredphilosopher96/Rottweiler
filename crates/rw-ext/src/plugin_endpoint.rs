@@ -1,16 +1,11 @@
 //! Declarative registrations and live plugin connections have separate owners.
-use std::{
-    collections::BTreeSet,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 use async_trait::async_trait;
-use rw_plugin_protocol::{
-    PluginCapabilities, PluginManifest, PluginToolCapability, PluginToolEffect,
-};
+use rw_plugin_protocol::{PluginManifest, PluginToolCapability};
 use rw_tools::CancellationToken;
 
 use crate::{CapabilityEnforcer, PluginHost, PluginRpcClient, PluginRpcError};
@@ -20,7 +15,6 @@ use crate::{CapabilityEnforcer, PluginHost, PluginRpcClient, PluginRpcError};
 #[derive(Clone)]
 pub struct PluginEndpointMetadata {
     manifest: Arc<PluginManifest>,
-    process_effects: BTreeSet<PluginToolEffect>,
     ui_generation: rw_types::extension_ui::UiGenerationId,
 }
 
@@ -34,7 +28,6 @@ impl PluginEndpointMetadata {
             code: "invalid_manifest".to_owned(),
             message: error.to_string(),
         })?;
-        let process_effects = declared_process_effects(&manifest.capabilities);
         let mut bytes = [0; 16];
         getrandom::fill(&mut bytes).map_err(|_| PluginRpcError {
             code: "generation_unavailable".into(),
@@ -43,7 +36,6 @@ impl PluginEndpointMetadata {
         let ui_generation = rw_types::extension_ui::UiGenerationId::from_bytes(bytes);
         Ok(Self {
             manifest: Arc::new(manifest),
-            process_effects,
             ui_generation,
         })
     }
@@ -59,11 +51,6 @@ impl PluginEndpointMetadata {
     #[must_use]
     pub fn manifest(&self) -> &PluginManifest {
         &self.manifest
-    }
-
-    #[must_use]
-    pub fn process_tool_effects(&self) -> &BTreeSet<PluginToolEffect> {
-        &self.process_effects
     }
 
     #[must_use]
@@ -202,20 +189,6 @@ impl PluginEndpoint for ReadyPluginEndpoint {
             message: error.to_string(),
         })
     }
-}
-
-pub(crate) fn declared_process_effects(
-    capabilities: &PluginCapabilities,
-) -> BTreeSet<PluginToolEffect> {
-    let mut effects = capabilities
-        .tools
-        .iter()
-        .flat_map(|tool| tool.caps.iter().copied())
-        .collect::<BTreeSet<_>>();
-    if !capabilities.providers.is_empty() {
-        effects.insert(PluginToolEffect::Network);
-    }
-    effects
 }
 
 #[cfg(test)]

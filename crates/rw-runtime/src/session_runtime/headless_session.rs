@@ -499,7 +499,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
             &executable_catalog.mcp_servers,
             &workspace_roots,
             &session_root,
-            &std::env::current_exe().into_diagnostic()?,
+            &crate::plugin_process::helper_executable().into_diagnostic()?,
             &config_loader.credentials_path(),
             root_global_proxy
                 .as_ref()
@@ -617,7 +617,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
     let native_extensions = crate::extension_runtime::generations::PluginGenerationOwner::compose(
         crate::extension_runtime::generations::PluginGenerationConfig {
             private_root: storage_root.clone(),
-            helper: std::env::current_exe().into_diagnostic()?,
+            helper: crate::plugin_process::helper_executable().into_diagnostic()?,
             redactor: plugin_redactor.clone(),
             budget: plugin_runtime_budget.clone(),
             session_ui: session_ui.clone(),

@@ -22,38 +22,6 @@ pub enum PluginSandboxMode {
     Approved,
 }
 
-impl PluginSandboxProfile {
-    #[must_use]
-    pub fn allows_workspace_reads(&self) -> bool {
-        self.capabilities.tools.iter().any(|tool| {
-            tool.caps
-                .contains(&rw_plugin_protocol::PluginToolEffect::ReadsFilesystem)
-        })
-    }
-
-    #[must_use]
-    pub fn allows_workspace_writes(&self) -> bool {
-        self.capabilities.tools.iter().any(|tool| {
-            tool.caps
-                .contains(&rw_plugin_protocol::PluginToolEffect::WritesFilesystem)
-        })
-    }
-
-    #[must_use]
-    pub fn requests_network(&self) -> bool {
-        !self.capabilities.providers.is_empty()
-            || self.capabilities.tools.iter().any(|tool| {
-                tool.caps
-                    .contains(&rw_plugin_protocol::PluginToolEffect::Network)
-            })
-    }
-
-    #[must_use]
-    pub fn allows_network(&self) -> bool {
-        self.requests_network() && !self.allowed_domains.is_empty()
-    }
-}
-
 /// A launched child with exclusive stdio ownership and a supervised process handle.
 pub struct LaunchedPluginProcess {
     pub stdin: PluginStdin,

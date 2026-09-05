@@ -16,8 +16,8 @@ use rw_ext::{
 };
 use rw_plugin_protocol::PluginToolEffect;
 use rw_tools::{
-    EgressPolicy, NetworkPolicy, SandboxPolicy, SandboxSupport, SupervisedEgressProxy,
-    probe_sandbox, shell_launch_plan,
+    NetworkPolicy, SandboxPolicy, SandboxSupport, SupervisedEgressProxy, probe_sandbox,
+    shell_launch_plan,
 };
 use tokio::{
     io::{AsyncReadExt as _, BufReader},
@@ -103,21 +103,8 @@ fn approved_write_roots(
         ));
     }
     config.validate_executable_identity()?;
-    let mut roots = vec![scratch.to_path_buf()];
-    if has_effect(PluginToolEffect::WritesFilesystem) {
-        if profile.approved_roots.is_empty() {
-            return Err(error(
-                "writes-fs requires at least one explicitly approved root",
-            ));
-        }
-        for root in &profile.approved_roots {
-            let canonical = std::fs::canonicalize(root).map_err(|error| process_error(&error))?;
-            if !canonical.is_dir() {
-                return Err(error("approved plugin root is not a directory"));
-            }
-            roots.push(canonical);
-        }
-    }
+    // Manifest effects are delegated by the host, never ambient worker grants.
+    let roots = vec![scratch.to_path_buf()];
     Ok(roots)
 }
 
@@ -185,24 +172,14 @@ fn plugin_sandbox_policy(
             ));
         }
         return SandboxPolicy::for_preparation(filesystem.as_ref().clone())
-            .map(|policy| (policy, None))
+            .map(|policy| (policy.without_process_creation(), None))
             .map_err(|sandbox| error(&sandbox.to_string()));
     }
-    // Keep even no-network plugins on an empty policy proxy so denied
-    // egress is observable and terminal instead of an invisible EPERM.
-    let proxy = SupervisedEgressProxy::start(EgressPolicy::new(&profile.allowed_domains))
-        .map_err(|sandbox| error(&sandbox.to_string()))?;
-    let network = NetworkPolicy::PolicyProxy {
-        port: proxy.address().port(),
-        relay_path: proxy.relay_path().map(Path::to_path_buf),
-    };
-    let mut read_roots = intrinsic_plugin_read_roots(config, scratch)?;
-    if profile.allows_workspace_reads() {
-        read_roots.extend(profile.approved_roots.iter().cloned());
-    }
-    let policy = SandboxPolicy::new(roots, network)
+    let read_roots = intrinsic_plugin_read_roots(config, scratch)?;
+    let policy = SandboxPolicy::new(roots, NetworkPolicy::Deny)
         .and_then(|policy| policy.with_read_roots(read_roots))
-        .map_err(|sandbox| error(&sandbox.to_string()))?;
+        .map_err(|sandbox| error(&sandbox.to_string()))?
+        .without_process_creation();
     #[cfg(target_os = "macos")]
     let policy = if matches!(profile.mode, rw_ext::PluginSandboxMode::Preparation { .. }) {
         policy
@@ -211,7 +188,7 @@ fn plugin_sandbox_policy(
     } else {
         policy
     };
-    Ok((policy, Some(proxy)))
+    Ok((policy, None))
 }
 
 async fn attach_supervisor(
@@ -464,12 +441,16 @@ fn error(message: &str) -> PluginProcessError {
 mod tests {
     #![allow(clippy::expect_used)]
 
+    #[path = "code_only.rs"]
+    mod code_only;
+
     use super::*;
     use rw_ext::{
         ApprovalStore, ApprovalStoreError, DenyPushHandler, LaunchedPluginProcess, PluginHost,
         PluginLauncher, SupervisedPluginProcess, approve_plugin_launch,
     };
     use rw_plugin_protocol::{PluginCapabilities, PluginManifest, PluginToolCapability};
+    use rw_tools::EgressPolicy;
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::sync::Mutex as StdMutex;
@@ -477,7 +458,7 @@ mod tests {
     #[test]
     fn intrinsic_runtime_reads_do_not_require_fake_manifest_capability_and_network_fails_closed() {
         let scratch = tempfile::tempdir().expect("scratch");
-        let helper = std::env::current_exe().expect("helper");
+        let helper = helper_executable().expect("fixture sandbox helper prerequisite");
         let Ok(launcher) = SandboxedPluginLauncher::new(scratch.path(), &helper) else {
             return;
         };
@@ -555,24 +536,6 @@ mod tests {
                 .expect("approval lock")
                 .insert(name.to_owned(), fingerprint.to_owned());
             Ok(())
-        }
-    }
-
-    struct RecordingProductionLauncher {
-        inner: SandboxedPluginLauncher,
-        process: StdMutex<Option<Arc<dyn SupervisedPluginProcess>>>,
-    }
-
-    #[async_trait]
-    impl PluginLauncher for RecordingProductionLauncher {
-        async fn launch(
-            &self,
-            config: &PluginProcessConfig,
-            profile: &PluginSandboxProfile,
-        ) -> Result<LaunchedPluginProcess, PluginLaunchError> {
-            let launched = self.inner.launch(config, profile).await?;
-            *self.process.lock().expect("process lock") = Some(Arc::clone(&launched.process));
-            Ok(launched)
         }
     }
 
@@ -676,7 +639,7 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let package = workspace.path().join("plugin-code");
         std::fs::create_dir(&package).expect("package directory");
-        let helper = std::env::current_exe().expect("helper");
+        let helper = helper_executable().expect("fixture sandbox helper prerequisite");
         let Ok(launcher) = SandboxedPluginLauncher::new(scratch.path(), &helper) else {
             return;
         };
@@ -727,68 +690,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn omitted_network_outbound_is_killed_and_surfaces_terminal_violation() {
-        let _admission = crate::native_fixture::admit().await;
-        let (bun, sdk) = bun_and_sdk();
-        let scratch = tempfile::tempdir().expect("scratch");
-        let workspace = tempfile::tempdir().expect("workspace");
-        let package = workspace.path().join("plugin-code");
-        std::fs::create_dir(&package).expect("package directory");
-        let helper = std::env::current_exe().expect("helper");
-        let Ok(inner) = SandboxedPluginLauncher::new(scratch.path(), &helper) else {
-            return;
-        };
-        let launcher = RecordingProductionLauncher {
-            inner,
-            process: StdMutex::new(None),
-        };
-        let config = compiled_fixture_config(&bun, &sdk, &package, "network-without-capability.ts");
-        let manifest: PluginManifest = serde_json::from_value(json!({
-            "name":"network-without-capability", "version":"1.0.0", "protocol":3,
-            "capabilities":{}
-        }))
-        .expect("adversarial manifest");
-        let approvals = MemoryApproval::default();
-        approve_plugin_launch(
-            &approvals,
-            &manifest,
-            &config,
-            "conformance:production:network-violation",
-        )
-        .expect("exact approval");
-        let host = PluginHost::launch_approved(
-            &launcher,
-            &approvals,
-            &config,
-            "conformance:production:network-violation",
-            &[workspace.path().to_path_buf()],
-            manifest,
-            Arc::new(DenyPushHandler),
-            Arc::new(crate::extension_runtime::SharedPluginRedactor::new(
-                rw_providers::FixtureRedactor::default(),
-            )),
-        )
-        .await
-        .expect("handshake before adversarial egress");
-        let process = launcher
-            .process
-            .lock()
-            .expect("process lock")
-            .clone()
-            .expect("production process recorded");
-        let error = tokio::time::timeout(Duration::from_secs(3), process.wait())
-            .await
-            .expect("terminal violation deadline")
-            .expect_err("network violation must be surfaced by the supervisor");
-        assert!(
-            error.message.contains("network egress"),
-            "unexpected supervisor error: {}",
-            error.message
-        );
-        drop(host);
-    }
-
-    #[tokio::test]
     async fn no_reads_plugin_cannot_read_sibling_workspace_secret() {
         let _admission = crate::native_fixture::admit().await;
         let (bun, sdk) = bun_and_sdk();
@@ -801,7 +702,7 @@ mod tests {
             "SIBLING_SECRET_CANARY",
         )
         .expect("secret fixture");
-        let helper = std::env::current_exe().expect("helper");
+        let helper = helper_executable().expect("fixture sandbox helper prerequisite");
         let Ok(launcher) = SandboxedPluginLauncher::new(scratch.path(), &helper) else {
             return;
         };
@@ -916,3 +817,15 @@ mod tests {
 
 #[cfg(all(test, unix))]
 mod child_signals;
+
+/// Selects the trusted helper owned by this executable host.
+pub(crate) fn helper_executable() -> std::io::Result<PathBuf> {
+    #[cfg(test)]
+    {
+        crate::native_fixture::sandbox_helper()
+    }
+    #[cfg(not(test))]
+    {
+        std::env::current_exe()
+    }
+}
