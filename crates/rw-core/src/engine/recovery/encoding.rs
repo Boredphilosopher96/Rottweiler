@@ -53,10 +53,14 @@ impl Write for Counter {
     }
 }
 
-/// Source-derived decode allowance is persisted with each IR selector. This scratch
-/// buffer is bounded independently of the raw reader and retained context window.
+/// The fold and source reader decode the same canonical event. Persist the
+/// normalized retained allocation of that turn, independently of decoder scratch.
+/// SourceReader rechecks the prepared allocation before transferring the turn.
 pub(super) fn turn_decode_bytes(turn: &rw_types::Turn) -> Result<u64, RecoveryError> {
-    decode_bytes(turn)
+    use rw_types::allocation::PrepareAllocation;
+    turn.prepared_bytes()
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or(RecoveryError::Limit("retained conversation allocation"))
 }
 
 pub(super) fn decode_bytes<T: Serialize + rw_types::allocation::DecodeAllocation>(

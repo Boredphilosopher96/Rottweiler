@@ -215,7 +215,12 @@ impl SourceReader<'_> {
                 EngineEvent::ConversationTurnCommitted {
                     agent_turn, turn, ..
                 },
-            ) if agent_turn == row.agent_turn => turn,
+            ) if agent_turn == row.agent_turn => {
+                // The canonical reducer owns the same cloned PendingEvent turn.
+                // Keep retained capacities identical to its persisted admission;
+                // the original decoder allocation belongs to this source page.
+                turn.clone()
+            }
             (
                 TurnSourceKind::Shell,
                 EngineEvent::UserShellStateChanged {

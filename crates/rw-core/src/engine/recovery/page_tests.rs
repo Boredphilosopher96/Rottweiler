@@ -229,3 +229,34 @@ fn output_pruning_pages_follow_captured_revisions_and_rewind() {
         Some(12)
     );
 }
+
+#[test]
+fn retained_turn_window_does_not_accumulate_decoder_scratch() {
+    let root = tempfile::tempdir().expect("root");
+    let modes = ModeRegistry::builtins().expect("modes");
+    let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
+    let mut recovery =
+        CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("recovery");
+    for index in 0..300 {
+        append(
+            &mut journal,
+            vec![PendingEvent::ConversationTurnCommitted {
+                agent_turn: index + 1,
+                turn: text(Role::User, &format!("bounded message {index}")),
+            }],
+        );
+    }
+    catch_up(&mut recovery, &journal.read_view(), &modes);
+    let history = recovery
+        .snapshot()
+        .expect("snapshot")
+        .bind_source(&journal.read_view())
+        .expect("source");
+    let page = history
+        .conversation_page(0..300, HistoryMaterializationLimits::default())
+        .expect("whole bounded window");
+    assert_eq!(page.range, 0..300);
+    assert!(!page.has_more);
+    assert_eq!(page.turns.len(), 300);
+    assert!(page.decoded_bytes < 1024 * 1024);
+}
