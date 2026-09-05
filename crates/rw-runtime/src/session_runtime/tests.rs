@@ -374,6 +374,10 @@ struct FixedProviderCatalogSource(ModelCatalogSnapshot);
 
 #[async_trait]
 impl ModelCatalogSource for QuickCatalogSource {
+    fn generation(&self) -> u64 {
+        0
+    }
+
     async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
         Ok(ModelCatalogSnapshot {
             aliases: Vec::new(),
@@ -394,6 +398,10 @@ impl ModelCatalogSource for QuickCatalogSource {
 
 #[async_trait]
 impl ModelCatalogSource for ScopedCatalogSource {
+    fn generation(&self) -> u64 {
+        0
+    }
+
     async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
         self.full_discoveries.fetch_add(1, Ordering::AcqRel);
         Ok(ModelCatalogSnapshot {
@@ -425,6 +433,10 @@ impl ModelCatalogSource for ScopedCatalogSource {
 
 #[async_trait]
 impl ModelCatalogSource for FixedProviderCatalogSource {
+    fn generation(&self) -> u64 {
+        0
+    }
+
     async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
         Ok(self.0.clone())
     }

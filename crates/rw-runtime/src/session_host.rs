@@ -356,6 +356,10 @@ impl EditableSettingKey {
 
 #[async_trait]
 impl ModelCatalogSource for PersistingModelCatalogSource {
+    fn generation(&self) -> u64 {
+        self.inner.generation()
+    }
+
     async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
         let snapshot = self.inner.discover().await?;
         let cache_path = self.cache_path.clone();

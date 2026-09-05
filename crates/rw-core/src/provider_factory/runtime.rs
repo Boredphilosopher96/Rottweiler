@@ -1016,6 +1016,10 @@ pub(super) async fn discover_runtime_provider(
 
 #[async_trait]
 impl ModelCatalogSource for ProviderRuntime {
+    fn generation(&self) -> u64 {
+        0
+    }
+
     async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
         let providers = self
             .discovery_providers

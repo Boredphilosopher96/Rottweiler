@@ -342,9 +342,13 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
             &parent_session,
             &primary,
             "fast",
-            Arc::new(CapturingModel {
-                request: Arc::new(Mutex::new(None)),
-            }),
+            super::super::native_model_generations::ChildNativeModel {
+                provider: Arc::new(CapturingModel {
+                    request: Arc::new(Mutex::new(None)),
+                }),
+                redactor: rw_providers::FixtureRedactor::default(),
+                resources: Arc::new(rw_core::NoopSessionResources),
+            },
             Arc::new(rw_core::NoopSecretRedactor),
             configured_permissions.as_ref(),
             4,
@@ -366,9 +370,13 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
             &SessionId("lease-child".to_owned()),
             &added,
             "fast",
-            Arc::new(CapturingModel {
-                request: Arc::new(Mutex::new(None)),
-            }),
+            super::super::native_model_generations::ChildNativeModel {
+                provider: Arc::new(CapturingModel {
+                    request: Arc::new(Mutex::new(None)),
+                }),
+                redactor: rw_providers::FixtureRedactor::default(),
+                resources: Arc::new(rw_core::NoopSessionResources),
+            },
             Arc::new(rw_core::NoopSecretRedactor),
             resumed_parent_permissions.as_ref(),
             4,
@@ -431,9 +439,13 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
             &SessionId("trusted-lease-child".to_owned()),
             &added,
             "fast",
-            Arc::new(CapturingModel {
-                request: Arc::new(Mutex::new(None)),
-            }),
+            super::super::native_model_generations::ChildNativeModel {
+                provider: Arc::new(CapturingModel {
+                    request: Arc::new(Mutex::new(None)),
+                }),
+                redactor: rw_providers::FixtureRedactor::default(),
+                resources: Arc::new(rw_core::NoopSessionResources),
+            },
             Arc::new(rw_core::NoopSecretRedactor),
             resumed_parent_permissions.as_ref(),
             4,

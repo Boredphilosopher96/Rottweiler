@@ -64,7 +64,7 @@ pub(super) fn openai_native_endpoint(endpoint: &str) -> bool {
 pub(super) type NativeWebSearchResolver =
     dyn Fn(&str) -> Option<rw_core::ProviderNativeWebSearchFactory> + Send + Sync + 'static;
 
-pub(super) struct RuntimeWebSearcher {
+pub(crate) struct RuntimeWebSearcher {
     pub(super) native: RwLock<Option<Arc<NativeWebSearchResolver>>>,
     pub(super) configured: Option<Arc<dyn WebSearcher>>,
 }

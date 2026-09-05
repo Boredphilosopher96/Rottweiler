@@ -10,6 +10,21 @@ use rw_types::config::BudgetConfig;
 use rw_types::config::CompactionConfig;
 use rw_types::config::ThinkingLevel;
 
+/// Resolves the provider generation admitted for a new operation. Existing
+/// operations retain their captured driver until their effects settle.
+pub trait ModelSource: Send + Sync {
+    fn resolve(&self) -> Result<std::sync::Arc<dyn ModelDriver>, AgentLoopError>;
+}
+
+impl<F> ModelSource for F
+where
+    F: Fn() -> Result<std::sync::Arc<dyn ModelDriver>, AgentLoopError> + Send + Sync,
+{
+    fn resolve(&self) -> Result<std::sync::Arc<dyn ModelDriver>, AgentLoopError> {
+        self()
+    }
+}
+
 /// Provider-neutral model streaming boundary used by the actor loop.
 #[async_trait]
 pub trait ModelDriver: Send + Sync {

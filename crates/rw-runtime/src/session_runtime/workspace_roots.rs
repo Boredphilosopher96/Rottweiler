@@ -15,6 +15,7 @@ use super::extension_discovery::discover_runtime_extensions_derived;
 use super::extension_discovery::skill_index_turn;
 use super::folder_trust::RuntimeFolderTrustController;
 use super::initial_memory::fresh_initial_session_context;
+use super::native_model_generations::ChildNativeModel;
 use super::native_search::NativeWebSearchResolver;
 use super::nested_instructions::register_nested_instruction_guard;
 use super::runtime_options::DEFAULT_DOOM_LOOP_LIMIT;
@@ -35,7 +36,6 @@ use miette::IntoDiagnostic;
 use miette::Result;
 use miette::miette;
 use rw_core::AgentLoopError;
-use rw_core::ModelDriver;
 use rw_core::PermissionGate;
 use rw_core::SessionActorConfig;
 use rw_core::SessionCommandContext;
@@ -170,7 +170,7 @@ impl RuntimeWorkspaceRootController {
         session_id: &SessionId,
         workspace_root: &Path,
         fallback_model_alias: &str,
-        model: Arc<dyn ModelDriver>,
+        model: ChildNativeModel,
         secret_redactor: Arc<dyn rw_core::SecretRedactor>,
         parent_permissions: &PermissionGate,
         max_turns: usize,
@@ -279,6 +279,28 @@ impl RuntimeWorkspaceRootController {
             })
             .map(Arc::new)
             .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
+        let ChildNativeModel {
+            provider,
+            redactor,
+            resources,
+        } = model;
+        let recorded: Arc<dyn rw_core::ModelDriver> =
+            Arc::new(super::prompt_model::PromptRecordingModel {
+                inner: provider,
+                journal: Arc::clone(&event_sink.prompt_shapes),
+            });
+        let recorded = super::native_search::AliasAwareWebSearchModel::wrap(
+            recorded,
+            built.websearch.as_ref(),
+        );
+        let model: Arc<dyn rw_core::ModelDriver> =
+            Arc::new(super::nested_instructions::NestedInstructionsModel {
+                inner: recorded,
+                tools: Arc::new(std::sync::OnceLock::from(Arc::downgrade(&built.registry))),
+                workspace_roots: Arc::clone(&instruction_roots),
+                active_sources: Arc::clone(&active_sources),
+                memory_redactor: redactor,
+            });
         let workspace_controller = Arc::new(RuntimeWorkspaceRootController {
             index_pool: Arc::clone(&self.index_pool),
             journal_service: Arc::clone(&self.journal_service),
@@ -348,7 +370,7 @@ impl RuntimeWorkspaceRootController {
             )),
             workspace_roots: workspace_controller,
             extension_development: Arc::new(rw_core::NoopSessionExtensionController),
-            resources: Arc::new(rw_core::NoopSessionResources),
+            resources,
             recovered,
             max_turns,
             identical_tool_failure_limit: DEFAULT_DOOM_LOOP_LIMIT,

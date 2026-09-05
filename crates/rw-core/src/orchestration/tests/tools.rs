@@ -73,7 +73,11 @@ async fn spawn_control_never_prompts_and_inherits_selected_live_model_for_builti
     agents
         .resolve_tool_names(std::iter::empty())
         .expect("built-in tools filter to the available registry");
-    let tool = SpawnAgentTool::new(orchestrator, Arc::new(agents), Arc::new(SelectedModel));
+    let tool = SpawnAgentTool::new(
+        orchestrator,
+        Arc::new(agents),
+        Arc::new(|| Ok(Arc::new(SelectedModel) as Arc<dyn crate::ModelDriver>)),
+    );
     let sink = Arc::new(RecordingSubagentSink::default());
     let context = ToolContext::new(workspace.path())
         .expect("tool context")

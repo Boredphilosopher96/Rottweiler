@@ -278,6 +278,10 @@ impl ProviderModelCatalogSource {
 
 #[async_trait]
 impl ModelCatalogSource for ProviderModelCatalogSource {
+    fn generation(&self) -> u64 {
+        0
+    }
+
     async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
         self.factory()
             .await?

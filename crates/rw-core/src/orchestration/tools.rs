@@ -14,7 +14,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::ModelDriver;
+use crate::ModelSource;
 
 use super::{
     MAX_SUBAGENT_PROGRESS_BYTES, OrchestrationError, SubagentHandle, SubagentObserver,
@@ -25,7 +25,7 @@ use super::{
 pub struct SpawnAgentTool {
     orchestrator: SubagentOrchestrator,
     agents: Arc<AgentRegistry>,
-    model: Arc<dyn ModelDriver>,
+    model: Arc<dyn ModelSource>,
     capabilities: CapabilityManifest,
 }
 
@@ -34,7 +34,7 @@ impl SpawnAgentTool {
     pub fn new(
         orchestrator: SubagentOrchestrator,
         agents: Arc<AgentRegistry>,
-        model: Arc<dyn ModelDriver>,
+        model: Arc<dyn ModelSource>,
     ) -> Self {
         // Spawning, resuming, interrupting, and closing a child are control-plane
         // operations. They do not exercise the child's tool authority. The child
@@ -239,7 +239,11 @@ impl Tool for SpawnAgentTool {
                     )
                 })?;
                 let resolved_model = loaded.model.as_deref().unwrap_or(inherited_model);
-                if !self.model.has_model_alias(resolved_model) {
+                let model = self
+                    .model
+                    .resolve()
+                    .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
+                if !model.has_model_alias(resolved_model) {
                     return Err(ToolError::InvalidInput(format!(
                         "agent `{agent_name}` selects unconfigured model alias `{resolved_model}`"
                     )));

@@ -89,6 +89,10 @@ pub(super) struct PersistingHostedCatalogSource {
 
 #[async_trait]
 impl ModelCatalogSource for PersistingHostedCatalogSource {
+    fn generation(&self) -> u64 {
+        self.inner.generation()
+    }
+
     async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
         let snapshot = self.inner.discover().await?;
         persist_catalog_snapshot(self.cache_path.clone(), snapshot.clone()).await;
@@ -119,6 +123,10 @@ pub(super) async fn persist_catalog_snapshot(path: PathBuf, snapshot: ModelCatal
 
 #[async_trait]
 impl ModelCatalogSource for ReloadingHostedCatalogSource {
+    fn generation(&self) -> u64 {
+        0
+    }
+
     async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
         let user_config_path = self.user_config_path.clone();
         let project_config_path = self.project_config_path.clone();

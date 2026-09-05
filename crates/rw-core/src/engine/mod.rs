@@ -7,6 +7,7 @@ pub use redaction::SecretRedactor;
 mod model;
 pub use model::ModelContextMetadata;
 pub use model::ModelDriver;
+pub use model::ModelSource;
 mod durability;
 pub use durability::{
     AdmittedEventBatch, EventBatchPlan, EventBatchReservation, ExtensionStateView,

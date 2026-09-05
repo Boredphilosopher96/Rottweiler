@@ -20,6 +20,9 @@ use super::folder_trust::RuntimeFolderTrustController;
 use super::folder_trust::project_approval_path;
 use super::initial_memory::fresh_initial_session_context;
 use super::interaction_policy::UnboundQuestionAsker;
+use super::native_model_generations::{
+    NativeModelGeneration, NativeModelGenerations, NativeModelRecipe, NativeProviderRecipe,
+};
 use super::native_search::AliasAwareWebSearchModel;
 use super::native_search::provider_model_for_alias;
 use super::native_search::provider_native_search_available;
@@ -650,6 +653,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
     .map(Arc::new);
     let plugin_resources =
         crate::session_resources::RuntimeSessionResources::new(None, plugin_runtime.clone());
+    let mut provider_recipe = None;
     let (model, engine_redactor): (Arc<dyn ModelDriver>, FixtureRedactor) = if inspection {
         let cache_support = inspection_profile
             .as_ref()
@@ -743,6 +747,11 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
         )
     } else {
         let pricing = load_effective_pricing_table().await?;
+        provider_recipe = Some(NativeProviderRecipe::Live {
+            credentials: config_loader.credentials_path().clone(),
+            pricing: pricing.clone(),
+            config: loaded_config.config.clone(),
+        });
         let factory = ProviderFactory::system(config_loader.credentials_path(), pricing)
             .with_extension_providers(
                 plugin_runtime
@@ -770,6 +779,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
     };
     register_credential_environment(&engine_redactor);
     plugin_redactor.bind(engine_redactor.clone());
+    let provider_model = Arc::clone(&model);
     let model: Arc<dyn ModelDriver> = if inspection {
         model
     } else {
@@ -789,6 +799,24 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
         active_sources: Arc::clone(&active_nested_instruction_sources),
         memory_redactor: engine_redactor.clone(),
     });
+    let recipe = NativeModelRecipe {
+        provider: provider_recipe
+            .unwrap_or_else(|| NativeProviderRecipe::Fixed(Arc::clone(&provider_model))),
+        redactor: engine_redactor.clone(),
+        prompt_shapes: (!inspection).then(|| Arc::clone(&durable_sink.prompt_shapes)),
+        catalog_path: storage_root.join("model-catalog.json"),
+        instruction_roots: Arc::clone(&instruction_workspace_roots),
+        active_sources: Arc::clone(&active_nested_instruction_sources),
+    };
+    let model_generations = NativeModelGenerations::new(
+        NativeModelGeneration {
+            model: Arc::clone(&model),
+            provider: provider_model,
+            catalog: None,
+            redactor: engine_redactor.clone(),
+        },
+        Arc::new(move |input| recipe.compose(input)),
+    );
     let project_approvals = project_approval_path(&storage_root, &workspace);
     let permissions = match options.permission_mode {
         Some(mode) => PermissionGate::for_headless_mode(mode),
@@ -912,7 +940,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
             budget_session_id: budget_session_id.clone(),
             provider_admission: provider_admission.clone(),
             storage_root: storage_root.clone(),
-            model: Arc::clone(&model),
+            model: model_generations.child_source(),
             permissions: Arc::clone(&permissions),
             secret_redactor: Arc::clone(&secret_redactor),
             lease_runtime: Arc::clone(&workspace_root_controller),
@@ -984,7 +1012,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
             .register(Arc::new(SpawnAgentTool::new(
                 orchestrator.clone(),
                 Arc::clone(&agents),
-                Arc::clone(&model),
+                model_generations.source(),
             )))
             .map_err(|error| miette!("spawn_agent tool could not register: {error}"))?;
         registry
@@ -1115,10 +1143,9 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
         folder_trust,
         workspace_roots: workspace_root_controller,
         extension_development,
-        resources: Arc::new(crate::session_resources::SessionResourcePair([
-            mcp_resources,
-            plugin_resources,
-        ])),
+        resources: model_generations.retain(Arc::new(
+            crate::session_resources::SessionResourcePair([mcp_resources, plugin_resources]),
+        )),
         recovered,
         max_turns: options.max_turns,
         identical_tool_failure_limit: DEFAULT_DOOM_LOOP_LIMIT,

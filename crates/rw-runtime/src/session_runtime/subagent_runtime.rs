@@ -1,10 +1,10 @@
+use super::native_model_generations::NativeModelGenerations;
 use super::workspace_roots::RuntimeWorkspaceRootController;
 use async_trait::async_trait;
 use miette::Result;
 use rw_core::AgentLoopError;
 use rw_core::HostError;
 use rw_core::HostSubagentService;
-use rw_core::ModelDriver;
 use rw_core::PermissionGate;
 use rw_core::SessionActorConfig;
 use rw_core::SubagentObserver;
@@ -26,7 +26,7 @@ pub(super) struct ChildActorTemplate {
     pub(super) budget_session_id: SessionId,
     pub(super) provider_admission: Arc<dyn rw_core::provider_admission::ProviderAdmission>,
     pub(super) storage_root: PathBuf,
-    pub(super) model: Arc<dyn ModelDriver>,
+    pub(super) model: std::sync::Weak<NativeModelGenerations>,
     pub(super) permissions: Arc<PermissionGate>,
     pub(super) secret_redactor: Arc<dyn rw_core::SecretRedactor>,
     pub(super) lease_runtime: Arc<RuntimeWorkspaceRootController>,
@@ -95,7 +95,7 @@ impl ChildActorTemplate {
             &launch.handle.session_id,
             &launch.workspace_root,
             &launch.request.model,
-            Arc::clone(&self.model),
+            NativeModelGenerations::capture_child(&self.model)?,
             Arc::clone(&self.secret_redactor),
             self.permissions.as_ref(),
             self.max_turns,
@@ -115,7 +115,7 @@ impl ChildActorTemplate {
             session_id,
             workspace_root,
             &policy.model_alias,
-            Arc::clone(&self.model),
+            NativeModelGenerations::capture_child(&self.model)?,
             Arc::clone(&self.secret_redactor),
             self.permissions.as_ref(),
             self.max_turns,

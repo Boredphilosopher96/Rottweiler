@@ -19,6 +19,9 @@ use super::folder_trust::RuntimeFolderTrustController;
 use super::folder_trust::project_approval_path;
 use super::initial_memory::fresh_initial_session_context;
 use super::interaction_policy::UnboundQuestionAsker;
+use super::native_model_generations::{
+    NativeModelGeneration, NativeModelGenerations, NativeModelRecipe, NativeProviderRecipe,
+};
 use super::native_search::AliasAwareWebSearchModel;
 use super::native_search::provider_native_search_available;
 use super::nested_instructions::NestedInstructionsModel;
@@ -491,10 +494,12 @@ pub(crate) async fn compose_hosted_actor(
     let plugin_resources =
         crate::session_resources::RuntimeSessionResources::new(None, plugin_runtime.clone());
 
+    let mut provider_recipe = None;
+    let mut initial_catalog_seed = None;
     let (model, engine_redactor, model_catalog): (
         Arc<dyn ModelDriver>,
         FixtureRedactor,
-        Option<Arc<CachedModelCatalog>>,
+        Option<Arc<dyn ModelCatalogSource>>,
     ) = match options.provider_mode {
         HostedProviderMode::Live => {
             let pricing = load_effective_pricing_table().await?;
@@ -503,6 +508,11 @@ pub(crate) async fn compose_hosted_actor(
                 .flat_map(|runtime| runtime.providers.iter())
                 .map(|(prefix, provider)| (prefix.clone(), Arc::clone(provider)))
                 .collect::<Vec<_>>();
+            provider_recipe = Some(NativeProviderRecipe::Live {
+                credentials: options.credentials_path.clone(),
+                pricing: pricing.clone(),
+                config: options.config.clone(),
+            });
             let factory = ProviderFactory::system(options.credentials_path, pricing)
                 .with_extension_providers(extension_providers);
             let user_config_path = extension_credentials_path.with_file_name("config.toml");
@@ -527,19 +537,13 @@ pub(crate) async fn compose_hosted_actor(
                 .ok()
                 .flatten()
                 .unwrap_or_else(|| ProviderModelCatalogSource::placeholder(&options.config));
+            initial_catalog_seed = Some(initial_catalog.clone());
             let source: Arc<dyn ModelCatalogSource> = Arc::new(PersistingHostedCatalogSource {
                 inner: model.clone(),
                 cache_path,
                 initial: initial_catalog.clone(),
             });
-            (
-                model,
-                redactor,
-                Some(Arc::new(CachedModelCatalog::with_initial(
-                    source,
-                    Some(initial_catalog),
-                ))),
-            )
+            (model, redactor, Some(source))
         }
         HostedProviderMode::DeterministicReplay {
             provider_name,
@@ -564,6 +568,7 @@ pub(crate) async fn compose_hosted_actor(
     };
     register_credential_environment(&engine_redactor);
     plugin_redactor.bind(engine_redactor.clone());
+    let provider_model = Arc::clone(&model);
     let model: Arc<dyn ModelDriver> = Arc::new(PromptRecordingModel {
         inner: model,
         journal: Arc::clone(&durable_sink.prompt_shapes),
@@ -578,6 +583,31 @@ pub(crate) async fn compose_hosted_actor(
         workspace_roots: Arc::clone(&instruction_workspace_roots),
         active_sources: Arc::clone(&active_nested_instruction_sources),
         memory_redactor: engine_redactor.clone(),
+    });
+    let has_catalog = model_catalog.is_some();
+    let recipe = NativeModelRecipe {
+        provider: provider_recipe
+            .unwrap_or_else(|| NativeProviderRecipe::Fixed(Arc::clone(&provider_model))),
+        redactor: engine_redactor.clone(),
+        prompt_shapes: Some(Arc::clone(&durable_sink.prompt_shapes)),
+        catalog_path: options.storage_root.join("model-catalog.json"),
+        instruction_roots: Arc::clone(&instruction_workspace_roots),
+        active_sources: Arc::clone(&active_nested_instruction_sources),
+    };
+    let model_generations = NativeModelGenerations::new(
+        NativeModelGeneration {
+            model: Arc::clone(&model),
+            provider: provider_model,
+            catalog: model_catalog,
+            redactor: engine_redactor.clone(),
+        },
+        Arc::new(move |input| recipe.compose(input)),
+    );
+    let model_catalog = has_catalog.then(|| {
+        Arc::new(CachedModelCatalog::with_initial(
+            model_generations.clone(),
+            initial_catalog_seed,
+        ))
     });
     let project_approvals = project_approval_path(&options.storage_root, &workspace);
     let permissions = match options.permission_mode {
@@ -699,7 +729,7 @@ pub(crate) async fn compose_hosted_actor(
         budget_session_id: budget_session_id.clone(),
         provider_admission: options.provider_admission.clone(),
         storage_root: options.storage_root.clone(),
-        model: Arc::clone(&model),
+        model: model_generations.child_source(),
         permissions: Arc::clone(&permissions),
         secret_redactor: Arc::clone(&secret_redactor),
         lease_runtime: Arc::clone(&workspace_root_controller),
@@ -771,7 +801,7 @@ pub(crate) async fn compose_hosted_actor(
         .register(Arc::new(SpawnAgentTool::new(
             orchestrator.clone(),
             Arc::clone(&agents),
-            Arc::clone(&model),
+            model_generations.source(),
         )))
         .map_err(|error| miette!("spawn_agent tool could not register: {error}"))?;
     registry
@@ -896,10 +926,9 @@ pub(crate) async fn compose_hosted_actor(
         folder_trust,
         workspace_roots: workspace_root_controller,
         extension_development,
-        resources: Arc::new(crate::session_resources::SessionResourcePair([
-            mcp_resources,
-            plugin_resources,
-        ])),
+        resources: model_generations.retain(Arc::new(
+            crate::session_resources::SessionResourcePair([mcp_resources, plugin_resources]),
+        )),
         recovered,
         max_turns: options.max_turns,
         identical_tool_failure_limit: DEFAULT_DOOM_LOOP_LIMIT,
@@ -916,6 +945,7 @@ pub(crate) async fn compose_hosted_actor(
         orchestrator,
     });
     Ok(HostedActorRuntime {
+        model_generations,
         handle,
         model_catalog,
         mcp: mcp_admin,

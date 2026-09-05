@@ -25,6 +25,14 @@ pub(super) struct PromptRecordingModel {
 
 #[async_trait]
 impl ModelDriver for PromptRecordingModel {
+    fn native_web_searcher(
+        &self,
+        alias: &str,
+        invocation: rw_core::provider_admission::ProviderInvocation,
+    ) -> Option<Arc<dyn rw_tools::WebSearcher>> {
+        self.inner.native_web_searcher(alias, invocation)
+    }
+
     async fn settle_effects(&self) -> std::result::Result<(), rw_core::AgentLoopError> {
         self.inner.settle_effects().await
     }

@@ -313,6 +313,10 @@ impl RecomposableHostedModel {
 
 #[async_trait]
 impl ModelCatalogSource for RecomposableHostedModel {
+    fn generation(&self) -> u64 {
+        self.catalog.generation()
+    }
+
     async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
         self.catalog.discover().await
     }
@@ -327,6 +331,14 @@ impl ModelCatalogSource for RecomposableHostedModel {
 
 #[async_trait]
 impl ModelDriver for RecomposableHostedModel {
+    fn native_web_searcher(
+        &self,
+        alias: &str,
+        invocation: rw_core::provider_admission::ProviderInvocation,
+    ) -> Option<Arc<dyn rw_tools::WebSearcher>> {
+        self.current().native_web_searcher(alias, invocation)
+    }
+
     async fn settle_effects(&self) -> std::result::Result<(), rw_core::AgentLoopError> {
         self.effects.settle().await
     }

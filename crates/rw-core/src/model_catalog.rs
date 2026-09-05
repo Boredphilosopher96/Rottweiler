@@ -18,6 +18,8 @@ pub struct ModelCatalogError(pub String);
 /// endpoints, and wire formats behind `rw-providers`.
 #[async_trait]
 pub trait ModelCatalogSource: Send + Sync + 'static {
+    /// Immutable provider-generation identity; static sources return zero.
+    fn generation(&self) -> u64;
     async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError>;
 
     /// Discovers one exact provider without composing or authenticating
@@ -29,6 +31,7 @@ pub trait ModelCatalogSource: Send + Sync + 'static {
 }
 
 struct CachedSnapshot {
+    generation: u64,
     discovered_at: Instant,
     snapshot: ModelCatalogSnapshot,
 }
@@ -76,11 +79,13 @@ impl CachedModelCatalog {
         snapshot: Option<ModelCatalogSnapshot>,
     ) -> Self {
         let discovered_at = clock.now();
+        let generation = source.generation();
         Self {
             source,
             clock,
             ttl,
             snapshot: Mutex::new(snapshot.map(|snapshot| CachedSnapshot {
+                generation,
                 discovered_at,
                 snapshot,
             })),
@@ -96,8 +101,10 @@ impl CachedModelCatalog {
     pub async fn get(&self, refresh: bool) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
         let mut cached = self.snapshot.lock().await;
         let now = self.clock.now();
+        let generation = self.source.generation();
         if !refresh
             && let Some(existing) = cached.as_ref()
+            && existing.generation == generation
             && now.duration_since(existing.discovered_at) < self.ttl
         {
             let mut snapshot = existing.snapshot.clone();
@@ -105,8 +112,10 @@ impl CachedModelCatalog {
             return Ok(snapshot);
         }
         let mut snapshot = self.source.discover().await?;
+        self.require_generation(generation)?;
         snapshot.cached = false;
         *cached = Some(CachedSnapshot {
+            generation,
             discovered_at: now,
             snapshot: snapshot.clone(),
         });
@@ -128,9 +137,14 @@ impl CachedModelCatalog {
     ) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
         let mut cached = self.snapshot.lock().await;
         let now = self.clock.now();
+        let generation = self.source.generation();
         let mut update = self.source.discover_provider(provider).await?;
+        self.require_generation(generation)?;
         retain_model_catalog_provider(&mut update, provider);
-        let mut snapshot = match cached.as_ref() {
+        let mut snapshot = match cached
+            .as_ref()
+            .filter(|cached| cached.generation == generation)
+        {
             Some(existing) => {
                 merge_model_catalog_provider(existing.snapshot.clone(), update, provider)
             }
@@ -138,10 +152,19 @@ impl CachedModelCatalog {
         };
         snapshot.cached = false;
         *cached = Some(CachedSnapshot {
+            generation,
             discovered_at: now,
             snapshot: snapshot.clone(),
         });
         Ok(snapshot)
+    }
+    fn require_generation(&self, expected: u64) -> Result<(), ModelCatalogError> {
+        if self.source.generation() != expected {
+            return Err(ModelCatalogError(
+                "provider generation changed during catalog discovery".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -228,6 +251,10 @@ mod tests {
 
     #[async_trait]
     impl ModelCatalogSource for Source {
+        fn generation(&self) -> u64 {
+            0
+        }
+
         async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(ModelCatalogSnapshot {
@@ -287,6 +314,10 @@ mod tests {
 
     #[async_trait]
     impl ModelCatalogSource for ProviderSource {
+        fn generation(&self) -> u64 {
+            0
+        }
+
         async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
             self.full_discoveries.fetch_add(1, Ordering::SeqCst);
             Ok(snapshot(vec![provider("unrelated", true, 99)]))
@@ -358,5 +389,75 @@ mod tests {
         assert_eq!(refreshed.providers[1].name, "github_copilot");
         assert_eq!(refreshed.providers[1].model_count, 7);
         assert!(!refreshed.cached);
+    }
+
+    struct GenerationSource {
+        identity: std::sync::atomic::AtomicU64,
+        change_during_discovery: std::sync::atomic::AtomicBool,
+    }
+    #[async_trait]
+    impl ModelCatalogSource for GenerationSource {
+        fn generation(&self) -> u64 {
+            self.identity.load(Ordering::SeqCst)
+        }
+        async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
+            let identity = self.generation();
+            if self.change_during_discovery.swap(false, Ordering::SeqCst) {
+                self.identity.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(snapshot(vec![provider(
+                &format!("provider-{identity}"),
+                true,
+                1,
+            )]))
+        }
+        async fn discover_provider(
+            &self,
+            _: &str,
+        ) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
+            self.discover().await
+        }
+    }
+
+    #[tokio::test]
+    async fn generation_replacement_invalidates_cache_and_rejects_late_discovery() {
+        let source = Arc::new(GenerationSource {
+            identity: std::sync::atomic::AtomicU64::new(0),
+            change_during_discovery: std::sync::atomic::AtomicBool::new(false),
+        });
+        let catalog = CachedModelCatalog::new(source.clone());
+        assert_eq!(
+            catalog.get(false).await.expect("first").providers[0].name,
+            "provider-0"
+        );
+        source.identity.store(1, Ordering::SeqCst);
+        let fresh = catalog.get(false).await.expect("new generation");
+        assert_eq!(fresh.providers[0].name, "provider-1");
+        assert!(
+            !fresh.cached,
+            "TTL cannot preserve a retired provider generation"
+        );
+        source.change_during_discovery.store(true, Ordering::SeqCst);
+        assert!(catalog.get(true).await.is_err());
+        assert_eq!(
+            catalog
+                .get(false)
+                .await
+                .expect("settled generation")
+                .providers[0]
+                .name,
+            "provider-2"
+        );
+        source.identity.store(3, Ordering::SeqCst);
+        let scoped = catalog
+            .refresh_provider("provider-3")
+            .await
+            .expect("scoped fresh generation");
+        assert_eq!(
+            scoped.providers.len(),
+            1,
+            "scoped discovery cannot merge retired provider rows"
+        );
+        assert_eq!(scoped.providers[0].name, "provider-3");
     }
 }
