@@ -16,11 +16,8 @@ use crate::engine::{
 };
 use async_trait::async_trait;
 use rw_ext::ModeRegistry;
-use rw_store::session::{
-    SessionEventPageLimits,
-    journal::{JournalReadView, SegmentedJournal},
-};
-use rw_types::{EngineEvent, SequenceId};
+use rw_store::session::journal::{JournalReadView, SegmentedJournal};
+use rw_types::SequenceId;
 use std::{
     ops::Range,
     sync::{Arc, Mutex},
@@ -211,10 +208,7 @@ impl SessionEventSink for JournalFixture {
         self.inner.settle_effects().await
     }
     fn capture_read_view(&self) -> Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
-        Ok(Arc::new(RawView {
-            source: self.log.lock().map_err(failure)?.read_view(),
-            _root: Arc::clone(&self.root),
-        }))
+        self.inner.capture_read_view()
     }
     async fn budget_totals(
         &self,
@@ -287,37 +281,5 @@ impl SessionHistoryView for View {
                 .map_err(failure)?,
             Arc::clone(&self.root),
         ))
-    }
-}
-#[derive(Debug)]
-struct RawView {
-    source: JournalReadView,
-    _root: Arc<tempfile::TempDir>,
-}
-#[async_trait]
-impl SessionEventReadView for RawView {
-    fn last_sequence(&self) -> Option<SequenceId> {
-        self.source.last_sequence()
-    }
-    async fn read_page(
-        &self,
-        after: Option<SequenceId>,
-        limits: SessionReplayLimits,
-    ) -> Result<Vec<EngineEvent>, AgentLoopError> {
-        Ok(self
-            .source
-            .page::<EngineEvent>(
-                after,
-                SessionEventPageLimits {
-                    max_page_events: limits.max_events,
-                    max_page_bytes: limits.max_bytes as u64,
-                    ..Default::default()
-                },
-            )
-            .map_err(failure)?
-            .events
-            .into_iter()
-            .map(|event| event.event)
-            .collect())
     }
 }

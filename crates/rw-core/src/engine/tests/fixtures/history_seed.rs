@@ -61,6 +61,12 @@ pub(super) fn events(
             }
         });
     }
+    for (tool_call_id, reclaimed_tokens) in &recovered.pruned_tool_outputs {
+        pending.push(PendingEvent::ToolOutputPruned {
+            tool_call_id: tool_call_id.clone(),
+            reclaimed_tokens: *reclaimed_tokens,
+        });
+    }
     for (index, content) in recovered.queued_messages.iter().enumerate() {
         pending.push(PendingEvent::MessageQueued {
             position: recovered

@@ -4,7 +4,6 @@ use crate::engine::AgentTurnStatus;
 use crate::engine::SessionUsage;
 use crate::engine::builtin_hook_dispatcher;
 use crate::engine::pending_event::PendingEvent;
-use crate::engine::projection::SessionRecoveredState;
 use crate::engine::projection::project_session_events;
 use crate::engine::session;
 use crate::engine::tests::fixtures::models::ScriptedModel;
@@ -24,7 +23,6 @@ use rw_types::config::PermissionDecision;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::time::timeout;
@@ -288,11 +286,7 @@ fn projector_kill_boundaries_never_duplicate_committed_tool_calls_or_results() {
 #[tokio::test]
 async fn resume_durably_closes_projected_inflight_turn_before_new_commands() {
     let root = TempDir::new().expect("tempdir");
-    let sink = Arc::new(RecordingSink {
-        events: Mutex::new(Vec::new()),
-        batch_sizes: Mutex::new(Vec::new()),
-        tail_floor: Mutex::new(Some(5.into())),
-    });
+    let sink = Arc::new(RecordingSink::default());
     let mut actor_config = config(
         root.path(),
         Arc::new(ScriptedModel::default()),
@@ -301,47 +295,47 @@ async fn resume_durably_closes_projected_inflight_turn_before_new_commands() {
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.event_sink = sink.clone();
-    actor_config.recovered = SessionRecoveredState {
-        conversation: vec![Turn {
-            role: Role::Assistant,
-            blocks: vec![Block::Text {
-                text: "partial".to_owned(),
-            }],
-            meta: TurnMeta::default(),
-        }],
-        queued_messages: Vec::new(),
-        completed_turns: 0,
-        next_turn: 2,
-        last_sequence: Some(5.into()),
-        interrupted_turn: Some(1),
-        turn_ends: BTreeMap::new(),
-        ..SessionRecoveredState::default()
-    };
+    let source = vec![
+        wire_event(0, PendingEvent::TurnStarted { turn: 1 }),
+        wire_event(
+            1,
+            PendingEvent::ConversationTurnCommitted {
+                agent_turn: 1,
+                turn: Turn {
+                    role: Role::Assistant,
+                    blocks: vec![Block::Text {
+                        text: "partial".into(),
+                    }],
+                    meta: TurnMeta::default(),
+                },
+            },
+        ),
+    ];
+    let prefix = source.len();
+    crate::commit_session_events(Arc::clone(&sink), source)
+        .await
+        .expect("seed source");
     let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
         .await
         .expect("actor");
     handle.send_message("/status").await.expect("status");
     let persisted = sink.events.lock().expect("sink events");
     assert!(matches!(
-        persisted.first().map(|event| &event.kind),
+        persisted.get(prefix).map(|event| &event.kind),
         Some(PendingEvent::TurnFinished {
             turn: 1,
             status: AgentTurnStatus::Interrupted,
             ..
         })
     ));
-    assert_eq!(persisted[0].sequence, 6.into());
+    assert_eq!(persisted[prefix].sequence, (prefix as u64).into());
 }
 
 #[tokio::test]
 async fn resume_closes_interrupted_tail_then_auto_starts_recovered_queue() {
     let root = TempDir::new().expect("tempdir");
     let model = Arc::new(ScriptedModel::new([stop_script("queue resumed", &[])]));
-    let sink = Arc::new(RecordingSink {
-        events: Mutex::new(Vec::new()),
-        batch_sizes: Mutex::new(Vec::new()),
-        tail_floor: Mutex::new(Some(9.into())),
-    });
+    let sink = Arc::new(RecordingSink::default());
     let mut actor_config = config(
         root.path(),
         model.clone(),
@@ -350,22 +344,34 @@ async fn resume_closes_interrupted_tail_then_auto_starts_recovered_queue() {
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.event_sink = sink.clone();
-    actor_config.recovered = SessionRecoveredState {
-        conversation: vec![Turn {
-            role: Role::Assistant,
-            blocks: vec![Block::Text {
-                text: "partial prior answer".to_owned(),
-            }],
-            meta: TurnMeta::default(),
-        }],
-        queued_messages: vec!["queued during crash".to_owned()],
-        completed_turns: 0,
-        next_turn: 2,
-        last_sequence: Some(9.into()),
-        interrupted_turn: Some(1),
-        turn_ends: BTreeMap::new(),
-        ..SessionRecoveredState::default()
-    };
+    let mut source = vec![
+        wire_event(0, PendingEvent::TurnStarted { turn: 1 }),
+        wire_event(
+            1,
+            PendingEvent::ConversationTurnCommitted {
+                agent_turn: 1,
+                turn: Turn {
+                    role: Role::Assistant,
+                    blocks: vec![Block::Text {
+                        text: "partial prior answer".into(),
+                    }],
+                    meta: TurnMeta::default(),
+                },
+            },
+        ),
+    ];
+    source.push(wire_event(
+        2,
+        PendingEvent::MessageQueued {
+            position: 1,
+            content: "queued during crash".into(),
+            attachments: vec![],
+        },
+    ));
+    let prefix = source.len();
+    crate::commit_session_events(Arc::clone(&sink), source)
+        .await
+        .expect("seed source");
     let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
         .await
         .expect("actor");
@@ -383,6 +389,7 @@ async fn resume_closes_interrupted_tail_then_auto_starts_recovered_queue() {
     let persisted = sink.events.lock().expect("sink events");
     let kinds = persisted
         .iter()
+        .skip(prefix)
         .map(|event| &event.kind)
         .collect::<Vec<_>>();
     assert!(matches!(
@@ -539,11 +546,10 @@ async fn resume_persists_tool_result_repairs_before_interrupted_closure() {
     ];
     let recovered = project_session_events(&original).expect("project kill tail");
     assert_eq!(recovered.interrupted_tool_repairs.len(), 1);
-    let sink = Arc::new(RecordingSink {
-        events: Mutex::new(Vec::new()),
-        batch_sizes: Mutex::new(Vec::new()),
-        tail_floor: Mutex::new(Some(1.into())),
-    });
+    let sink = Arc::new(RecordingSink::default());
+    crate::commit_session_events(Arc::clone(&sink), original.clone())
+        .await
+        .expect("seed interrupted source");
     let mut actor_config = config(
         root.path(),
         Arc::new(ScriptedModel::default()),
@@ -558,7 +564,7 @@ async fn resume_persists_tool_result_repairs_before_interrupted_closure() {
         .expect("actor");
     timeout(Duration::from_secs(1), async {
         loop {
-            if sink.events.lock().expect("events").len() >= 4 {
+            if sink.events.lock().expect("events").len() >= original.len() + 4 {
                 break;
             }
             tokio::task::yield_now().await;
@@ -566,7 +572,7 @@ async fn resume_persists_tool_result_repairs_before_interrupted_closure() {
     })
     .await
     .expect("durable recovery closure");
-    let repairs = sink.events.lock().expect("events").clone();
+    let repairs = sink.events.lock().expect("events")[original.len()..].to_vec();
     assert!(
         matches!(&repairs[0].kind, PendingEvent::ToolCallStarted { id, invocation_id, name, .. }
             if id == "lost-call" && invocation_id.0 == "turn-1:repair-0" && name == "fixture")

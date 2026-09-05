@@ -5,7 +5,6 @@ use crate::engine::MessageDisposition;
 use crate::engine::SessionActor;
 use crate::engine::builtin_hook_dispatcher;
 use crate::engine::pending_event::PendingEvent;
-use crate::engine::projection::SessionRecoveredState;
 use crate::engine::projection::project_session_events;
 use crate::engine::tests::fixtures::models::PendingModel;
 use crate::engine::tests::fixtures::models::ScriptedModel;
@@ -23,9 +22,7 @@ use rw_types::EngineEvent;
 use rw_types::Role;
 use rw_types::SessionId;
 use rw_types::config::PermissionDecision;
-use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -52,11 +49,7 @@ fn actor_rejects_session_ids_outside_the_storage_safe_alphabet() {
 async fn recovered_sequence_and_user_message_are_appended_before_broadcast() {
     let root = TempDir::new().expect("tempdir");
     let model = Arc::new(ScriptedModel::new([stop_script("done", &[])]));
-    let sink = Arc::new(RecordingSink {
-        events: Mutex::new(Vec::new()),
-        batch_sizes: Mutex::new(Vec::new()),
-        tail_floor: Mutex::new(Some(40.into())),
-    });
+    let sink = Arc::new(RecordingSink::default());
     let mut actor_config = config(
         root.path(),
         model,
@@ -65,16 +58,26 @@ async fn recovered_sequence_and_user_message_are_appended_before_broadcast() {
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.event_sink = sink.clone();
-    actor_config.recovered = SessionRecoveredState {
-        conversation: Vec::new(),
-        queued_messages: Vec::new(),
-        completed_turns: 6,
-        next_turn: 7,
-        last_sequence: Some(40.into()),
-        interrupted_turn: None,
-        turn_ends: BTreeMap::new(),
-        ..SessionRecoveredState::default()
-    };
+    let mut source = Vec::new();
+    for turn in 1..=6 {
+        source.push(crate::engine::tests::fixtures::support::wire_event(
+            source.len() as u64,
+            PendingEvent::TurnStarted { turn },
+        ));
+        source.push(crate::engine::tests::fixtures::support::wire_event(
+            source.len() as u64,
+            PendingEvent::TurnFinished {
+                turn,
+                status: crate::engine::AgentTurnStatus::Completed,
+                usage: crate::engine::SessionUsage::default(),
+                cost: crate::engine::unavailable_cost(),
+            },
+        ));
+    }
+    let prefix = source.len();
+    crate::commit_session_events(Arc::clone(&sink), source)
+        .await
+        .expect("seed six completed turns");
     let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
         .await
         .expect("actor");
@@ -84,7 +87,7 @@ async fn recovered_sequence_and_user_message_are_appended_before_broadcast() {
         matches!(kind, PendingEvent::TurnStarted { .. })
     })
     .await;
-    assert_eq!(started.sequence, 42.into());
+    assert_eq!(started.sequence, ((prefix + 1) as u64).into());
     assert!(matches!(
         started.kind,
         PendingEvent::TurnStarted { turn: 7 }
@@ -93,14 +96,14 @@ async fn recovered_sequence_and_user_message_are_appended_before_broadcast() {
         matches!(kind, PendingEvent::UserMessageAccepted { .. })
     })
     .await;
-    assert_eq!(accepted.sequence, 43.into());
+    assert_eq!(accepted.sequence, ((prefix + 2) as u64).into());
     assert!(matches!(
         &accepted.kind,
         PendingEvent::UserMessageAccepted { turn: 7, content, .. }
             if content == "persist me"
     ));
     let persisted = sink.events.lock().expect("sink lock");
-    assert_eq!(persisted.get(2), Some(&accepted));
+    assert_eq!(persisted.get(prefix + 2), Some(&accepted));
 }
 
 #[tokio::test]
@@ -114,10 +117,11 @@ async fn persistence_failure_is_returned_before_provider_work_or_broadcast() {
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     );
-    actor_config.event_sink = Arc::new(FailingSink);
-    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+    let mut actor_config = crate::engine::tests::fixtures::history::bind(actor_config)
         .await
-        .expect("actor");
+        .expect("initialize source");
+    actor_config.event_sink = Arc::new(FailingSink);
+    let handle = SessionActor::spawn(actor_config).expect("actor");
     assert!(matches!(
         handle.send_message("must persist").await,
         Err(AgentLoopError::Persistence(_))

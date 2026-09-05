@@ -342,7 +342,9 @@ async fn permission_mode_projects_and_is_reapplied_when_a_session_resumes() {
         PermissionDecision::Ask,
         HookDispatcher::new(),
     );
-    actor_config.recovered = recovered;
+    crate::commit_session_events(Arc::clone(&actor_config.event_sink), durable)
+        .await
+        .expect("seed permission source");
     let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
         .await
         .expect("resume actor");

@@ -67,6 +67,7 @@ async fn large_reconnect_pages_pin_cursor_and_preserve_attach_ack_after_lag() {
     let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
         .await
         .expect("actor");
+    sink.pages.lock().expect("setup pages").clear();
     let session = SessionId("fixture-session".to_owned());
     let mut observer = handle
         .subscribe_client(ClientId("observer".to_owned()), Some(SequenceId(499)))
@@ -248,10 +249,11 @@ async fn attach_and_subscription_reject_wrong_session_or_protocol_gap_events() {
             PermissionDecision::Allow,
             builtin_hook_dispatcher().expect("hooks"),
         );
-        actor_config.event_sink = Arc::new(CorruptGapSink { event });
-        let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        let mut actor_config = crate::engine::tests::fixtures::history::bind(actor_config)
             .await
-            .expect("actor");
+            .expect("initialize canonical source");
+        actor_config.event_sink = Arc::new(CorruptGapSink { event });
+        let handle = crate::engine::SessionActor::spawn(actor_config).expect("actor");
         let mut subscription = handle
             .subscribe_client(ClientId("driver".to_owned()), None)
             .expect("subscription");

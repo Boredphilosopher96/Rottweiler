@@ -338,7 +338,27 @@ pub(in crate::engine::tests) struct SessionEvent {
 
 pub(in crate::engine::tests) fn observe_event(wire: EngineEvent) -> Option<SessionEvent> {
     let meta = wire.meta()?.clone();
-    let kind = recovered_pending_event(&wire).ok()??;
+    let kind = match &wire {
+        EngineEvent::SubagentSpawned {
+            subagent_id,
+            child_session_id,
+            task,
+            ..
+        } => PendingEvent::SubagentSpawned {
+            subagent_id: subagent_id.clone(),
+            child_session_id: child_session_id.clone(),
+            task: task.clone(),
+        },
+        EngineEvent::SubagentFinished {
+            subagent_id,
+            result,
+            ..
+        } => PendingEvent::SubagentFinished {
+            subagent_id: subagent_id.clone(),
+            result: result.clone(),
+        },
+        _ => recovered_pending_event(&wire).ok()??,
+    };
     Some(SessionEvent {
         version: meta.protocol_version,
         sequence: meta.sequence_id,
