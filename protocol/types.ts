@@ -55,9 +55,9 @@ export type TodoStatus = "pending" | "in_progress" | "completed" | "blocked";
 
 export type TodoSnapshot = { items: Array<TodoItem>, };
 
-export type TodoReadSnapshot = { through?: SequenceId | null, snapshot: TodoSnapshot, };
+export type TodoReadSnapshot = { through: SequenceId | null, snapshot: TodoSnapshot, };
 
-export type TodoReadResult = { "type": "ready", todos: TodoReadSnapshot, } | { "type": "catching_up", through?: SequenceId | null, target?: SequenceId | null, };
+export type TodoReadResult = { "type": "ready", todos: TodoReadSnapshot, } | { "type": "catching_up", through: SequenceId | null, target: SequenceId | null, };
 
 export type ProgressAmount = { completed: number, total: number, };
 

@@ -2853,7 +2853,9 @@
           },
           "additionalProperties": false,
           "required": [
-            "type"
+            "type",
+            "through",
+            "target"
           ]
         }
       ]
@@ -2878,6 +2880,7 @@
       },
       "additionalProperties": false,
       "required": [
+        "through",
         "snapshot"
       ]
     },
