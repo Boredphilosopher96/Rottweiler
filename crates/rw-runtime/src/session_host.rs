@@ -717,6 +717,7 @@ impl RuntimeSessionFactory {
             wasm_workers: Arc::clone(&self.wasm_workers),
             index_pool: Arc::clone(&self.index_pool),
             journal_service: Arc::clone(&self.journal_service),
+            transcripts: Arc::clone(&self.transcripts),
             provider_admission: Arc::clone(&self.provider_admission),
             workspace: workspace.clone(),
             additional_workspaces: Vec::new(),

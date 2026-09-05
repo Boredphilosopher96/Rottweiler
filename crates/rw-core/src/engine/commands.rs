@@ -174,6 +174,7 @@ impl FolderTrustController for NoopFolderTrustController {
 
 /// Complete immutable runtime boundary swapped after a live root append.
 pub struct WorkspaceRuntimeGeneration {
+    pub ui: Arc<dyn crate::ui::UiRegistry>,
     pub generation: u64,
     pub effective_from_turn: u64,
     pub roots: Vec<PathBuf>,

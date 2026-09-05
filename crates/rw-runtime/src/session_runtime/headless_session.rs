@@ -152,6 +152,8 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
     initialize_private_storage_root(&storage_root).into_diagnostic()?;
     collect_abandoned_empty_sessions(&storage_root)?;
     let journal_service = JournalService::new(&storage_root)?;
+    let transcripts =
+        crate::transcript_service::TranscriptReader::new(Arc::clone(&journal_service));
     let provider_admission = Arc::new(
         crate::provider_admission::DurableProviderAdmission::open(storage_root.clone())
             .await
@@ -607,6 +609,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
         || (options.replay_dir.is_some() && options.record_replay_script.is_none())
         || options.in_memory_replay_script.is_some())
     .then(deny_outbound_network_for_process);
+    let session_ui = Arc::new(crate::extension_runtime::ui::UiSessionBudget::default());
     let plugin_redactor = Arc::new(crate::extension_runtime::SharedPluginRedactor::new(
         fixture_redactor.clone(),
     ));
@@ -621,6 +624,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
             &std::env::current_exe().into_diagnostic()?,
             &plugin_redactor,
             &plugin_runtime_budget,
+            Arc::clone(&session_ui),
         )?;
         for pending in &runtime.pending {
             tracing::warn!("plugin {pending}");
@@ -823,6 +827,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
     let workspace_root_controller = Arc::new(RuntimeWorkspaceRootController {
         index_pool: Arc::clone(&index_pool),
         journal_service: Arc::clone(&journal_service),
+        transcripts: Arc::clone(&transcripts),
         checkpoint_root,
         storage_root: storage_root.clone(),
         question_asker: root_question_asker,
@@ -1072,11 +1077,20 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
                 std::env::current_exe().into_diagnostic()?,
                 Arc::clone(&plugin_redactor),
                 Arc::clone(&plugin_runtime_budget),
+                Arc::clone(&session_ui),
             ),
         )
     };
     let initial_thinking = configured_session_thinking(&loaded_config.config, &model_alias);
     let actor = SessionActor::spawn(SessionActorConfig {
+        ui: plugin_runtime.as_ref().map_or_else(
+            || Arc::new(rw_core::ui::EmptyUiRegistry) as Arc<dyn rw_core::ui::UiRegistry>,
+            |plugins| plugins.ui.clone(),
+        ),
+        ui_tool_source: Arc::new(crate::extension_runtime::ui::source::ToolSource {
+            reader: Arc::clone(&transcripts),
+            session: SessionId(session_id.clone()),
+        }),
         budget_session_id,
         session_id: SessionId(session_id.clone()),
         workspace_root: workspace,

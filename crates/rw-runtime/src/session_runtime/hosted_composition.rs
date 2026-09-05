@@ -449,6 +449,7 @@ pub(crate) async fn compose_hosted_actor(
             ),
         ) as Arc<dyn rw_core::HostMcpService>
     });
+    let session_ui = Arc::new(crate::extension_runtime::ui::UiSessionBudget::default());
     let plugin_redactor = Arc::new(crate::extension_runtime::SharedPluginRedactor::new(
         fixture_redactor.clone(),
     ));
@@ -462,6 +463,7 @@ pub(crate) async fn compose_hosted_actor(
             &std::env::current_exe().into_diagnostic()?,
             &plugin_redactor,
             &options.plugin_runtime_budget,
+            Arc::clone(&session_ui),
         )?);
         for pending in &runtime.pending {
             tracing::warn!("plugin {pending}");
@@ -614,6 +616,7 @@ pub(crate) async fn compose_hosted_actor(
     let workspace_root_controller = Arc::new(RuntimeWorkspaceRootController {
         index_pool: Arc::clone(&options.index_pool),
         journal_service: Arc::clone(&options.journal_service),
+        transcripts: Arc::clone(&options.transcripts),
         checkpoint_root: checkpoint_root(&options.storage_root, &workspace, &session_id),
         storage_root: options.storage_root.clone(),
         question_asker: root_question_asker,
@@ -856,10 +859,19 @@ pub(crate) async fn compose_hosted_actor(
             std::env::current_exe().into_diagnostic()?,
             Arc::clone(&plugin_redactor),
             Arc::clone(&options.plugin_runtime_budget),
+            Arc::clone(&session_ui),
         ),
     );
     let initial_thinking = configured_session_thinking(&options.config, &persisted_model_alias);
     let handle = SessionActor::spawn(SessionActorConfig {
+        ui: plugin_runtime.as_ref().map_or_else(
+            || Arc::new(rw_core::ui::EmptyUiRegistry) as Arc<dyn rw_core::ui::UiRegistry>,
+            |plugins| plugins.ui.clone(),
+        ),
+        ui_tool_source: Arc::new(crate::extension_runtime::ui::source::ToolSource {
+            reader: Arc::clone(&options.transcripts),
+            session: options.session_id.clone(),
+        }),
         budget_session_id,
         session_id: options.session_id,
         workspace_root: workspace,

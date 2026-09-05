@@ -627,6 +627,8 @@ needs = ["impl", "tests"]
     let actor_factory: Arc<dyn SubagentSessionFactory> =
         Arc::new(ActorSubagentSessionFactory::new(move |launch| {
             Ok(SessionActorConfig {
+                ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),
+                ui_tool_source: std::sync::Arc::new(rw_core::ui::UnavailableUiToolSource),
                 budget_session_id: launch.handle.session_id.clone(),
                 session_id: launch.handle.session_id.clone(),
                 workspace_root: launch.workspace_root.clone(),
@@ -742,6 +744,8 @@ async fn production_actor_dispatches_command_node_through_typed_registry() {
     let child_workspace = project.clone();
     let factory = Arc::new(ActorSubagentSessionFactory::new(move |launch| {
         Ok(SessionActorConfig {
+            ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),
+            ui_tool_source: std::sync::Arc::new(rw_core::ui::UnavailableUiToolSource),
             budget_session_id: launch.handle.session_id.clone(),
             session_id: launch.handle.session_id.clone(),
             workspace_root: child_workspace.clone(),

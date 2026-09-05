@@ -93,6 +93,7 @@ pub(crate) struct HostedSessionComposition {
     pub wasm_workers: Arc<rw_ext::WasmWorkerPool>,
     pub index_pool: Arc<rw_tools::WorkspaceIndexPool>,
     pub journal_service: Arc<JournalService>,
+    pub transcripts: Arc<crate::transcript_service::TranscriptReader>,
     pub workspace: PathBuf,
     pub additional_workspaces: Vec<PathBuf>,
     pub allowed_workspace_roots: Vec<PathBuf>,

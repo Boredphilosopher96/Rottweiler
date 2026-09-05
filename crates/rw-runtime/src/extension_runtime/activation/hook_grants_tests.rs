@@ -56,6 +56,7 @@ async fn native_hook_registration_uses_sibling_tools_process_write_authority() {
             &root.path().join("unavailable-helper"),
             &redactor,
             &budget,
+            Arc::new(crate::extension_runtime::ui::UiSessionBudget::default()),
         )
         .expect("inert registration");
         let mut dispatcher = HookDispatcher::new();

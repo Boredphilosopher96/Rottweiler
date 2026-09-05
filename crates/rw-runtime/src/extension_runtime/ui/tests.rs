@@ -85,6 +85,7 @@ fn registry() -> (Arc<UiBudget>, RuntimeUiRegistry) {
         Arc::new(SharedPluginRedactor::new(
             rw_providers::FixtureRedactor::new(["secret-token".into()]),
         )),
+        Arc::new(super::UiSessionBudget::default()),
     );
     (budget, registry)
 }
@@ -171,4 +172,51 @@ fn rejected_registration_does_not_consume_catalog_or_allocation_capacity() {
     budget
         .close()
         .expect("rejected registration charges returned");
+}
+
+#[test]
+fn session_panel_credits_span_registries_and_allow_replacement_at_capacity() {
+    let budget = Arc::new(UiBudget::default());
+    let session = Arc::new(super::UiSessionBudget::default());
+    let redactor = Arc::new(SharedPluginRedactor::new(
+        rw_providers::FixtureRedactor::default(),
+    ));
+    let registries: Vec<_> = (0..9)
+        .map(|_| {
+            let registry =
+                RuntimeUiRegistry::new(budget.clone(), redactor.clone(), session.clone());
+            let endpoint = endpoint(1);
+            let owner = endpoint.metadata.ui_owner();
+            registry.register(endpoint).expect("registered");
+            (registry, owner)
+        })
+        .collect();
+    for (registry, owner) in registries.iter().take(8) {
+        registry
+            .publish_panel(owner, "panel-0", json!({"text":"first"}))
+            .expect("admitted slot");
+    }
+    assert!(
+        registries[8]
+            .0
+            .publish_panel(&registries[8].1, "panel-0", json!({"text":"ninth"}))
+            .is_err()
+    );
+    registries[0].0.state.lock().expect("state").last_update = None;
+    assert_eq!(
+        registries[0]
+            .0
+            .publish_panel(&registries[0].1, "panel-0", json!({"text":"replacement"}))
+            .expect("replacement reuses slot"),
+        2
+    );
+    registries[0].0.close();
+    registries[8]
+        .0
+        .publish_panel(&registries[8].1, "panel-0", json!({"text":"released slot"}))
+        .expect("slot returned");
+    for (registry, _) in &registries {
+        registry.close();
+    }
+    budget.close().expect("all retained allocations returned");
 }

@@ -39,6 +39,8 @@ pub struct StartupNotification {
 }
 
 pub struct SessionActorConfig {
+    pub ui: Arc<dyn crate::ui::UiRegistry>,
+    pub ui_tool_source: Arc<dyn crate::ui::UiToolSource>,
     pub session_id: SessionId,
     /// Immutable root session whose cap covers this session and its descendants.
     pub budget_session_id: SessionId,
@@ -101,6 +103,8 @@ impl fmt::Debug for SessionActorConfig {
 impl SessionActorConfig {
     pub(in crate::engine) fn with_model_alias(&self, model_alias: String) -> Self {
         Self {
+            ui: Arc::clone(&self.ui),
+            ui_tool_source: Arc::clone(&self.ui_tool_source),
             session_id: self.session_id.clone(),
             budget_session_id: self.budget_session_id.clone(),
             workspace_root: self.workspace_root.clone(),
@@ -142,6 +146,7 @@ impl SessionActorConfig {
         configured.workspace_root.clone_from(&generation.roots[0]);
         configured.additional_workspace_roots = generation.roots.iter().skip(1).cloned().collect();
         configured.workspace_generation = generation.generation;
+        configured.ui = Arc::clone(&generation.ui);
         configured.tools = Arc::new(
             generation
                 .tools
@@ -172,6 +177,7 @@ impl SessionActorConfig {
         configured.tools = Arc::clone(&snapshot.tools);
         configured.hooks = Arc::clone(&snapshot.hooks);
         configured.commands = Arc::clone(&snapshot.commands);
+        configured.ui = Arc::clone(&snapshot.ui);
         configured
     }
 

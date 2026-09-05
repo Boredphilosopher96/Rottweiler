@@ -284,6 +284,7 @@ async fn source_and_provider_metadata_registration_performs_no_activation() {
         &fixture.root.path().join("missing-release/rw"),
         &fixture.endpoint.generation.recipe.redactor,
         &fixture.budget,
+        Arc::new(crate::extension_runtime::ui::UiSessionBudget::default()),
     )
     .expect("inert composition");
     assert_eq!(runtime.providers.len(), 1);
@@ -369,6 +370,7 @@ async fn zero_ten_and_fifty_installed_plugins_remain_inert() {
             &fixture.root.path().join("unavailable-helper"),
             &fixture.endpoint.generation.recipe.redactor,
             &budget,
+            Arc::new(crate::extension_runtime::ui::UiSessionBudget::default()),
         )
         .expect("metadata composition");
         assert_eq!(runtime.endpoints.len(), count);

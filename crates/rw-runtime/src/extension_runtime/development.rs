@@ -47,6 +47,7 @@ pub(crate) struct RuntimeSessionExtensionController {
     helper: PathBuf,
     redactor: Arc<SharedPluginRedactor>,
     activation: Arc<PluginRuntimeBudget>,
+    session_ui: Arc<ui::UiSessionBudget>,
     state: tokio::sync::Mutex<DevelopmentExtensionState>,
     operation: tokio::sync::Mutex<()>,
     failed: std::sync::atomic::AtomicBool,
@@ -58,12 +59,14 @@ impl RuntimeSessionExtensionController {
         helper: PathBuf,
         redactor: Arc<SharedPluginRedactor>,
         activation: Arc<PluginRuntimeBudget>,
+        session_ui: Arc<ui::UiSessionBudget>,
     ) -> Self {
         Self {
             private_root,
             helper,
             redactor,
             activation,
+            session_ui,
             state: tokio::sync::Mutex::new(DevelopmentExtensionState::default()),
             operation: tokio::sync::Mutex::new(()),
             failed: std::sync::atomic::AtomicBool::new(false),
@@ -181,7 +184,11 @@ impl RuntimeSessionExtensionController {
                 launcher: None,
             }),
         );
-        let mut candidate = PluginSessionRuntime::new(&self.activation, &self.redactor);
+        let mut candidate = PluginSessionRuntime::new(
+            &self.activation,
+            &self.redactor,
+            Arc::clone(&self.session_ui),
+        );
         candidate
             .register_endpoint(plugin, manifest, Arc::clone(&endpoint), push_handler)
             .map_err(development_error)?;
@@ -228,6 +235,10 @@ impl RuntimeSessionExtensionController {
                 })?;
         }
         Ok(rw_core::SessionExtensionSnapshot {
+            ui: Arc::new(rw_core::ui::CombinedUiRegistry::new(
+                Arc::clone(&base.ui),
+                candidate.ui.clone(),
+            )?),
             revision,
             workspace_roots: Arc::clone(&base.workspace_roots),
             tools: Arc::new(tools),

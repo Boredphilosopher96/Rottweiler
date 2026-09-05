@@ -305,6 +305,8 @@ async fn actor_applies_durable_child_artifact_then_reports_conflict_without_corr
         .expect("fixture concrete model"),
     );
     let actor = SessionActor::spawn(SessionActorConfig {
+        ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),
+        ui_tool_source: std::sync::Arc::new(rw_core::ui::UnavailableUiToolSource),
         budget_session_id: parent_session.clone(),
         session_id: parent_session,
         workspace_root: repository.clone(),
@@ -666,6 +668,8 @@ async fn crashed_worktree_child_recovers_follows_up_and_applies_after_second_res
         )
         .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
         Ok(SessionActorConfig {
+            ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),
+            ui_tool_source: std::sync::Arc::new(rw_core::ui::UnavailableUiToolSource),
             budget_session_id: session_id.clone(),
             session_id: session_id.clone(),
             workspace_root: workspace.to_path_buf(),

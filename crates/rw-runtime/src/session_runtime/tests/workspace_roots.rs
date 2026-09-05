@@ -274,9 +274,11 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
             .with_workspace_roots([&primary])
             .with_project_approval_file(approvals),
     );
+    let journal_service = JournalService::new(&private).expect("journal reads");
     let controller = RuntimeWorkspaceRootController {
+        transcripts: crate::transcript_service::TranscriptReader::new(Arc::clone(&journal_service)),
         index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
-        journal_service: JournalService::new(&private).expect("journal reads"),
+        journal_service,
         checkpoint_root: checkpoint_root.clone(),
         storage_root: private.clone(),
         question_asker: Arc::new(UnboundQuestionAsker),
@@ -622,9 +624,11 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
             .expect("ack bash rewind");
     }
 
+    let journal_service = JournalService::new(&private).expect("journal reads");
     let pending = RuntimeWorkspaceRootController {
+        transcripts: crate::transcript_service::TranscriptReader::new(Arc::clone(&journal_service)),
         index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
-        journal_service: JournalService::new(&private).expect("journal reads"),
+        journal_service,
         checkpoint_root: checkpoint_root.clone(),
         storage_root: private.clone(),
         question_asker: Arc::new(UnboundQuestionAsker),

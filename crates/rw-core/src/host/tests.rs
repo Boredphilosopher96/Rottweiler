@@ -207,6 +207,8 @@ impl StubFactory {
             )
             .expect("session marker command");
         let handle = SessionActor::spawn(SessionActorConfig {
+            ui: std::sync::Arc::new(crate::ui::EmptyUiRegistry),
+            ui_tool_source: std::sync::Arc::new(crate::ui::UnavailableUiToolSource),
             budget_session_id: session_id.clone(),
             session_id: session_id.clone(),
             workspace_root: workspace,

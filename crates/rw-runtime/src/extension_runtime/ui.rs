@@ -1,11 +1,12 @@
 //! One bounded live UI registry. Historical tool surfaces belong to their result
 //! event, while panel replacements retire the previous retained value immediately.
 mod budget;
+pub(crate) mod source;
 #[cfg(test)]
 mod tests;
 use super::{PluginSessionCommand, SharedPluginRedactor};
-pub(crate) use budget::UiBudget;
 use budget::{PREPARATION_BYTES, shrink};
+pub(crate) use budget::{UiBudget, UiSessionBudget};
 use rw_core::{
     AgentLoopError,
     ui::{BoundUiCommand, UiRegistry},
@@ -39,6 +40,7 @@ struct Registration {
     _permit: OwnedSemaphorePermit,
 }
 struct Panel {
+    wire: budget::PanelCredit,
     surface: PreparedAllocation<UiPanelSnapshot>,
     encoded: usize,
     _permit: OwnedSemaphorePermit,
@@ -53,13 +55,19 @@ struct State {
 }
 pub(crate) struct RuntimeUiRegistry {
     budget: Arc<UiBudget>,
+    session_budget: Arc<UiSessionBudget>,
     redactor: Arc<SharedPluginRedactor>,
     state: Mutex<State>,
 }
 impl RuntimeUiRegistry {
-    pub(crate) fn new(budget: Arc<UiBudget>, redactor: Arc<SharedPluginRedactor>) -> Self {
+    pub(crate) fn new(
+        budget: Arc<UiBudget>,
+        redactor: Arc<SharedPluginRedactor>,
+        session_budget: Arc<UiSessionBudget>,
+    ) -> Self {
         Self {
             budget,
+            session_budget,
             redactor,
             state: Mutex::new(State {
                 registrations: Vec::new(),
@@ -206,15 +214,21 @@ impl RuntimeUiRegistry {
         if retained + encoded + 32 > 512 * 1024 {
             return Err(error("panel surface capacity exhausted"));
         }
-        let panel = Panel {
-            surface: plan.prepare(),
-            encoded,
-            _permit: permit,
-        };
+        let prepared = plan.prepare();
         if let Some(index) = existing {
-            state.panels[index] = panel;
+            let panel = &mut state.panels[index];
+            panel.wire.resize(encoded + 64)?;
+            panel.surface = prepared;
+            panel._permit = permit;
+            panel.encoded = encoded;
         } else {
-            state.panels.push(panel);
+            let wire = self.session_budget.panel(encoded + 64)?;
+            state.panels.push(Panel {
+                wire,
+                surface: prepared,
+                encoded,
+                _permit: permit,
+            });
         }
         state.next_revision = next_revision;
         state.last_update = Some(now);
@@ -302,6 +316,13 @@ impl RuntimeUiRegistry {
     }
 }
 impl UiRegistry for RuntimeUiRegistry {
+    fn owns(&self, owner: &UiContributionOwner) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        !state.closed && find_registration(&state, owner).is_ok()
+    }
     fn catalog(&self) -> Result<UiCatalog, AgentLoopError> {
         let state = self
             .state

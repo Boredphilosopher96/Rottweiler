@@ -330,6 +330,8 @@ async fn lazy_first_model_switch_does_not_activate_when_persistence_fails() {
     let workspace = tempdir().expect("workspace");
     let session_id = SessionId("failed-lazy-model-switch".to_owned());
     let actor = SessionActor::spawn(SessionActorConfig {
+        ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),
+        ui_tool_source: std::sync::Arc::new(rw_core::ui::UnavailableUiToolSource),
         budget_session_id: session_id.clone(),
         session_id: session_id.clone(),
         workspace_root: workspace.path().to_path_buf(),

@@ -1082,6 +1082,7 @@ pub(super) async fn dispatch_protocol(
             | ClientCommand::DetachDevelopmentPlugin { .. }
     ) {
         let current = SessionExtensionSnapshot {
+            ui: Arc::clone(&config.ui),
             revision: config.workspace_generation,
             workspace_roots: Arc::from(
                 std::iter::once(config.workspace_root.clone())

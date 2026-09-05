@@ -444,6 +444,7 @@ pub(super) async fn dispatch_message(
                         let rebase = config
                             .extension_development
                             .rebase(SessionExtensionSnapshot {
+                                ui: Arc::clone(&config.ui),
                                 revision: base_config.workspace_generation,
                                 workspace_roots: Arc::from(generation.roots.clone()),
                                 tools: Arc::clone(&base_config.tools),

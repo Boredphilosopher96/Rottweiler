@@ -100,6 +100,7 @@ pub(super) fn canonical_workspace_roots(
 pub(super) struct RuntimeWorkspaceRootController {
     pub(super) index_pool: Arc<rw_tools::WorkspaceIndexPool>,
     pub(super) journal_service: Arc<JournalService>,
+    pub(super) transcripts: Arc<crate::transcript_service::TranscriptReader>,
     pub(super) checkpoint_root: PathBuf,
     pub(super) storage_root: PathBuf,
     pub(super) question_asker: Arc<dyn QuestionAsker>,
@@ -281,6 +282,7 @@ impl RuntimeWorkspaceRootController {
         let workspace_controller = Arc::new(RuntimeWorkspaceRootController {
             index_pool: Arc::clone(&self.index_pool),
             journal_service: Arc::clone(&self.journal_service),
+            transcripts: Arc::clone(&self.transcripts),
             checkpoint_root: child_checkpoint_root.clone(),
             storage_root: storage_root.to_path_buf(),
             question_asker: Arc::clone(&self.question_asker),
@@ -310,6 +312,11 @@ impl RuntimeWorkspaceRootController {
             root_authorization: WorkspaceRootAuthorization::Hosted(roots.clone()),
         });
         Ok(SessionActorConfig {
+            ui: Arc::new(rw_core::ui::EmptyUiRegistry),
+            ui_tool_source: Arc::new(crate::extension_runtime::ui::source::ToolSource {
+                reader: Arc::clone(&self.transcripts),
+                session: session_id.clone(),
+            }),
             budget_session_id: budget_session_id.clone(),
             session_id: session_id.clone(),
             workspace_root: workspace_root.to_path_buf(),
@@ -604,6 +611,7 @@ impl rw_core::WorkspaceRootController for RuntimeWorkspaceRootController {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(generation, prepared.roots.clone());
         Ok(rw_core::WorkspaceRuntimeGeneration {
+            ui: Arc::new(rw_core::ui::EmptyUiRegistry),
             generation,
             effective_from_turn,
             roots: prepared.roots.clone(),

@@ -333,11 +333,16 @@ pub(crate) struct PluginEventRegistration {
 }
 
 impl PluginSessionRuntime {
-    fn new(budget: &Arc<PluginRuntimeBudget>, redactor: &Arc<SharedPluginRedactor>) -> Self {
+    fn new(
+        budget: &Arc<PluginRuntimeBudget>,
+        redactor: &Arc<SharedPluginRedactor>,
+        session_ui: Arc<ui::UiSessionBudget>,
+    ) -> Self {
         Self {
             ui: Arc::new(ui::RuntimeUiRegistry::new(
                 Arc::clone(&budget.ui),
                 Arc::clone(redactor),
+                session_ui,
             )),
             delivery: Arc::clone(&budget.delivery),
             endpoints: Vec::new(),
@@ -358,8 +363,9 @@ impl PluginSessionRuntime {
         helper: &Path,
         redactor: &Arc<SharedPluginRedactor>,
         budget: &Arc<PluginRuntimeBudget>,
+        session_ui: Arc<ui::UiSessionBudget>,
     ) -> Result<Self> {
-        let mut runtime = Self::new(budget, redactor);
+        let mut runtime = Self::new(budget, redactor, session_ui);
         for config in configs.iter().filter(|config| config.enabled) {
             let manifest = match config.load_manifest() {
                 Ok(manifest) => manifest,

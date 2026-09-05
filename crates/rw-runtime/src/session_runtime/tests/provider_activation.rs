@@ -112,6 +112,8 @@ async fn engine_switches_to_an_exact_model_route_staged_by_provider_activation()
     let workspace = tempdir().expect("workspace");
     let session_id = SessionId("staged-provider-switch".to_owned());
     let actor = SessionActor::spawn(SessionActorConfig {
+        ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),
+        ui_tool_source: std::sync::Arc::new(rw_core::ui::UnavailableUiToolSource),
         budget_session_id: session_id.clone(),
         session_id: session_id.clone(),
         workspace_root: workspace.path().to_path_buf(),
@@ -565,26 +567,34 @@ async fn hosted_resume_with_unavailable_concrete_model_keeps_control_plane_usabl
             .await
             .expect("test authority"),
     );
-    let options = |resume, requested_model| HostedSessionComposition {
-        provider_admission: Arc::clone(&provider_admission),
-        plugin_runtime_budget: Arc::new(crate::extension_runtime::PluginRuntimeBudget::default()),
-        wasm_workers: rw_ext::WasmWorkerPool::new(),
-        index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
-        journal_service: JournalService::new(&storage).expect("journal reads"),
-        workspace: workspace.clone(),
-        additional_workspaces: Vec::new(),
-        allowed_workspace_roots: vec![workspace.clone()],
-        storage_root: storage.clone(),
-        credentials_path: storage.join("credentials.json"),
-        config: config.clone(),
-        session_id: session_id.clone(),
-        requested_model,
-        resume,
-        permission_mode: Some(PermissionMode::Strict),
-        max_turns: 2,
-        provider_mode: HostedProviderMode::Live,
-        dangerously_trust: false,
-        wait_for_execution_lease: false,
+    let options = |resume, requested_model| {
+        let journal_service = JournalService::new(&storage).expect("journal reads");
+        HostedSessionComposition {
+            transcripts: crate::transcript_service::TranscriptReader::new(Arc::clone(
+                &journal_service,
+            )),
+            provider_admission: Arc::clone(&provider_admission),
+            plugin_runtime_budget: Arc::new(
+                crate::extension_runtime::PluginRuntimeBudget::default(),
+            ),
+            wasm_workers: rw_ext::WasmWorkerPool::new(),
+            index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
+            journal_service,
+            workspace: workspace.clone(),
+            additional_workspaces: Vec::new(),
+            allowed_workspace_roots: vec![workspace.clone()],
+            storage_root: storage.clone(),
+            credentials_path: storage.join("credentials.json"),
+            config: config.clone(),
+            session_id: session_id.clone(),
+            requested_model,
+            resume,
+            permission_mode: Some(PermissionMode::Strict),
+            max_turns: 2,
+            provider_mode: HostedProviderMode::Live,
+            dangerously_trust: false,
+            wait_for_execution_lease: false,
+        }
     };
     let initial = compose_hosted_actor(options(false, Some("extra/new-model".to_owned())))
         .await

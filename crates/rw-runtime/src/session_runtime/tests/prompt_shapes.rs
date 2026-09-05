@@ -129,6 +129,8 @@ async fn historical_anthropic_prompt_shape_restores_cache_and_tool_schema_offlin
     let workspace = root.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("workspace");
     let actor = SessionActor::spawn(SessionActorConfig {
+        ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),
+        ui_tool_source: std::sync::Arc::new(rw_core::ui::UnavailableUiToolSource),
         budget_session_id: SessionId(session_id.to_owned()),
         session_id: SessionId(session_id.to_owned()),
         workspace_root: workspace,

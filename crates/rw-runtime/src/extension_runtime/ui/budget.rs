@@ -49,3 +49,62 @@ pub(super) fn shrink(
     drop(permit.split(spare));
     Ok(())
 }
+
+/// Shared by the configured and temporary registries of one session.
+pub(crate) struct UiSessionBudget {
+    panels: Arc<Semaphore>,
+    wire: Arc<Semaphore>,
+}
+impl Default for UiSessionBudget {
+    fn default() -> Self {
+        Self {
+            panels: Arc::new(Semaphore::new(8)),
+            wire: Arc::new(Semaphore::new(512 * 1024)),
+        }
+    }
+}
+pub(super) struct PanelCredit {
+    _slot: OwnedSemaphorePermit,
+    bytes: OwnedSemaphorePermit,
+    pool: Arc<Semaphore>,
+}
+impl UiSessionBudget {
+    pub(super) fn panel(&self, bytes: usize) -> Result<PanelCredit, PluginRpcError> {
+        let slot = self
+            .panels
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| super::error("session panel count exhausted"))?;
+        let charge = u32::try_from(bytes).map_err(|_| super::error("panel charge overflow"))?;
+        let bytes = self
+            .wire
+            .clone()
+            .try_acquire_many_owned(charge)
+            .map_err(|_| super::error("session panel wire capacity exhausted"))?;
+        Ok(PanelCredit {
+            _slot: slot,
+            bytes,
+            pool: self.wire.clone(),
+        })
+    }
+}
+impl PanelCredit {
+    /// Existing views remain admitted until replacement is ready. Additional
+    /// credits are acquired before resizing; rejection leaves the old charge intact.
+    pub(super) fn resize(&mut self, bytes: usize) -> Result<(), PluginRpcError> {
+        let current = self.bytes.num_permits();
+        if bytes > current {
+            let extra = u32::try_from(bytes - current)
+                .map_err(|_| super::error("panel charge overflow"))?;
+            let extra = self
+                .pool
+                .clone()
+                .try_acquire_many_owned(extra)
+                .map_err(|_| super::error("session panel wire capacity exhausted"))?;
+            self.bytes.merge(extra);
+        } else {
+            drop(self.bytes.split(current - bytes));
+        }
+        Ok(())
+    }
+}
