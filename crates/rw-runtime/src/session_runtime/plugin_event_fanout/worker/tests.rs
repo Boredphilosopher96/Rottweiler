@@ -221,7 +221,7 @@ fn journal(count: u64) -> Arc<Journal> {
             .collect(),
     })
 }
-fn start(
+fn dormant(
     journal: Arc<Journal>,
     consumer: Arc<Consumer>,
 ) -> (
@@ -246,9 +246,83 @@ fn start(
         context,
         permit,
     );
+    (worker, sources)
+}
+fn start(
+    journal: Arc<Journal>,
+    consumer: Arc<Consumer>,
+) -> (
+    PluginFanoutWorker,
+    Arc<crate::extension_runtime::PluginEventSources>,
+) {
+    let (worker, sources) = dormant(journal, consumer);
     worker.activate();
     (worker, sources)
 }
+
+#[tokio::test]
+async fn prepared_worker_cannot_read_or_deliver_before_publication() {
+    let consumer = Consumer::new();
+    let (worker, _) = dormant(journal(1), consumer.clone());
+    worker.wake(ExtensionEventKind::PluginStatusChanged);
+    tokio::task::yield_now().await;
+    assert!(
+        consumer
+            .notices
+            .lock()
+            .unwrap_or_else(|error| panic!("fixture: {error:?}"))
+            .is_empty()
+    );
+    assert!(
+        consumer
+            .committed
+            .lock()
+            .unwrap_or_else(|error| panic!("fixture: {error:?}"))
+            .is_empty()
+    );
+    worker.activate();
+    wait_for(|| {
+        consumer
+            .committed
+            .lock()
+            .unwrap_or_else(|error| panic!("fixture: {error:?}"))
+            .len()
+            == 1
+    })
+    .await;
+    worker.cancel();
+    worker
+        .settle()
+        .await
+        .unwrap_or_else(|error| panic!("settled: {error}"));
+}
+
+#[tokio::test]
+async fn unpublished_worker_cancellation_settles_without_consuming_source() {
+    let consumer = Consumer::new();
+    let (worker, _) = dormant(journal(1), consumer.clone());
+    worker.cancel();
+    worker
+        .settle()
+        .await
+        .unwrap_or_else(|error| panic!("settled: {error}"));
+    assert!(consumer.settled.load(Ordering::Acquire));
+    assert!(
+        consumer
+            .notices
+            .lock()
+            .unwrap_or_else(|error| panic!("fixture: {error:?}"))
+            .is_empty()
+    );
+    assert!(
+        consumer
+            .committed
+            .lock()
+            .unwrap_or_else(|error| panic!("fixture: {error:?}"))
+            .is_empty()
+    );
+}
+
 async fn wait_for(mut condition: impl FnMut() -> bool) {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while !condition() {

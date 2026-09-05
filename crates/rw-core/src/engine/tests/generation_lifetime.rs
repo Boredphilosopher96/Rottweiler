@@ -65,16 +65,13 @@ impl SessionExtensionController for CallbackGeneration {
         current.publication = RuntimePublication::Prepared(self.publication.clone());
         Ok(current)
     }
-    async fn detach(&self) -> Result<SessionExtensionSnapshot, AgentLoopError> {
+    async fn detach(
+        &self,
+        _: SessionExtensionSnapshot,
+    ) -> Result<SessionExtensionSnapshot, AgentLoopError> {
         Err(AgentLoopError::InvalidConfiguration(
             "fixture has no detach".into(),
         ))
-    }
-    async fn rebase(
-        &self,
-        current: SessionExtensionSnapshot,
-    ) -> Result<(SessionExtensionSnapshot, bool), AgentLoopError> {
-        Ok((current, false))
     }
     async fn shutdown(&self) -> Result<(), AgentLoopError> {
         Ok(())

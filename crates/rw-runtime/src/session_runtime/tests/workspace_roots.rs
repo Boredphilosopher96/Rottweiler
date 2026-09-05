@@ -276,6 +276,7 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
     );
     let journal_service = JournalService::new(&private).expect("journal reads");
     let controller = RuntimeWorkspaceRootController {
+        native: super::super::native_registry_recipe::RootNativeBinding::Standalone,
         transcripts: crate::transcript_service::TranscriptReader::new(Arc::clone(&journal_service)),
         index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
         journal_service,
@@ -490,11 +491,16 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
     );
     let generation = rw_core::WorkspaceRootController::append_root(
         &controller,
-        &added,
-        std::slice::from_ref(&primary),
-        0,
-        1,
-        Arc::clone(&resumed_parent_permissions),
+        rw_core::WorkspaceRootRequest {
+            requested: &added,
+            roots: std::slice::from_ref(&primary),
+            generation: 0,
+            effective_from_turn: 1,
+            permissions: Arc::clone(&resumed_parent_permissions),
+            model: child.model.clone(),
+            model_alias: &child.model_alias,
+            mcp_policy: child.tools.mcp_tool_policy().clone(),
+        },
     )
     .await
     .expect("prepare generation");
@@ -637,6 +643,7 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
 
     let journal_service = JournalService::new(&private).expect("journal reads");
     let pending = RuntimeWorkspaceRootController {
+        native: super::super::native_registry_recipe::RootNativeBinding::Standalone,
         transcripts: crate::transcript_service::TranscriptReader::new(Arc::clone(&journal_service)),
         index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
         journal_service,
@@ -680,11 +687,16 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
     let third = std::fs::canonicalize(third).expect("canonical third");
     let _prepared = rw_core::WorkspaceRootController::append_root(
         &pending,
-        &third,
-        &generation.roots,
-        1,
-        2,
-        Arc::clone(&generation.permissions),
+        rw_core::WorkspaceRootRequest {
+            requested: &third,
+            roots: &generation.roots,
+            generation: 1,
+            effective_from_turn: 2,
+            permissions: Arc::clone(&generation.permissions),
+            model: generation.model.clone(),
+            model_alias: &child.model_alias,
+            mcp_policy: child.tools.mcp_tool_policy().clone(),
+        },
     )
     .await
     .expect("prepare uncommitted generation");

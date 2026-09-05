@@ -146,14 +146,9 @@ impl SessionActorConfig {
         configured.workspace_root.clone_from(&generation.roots[0]);
         configured.additional_workspace_roots = generation.roots.iter().skip(1).cloned().collect();
         configured.workspace_generation = generation.generation;
+        configured.model = Arc::clone(&generation.model);
         configured.ui = Arc::clone(&generation.ui);
-        configured.tools = Arc::new(
-            generation
-                .tools
-                .as_ref()
-                .clone()
-                .with_mcp_tool_policy(self.tools.mcp_tool_policy().clone()),
-        );
+        configured.tools = Arc::clone(&generation.tools);
         configured.hooks = Arc::clone(&generation.hooks);
         configured.commands = Arc::clone(&generation.commands);
         configured.modes = self.modes.get(&active_mode.0).map_or_else(
@@ -174,6 +169,7 @@ impl SessionActorConfig {
         snapshot: &SessionExtensionSnapshot,
     ) -> Self {
         let mut configured = self.with_model_alias(self.model_alias.clone());
+        configured.model = Arc::clone(&snapshot.model);
         configured.tools = Arc::clone(&snapshot.tools);
         configured.hooks = Arc::clone(&snapshot.hooks);
         configured.commands = Arc::clone(&snapshot.commands);

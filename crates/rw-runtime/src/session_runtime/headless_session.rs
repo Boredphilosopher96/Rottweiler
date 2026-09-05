@@ -823,6 +823,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
         },
         Arc::new(move |input| recipe.compose(input)),
     );
+    native_extensions.bind_models(model_generations.clone())?;
     let project_approvals = project_approval_path(&storage_root, &workspace);
     let permissions = match options.permission_mode {
         Some(mode) => PermissionGate::for_headless_mode(mode),
@@ -859,6 +860,11 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
         .await?;
     wasm_startup_notifications.extend(extension_startup_notifications(&extension_catalog));
     let workspace_root_controller = Arc::new(RuntimeWorkspaceRootController {
+        native: if inspection {
+            super::native_registry_recipe::RootNativeBinding::Standalone
+        } else {
+            super::native_registry_recipe::RootNativeBinding::session()
+        },
         index_pool: Arc::clone(&index_pool),
         journal_service: Arc::clone(&journal_service),
         transcripts: Arc::clone(&transcripts),
@@ -902,6 +908,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
     let actor_event_sink: Arc<dyn SessionEventSink> = plugin_delivery.clone();
     let secret_redactor: Arc<dyn rw_core::SecretRedactor> =
         Arc::new(SharedEngineSecretRedactor(engine_redactor));
+    let mut native_orchestrator = None;
     let runtime_tools = if inspection {
         Arc::clone(&actor_tools)
     } else {
@@ -995,6 +1002,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
             crate::subagent_metadata::PrivateSubagentMetadataStore::open(&storage_root)
                 .map_err(|error| miette!("subagent metadata could not open: {error}"))?,
         );
+        native_orchestrator = Some(orchestrator.clone());
         orchestrator.bind_metadata_store(metadata.clone());
         let parent_session = SessionId(session_id.clone());
         let names = actor_tools
@@ -1092,15 +1100,25 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
     let extension_development: Arc<dyn rw_core::SessionExtensionController> = if inspection {
         Arc::new(rw_core::NoopSessionExtensionController)
     } else {
-        Arc::new(
+        let orchestrator =
+            native_orchestrator.ok_or_else(|| miette!("native registry has no orchestrator"))?;
+        let controller = Arc::new(
             crate::extension_runtime::RuntimeSessionExtensionController::new(
-                storage_root.clone(),
-                std::env::current_exe().into_diagnostic()?,
-                Arc::clone(&plugin_redactor),
-                Arc::clone(&plugin_runtime_budget),
-                Arc::clone(&session_ui),
+                native_extensions.clone(),
+                super::native_registry_recipe::NativeRegistryRecipe {
+                    roots: Arc::downgrade(&workspace_root_controller),
+                    orchestrator,
+                    models: model_generations.clone(),
+                    mcp: mcp_runtime.clone(),
+                    storage_root: storage_root.clone(),
+                },
             ),
-        )
+        );
+        workspace_root_controller
+            .native
+            .bind(&controller)
+            .map_err(display_agent_error)?;
+        controller
     };
     let initial_thinking = configured_session_thinking(&loaded_config.config, &model_alias);
     let actor = SessionActor::spawn(SessionActorConfig {

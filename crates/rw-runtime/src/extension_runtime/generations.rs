@@ -4,8 +4,12 @@ use super::{
     activation, ui,
 };
 use crate::extension_config::DiscoveredPlugin;
+use crate::session_runtime::native_model_generations::{
+    NativeModelGenerations, NativeModelInput, NativeModelReplacement, PreparedNativeModel,
+};
 use crate::session_runtime::plugin_event_fanout::{PluginFanoutEventSink, PreparedPluginDelivery};
 use miette::{Result, miette};
+use rw_core::AgentLoopError;
 use rw_ext::{
     PluginEndpoint, PluginEndpointMetadata,
     invocation::{ExclusiveInvocationGuard, ExtensionInvocations, PreparedExtensionGeneration},
@@ -120,6 +124,7 @@ pub(crate) struct PluginGenerationOwner {
     binding: RwLock<Option<rw_core::PluginSessionBinding>>,
     operation: Arc<Mutex<()>>,
     delivery: RwLock<Option<Arc<PluginFanoutEventSink>>>,
+    models: RwLock<Option<Arc<NativeModelGenerations>>>,
     closed: std::sync::atomic::AtomicBool,
 }
 impl PluginGenerationOwner {
@@ -147,6 +152,7 @@ impl PluginGenerationOwner {
             binding: RwLock::new(None),
             operation: Arc::new(Mutex::new(())),
             delivery: RwLock::new(None),
+            models: RwLock::new(None),
             closed: std::sync::atomic::AtomicBool::new(false),
         }))
     }
@@ -155,6 +161,17 @@ impl PluginGenerationOwner {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+    pub(crate) fn bind_models(&self, models: Arc<NativeModelGenerations>) -> Result<()> {
+        let mut slot = self
+            .models
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot.is_some() {
+            return Err(miette!("native model owner is already bound"));
+        }
+        *slot = Some(models);
+        Ok(())
     }
     pub(crate) fn bind_delivery(&self, delivery: Arc<PluginFanoutEventSink>) -> Result<()> {
         let mut slot = self
@@ -180,58 +197,66 @@ impl PluginGenerationOwner {
         configured: &[DiscoveredPlugin],
         development: Option<&DiscoveredPlugin>,
         roots: &[PathBuf],
-    ) -> Result<PreparedPluginGeneration> {
+    ) -> std::result::Result<PreparedPluginGeneration, AgentLoopError> {
         let operation = self.operation.clone().lock_owned().await;
         if self.closed.load(std::sync::atomic::Ordering::Acquire) {
-            return Err(miette!("native extension session is closed"));
+            return Err(AgentLoopError::Closed);
         }
         let batch = self
             .configuration
-            .discover(configured, development, roots)?;
+            .discover(configured, development, roots)
+            .map_err(invalid)?;
         let raw = batch
             .plugins
             .iter()
             .map(|plugin| plugin.raw.clone())
             .collect::<Vec<_>>();
-        let delivery = self
-            .delivery
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-            .ok_or_else(|| miette!("native generation has no event delivery owner"))?;
-        delivery
-            .pause_and_settle()
-            .await
-            .map_err(|error| miette!(error.to_string()))?;
-        let guard = self
-            .invocations
-            .pause_and_settle()
-            .await
-            .map_err(|error| miette!(error.to_string()))?;
-        self.current().ui.close();
-        let candidate = guard
-            .prepare(&raw)
-            .map_err(|error| miette!(error.to_string()))?;
-        let managed = candidate
-            .endpoints()
-            .map_err(|error| miette!(error.to_string()))?;
-        let runtime = self.configuration.runtime(batch, managed)?;
         let binding = self
             .binding
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
-            .ok_or_else(|| miette!("native generation has no session binding"))?;
-        runtime.bind_generation(&binding)?;
+            .ok_or_else(|| invalid("native generation has no session binding"))?;
+        let delivery = self
+            .delivery
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .ok_or_else(|| invalid("native generation has no event delivery owner"))?;
+        let models = self
+            .models
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .ok_or_else(|| invalid("native generation has no model owner"))?;
+        // Child admission and the retained-generation check are one transaction.
+        // Do not retire a plugin process until that guard is held.
+        let model = models.begin_replacement()?;
+        let (delivery_proof, native_proof) = tokio::join!(
+            delivery.pause_and_settle(),
+            self.invocations.pause_and_settle(),
+        );
+        // Both actual owners are asked for proof even if either one fails.
+        let guard = native_proof.map_err(unsettled)?;
+        delivery_proof.map_err(unsettled)?;
+        self.current().ui.close();
+        let candidate = guard.prepare(&raw).map_err(unsettled)?;
+        let managed = candidate.endpoints().map_err(unsettled)?;
+        let runtime = self
+            .configuration
+            .runtime(batch, managed)
+            .map_err(unsettled)?;
+        runtime.bind_generation(&binding).map_err(unsettled)?;
         let delivery = delivery
             .prepare(runtime.event_routers.clone())
-            .map_err(|error| miette!(error.to_string()))?;
+            .map_err(unsettled)?;
         Ok(PreparedPluginGeneration {
             owner: self.clone(),
             runtime,
             delivery,
             guard,
             candidate,
+            model,
             _operation: operation,
         })
     }
@@ -245,21 +270,20 @@ impl PluginGenerationOwner {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let delivery_proof = if let Some(delivery) = delivery {
-            delivery
-                .pause_and_settle()
-                .await
-                .map_err(|error| miette!(error.to_string()))
-        } else {
-            Ok(())
+        let delivery_proof = async {
+            if let Some(delivery) = delivery {
+                delivery
+                    .pause_and_settle()
+                    .await
+                    .map_err(|error| miette!(error.to_string()))
+            } else {
+                Ok(())
+            }
         };
-        let guard = self
-            .invocations
-            .pause_and_settle()
-            .await
-            .map_err(|error| miette!(error.to_string()))?;
+        let (delivery, native) = tokio::join!(delivery_proof, self.invocations.pause_and_settle());
+        let guard = native.map_err(|error| miette!(error.to_string()))?;
         drop(guard);
-        delivery_proof
+        delivery
     }
 }
 
@@ -270,21 +294,94 @@ pub(crate) struct PreparedPluginGeneration {
     delivery: PreparedPluginDelivery,
     guard: ExclusiveInvocationGuard,
     candidate: PreparedExtensionGeneration,
+    model: NativeModelReplacement,
     _operation: OwnedMutexGuard<()>,
 }
 impl PreparedPluginGeneration {
-    pub(crate) fn publish(self) -> Result<Arc<PluginSessionRuntime>> {
-        *self
-            .owner
-            .current
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = self.runtime.clone();
-        self.guard
-            .resume(self.candidate)
-            .map_err(|error| miette!(error.to_string()))?;
-        self.delivery
-            .publish()
-            .map_err(|error| miette!(error.to_string()))?;
-        Ok(self.runtime)
+    pub(crate) fn with_model(
+        self,
+        mut input: NativeModelInput,
+    ) -> std::result::Result<PreparedNativePublication, AgentLoopError> {
+        input.providers = self.runtime.providers.clone();
+        let model = self.model.prepare(input).map_err(unsettled)?;
+        Ok(PreparedNativePublication {
+            owner: self.owner,
+            runtime: self.runtime,
+            delivery: self.delivery,
+            guard: self.guard,
+            candidate: self.candidate,
+            model,
+            _operation: self._operation,
+        })
     }
+}
+
+pub(crate) struct PreparedNativePublication {
+    owner: Arc<PluginGenerationOwner>,
+    runtime: Arc<PluginSessionRuntime>,
+    delivery: PreparedPluginDelivery,
+    guard: ExclusiveInvocationGuard,
+    candidate: PreparedExtensionGeneration,
+    model: PreparedNativeModel,
+    _operation: OwnedMutexGuard<()>,
+}
+impl PreparedNativePublication {
+    pub(crate) fn model(&self) -> Arc<dyn rw_core::ModelDriver> {
+        self.model.model()
+    }
+    pub(crate) fn publication(
+        self,
+        orchestrator: rw_core::SubagentOrchestrator,
+        tools: Arc<rw_tools::ToolRegistry>,
+    ) -> rw_core::RuntimePublication {
+        rw_core::RuntimePublication::Prepared(Arc::new(Publication(std::sync::Mutex::new(Some((
+            self,
+            orchestrator,
+            tools,
+        ))))))
+    }
+    fn publish(
+        self,
+        orchestrator: rw_core::SubagentOrchestrator,
+        tools: Arc<rw_tools::ToolRegistry>,
+    ) -> std::result::Result<(), AgentLoopError> {
+        if self.owner.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(AgentLoopError::Closed);
+        }
+        self.delivery.publish_with(|| {
+            orchestrator.bind_tools(tools);
+            self.guard.resume(self.candidate).map_err(unsettled)?;
+            *self
+                .owner
+                .current
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = self.runtime;
+            // No fallible operation may follow reopening child admission.
+            self.model.publish();
+            Ok(())
+        })
+    }
+}
+type PublicationParts = (
+    PreparedNativePublication,
+    rw_core::SubagentOrchestrator,
+    Arc<rw_tools::ToolRegistry>,
+);
+struct Publication(std::sync::Mutex<Option<PublicationParts>>);
+impl rw_core::PreparedRuntimePublication for Publication {
+    fn publish(&self) -> std::result::Result<(), AgentLoopError> {
+        let (prepared, orchestrator, tools) = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .ok_or_else(|| unsettled("native generation publication was already consumed"))?;
+        prepared.publish(orchestrator, tools)
+    }
+}
+fn invalid(error: impl ToString) -> AgentLoopError {
+    AgentLoopError::InvalidConfiguration(error.to_string())
+}
+fn unsettled(error: impl ToString) -> AgentLoopError {
+    AgentLoopError::EffectsUnsettled(error.to_string())
 }

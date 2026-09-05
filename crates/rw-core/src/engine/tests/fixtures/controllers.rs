@@ -88,6 +88,7 @@ pub(in crate::engine::tests) struct RecordingFolderTrust {
 }
 
 pub(in crate::engine::tests) struct FixedWorkspaceRootController {
+    pub(in crate::engine::tests) extensions: Option<Arc<FixedSessionExtensionController>>,
     pub(in crate::engine::tests) roots: Vec<PathBuf>,
     pub(in crate::engine::tests) tools: Arc<ToolRegistry>,
     pub(in crate::engine::tests) permissions: Arc<PermissionGate>,
@@ -133,6 +134,8 @@ impl SessionExtensionController for FixedSessionExtensionController {
             .expect("development marker command");
         Ok(SessionExtensionSnapshot {
             publication: crate::RuntimePublication::Active,
+            model: base.model,
+            model_alias: base.model_alias,
             ui: Arc::new(crate::ui::EmptyUiRegistry),
             revision: base.revision.saturating_add(1),
             workspace_roots: base.workspace_roots,
@@ -142,7 +145,10 @@ impl SessionExtensionController for FixedSessionExtensionController {
         })
     }
 
-    async fn detach(&self) -> Result<SessionExtensionSnapshot, AgentLoopError> {
+    async fn detach(
+        &self,
+        _current: SessionExtensionSnapshot,
+    ) -> Result<SessionExtensionSnapshot, AgentLoopError> {
         self.detaches.fetch_add(1, Ordering::SeqCst);
         self.base
             .lock()
@@ -155,7 +161,13 @@ impl SessionExtensionController for FixedSessionExtensionController {
             })
     }
 
-    async fn rebase(
+    async fn shutdown(&self) -> Result<(), AgentLoopError> {
+        Ok(())
+    }
+}
+
+impl FixedSessionExtensionController {
+    pub(in crate::engine::tests) async fn rebase(
         &self,
         current: SessionExtensionSnapshot,
     ) -> Result<(SessionExtensionSnapshot, bool), AgentLoopError> {
@@ -177,6 +189,8 @@ impl SessionExtensionController for FixedSessionExtensionController {
         Ok((
             SessionExtensionSnapshot {
                 publication: crate::RuntimePublication::Active,
+                model: current.model,
+                model_alias: current.model_alias,
                 ui: Arc::new(crate::ui::EmptyUiRegistry),
                 revision: current.revision.saturating_add(1),
                 workspace_roots: current.workspace_roots,
@@ -187,20 +201,13 @@ impl SessionExtensionController for FixedSessionExtensionController {
             false,
         ))
     }
-    async fn shutdown(&self) -> Result<(), AgentLoopError> {
-        Ok(())
-    }
 }
 
 #[async_trait]
 impl WorkspaceRootController for FixedWorkspaceRootController {
     async fn append_root(
         &self,
-        _requested: &Path,
-        _current_roots: &[PathBuf],
-        current_generation: u64,
-        effective_from_turn: u64,
-        _permissions: Arc<PermissionGate>,
+        request: crate::WorkspaceRootRequest<'_>,
     ) -> Result<WorkspaceRuntimeGeneration, AgentLoopError> {
         let mut commands = builtin_command_registry().expect("generation commands");
         commands
@@ -212,11 +219,12 @@ impl WorkspaceRootController for FixedWorkspaceRootController {
                 EchoCommand,
             )
             .expect("generation marker command");
-        Ok(WorkspaceRuntimeGeneration {
+        let mut generation = WorkspaceRuntimeGeneration {
+            model: request.model,
             publication: crate::RuntimePublication::Active,
             ui: Arc::new(crate::ui::EmptyUiRegistry),
-            generation: current_generation + 1,
-            effective_from_turn,
+            generation: request.generation + 1,
+            effective_from_turn: request.effective_from_turn,
             roots: self.roots.clone(),
             tools: Arc::clone(&self.tools),
             hooks: Arc::new(builtin_hook_dispatcher().expect("generation hooks")),
@@ -226,7 +234,26 @@ impl WorkspaceRootController for FixedWorkspaceRootController {
             checkpoints: Arc::new(NoopMutationCheckpointCoordinator),
             folder_trust: Arc::new(NoopFolderTrustController),
             supplemental_context: Vec::new(),
-        })
+        };
+        if let Some(extensions) = &self.extensions {
+            let (snapshot, _) = extensions
+                .rebase(SessionExtensionSnapshot {
+                    publication: generation.publication.clone(),
+                    model: generation.model.clone(),
+                    model_alias: request.model_alias.to_owned(),
+                    ui: generation.ui.clone(),
+                    revision: generation.generation,
+                    workspace_roots: Arc::from(generation.roots.clone()),
+                    tools: generation.tools.clone(),
+                    hooks: generation.hooks.clone(),
+                    commands: generation.commands.clone(),
+                })
+                .await?;
+            generation.tools = snapshot.tools;
+            generation.hooks = snapshot.hooks;
+            generation.commands = snapshot.commands;
+        }
+        Ok(generation)
     }
 
     async fn prepare_commit_generation(&self, _generation: u64) -> Result<(), AgentLoopError> {

@@ -33,69 +33,29 @@ impl ApprovalStore for SessionDevelopmentApprovalStore {
     }
 }
 
+/// The controller owns one source recipe for configured and development plugins.
+pub(crate) struct RuntimeSessionExtensionController {
+    owner: Arc<super::generations::PluginGenerationOwner>,
+    recipe: crate::session_runtime::native_registry_recipe::NativeRegistryRecipe,
+    state: tokio::sync::Mutex<DevelopmentExtensionState>,
+}
 #[derive(Default)]
-pub(super) struct DevelopmentExtensionState {
-    base: Option<rw_core::SessionExtensionSnapshot>,
+struct DevelopmentExtensionState {
+    development: Option<crate::extension_config::DiscoveredPlugin>,
     ceiling: Option<rw_plugin_protocol::PluginCapabilities>,
-    active: Option<PluginSessionRuntime>,
     revision: u64,
 }
-
-/// Sole owner of a session's temporary source-plugin generation.
-pub(crate) struct RuntimeSessionExtensionController {
-    private_root: PathBuf,
-    helper: PathBuf,
-    redactor: Arc<SharedPluginRedactor>,
-    activation: Arc<PluginRuntimeBudget>,
-    session_ui: Arc<ui::UiSessionBudget>,
-    state: tokio::sync::Mutex<DevelopmentExtensionState>,
-    operation: tokio::sync::Mutex<()>,
-    failed: std::sync::atomic::AtomicBool,
-}
-
 impl RuntimeSessionExtensionController {
     pub(crate) fn new(
-        private_root: PathBuf,
-        helper: PathBuf,
-        redactor: Arc<SharedPluginRedactor>,
-        activation: Arc<PluginRuntimeBudget>,
-        session_ui: Arc<ui::UiSessionBudget>,
+        owner: Arc<super::generations::PluginGenerationOwner>,
+        recipe: crate::session_runtime::native_registry_recipe::NativeRegistryRecipe,
     ) -> Self {
         Self {
-            private_root,
-            helper,
-            redactor,
-            activation,
-            session_ui,
+            owner,
+            recipe,
             state: tokio::sync::Mutex::new(DevelopmentExtensionState::default()),
-            operation: tokio::sync::Mutex::new(()),
-            failed: std::sync::atomic::AtomicBool::new(false),
         }
     }
-
-    fn ensure_ready(&self) -> std::result::Result<(), rw_core::AgentLoopError> {
-        if self.failed.load(std::sync::atomic::Ordering::Acquire) {
-            return Err(rw_core::AgentLoopError::EffectsUnsettled(
-                "development generation retirement is unproven".to_owned(),
-            ));
-        }
-        Ok(())
-    }
-
-    async fn retire(
-        &self,
-        runtime: PluginSessionRuntime,
-    ) -> std::result::Result<(), rw_core::AgentLoopError> {
-        self.failed
-            .store(true, std::sync::atomic::Ordering::Release);
-        let resources =
-            crate::session_resources::RuntimeSessionResources::new(None, Some(Arc::new(runtime)));
-        rw_core::SessionResources::shutdown(resources.as_ref()).await?;
-        self.failed
-            .store(false, std::sync::atomic::Ordering::Release);
-        Ok(())
-    }
-
     fn discovered(
         source: &Path,
         workspace_roots: &[PathBuf],
@@ -160,101 +120,122 @@ impl RuntimeSessionExtensionController {
         Ok((plugin, manifest))
     }
 
-    async fn prepare_candidate(
+    async fn prepare(
         &self,
-        plugin: &crate::extension_config::DiscoveredPlugin,
-        manifest: &PluginManifest,
-        workspace_roots: &[PathBuf],
-    ) -> std::result::Result<PluginSessionRuntime, rw_core::AgentLoopError> {
-        let metadata =
-            rw_ext::PluginEndpointMetadata::new(manifest.clone()).map_err(development_error)?;
-        let push_handler = Arc::new(SessionPluginPushHandler::default());
-        let endpoint: Arc<dyn rw_ext::PluginEndpoint> = Arc::new(
-            activation::DormantPluginEndpoint::new(activation::ActivationRecipe {
-                metadata,
-                approval: activation::ActivationApproval::SessionDevelopment,
-                config: plugin.clone(),
-                private_root: self.private_root.clone(),
-                workspace_roots: workspace_roots.to_vec(),
-                helper: self.helper.clone(),
-                redactor: Arc::clone(&self.redactor),
-                push_handler: Arc::clone(&push_handler),
-                budget: Arc::clone(&self.activation),
-                #[cfg(test)]
-                launcher: None,
-            }),
-        );
-        let mut candidate = PluginSessionRuntime::new(
-            &self.activation,
-            &self.redactor,
-            Arc::clone(&self.session_ui),
-        );
-        candidate
-            .register_endpoint(plugin, manifest, Arc::clone(&endpoint), push_handler)
-            .map_err(development_error)?;
-        match endpoint.connect(&CancellationToken::default()).await {
-            Ok(_) => Ok(candidate),
-            Err(error) => {
-                self.retire(candidate).await?;
-                if error.code == "effects_unsettled" {
-                    self.failed
-                        .store(true, std::sync::atomic::Ordering::Release);
-                    Err(rw_core::AgentLoopError::EffectsUnsettled(error.message))
-                } else {
-                    Err(development_error(error))
-                }
-            }
-        }
-    }
-
-    fn compose_candidate(
-        base: &rw_core::SessionExtensionSnapshot,
-        candidate: &PluginSessionRuntime,
+        state: &DevelopmentExtensionState,
+        built: &mut crate::session_runtime::tool_composition::BuiltTools,
+        roots: &[PathBuf],
+        alias: &str,
         revision: u64,
+        development: Option<&crate::extension_config::DiscoveredPlugin>,
     ) -> std::result::Result<rw_core::SessionExtensionSnapshot, rw_core::AgentLoopError> {
-        let mut tools = base.tools.as_ref().clone();
+        let root_owner = self.recipe.root_owner()?;
+        let catalog = root_owner.extension_catalog(roots)?;
+        let configured = root_owner.native_configs(roots)?;
+        let prepared = self.owner.prepare(&configured, development, roots).await?;
+        let candidate = prepared.runtime.clone();
+        let mut tools = built.registry.as_ref().clone();
         for tool in &candidate.tools {
-            tools.register(Arc::clone(tool)).map_err(|error| {
-                development_error(format!("development plugin tool collision: {error}"))
-            })?;
+            tools.register(tool.clone()).map_err(closed_generation)?;
         }
-        let mut hooks = base.hooks.as_ref().clone();
+        self.recipe
+            .add_tools(&mut tools, &catalog)
+            .map_err(closed_generation)?;
+        built.registry = Arc::new(tools);
+        let extensions = root_owner
+            .prepare_extensions(roots, built)
+            .map_err(closed_generation)?;
+        let mut hooks = extensions.hooks.as_ref().clone();
         for (registration, handler) in &candidate.hooks {
             hooks
-                .register_shared(registration.clone(), Arc::clone(handler))
-                .map_err(|error| {
-                    development_error(format!("development plugin hook collision: {error}"))
-                })?;
+                .register_shared(registration.clone(), handler.clone())
+                .map_err(closed_generation)?;
         }
-        let mut commands = base.commands.as_ref().clone();
+        let mut commands = extensions.commands.as_ref().clone();
+        if let Some(mcp) = &self.recipe.mcp {
+            super::register_mcp_command(
+                &mut commands,
+                mcp.manager.clone(),
+                Some(mcp.approvals.clone()),
+            )
+            .await
+            .map_err(closed_generation)?;
+        }
         for (descriptor, handler) in &candidate.commands {
             commands
-                .register_shared(descriptor.clone(), Arc::clone(handler))
-                .map_err(|error| {
-                    development_error(format!("development plugin command collision: {error}"))
-                })?;
+                .register_shared(descriptor.clone(), handler.clone())
+                .map_err(closed_generation)?;
+        }
+        let publication = prepared.with_model(
+            crate::session_runtime::native_model_generations::NativeModelInput {
+                providers: Vec::new(),
+                tools: built.registry.clone(),
+                roots: roots.to_vec(),
+                alias: alias.to_owned(),
+                websearch: built.websearch.clone(),
+            },
+        )?;
+        let revision = state
+            .revision
+            .max(revision)
+            .checked_add(1)
+            .ok_or_else(|| closed_generation("extension revision exhausted"))?;
+        let model = publication.model();
+        for agent in rw_ext::compose_agent_registry(&catalog)
+            .map_err(closed_generation)?
+            .definitions()
+        {
+            if let Some(alias) = agent.model()
+                && !model.has_model_alias(alias)
+            {
+                return Err(closed_generation(
+                    "agent references an unavailable model in the candidate generation",
+                ));
+            }
         }
         Ok(rw_core::SessionExtensionSnapshot {
-            publication: rw_core::RuntimePublication::Active,
-            ui: Arc::new(rw_core::ui::CombinedUiRegistry::new(
-                Arc::clone(&base.ui),
-                candidate.ui.clone(),
-            )?),
+            model,
+            model_alias: alias.to_owned(),
+            publication: publication
+                .publication(self.recipe.orchestrator.clone(), built.registry.clone()),
+            ui: candidate.ui.clone(),
             revision,
-            workspace_roots: Arc::clone(&base.workspace_roots),
-            tools: Arc::new(tools),
+            workspace_roots: Arc::from(roots.to_vec()),
+            tools: built.registry.clone(),
             hooks: Arc::new(hooks),
             commands: Arc::new(commands),
         })
     }
+    pub(crate) async fn prepare_workspace(
+        &self,
+        root: &mut crate::session_runtime::workspace_roots::PreparedRootGeneration,
+        alias: &str,
+        revision: u64,
+    ) -> std::result::Result<rw_core::SessionExtensionSnapshot, rw_core::AgentLoopError> {
+        let mut state = self.state.lock().await;
+        let snapshot = self
+            .prepare(
+                &state,
+                &mut root.built,
+                &root.roots,
+                alias,
+                revision,
+                state.development.as_ref(),
+            )
+            .await?;
+        state.revision = snapshot.revision;
+        root.extensions.hooks = snapshot.hooks.clone();
+        root.extensions.commands = snapshot.commands.clone();
+        Ok(snapshot)
+    }
 }
 
 pub(super) fn development_error(error: impl ToString) -> rw_core::AgentLoopError {
-    let message = error.to_string();
-    drop(error);
-    rw_core::AgentLoopError::InvalidConfiguration(message)
+    rw_core::AgentLoopError::InvalidConfiguration(error.to_string())
 }
-
+fn closed_generation(error: impl ToString) -> rw_core::AgentLoopError {
+    rw_core::AgentLoopError::EffectsUnsettled(error.to_string())
+}
 #[async_trait]
 impl rw_core::SessionExtensionController for RuntimeSessionExtensionController {
     async fn attach(
@@ -262,116 +243,79 @@ impl rw_core::SessionExtensionController for RuntimeSessionExtensionController {
         source: &Path,
         current: rw_core::SessionExtensionSnapshot,
     ) -> std::result::Result<rw_core::SessionExtensionSnapshot, rw_core::AgentLoopError> {
-        let _operation = self.operation.lock().await;
-        self.ensure_ready()?;
+        let mut state = self.state.lock().await;
         let (plugin, manifest) =
             Self::discovered(source, &current.workspace_roots).map_err(development_error)?;
-        let (base, ceiling, current_revision) = {
-            let state = self.state.lock().await;
-            (
-                state.base.clone().unwrap_or_else(|| current.clone()),
-                state.ceiling.clone(),
-                state.revision.max(current.revision),
-            )
-        };
-        if ceiling
+        if state
+            .ceiling
             .as_ref()
             .is_some_and(|ceiling| ceiling != &manifest.capabilities)
         {
-            return Err(rw_core::AgentLoopError::InvalidConfiguration(
-                "development plugin capability expansion requires detach and a new explicit grant"
-                    .to_owned(),
+            return Err(development_error(
+                "development capability change requires detach and a fresh explicit grant",
             ));
         }
-        let candidate = self
-            .prepare_candidate(&plugin, &manifest, &current.workspace_roots)
+        let mut built = self
+            .recipe
+            .root_owner()?
+            .prepare_tools(&current.workspace_roots)?;
+        built.registry = Arc::new(
+            built
+                .registry
+                .as_ref()
+                .clone()
+                .with_mcp_tool_policy(current.tools.mcp_tool_policy().clone()),
+        );
+        let snapshot = self
+            .prepare(
+                &state,
+                &mut built,
+                &current.workspace_roots,
+                &current.model_alias,
+                current.revision,
+                Some(&plugin),
+            )
             .await?;
-        let revision = current_revision.saturating_add(1);
-        let snapshot = match Self::compose_candidate(&base, &candidate, revision) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                self.retire(candidate).await?;
-                return Err(error);
-            }
-        };
-        let retired = {
-            let mut state = self.state.lock().await;
-            if state.base.is_none() {
-                state.base = Some(base);
-            }
-            if state.ceiling.is_none() {
-                state.ceiling = Some(manifest.capabilities);
-            }
-            state.revision = revision;
-            state.active.replace(candidate)
-        };
-        if let Some(retired) = retired {
-            self.retire(retired).await?;
-        }
+        state.ceiling = Some(manifest.capabilities);
+        state.development = Some(plugin);
+        state.revision = snapshot.revision;
         Ok(snapshot)
     }
-
     async fn detach(
         &self,
-    ) -> std::result::Result<rw_core::SessionExtensionSnapshot, rw_core::AgentLoopError> {
-        let _operation = self.operation.lock().await;
-        self.ensure_ready()?;
-        let (base, active) = {
-            let mut state = self.state.lock().await;
-            let base = state.base.take().ok_or_else(|| {
-                rw_core::AgentLoopError::InvalidConfiguration(
-                    "no development plugin is attached".to_owned(),
-                )
-            })?;
-            state.ceiling = None;
-            state.revision = state.revision.saturating_add(1);
-            (base, state.active.take())
-        };
-        if let Some(active) = active {
-            self.retire(active).await?;
-        }
-        Ok(base)
-    }
-
-    async fn rebase(
-        &self,
         current: rw_core::SessionExtensionSnapshot,
-    ) -> std::result::Result<(rw_core::SessionExtensionSnapshot, bool), rw_core::AgentLoopError>
-    {
-        let _operation = self.operation.lock().await;
-        self.ensure_ready()?;
-        let (snapshot, retired) = {
-            let mut state = self.state.lock().await;
-            let Some(active) = state.active.as_ref() else {
-                return Ok((current, false));
-            };
-            let revision = state.revision.max(current.revision).saturating_add(1);
-            if let Ok(snapshot) = Self::compose_candidate(&current, active, revision) {
-                state.base = Some(current);
-                state.revision = revision;
-                (snapshot, None)
-            } else {
-                let retired = state.active.take();
-                state.base = None;
-                state.ceiling = None;
-                state.revision = revision;
-                (current, retired)
-            }
-        };
-        if let Some(retired) = retired {
-            self.retire(retired).await?;
-            return Ok((snapshot, true));
+    ) -> std::result::Result<rw_core::SessionExtensionSnapshot, rw_core::AgentLoopError> {
+        let mut state = self.state.lock().await;
+        if state.development.is_none() {
+            return Err(development_error("no development plugin is attached"));
         }
-        Ok((snapshot, false))
+        let mut built = self
+            .recipe
+            .root_owner()?
+            .prepare_tools(&current.workspace_roots)?;
+        built.registry = Arc::new(
+            built
+                .registry
+                .as_ref()
+                .clone()
+                .with_mcp_tool_policy(current.tools.mcp_tool_policy().clone()),
+        );
+        let snapshot = self
+            .prepare(
+                &state,
+                &mut built,
+                &current.workspace_roots,
+                &current.model_alias,
+                current.revision,
+                None,
+            )
+            .await?;
+        state.development = None;
+        state.ceiling = None;
+        state.revision = snapshot.revision;
+        Ok(snapshot)
     }
-
     async fn shutdown(&self) -> std::result::Result<(), rw_core::AgentLoopError> {
-        let _operation = self.operation.lock().await;
-        let earlier = self.ensure_ready();
-        let active = self.state.lock().await.active.take();
-        if let Some(active) = active {
-            self.retire(active).await?;
-        }
-        earlier
+        self.owner.shutdown().await.map_err(closed_generation)
     }
 }

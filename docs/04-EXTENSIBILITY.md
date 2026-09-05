@@ -258,7 +258,22 @@ when a caller stops waiting. Changed catalog schemas remain inactive until appro
 
 `rw plugin status|approve|revoke` manages the separately fingerprinted plugin approval ledger. `rw plugin check <path> --allow-exec` validates source-package identity and runs the declared typecheck and test scripts without attaching the plugin to a session. For a source target, the release-owned sibling host discovers the complete graph without executing top-level plugin code; Rust validates the Bun lock identities, copies exact no-follow bytes to private scratch, rebuilds from that sealed tree, requires the second graph to match, and publishes one content-addressed bundle. Approval binds the manifest, source graph, lockfile, bundle, host ABI, format, origin, environment names, domains, and sandbox policy. Each plugin launches in its own host process. A source failure leaves other plugins running.
 
-The scaffold contains one inert `manifest.json`, imported through `parsePluginManifest`, so authority has one owner. `rw plugin dev <path> --session current --allow-dev-exec` attaches that package to one live local session. Stable edits prepare candidates through the same resolver; the actor swaps a complete immutable tool/hook/command snapshot only after success, retains the last-good generation on rejection, blocks capability changes until detach, and never writes the ephemeral grant to production approval.
+The scaffold contains one inert `manifest.json`, imported through `parsePluginManifest`, so authority has one owner. `rw plugin dev <path> --session current --allow-dev-exec` attaches that package to one live local session. Capability changes require detach and an explicit grant; development approval is never written to production approval.
+
+One native generation owns configured and development plugins, provider routes,
+tools, hooks, commands, UI identities, and event workers. Replacement closes child
+admission before proving old plugin and delivery effects settled. It rebuilds
+first-party MCP, orchestration, and workflow registrations from the same root and
+extension recipe. A retained child generation prevents replacement.
+
+Preparation runs in an independently owned command task so the actor can service
+retiring plugins' host callbacks. The actor commits a root change, installs its
+complete candidate, then synchronously publishes the matching native gate, model
+routes, and delivery workers. Candidate workers cannot consume events before this
+publication. A dropped requester does not abandon preparation. Lost authority or
+failed proof after retirement leaves admission closed; no stale adapter can
+silently resume. Session state and delivery acknowledgements remain canonical
+across process replacement, while live UI ownership receives a fresh identity.
 
 The separate executable target pins its executable, explicit interpreter entrypoints, adjacent dependency descriptors, manifest, code root, origin, environment names, and domains by canonical path, length, and BLAKE3 identity. Eval, module-runner, package-runner, and `PATH`-resolved forms are rejected.
 

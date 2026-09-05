@@ -618,6 +618,7 @@ pub(crate) async fn compose_hosted_actor(
         },
         Arc::new(move |input| recipe.compose(input)),
     );
+    native_extensions.bind_models(model_generations.clone())?;
     let model_catalog = has_catalog.then(|| {
         Arc::new(CachedModelCatalog::with_initial(
             model_generations.clone(),
@@ -659,6 +660,7 @@ pub(crate) async fn compose_hosted_actor(
         .await?;
     wasm_startup_notifications.extend(extension_startup_notifications(&extension_catalog));
     let workspace_root_controller = Arc::new(RuntimeWorkspaceRootController {
+        native: super::native_registry_recipe::RootNativeBinding::session(),
         index_pool: Arc::clone(&options.index_pool),
         journal_service: Arc::clone(&options.journal_service),
         transcripts: Arc::clone(&options.transcripts),
@@ -885,15 +887,22 @@ pub(crate) async fn compose_hosted_actor(
     }
     let runtime_commands = Arc::new(runtime_commands);
     let _ = commands_cell.set(Arc::clone(&runtime_commands));
-    let extension_development: Arc<dyn rw_core::SessionExtensionController> = Arc::new(
+    let extension_development = Arc::new(
         crate::extension_runtime::RuntimeSessionExtensionController::new(
-            options.storage_root.clone(),
-            std::env::current_exe().into_diagnostic()?,
-            Arc::clone(&plugin_redactor),
-            Arc::clone(&options.plugin_runtime_budget),
-            Arc::clone(&session_ui),
+            native_extensions.clone(),
+            super::native_registry_recipe::NativeRegistryRecipe {
+                roots: Arc::downgrade(&workspace_root_controller),
+                orchestrator: orchestrator.clone(),
+                models: model_generations.clone(),
+                mcp: mcp_runtime.clone(),
+                storage_root: options.storage_root.clone(),
+            },
         ),
     );
+    workspace_root_controller
+        .native
+        .bind(&extension_development)
+        .map_err(display_agent_error)?;
     let initial_thinking = configured_session_thinking(&options.config, &persisted_model_alias);
     let handle = SessionActor::spawn(SessionActorConfig {
         ui: plugin_runtime.ui.clone(),

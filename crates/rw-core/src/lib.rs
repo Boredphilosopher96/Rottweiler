@@ -65,9 +65,9 @@ pub use engine::{
     SessionHandle, SessionProjectionError, SessionProjector, SessionRecoveredState,
     SessionReplayLimits, SessionResources, SessionSnapshot, SessionSubscription, SessionUsage,
     StartupNotification, SystemEventClock, TOOL_CANCELLATION_GRACE, WorkspaceRootController,
-    WorkspaceRuntimeGeneration, builtin_command_registry, builtin_hook_dispatcher,
-    commit_session_events, project_session_events, project_session_events_with_modes,
-    project_session_read_view,
+    WorkspaceRootRequest, WorkspaceRuntimeGeneration, builtin_command_registry,
+    builtin_hook_dispatcher, commit_session_events, project_session_events,
+    project_session_events_with_modes, project_session_read_view,
 };
 pub use host::{
     BoundClient, CompletedForkOperation, CreateSessionRequest, EngineHost, EngineHostConfig,

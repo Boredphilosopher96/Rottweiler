@@ -242,13 +242,13 @@ pub(super) fn command_mode_can_open_proxy(mode: &CommandFixtureMode) -> bool {
     )
 }
 
-pub(super) struct BuiltTools {
-    pub(super) registry: Arc<ToolRegistry>,
-    pub(super) command_executor: Arc<dyn CommandExecutor>,
-    pub(super) read_only_hook_executor: Arc<dyn CommandExecutor>,
-    pub(super) read_only_hook_scratch: PathBuf,
-    pub(super) code_intelligence: Arc<dyn CodeIntelligenceProvider>,
-    pub(super) websearch: Option<Arc<RuntimeWebSearcher>>,
-    pub(super) background: Arc<BackgroundProcessManager>,
-    pub(super) _execution_lease: Arc<ExecutionLease>,
+pub(crate) struct BuiltTools {
+    pub(crate) registry: Arc<ToolRegistry>,
+    pub(crate) command_executor: Arc<dyn CommandExecutor>,
+    pub(crate) read_only_hook_executor: Arc<dyn CommandExecutor>,
+    pub(crate) read_only_hook_scratch: PathBuf,
+    pub(crate) code_intelligence: Arc<dyn CodeIntelligenceProvider>,
+    pub(crate) websearch: Option<Arc<RuntimeWebSearcher>>,
+    pub(crate) background: Arc<BackgroundProcessManager>,
+    pub(crate) _execution_lease: Arc<ExecutionLease>,
 }

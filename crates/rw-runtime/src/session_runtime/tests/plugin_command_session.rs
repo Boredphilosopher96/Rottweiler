@@ -132,7 +132,7 @@ async fn sdk_command_controls_state_and_panel_reenter_the_live_actor() {
         journal_service,
         workspace: workspace.clone(),
         additional_workspaces: Vec::new(),
-        allowed_workspace_roots: vec![workspace],
+        allowed_workspace_roots: vec![workspace.clone()],
         storage_root: storage.clone(),
         credentials_path: storage.join("credentials.json"),
         config,
@@ -181,9 +181,97 @@ async fn sdk_command_controls_state_and_panel_reenter_the_live_actor() {
         .expect("host-projected panels");
     assert_eq!(panels.panels.len(), 1);
     assert_eq!(panels.panels[0].revision, 1);
+    verify_root_recomposition(&runtime, &workspace, state.revision).await;
     runtime
         .handle
         .close()
         .await
         .expect("actor and plugin effects settled");
+}
+
+async fn verify_root_recomposition(
+    runtime: &super::super::runtime_options::HostedActorRuntime,
+    workspace: &Path,
+    previous_revision: Option<rw_types::SequenceId>,
+) {
+    let old_catalog = runtime
+        .handle
+        .ui_catalog()
+        .await
+        .expect("initial UI catalog");
+    let old_generation =
+        rw_core::ModelCatalogSource::generation(runtime.model_generations.as_ref());
+    let added = workspace.join("additional");
+    std::fs::create_dir(&added).expect("new workspace root");
+    runtime
+        .handle
+        .send_message(format!("/add-dir {}", added.display()))
+        .await
+        .expect("publish complete root generation");
+    assert_eq!(
+        runtime
+            .handle
+            .snapshot()
+            .await
+            .expect("published root snapshot")
+            .workspace_roots
+            .len(),
+        2
+    );
+    assert!(
+        rw_core::ModelCatalogSource::generation(runtime.model_generations.as_ref())
+            > old_generation
+    );
+    let catalog = runtime
+        .handle
+        .ui_catalog()
+        .await
+        .expect("replacement catalog");
+    assert_eq!(catalog.entries.len(), old_catalog.entries.len());
+    assert_ne!(
+        catalog.entries[0].owner.generation,
+        old_catalog.entries[0].owner.generation
+    );
+    assert!(
+        runtime
+            .handle
+            .ui_panels()
+            .await
+            .expect("fresh panel state")
+            .panels
+            .is_empty()
+    );
+    assert!(
+        runtime
+            .handle
+            .command_descriptors()
+            .iter()
+            .any(|entry| entry.name() == "context-panel")
+    );
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        runtime.handle.send_message("/context-panel"),
+    )
+    .await
+    .expect("replacement callback deadline")
+    .expect("new plugin generation is bound to live actor");
+    let state = runtime
+        .handle
+        .plugin_session_capability("command-session")
+        .expect("namespace")
+        .read_state()
+        .await
+        .expect("canonical state survives process retirement");
+    assert!(state.revision > previous_revision);
+    assert_eq!(state.entries.len(), 1);
+    assert_eq!(
+        runtime
+            .handle
+            .ui_panels()
+            .await
+            .expect("replacement panel")
+            .panels
+            .len(),
+        1
+    );
 }

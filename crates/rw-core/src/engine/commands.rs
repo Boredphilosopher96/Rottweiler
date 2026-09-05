@@ -174,6 +174,7 @@ impl FolderTrustController for NoopFolderTrustController {
 
 /// Complete immutable runtime boundary swapped after a live root append.
 pub struct WorkspaceRuntimeGeneration {
+    pub model: Arc<dyn super::ModelDriver>,
     pub publication: super::RuntimePublication,
     pub ui: Arc<dyn crate::ui::UiRegistry>,
     pub generation: u64,
@@ -201,16 +202,24 @@ impl fmt::Debug for WorkspaceRuntimeGeneration {
     }
 }
 
+/// Captured actor authority for one append-only root preparation.
+pub struct WorkspaceRootRequest<'a> {
+    pub requested: &'a Path,
+    pub roots: &'a [PathBuf],
+    pub generation: u64,
+    pub effective_from_turn: u64,
+    pub permissions: Arc<PermissionGate>,
+    pub model: Arc<dyn super::ModelDriver>,
+    pub model_alias: &'a str,
+    pub mcp_policy: rw_tools::McpToolPolicy,
+}
+
 /// Host-owned builder and persistence boundary for live workspace generations.
 #[async_trait]
 pub trait WorkspaceRootController: Send + Sync {
     async fn append_root(
         &self,
-        requested: &Path,
-        current_roots: &[PathBuf],
-        current_generation: u64,
-        effective_from_turn: u64,
-        permissions: Arc<PermissionGate>,
+        request: WorkspaceRootRequest<'_>,
     ) -> Result<WorkspaceRuntimeGeneration, AgentLoopError>;
 
     async fn prepare_commit_generation(&self, generation: u64) -> Result<(), AgentLoopError>;
@@ -231,11 +240,7 @@ pub struct NoopWorkspaceRootController;
 impl WorkspaceRootController for NoopWorkspaceRootController {
     async fn append_root(
         &self,
-        _requested: &Path,
-        _current_roots: &[PathBuf],
-        _current_generation: u64,
-        _effective_from_turn: u64,
-        _permissions: Arc<PermissionGate>,
+        _request: WorkspaceRootRequest<'_>,
     ) -> Result<WorkspaceRuntimeGeneration, AgentLoopError> {
         Err(AgentLoopError::InvalidConfiguration(
             "live workspace-root changes are unavailable for this session host".to_owned(),

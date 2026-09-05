@@ -82,7 +82,7 @@ mod turn;
 pub use commands::{
     CommandToolCall, CommandToolOutputKind, FolderTrustController, FolderTrustOperation,
     NoopFolderTrustController, NoopWorkspaceRootController, SessionCommandAction,
-    SessionCommandContext, SessionCommandOutput, WorkspaceRootController,
+    SessionCommandContext, SessionCommandOutput, WorkspaceRootController, WorkspaceRootRequest,
     WorkspaceRuntimeGeneration, builtin_command_registry,
 };
 use projection::approved_plan_context_item;

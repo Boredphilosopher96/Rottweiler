@@ -13,22 +13,15 @@ use std::{path::Path, sync::Arc};
 
 pub(in crate::engine) enum PreparedChange {
     None,
-    Workspace {
-        generation: Box<WorkspaceRuntimeGeneration>,
-        extensions: SessionExtensionSnapshot,
-    },
+    Workspace(Box<WorkspaceRuntimeGeneration>),
     Extensions(SessionExtensionSnapshot),
 }
 impl PreparedChange {
     pub(super) fn requires_publication(&self) -> bool {
         match self {
             Self::None => false,
-            Self::Workspace {
-                generation,
-                extensions,
-            } => {
+            Self::Workspace(generation) => {
                 matches!(generation.publication, RuntimePublication::Prepared(_))
-                    || matches!(extensions.publication, RuntimePublication::Prepared(_))
             }
             Self::Extensions(snapshot) => {
                 matches!(snapshot.publication, RuntimePublication::Prepared(_))
@@ -36,7 +29,7 @@ impl PreparedChange {
         }
     }
     pub(super) async fn abort(&self, config: &SessionActorConfig) {
-        if let Self::Workspace { generation, .. } = self {
+        if let Self::Workspace(generation) = self {
             let _ = config
                 .workspace_roots
                 .abort_generation(generation.generation)
@@ -48,6 +41,8 @@ impl PreparedChange {
 fn snapshot(config: &SessionActorConfig) -> SessionExtensionSnapshot {
     SessionExtensionSnapshot {
         publication: RuntimePublication::Active,
+        model: config.model.clone(),
+        model_alias: config.model_alias.clone(),
         ui: config.ui.clone(),
         revision: config.workspace_generation,
         workspace_roots: Arc::from(
@@ -69,7 +64,7 @@ pub(super) async fn prepare_development(
     let extensions = if let Some(source) = source {
         config.extension_development.attach(source, current).await?
     } else {
-        config.extension_development.detach().await?
+        config.extension_development.detach(current).await?
     };
     Ok(PreparedCommand {
         output: SessionCommandOutput {
@@ -99,13 +94,16 @@ pub(super) async fn prepare_output(
     let current = snapshot(config);
     let generation = config
         .workspace_roots
-        .append_root(
-            path,
-            &current.workspace_roots,
-            config.workspace_generation,
-            next_turn,
-            config.permissions.clone(),
-        )
+        .append_root(crate::WorkspaceRootRequest {
+            requested: path,
+            roots: &current.workspace_roots,
+            generation: config.workspace_generation,
+            effective_from_turn: next_turn,
+            permissions: config.permissions.clone(),
+            model: config.model.clone(),
+            model_alias: &config.model_alias,
+            mcp_policy: config.tools.mcp_tool_policy().clone(),
+        })
         .await?;
     let valid = config.workspace_generation.checked_add(1) == Some(generation.generation)
         && generation.effective_from_turn == next_turn
@@ -124,47 +122,21 @@ pub(super) async fn prepare_output(
             .workspace_roots
             .abort_generation(generation.generation)
             .await?;
-        return Err(AgentLoopError::InvalidConfiguration(
-            "workspace controller returned a non-canonical or non-append generation".into(),
-        ));
+        let message =
+            "workspace controller returned a non-canonical or non-append generation".to_owned();
+        return Err(
+            if matches!(generation.publication, RuntimePublication::Prepared(_)) {
+                AgentLoopError::EffectsUnsettled(message)
+            } else {
+                AgentLoopError::InvalidConfiguration(message)
+            },
+        );
     }
-    // Rebase may retire native effects and call the actor. It belongs to this
-    // independently owned task, before any durable marker or publication.
-    let rebased = config
-        .extension_development
-        .rebase(SessionExtensionSnapshot {
-            publication: generation.publication.clone(),
-            ui: generation.ui.clone(),
-            revision: generation.generation,
-            workspace_roots: Arc::from(generation.roots.clone()),
-            tools: generation.tools.clone(),
-            hooks: generation.hooks.clone(),
-            commands: generation.commands.clone(),
-        })
-        .await;
-    let (extensions, detached) = match rebased {
-        Ok(value) => value,
-        Err(error) => {
-            config
-                .workspace_roots
-                .abort_generation(generation.generation)
-                .await?;
-            return Err(error);
-        }
-    };
     output.action = SessionCommandAction::None;
     output.message = format!("added workspace root @root/{}", generation.roots.len() - 1);
-    if detached {
-        output
-            .message
-            .push_str("; development plugin detached after a registry collision");
-    }
     Ok(PreparedCommand {
         output,
-        change: PreparedChange::Workspace {
-            generation: Box::new(generation),
-            extensions,
-        },
+        change: PreparedChange::Workspace(Box::new(generation)),
     })
 }
 
@@ -180,10 +152,7 @@ pub(super) async fn apply(
             *context.config = Arc::new(context.config.with_extension_snapshot(snapshot));
             snapshot.publication.publish()
         }
-        PreparedChange::Workspace {
-            generation,
-            extensions,
-        } => apply_workspace(generation, extensions, context).await,
+        PreparedChange::Workspace(generation) => apply_workspace(generation, context).await,
     };
     // The caller poisons admission when a prepared external boundary cannot be
     // published. It must never resume a config whose endpoints were retired.
@@ -204,7 +173,6 @@ fn install_extensions(snapshot: &SessionExtensionSnapshot, context: &DispatchCon
 
 async fn apply_workspace(
     generation: &WorkspaceRuntimeGeneration,
-    extensions: &SessionExtensionSnapshot,
     mut context: DispatchContext<'_>,
 ) -> Result<(), AgentLoopError> {
     let replacement = ToolContext::from_workspace_roots(&generation.roots)
@@ -212,7 +180,7 @@ async fn apply_workspace(
             AgentLoopError::ToolContext("workspace tool context could not prepare".into())
         })?
         .with_session_id(context.config.session_id.clone())
-        .with_mcp_tool_policy(context.config.tools.mcp_tool_policy().clone());
+        .with_mcp_tool_policy(generation.tools.mcp_tool_policy().clone());
     let result = commit_workspace(generation, &mut context).await;
     if let Err(error) = result {
         context
@@ -228,17 +196,19 @@ async fn apply_workspace(
         .finalize_generation(generation.generation);
     let next = context
         .config
-        .with_workspace_generation(generation, &context.state.mode_id)
-        .with_extension_snapshot(extensions);
-    install_extensions(extensions, &context);
+        .with_workspace_generation(generation, &context.state.mode_id);
+    *context
+        .command_descriptors
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Arc::from(next.commands.descriptors().cloned().collect::<Vec<_>>());
     *context
         .mode_registry
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = next.modes.clone();
     *context.config = Arc::new(next);
     *context.tool_context = replacement;
-    // A rebase owns the one complete publication, including the root candidate.
-    extensions.publication.publish()
+    generation.publication.publish()
 }
 
 async fn commit_workspace(

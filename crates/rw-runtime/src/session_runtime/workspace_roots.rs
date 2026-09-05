@@ -96,7 +96,8 @@ pub(super) fn canonical_workspace_roots(
 }
 
 #[allow(clippy::struct_excessive_bools)]
-pub(super) struct RuntimeWorkspaceRootController {
+pub(crate) struct RuntimeWorkspaceRootController {
+    pub(crate) native: super::native_registry_recipe::RootNativeBinding,
     pub(super) index_pool: Arc<rw_tools::WorkspaceIndexPool>,
     pub(super) journal_service: Arc<JournalService>,
     pub(super) transcripts: Arc<crate::transcript_service::TranscriptReader>,
@@ -144,19 +145,19 @@ impl WorkspaceRootAuthorization {
     }
 }
 
-pub(super) struct PreparedExtensionGeneration {
-    pub(super) hooks: Arc<HookDispatcher>,
-    pub(super) commands: Arc<CommandRegistry<SessionCommandContext, SessionCommandOutput>>,
-    pub(super) modes: Arc<rw_ext::ModeRegistry>,
-    pub(super) skill_index: Option<Turn>,
+pub(crate) struct PreparedExtensionGeneration {
+    pub(crate) hooks: Arc<HookDispatcher>,
+    pub(crate) commands: Arc<CommandRegistry<SessionCommandContext, SessionCommandOutput>>,
+    pub(crate) modes: Arc<rw_ext::ModeRegistry>,
+    pub(crate) skill_index: Option<Turn>,
 }
 
-pub(super) struct PreparedRootGeneration {
-    pub(super) roots: Vec<PathBuf>,
-    pub(super) supplemental_context: Vec<Turn>,
-    pub(super) built: BuiltTools,
-    pub(super) permissions: Arc<PermissionGate>,
-    pub(super) extensions: PreparedExtensionGeneration,
+pub(crate) struct PreparedRootGeneration {
+    pub(crate) roots: Vec<PathBuf>,
+    pub(crate) supplemental_context: Vec<Turn>,
+    pub(crate) built: BuiltTools,
+    pub(crate) permissions: Arc<PermissionGate>,
+    pub(crate) extensions: PreparedExtensionGeneration,
 }
 
 impl RuntimeWorkspaceRootController {
@@ -297,6 +298,7 @@ impl RuntimeWorkspaceRootController {
                 memory_redactor: redactor,
             });
         let workspace_controller = Arc::new(RuntimeWorkspaceRootController {
+            native: super::native_registry_recipe::RootNativeBinding::Standalone,
             index_pool: Arc::clone(&self.index_pool),
             journal_service: Arc::clone(&self.journal_service),
             transcripts: Arc::clone(&self.transcripts),
@@ -374,7 +376,7 @@ impl RuntimeWorkspaceRootController {
         })
     }
 
-    pub(super) fn prepare_tools(
+    pub(crate) fn prepare_tools(
         &self,
         roots: &[PathBuf],
     ) -> std::result::Result<BuiltTools, AgentLoopError> {
@@ -513,7 +515,57 @@ impl RuntimeWorkspaceRootController {
         })
     }
 
-    pub(super) fn prepare_extensions(
+    pub(crate) fn extension_catalog(
+        &self,
+        roots: &[PathBuf],
+    ) -> std::result::Result<Arc<rw_ext::ExtensionCatalog>, AgentLoopError> {
+        discover_runtime_extensions(
+            roots,
+            &self.trust_store_path,
+            &self.extension_user_home,
+            &self.extension_user_rottweiler,
+            self.dangerously_trust,
+        )
+        .map(Arc::new)
+        .map_err(|_| {
+            AgentLoopError::InvalidConfiguration(
+                "workspace extensions could not be discovered".into(),
+            )
+        })
+    }
+    pub(crate) fn native_configs(
+        &self,
+        roots: &[PathBuf],
+    ) -> std::result::Result<Vec<crate::extension_config::DiscoveredPlugin>, AgentLoopError> {
+        if self.offline {
+            return Ok(Vec::new());
+        }
+        let primary = roots.first().ok_or_else(|| {
+            AgentLoopError::InvalidConfiguration("native discovery requires a workspace".into())
+        })?;
+        let trusted = self.dangerously_trust
+            || FolderTrustStore::new(self.trust_store_path.clone())
+                .assess(primary)
+                .map_err(|_| {
+                    AgentLoopError::InvalidConfiguration(
+                        "native extension trust is unavailable".into(),
+                    )
+                })?
+                .project_execution_enabled();
+        crate::extension_config::discover_executable_configs(
+            &self.extension_user_home,
+            primary,
+            trusted,
+        )
+        .map(|catalog| catalog.plugins)
+        .map_err(|_| {
+            AgentLoopError::InvalidConfiguration(
+                "native extension configuration is unavailable".into(),
+            )
+        })
+    }
+
+    pub(crate) fn prepare_extensions(
         &self,
         roots: &[PathBuf],
         built: &BuiltTools,
@@ -584,15 +636,44 @@ impl RuntimeWorkspaceRootController {
 impl rw_core::WorkspaceRootController for RuntimeWorkspaceRootController {
     async fn append_root(
         &self,
-        requested: &Path,
-        current_roots: &[PathBuf],
-        current_generation: u64,
-        effective_from_turn: u64,
-        permissions: Arc<PermissionGate>,
+        request: rw_core::WorkspaceRootRequest<'_>,
     ) -> std::result::Result<rw_core::WorkspaceRuntimeGeneration, AgentLoopError> {
+        let rw_core::WorkspaceRootRequest {
+            requested,
+            roots: current_roots,
+            generation: current_generation,
+            effective_from_turn,
+            permissions,
+            model,
+            model_alias,
+            mcp_policy,
+        } = request;
         let roots = self.appended_roots(requested, current_roots)?;
-        let prepared = self.prepare_root_generation(roots, &permissions)?;
-        let generation = current_generation.saturating_add(1);
+        let mut prepared = self.prepare_root_generation(roots, &permissions)?;
+        prepared.built.registry = Arc::new(
+            prepared
+                .built
+                .registry
+                .as_ref()
+                .clone()
+                .with_mcp_tool_policy(mcp_policy),
+        );
+        let generation = current_generation.checked_add(1).ok_or_else(|| {
+            AgentLoopError::InvalidConfiguration("workspace generation exhausted".into())
+        })?;
+        let native_owner = match &self.native {
+            super::native_registry_recipe::RootNativeBinding::Standalone => None,
+            super::native_registry_recipe::RootNativeBinding::Session(binding) => Some(
+                binding
+                    .get()
+                    .and_then(std::sync::Weak::upgrade)
+                    .ok_or_else(|| {
+                        AgentLoopError::InvalidConfiguration(
+                            "session root composition is unavailable".into(),
+                        )
+                    })?,
+            ),
+        };
         append_checkpoint_root_generation(
             &self.checkpoint_root,
             current_roots,
@@ -612,6 +693,22 @@ impl rw_core::WorkspaceRootController for RuntimeWorkspaceRootController {
                 ));
             }
         };
+        let native = if let Some(controller) = native_owner {
+            Some(
+                match controller
+                    .prepare_workspace(&mut prepared, model_alias, generation)
+                    .await
+                {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        self.abort_generation(generation).await?;
+                        return Err(error);
+                    }
+                },
+            )
+        } else {
+            None
+        };
         self.toolchain_runtime.prepare(
             generation,
             Arc::clone(&prepared.built.command_executor),
@@ -623,9 +720,20 @@ impl rw_core::WorkspaceRootController for RuntimeWorkspaceRootController {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(generation, prepared.roots.clone());
+        let (model, publication, ui) = native.map_or_else(
+            || {
+                (
+                    model,
+                    rw_core::RuntimePublication::Active,
+                    Arc::new(rw_core::ui::EmptyUiRegistry) as Arc<dyn rw_core::ui::UiRegistry>,
+                )
+            },
+            |snapshot| (snapshot.model, snapshot.publication, snapshot.ui),
+        );
         Ok(rw_core::WorkspaceRuntimeGeneration {
-            publication: rw_core::RuntimePublication::Active,
-            ui: Arc::new(rw_core::ui::EmptyUiRegistry),
+            model,
+            publication,
+            ui,
             generation,
             effective_from_turn,
             roots: prepared.roots.clone(),

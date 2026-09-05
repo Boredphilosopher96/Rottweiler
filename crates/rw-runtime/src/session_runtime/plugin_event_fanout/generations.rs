@@ -109,7 +109,10 @@ pub(crate) struct PreparedPluginDelivery {
     revision: u64,
 }
 impl PreparedPluginDelivery {
-    pub(crate) fn publish(self) -> Result<(), AgentLoopError> {
+    pub(crate) fn publish_with(
+        self,
+        publish: impl FnOnce() -> Result<(), AgentLoopError>,
+    ) -> Result<(), AgentLoopError> {
         let mut generation = self
             .owner
             .workers
@@ -123,6 +126,7 @@ impl PreparedPluginDelivery {
         {
             return Err(error("event delivery publication authority changed"));
         }
+        publish()?;
         generation.workers = Arc::from(self.workers);
         generation.revision = self.revision;
         generation.paused = false;

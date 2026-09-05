@@ -352,6 +352,7 @@ async fn add_dir_commit_failure_aborts_generation_and_preserves_live_runtime() {
     let tools = Arc::new(ToolRegistry::new());
     let permissions = Arc::new(PermissionGate::new(PermissionDecision::Allow));
     let controller = Arc::new(FixedWorkspaceRootController {
+        extensions: None,
         roots: vec![primary.clone(), added.clone()],
         tools: Arc::clone(&tools),
         permissions: Arc::clone(&permissions),
@@ -396,6 +397,7 @@ async fn add_dir_commit_failure_aborts_generation_and_preserves_live_runtime() {
 
     let failing_permissions = Arc::new(PermissionGate::new(PermissionDecision::Allow));
     let failing_controller = Arc::new(FixedWorkspaceRootController {
+        extensions: None,
         roots: vec![primary.clone(), added.clone()],
         tools: Arc::new(ToolRegistry::new()),
         permissions: Arc::clone(&failing_permissions),
@@ -436,6 +438,7 @@ async fn add_dir_commit_refreshes_the_nonblocking_command_catalog() {
     let tools = Arc::new(ToolRegistry::new());
     let permissions = Arc::new(PermissionGate::new(PermissionDecision::Allow));
     let controller = Arc::new(FixedWorkspaceRootController {
+        extensions: None,
         roots: vec![primary.clone(), added.clone()],
         tools: Arc::clone(&tools),
         permissions: Arc::clone(&permissions),
@@ -482,7 +485,9 @@ async fn live_plugin_reload_swaps_only_successful_generations_and_detach_restore
     let added = std::fs::canonicalize(added_dir.path()).expect("canonical added");
     let tools = Arc::new(ToolRegistry::new());
     let permissions = Arc::new(PermissionGate::new(PermissionDecision::Allow));
+    let extension_controller = Arc::new(FixedSessionExtensionController::default());
     let workspace_controller = Arc::new(FixedWorkspaceRootController {
+        extensions: Some(extension_controller.clone()),
         roots: vec![primary.clone(), added.clone()],
         tools: Arc::clone(&tools),
         permissions: Arc::clone(&permissions),
@@ -490,7 +495,6 @@ async fn live_plugin_reload_swaps_only_successful_generations_and_detach_restore
         aborted: AtomicU64::new(0),
         fail_commit: false,
     });
-    let extension_controller = Arc::new(FixedSessionExtensionController::default());
     let mut actor_config = config(
         &primary,
         Arc::new(ScriptedModel::default()),
