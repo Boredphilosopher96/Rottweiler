@@ -54,27 +54,30 @@ impl SubagentSessionFactory for WorktreeSubagentSessionFactory {
         if launch.request.isolation == SubagentIsolation::Shared {
             return self.inner.create(launch).await;
         }
-        let lease = Arc::new(
-            self.isolation
-                .create(launch.cancellation.clone())
-                .await
-                .map_err(|error| OrchestrationError::Session(error.to_string()))?,
-        );
-        launch.workspace_root = lease.path().to_path_buf();
+        let allocation = self
+            .isolation
+            .create(launch.cancellation.clone())
+            .await
+            .map_err(creation_error)?;
+        launch.workspace_root = allocation.lease().path().to_path_buf();
         let inner = match self.inner.create(launch).await {
             Ok(inner) => inner,
             Err(error) => {
-                let _ = self
-                    .isolation
-                    .cleanup_if_untouched(&lease, CancellationToken::default())
-                    .await;
+                if matches!(error, OrchestrationError::EffectsUnsettled(_)) {
+                    return Err(error);
+                }
+                if let Err(cleanup) = allocation.rollback().await {
+                    return Err(OrchestrationError::EffectsUnsettled(format!(
+                        "{error}; {cleanup}"
+                    )));
+                }
                 return Err(error);
             }
         };
         Ok(Arc::new(WorktreeSubagentSession {
             inner,
             isolation: Arc::clone(&self.isolation),
-            lease,
+            lease: Arc::new(allocation.commit()),
         }))
     }
 
@@ -449,5 +452,14 @@ impl SubagentSession for ActorSubagentSession {
             .await
             .map(|_| ())
             .map_err(|error| OrchestrationError::Session(error.to_string()))
+    }
+}
+
+fn creation_error(error: rw_tools::ToolError) -> OrchestrationError {
+    match error {
+        rw_tools::ToolError::EffectsUnsettled(reason) => {
+            OrchestrationError::EffectsUnsettled(reason)
+        }
+        error => OrchestrationError::Session(error.to_string()),
     }
 }

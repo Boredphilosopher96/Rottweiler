@@ -373,6 +373,8 @@ pub enum OrchestrationError {
     AlreadyRunning(String),
     #[error("subagent `{0}` has no pending result")]
     NoPendingResult(String),
+    #[error("subagent effects remain unproven: {0}")]
+    EffectsUnsettled(String),
     #[error("subagent session failed: {0}")]
     Session(String),
     #[error("subagent observer failed: {0}")]

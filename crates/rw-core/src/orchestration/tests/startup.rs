@@ -192,3 +192,65 @@ async fn rejected_startup_does_not_cancel_its_parent_turn() {
         .expect("no unsettled child");
     assert!(!cancellation.is_cancelled());
 }
+
+struct FailedCreationFactory {
+    panic: bool,
+}
+#[async_trait]
+impl SubagentSessionFactory for FailedCreationFactory {
+    async fn create(
+        &self,
+        _launch: SubagentLaunch,
+    ) -> Result<Arc<dyn SubagentSession>, OrchestrationError> {
+        assert!(
+            !self.panic,
+            "factory panicked after starting unknown effects"
+        );
+        Err(OrchestrationError::EffectsUnsettled(
+            "factory still owns effects".to_owned(),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn factory_failure_without_a_returned_session_keeps_startup_ownership() {
+    for panic in [false, true] {
+        let orchestrator = SubagentOrchestrator::new(
+            SubagentLimits {
+                max_concurrency: 1,
+                ..SubagentLimits::default()
+            },
+            Arc::new(FailedCreationFactory { panic }),
+            Arc::new(ToolRegistry::new()),
+        )
+        .expect("orchestrator");
+        assert!(matches!(
+            orchestrator
+                .start(
+                    SessionId("parent".to_owned()),
+                    request("create"),
+                    Arc::new(RecordingObserver::default()),
+                    CancellationToken::default(),
+                )
+                .await,
+            Err(OrchestrationError::EffectsUnsettled(_))
+        ));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), orchestrator.settle_startups())
+                .await
+                .expect("settlement must return"),
+            Err(OrchestrationError::EffectsUnsettled(_))
+        ));
+        assert!(matches!(
+            orchestrator
+                .start(
+                    SessionId("parent".to_owned()),
+                    request("capacity remains owned"),
+                    Arc::new(RecordingObserver::default()),
+                    CancellationToken::default(),
+                )
+                .await,
+            Err(OrchestrationError::ConcurrencyExceeded { .. })
+        ));
+    }
+}

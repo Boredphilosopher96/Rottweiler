@@ -37,7 +37,7 @@ fn git(cwd: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
-fn repository() -> tempfile::TempDir {
+pub(super) fn repository() -> tempfile::TempDir {
     let repo = tempfile::tempdir().expect("repository tempdir");
     git(repo.path(), &["init", "--quiet"]);
     std::fs::write(repo.path().join("shared.txt"), b"base\n").expect("write base");
@@ -73,7 +73,7 @@ fn authorized_apply_tool(artifacts: &[&DiffArtifact]) -> (ApplyWorktreeDiffTool,
     (ApplyWorktreeDiffTool::new(authority), session)
 }
 
-async fn isolation(repo: &Path, private: &Path) -> WorktreeIsolation {
+pub(super) async fn isolation(repo: &Path, private: &Path) -> WorktreeIsolation {
     WorktreeIsolation::new(
         repo,
         private,
@@ -94,7 +94,11 @@ async fn three_parallel_explorers_leave_parent_diff_untouched() {
         manager.create(CancellationToken::default()),
         manager.create(CancellationToken::default()),
     );
-    let leases = [one.expect("one"), two.expect("two"), three.expect("three")];
+    let leases = [
+        one.expect("one").commit(),
+        two.expect("two").commit(),
+        three.expect("three").commit(),
+    ];
     for (index, lease) in leases.iter().enumerate() {
         std::fs::write(
             lease.path().join(format!("explorer-{index}.txt")),
@@ -135,7 +139,8 @@ async fn separate_managers_serialize_overlapping_add_and_remove_registry_mutatio
     let existing = first
         .create(CancellationToken::default())
         .await
-        .expect("existing lease");
+        .expect("existing lease")
+        .commit();
     assert!(first.registry_state.get().is_some());
     assert!(second.registry_state.get().is_none());
     drop(
@@ -172,7 +177,8 @@ async fn separate_managers_serialize_overlapping_add_and_remove_registry_mutatio
     let created = create
         .await
         .expect("add task")
-        .expect("create after gate release");
+        .expect("create after gate release")
+        .commit();
     assert!(
         remove
             .await
@@ -218,7 +224,8 @@ async fn isolated_diff_applies_only_through_explicit_tool() {
     let lease = manager
         .create(CancellationToken::default())
         .await
-        .expect("lease");
+        .expect("lease")
+        .commit();
     std::fs::write(lease.path().join("shared.txt"), b"implemented\n").expect("edit");
     std::fs::write(lease.path().join("--help;touch owned"), b"exact argv\n")
         .expect("write injection-shaped path");
@@ -264,11 +271,13 @@ async fn conflicting_pair_is_a_tool_error_and_keeps_first_result() {
     let first = manager
         .create(CancellationToken::default())
         .await
-        .expect("first");
+        .expect("first")
+        .commit();
     let second = manager
         .create(CancellationToken::default())
         .await
-        .expect("second");
+        .expect("second")
+        .commit();
     std::fs::write(first.path().join("shared.txt"), b"first\n").expect("first write");
     std::fs::write(second.path().join("shared.txt"), b"second\n").expect("second write");
     let (usage, cost) = accounting();
@@ -335,7 +344,8 @@ async fn post_preflight_apply_failure_preserves_parent_bytes_and_index() {
     let lease = manager
         .create(CancellationToken::default())
         .await
-        .expect("lease");
+        .expect("lease")
+        .commit();
     std::fs::write(lease.path().join("shared.txt"), b"child\n").expect("child write");
     let (usage, cost) = accounting();
     let artifact = manager
@@ -384,7 +394,8 @@ async fn correctly_hashed_forgery_is_rejected_by_session_authority() {
     let lease = manager
         .create(CancellationToken::default())
         .await
-        .expect("lease");
+        .expect("lease")
+        .commit();
     std::fs::write(lease.path().join("shared.txt"), b"authorized\n").expect("authorized edit");
     let (usage, cost) = accounting();
     let authorized = manager
@@ -435,7 +446,8 @@ async fn artifact_reference_is_session_scoped_and_preview_expands_full_artifact(
     let lease = manager
         .create(CancellationToken::default())
         .await
-        .expect("lease");
+        .expect("lease")
+        .commit();
     std::fs::write(lease.path().join("shared.txt"), b"referenced\n").expect("referenced edit");
     let (usage, cost) = accounting();
     let artifact = manager
@@ -478,7 +490,8 @@ async fn apply_input_requires_exactly_one_artifact_form() {
     let lease = manager
         .create(CancellationToken::default())
         .await
-        .expect("lease");
+        .expect("lease")
+        .commit();
     std::fs::write(lease.path().join("shared.txt"), b"exactly-one\n").expect("edit");
     let (usage, cost) = accounting();
     let artifact = manager
@@ -522,7 +535,8 @@ async fn cancellation_and_safe_cleanup_fail_closed() {
     let clean = manager
         .create(CancellationToken::default())
         .await
-        .expect("clean");
+        .expect("clean")
+        .commit();
     let clean_path = clean.path().to_path_buf();
     assert!(
         manager
@@ -535,7 +549,8 @@ async fn cancellation_and_safe_cleanup_fail_closed() {
     let dirty = manager
         .create(CancellationToken::default())
         .await
-        .expect("dirty");
+        .expect("dirty")
+        .commit();
     std::fs::write(dirty.path().join("keep.txt"), b"keep\n").expect("dirty write");
     assert!(
         !manager
@@ -554,7 +569,8 @@ async fn tombstoned_changed_lease_is_discarded_without_parent_mutation() {
     let lease = manager
         .create(CancellationToken::default())
         .await
-        .expect("lease");
+        .expect("lease")
+        .commit();
     std::fs::write(lease.path().join("rewound.txt"), b"discard me\n").expect("dirty write");
     let record = lease.durable_record();
     let lease_path = lease.path().to_path_buf();
@@ -581,7 +597,8 @@ async fn tombstoned_discard_honors_cancellation_without_removing_the_lease() {
     let lease = manager
         .create(CancellationToken::default())
         .await
-        .expect("lease");
+        .expect("lease")
+        .commit();
     std::fs::write(lease.path().join("keep.txt"), b"keep\n").expect("dirty write");
     let record = lease.durable_record();
     let cancellation = CancellationToken::default();
@@ -605,7 +622,8 @@ async fn tombstoned_discard_rejects_tampered_path_and_base() {
     let lease = manager
         .create(CancellationToken::default())
         .await
-        .expect("lease");
+        .expect("lease")
+        .commit();
     let record = lease.durable_record();
 
     let mut path_tampered = record.clone();
@@ -642,7 +660,8 @@ async fn tombstoned_discard_rejects_absent_but_registered_worktree() {
     let lease = manager
         .create(CancellationToken::default())
         .await
-        .expect("lease");
+        .expect("lease")
+        .commit();
     let record = lease.durable_record();
     let path = lease.path().to_path_buf();
     let parked = manager.private_root().join("parked-registered-lease");
@@ -673,7 +692,8 @@ async fn tombstoned_discard_rejects_symlink_and_inode_swaps() {
     let symlink_lease = manager
         .create(CancellationToken::default())
         .await
-        .expect("symlink lease");
+        .expect("symlink lease")
+        .commit();
     let symlink_record = symlink_lease.durable_record();
     let symlink_path = symlink_lease.path().to_path_buf();
     let symlink_parked = manager.private_root().join("parked-symlink-lease");
@@ -696,7 +716,8 @@ async fn tombstoned_discard_rejects_symlink_and_inode_swaps() {
     let inode_lease = manager
         .create(CancellationToken::default())
         .await
-        .expect("inode lease");
+        .expect("inode lease")
+        .commit();
     let inode_record = inode_lease.durable_record();
     let inode_path = inode_lease.path().to_path_buf();
     let inode_parked = manager.private_root().join("parked-inode-lease");
@@ -753,7 +774,8 @@ async fn captured_changes_finalize_only_while_artifact_still_matches() {
     let lease = manager
         .create(CancellationToken::default())
         .await
-        .expect("lease");
+        .expect("lease")
+        .commit();
     std::fs::write(lease.path().join("new.txt"), b"captured\n").expect("write");
     let (usage, cost) = accounting();
     let child = manager
@@ -788,7 +810,8 @@ async fn finalization_rechecks_after_capture_before_forced_removal() {
     let lease = manager
         .create(CancellationToken::default())
         .await
-        .expect("lease");
+        .expect("lease")
+        .commit();
     let target = lease.path().join("new.txt");
     std::fs::write(&target, b"captured\n").expect("captured write");
     let (usage, cost) = accounting();
@@ -827,7 +850,8 @@ async fn durable_rebind_continues_in_the_same_worktree() {
     let lease = manager
         .create(CancellationToken::default())
         .await
-        .expect("lease");
+        .expect("lease")
+        .commit();
     std::fs::write(lease.path().join("first.txt"), b"first turn\n").expect("first turn");
     let (usage, cost) = accounting();
     let first = manager
@@ -956,7 +980,8 @@ async fn rejects_nested_roots_subdirectories_and_symlink_swaps() {
         let lease = manager
             .create(CancellationToken::default())
             .await
-            .expect("lease");
+            .expect("lease")
+            .commit();
         let original = lease.path().to_path_buf();
         let moved = private.path().join("moved-worktree");
         std::fs::rename(&original, &moved).expect("move worktree");
@@ -1008,7 +1033,8 @@ async fn project_hooks_and_filters_never_execute_during_isolation() {
     let lease = manager
         .create(CancellationToken::default())
         .await
-        .expect("lease");
+        .expect("lease")
+        .commit();
     assert!(!marker.exists(), "project filter or hook executed");
     std::fs::write(lease.path().join("filtered.txt"), "changed\n").expect("change");
     let (usage, cost) = accounting();
@@ -1028,3 +1054,5 @@ fn artifact_paths_and_text_are_bounded() {
     assert_eq!(text, "hello ");
     assert!(truncated);
 }
+
+mod creation;

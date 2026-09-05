@@ -188,6 +188,7 @@ pub struct WorktreeIsolation {
     private_root: PathBuf,
     limits: WorktreeLimits,
     registry_state: Arc<tokio::sync::OnceCell<WorktreeRegistryState>>,
+    creation_failure: Arc<Mutex<Option<PathBuf>>>,
 }
 
 #[derive(Debug)]
@@ -389,6 +390,7 @@ impl WorktreeIsolation {
             private_root,
             limits,
             registry_state: Arc::new(tokio::sync::OnceCell::new()),
+            creation_failure: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -522,131 +524,6 @@ impl WorktreeIsolation {
         .await?;
         require_success("discard tombstoned isolated worktree", &output)?;
         Ok(())
-    }
-
-    /// Creates a detached worktree at the repository's current `HEAD`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when Git cannot resolve `HEAD`, private allocation or
-    /// worktree creation fails, or cancellation is requested.
-    pub async fn create(
-        &self,
-        cancellation: CancellationToken,
-    ) -> Result<WorktreeLease, ToolError> {
-        // `git worktree add` mutates the repository's shared worktree
-        // registry. Git does not provide one transaction spanning its
-        // discovery, allocation, registration, and our failure cleanup, so
-        // concurrent adds can transiently reject one otherwise independent
-        // child. Serialize only this short allocation boundary; child turns
-        // and worktree contents remain fully parallel after their leases exist.
-        let _registry = self.lock_registry(&cancellation).await?;
-        cancellation.check()?;
-        let head = run_git(
-            &self.repository_root,
-            [
-                OsString::from("rev-parse"),
-                OsString::from("--verify"),
-                OsString::from("HEAD^{commit}"),
-            ],
-            None,
-            &cancellation,
-        )
-        .await?;
-        require_success("resolve worktree base commit", &head)?;
-        let base_commit = text_stdout(&head.stdout, "base commit")?;
-        validate_oid(&base_commit)?;
-
-        let temporary = tempfile::Builder::new()
-            .prefix("rw-agent-")
-            .tempdir_in(&self.private_root)
-            .map_err(|source| ToolError::Io {
-                operation: "allocate private worktree path",
-                path: self.private_root.clone(),
-                source,
-            })?;
-        let path = temporary.path().to_path_buf();
-        std::fs::remove_dir(&path).map_err(|source| ToolError::Io {
-            operation: "prepare private worktree path",
-            path: path.clone(),
-            source,
-        })?;
-        let _preserved = temporary.keep();
-        let output = run_git(
-            &self.repository_root,
-            [
-                OsString::from("worktree"),
-                OsString::from("add"),
-                OsString::from("--detach"),
-                OsString::from("--"),
-                path.as_os_str().to_os_string(),
-                OsString::from(&base_commit),
-            ],
-            None,
-            &cancellation,
-        )
-        .await;
-        let output = match output {
-            Ok(output) => output,
-            Err(error) => {
-                self.cleanup_partial_creation(&path).await;
-                return Err(error);
-            }
-        };
-        if let Err(error) = require_success("create isolated worktree", &output) {
-            self.cleanup_partial_creation(&path).await;
-            return Err(error);
-        }
-        if let Err(error) = set_private_permissions(&path) {
-            self.cleanup_partial_creation(&path).await;
-            return Err(error);
-        }
-        let identity = match DirectoryIdentity::capture(&path) {
-            Ok(identity) => identity,
-            Err(error) => {
-                self.cleanup_partial_creation(&path).await;
-                return Err(error);
-            }
-        };
-        if !identity.canonical.starts_with(&self.private_root) {
-            self.cleanup_partial_creation(&path).await;
-            return Err(ToolError::Command(
-                "git created the worktree outside private storage".to_owned(),
-            ));
-        }
-        Ok(WorktreeLease {
-            finalization_gate: process_worktree_finalization_gate(&path),
-            path,
-            base_commit,
-            identity,
-        })
-    }
-
-    async fn cleanup_partial_creation(&self, path: &Path) {
-        let cancellation = CancellationToken::default();
-        let _ = run_git(
-            &self.repository_root,
-            [
-                OsString::from("worktree"),
-                OsString::from("remove"),
-                OsString::from("--force"),
-                OsString::from("--"),
-                path.as_os_str().to_os_string(),
-            ],
-            None,
-            &cancellation,
-        )
-        .await;
-        let safe_directory = std::fs::symlink_metadata(path).is_ok_and(|metadata| {
-            metadata.file_type().is_dir()
-                && !metadata.file_type().is_symlink()
-                && path
-                    .canonicalize()
-                    .is_ok_and(|canonical| canonical.starts_with(&self.private_root))
-        });
-        if safe_directory {
-            let _ = std::fs::remove_dir_all(path);
-        }
     }
 
     /// Captures all tracked and untracked changes without touching the parent tree.
@@ -998,6 +875,9 @@ pub use apply::{
     ApplyWorktreeDiffInput, ApplyWorktreeDiffTool, DiffArtifactAuthority,
     SessionDiffArtifactAuthority,
 };
+
+mod creation;
+pub use creation::WorktreeAllocation;
 
 mod git;
 use git::{

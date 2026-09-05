@@ -31,7 +31,7 @@ impl Startups {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .is_empty()
             {
-                return Err(OrchestrationError::Session(
+                return Err(OrchestrationError::EffectsUnsettled(
                     "child startup effects remain unproven".to_owned(),
                 ));
             }
@@ -263,7 +263,7 @@ impl SubagentOrchestrator {
         .catch_unwind()
         .await
         .unwrap_or_else(|_| {
-            Err(OrchestrationError::Session(
+            Err(OrchestrationError::EffectsUnsettled(
                 "child startup panicked".to_owned(),
             ))
         });
@@ -296,14 +296,17 @@ impl SubagentOrchestrator {
                     AssertUnwindSafe(child.cleanup(self.inner.limits, &error.to_string()))
                         .catch_unwind()
                         .await;
-                let settled = settled.unwrap_or_else(|_| {
+                let mut settled = settled.unwrap_or_else(|_| {
                     Err(OrchestrationError::Session(
                         "child startup cleanup panicked".to_owned(),
                     ))
                 });
+                if let OrchestrationError::EffectsUnsettled(reason) = &error {
+                    settled = Err(OrchestrationError::EffectsUnsettled(reason.clone()));
+                }
                 let response = match &settled {
                     Ok(()) => error,
-                    Err(cleanup) => OrchestrationError::Session(format!(
+                    Err(cleanup) => OrchestrationError::EffectsUnsettled(format!(
                         "{error}; child effects remain unproven: {cleanup}"
                     )),
                 };

@@ -85,6 +85,6 @@ pub use web::{
 };
 pub use worktree::{
     ApplyWorktreeDiffInput, ApplyWorktreeDiffTool, ChildReturnArtifact, DiffArtifactAuthority,
-    SessionDiffArtifactAuthority, WorktreeIsolation, WorktreeLease, WorktreeLeaseRecord,
-    WorktreeLimits,
+    SessionDiffArtifactAuthority, WorktreeAllocation, WorktreeIsolation, WorktreeLease,
+    WorktreeLeaseRecord, WorktreeLimits,
 };

@@ -14638,11 +14638,13 @@ mod tests {
         let first_lease = manager
             .create(CancellationToken::default())
             .await
-            .expect("first lease");
+            .expect("first lease")
+            .commit();
         let second_lease = manager
             .create(CancellationToken::default())
             .await
-            .expect("second lease");
+            .expect("second lease")
+            .commit();
         std::fs::write(first_lease.path().join("shared.txt"), b"first child\n")
             .expect("first child edit");
         std::fs::write(second_lease.path().join("shared.txt"), b"second child\n")
@@ -15341,7 +15343,8 @@ mod tests {
         let lease = manager
             .create(CancellationToken::default())
             .await
-            .expect("lease");
+            .expect("lease")
+            .commit();
         std::fs::write(lease.path().join("rewound.txt"), b"discard\n").expect("changed worktree");
         let lease_path = lease.path().to_path_buf();
         let parent_session_id = SessionId("parent".to_owned());
@@ -20395,7 +20398,8 @@ mod tests {
         let initial_lease = initial_manager
             .create(CancellationToken::default())
             .await
-            .expect("initial lease");
+            .expect("initial lease")
+            .commit();
         let lease_record = initial_lease.durable_record();
         let child_workspace = initial_lease.path().to_path_buf();
         let parent = SessionId("recovery-parent".to_owned());
