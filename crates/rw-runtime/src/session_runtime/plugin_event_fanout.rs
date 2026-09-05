@@ -187,6 +187,9 @@ pub(super) fn plugin_event_payload(
     redactor: &FixtureRedactor,
     event: &EngineEvent,
 ) -> Option<(String, String, serde_json::Value)> {
+    if matches!(event, EngineEvent::ExtensionStateCommitted { .. }) {
+        return None;
+    }
     let mut payload = serde_json::to_value(event).ok()?;
     redact_json_value(redactor, &mut payload);
     if !matches!(serde_json::to_vec(&payload), Ok(bytes) if bytes.len() <= 256 * 1024) {

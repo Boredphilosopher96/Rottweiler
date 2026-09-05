@@ -141,3 +141,26 @@ fn engine_stream_redactor_holds_every_supported_private_key_envelope() {
         &redactor, &complete,
     ));
 }
+
+#[test]
+fn namespace_transactions_never_enter_another_plugins_event_feed() {
+    let event = EngineEvent::ExtensionStateCommitted {
+        meta: EventMeta {
+            protocol_version: SESSION_EVENT_VERSION,
+            session_id: SessionId("fixture-session".to_owned()),
+            sequence_id: SequenceId(4),
+            emitted_at: "2026-07-11T00:00:00Z".to_owned(),
+            caused_by: None,
+        },
+        plugin_id: "private-plugin".to_owned(),
+        transaction: rw_types::extension_contract::ExtensionStateTransaction {
+            expected_revision: None,
+            mutations: vec![rw_types::extension_contract::ExtensionStateMutation::Set {
+                key: "private".into(),
+                value: serde_json::json!("not another plugin's capability"),
+            }],
+            acknowledged: None,
+        },
+    };
+    assert!(plugin_event_payload(&FixtureRedactor::default(), &event).is_none());
+}
