@@ -33,43 +33,61 @@ const FIXTURE_VERSION: u16 = 4;
 const WRITER_QUEUE_CAPACITY: usize = 8;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RecordFixture {
     version: u16,
     provider: String,
     capabilities: RecordedCapabilities,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "Option::deserialize")]
     model_metadata: Option<ProviderModelMetadata>,
     wire_mode: WireMode,
     request_hash: String,
     occurrence: u64,
     request: ProviderRequest,
-    #[serde(default)]
     raw_sse: Vec<RawSseFrame>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "Option::deserialize")]
     start_error: Option<ProviderError>,
-    #[serde(default)]
     items: Vec<RecordedItem>,
 }
 
+impl RecordFixture {
+    fn validate(&self) -> Result<(), ProviderError> {
+        if self.version != FIXTURE_VERSION
+            || (self.start_error.is_some() && (!self.raw_sse.is_empty() || !self.items.is_empty()))
+            || (self.wire_mode == WireMode::GitHubCopilot && self.start_error.is_none())
+            || (self.wire_mode == WireMode::NormalizedReplay && !self.raw_sse.is_empty())
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Protocol,
+                "recording requires its schema, explicit stream dialect, and consistent outcome",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CapabilityManifest {
     version: u16,
     provider: String,
     capabilities: RecordedCapabilities,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "Option::deserialize")]
     model_metadata: Option<ProviderModelMetadata>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RecordedCapabilities {
     tool_calling: bool,
     vision: bool,
     thinking: bool,
     cache_breakpoints: RecordedCacheBreakpointSupport,
+    #[serde(deserialize_with = "Option::deserialize")]
     max_context_tokens: Option<u64>,
+    #[serde(deserialize_with = "Option::deserialize")]
     max_output_tokens: Option<u64>,
     wire_mode: WireMode,
-    #[serde(default)]
     native_web_search: RecordedNativeWebSearchSupport,
 }
 
@@ -166,6 +184,7 @@ struct WriteJob {
 
 impl WriteJob {
     fn write(&self) -> Result<(), ProviderError> {
+        self.fixture.validate()?;
         ensure_capability_manifest(
             &self.directory,
             &self.provider,
@@ -467,6 +486,15 @@ impl Provider for Recorder {
             activity: Arc::clone(&self.activity),
             tracking: true,
         };
+        if wire_mode == WireMode::GitHubCopilot {
+            let context = start.context.take().ok_or_else(writer_state_error)?;
+            start.finish_tracking();
+            let error = ProviderError::new(
+                ProviderErrorKind::Protocol,
+                "provider stream requires an explicit wire dialect",
+            );
+            return Err(persist_start_error(context, error).await);
+        }
         let inner_stream = match self
             .inner
             .stream_with_wire_sink(
@@ -769,7 +797,7 @@ pub struct ReplayProvider {
 
 impl ReplayProvider {
     /// Reads the persisted native-search capability without constructing a
-    /// replay stream. Older manifests deserialize this capability as false.
+    /// replay stream.
     ///
     /// # Errors
     ///
@@ -860,8 +888,8 @@ impl Provider for ReplayProvider {
                 format!("invalid replay fixture {}: {error}", path.display()),
             )
         })?;
-        if fixture.version != FIXTURE_VERSION
-            || fixture.provider != self.name
+        fixture.validate()?;
+        if fixture.provider != self.name
             || !fixture_matches_manifest(
                 &fixture,
                 &self.recorded_capabilities,
@@ -876,12 +904,6 @@ impl Provider for ReplayProvider {
             ));
         }
         if let Some(error) = fixture.start_error {
-            if !fixture.raw_sse.is_empty() || !fixture.items.is_empty() {
-                return Err(ProviderError::new(
-                    ProviderErrorKind::Protocol,
-                    "provider-start replay fixture also contained stream output",
-                ));
-            }
             return Err(error);
         }
         let items = if fixture.raw_sse.is_empty() {
@@ -899,11 +921,11 @@ impl Provider for ReplayProvider {
                     crate::OpenAiWireMode::Responses,
                     &fixture.raw_sse,
                 ),
-                // Version-4 fixtures written before exact Copilot dialects were
-                // persisted keep their already-normalized items. This is an
-                // explicit compatibility path and never guesses from frames.
                 WireMode::GitHubCopilot | WireMode::NormalizedReplay => {
-                    recorded_to_results(fixture.items.clone())
+                    return Err(ProviderError::new(
+                        ProviderErrorKind::Protocol,
+                        "raw replay frames require an explicit provider wire dialect",
+                    ));
                 }
                 WireMode::GitHubCopilotMessages => crate::github_copilot::replay_sse_frames(
                     crate::GitHubCopilotEndpoint::Messages,
@@ -1020,7 +1042,7 @@ fn is_incomplete_replay_error(error: &ProviderError) -> bool {
 fn raw_replay_mismatch() -> ProviderError {
     ProviderError::new(
         ProviderErrorKind::Protocol,
-        "raw replay frames no longer normalize to the recorded event stream",
+        "raw replay frames differ from the recorded event stream",
     )
 }
 
@@ -1077,8 +1099,8 @@ async fn load_recorded_capabilities(
                 format!("invalid replay fixture {}: {error}", path.display()),
             )
         })?;
-        if fixture.version != FIXTURE_VERSION
-            || fixture.provider != provider
+        fixture.validate()?;
+        if fixture.provider != provider
             || !fixture_matches_manifest(
                 &fixture,
                 &manifest.capabilities,
@@ -1195,13 +1217,13 @@ fn reconcile_capability_manifest(
             ) {
                 return Err(changed_manifest_error(provider));
             }
-            let upgraded = CapabilityManifest {
+            let resolved = CapabilityManifest {
                 version: FIXTURE_VERSION,
                 provider: provider.to_owned(),
                 capabilities: capabilities.clone(),
                 model_metadata: Some(metadata.clone()),
             };
-            replace_manifest_atomically(path, &upgraded, hash, occurrence)
+            replace_manifest_atomically(path, &resolved, hash, occurrence)
         }
         (Some(existing), Some(incoming))
             if existing == incoming && &manifest.capabilities == capabilities =>
@@ -1284,11 +1306,11 @@ fn replace_manifest_atomically(
     let bytes = serde_json::to_vec_pretty(manifest).map_err(|error| {
         ProviderError::new(
             ProviderErrorKind::Protocol,
-            format!("could not serialize upgraded replay capability manifest: {error}"),
+            format!("could not serialize resolved replay capability manifest: {error}"),
         )
     })?;
     let temporary = path.with_file_name(format!(
-        ".{}-upgrade-{hash}-{occurrence:08}.tmp",
+        ".{}-resolved-{hash}-{occurrence:08}.tmp",
         path.file_name()
             .and_then(std::ffi::OsStr::to_str)
             .unwrap_or("capabilities")

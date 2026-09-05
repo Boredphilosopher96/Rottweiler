@@ -1,3 +1,5 @@
+mod schema;
+
 use std::{
     sync::{
         Arc,
@@ -18,10 +20,7 @@ use crate::{
     ProviderRequest, TokenUsage, ToolChoice, UsageAccounting, WireFrameSink, WireMode,
 };
 
-use super::{
-    FixtureRedactor, RecordFixture, RecordedCapabilities, Recorder, ReplayProvider, canonicalize,
-    fixture_path, request_hash,
-};
+use super::{FixtureRedactor, RecordFixture, Recorder, ReplayProvider, fixture_path, request_hash};
 
 struct FixtureProvider {
     name: String,
@@ -39,8 +38,6 @@ struct MetadataErrorProvider;
 struct FlakyMetadataProvider {
     metadata_calls: AtomicUsize,
 }
-
-struct LegacyCopilotRawProvider;
 
 struct ResolvedMetadataStartErrorProvider;
 
@@ -211,36 +208,6 @@ impl Provider for FlakyMetadataProvider {
 }
 
 #[async_trait]
-impl Provider for LegacyCopilotRawProvider {
-    fn name(&self) -> &'static str {
-        "legacy-copilot"
-    }
-
-    fn capabilities(&self) -> Capabilities {
-        Capabilities {
-            wire_mode: WireMode::GitHubCopilot,
-            ..test_capabilities()
-        }
-    }
-
-    async fn stream(&self, _request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
-        Ok(legacy_copilot_items())
-    }
-
-    async fn stream_with_wire_sink(
-        &self,
-        _request: ProviderRequest,
-        sink: Arc<dyn WireFrameSink>,
-    ) -> Result<BoxEventStream, ProviderError> {
-        // Deliberately ambiguous/error-shaped raw data proves the legacy
-        // compatibility path replays recorded normalized items, not a
-        // guessed Copilot dialect.
-        sink.capture(None, r#"{"error":{"type":"future_error"}}"#);
-        Ok(legacy_copilot_items())
-    }
-}
-
-#[async_trait]
 impl Provider for ResolvedMetadataStartErrorProvider {
     fn name(&self) -> &'static str {
         "resolved-metadata-start-error"
@@ -307,17 +274,6 @@ fn flaky_metadata_items(sink: Option<&Arc<dyn WireFrameSink>>) -> BoxEventStream
     Box::pin(futures_util::stream::iter(
         crate::github_copilot::replay_sse_frames(crate::GitHubCopilotEndpoint::Responses, &raw),
     ))
-}
-
-fn legacy_copilot_items() -> BoxEventStream {
-    Box::pin(futures_util::stream::iter([
-        Ok(ProviderEvent::TextDelta {
-            text: "legacy-normalized".to_owned(),
-        }),
-        Ok(ProviderEvent::Finished {
-            reason: FinishReason::Stop,
-        }),
-    ]))
 }
 
 #[async_trait]
@@ -536,47 +492,6 @@ fn test_capabilities() -> Capabilities {
         max_output_tokens: None,
         wire_mode: WireMode::NormalizedReplay,
     }
-}
-
-#[test]
-fn pre_m3_request_without_cache_hint_keeps_its_fixture_hash() {
-    let legacy_request = serde_json::json!({
-        "model": "fixture-model",
-        "turns": [],
-        "tools": [],
-        "tool_choice": {"mode": "auto"},
-        "max_output_tokens": 10,
-        "temperature": null,
-        "thinking": "off"
-    });
-    let legacy_bytes = serde_json::to_vec(&canonicalize(legacy_request))
-        .unwrap_or_else(|error| panic!("legacy request must encode: {error}"));
-    let legacy_hash = blake3::hash(&legacy_bytes).to_hex().to_string();
-
-    let current = request();
-    let serialized = serde_json::to_value(&current)
-        .unwrap_or_else(|error| panic!("current request must serialize: {error}"));
-    assert!(serialized.get("cache_hint").is_none());
-    assert_eq!(
-        request_hash(&current).unwrap_or_else(|error| panic!("current request must hash: {error}")),
-        legacy_hash
-    );
-}
-
-#[test]
-fn legacy_capability_manifest_defaults_native_search_to_unsupported() {
-    let value = serde_json::json!({
-        "tool_calling": true,
-        "vision": false,
-        "thinking": false,
-        "cache_breakpoints": "none",
-        "max_context_tokens": null,
-        "max_output_tokens": null,
-        "wire_mode": "open_ai_responses"
-    });
-    let capabilities: RecordedCapabilities = serde_json::from_value(value)
-        .unwrap_or_else(|error| panic!("legacy capabilities must parse: {error}"));
-    assert!(!capabilities.native_web_search.0);
 }
 
 #[tokio::test]
@@ -1094,7 +1009,7 @@ async fn metadata_discovery_error_is_recorded_without_an_occurrence_hole() {
 }
 
 #[tokio::test]
-async fn transient_metadata_failure_then_success_upgrades_manifest_and_replays_both() {
+async fn metadata_discovery_failure_and_resolved_stream_replay_in_order() {
     let directory = unique_temp_directory("metadata-evolution");
     let recorder = Recorder::new(
         Arc::new(FlakyMetadataProvider {
@@ -1153,24 +1068,6 @@ async fn transient_metadata_failure_then_success_upgrades_manifest_and_replays_b
     assert_eq!(first.wire_mode, WireMode::GitHubCopilot);
     assert!(second.model_metadata.is_some());
     assert_eq!(second.wire_mode, WireMode::GitHubCopilotResponses);
-
-    let _ = tokio::fs::remove_dir_all(directory).await;
-}
-
-#[tokio::test]
-async fn legacy_generic_copilot_fixture_replays_normalized_items_without_guessing() {
-    let directory = unique_temp_directory("legacy-copilot-wire");
-    let recorder = Recorder::new(
-        Arc::new(LegacyCopilotRawProvider),
-        &directory,
-        FixtureRedactor::default(),
-    );
-    let live = collect(&recorder).await;
-    let replay = ReplayProvider::load("legacy-copilot", &directory)
-        .await
-        .unwrap_or_else(|error| panic!("legacy replay must load: {error}"));
-    let replayed = collect(&replay).await;
-    assert_eq!(live, replayed);
 
     let _ = tokio::fs::remove_dir_all(directory).await;
 }

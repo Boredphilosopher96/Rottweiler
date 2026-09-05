@@ -153,25 +153,25 @@ fn valid_search_domain(domain: &str) -> bool {
 
 /// A provider-neutral request assembled by the engine.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderRequest {
     /// Provider-local model name. The router replaces aliases before dispatch.
     pub model: String,
     /// Conversation in Rottweiler's shared message IR.
     pub turns: Vec<Turn>,
     /// Function tools exposed for this turn.
-    #[serde(default)]
     pub tools: Vec<ToolDefinition>,
     /// Whether the model may, must, must not, or must specifically call a tool.
-    #[serde(default)]
     pub tool_choice: ToolChoice,
     /// Maximum number of output tokens.
     pub max_output_tokens: u32,
     /// Optional sampling temperature.
+    #[serde(deserialize_with = "Option::deserialize")]
     pub temperature: Option<f32>,
     /// Provider-independent reasoning control.
     pub thinking: ThinkingLevel,
     /// Stable-prefix boundary assembled by the provider-neutral context engine.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "Option::deserialize")]
     pub cache_hint: Option<CacheHint>,
 }
 
