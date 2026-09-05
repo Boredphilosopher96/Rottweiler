@@ -3,6 +3,7 @@ pub use contracts::*;
 mod commands;
 mod control;
 mod control_admission;
+mod control_completion;
 mod control_owner;
 mod events;
 mod lifecycle;

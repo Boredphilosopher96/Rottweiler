@@ -156,6 +156,11 @@ impl EngineHost {
         let operation_hash = payload_hash.clone();
         let work = async move {
             let _admission = admission;
+            let mut completion_guard = super::control_completion::CompletionGuard::new(
+                &host,
+                &operation_key,
+                &operation_hash,
+            );
             let dispatch = if let Ok(dispatch) =
                 std::panic::AssertUnwindSafe(host.execute(command, operation_hash.clone()))
                     .catch_unwind()
@@ -182,6 +187,7 @@ impl EngineHost {
                 &meta.client_id,
             )
             .await;
+            completion_guard.complete();
         };
         if self.control_owner.spawn(work, shutdown).is_err() {
             let dispatch = Arc::new(CachedDispatch {

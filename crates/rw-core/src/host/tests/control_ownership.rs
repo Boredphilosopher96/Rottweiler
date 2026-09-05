@@ -230,3 +230,42 @@ async fn panicking_control_returns_a_failure_and_poisoned_host_cannot_claim_clos
     assert!(host.shutdown_sessions().await.is_err());
     assert_eq!(factory.shutdowns.load(Ordering::Acquire), 0);
 }
+
+#[tokio::test]
+async fn panic_while_constructing_failure_still_settles_duplicate_completion() {
+    struct PanickingClock;
+    impl EventClock for PanickingClock {
+        fn emitted_at(&self) -> String {
+            panic!("injected clock failure")
+        }
+    }
+    let host = EngineHost::new(
+        EngineHostConfig::default(),
+        Arc::new(StubFactory {
+            panic_allocate: true,
+            ..StubFactory::new()
+        }),
+        Arc::new(StubQueries::default()),
+    )
+    .expect("host")
+    .with_clock(Arc::new(PanickingClock));
+    let command = ClientCommand::CreateSession {
+        meta: meta("spoof", "panic-completion"),
+        cwd: "workspace".into(),
+        model: None,
+    };
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        host.dispatch(bound(), command.clone()),
+    )
+    .await
+    .expect("unwind releases original waiter");
+    assert!(
+        matches!(result.outcome, CommandOutcome::Rejected { error } if error.code == "control_completion_failed")
+    );
+    let duplicate = tokio::time::timeout(Duration::from_secs(2), host.dispatch(bound(), command))
+        .await
+        .expect("unwind releases duplicate waiter");
+    assert!(matches!(duplicate.outcome, CommandOutcome::Rejected { .. }));
+    assert!(host.control_owner.settle().await.is_err());
+}

@@ -47,6 +47,15 @@ impl ControlOwner {
         Ok(())
     }
 
+    pub(super) fn fail(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.failed = true;
+        state.closed = true;
+    }
+
     pub(super) fn close_admission(&self) {
         self.state
             .lock()
