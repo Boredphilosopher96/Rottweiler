@@ -131,15 +131,7 @@ export function toolsAppState(): RottweilerState {
   }))
   return {
     ...createInitialState(),
-    transcript: Array.from({ length: 24 }, (_, index) => ({
-      sequenceId: `${index + 1}`,
-      agentTurn: `history-${index}`,
-      turn: {
-        role: "assistant" as const,
-        blocks: [{ type: "text" as const, text: `Historical response ${index}\nsecond line` }],
-        meta: { synthetic: false, summary: false },
-      },
-    })),
+    hasActivity: true,
     streamingTail: createStreamingTail({
       turnId: "turn-tools",
       text: "",

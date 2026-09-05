@@ -45,7 +45,7 @@ test("provider receipts advance the durable cursor without duplicating turn disp
   const accounted = reduceRottweilerState(initial, engineEvent(receipt))
   expect(accounted.lastSequence).toBe("1")
   expect(accounted.turns).toBe(initial.turns)
-  expect(accounted.transcript).toBe(initial.transcript)
+  expect(accounted.hasActivity).toBe(initial.hasActivity)
   expect(accounted.streamingTail).toBe(initial.streamingTail)
   expect(accounted.cost).toBe(initial.cost)
 
@@ -60,7 +60,7 @@ test("provider receipts advance the durable cursor without duplicating turn disp
   expect(completed.turns["turn-accounting"]?.cost).toEqual(actuals.cost)
   const duplicate = reduceRottweilerState(completed, engineEvent(finished))
   expect(duplicate.turns).toBe(completed.turns)
-  expect(duplicate.transcript).toBe(completed.transcript)
+  expect(duplicate.hasActivity).toBe(completed.hasActivity)
   expect(duplicate.cost).toBe(completed.cost)
   expect(duplicate.protocol.duplicateEvents).toBe(1)
 })

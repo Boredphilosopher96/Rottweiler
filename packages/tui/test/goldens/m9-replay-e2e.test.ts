@@ -55,7 +55,7 @@ test("authenticated observer reads semantic pages without replaying lifetime eve
     }
     expect(app.state.lastSequence).toBeNull()
     expect(app.state.replay.completedThrough).toBeNull()
-    expect(app.state.transcript).toHaveLength(0)
+    expect("transcript" in app.state).toBe(false)
     expect(app.state.protocol.invalidEvents).toBe(0)
     const frame = setup.captureCharFrame()
     expect(frame).toContain("Persisted replay verified")

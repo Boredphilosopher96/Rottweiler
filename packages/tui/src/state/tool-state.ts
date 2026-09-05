@@ -8,7 +8,6 @@ import {
   type TodoProjection,
   type ToolProjection
 } from "./model"
-import { MAX_RETAINED_TRANSCRIPT_ENTRIES } from "./turn-state"
 
 export const UNKNOWN_ACTIVITY_TIMING: ActivityTimingProjection = { kind: "unknown" }
 
@@ -22,7 +21,7 @@ export const MAX_TODO_TOTAL_BYTES = 64 * 1_024
 
 export const MAX_RETAINED_TOOL_PROJECTIONS = 16
 
-export const MAX_RETAINED_TODO_TOOL_PROJECTIONS = MAX_RETAINED_TRANSCRIPT_ENTRIES
+export const MAX_RETAINED_TODO_TOOL_PROJECTIONS = 256
 
 export function retainRecentTools(
   current: RottweilerState["tools"],

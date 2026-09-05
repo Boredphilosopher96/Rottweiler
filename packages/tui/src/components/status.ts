@@ -60,7 +60,7 @@ export class StatusLineRenderable extends TextRenderable {
     const permissionMode = permissionRuntimeMode(state.permissions)
     const hasSessionActivity =
       state.replay.active ||
-      state.transcript.length > 0 ||
+      state.hasActivity ||
       state.streamingTail !== null ||
       Object.keys(state.tools).length > 0
     const context =

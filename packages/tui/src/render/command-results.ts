@@ -1,9 +1,8 @@
 import {
   type BoundedCommandTextProjection,
   type CommandResultProjection,
-  type RottweilerState,
   type StructuredCommandResultRow
-} from "./model"
+} from "./command-types"
 
 const HIDDEN_COMMAND_RESULT_FIELDS = new Set([
   "protocol_version",
@@ -24,12 +23,24 @@ const HIDDEN_COMMAND_RESULT_FIELDS = new Set([
 export function projectCommandResult(
   name: string,
   source: string,
-  state: RottweilerState,
 ): CommandResultProjection {
-  if (name === "context" && state.context !== null) return projectContextCommand(state.context)
-  if (name === "cost" && state.cost !== null) return projectCostCommand(state.cost)
-
+  if (source.length > 8192) return { kind: "unsafe_structured" }
   const trimmed = source.trim()
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      const parsed: unknown = JSON.parse(trimmed)
+      const rows = projectStructuredRows(parsed, 0)
+      return {
+        kind: "structured",
+        rows: rows.slice(0, 24),
+        omittedRowCount: Math.max(0, rows.length - 24),
+      }
+    } catch {
+      // A structured-looking result that cannot be decoded is not safe UI state.
+      // It may be a truncated wire payload, so fail closed instead of retaining it.
+      return { kind: "unsafe_structured" }
+    }
+  }
   if (name === "help") return projectHelpCommand(trimmed)
   if (name === "status") return projectStatusCommand(trimmed)
   if (name === "mode") return projectModeCommand(trimmed)
@@ -46,67 +57,7 @@ export function projectCommandResult(
       detail: trimmed.length === 0 ? null : singleLineCommand(trimmed, 180),
     }
   }
-  if (trimmed.length === 0 || (!trimmed.startsWith("{") && !trimmed.startsWith("["))) {
-    return { kind: "message", content: projectBoundedText(trimmed.split("\n"), 32) }
-  }
-  try {
-    const parsed: unknown = JSON.parse(trimmed)
-    const rows = projectStructuredRows(parsed, 0)
-    return {
-      kind: "structured",
-      rows: rows.slice(0, 24),
-      omittedRowCount: Math.max(0, rows.length - 24),
-    }
-  } catch {
-    // A structured-looking result that cannot be decoded is not safe UI state.
-    // It may be a truncated wire payload, so fail closed instead of retaining it.
-    return { kind: "unsafe_structured" }
-  }
-}
-
-function projectContextCommand(
-  snapshot: NonNullable<RottweilerState["context"]>,
-): Extract<CommandResultProjection, { readonly kind: "context" }> {
-  const groups = new Map<string, { count: number; tokens: bigint }>()
-  for (const item of snapshot.items) {
-    const current = groups.get(item.kind) ?? { count: 0, tokens: 0n }
-    current.count += 1
-    current.tokens += unsignedCommandValue(item.estimated_tokens)
-    groups.set(item.kind, current)
-  }
-  return {
-    kind: "context",
-    usedTokens: snapshot.used_tokens,
-    usableTokens: snapshot.usable_tokens,
-    reservedTokens: snapshot.reserved_tokens,
-    contextWindowKnown: snapshot.context_window_known,
-    itemCount: snapshot.items.length,
-    groups: [...groups].map(([kind, group]) => ({
-      kind,
-      itemCount: group.count,
-      estimatedTokens: group.tokens.toString(),
-    })),
-  }
-}
-
-function projectCostCommand(
-  snapshot: NonNullable<RottweilerState["cost"]>,
-): Extract<CommandResultProjection, { readonly kind: "cost" }> {
-  const usage = snapshot.session_usage
-  return {
-    kind: "cost",
-    inputTokens: usage.input_tokens,
-    outputTokens: usage.output_tokens,
-    reasoningTokens: usage.reasoning_tokens,
-    cacheReadTokens: usage.cache_read_tokens,
-    cacheHitBasisPoints: snapshot.cache_hit_basis_points,
-    subscriptionQuotaEntries: snapshot.session_subscription_quota_entries,
-    costUnavailableEntries: snapshot.session_cost_unavailable_entries,
-    monetaryAccountingComplete: snapshot.session_monetary_accounting_complete,
-    costMicrosUsd: snapshot.session_cost_micros_usd,
-    accountedTurnCount: snapshot.turns.length,
-    utcDay: snapshot.utc_day,
-  }
+  return { kind: "message", content: projectBoundedText(trimmed.split("\n"), 32) }
 }
 
 function projectHelpCommand(
@@ -313,15 +264,6 @@ function projectUnboundedText(source: string): BoundedCommandTextProjection {
 function singleLineCommand(source: string, maximum: number): string {
   const safe = source.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/\s+/g, " ").trim()
   return safe.length <= maximum ? safe : `${safe.slice(0, maximum - 1)}…`
-}
-
-function unsignedCommandValue(value: string): bigint {
-  try {
-    const parsed = BigInt(value)
-    return parsed < 0n ? 0n : parsed
-  } catch {
-    return 0n
-  }
 }
 
 function projectStructuredRows(

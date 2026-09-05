@@ -70,7 +70,7 @@ export function childEngineEvent(
 export function boundSubagentState(state: RottweilerState): RottweilerState {
   return {
     ...state,
-    transcript: [],
+    latestShell: null,
     turns: boundProjectionRecord(state.turns),
     tools: boundProjectionRecord(state.tools),
     questions: boundProjectionRecord(state.questions),

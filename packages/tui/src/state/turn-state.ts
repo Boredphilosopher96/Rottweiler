@@ -2,25 +2,12 @@ import { MAX_TAIL_TEXT_BYTES, utf8Prefix } from "./display-buffer"
 import {
   createStreamingTail,
   type RottweilerState,
-  type StreamingTail,
-  type TranscriptEntry
+  type StreamingTail
 } from "./model"
 
 export const MAX_COMPACTION_STREAM_BYTES = 256 * 1_024
 
-export const MAX_RETAINED_TRANSCRIPT_ENTRIES = 256
-
 export const MAX_RETAINED_TURN_PROJECTIONS = 256
-
-export function retainTranscriptEntry(
-  transcript: RottweilerState["transcript"],
-  entry: TranscriptEntry,
-): RottweilerState["transcript"] {
-  return [
-    ...transcript.slice(-(MAX_RETAINED_TRANSCRIPT_ENTRIES - 1)),
-    entry,
-  ]
-}
 
 export function retainRecentTurns(
   current: RottweilerState["turns"],

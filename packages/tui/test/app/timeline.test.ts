@@ -70,7 +70,7 @@ describe("Rottweiler semantic timeline", () => {
   test("newest-first pages restore old user sources independently of recent raw events", async () => {
     const items: TranscriptItem[] = Array.from({ length: 400 }, (_, index) => conversationItem(index, "user", `Request ${index}`))
     const result = await setup(historyReaderFor(items))
-    expect(result.app.state.transcript).toHaveLength(0)
+    expect("transcript" in result.app.state).toBe(false)
     result.app.openTimelinePicker()
     await waitForHistory(result, () => result.app.picker.select.options.some(option => option.value === "timeline.turn.399"))
     expect(result.app.picker.select.options.filter(option => String(option.value).startsWith("timeline.turn.")).map(option => option.name))

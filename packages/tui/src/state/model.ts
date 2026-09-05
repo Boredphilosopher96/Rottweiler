@@ -26,7 +26,6 @@ import type {
   SubagentStatus as SubagentTerminalStatus,
   ToolCapability,
   ToolOutput,
-  Turn,
   TurnStatus,
   UnifiedDiff,
   Usage,
@@ -53,158 +52,14 @@ export interface ConnectionProjection {
   readonly gap: SequenceGap | null
 }
 
-/** Presentation-only replay state; durable transcript data still comes from EngineEvent. */
+/** Replay lifecycle state; display history is read through the semantic transcript service. */
 export interface ReplayProjection {
   readonly active: boolean
   readonly sessionId: string | null
   readonly completedThrough: string | null
 }
 
-export interface BoundedCommandTextProjection {
-  readonly lines: readonly string[]
-  readonly omittedLineCount: number
-}
-
-export interface StructuredCommandResultRow {
-  readonly prefixes: readonly ("bullet" | "indent")[]
-  readonly label: string | null
-  readonly value: StructuredCommandResultValue
-}
-
-export type StructuredCommandResultValue =
-  | { readonly kind: "heading" }
-  | { readonly kind: "string"; readonly value: string }
-  | { readonly kind: "number"; readonly value: number }
-  | { readonly kind: "boolean"; readonly value: boolean }
-  | { readonly kind: "none" }
-  | { readonly kind: "empty_list" }
-  | { readonly kind: "redacted" }
-  | { readonly kind: "details_omitted" }
-
-/** Bounded semantic content retained for a completed slash command. */
-export type CommandResultProjection =
-  | {
-      readonly kind: "context"
-      readonly usedTokens: string
-      readonly usableTokens: string
-      readonly reservedTokens: string
-      readonly contextWindowKnown: boolean
-      readonly itemCount: number
-      readonly groups: readonly {
-        readonly kind: string
-        readonly itemCount: number
-        readonly estimatedTokens: string
-      }[]
-    }
-  | {
-      readonly kind: "cost"
-      readonly inputTokens: string
-      readonly outputTokens: string
-      readonly reasoningTokens: string
-      readonly cacheReadTokens: string
-      readonly cacheHitBasisPoints: number
-      readonly subscriptionQuotaEntries: string
-      readonly costUnavailableEntries: string
-      readonly monetaryAccountingComplete: boolean
-      readonly costMicrosUsd: string
-      readonly accountedTurnCount: number
-      readonly utcDay: string
-    }
-  | {
-      readonly kind: "help"
-      readonly commands: readonly {
-        readonly usage: string
-        readonly description: string
-      }[]
-      readonly omittedCommandCount: number
-      readonly fallback: BoundedCommandTextProjection | null
-    }
-  | {
-      readonly kind: "status"
-      readonly agent: string
-      readonly mode: string
-      readonly queuedMessages: string
-    }
-  | {
-      readonly kind: "permissions"
-      readonly summary: string | null
-      readonly mode: string | null
-      readonly defaultPermission: string | null
-      readonly rememberedApprovals: string | null
-      readonly rules: readonly {
-        readonly scope: "Project" | "Session"
-        readonly decision: string
-        readonly target: string
-        readonly remembered: boolean
-      }[]
-      readonly omittedRuleCount: number
-    }
-  | {
-      readonly kind: "mode"
-      readonly mode: string | null
-      readonly active: boolean
-    }
-  | {
-      readonly kind: "plan"
-      readonly title: string | null
-      readonly body: BoundedCommandTextProjection | null
-    }
-  | {
-      readonly kind: "review"
-      readonly summary: string | null
-      readonly files: readonly {
-        readonly path: string
-        readonly status: string
-        readonly note: string
-      }[]
-      readonly omittedFileCount: number
-    }
-  | {
-      readonly kind: "trust"
-      readonly trust: "updated" | "trusted" | "untrusted" | "unknown"
-      readonly message: string | null
-    }
-  | {
-      readonly kind: "mcp"
-      readonly updated: boolean
-      readonly servers: readonly {
-        readonly name: string
-        readonly status: string
-      }[]
-      readonly omittedServerCount: number
-      readonly fallback: BoundedCommandTextProjection | null
-    }
-  | {
-      readonly kind: "completion"
-      readonly title: string
-      readonly detail: string | null
-    }
-  | {
-      readonly kind: "message"
-      readonly content: BoundedCommandTextProjection
-    }
-  | {
-      readonly kind: "structured"
-      readonly rows: readonly StructuredCommandResultRow[]
-      readonly omittedRowCount: number
-    }
-  | { readonly kind: "unsafe_structured" }
-
-export interface TranscriptEntry {
-  readonly sequenceId: string
-  readonly agentTurn: string
-  readonly turn: Turn
-  /** Presentation kind for host results that are not conversation turns. */
-  readonly presentation?: "conversation" | "command_result" | "shell_result"
-  readonly title?: string
-  /** Structured semantic content for a completed slash command. */
-  readonly commandResult?: CommandResultProjection
-  /** Structured foreground-shell content. Kept out of Markdown so commands and
-   * terminal output cannot be interpreted as user-authored formatting. */
-  readonly shell?: ShellTranscriptPresentation
-}
-
-export interface ShellTranscriptPresentation {
+export interface ShellActivityProjection {
   readonly shellId: string
   readonly command: string
   readonly active: boolean
@@ -511,7 +366,8 @@ export interface RottweilerState {
   readonly replay: ReplayProjection
   readonly historyReady: { readonly sessionId: string; readonly through: string | null } | null
   readonly lastSequence: string | null
-  readonly transcript: readonly TranscriptEntry[]
+  readonly hasActivity: boolean
+  readonly latestShell: ShellActivityProjection | null
   /** Kept separate so streaming deltas never replace or re-layout transcript history. */
   readonly streamingTail: StreamingTail | null
   readonly turns: Readonly<Record<string, TurnProjection>>
@@ -576,7 +432,8 @@ export function createInitialState(): RottweilerState {
     replay: { active: false, sessionId: null, completedThrough: null },
     historyReady: null,
     lastSequence: null,
-    transcript: [],
+    hasActivity: false,
+    latestShell: null,
     streamingTail: null,
     turns: {},
     tools: {},

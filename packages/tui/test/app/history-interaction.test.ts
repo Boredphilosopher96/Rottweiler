@@ -1,16 +1,13 @@
 import { CliRenderEvents, type Selection } from "@opentui/core"
 import { createTestRenderer, type TestRenderer } from "@opentui/core/testing"
 import { afterEach, describe, expect, test } from "bun:test"
-import { PROTOCOL_VERSION } from "../../../../protocol/types"
 import {
   createRottweilerApp
 } from "../../src/app"
-import { commandResultMarkdown } from "../../src/render"
-import { createInitialState, engineEvent, reduceRottweilerState } from "../../src/state"
 import {
   kennelTheme
 } from "../../src/theme"
-import { emptyHistoryReader, historyReaderFor, conversationItem, toolItem } from "../fixtures/history"
+import { waitForHistory, emptyHistoryReader, historyReaderFor, conversationItem, toolItem } from "../fixtures/history"
 import { rgba } from "./fixtures"
 
 describe("Rottweiler history-interaction", () => {
@@ -210,32 +207,21 @@ describe("Rottweiler history-interaction", () => {
     expect(app.banner.plainText).toBe("Copied to clipboard")
   })
 
-  test("fails closed for malformed command JSON and redacts command secrets", () => {
-    const eventMeta = (sequence: string) => ({
-      protocol_version: PROTOCOL_VERSION,
-      session_id: "session-command-safety",
-      sequence_id: sequence,
-      emitted_at: "2026-01-01T00:00:00Z",
-    })
-    let state = createInitialState()
-    state = reduceRottweilerState(state, engineEvent({
-      type: "command_finished",
-      meta: eventMeta("1"),
-      name: "extension",
-      message: "{\"api_key\":\"must-not-render\",\"nested\":{\"access_token\":\"also-secret\"}}",
-      unrestorable_paths: [],
-    }))
-    state = reduceRottweilerState(state, engineEvent({
-      type: "command_finished",
-      meta: eventMeta("2"),
-      name: "extension",
-      message: "{\"machine_local_path\":\"/private/repo\",",
-      unrestorable_paths: [],
-    }))
-
-    const results = state.transcript.slice(-2).map((entry) =>
-      entry.commandResult === undefined ? "" : commandResultMarkdown(entry.commandResult)
-    )
+  test("mounted command rows reject malformed JSON and redact command secrets", async () => {
+    const messages = [
+      '{"api_key":"must-not-render","nested":{"access_token":"also-secret"}}',
+      '{"machine_local_path":"/private/repo",',
+    ]
+    const setup = await createTestRenderer({ width: 88, height: 18, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, { historyReader: historyReaderFor(messages.map((text, index) => ({
+      id: String(index + 1), ordinal: String(index), revision: String(index + 1), agent_turn: null,
+      content: { type: "command", name: "extension", message: { text, format: "text", complete: true,
+        source: { sequence: String(index + 1), selector: { type: "command_message" } } } },
+    }))) })
+    renderer.root.add(app)
+    await waitForHistory(setup, () => app.transcript.mountedEntryCount === 2)
+    const results = [...app.transcript.mountedCards.values()].sort((a, b) => Number(a.item.ordinal) - Number(b.item.ordinal)).map(row => row.markdown.content)
     expect(results[0]).toContain("Api key: [redacted]")
     expect(results[0]).toContain("Access token: [redacted]")
     expect(results[0]).not.toContain("must-not-render")

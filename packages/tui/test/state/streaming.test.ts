@@ -7,7 +7,6 @@ import {
   createInitialState,
   enterReplayMode,
   MAX_COMPACTION_STREAM_BYTES,
-  MAX_RETAINED_TRANSCRIPT_ENTRIES,
   MAX_RETAINED_TURN_PROJECTIONS
 } from "../../src/state"
 
@@ -15,15 +14,15 @@ import { meta, metaAt, reduce } from "./fixtures"
 
 describe("state streaming", () => {
 
-  test("keeps immutable transcript history stable while updating the streaming tail", () => {
+  test("retires live text when its semantic conversation source commits", () => {
     let state = createInitialState()
     state = reduce(state, { type: "turn_started", meta: meta("1"), turn_id: "7" })
-    const transcript = state.transcript
+    const activity = state.hasActivity
     state = reduce(state, { type: "text_delta", meta: meta("2"), turn_id: "7", text: "hel" })
-    expect(state.transcript).toBe(transcript)
+    expect(state.hasActivity).toBe(activity)
     expect(state.streamingTail?.text).toBe("hel")
     state = reduce(state, { type: "text_delta", meta: meta("3"), turn_id: "7", text: "lo" })
-    expect(state.transcript).toBe(transcript)
+    expect(state.hasActivity).toBe(activity)
     expect(state.streamingTail?.text).toBe("hello")
 
     const turn: Turn = {
@@ -37,7 +36,8 @@ describe("state streaming", () => {
       agent_turn: "7",
       turn,
     })
-    expect(state.transcript).toEqual([{ sequenceId: "4", agentTurn: "7", turn }])
+    expect(state.hasActivity).toBe(true)
+    expect("transcript" in state).toBe(false)
     expect(state.streamingTail).toBeNull()
     expect(state.model).toBe("copilot/gpt-5-mini")
     expect(state.provider).toBe("copilot")
@@ -268,7 +268,7 @@ describe("state streaming", () => {
 
   test("bounds retained transcript and completed turn history", () => {
     let state = createInitialState()
-    const total = MAX_RETAINED_TRANSCRIPT_ENTRIES + 8
+    const total = MAX_RETAINED_TURN_PROJECTIONS + 8
     for (let index = 0; index < total; index += 1) {
       const turnId = `${index + 1}`
       const sequence = index * 3
@@ -303,8 +303,8 @@ describe("state streaming", () => {
       })
     }
 
-    expect(state.transcript).toHaveLength(MAX_RETAINED_TRANSCRIPT_ENTRIES)
-    expect(state.transcript[0]?.agentTurn).toBe("9")
+    expect(state.hasActivity).toBe(true)
+    expect("transcript" in state).toBe(false)
     expect(Object.keys(state.turns)).toHaveLength(MAX_RETAINED_TURN_PROJECTIONS)
     expect(state.turns["1"]).toBeUndefined()
     expect(state.turns[`${total}`]?.status).toBe("completed")

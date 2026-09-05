@@ -37,7 +37,7 @@ describe("semantic history rendering", () => {
 
   test("large source history stays outside the live reducer and only its bounded page mounts", async () => {
     const { app } = await fixture(Array.from({ length: 600 }, (_, index) => conversationItem(index + 1, "assistant", `Durable answer ${index}`)))
-    expect(app.state.transcript).toHaveLength(0)
+    expect("transcript" in app.state).toBe(false)
     expect(app.transcript.mountedEntryCount).toBe(16)
     expect(app.transcript.mountedKeys.at(-1)).toBe("600")
   })
@@ -67,7 +67,7 @@ describe("semantic history rendering", () => {
     await setup.flush()
     expect(app.transcript.mountedCards.get("1")).toBe(row)
     expect(row?.markdown).toBe(markdown)
-    expect(markdown?.content).toContain('```json\n{"queue":"empty"}\n```')
+    expect(markdown?.content).toContain("Queue: empty")
   })
 
   test("native mouse scroll preserves identities while remaining inside the physical window", async () => {

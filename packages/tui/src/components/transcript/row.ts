@@ -3,6 +3,8 @@ import { BoxRenderable, CodeRenderable, MarkdownRenderable, TextRenderable, t, f
 import type { TranscriptBodyPreview, TranscriptContent, TranscriptContentSource, TranscriptItem } from "../../protocol"
 import type { RottweilerTheme } from "../../theme"
 import { ReasoningBlockRenderable } from "./blocks"
+import { commandResultMarkdown } from "../../render/command-presentation"
+import { projectCommandResult } from "../../render/command-results"
 import { formatCost } from "../../render"
 
 const MAX_ROW_TEXT = 4096
@@ -165,7 +167,11 @@ export class TranscriptRowRenderable extends BoxRenderable {
         }
         break
     }
-    const text = bodies.map(body => body.format === "json" ? `\`\`\`json\n${body.text}\n\`\`\`` : body.text).join("\n\n")
+    const text = content.type === "command"
+      ? content.message.complete ? commandResultMarkdown(projectCommandResult(content.name, content.message.text))
+        : content.message.format === "json" || /^[\s]*[\[{]/.test(content.message.text)
+          ? "_Open complete content to inspect this structured result._" : content.message.text
+      : bodies.map(body => body.format === "json" ? `\`\`\`json\n${body.text}\n\`\`\`` : body.text).join("\n\n")
     const clipped = text.length > MAX_ROW_TEXT
     this.header.content = content.type === "conversation" && content.role === "assistant"
       ? t`${fg(this.#theme.accent)("● ")}${bold(fg(this.#theme.text)("rottweiler"))}`

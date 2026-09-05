@@ -110,15 +110,8 @@ export function projectToolsWorkspace(
       .filter((tool) => tool.turnId === turnId)
       .sort((left, right) => left.callIndex - right.callIndex || left.toolCallId.localeCompare(right.toolCallId))
       .map((tool) => projectToolActivity(tool, nowMs, state.replay.active))
-  let selectedShell: NonNullable<RottweilerState["transcript"][number]["shell"]> | null = null
-  for (let index = state.transcript.length - 1; index >= 0; index -= 1) {
-    const entry = state.transcript[index]
-    const shell = entry?.presentation === "shell_result" ? entry.shell : undefined
-    if (shell === undefined) continue
-    if (state.shell.shellId !== null && shell.shellId !== state.shell.shellId) continue
-    selectedShell = shell
-    break
-  }
+  const selectedShell = state.latestShell !== null
+    && (state.shell.shellId === null || state.latestShell.shellId === state.shell.shellId) ? state.latestShell : null
   const shells: readonly ShellActivityPresentation[] = selectedShell === null
     ? []
     : [{

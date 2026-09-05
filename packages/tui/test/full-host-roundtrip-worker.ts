@@ -3,7 +3,6 @@ import { writeFile } from "node:fs/promises"
 import { createTestRenderer } from "@opentui/core/testing"
 
 import { createRottweilerApp } from "../src/app"
-import { commandResultMarkdown } from "../src/render"
 import { createEngineRuntimeFromEnvironment } from "../src/runtime"
 
 const reportFile = process.env.ROTTWEILER_TEST_REPORT_FILE
@@ -56,12 +55,9 @@ try {
 }
 
 function commandResult(app: ReturnType<typeof createRottweilerApp>): string {
-  return app.state.transcript
-    .filter((entry) => entry.presentation === "command_result" && entry.title === "/status")
-    .flatMap((entry) => entry.commandResult === undefined
-      ? []
-      : [commandResultMarkdown(entry.commandResult)])
-    .join("\n")
+  return [...app.transcript.mountedCards.values()]
+    .filter(row => row.item.content.type === "command" && row.item.content.name === "status")
+    .map(row => row.markdown.content).join("\n")
 }
 
 async function waitFor(label: string, predicate: () => boolean, timeoutMs = 10_000): Promise<void> {

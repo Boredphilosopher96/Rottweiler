@@ -5,7 +5,6 @@ import {
 import { MAX_U64, durableSequenceId, parseU64 } from "../transport"
 import type { RottweilerAction } from "./actions"
 import { boundedCommandAcks, responseAck } from "./command-acks"
-import { projectCommandResult } from "./command-results"
 import { EMPTY_TOOL_OUTPUT, boundedUtf8 } from "./display-buffer"
 import {
   createInitialState,
@@ -16,7 +15,7 @@ import { projectSession, projectSessionReview, providerQualifiedRoute } from "./
 import { projectShellEvent } from "./shell-state"
 import { MAX_SUBAGENT_TASK_BYTES, boundedSubagentHistory, nextSubagentArchiveKey, subagentActivity, subagentTerminalSummary } from "./subagents"
 import { UNKNOWN_ACTIVITY_TIMING, closeActivityTiming, deriveTodosFromTools, observeActivityTiming, openActivityTiming, projectTodoOutput, retainRecentTools, updateTool } from "./tool-state"
-import { MAX_COMPACTION_STREAM_BYTES, appendTailText, attachToolToTail, currentTurnId, retainRecentTurns, retainTranscriptEntry, updateTail } from "./turn-state"
+import { MAX_COMPACTION_STREAM_BYTES, appendTailText, attachToolToTail, currentTurnId, retainRecentTurns, updateTail } from "./turn-state"
 
 export function reduceRottweilerState(
   state: RottweilerState = createInitialState(),
@@ -326,7 +325,7 @@ function applyKnownEvent(
       const freshUnresolvedSelection =
         !hasReadyProvider &&
         currentModel === undefined &&
-        state.transcript.length === 0 &&
+        !state.hasActivity &&
         state.streamingTail === null
       return {
         ...state,
@@ -563,14 +562,6 @@ function applyKnownEvent(
         ],
       }
     case "conversation_turn_committed": {
-      const transcript = retainTranscriptEntry(
-        state.transcript,
-        {
-          sequenceId: sequenceId ?? state.lastSequence ?? "0",
-          agentTurn: event.agent_turn,
-          turn: event.turn,
-        },
-      )
       const clearsTail =
         (event.turn.role === "assistant" || event.turn.role === "tool") &&
         state.streamingTail?.turnId === event.agent_turn
@@ -578,7 +569,7 @@ function applyKnownEvent(
         event.turn.role === "assistant" ? providerQualifiedRoute(event.turn.meta.model) : null
       return {
         ...state,
-        transcript,
+        hasActivity: true,
         streamingTail: clearsTail ? null : state.streamingTail,
         ...(resolvedRoute === null
           ? {}
@@ -612,13 +603,6 @@ function applyKnownEvent(
       )
       return {
         ...state,
-        transcript:
-          target === null
-            ? state.transcript
-            : state.transcript.filter((entry) => {
-              const turn = parseU64(entry.agentTurn)
-              return turn === null || turn <= target
-            }),
         streamingTail: null,
         queuedMessages: [],
         turns,
@@ -1107,40 +1091,11 @@ function applyKnownEvent(
     case "model_changed":
       return { ...state, model: event.model, provider: event.provider ?? null }
     case "user_shell_state_changed":
-      return projectShellEvent({
-        ...state,
-        shell: {
-          shellId: event.shell_id,
-          active: event.active,
-          status: event.status ?? null,
-          capturedOutput: event.captured_output ?? null,
-        },
-      }, event, sequenceId ?? state.lastSequence ?? "0")
+      return projectShellEvent(state, event)
     case "error":
       return { ...state, errors: [...state.errors.slice(-63), event.error] }
-    case "command_finished": {
-      const commandSequence = sequenceId ?? state.lastSequence ?? "0"
-      const commandResult = projectCommandResult(event.name, event.message, state)
-      return {
-        ...state,
-        errors: [],
-        transcript: retainTranscriptEntry(
-          state.transcript,
-          {
-            sequenceId: commandSequence,
-            agentTurn: `command:${event.name}:${commandSequence}`,
-            turn: {
-              role: "system",
-              blocks: [],
-              meta: { synthetic: true, summary: false },
-            },
-            presentation: "command_result",
-            title: `/${event.name}`,
-            commandResult,
-          },
-        ),
-      }
-    }
+    case "command_finished":
+      return { ...state, hasActivity: true, errors: [] }
     case "context_usage_updated":
       return {
         ...state,

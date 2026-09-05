@@ -15,6 +15,6 @@ test("history availability does not claim durable replay or advance a cursor", (
   expect(state.historyReady).toEqual({ sessionId: "historical", through: "18446744073709551615" })
   expect(state.lastSequence).toBeNull()
   expect(state.replay.completedThrough).toBeNull()
-  expect(state.transcript).toBe(initial.transcript)
+  expect(state.hasActivity).toBe(initial.hasActivity)
   expect(state.commandAcks).toBe(initial.commandAcks)
 })

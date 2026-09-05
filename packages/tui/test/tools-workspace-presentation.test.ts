@@ -304,16 +304,7 @@ describe("Tools workspace presentation", () => {
   test("projects bounded sanitized foreground shell output as a keyed activity row", () => {
     const state: RottweilerState = {
       ...createInitialState(),
-      transcript: [{
-        sequenceId: "shell-sequence",
-        agentTurn: "shell:shell-safe",
-        turn: {
-          role: "user",
-          blocks: [],
-          meta: { synthetic: true, summary: false },
-        },
-        presentation: "shell_result",
-        shell: {
+      latestShell: {
           shellId: "shell-safe",
           command: "printf hello",
           active: false,
@@ -321,7 +312,7 @@ describe("Tools workspace presentation", () => {
           capturedOutput: Array.from({ length: 12 }, (_, index) => `safe-${index + 1}`).join("\n"),
           outputTruncated: true,
         },
-      }],
+
     }
 
     const projected = projectToolsWorkspace(state, Date.now())
@@ -347,26 +338,8 @@ describe("Tools workspace presentation", () => {
   })
 
   test("projects at most the authoritative foreground shell from retained history", () => {
-    const shellEntry = (
-      shellId: string,
-      capturedOutput: string,
-    ): RottweilerState["transcript"][number] => ({
-      sequenceId: `sequence-${shellId}-${capturedOutput}`,
-      agentTurn: `shell:${shellId}`,
-      turn: {
-        role: "system",
-        blocks: [],
-        meta: { synthetic: true, summary: false },
-      },
-      presentation: "shell_result",
-      shell: {
-        shellId,
-        command: `printf ${shellId}`,
-        active: false,
-        status: 0,
-        capturedOutput,
-        outputTruncated: false,
-      },
+    const shellEntry = (shellId: string, capturedOutput: string): NonNullable<RottweilerState["latestShell"]> => ({
+      shellId, command: `printf ${shellId}`, active: false, status: 0, capturedOutput, outputTruncated: false,
     })
     const state: RottweilerState = {
       ...createInitialState(),
@@ -377,11 +350,7 @@ describe("Tools workspace presentation", () => {
         status: 0,
         capturedOutput: "current latest",
       },
-      transcript: [
-        shellEntry("shell-old", "historical output"),
-        shellEntry("shell-current", "current stale"),
-        shellEntry("shell-current", "current latest"),
-      ],
+      latestShell: shellEntry("shell-current", "current latest"),
     }
 
     const projected = projectToolsWorkspace(state, Date.now())

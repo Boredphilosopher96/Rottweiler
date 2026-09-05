@@ -529,7 +529,7 @@ describe("Rottweiler discovery", () => {
       message: "actor idle · queue empty",
       unrestorable_paths: [],
     })
-    expect(app.state.transcript).toHaveLength(0)
+    expect("transcript" in app.state).toBe(false)
     expect(postDestroyCommands).toBe(0)
   })
 

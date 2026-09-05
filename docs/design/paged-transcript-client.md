@@ -35,7 +35,7 @@ The TUI requests at most 32 items and 256 KiB per transcript page. Historical ro
 
 The default cache admits 16 MiB of charged values and 2,048 entries. Charges account for retained strings, structured values, keys and entry overhead. A mounted reader holds a lease on its exact revision. Removing or replacing a resident entry does not release its charge until its final reader releases it. Admission evicts unpinned entries in least-recently-used order and rejects a value that cannot fit beside pinned readers.
 
-`HistoryController` retains at most eight session views and 32 page-range descriptors per session. Evicted content can be fetched again through its durable source. Child transcript pages use the same cache. These limits describe the history allocation owner; they are not a process-RSS ceiling or a bound on every live-state collection.
+`HistoryController` retains at most eight session views and 32 page-range descriptors per session. Evicted content can be fetched again through its durable source. Child transcript pages use the same cache. The live reducer does not retain conversation or command bodies. It owns an activity flag and one bounded foreground-shell preview; command cards format their own bounded semantic source previews. Historical formatting never borrows context or cost state from a different turn. Complete structured command values redact private fields, and incomplete structured previews expose the content action without interpreting partial JSON. These limits describe the history allocation owner; they are not a process-RSS ceiling or a bound on every live-state collection.
 
 ## Native viewport
 
