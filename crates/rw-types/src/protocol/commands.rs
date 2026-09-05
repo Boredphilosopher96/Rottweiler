@@ -646,6 +646,7 @@ urgent_commands!(
     CancelProviderAuth,
     ApproveTool,
     ApprovePlan,
+    AnswerQuestion,
     ShutdownHost
 );
 

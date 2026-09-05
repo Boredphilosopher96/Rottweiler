@@ -100,18 +100,18 @@ impl CliMcpBridge {
         }
         tokio::time::timeout(HOST_RESULT_TIMEOUT, async {
             while let Some(event) = events.recv().await {
+                let event = event.map_err(|_| {
+                    BridgeError::safe("engine session result stream is unavailable")
+                })?;
+                let event: EngineEvent = serde_json::from_slice(&event.json)
+                    .map_err(|_| BridgeError::safe("engine session result JSON is invalid"))?;
                 match event {
-                    Ok(EngineEvent::SessionsListed { meta, sessions })
+                    EngineEvent::SessionsListed { meta, sessions }
                         if meta.request_id == request_id =>
                     {
                         return Ok(sessions);
                     }
-                    Ok(_) => {}
-                    Err(_) => {
-                        return Err(BridgeError::safe(
-                            "engine session result stream is unavailable",
-                        ));
-                    }
+                    _ => {}
                 }
             }
             Err(BridgeError::safe(

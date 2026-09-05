@@ -164,6 +164,22 @@ The signed updater follows the same boundary: `rw-core` owns exact-byte threshol
 
 **Resync semantics**: events carry per-session monotonic sequence ids. Live delivery uses the in-memory broadcast channel; **the source of truth for gap replay is the persisted event log** — a reconnecting client sends its last-seen id and the engine streams the gap from disk, so resync is unbounded and immune to broadcast-buffer lag (a lagging live subscriber is dropped to catch-up-from-log mode rather than losing events). If a repaired or truncated log ends before the client's cursor, the host rejects the subscription before SSE success with a typed `replay_cursor_ahead` response. The TUI discards the mismatched projection once and replays that session from the beginning instead of retrying the impossible cursor.
 
+HTTP command clients declare the source-owned normal or urgent command lane. The
+transport validates the declaration against the decoded command, reserves input
+bytes before collection, and shape-checks JSON before typed allocation. Ordinary
+input has a 64 MiB pool and urgent input a separate 4 MiB pool; body/header deadlines
+and a connection cap bound incomplete requests. Runtime client identities and
+capabilities are authenticated together with a runtime-scoped key, without retaining
+a registration for every connection ever opened.
+
+Host event fanout shares encoded JSON bytes through every intermediate queue and
+the final SSE frame. A 96 MiB host-wide owner covers prepared copies, encoding
+scratch, and retained output; four encoders and 64 subscriptions (four per client)
+bound concurrent work. Final byte clones retain both allocation and subscription
+credits. Exhaustion closes delivery so durable events recover from their source;
+completed controls remain available through their operation receipts. Session
+journal decode ownership is separate from transport encoding ownership.
+
 Host control admission counts prepared typed allocation capacity before hashing or
 spawning work: ordinary controls have 64 global slots, eight per client, eight
 per session, and 32 MiB of retained command bytes. A single command may retain

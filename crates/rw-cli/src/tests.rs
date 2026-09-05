@@ -84,7 +84,7 @@ impl crate::server::ServerEngine for ProviderMutationProbe {
         _session_id: Option<rw_core::SessionId>,
         _last_seen: Option<rw_core::SequenceId>,
     ) -> std::result::Result<
-        tokio::sync::mpsc::Receiver<std::result::Result<rw_core::EngineEvent, String>>,
+        tokio::sync::mpsc::Receiver<std::result::Result<rw_core::HostEvent, String>>,
         crate::server::EventSubscriptionError,
     > {
         let (_send, receive) = tokio::sync::mpsc::channel(1);

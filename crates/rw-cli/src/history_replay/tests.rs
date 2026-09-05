@@ -64,12 +64,18 @@ async fn historical_availability_is_not_raw_replay_and_pages_are_direct_authenti
         .subscribe(client.clone(), Some(SessionId("history".into())), None)
         .await
         .expect("subscribe");
+    let event = events
+        .recv()
+        .await
+        .expect("event")
+        .expect("history response");
+    let event: EngineEvent = serde_json::from_slice(&event.json).expect("protocol JSON");
     assert!(matches!(
-        events.recv().await,
-        Some(Ok(EngineEvent::SessionHistoryReady {
+        event,
+        EngineEvent::SessionHistoryReady {
             through_sequence: Some(SequenceId(299)),
             ..
-        }))
+        }
     ));
     assert!(matches!(
         events.try_recv(),

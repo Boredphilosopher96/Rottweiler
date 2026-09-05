@@ -68,11 +68,13 @@ impl HostEventBudget {
             .saturating_add(output_limit)
             .saturating_mul(2)
             .div_ceil(UNIT);
-        let encoder = self
-            .encoders
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| limit_error())?;
+        let encoder = tokio::time::timeout(
+            super::HOST_EVENT_STALL_TIMEOUT,
+            self.encoders.clone().acquire_owned(),
+        )
+        .await
+        .map_err(|_| limit_error())?
+        .map_err(|_| limit_error())?;
         let mut credit = self
             .bytes
             .clone()
@@ -203,5 +205,28 @@ mod tests {
         assert_eq!(budget.encoders.available_permits(), 4);
         drop(credit);
         assert!(budget.encode(&event()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn transported_bytes_keep_subscription_slots_after_worker_exit() {
+        let global = Arc::new(Semaphore::new(1));
+        let client = Arc::new(Semaphore::new(1));
+        let lease = Arc::new(ClientSubscriptionLease {
+            _global: global.clone().acquire_owned().await.expect("global slot"),
+            _client: client.clone().acquire_owned().await.expect("client slot"),
+        });
+        let event = HostEventBudget::default()
+            .encode(&event())
+            .await
+            .expect("encoded")
+            .for_subscription(&lease);
+        let transport = event.json.clone();
+        drop(event);
+        drop(lease);
+        assert_eq!(global.available_permits(), 0);
+        assert_eq!(client.available_permits(), 0);
+        drop(transport);
+        assert_eq!(global.available_permits(), 1);
+        assert_eq!(client.available_permits(), 1);
     }
 }

@@ -1,3 +1,4 @@
+use rw_core::EngineEvent;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};

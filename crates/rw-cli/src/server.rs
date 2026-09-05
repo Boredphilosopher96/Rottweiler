@@ -27,8 +27,8 @@ use hyper::{
 use hyper_util::rt::TokioIo;
 use miette::{IntoDiagnostic as _, Result, miette};
 use rw_core::{
-    ClientCommand, ClientId, CommandOutcome, EngineError, EngineErrorCategory, EngineEvent,
-    ProviderApiKey, ProviderApiKeySubmission, SequenceId, SessionId, ShellId,
+    ClientCommand, ClientId, CommandOutcome, EngineError, EngineErrorCategory, ProviderApiKey,
+    ProviderApiKeySubmission, SequenceId, SessionId, ShellId,
 };
 use serde::{Deserialize, Serialize};
 use tokio::{
