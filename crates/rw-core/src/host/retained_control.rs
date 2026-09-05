@@ -23,35 +23,50 @@ impl Default for CompletionBudget {
         }
     }
 }
+pub(super) struct CompletionReservation {
+    pub(super) bytes: OwnedSemaphorePermit,
+    pub(super) failure: Arc<RetainedDispatch>,
+    pub(super) closed: Arc<RetainedDispatch>,
+    pub(super) oversized: Arc<RetainedDispatch>,
+}
 impl CompletionBudget {
     pub(super) fn acquire(
         &self,
         command: &ClientCommand,
         ledger: &mut DedupeRegistry,
         key: &(ClientId, RequestId),
-    ) -> Option<OwnedSemaphorePermit> {
+    ) -> Option<CompletionReservation> {
         let (pool, units) = if super::control_admission::is_urgent(command) {
             (&self.urgent, URGENT_REPLY_UNITS)
         } else {
             (&self.normal, NORMAL_REPLY_UNITS)
         };
         loop {
-            if let Ok(lease) = pool.clone().try_acquire_many_owned(units) {
-                return Some(lease);
+            if let Ok(mut bytes) = pool.clone().try_acquire_many_owned(units) {
+                let failure = error_reply(
+                    "control_completion_failed",
+                    "control completion failed; effects require host recovery",
+                    bytes.split(2)?,
+                )?;
+                let closed = error_reply(
+                    "host_shutting_down",
+                    "host control admission is closed",
+                    bytes.split(2)?,
+                )?;
+                let oversized = error_reply(
+                    "control_result_limit",
+                    "control effects settled but its reply exceeds the retained byte limit; inspect session state before further actions",
+                    bytes.split(2)?,
+                )?;
+                return Some(CompletionReservation {
+                    bytes,
+                    failure,
+                    closed,
+                    oversized,
+                });
             }
-            // Eviction releases only the cache's reference. A slow waiter retains
-            // its own lease, so this cannot manufacture capacity it still owns.
-            let victim = ledger
-                .order
-                .iter()
-                .find(|candidate| {
-                    *candidate != key
-                        && matches!(
-                            ledger.entries.get(*candidate),
-                            Some(DedupeState::Complete { dispatch, .. }) if Arc::ptr_eq(dispatch._bytes.semaphore(), pool)
-                        )
-                })
-                .cloned()?;
+            // A slow waiter retains its own lease after cache eviction.
+            let victim = ledger.order.iter().find(|candidate| *candidate != key && matches!(ledger.entries.get(*candidate), Some(DedupeState::Complete { dispatch, .. }) if Arc::ptr_eq(dispatch.bytes.semaphore(), pool))).cloned()?;
             ledger.entries.remove(&victim);
             ledger.order.retain(|candidate| candidate != &victim);
         }
@@ -61,7 +76,7 @@ impl CompletionBudget {
 #[derive(Debug)]
 pub(super) struct RetainedDispatch {
     value: PreparedAllocation<CachedDispatch>,
-    _bytes: OwnedSemaphorePermit,
+    bytes: OwnedSemaphorePermit,
 }
 impl std::ops::Deref for RetainedDispatch {
     type Target = CachedDispatch;
@@ -70,24 +85,37 @@ impl std::ops::Deref for RetainedDispatch {
     }
 }
 impl RetainedDispatch {
-    pub(super) fn prepare(dispatch: CachedDispatch, mut bytes: OwnedSemaphorePermit) -> Arc<Self> {
-        let capacity = bytes.num_permits() * UNIT;
-        let plan = match AllocationPlan::new(dispatch) {
-            Ok(plan) if plan.bytes() <= capacity => plan,
-            _ => AllocationPlan::new(CachedDispatch {
-                outcome: rejected("control_result_limit", "control effects settled but its reply exceeds the retained byte limit; inspect session state before further actions"),
-                events: Vec::new(), cacheable: true,
-            }).expect("bounded completion error"),
-        };
+    pub(super) fn prepare(
+        dispatch: CachedDispatch,
+        mut bytes: OwnedSemaphorePermit,
+    ) -> Option<Arc<Self>> {
+        let plan = AllocationPlan::new(dispatch).ok()?;
+        if plan.bytes() > bytes.num_permits() * UNIT {
+            return None;
+        }
         let unused = bytes
             .num_permits()
             .saturating_sub(plan.bytes().div_ceil(UNIT));
         drop(bytes.split(unused));
-        Arc::new(Self {
+        Some(Arc::new(Self {
             value: plan.prepare(),
-            _bytes: bytes,
-        })
+            bytes,
+        }))
     }
+}
+fn error_reply(
+    code: &str,
+    message: &str,
+    bytes: OwnedSemaphorePermit,
+) -> Option<Arc<RetainedDispatch>> {
+    RetainedDispatch::prepare(
+        CachedDispatch {
+            outcome: rejected(code, message),
+            events: Vec::new(),
+            cacheable: true,
+        },
+        bytes,
+    )
 }
 impl PrepareAllocation for CachedDispatch {
     fn prepared_heap_bytes(&self) -> Option<usize> {
@@ -102,6 +130,7 @@ impl PrepareAllocation for CachedDispatch {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use rw_types::CommandOutcome;
@@ -109,7 +138,10 @@ mod tests {
     #[test]
     fn shared_waiter_keeps_bytes_after_cache_eviction() {
         let pool = Arc::new(Semaphore::new(4096));
-        let lease = pool.clone().try_acquire_many_owned(4096).unwrap();
+        let lease = pool
+            .clone()
+            .try_acquire_many_owned(4096)
+            .expect("admission");
         let result = RetainedDispatch::prepare(
             CachedDispatch {
                 outcome: CommandOutcome::Accepted {},
@@ -117,7 +149,8 @@ mod tests {
                 cacheable: true,
             },
             lease,
-        );
+        )
+        .expect("bounded reply");
         let waiter = result.clone();
         drop(result);
         assert!(pool.available_permits() < 4096);
@@ -131,7 +164,7 @@ mod tests {
         let mut code = String::with_capacity(64 * 1024);
         code.push_str("error");
         let mut outcome = rejected("error", "message");
-        if let rw_types::CommandOutcome::Rejected { error } = &mut outcome {
+        if let CommandOutcome::Rejected { error } = &mut outcome {
             error.code = code;
         }
         let result = RetainedDispatch::prepare(
@@ -140,13 +173,9 @@ mod tests {
                 events: Vec::new(),
                 cacheable: true,
             },
-            pool.clone().try_acquire_many_owned(4).unwrap(),
+            pool.clone().try_acquire_many_owned(4).expect("admission"),
         );
-        assert!(
-            matches!(&result.outcome, CommandOutcome::Rejected { error } if error.code == "control_result_limit")
-        );
-        assert!(result.value.bytes() < 4 * UNIT);
-        drop(result);
+        assert!(result.is_none());
         assert_eq!(pool.available_permits(), 4);
     }
 }

@@ -164,6 +164,21 @@ The signed updater follows the same boundary: `rw-core` owns exact-byte threshol
 
 **Resync semantics**: events carry per-session monotonic sequence ids. Live delivery uses the in-memory broadcast channel; **the source of truth for gap replay is the persisted event log** — a reconnecting client sends its last-seen id and the engine streams the gap from disk, so resync is unbounded and immune to broadcast-buffer lag (a lagging live subscriber is dropped to catch-up-from-log mode rather than losing events). If a repaired or truncated log ends before the client's cursor, the host rejects the subscription before SSE success with a typed `replay_cursor_ahead` response. The TUI discards the mismatched projection once and replays that session from the beginning instead of retrying the impossible cursor.
 
+Host control admission counts prepared typed allocation capacity before hashing or
+spawning work: ordinary controls have 64 global slots, eight per client, eight
+per session, and 32 MiB of retained command bytes. A single command may retain
+at most 8 MiB. Interruptions, cancellation, approvals, and shutdown use an
+independent eight-slot, 1 MiB lane with two slots per client/session and 64 KiB
+per command. Exhaustion returns an explicit busy response without accepting work.
+Accepted controls remain owned after transport cancellation. Shutdown joins their
+effect proofs, and unwinding releases completion waiters while poisoning closure.
+
+Control completion reserves bytes before execution. Prepared results, cache entries,
+and waiting callers share one allocation lease: 64 MiB for ordinary results and
+1 MiB for urgent results. Cache eviction frees only its own reference. A completion
+that exceeds its reservation returns `control_result_limit`; its effects have
+settled, so the caller must inspect session state before further actions.
+
 Interrupt admission uses the committed driver lease and exact active turn under
 one short control lock. Cancellation and its connection acknowledgement do not
 wait for journal I/O or the actor command queue. The actor publishes lease changes

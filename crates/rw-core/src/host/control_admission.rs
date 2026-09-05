@@ -142,6 +142,7 @@ fn owner<K: Clone + Eq + std::hash::Hash>(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use rw_types::{CommandMeta, RequestId};
@@ -166,18 +167,20 @@ mod tests {
             .map(|_| admission.acquire(&normal, 1024).expect("slot"))
             .collect();
         assert_eq!(
-            admission.acquire(&normal, 1024).unwrap_err(),
+            admission
+                .acquire(&normal, 1024)
+                .expect_err("saturated scope"),
             "client control count exhausted"
         );
         assert_eq!(
             admission
                 .acquire(&command("other", "session"), 1024)
-                .unwrap_err(),
+                .expect_err("saturated scope"),
             "session control count exhausted"
         );
         let urgent = ClientCommand::Interrupt {
             meta: normal.meta().clone(),
-            session_id: normal.session_id().unwrap().clone(),
+            session_id: normal.session_id().expect("session command").clone(),
         };
         let cancellation = admission
             .acquire(&urgent, 1024)
@@ -207,7 +210,7 @@ mod tests {
         assert_eq!(
             admission
                 .acquire(&command("another", "another"), 1024)
-                .unwrap_err(),
+                .expect_err("saturated scope"),
             "host control bytes exhausted"
         );
         drop(leases);

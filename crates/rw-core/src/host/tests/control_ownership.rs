@@ -269,3 +269,35 @@ async fn panic_while_constructing_failure_still_settles_duplicate_completion() {
     assert!(matches!(duplicate.outcome, CommandOutcome::Rejected { .. }));
     assert!(host.control_owner.settle().await.is_err());
 }
+
+#[tokio::test]
+async fn command_capacity_is_rejected_before_factory_effects() {
+    let factory = Arc::new(StubFactory::new());
+    let host = EngineHost::new(
+        EngineHostConfig::default(),
+        factory.clone(),
+        Arc::new(StubQueries::default()),
+    )
+    .expect("host");
+    let mut cwd = String::with_capacity(16 * 1024 * 1024);
+    cwd.push_str("workspace");
+    let result = host
+        .dispatch(
+            bound(),
+            ClientCommand::CreateSession {
+                meta: meta("spoof", "oversized-capacity"),
+                cwd,
+                model: None,
+            },
+        )
+        .await;
+    assert!(
+        matches!(result.outcome, CommandOutcome::Rejected { error } if error.code == "control_busy")
+    );
+    assert_eq!(
+        factory.next.load(Ordering::Acquire),
+        1,
+        "no session identity allocated"
+    );
+    host.shutdown_sessions().await.expect("closed");
+}

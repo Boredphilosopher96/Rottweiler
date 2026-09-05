@@ -15,7 +15,7 @@ enum ControlRequest {
     Launch {
         completion: watch::Receiver<Option<Arc<super::RetainedDispatch>>>,
         admission: super::control_admission::ControlLease,
-        reply_bytes: tokio::sync::OwnedSemaphorePermit,
+        reply: super::retained_control::CompletionReservation,
     },
 }
 
@@ -57,9 +57,9 @@ impl EngineHost {
             ControlRequest::Launch {
                 completion,
                 admission,
-                reply_bytes,
+                reply,
             } => {
-                self.launch_control(command, key, payload_hash, admission, reply_bytes)
+                self.launch_control(command, key, payload_hash, admission, reply)
                     .await;
                 (completion, true)
             }
@@ -128,7 +128,7 @@ impl EngineHost {
                 Ok(ControlRequest::Running(completion.subscribe()))
             }
             None => {
-                let reply_bytes = self
+                let reply = self
                     .completion_budget
                     .acquire(command, &mut dedupe, key)
                     .ok_or(ControlRejection(
@@ -147,7 +147,7 @@ impl EngineHost {
                 Ok(ControlRequest::Launch {
                     completion: wait,
                     admission,
-                    reply_bytes,
+                    reply,
                 })
             }
         }
@@ -159,39 +159,21 @@ impl EngineHost {
         key: (ClientId, RequestId),
         payload_hash: String,
         admission: super::control_admission::ControlLease,
-        mut reply_bytes: tokio::sync::OwnedSemaphorePermit,
+        reply: super::retained_control::CompletionReservation,
     ) {
         let shutdown = matches!(command, ClientCommand::ShutdownHost { .. });
         let meta = command.meta().clone();
         let host = self.clone();
         let operation_key = key.clone();
         let operation_hash = payload_hash.clone();
-        let fallback = super::RetainedDispatch::prepare(
-            CachedDispatch {
-                outcome: rejected(
-                    "control_completion_failed",
-                    "control completion failed; effects require host recovery",
-                ),
-                events: Vec::new(),
-                cacheable: true,
-            },
-            reply_bytes.split(2).expect("reserved unwind reply"),
-        );
-        let closed = super::RetainedDispatch::prepare(
-            CachedDispatch {
-                outcome: rejected("host_shutting_down", "host control admission is closed"),
-                events: Vec::new(),
-                cacheable: true,
-            },
-            reply_bytes.split(2).expect("reserved closed reply"),
-        );
+        let closed = reply.closed;
         let work = async move {
             let _admission = admission;
             let mut completion_guard = super::control_completion::CompletionGuard::new(
                 &host,
                 &operation_key,
                 &operation_hash,
-                fallback,
+                reply.failure,
             );
             let dispatch = if let Ok(dispatch) =
                 std::panic::AssertUnwindSafe(host.execute(command, operation_hash.clone()))
@@ -215,7 +197,7 @@ impl EngineHost {
             host.complete_request(
                 operation_key,
                 operation_hash,
-                super::RetainedDispatch::prepare(dispatch, reply_bytes),
+                super::RetainedDispatch::prepare(dispatch, reply.bytes).unwrap_or(reply.oversized),
                 &meta.client_id,
             )
             .await;
