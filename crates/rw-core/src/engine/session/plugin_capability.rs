@@ -38,7 +38,7 @@ impl PluginSessionCapability {
         request: rw_types::extension_control::ExtensionContextRead,
     ) -> Result<rw_types::extension_control::ExtensionContextPage, AgentLoopError> {
         if let Some(id) = &request.after_item_id {
-            rw_types::extension_control::validate_name(&id.0)
+            rw_types::extension_control::validate_context_item_id(&id.0)
                 .map_err(|error| AgentLoopError::InvalidConfiguration(error.into()))?;
         }
         let (respond, receive) = oneshot::channel();

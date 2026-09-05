@@ -591,7 +591,7 @@ pub(super) fn validate_push_params(method: &str, params: &Value) -> Result<(), P
         return request
             .after_item_id
             .as_ref()
-            .map(|id| rw_types::extension_control::validate_name(&id.0))
+            .map(|id| rw_types::extension_control::validate_context_item_id(&id.0))
             .transpose()
             .map(|_| ())
             .map_err(|error| rpc_error("invalid_push", error));

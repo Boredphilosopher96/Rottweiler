@@ -4,7 +4,7 @@ use crate::engine::turn::{assemble_session_context, protocol_context_kind};
 use crate::engine::{AgentLoopError, RoutedEvent, apply_mode_change, mode_permission_base};
 use rw_types::extension_control::{
     ExtensionContextItem, ExtensionContextPage, ExtensionContextRead, ExtensionControl,
-    ExtensionControlOutcome, MAX_CONTEXT_PAGE_ITEMS, validate_name,
+    ExtensionControlOutcome, MAX_CONTEXT_PAGE_ITEMS, validate_context_item_id,
 };
 use rw_types::{ContextItemId, ContextItemState, Role, SequenceId, SessionMode};
 use std::sync::Arc;
@@ -30,7 +30,7 @@ pub(super) fn read_context(
         false,
     )?;
     let start = if let Some(id) = &request.after_item_id {
-        validate_name(&id.0).map_err(invalid)?;
+        validate_context_item_id(&id.0).map_err(invalid)?;
         match assembled
             .items
             .iter()
@@ -57,7 +57,7 @@ pub(super) fn read_context(
             if index >= assembled.items.len() {
                 let tool = &assembled.tools[index - assembled.items.len()];
                 let item_id = ContextItemId(format!("tool:{}", tool.name));
-                validate_name(&item_id.0).map_err(invalid)?;
+                validate_context_item_id(&item_id.0).map_err(invalid)?;
                 return Ok(ExtensionContextItem {
                     item_id,
                     kind: rw_types::ContextItemKind::ToolDefinitions,
@@ -74,7 +74,7 @@ pub(super) fn read_context(
                 });
             }
             let item = &assembled.items[index];
-            validate_name(&item.id.0).map_err(invalid)?;
+            validate_context_item_id(&item.id.0).map_err(invalid)?;
             let role = item
                 .assembled_turn_index
                 .and_then(|index| assembled.turns.get(index))
