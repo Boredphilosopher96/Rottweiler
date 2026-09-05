@@ -623,6 +623,13 @@ pub(super) fn validate_push_params(method: &str, params: &Value) -> Result<(), P
         return rw_types::extension_contract::validate_state_transaction(&transaction)
             .map_err(|error| rpc_error("invalid_push", &error.to_string()));
     }
+    validate_text_push(method, object)
+}
+
+fn validate_text_push(
+    method: &str,
+    object: &serde_json::Map<String, Value>,
+) -> Result<(), PluginRpcError> {
     let (allowed, fields): (&[&str], &[(&str, usize)]) = match method {
         METHOD_SESSION_QUERY | METHOD_EXTENSION_STATE_READ => (&[], &[]),
         METHOD_SESSION_INJECT_MESSAGE => (

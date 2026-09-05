@@ -822,10 +822,7 @@ impl CapabilityEnforcer {
         self.check(
             CapabilityKind::Event,
             event.as_str(),
-            self.capabilities
-                .event_subscriptions
-                .iter()
-                .any(|declared| *declared == event),
+            self.capabilities.event_subscriptions.contains(&event),
         )
     }
 
