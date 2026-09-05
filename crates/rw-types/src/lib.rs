@@ -49,14 +49,15 @@ pub use protocol::{
     PermissionApprovalScope, PermissionRuleDescriptor, PermissionStateDescriptor, PlanArtifact,
     PlanDecision, PlanStep, PromptDump, PromptTool, ProviderAuthAttemptId, ProviderAuthChallenge,
     ProviderAuthKind, ProviderDescriptor, ProviderNextAction, Question, QuestionId, QuestionOption,
-    QuestionResponseKind, RequestId, ReviewFileDecision, ReviewFileStatus, RewindTarget,
-    RuntimeServiceDescriptor, RuntimeServiceKind, SequenceId, SessionDescriptor, SessionId,
-    SessionIdError, SessionMode, SessionReview, SessionReviewFile, ShellId, StoredAttachment,
-    SubagentActivity, SubagentDescriptor, SubagentId, SubagentIsolation, SubagentResult,
-    SubagentStatus, SubscriptionTokenAccounting, TRANSIENT_ENGINE_EVENT_TYPES, ToolCapability,
-    ToolOutputStream, TouchedFile, TouchedFileStatus, TranscriptFormat, TurnAccounting, TurnId,
-    TurnStatus, UnifiedDiff, UnrestorablePath, Usage, UserSettingDescriptor, WorkspaceDiff,
-    WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus,
+    QuestionResponseKind, RequestId, ReviewFileDecision, ReviewFileStatus, RewindSourcePosition,
+    RewindTarget, RuntimeServiceDescriptor, RuntimeServiceKind, SequenceId, SessionDescriptor,
+    SessionId, SessionIdError, SessionMode, SessionReview, SessionReviewFile, ShellId,
+    StoredAttachment, SubagentActivity, SubagentDescriptor, SubagentId, SubagentIsolation,
+    SubagentResult, SubagentStatus, SubscriptionTokenAccounting, TRANSIENT_ENGINE_EVENT_TYPES,
+    ToolCapability, ToolOutputStream, TouchedFile, TouchedFileStatus, TranscriptFormat,
+    TurnAccounting, TurnId, TurnStatus, UnifiedDiff, UnrestorablePath, Usage,
+    UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview,
+    WorkspaceRootDescriptor, WorkspaceStatus,
 };
 
 /// Version of the protocol emitted by these types.
