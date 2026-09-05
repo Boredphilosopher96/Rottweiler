@@ -43,7 +43,7 @@ struct Panel {
     wire: budget::PanelCredit,
     surface: PreparedAllocation<UiPanelSnapshot>,
     encoded: usize,
-    _permit: OwnedSemaphorePermit,
+    permit: OwnedSemaphorePermit,
 }
 struct State {
     registrations: Vec<Arc<Registration>>,
@@ -219,7 +219,7 @@ impl RuntimeUiRegistry {
             let panel = &mut state.panels[index];
             panel.wire.resize(encoded + 64)?;
             panel.surface = prepared;
-            panel._permit = permit;
+            panel.permit = permit;
             panel.encoded = encoded;
         } else {
             let wire = self.session_budget.panel(encoded + 64)?;
@@ -227,7 +227,7 @@ impl RuntimeUiRegistry {
                 wire,
                 surface: prepared,
                 encoded,
-                _permit: permit,
+                permit,
             });
         }
         state.next_revision = next_revision;

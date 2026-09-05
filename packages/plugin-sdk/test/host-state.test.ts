@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test"
+import type { ExtensionContextPage } from "../src/generated/extension-contract"
 import { hostStateContext } from "../src/host-state"
 import { RPC_METHODS, type JsonValue } from "../src/generated/protocol-3"
 
@@ -78,7 +79,7 @@ test("context paging admits a complete namespaced tool identity", async () => {
     outcome: "ready", sequence: "4", next_after_item_id: itemId,
     items: [{ item_id: itemId, kind: "tool_definitions", source: "tool_registry",
       estimated_tokens: "42", state: { pinned: false, evicted: false, summarized: false, pruned: false } }],
-  }
+  } satisfies ExtensionContextPage
   const calls: JsonValue[] = []
   const session = hostStateContext(async (_, params) => { calls.push(params); return page }).session
   expect(await session.readContext({ expected_sequence: "4", after_item_id: itemId })).toEqual(page)

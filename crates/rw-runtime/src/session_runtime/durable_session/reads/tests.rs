@@ -7,14 +7,14 @@ async fn dropped_read_waiter_keeps_worker_and_retained_owner_until_completion() 
     let reads = ReadOperations::new();
     let retained = Arc::new(());
     let weak = Arc::downgrade(&retained);
-    let (ready, started) = tokio::sync::oneshot::channel();
+    let (signal, started) = tokio::sync::oneshot::channel();
     let (release, wait) = std::sync::mpsc::channel();
     let query = tokio::spawn({
         let reads = Arc::clone(&reads);
         async move {
             reads
                 .run(retained, move |_| {
-                    ready.send(()).expect("worker started");
+                    signal.send(()).expect("worker started");
                     wait.recv_timeout(Duration::from_secs(5))
                         .expect("release worker");
                     Ok(())
@@ -52,14 +52,14 @@ async fn read_panic_fails_settlement_and_future_admission() {
     let reads = ReadOperations::new();
     assert!(
         reads
-            .run((), |_| -> Result<(), rw_core::AgentLoopError> {
+            .run((), |()| -> Result<(), rw_core::AgentLoopError> {
                 panic!("controlled reader panic");
             })
             .await
             .is_err()
     );
     assert!(reads.settle().await.is_err());
-    assert!(reads.run((), |_| Ok(())).await.is_err());
+    assert!(reads.run((), |()| Ok(())).await.is_err());
     assert_eq!(reads.active(), 0);
 }
 
