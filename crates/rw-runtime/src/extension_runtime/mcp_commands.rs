@@ -275,11 +275,19 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for McpCommand 
                         .await
                         .map_err(|error| mcp_command_error(&error))?;
                 }
-                let schema_approved = self
-                    .manager
-                    .approve_pending_tools(&id)
-                    .await
-                    .map_err(|error| mcp_command_error(&error))?;
+                // Configuration approval does not grant a disabled server a
+                // live schema. Only a connected pending catalog needs approval.
+                let has_pending_schema = self.manager.statuses().await.iter().any(|status| {
+                    status.id == id && matches!(status.state, rw_mcp::ServerState::ApprovalRequired)
+                });
+                let schema_approved = if has_pending_schema {
+                    self.manager
+                        .approve_pending_tools(&id)
+                        .await
+                        .map_err(|error| mcp_command_error(&error))?
+                } else {
+                    false
+                };
                 format!(
                     "MCP server {id} is approved.\nConfiguration: {}\nTool schema: {}",
                     if config_approval_changed {

@@ -15,6 +15,9 @@ use crate::{
 use rw_tools::CapabilityManifest;
 use rw_types::McpServerId;
 
+/// Aggregate server admission bound for each manager.
+pub const MAX_SERVERS: usize = 64;
+
 const MAX_CATALOG_ENTRIES: usize = 256;
 const MAX_CATALOG_ENTRY_BYTES: usize = 64 * 1024;
 const MAX_SEARCH_RESULTS: usize = 32;
@@ -63,7 +66,7 @@ impl ServerEntry {
     }
 }
 
-/// Concurrent, deterministic registry for any number of MCP servers.
+/// Concurrent, deterministic registry with bounded MCP server admission.
 #[derive(Clone)]
 pub struct McpManager {
     inner: Arc<ManagerState>,
@@ -121,7 +124,7 @@ impl McpManager {
     ) -> Result<(), McpError> {
         let mut servers = self.inner.servers.write().await;
         self.inner.operations.ensure_open()?;
-        if servers.len() >= 64 {
+        if servers.len() >= MAX_SERVERS {
             return Err(McpError::Policy("MCP server capacity exhausted".to_owned()));
         }
         if servers.contains_key(&config.id) {

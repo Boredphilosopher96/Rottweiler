@@ -445,7 +445,7 @@ impl LiveMcpAdmin {
 
     async fn inventory(&self) -> std::result::Result<Vec<McpServerDescriptor>, HostError> {
         let mut servers = Vec::new();
-        for status in self.manager.statuses().await.into_iter().take(128) {
+        for status in self.manager.statuses().await {
             let approved = self
                 .approvals
                 .is_approved(&status.id)

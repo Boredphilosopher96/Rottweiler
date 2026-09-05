@@ -13,7 +13,7 @@ pub use client::{
     McpAuthorizationProvider, McpClient, McpConnectionApprovalPolicy, McpConnector,
     SandboxedStdioConnector, boxed_running_http_client, sorted_headers,
 };
-pub use manager::{CompactJsonEncoder, McpManager, StructuredResponseEncoder};
+pub use manager::{CompactJsonEncoder, MAX_SERVERS, McpManager, StructuredResponseEncoder};
 pub use server::{
     BridgeError, EngineMcpBridge, EngineTool, McpServerAuthority, RottweilerMcpServer,
     RottweilerMcpServerFactory, SessionSummary, serve_stdio,

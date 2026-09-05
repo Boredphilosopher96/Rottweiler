@@ -855,7 +855,7 @@ async fn live_admin_inventory_is_bounded() {
             project.path().join(".rottweiler/config.toml"),
         ),
     );
-    for index in 0..129 {
+    for index in 0..rw_mcp::MAX_SERVERS {
         let name = format!("server.{index:03}");
         let discovered = admin
             .discovered_http(&name, "https://example.com/mcp")
@@ -872,7 +872,14 @@ async fn live_admin_inventory_is_bounded() {
             .register_user_server(discovered)
             .expect("approval");
     }
-    assert_eq!(admin.list().await.expect("inventory").len(), 128);
+    let rejected = admin
+        .add_http("over.capacity", "https://example.com/mcp")
+        .await;
+    assert!(rejected.is_err(), "server admission must reject overflow");
+    let inventory = admin.list().await.expect("inventory");
+    assert_eq!(inventory.len(), rw_mcp::MAX_SERVERS);
+    assert_eq!(inventory.len(), manager.statuses().await.len());
+    assert!(admin.review("over.capacity").await.is_err());
 }
 
 struct FailFirstCatalogConnector(Arc<std::sync::atomic::AtomicUsize>);
