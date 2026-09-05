@@ -779,6 +779,8 @@ pub(crate) async fn compose_hosted_actor(
         isolated,
         isolation_error,
     });
+    let child_history =
+        super::durable_session::ChildLifecycleReader::new(Arc::clone(&durable_sink));
     let orchestrator = SubagentOrchestrator::new(
         SubagentLimits {
             max_depth: options.config.engine.subagent_max_depth,
@@ -788,6 +790,7 @@ pub(crate) async fn compose_hosted_actor(
         },
         factory,
         Arc::clone(&built_tools.registry),
+        child_history.clone(),
     )
     .map_err(|error| miette!("subagent orchestrator could not start: {error}"))?;
     let metadata = Arc::new(
@@ -833,7 +836,7 @@ pub(crate) async fn compose_hosted_actor(
         &options.storage_root,
         &options.session_id,
         &durable_sink,
-        &recovered_events,
+        &child_history,
         &allowed_workspace_roots,
         options.config.engine.subagent_max_depth,
         &orchestrator,

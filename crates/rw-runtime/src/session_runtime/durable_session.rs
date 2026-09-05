@@ -1,5 +1,7 @@
 mod accounting;
 mod canonical;
+mod child_lifecycle;
+pub(super) use child_lifecycle::ChildLifecycleReader;
 mod provider_recovery;
 mod reads;
 use super::accounting_projection::is_session_projection_boundary;

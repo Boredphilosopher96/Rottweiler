@@ -81,6 +81,7 @@ async fn rejected_child_configuration_proves_worktree_cleanup_before_releasing_a
             },
             factory,
             Arc::new(ToolRegistry::new()),
+            Arc::new(super::TestArtifactSource::default()),
         )
         .expect("orchestrator");
         let mut request = request("rejected");

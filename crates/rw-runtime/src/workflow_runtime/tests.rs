@@ -1,4 +1,7 @@
 #![allow(clippy::expect_used)]
+#[path = "test_artifact_source.rs"]
+mod test_artifact_source;
+use test_artifact_source::TestArtifactSource;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -515,8 +518,13 @@ needs = ["impl", "tests"]
         maximum: Arc::clone(&maximum),
         launches: Arc::clone(&launches),
     });
-    let orchestrator =
-        SubagentOrchestrator::new(SubagentLimits::default(), factory, tools).expect("orchestrator");
+    let orchestrator = SubagentOrchestrator::new(
+        SubagentLimits::default(),
+        factory,
+        tools,
+        Arc::new(TestArtifactSource::default()),
+    )
+    .expect("orchestrator");
     let observer = Arc::new(ReplayObserver::default());
     let (_journal_root, journal) = test_journal(
         catalog.workflow("delivery").expect("workflow"),
@@ -681,6 +689,7 @@ needs = ["impl", "tests"]
         SubagentLimits::default(),
         factory,
         Arc::new(ToolRegistry::new()),
+        Arc::new(TestArtifactSource::default()),
     )
     .expect("orchestrator");
     let (_journal_root, journal) = test_journal(
@@ -784,6 +793,7 @@ async fn production_actor_dispatches_command_node_through_typed_registry() {
         SubagentLimits::default(),
         factory,
         Arc::new(ToolRegistry::new()),
+        Arc::new(TestArtifactSource::default()),
     )
     .expect("orchestrator");
     let (_journal_root, journal) = test_journal(
@@ -852,6 +862,7 @@ async fn repeated_workflows_close_children_before_metadata_cap() {
         SubagentLimits::default(),
         factory,
         Arc::new(ToolRegistry::new()),
+        Arc::new(TestArtifactSource::default()),
     )
     .expect("orchestrator");
     let metadata = Arc::new(CappedMetadataStore::default());

@@ -5,6 +5,7 @@ use super::ApplyWorktreeDiffTool;
 use super::Arc;
 use super::CancellationToken;
 use super::CapabilityManifest;
+use super::ChildLifecycleReader;
 use super::Cost;
 use super::DurableEventSink;
 use super::EngineEvent;
@@ -48,7 +49,6 @@ use super::base_agent_system_turn;
 use super::builtin_command_registry;
 use super::builtin_hook_dispatcher;
 use super::discard_rewound_subagent_record;
-use super::effective_subagent_events;
 use super::load_session_events;
 use super::project_session_events;
 use super::promote_pending_recovery_record;
@@ -231,8 +231,7 @@ async fn actor_applies_durable_child_artifact_then_reports_conflict_without_corr
     )
     .await
     .expect("durable turn finish");
-    let lifecycle = effective_subagent_events(&durable.load().expect("load durable events"))
-        .expect("effective durable lifecycle");
+    let history = ChildLifecycleReader::new(Arc::clone(&durable));
 
     let base_tools = Arc::new(ToolRegistry::new());
     let unused_factory = ActorSubagentSessionFactory::new(
@@ -244,11 +243,9 @@ async fn actor_applies_durable_child_artifact_then_reports_conflict_without_corr
         SubagentLimits::default(),
         Arc::new(unused_factory),
         Arc::clone(&base_tools),
+        history.clone(),
     )
     .expect("orchestrator");
-    orchestrator
-        .rebuild_artifact_authority(&parent_session, &lifecycle)
-        .expect("rebuild durable artifact authority");
     let mut registry = ToolRegistry::new();
     registry
         .register(Arc::new(ApplyWorktreeDiffTool::new(
@@ -505,18 +502,48 @@ async fn rewound_changed_worktree_is_discarded_before_metadata_tombstone_removal
             unrestorable_paths: Vec::new(),
         },
     ];
-    let effective = effective_subagent_events(&raw).expect("effective lifecycle");
+    let mut raw = raw;
+    let mut prefix = vec![
+        EngineEvent::TurnStarted {
+            meta: meta(0),
+            turn_id: TurnId("1".into()),
+        },
+        EngineEvent::TurnFinished {
+            meta: meta(1),
+            turn_id: TurnId("1".into()),
+            status: TurnStatus::Completed,
+            usage: Usage {
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+            },
+            cost: Cost::Unavailable {
+                reason: "fixture".into(),
+            },
+        },
+    ];
+    for event in &mut raw {
+        event.meta_mut().expect("durable").sequence_id.0 += 2;
+    }
+    prefix.extend(raw);
+    let sink = DurableEventSink::new(
+        SessionEventLog::open(&storage, &parent_session_id.0).expect("log"),
+        storage.clone(),
+        parent_session_id.0.clone(),
+        JournalService::new(&storage).expect("journal"),
+    )
+    .expect("sink");
+    rw_core::commit_session_events(Arc::clone(&sink), prefix)
+        .await
+        .expect("source");
+    let history = ChildLifecycleReader::new(sink);
 
     assert!(
-        discard_rewound_subagent_record(
-            &record,
-            &effective,
-            &raw,
-            Some(&manager),
-            &RejectMetadataRemove,
-        )
-        .await
-        .is_err(),
+        discard_rewound_subagent_record(&record, &history, Some(&manager), &RejectMetadataRemove,)
+            .await
+            .is_err(),
         "metadata failure must retain the durable tombstone for retry"
     );
     assert!(!lease_path.exists());
@@ -528,7 +555,7 @@ async fn rewound_changed_worktree_is_discarded_before_metadata_tombstone_removal
         1
     );
     assert!(
-        discard_rewound_subagent_record(&record, &effective, &raw, Some(&manager), &metadata,)
+        discard_rewound_subagent_record(&record, &history, Some(&manager), &metadata,)
             .await
             .expect("idempotent discard retry")
     );
@@ -547,7 +574,7 @@ async fn rewound_changed_worktree_is_discarded_before_metadata_tombstone_removal
     pending.phase = rw_core::SubagentRecoveryPhase::Pending;
     metadata.save(pending.clone()).await.expect("save pending");
     assert!(
-        discard_rewound_subagent_record(&pending, &[], &[], None, &metadata)
+        discard_rewound_subagent_record(&pending, &history, None, &metadata)
             .await
             .expect("discard uncommitted pending")
     );
@@ -849,19 +876,16 @@ async fn crashed_worktree_child_recovers_follows_up_and_applies_after_second_res
         JournalService::new(&(storage.clone())).expect("journal reads"),
     )
     .expect("recovered parent sink");
-    let repaired = repair_incomplete_subagent_lifecycles(
-        &parent_sink,
-        &parent,
-        &parent_sink.load().expect("load interrupted lifecycle"),
-    )
-    .await
-    .expect("repair interrupted lifecycle");
+    let history = ChildLifecycleReader::new(Arc::clone(&parent_sink));
+    repair_incomplete_subagent_lifecycles(&parent_sink, &parent, &history)
+        .await
+        .expect("repair interrupted lifecycle");
+    let repaired = parent_sink.load().expect("repaired source");
     assert!(matches!(
         repaired.last(),
         Some(EngineEvent::SubagentFinished { result, .. })
             if result.status == rw_types::SubagentStatus::Failed
     ));
-    let effective = effective_subagent_events(&repaired).expect("effective repaired lifecycle");
     let recovered_manager = Arc::new(
         WorktreeIsolation::new(
             &repository,
@@ -885,8 +909,7 @@ async fn crashed_worktree_child_recovers_follows_up_and_applies_after_second_res
     assert!(
         !discard_rewound_subagent_record(
             &recovered_record,
-            &effective,
-            &repaired,
+            &history,
             Some(recovered_manager.as_ref()),
             &metadata,
         )
@@ -965,13 +988,14 @@ async fn crashed_worktree_child_recovers_follows_up_and_applies_after_second_res
         actor_factory,
         Arc::clone(&recovered_manager),
     ));
-    let recovered_orchestrator =
-        SubagentOrchestrator::new(SubagentLimits::default(), factory, Arc::clone(&child_tools))
-            .expect("recovered orchestrator");
+    let recovered_orchestrator = SubagentOrchestrator::new(
+        SubagentLimits::default(),
+        factory,
+        Arc::clone(&child_tools),
+        history.clone(),
+    )
+    .expect("recovered orchestrator");
     recovered_orchestrator.bind_metadata_store(Arc::new(metadata));
-    recovered_orchestrator
-        .rebuild_artifact_authority(&parent, &effective)
-        .expect("rebuild repaired authority");
     recovered_orchestrator
         .recover_record(recovered_record)
         .await
@@ -1035,6 +1059,7 @@ async fn crashed_worktree_child_recovers_follows_up_and_applies_after_second_res
         .await
         .expect("stop recovered child actor");
     drop(recovered_orchestrator);
+    drop(history);
     drop(parent_sink);
     drop(recovered_manager);
     tokio::task::yield_now().await;
@@ -1053,13 +1078,20 @@ async fn crashed_worktree_child_recovers_follows_up_and_applies_after_second_res
 
     let second_restart_log =
         SessionEventLog::open(&storage, &parent.0).expect("second parent restart");
-    let second_restart_events =
-        load_session_events(&second_restart_log).expect("load lifecycle after second restart");
-    let second_restart_effective = effective_subagent_events(&second_restart_events)
-        .expect("effective lifecycle after second restart");
+    let second_sink = DurableEventSink::new(
+        second_restart_log,
+        storage.clone(),
+        parent.0.clone(),
+        JournalService::new(&storage).expect("journal"),
+    )
+    .expect("sink");
+    let history = ChildLifecycleReader::new(second_sink);
     assert!(
-        rw_core::incomplete_subagent_lifecycles(&second_restart_effective)
+        history
+            .pending(&parent, None)
+            .await
             .expect("complete recovered lifecycle")
+            .1
             .is_empty()
     );
     let unused_factory = ActorSubagentSessionFactory::new(
@@ -1071,11 +1103,9 @@ async fn crashed_worktree_child_recovers_follows_up_and_applies_after_second_res
         SubagentLimits::default(),
         Arc::new(unused_factory),
         Arc::new(ToolRegistry::new()),
+        history,
     )
     .expect("second restart orchestrator");
-    second_restart_orchestrator
-        .rebuild_artifact_authority(&parent, &second_restart_effective)
-        .expect("rebuild recovered artifact grant");
     let apply = ApplyWorktreeDiffTool::new(second_restart_orchestrator.diff_artifact_authority());
     let applied = apply
         .execute(

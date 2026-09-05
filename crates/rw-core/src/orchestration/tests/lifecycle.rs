@@ -304,51 +304,16 @@ async fn invalid_diff_is_rejected_before_the_durable_finished_observer() {
     assert_eq!(durable_results.as_slice(), [result]);
 }
 
-#[test]
-fn failed_authority_rebuild_revokes_old_grants_before_validation() {
-    let factory = Arc::new(FakeFactory::default());
-    let orchestrator = orchestrator(SubagentLimits::default(), factory);
-    let parent = SessionId("parent".to_owned());
+#[tokio::test]
+async fn unacknowledged_artifact_has_no_authority() {
+    let orchestrator = orchestrator(SubagentLimits::default(), Arc::new(FakeFactory::default()));
     let artifact = test_artifact();
-    orchestrator
-        .diff_artifact_authority()
-        .record_durable(parent.clone(), &artifact)
-        .expect("initial grant");
-    let mut invalid = artifact.clone();
-    invalid.id = "0".repeat(64);
-    let event = EngineEvent::SubagentFinished {
-        meta: rw_types::EventMeta {
-            protocol_version: rw_types::PROTOCOL_VERSION,
-            session_id: parent.clone(),
-            sequence_id: rw_types::SequenceId(1),
-            emitted_at: "2026-01-01T00:00:00Z".to_owned(),
-            caused_by: None,
-        },
-        subagent_id: SubagentId("child".to_owned()),
-        result: SubagentResult {
-            subagent_id: SubagentId("child".to_owned()),
-            session_id: SessionId("child-session".to_owned()),
-            status: SubagentStatus::Completed,
-            final_text: String::new(),
-            touched_files: Vec::new(),
-            diff_artifact: Some(invalid),
-            usage: zero_usage(),
-            cost: Cost::Unavailable {
-                reason: "fixture".to_owned(),
-            },
-            turns: 1,
-            duration_millis: 1,
-        },
-    };
-    assert!(
-        orchestrator
-            .rebuild_artifact_authority(&parent, &[event])
-            .is_err()
-    );
     assert!(
         orchestrator
             .diff_artifact_authority()
-            .resolve(&parent, &artifact.id)
+            .resolve(&SessionId("parent".into()), &artifact.id)
+            .await
+            .expect("source")
             .is_none()
     );
 }
@@ -512,7 +477,14 @@ async fn clean_follow_up_clears_the_previous_durable_artifact_before_close() {
 #[tokio::test]
 async fn recovered_dirty_child_closes_with_the_full_durable_artifact() {
     let factory = Arc::new(FakeFactory::default());
-    let orchestrator = orchestrator(SubagentLimits::default(), Arc::clone(&factory));
+    let source = Arc::new(super::TestArtifactSource::default());
+    let orchestrator = SubagentOrchestrator::new(
+        SubagentLimits::default(),
+        factory.clone(),
+        Arc::new(ToolRegistry::new()),
+        source.clone(),
+    )
+    .expect("orchestrator");
     let parent = SessionId("parent".to_owned());
     let artifact = test_artifact();
     let artifact_id = artifact.id.clone();
@@ -540,9 +512,13 @@ async fn recovered_dirty_child_closes_with_the_full_durable_artifact() {
             duration_millis: 1,
         },
     };
-    orchestrator
-        .rebuild_artifact_authority(&parent, &[event])
-        .expect("authority rebuild");
+    let EngineEvent::SubagentFinished { result, .. } = event else {
+        panic!("terminal fixture");
+    };
+    source
+        .verify_result(&parent, &result)
+        .await
+        .expect("fixture terminal source");
     orchestrator
         .recover_record(recovery_record("child", "child-session"))
         .await

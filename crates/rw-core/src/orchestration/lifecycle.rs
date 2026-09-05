@@ -6,12 +6,12 @@ use std::{
 };
 
 use rw_tools::{
-    CancellationToken, CapabilityManifest, DiffArtifactAuthority, McpToolPolicy,
-    SessionDiffArtifactAuthority, ToolRegistry, WorktreeLeaseRecord, validate_mcp_virtual_tool,
+    CancellationToken, CapabilityManifest, McpToolPolicy, ToolRegistry, WorktreeLeaseRecord,
+    validate_mcp_virtual_tool,
 };
 use rw_types::{
-    Cost, EngineEvent, SessionId, SubagentDescriptor, SubagentId, SubagentIsolation,
-    SubagentResult, SubagentStatus,
+    Cost, SessionId, SubagentDescriptor, SubagentId, SubagentIsolation, SubagentResult,
+    SubagentStatus,
 };
 use tokio::sync::{Semaphore, watch};
 
@@ -35,6 +35,7 @@ impl SubagentOrchestrator {
         limits: SubagentLimits,
         factory: Arc<dyn SubagentSessionFactory>,
         tools: Arc<ToolRegistry>,
+        artifact_source: Arc<dyn super::SubagentArtifactSource>,
     ) -> Result<Self, OrchestrationError> {
         if limits.max_concurrency == 0 || limits.max_turns == 0 || limits.max_duration.is_zero() {
             return Err(OrchestrationError::InvalidRequest(
@@ -53,8 +54,7 @@ impl SubagentOrchestrator {
                 sequence: std::sync::atomic::AtomicU64::new(0),
                 sessions: Mutex::new(HashMap::new()),
                 session_depths: Mutex::new(HashMap::new()),
-                diff_artifact_authority: Arc::new(SessionDiffArtifactAuthority::default()),
-                latest_artifacts: Mutex::new(HashMap::new()),
+                diff_artifact_authority: artifact_source,
                 metadata: RwLock::new(Arc::new(NoopSubagentMetadataStore)),
             }),
         })
@@ -97,97 +97,8 @@ impl SubagentOrchestrator {
 
     /// Shared provenance authority for the registered `apply_worktree_diff` tool.
     #[must_use]
-    pub fn diff_artifact_authority(&self) -> Arc<SessionDiffArtifactAuthority> {
-        Arc::clone(&self.inner.diff_artifact_authority)
-    }
-
-    /// Rebuilds one exact grant from a durable parent `SubagentFinished` result.
-    ///
-    /// # Errors
-    ///
-    /// Returns when the durable artifact is malformed.
-    pub fn record_recovered_result(
-        &self,
-        parent_session_id: SessionId,
-        result: &SubagentResult,
-    ) -> Result<(), OrchestrationError> {
-        if let Some(artifact) = &result.diff_artifact {
-            self.inner
-                .diff_artifact_authority
-                .record_durable(parent_session_id, artifact)
-                .map_err(|error| OrchestrationError::Session(error.to_string()))?;
-        }
-        Ok(())
-    }
-
-    /// Rebuilds artifact grants exclusively from committed parent events.
-    /// A child result without a diff artifact grants no artifact authority.
-    ///
-    /// # Errors
-    ///
-    /// Returns when a structured result disagrees with its durable subagent id
-    /// or contains an invalid artifact.
-    pub fn rebuild_artifact_authority(
-        &self,
-        parent_session_id: &SessionId,
-        events: &[EngineEvent],
-    ) -> Result<(), OrchestrationError> {
-        self.inner
-            .diff_artifact_authority
-            .revoke_session(parent_session_id);
-        self.inner
-            .latest_artifacts
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|(session, _), _| session != parent_session_id);
-        let mut artifacts = Vec::new();
-        let mut latest = HashMap::<SubagentId, Option<String>>::new();
-        for event in events {
-            let EngineEvent::SubagentFinished {
-                subagent_id,
-                result,
-                ..
-            } = event
-            else {
-                continue;
-            };
-            if &result.subagent_id != subagent_id {
-                return Err(OrchestrationError::Session(
-                    "durable child result id does not match its lifecycle event".to_owned(),
-                ));
-            }
-            if let Some(artifact) = &result.diff_artifact {
-                self.inner
-                    .diff_artifact_authority
-                    .validate(artifact)
-                    .map_err(|error| OrchestrationError::Session(error.to_string()))?;
-                artifacts.push(artifact);
-            }
-            latest.insert(
-                subagent_id.clone(),
-                result
-                    .diff_artifact
-                    .as_ref()
-                    .map(|artifact| artifact.id.clone()),
-            );
-        }
-        for artifact in artifacts {
-            self.inner
-                .diff_artifact_authority
-                .record_durable(parent_session_id.clone(), artifact)
-                .map_err(|error| OrchestrationError::Session(error.to_string()))?;
-        }
-        let mut recovered_latest = self
-            .inner
-            .latest_artifacts
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for (subagent_id, artifact_id) in latest {
-            if let Some(artifact_id) = artifact_id {
-                recovered_latest.insert((parent_session_id.clone(), subagent_id), artifact_id);
-            }
-        }
-        Ok(())
+    pub fn diff_artifact_authority(&self) -> Arc<dyn rw_tools::DiffArtifactAuthority> {
+        Arc::clone(&self.inner.diff_artifact_authority) as Arc<dyn rw_tools::DiffArtifactAuthority>
     }
 
     fn prepare_launch(
@@ -303,6 +214,7 @@ impl SubagentOrchestrator {
                     isolation: request.isolation,
                     parent_session_id: parent_session_id.clone(),
                     latest_durable_artifact_id: None,
+                    closing_artifact: None,
                     close_completed: false,
                     close_gate: Arc::new(tokio::sync::Mutex::new(())),
                 },
@@ -399,22 +311,19 @@ impl SubagentOrchestrator {
                 },
             };
             if let Some(artifact) = result.diff_artifact.as_ref()
-                && let Err(error) = inner.diff_artifact_authority.validate(artifact)
+                && let Err(error) = rw_tools::validate_diff_artifact(artifact)
             {
                 result.status = SubagentStatus::Failed;
                 result.final_text = format!("isolated child returned an invalid diff: {error}");
                 result.diff_artifact = None;
             }
             let durable_result = match observer.finished(&result).await {
-                Ok(()) => {
-                    let grant = result.diff_artifact.as_ref().map_or(Ok(()), |artifact| {
-                        inner
-                            .diff_artifact_authority
-                            .record_durable(parent_session_id.clone(), artifact)
-                            .map_err(|error| error.to_string())
-                    });
-                    grant.map(|()| result)
-                }
+                Ok(()) => inner
+                    .diff_artifact_authority
+                    .verify_result(&parent_session_id, &result)
+                    .await
+                    .map(|()| result)
+                    .map_err(|error| error.to_string()),
                 Err(error) => Err(error.to_string()),
             };
             {
@@ -428,16 +337,6 @@ impl SubagentOrchestrator {
                             .diff_artifact
                             .as_ref()
                             .map(|artifact| artifact.id.clone());
-                        let mut latest = inner
-                            .latest_artifacts
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        let key = (parent_session_id.clone(), handle.subagent_id.clone());
-                        if let Some(artifact) = &durable.diff_artifact {
-                            latest.insert(key, artifact.id.clone());
-                        } else {
-                            latest.remove(&key);
-                        }
                     }
                     record.state = SessionState::Inactive;
                 }
@@ -643,21 +542,25 @@ impl SubagentOrchestrator {
                 record.close_completed,
             )
         };
-        let durable_artifact = artifact_id
-            .as_deref()
-            .map(|id| {
-                self.inner
-                    .diff_artifact_authority
-                    .resolve(&parent_session_id, id)
-                    .ok_or_else(|| {
+        let durable_artifact = match artifact_id.as_deref() {
+            Some(id) => self
+                .inner
+                .diff_artifact_authority
+                .resolve(&parent_session_id, id)
+                .await
+                .map_err(|error| OrchestrationError::Session(error.to_string()))
+                .and_then(|artifact| {
+                    artifact.ok_or_else(|| {
                         OrchestrationError::Session(
-                            "durable child artifact authority is unavailable".to_owned(),
+                            "durable child artifact authority is unavailable".into(),
                         )
                     })
-            })
-            .transpose();
+                })
+                .map(Some),
+            None => Ok(None),
+        };
         let durable_artifact = match durable_artifact {
-            Ok(artifact) => artifact,
+            Ok(artifact) => artifact.map(Arc::new),
             Err(error) => {
                 if !already_finalized
                     && let Some(record) = self
@@ -673,23 +576,28 @@ impl SubagentOrchestrator {
             }
         };
         if !already_finalized {
+            if let Some(record) = self
+                .inner
+                .sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get_mut(subagent_id)
+            {
+                record.closing_artifact = durable_artifact.clone();
+            }
             if let Err(error) = tokio::time::timeout(
                 control_timeout(self.inner.limits),
-                session.close(durable_artifact.as_ref()),
+                session.close(
+                    durable_artifact
+                        .as_ref()
+                        .map(|artifact| artifact.artifact()),
+                ),
             )
             .await
-            .map_err(|_| OrchestrationError::Session("child close timed out".to_owned()))
+            .map_err(|_| OrchestrationError::EffectsUnsettled("child close timed out".to_owned()))
             .and_then(std::convert::identity)
             {
-                if let Some(record) = self
-                    .inner
-                    .sessions
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .get_mut(subagent_id)
-                {
-                    record.state = SessionState::Inactive;
-                }
+                // Retain both child and source admission after failed or abandoned close.
                 return Err(error);
             }
             if let Some(record) = self
@@ -700,6 +608,7 @@ impl SubagentOrchestrator {
                 .get_mut(subagent_id)
             {
                 record.close_completed = true;
+                record.closing_artifact = None;
             }
         }
         let metadata = self
@@ -722,11 +631,6 @@ impl SubagentOrchestrator {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(&record.handle.session_id);
         }
-        self.inner
-            .latest_artifacts
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&(parent_session_id, subagent_id.clone()));
         Ok(())
     }
 
@@ -823,6 +727,7 @@ impl SubagentOrchestrator {
                     isolation: SubagentIsolation::Worktree,
                     parent_session_id,
                     latest_durable_artifact_id: None,
+                    closing_artifact: None,
                     close_completed: false,
                     close_gate: Arc::new(tokio::sync::Mutex::new(())),
                 },
@@ -902,14 +807,9 @@ impl SubagentOrchestrator {
             })?;
         let latest_durable_artifact_id = self
             .inner
-            .latest_artifacts
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&(
-                record.parent_session_id.clone(),
-                record.handle.subagent_id.clone(),
-            ))
-            .cloned();
+            .diff_artifact_authority
+            .latest(&record.parent_session_id, &record.handle.subagent_id)
+            .await?;
         self.inner
             .session_depths
             .lock()
@@ -940,6 +840,7 @@ impl SubagentOrchestrator {
                     isolation: record.isolation,
                     parent_session_id: record.parent_session_id,
                     latest_durable_artifact_id,
+                    closing_artifact: None,
                     close_completed: false,
                     close_gate: Arc::new(tokio::sync::Mutex::new(())),
                 },

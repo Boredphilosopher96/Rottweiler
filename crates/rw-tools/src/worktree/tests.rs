@@ -64,12 +64,13 @@ fn accounting() -> (Usage, Cost) {
 
 fn authorized_apply_tool(artifacts: &[&DiffArtifact]) -> (ApplyWorktreeDiffTool, SessionId) {
     let session = SessionId("parent-session".to_owned());
-    let authority = Arc::new(SessionDiffArtifactAuthority::default());
-    for artifact in artifacts {
-        authority
-            .record_durable(session.clone(), artifact)
-            .expect("record durable artifact");
-    }
+    let authority = Arc::new(FixtureArtifactSource {
+        session: session.clone(),
+        artifacts: artifacts
+            .iter()
+            .map(|artifact| (*artifact).clone())
+            .collect(),
+    });
     (ApplyWorktreeDiffTool::new(authority), session)
 }
 
@@ -1056,3 +1057,21 @@ fn artifact_paths_and_text_are_bounded() {
 }
 
 mod creation;
+
+struct FixtureArtifactSource {
+    session: SessionId,
+    artifacts: Vec<DiffArtifact>,
+}
+#[async_trait::async_trait]
+impl DiffArtifactAuthority for FixtureArtifactSource {
+    async fn resolve(
+        &self,
+        parent: &SessionId,
+        id: &str,
+    ) -> Result<Option<AuthorizedDiffArtifact>, ToolError> {
+        Ok((parent == &self.session)
+            .then(|| self.artifacts.iter().find(|artifact| artifact.id == id))
+            .flatten()
+            .map(|artifact| AuthorizedDiffArtifact::new(artifact.clone(), ())))
+    }
+}

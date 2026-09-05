@@ -2,6 +2,7 @@
 use super::Arc;
 use super::CancellationToken;
 use super::CapabilityManifest;
+use super::ChildLifecycleReader;
 use super::Cost;
 use super::DurableEventSink;
 use super::EngineEvent;
@@ -23,15 +24,14 @@ use super::ToolRegistry;
 use super::TurnId;
 use super::TurnStatus;
 use super::Usage;
-use super::effective_subagent_events;
 use super::load_session_events;
 use super::recover_subagent_tree;
 use super::recovery_workspace_authorized;
 use super::repair_incomplete_subagent_lifecycles;
 use rw_core::SubagentMetadataStore;
 
-#[test]
-fn effective_child_lifecycle_drops_rewound_branch_and_keeps_new_branch() {
+#[tokio::test]
+async fn effective_child_lifecycle_drops_rewound_branch_and_keeps_new_branch() {
     let meta = |sequence| EventMeta {
         protocol_version: SESSION_EVENT_VERSION,
         session_id: SessionId("parent".to_owned()),
@@ -78,19 +78,20 @@ fn effective_child_lifecycle_drops_rewound_branch_and_keeps_new_branch() {
     });
     events.extend(spawn(7, 3, "kept-new"));
 
-    let effective = effective_subagent_events(&events).expect("effective lifecycle");
-    let names = effective
+    let (_storage, _sink, history) = history_fixture(&events).await;
+    let (_, pending) = history
+        .pending(&SessionId("parent".into()), None)
+        .await
+        .expect("pending");
+    let names = pending
         .iter()
-        .filter_map(|event| match event {
-            EngineEvent::SubagentSpawned { subagent_id, .. } => Some(subagent_id.0.as_str()),
-            _ => None,
-        })
+        .map(|binding| binding.subagent_id.0.as_str())
         .collect::<Vec<_>>();
     assert_eq!(names, vec!["kept-old", "kept-new"]);
 }
 
-#[test]
-fn tail_repair_closes_original_turn_and_rewind_removes_both_lifecycle_events() {
+#[tokio::test]
+async fn tail_repair_closes_original_turn_and_rewind_removes_both_lifecycle_events() {
     let parent = SessionId("parent".to_owned());
     let child = rw_types::SubagentId("child".to_owned());
     let child_session = SessionId("child-session".to_owned());
@@ -136,19 +137,65 @@ fn tail_repair_closes_original_turn_and_rewind_removes_both_lifecycle_events() {
             }),
         },
     ];
-    let effective = effective_subagent_events(&events).expect("tail repair is effective");
-    assert_eq!(effective.len(), 2);
-
-    events.push(EngineEvent::ConversationRewound {
-        meta: meta(4),
-        to_agent_turn: 0,
-        operation_id: "rewind-before-child".to_owned(),
-        unrestorable_paths: Vec::new(),
-    });
+    // The first completed turn is the checkpoint before the child-bearing turn.
+    let mut prefix = vec![
+        EngineEvent::TurnStarted {
+            meta: meta(0),
+            turn_id: TurnId("1".into()),
+        },
+        EngineEvent::TurnFinished {
+            meta: meta(1),
+            turn_id: TurnId("1".into()),
+            status: TurnStatus::Completed,
+            usage: Usage {
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+            },
+            cost: Cost::Unavailable {
+                reason: "fixture".into(),
+            },
+        },
+    ];
+    for event in &mut events {
+        if let EngineEvent::TurnStarted { turn_id, .. }
+        | EngineEvent::TurnFinished { turn_id, .. } = event
+        {
+            *turn_id = TurnId("2".into());
+        }
+        event.meta_mut().expect("durable").sequence_id.0 += 2;
+    }
+    prefix.extend(events);
+    let (_storage, sink, history) = history_fixture(&prefix).await;
+    let child = rw_types::SubagentId("child".into());
     assert!(
-        effective_subagent_events(&events)
-            .expect("rewound repair")
-            .is_empty()
+        history
+            .binding(&parent, &child)
+            .await
+            .expect("binding")
+            .expect("child")
+            .terminal
+            .is_some()
+    );
+    rw_core::commit_session_events(
+        sink,
+        vec![EngineEvent::ConversationRewound {
+            meta: meta(6),
+            to_agent_turn: 1,
+            operation_id: "rewind-before-child".into(),
+            unrestorable_paths: Vec::new(),
+        }],
+    )
+    .await
+    .expect("rewind");
+    assert!(
+        history
+            .binding(&parent, &child)
+            .await
+            .expect("rewound binding")
+            .is_none()
     );
 }
 
@@ -193,10 +240,11 @@ async fn recovery_durably_repairs_incomplete_children_once_in_spawn_order() {
             .await
             .expect("append lifecycle");
     }
-    let before = sink.load().expect("load before repair");
-    let repaired = repair_incomplete_subagent_lifecycles(&sink, &parent, &before)
+    let history = ChildLifecycleReader::new(Arc::clone(&sink));
+    repair_incomplete_subagent_lifecycles(&sink, &parent, &history)
         .await
         .expect("repair incomplete children");
+    let repaired = sink.load().expect("repaired events");
     let repaired_ids = repaired
         .iter()
         .filter_map(|event| match event {
@@ -206,16 +254,17 @@ async fn recovery_durably_repairs_incomplete_children_once_in_spawn_order() {
         .collect::<Vec<_>>();
     assert_eq!(repaired_ids, ["first", "second"]);
     assert!(
-        rw_core::incomplete_subagent_lifecycles(
-            &effective_subagent_events(&repaired).expect("effective repaired lifecycle")
-        )
-        .expect("scan repaired lifecycle")
-        .is_empty()
+        history
+            .pending(&parent, None)
+            .await
+            .expect("pending")
+            .1
+            .is_empty()
     );
-    let repeated = repair_incomplete_subagent_lifecycles(&sink, &parent, &repaired)
+    repair_incomplete_subagent_lifecycles(&sink, &parent, &history)
         .await
         .expect("idempotent repair");
-    assert_eq!(repeated.len(), repaired.len());
+    assert_eq!(sink.load().expect("repeated source").len(), repaired.len());
 }
 
 #[tokio::test]
@@ -313,11 +362,22 @@ async fn recovery_recursively_rebinds_depth_two_children_and_is_restart_idempote
 
     async fn assert_follow_up(
         orchestrator: &SubagentOrchestrator,
+        sink: Arc<DurableEventSink>,
         owner: &SessionId,
         child_id: &rw_types::SubagentId,
         expected_session: &SessionId,
     ) {
-        let observer: Arc<dyn rw_core::SubagentObserver> = Arc::new(RecoveryProbeObserver);
+        let next = sink
+            .load()
+            .expect("fixture source")
+            .last()
+            .and_then(EngineEvent::meta)
+            .map_or(0, |meta| meta.sequence_id.0 + 1);
+        let observer: Arc<dyn rw_core::SubagentObserver> = Arc::new(RecoveryProbeObserver {
+            sink,
+            parent: owner.clone(),
+            next: std::sync::atomic::AtomicU64::new(next),
+        });
         let handle = orchestrator
             .follow_up(
                 owner,
@@ -393,17 +453,18 @@ async fn recovery_recursively_rebinds_depth_two_children_and_is_restart_idempote
         },
         first_factory,
         Arc::new(ToolRegistry::new()),
+        ChildLifecycleReader::new(Arc::clone(&root_sink)),
     )
     .expect("first orchestrator");
     first.bind_metadata_store(metadata.clone());
     let first_registry = orchestration_registry();
     first.bind_tools(Arc::clone(&first_registry));
-    let initial_root_events = root_sink.load().expect("initial root events");
+    let history = ChildLifecycleReader::new(Arc::clone(&root_sink));
     recover_subagent_tree(
         &storage,
         &parent,
         &root_sink,
-        &initial_root_events,
+        &history,
         std::slice::from_ref(&workspace),
         2,
         &first,
@@ -417,8 +478,25 @@ async fn recovery_recursively_rebinds_depth_two_children_and_is_restart_idempote
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
     assert_eq!(rebound, [grandchild_session.clone(), child_session.clone()]);
-    assert_follow_up(&first, &parent, &child_id, &child_session).await;
-    assert_follow_up(&first, &child_session, &grandchild_id, &grandchild_session).await;
+    assert_follow_up(
+        &first,
+        Arc::clone(&root_sink),
+        &parent,
+        &child_id,
+        &child_session,
+    )
+    .await;
+    assert_follow_up(
+        &first,
+        history
+            .open_sink(&storage, &child_session)
+            .await
+            .expect("child sink"),
+        &child_session,
+        &grandchild_id,
+        &grandchild_session,
+    )
+    .await;
     drop(first);
 
     let second_factory = Arc::new(RecoveryProbeFactory::default());
@@ -430,17 +508,17 @@ async fn recovery_recursively_rebinds_depth_two_children_and_is_restart_idempote
         },
         second_factory,
         Arc::new(ToolRegistry::new()),
+        ChildLifecycleReader::new(Arc::clone(&root_sink)),
     )
     .expect("second orchestrator");
     second.bind_metadata_store(metadata.clone());
     let second_registry = orchestration_registry();
     second.bind_tools(Arc::clone(&second_registry));
-    let restarted_root_events = root_sink.load().expect("restarted root events");
     recover_subagent_tree(
         &storage,
         &parent,
         &root_sink,
-        &restarted_root_events,
+        &history,
         std::slice::from_ref(&workspace),
         2,
         &second,
@@ -456,8 +534,25 @@ async fn recovery_recursively_rebinds_depth_two_children_and_is_restart_idempote
             .as_slice(),
         [grandchild_session.clone(), child_session.clone()]
     );
-    assert_follow_up(&second, &parent, &child_id, &child_session).await;
-    assert_follow_up(&second, &child_session, &grandchild_id, &grandchild_session).await;
+    assert_follow_up(
+        &second,
+        Arc::clone(&root_sink),
+        &parent,
+        &child_id,
+        &child_session,
+    )
+    .await;
+    assert_follow_up(
+        &second,
+        history
+            .open_sink(&storage, &child_session)
+            .await
+            .expect("child sink"),
+        &child_session,
+        &grandchild_id,
+        &grandchild_session,
+    )
+    .await;
     assert_eq!(
         root_sink
             .load()
@@ -553,4 +648,28 @@ fn recovery_root_gate_rejects_noncanonical_missing_file_and_symlink_paths() {
             std::slice::from_ref(&local)
         ));
     }
+}
+
+async fn history_fixture(
+    events: &[EngineEvent],
+) -> (TempDir, Arc<DurableEventSink>, Arc<ChildLifecycleReader>) {
+    let storage = TempDir::new().expect("storage");
+    let parent = &events
+        .first()
+        .expect("source event")
+        .meta()
+        .expect("meta")
+        .session_id;
+    let sink = DurableEventSink::new(
+        SessionEventLog::open(storage.path(), &parent.0).expect("log"),
+        storage.path().to_path_buf(),
+        parent.0.clone(),
+        JournalService::new(storage.path()).expect("journal"),
+    )
+    .expect("sink");
+    rw_core::commit_session_events(Arc::clone(&sink), events.to_vec())
+        .await
+        .expect("source fixture");
+    let history = ChildLifecycleReader::new(Arc::clone(&sink));
+    (storage, sink, history)
 }

@@ -222,6 +222,7 @@ async fn factory_failure_without_a_returned_session_keeps_startup_ownership() {
             },
             Arc::new(FailedCreationFactory { panic }),
             Arc::new(ToolRegistry::new()),
+            Arc::new(super::TestArtifactSource::default()),
         )
         .expect("orchestrator");
         assert!(matches!(

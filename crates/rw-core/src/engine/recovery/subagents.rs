@@ -17,7 +17,7 @@ use rw_store::session::{
 use rw_types::{EngineEvent, SequenceId, SessionId, SubagentId};
 use serde::{Deserialize, Serialize};
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const PAGE: usize = 16;
 const IDENTITIES: u8 = 1;
 const RAW_SPAWNS: u8 = 2;
@@ -47,6 +47,7 @@ pub struct SubagentBinding {
     pub spawned_turn: u64,
     pub terminal: Option<SequenceId>,
     pub latest_result: Option<SequenceId>,
+    pub latest_artifact: Option<String>,
     scope: u64,
     revision: SequenceId,
     artifact_scope: Option<u64>,

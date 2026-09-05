@@ -1,6 +1,5 @@
+use super::durable_session::ChildLifecycleReader;
 use super::durable_session::DurableEventSink;
-use super::durable_session::load_session_events;
-use crate::journal_service::JournalService;
 use rw_core::AgentLoopError;
 use rw_core::EngineEvent;
 use rw_core::EventClock;
@@ -10,182 +9,55 @@ use rw_core::SequenceId;
 use rw_core::SubagentMetadataStore;
 use rw_core::SubagentOrchestrator;
 use rw_core::SystemEventClock;
-use rw_store::session::SessionEventLog;
 use rw_tools::CancellationToken;
 use rw_tools::WorktreeIsolation;
 use rw_types::SessionId;
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub(super) fn effective_subagent_events(
-    events: &[EngineEvent],
-) -> std::result::Result<Vec<EngineEvent>, AgentLoopError> {
-    let mut active_turn = None;
-    let mut retained: Vec<(u64, EngineEvent)> = Vec::new();
-    for event in events {
-        match event {
-            EngineEvent::TurnStarted { turn_id, .. } => {
-                active_turn = Some(turn_id.0.parse::<u64>().map_err(|_| {
-                    AgentLoopError::Persistence("durable turn id is not numeric".to_owned())
-                })?);
-            }
-            EngineEvent::TurnFinished { turn_id, .. } => {
-                let turn = turn_id.0.parse::<u64>().map_err(|_| {
-                    AgentLoopError::Persistence("durable turn id is not numeric".to_owned())
-                })?;
-                if active_turn != Some(turn) {
-                    return Err(AgentLoopError::Persistence(
-                        "durable turn lifecycle is inconsistent".to_owned(),
-                    ));
-                }
-                active_turn = None;
-            }
-            EngineEvent::ConversationRewound { to_agent_turn, .. } => {
-                retained.retain(|(turn, _)| turn <= to_agent_turn);
-                active_turn = None;
-            }
-            EngineEvent::SubagentSpawned { .. } => {
-                let turn = active_turn.ok_or_else(|| {
-                    AgentLoopError::Persistence(
-                        "durable child spawn occurred outside an active turn".to_owned(),
-                    )
-                })?;
-                retained.push((turn, event.clone()));
-            }
-            EngineEvent::SubagentFinished { subagent_id, .. } => {
-                let turn = active_turn
-                    .or_else(|| unmatched_retained_spawn_turn(&retained, subagent_id))
-                    .ok_or_else(|| {
-                        AgentLoopError::Persistence(
-                            "durable child result has no active or retained spawn".to_owned(),
-                        )
-                    })?;
-                retained.push((turn, event.clone()));
-            }
-            _ => {}
-        }
-    }
-    let mut active = HashMap::new();
-    for (_, event) in &retained {
-        match event {
-            EngineEvent::SubagentSpawned {
-                subagent_id,
-                child_session_id,
-                ..
-            } => {
-                if active
-                    .insert(subagent_id.clone(), child_session_id.clone())
-                    .is_some()
-                {
-                    return Err(AgentLoopError::Persistence(
-                        "durable child spawned twice without a terminal result".to_owned(),
-                    ));
-                }
-            }
-            EngineEvent::SubagentFinished {
-                subagent_id,
-                result,
-                ..
-            } => {
-                let session = active.remove(subagent_id).ok_or_else(|| {
-                    AgentLoopError::Persistence(
-                        "durable child result has no effective spawn".to_owned(),
-                    )
-                })?;
-                if result.subagent_id != *subagent_id || result.session_id != session {
-                    return Err(AgentLoopError::Persistence(
-                        "durable child result identity is inconsistent".to_owned(),
-                    ));
-                }
-            }
-            _ => unreachable!(),
-        }
-    }
-    Ok(retained.into_iter().map(|(_, event)| event).collect())
-}
-
-pub(super) fn unmatched_retained_spawn_turn(
-    retained: &[(u64, EngineEvent)],
-    target: &rw_types::SubagentId,
-) -> Option<u64> {
-    let mut unmatched = None;
-    for (turn, event) in retained {
-        match event {
-            EngineEvent::SubagentSpawned { subagent_id, .. } if subagent_id == target => {
-                unmatched = Some(*turn);
-            }
-            EngineEvent::SubagentFinished { subagent_id, .. } if subagent_id == target => {
-                unmatched = None;
-            }
-            _ => {}
-        }
-    }
-    unmatched
-}
-
-pub(super) fn validate_subagent_recovery_record(
-    record: &rw_core::SubagentRecoveryRecord,
-    events: &[EngineEvent],
-) -> std::result::Result<(), AgentLoopError> {
-    let durable = events.iter().any(|event| {
-        matches!(
-            event,
-            EngineEvent::SubagentSpawned {
-                subagent_id,
-                child_session_id,
-                ..
-            } if subagent_id == &record.handle.subagent_id
-                && child_session_id == &record.handle.session_id
-        )
-    });
-    if !durable {
-        return Err(AgentLoopError::Persistence(
-            "host-private child metadata has no matching durable spawn event".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
 pub(super) async fn repair_incomplete_subagent_lifecycles(
     sink: &Arc<DurableEventSink>,
-    parent_session_id: &SessionId,
-    events: &[EngineEvent],
-) -> std::result::Result<Vec<EngineEvent>, AgentLoopError> {
-    let effective = effective_subagent_events(events)?;
-    let incomplete = rw_core::incomplete_subagent_lifecycles(&effective)
-        .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-    if incomplete.is_empty() {
-        return Ok(events.to_vec());
+    parent: &SessionId,
+    history: &ChildLifecycleReader,
+) -> Result<(), AgentLoopError> {
+    loop {
+        let (through, pending) = history.pending(parent, None).await?;
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let first = through
+            .map_or(Some(0), |value| value.0.checked_add(1))
+            .ok_or_else(|| AgentLoopError::Persistence("durable sequence overflow".into()))?;
+        let emitted_at = SystemEventClock.emitted_at();
+        let mut repairs = Vec::with_capacity(pending.len());
+        for (offset, binding) in pending.into_iter().enumerate() {
+            let sequence = first
+                .checked_add(
+                    u64::try_from(offset)
+                        .map_err(|error| AgentLoopError::Persistence(error.to_string()))?,
+                )
+                .ok_or_else(|| AgentLoopError::Persistence("durable sequence overflow".into()))?;
+            let handle = rw_core::SubagentHandle {
+                subagent_id: binding.subagent_id,
+                session_id: binding.session_id,
+            };
+            repairs.push(EngineEvent::SubagentFinished {
+                meta: EventMeta {
+                    protocol_version: SESSION_EVENT_VERSION,
+                    session_id: parent.clone(),
+                    sequence_id: SequenceId(sequence),
+                    emitted_at: emitted_at.clone(),
+                    caused_by: None,
+                },
+                subagent_id: handle.subagent_id.clone(),
+                result: rw_core::interrupted_subagent_recovery_result(&handle),
+            });
+        }
+        rw_core::commit_session_events(Arc::clone(sink), repairs).await?;
     }
-    let first_sequence = events
-        .last()
-        .and_then(EngineEvent::meta)
-        .map_or(0, |meta| meta.sequence_id.0.saturating_add(1));
-    let emitted_at = SystemEventClock.emitted_at();
-    let repairs = incomplete
-        .iter()
-        .enumerate()
-        .map(|(offset, handle)| EngineEvent::SubagentFinished {
-            meta: EventMeta {
-                protocol_version: SESSION_EVENT_VERSION,
-                session_id: parent_session_id.clone(),
-                sequence_id: SequenceId(
-                    first_sequence.saturating_add(u64::try_from(offset).unwrap_or(u64::MAX)),
-                ),
-                emitted_at: emitted_at.clone(),
-                caused_by: None,
-            },
-            subagent_id: handle.subagent_id.clone(),
-            result: rw_core::interrupted_subagent_recovery_result(handle),
-        })
-        .collect::<Vec<_>>();
-    rw_core::commit_session_events(Arc::clone(sink), repairs).await?;
-    sink.load()
-        .map_err(|error| AgentLoopError::Persistence(error.to_string()))
 }
 
 pub(super) fn recovery_workspace_authorized(
@@ -227,19 +99,30 @@ pub(super) async fn promote_pending_recovery_record(
 
 pub(super) async fn discard_rewound_subagent_record(
     record: &rw_core::SubagentRecoveryRecord,
-    effective_events: &[EngineEvent],
-    raw_events: &[EngineEvent],
+    history: &ChildLifecycleReader,
     worktree_manager: Option<&WorktreeIsolation>,
     metadata: &dyn SubagentMetadataStore,
 ) -> std::result::Result<bool, AgentLoopError> {
-    let Err(effective_error) = validate_subagent_recovery_record(record, effective_events) else {
+    let effective = history
+        .binding(&record.parent_session_id, &record.handle.subagent_id)
+        .await?;
+    if effective
+        .as_ref()
+        .is_some_and(|binding| binding.session_id == record.handle.session_id)
+    {
         return Ok(false);
-    };
-    let raw_spawn_exists = validate_subagent_recovery_record(record, raw_events).is_ok();
-    let uncommitted_pending =
-        record.phase == rw_core::SubagentRecoveryPhase::Pending && !raw_spawn_exists;
-    if !raw_spawn_exists && !uncommitted_pending {
-        return Err(effective_error);
+    }
+    let published = history
+        .published(
+            &record.parent_session_id,
+            &record.handle.subagent_id,
+            &record.handle.session_id,
+        )
+        .await?;
+    if !published && record.phase != rw_core::SubagentRecoveryPhase::Pending {
+        return Err(AgentLoopError::Persistence(
+            "host-private child metadata has no matching durable spawn event".into(),
+        ));
     }
     if let Some(lease) = &record.worktree {
         let manager = worktree_manager.ok_or_else(|| {
@@ -269,26 +152,6 @@ pub(super) struct SubagentRecoveryNode {
     pub(super) parent_session_id: SessionId,
     pub(super) parent_depth: usize,
     pub(super) authorized_roots: Vec<PathBuf>,
-    pub(super) events: Option<Vec<EngineEvent>>,
-}
-
-pub(super) fn open_subagent_recovery_log(
-    journal_service: Arc<JournalService>,
-    storage_root: &Path,
-    session_id: &SessionId,
-) -> std::result::Result<(Arc<DurableEventSink>, Vec<EngineEvent>), AgentLoopError> {
-    let log = SessionEventLog::open(storage_root, &session_id.0)
-        .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-    let events = load_session_events(&log)
-        .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-    let sink = DurableEventSink::new(
-        log,
-        storage_root.to_path_buf(),
-        session_id.0.clone(),
-        journal_service,
-    )
-    .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-    Ok((sink, events))
 }
 
 /// Repairs and rebinds a complete persisted subagent tree. Discovery is kept
@@ -299,7 +162,7 @@ pub(super) async fn recover_subagent_tree(
     storage_root: &Path,
     root_session_id: &SessionId,
     root_sink: &Arc<DurableEventSink>,
-    root_events: &[EngineEvent],
+    history: &ChildLifecycleReader,
     root_authorized_roots: &[PathBuf],
     max_depth: usize,
     orchestrator: &SubagentOrchestrator,
@@ -310,7 +173,6 @@ pub(super) async fn recover_subagent_tree(
         parent_session_id: root_session_id.clone(),
         parent_depth: 0,
         authorized_roots: root_authorized_roots.to_vec(),
-        events: Some(root_events.to_vec()),
     }]);
     let mut visited = HashSet::new();
     let mut records = Vec::new();
@@ -321,26 +183,14 @@ pub(super) async fn recover_subagent_tree(
                 "persisted child session topology contains a loop or duplicate".to_owned(),
             ));
         }
-        let (sink, events) = if let Some(events) = node.events {
-            (None, events)
+        let sink = if node.parent_session_id == *root_session_id {
+            Arc::clone(root_sink)
         } else {
-            let (sink, events) = open_subagent_recovery_log(
-                Arc::clone(&root_sink.journal_service),
-                storage_root,
-                &node.parent_session_id,
-            )?;
-            (Some(sink), events)
+            history
+                .open_sink(storage_root, &node.parent_session_id)
+                .await?
         };
-        let repaired = repair_incomplete_subagent_lifecycles(
-            sink.as_ref().unwrap_or(root_sink),
-            &node.parent_session_id,
-            &events,
-        )
-        .await?;
-        let effective = effective_subagent_events(&repaired)?;
-        orchestrator
-            .rebuild_artifact_authority(&node.parent_session_id, &effective)
-            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+        repair_incomplete_subagent_lifecycles(&sink, &node.parent_session_id, history).await?;
 
         let expected_depth = node.parent_depth.checked_add(1).ok_or_else(|| {
             AgentLoopError::Persistence("persisted child depth overflow".to_owned())
@@ -356,13 +206,15 @@ pub(super) async fn recover_subagent_tree(
                 )));
             }
             if record.phase == rw_core::SubagentRecoveryPhase::Closed {
-                let published = repaired.iter().any(|event| matches!(event, EngineEvent::SubagentSpawned {subagent_id, ..} if subagent_id == &record.handle.subagent_id));
-                if published {
-                    validate_subagent_recovery_record(&record, &repaired)?;
-                    if validate_subagent_recovery_record(&record, &effective).is_ok()
-                        && !effective.iter().any(|event| matches!(event, EngineEvent::SubagentFinished {subagent_id, result, ..} if subagent_id == &record.handle.subagent_id && result.session_id == record.handle.session_id)) {
-                        return Err(AgentLoopError::Persistence("closed child still lacks durable terminal proof".to_owned()));
-                    }
+                if let Some(binding) = history
+                    .binding(&node.parent_session_id, &record.handle.subagent_id)
+                    .await?
+                    && binding.session_id == record.handle.session_id
+                    && binding.terminal.is_none()
+                {
+                    return Err(AgentLoopError::Persistence(
+                        "closed child still lacks durable terminal proof".into(),
+                    ));
                 }
                 metadata
                     .remove(&record.parent_session_id, &record.handle.subagent_id)
@@ -376,14 +228,7 @@ pub(super) async fn recover_subagent_tree(
                         .to_owned(),
                 ));
             }
-            if discard_rewound_subagent_record(
-                &record,
-                &effective,
-                &repaired,
-                worktree_manager,
-                metadata,
-            )
-            .await?
+            if discard_rewound_subagent_record(&record, history, worktree_manager, metadata).await?
             {
                 continue;
             }
@@ -411,7 +256,6 @@ pub(super) async fn recover_subagent_tree(
                 parent_session_id: record.handle.session_id.clone(),
                 parent_depth: record.depth,
                 authorized_roots: vec![child_root],
-                events: None,
             });
             records.push(record);
         }

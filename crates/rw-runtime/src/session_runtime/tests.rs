@@ -33,9 +33,9 @@ use super::credential_resolution::resolve_tool_proxy;
 use super::credential_resolution::resolve_websearch_headers_with;
 use super::custom_commands::compose_runtime_commands;
 use super::declarative_hooks::register_declarative_hooks;
-use super::durable_session::DurableEventSink;
 use super::durable_session::append_tool_output;
 use super::durable_session::load_session_events;
+use super::durable_session::{ChildLifecycleReader, DurableEventSink};
 use super::extension_discovery::discover_runtime_extensions;
 use super::extension_discovery::extension_startup_notifications;
 use super::extension_discovery::skill_index_turn;
@@ -101,7 +101,6 @@ use super::session_metadata::load_session_metadata_any_bounded;
 use super::session_metadata::persist_session_metadata;
 use super::session_selection::checkpoint_root;
 use super::subagent_recovery::discard_rewound_subagent_record;
-use super::subagent_recovery::effective_subagent_events;
 use super::subagent_recovery::promote_pending_recovery_record;
 use super::subagent_recovery::recover_subagent_tree;
 use super::subagent_recovery::recovery_workspace_authorized;
@@ -353,7 +352,22 @@ struct RecoveryProbeSession {
     session_id: SessionId,
 }
 
-struct RecoveryProbeObserver;
+struct RecoveryProbeObserver {
+    sink: Arc<DurableEventSink>,
+    parent: SessionId,
+    next: std::sync::atomic::AtomicU64,
+}
+impl RecoveryProbeObserver {
+    fn meta(&self) -> EventMeta {
+        EventMeta {
+            protocol_version: SESSION_EVENT_VERSION,
+            session_id: self.parent.clone(),
+            sequence_id: SequenceId(self.next.fetch_add(1, Ordering::SeqCst)),
+            emitted_at: "2026-01-01T00:00:00.000Z".into(),
+            caused_by: None,
+        }
+    }
+}
 
 struct DropProbe(Arc<std::sync::atomic::AtomicBool>);
 
@@ -745,17 +759,38 @@ impl rw_core::SubagentSession for RecoveryProbeSession {
 impl rw_core::SubagentObserver for RecoveryProbeObserver {
     async fn spawned(
         &self,
-        _handle: &rw_core::SubagentHandle,
-        _task: &str,
+        handle: &rw_core::SubagentHandle,
+        task: &str,
     ) -> std::result::Result<(), rw_core::OrchestrationError> {
-        Ok(())
+        rw_core::commit_session_events(
+            Arc::clone(&self.sink),
+            vec![EngineEvent::SubagentSpawned {
+                meta: self.meta(),
+                subagent_id: handle.subagent_id.clone(),
+                child_session_id: handle.session_id.clone(),
+                task: task.into(),
+            }],
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| rw_core::OrchestrationError::Session(error.to_string()))
     }
 
     async fn finished(
         &self,
-        _result: &rw_types::SubagentResult,
+        result: &rw_types::SubagentResult,
     ) -> std::result::Result<(), rw_core::OrchestrationError> {
-        Ok(())
+        rw_core::commit_session_events(
+            Arc::clone(&self.sink),
+            vec![EngineEvent::SubagentFinished {
+                meta: self.meta(),
+                subagent_id: result.subagent_id.clone(),
+                result: result.clone(),
+            }],
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| rw_core::OrchestrationError::Session(error.to_string()))
     }
 
     async fn progress(

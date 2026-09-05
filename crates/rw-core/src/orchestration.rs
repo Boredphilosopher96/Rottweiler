@@ -9,10 +9,7 @@ use std::{
 
 use async_trait::async_trait;
 use rw_ext::LoadedAgent;
-use rw_tools::{
-    CancellationToken, CapabilityManifest, SessionDiffArtifactAuthority, ToolRegistry,
-    WorktreeLeaseRecord,
-};
+use rw_tools::{CancellationToken, CapabilityManifest, ToolRegistry, WorktreeLeaseRecord};
 use rw_types::{
     Cost, DiffArtifact, EngineEvent, SessionId, SessionMode, SubagentActivity, SubagentDescriptor,
     SubagentId, SubagentIsolation, SubagentResult, SubagentStatus, TurnStatus, Usage,
@@ -396,8 +393,7 @@ struct OrchestratorInner {
     sequence: std::sync::atomic::AtomicU64,
     sessions: Mutex<HashMap<SubagentId, SessionRecord>>,
     session_depths: Mutex<HashMap<SessionId, usize>>,
-    diff_artifact_authority: Arc<SessionDiffArtifactAuthority>,
-    latest_artifacts: Mutex<HashMap<(SessionId, SubagentId), String>>,
+    diff_artifact_authority: Arc<dyn SubagentArtifactSource>,
     metadata: RwLock<Arc<dyn SubagentMetadataStore>>,
 }
 
@@ -412,6 +408,7 @@ struct SessionRecord {
     isolation: SubagentIsolation,
     parent_session_id: SessionId,
     latest_durable_artifact_id: Option<String>,
+    closing_artifact: Option<Arc<rw_tools::AuthorizedDiffArtifact>>,
     close_completed: bool,
     close_gate: Arc<tokio::sync::Mutex<()>>,
 }
@@ -488,7 +485,9 @@ fn subagent_status(status: &TurnStatus) -> SubagentStatus {
     }
 }
 
+mod artifact_source;
 mod lifecycle;
+pub use artifact_source::SubagentArtifactSource;
 mod startup;
 
 mod policy;

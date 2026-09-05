@@ -145,12 +145,34 @@ impl SubagentLifecycleView {
     /// # Errors
     /// Rejects inconsistent source identities.
     pub fn latest_artifact(&self, subagent: &SubagentId) -> Result<Option<String>, RecoveryError> {
-        let Some(binding) = self.binding(subagent)? else {
-            return Ok(None);
-        };
-        let Some(sequence) = binding.latest_result else {
-            return Ok(None);
-        };
+        Ok(self
+            .binding(subagent)?
+            .and_then(|binding| binding.latest_artifact))
+    }
+    /// Hash complete typed result contents without allocating a serialized copy.
+    /// # Errors
+    /// Rejects invalid result serialization.
+    pub fn result_digest(result: &rw_types::SubagentResult) -> Result<[u8; 32], RecoveryError> {
+        reduce::digest(result)
+    }
+    /// Verify one acknowledged terminal against the latest effective source.
+    /// # Errors
+    /// Rejects missing, mismatched or stale terminal proof.
+    pub fn verify_terminal(
+        &self,
+        child: &SubagentId,
+        session: &SessionId,
+        digest: [u8; 32],
+    ) -> Result<(), RecoveryError> {
+        let binding = self
+            .binding(child)?
+            .ok_or(RecoveryError::Invalid("acknowledged child has no source"))?;
+        if &binding.session_id != session {
+            return Err(RecoveryError::Invalid("acknowledged child session"));
+        }
+        let sequence = binding.terminal.ok_or(RecoveryError::Invalid(
+            "acknowledged child lacks terminal proof",
+        ))?;
         let event = SourceReader {
             source: &self.source,
             events: VecDeque::new(),
@@ -162,14 +184,17 @@ impl SubagentLifecycleView {
             ..
         } = event
         else {
-            return Err(RecoveryError::Invalid("child latest result source"));
+            return Err(RecoveryError::Invalid("child terminal source"));
         };
-        if &subagent_id != subagent
-            || result.subagent_id != subagent_id
-            || result.session_id != binding.session_id
+        if &subagent_id != child
+            || &result.subagent_id != child
+            || &result.session_id != session
+            || reduce::digest(&result)? != digest
         {
-            return Err(RecoveryError::Invalid("child latest result identity"));
+            return Err(RecoveryError::Invalid(
+                "acknowledged child terminal contents",
+            ));
         }
-        Ok(result.diff_artifact.map(|artifact| artifact.id))
+        Ok(())
     }
 }

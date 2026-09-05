@@ -488,7 +488,13 @@ fn test_event_meta(sequence: u64) -> rw_types::EventMeta {
 }
 
 fn orchestrator(limits: SubagentLimits, factory: Arc<FakeFactory>) -> SubagentOrchestrator {
-    SubagentOrchestrator::new(limits, factory, Arc::new(ToolRegistry::new())).expect("orchestrator")
+    SubagentOrchestrator::new(
+        limits,
+        factory,
+        Arc::new(ToolRegistry::new()),
+        Arc::new(TestArtifactSource::default()),
+    )
+    .expect("orchestrator")
 }
 
 struct MutatingTool;
@@ -584,3 +590,6 @@ mod tools;
 mod startup;
 
 mod worktree_startup;
+
+mod artifact_source;
+use artifact_source::TestArtifactSource;

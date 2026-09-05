@@ -1,10 +1,10 @@
 mod presentation;
 use presentation::APPLY_PRESENTATION;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use rw_types::{DiffArtifact, SessionId, ToolCapability};
@@ -36,74 +36,41 @@ pub struct ApplyWorktreeDiffInput {
     pub artifact_id: Option<String>,
 }
 
-/// Session-scoped provenance check for durable child artifacts.
-pub trait DiffArtifactAuthority: Send + Sync {
-    /// Resolves a full artifact only after it was durably recorded for the parent session.
-    fn resolve(&self, parent_session: &SessionId, artifact_id: &str) -> Option<DiffArtifact>;
+/// A decoded artifact retains its source admission through preview or application.
+pub struct AuthorizedDiffArtifact {
+    artifact: DiffArtifact,
+    _owner: Box<dyn Send + Sync>,
 }
-
-/// Rebuildable authority populated only from durable `SubagentFinished` records.
-#[derive(Debug, Default)]
-pub struct SessionDiffArtifactAuthority {
-    grants: Mutex<HashMap<(SessionId, String), DiffArtifact>>,
-}
-
-impl SessionDiffArtifactAuthority {
-    /// Validates an artifact without granting authority to apply it.
-    ///
-    /// # Errors
-    ///
-    /// Returns when the digest, base commit, or touched manifest is malformed.
-    pub fn validate(&self, artifact: &DiffArtifact) -> Result<(), ToolError> {
-        verify_artifact(artifact)
-    }
-
-    /// Grants one exact artifact after its durable child-result event commits.
-    /// Calling this while rebuilding a session from the same durable records is idempotent.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the artifact digest, commit, or manifest is invalid.
-    pub fn record_durable(
-        &self,
-        parent_session: SessionId,
-        artifact: &DiffArtifact,
-    ) -> Result<(), ToolError> {
-        verify_artifact(artifact)?;
-        let key = (parent_session, artifact.id.clone());
-        let mut grants = self
-            .grants
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(existing) = grants.get(&key) {
-            if existing != artifact {
-                return Err(ToolError::InvalidInput(
-                    "worktree diff artifact id was already bound to different contents".to_owned(),
-                ));
-            }
-            return Ok(());
+impl AuthorizedDiffArtifact {
+    pub fn new(artifact: DiffArtifact, owner: impl Send + Sync + 'static) -> Self {
+        Self {
+            artifact,
+            _owner: Box::new(owner),
         }
-        grants.insert(key, artifact.clone());
-        Ok(())
     }
-
-    /// Drops every in-memory grant when a parent session is permanently deleted.
-    pub fn revoke_session(&self, parent_session: &SessionId) {
-        self.grants
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|(session, _), _| session != parent_session);
+    #[must_use]
+    pub const fn artifact(&self) -> &DiffArtifact {
+        &self.artifact
     }
 }
 
-impl DiffArtifactAuthority for SessionDiffArtifactAuthority {
-    fn resolve(&self, parent_session: &SessionId, artifact_id: &str) -> Option<DiffArtifact> {
-        self.grants
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&(parent_session.clone(), artifact_id.to_owned()))
-            .cloned()
-    }
+/// Session-scoped provenance check against effective durable child results.
+#[async_trait]
+pub trait DiffArtifactAuthority: Send + Sync {
+    /// # Errors
+    /// Rejects unavailable authority or unproven owned read effects.
+    async fn resolve(
+        &self,
+        parent_session: &SessionId,
+        artifact_id: &str,
+    ) -> Result<Option<AuthorizedDiffArtifact>, ToolError>;
+}
+
+/// Validate a complete artifact's digest and touched-path contract.
+/// # Errors
+/// Rejects malformed commit, digest or relative-path identities.
+pub fn validate_diff_artifact(artifact: &DiffArtifact) -> Result<(), ToolError> {
+    verify_artifact(artifact)
 }
 
 /// The only supported merge-back boundary. Core checkpoints its exact manifest
@@ -129,11 +96,11 @@ impl ApplyWorktreeDiffTool {
         }
     }
 
-    fn resolve_input(
+    async fn resolve_input(
         &self,
         context: &ToolContext,
         input: ApplyWorktreeDiffInput,
-    ) -> Result<DiffArtifact, ToolError> {
+    ) -> Result<AuthorizedDiffArtifact, ToolError> {
         let session = context.session_id().ok_or_else(|| {
             ToolError::InvalidInput(
                 "apply_worktree_diff requires an authenticated parent session".to_owned(),
@@ -158,15 +125,16 @@ impl ApplyWorktreeDiffTool {
         let resolved = self
             .authority
             .resolve(session, &artifact_id)
+            .await?
             .ok_or_else(|| {
                 ToolError::InvalidInput(
                     "worktree diff was not durably produced for this parent session".to_owned(),
                 )
             })?;
-        verify_artifact(&resolved)?;
+        verify_artifact(resolved.artifact())?;
         if supplied
             .as_ref()
-            .is_some_and(|artifact| artifact != &resolved)
+            .is_some_and(|artifact| artifact != resolved.artifact())
         {
             return Err(ToolError::InvalidInput(
                 "worktree diff was not durably produced for this parent session".to_owned(),
@@ -224,11 +192,12 @@ impl Tool for ApplyWorktreeDiffTool {
 
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {
         let input: ApplyWorktreeDiffInput = parse_input(input)?;
-        let artifact = self.resolve_input(context, input)?;
+        let admitted = self.resolve_input(context, input).await?;
+        let artifact = admitted.artifact();
         context.cancellation.check()?;
         let _guard = self.apply_lock.lock().await;
         validate_repository_root(context.workspace_root(), &context.cancellation).await?;
-        validate_patch_manifest(context.workspace_root(), &artifact, &context.cancellation).await?;
+        validate_patch_manifest(context.workspace_root(), artifact, &context.cancellation).await?;
 
         let index = git_index_path(context.workspace_root(), &context.cancellation).await?;
         let temporary_index = tempfile::NamedTempFile::new().map_err(|source| ToolError::Io {
@@ -308,8 +277,9 @@ impl Tool for ApplyWorktreeDiffTool {
         input: &Value,
     ) -> Result<Option<crate::ApprovalPreview>, ToolError> {
         let input: ApplyWorktreeDiffInput = parse_input(input.clone())?;
-        let artifact = self.resolve_input(context, input)?;
-        let after = serde_json::to_vec_pretty(&artifact)
+        let admitted = self.resolve_input(context, input).await?;
+        let artifact = admitted.artifact();
+        let after = serde_json::to_vec_pretty(artifact)
             .map_err(|source| ToolError::Output(source.to_string()))?;
         Ok(Some(crate::ApprovalPreview {
             path: PathBuf::from(format!(".rottweiler/diff-artifacts/{}.json", artifact.id)),

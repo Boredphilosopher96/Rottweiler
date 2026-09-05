@@ -872,8 +872,8 @@ fn run_finalize_after_capture_test_hook(lease_path: &Path) {
 
 mod apply;
 pub use apply::{
-    ApplyWorktreeDiffInput, ApplyWorktreeDiffTool, DiffArtifactAuthority,
-    SessionDiffArtifactAuthority,
+    ApplyWorktreeDiffInput, ApplyWorktreeDiffTool, AuthorizedDiffArtifact, DiffArtifactAuthority,
+    validate_diff_artifact,
 };
 
 mod creation;

@@ -79,6 +79,10 @@ pub(super) fn apply(
                 spawned: sequence,
                 spawned_turn: turn,
                 terminal: None,
+                latest_artifact: current
+                    .as_ref()
+                    .filter(|current| &current.session_id == child_session_id)
+                    .and_then(|current| current.latest_artifact.clone()),
                 latest_result: current
                     .filter(|current| &current.session_id == child_session_id)
                     .and_then(|current| current.latest_result),
@@ -110,6 +114,10 @@ pub(super) fn apply(
             }
             current.terminal = Some(sequence);
             current.latest_result = Some(sequence);
+            current.latest_artifact = result
+                .diff_artifact
+                .as_ref()
+                .map(|artifact| artifact.id.clone());
             current.revision = sequence;
             if let Some(artifact) = &result.diff_artifact {
                 let id = artifact.id.as_bytes();
@@ -165,7 +173,7 @@ fn turn(turn: &rw_types::TurnId) -> Result<u64, RecoveryError> {
         .parse()
         .map_err(|_| RecoveryError::Invalid("child source turn identity"))
 }
-pub(super) fn digest(value: &rw_types::DiffArtifact) -> Result<[u8; 32], RecoveryError> {
+pub(super) fn digest(value: &impl serde::Serialize) -> Result<[u8; 32], RecoveryError> {
     struct HashWriter(blake3::Hasher);
     impl std::io::Write for HashWriter {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {

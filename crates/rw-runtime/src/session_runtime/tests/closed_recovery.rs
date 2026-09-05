@@ -64,19 +64,20 @@ async fn closed_children_never_rebind_missing_workspaces_or_invent_publication()
         }
         let factory = Arc::new(RecoveryProbeFactory::default());
         let rebound = Arc::clone(&factory.rebound);
+        let history = ChildLifecycleReader::new(Arc::clone(&sink));
         let orchestrator = SubagentOrchestrator::new(
             SubagentLimits::default(),
             factory,
             Arc::new(ToolRegistry::new()),
+            history.clone(),
         )
         .expect("orchestrator");
         orchestrator.bind_metadata_store(metadata.clone());
-        let events = sink.load().expect("events");
         recover_subagent_tree(
             &storage,
             &parent,
             &sink,
-            &events,
+            &history,
             std::slice::from_ref(&workspace),
             2,
             &orchestrator,

@@ -987,6 +987,8 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
             isolated,
             isolation_error,
         });
+        let child_history =
+            super::durable_session::ChildLifecycleReader::new(Arc::clone(&durable_sink));
         let orchestrator = SubagentOrchestrator::new(
             SubagentLimits {
                 max_depth: loaded_config.config.engine.subagent_max_depth,
@@ -996,6 +998,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
             },
             factory,
             Arc::clone(&actor_tools),
+            child_history.clone(),
         )
         .map_err(|error| miette!("subagent orchestrator could not start: {error}"))?;
         let metadata = Arc::new(
@@ -1041,7 +1044,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
             &storage_root,
             &parent_session,
             &durable_sink,
-            &recovered_events,
+            &child_history,
             &workspace_roots,
             loaded_config.config.engine.subagent_max_depth,
             &orchestrator,
