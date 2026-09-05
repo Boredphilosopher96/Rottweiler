@@ -1,3 +1,4 @@
+#![cfg(test)]
 use super::BTreeMap;
 use super::CancellationToken;
 use super::EgressPolicy;

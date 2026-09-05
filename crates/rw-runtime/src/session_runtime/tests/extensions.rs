@@ -1,3 +1,4 @@
+#![cfg(test)]
 use super::Arc;
 use super::BTreeMap;
 use super::BashSandboxMode;

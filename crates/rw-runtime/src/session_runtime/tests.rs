@@ -1,3 +1,4 @@
+#![cfg(test)]
 #![allow(clippy::expect_used)]
 #[cfg(test)]
 use super::accounting_projection::compact_title;

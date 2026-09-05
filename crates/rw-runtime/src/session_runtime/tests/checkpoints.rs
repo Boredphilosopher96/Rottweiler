@@ -1,3 +1,4 @@
+#![cfg(test)]
 use super::AgentLoopError;
 use super::Arc;
 use super::CheckpointStore;

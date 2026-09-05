@@ -1,3 +1,4 @@
+#![cfg(test)]
 use super::ActorSubagentSessionFactory;
 use super::AgentLoopError;
 use super::ApplyWorktreeDiffTool;

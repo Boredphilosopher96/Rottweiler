@@ -1,3 +1,4 @@
+#![cfg(test)]
 use super::AbortOnDropTask;
 use super::ActivatedHostedProvider;
 use super::AgentLoopError;

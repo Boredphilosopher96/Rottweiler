@@ -1,3 +1,4 @@
+#![cfg(test)]
 #![allow(clippy::expect_used)]
 
 use super::*;

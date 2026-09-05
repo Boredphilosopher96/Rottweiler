@@ -1,3 +1,4 @@
+#![cfg(test)]
 use super::Arc;
 use super::AtomicUsize;
 use super::BTreeMap;

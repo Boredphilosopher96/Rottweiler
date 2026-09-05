@@ -1,3 +1,4 @@
+#![cfg(test)]
 use super::ApprovalDecision;
 use super::EngineEvent;
 use super::EventMeta;

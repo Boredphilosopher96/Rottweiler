@@ -30,6 +30,20 @@ fn production() { TcpStream::connect(endpoint); }
         self.assertNotIn("test_support", production)
         self.assertIn("TcpStream::connect", production)
 
+    def test_test_only_file_is_excluded_by_its_rust_compile_condition(self) -> None:
+        source = """\
+#![allow(clippy::expect_used)]
+#![cfg(test)]
+fn fixture() { TcpStream::connect(endpoint); }
+"""
+        self.assertEqual(self.production_source(source), "")
+
+    def test_test_named_file_without_compile_condition_is_still_checked(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tests.rs"
+            path.write_text("fn live() { TcpStream::connect(endpoint); }", encoding="utf-8")
+            self.assertIn("TcpStream::connect", MODULE.production_source(path))
+
     def test_cfg_test_module_is_removed_without_losing_later_items(self) -> None:
         source = """\
 fn before() {}

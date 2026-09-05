@@ -1,3 +1,4 @@
+#![cfg(test)]
 use super::Arc;
 use super::BashSandboxMode;
 use super::CodeIntelligenceProvider;

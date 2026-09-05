@@ -5,7 +5,9 @@ pub use active::InterruptedTurnInputs;
 mod accounting;
 pub use accounting::{MAX_ACCOUNTING_PAGE_BYTES, RecoveryAccountingPage};
 mod control;
-pub use control::{MAX_CONTROL_SOURCE_BYTES, RecoveredMessage, RecoveredModelSelection, RecoveryControlPayloads};
+pub use control::{
+    MAX_CONTROL_SOURCE_BYTES, RecoveredMessage, RecoveredModelSelection, RecoveryControlPayloads,
+};
 mod encoding;
 mod maintenance;
 mod projector;
@@ -17,7 +19,6 @@ pub use read::{
 };
 mod state;
 mod window;
-pub use window::RecoveryBoundary;
 pub use projector::{CanonicalRecovery, RecoveryProgress};
 use rw_store::session::recovery_index::RecoveryIndexError;
 pub use state::{
@@ -25,6 +26,7 @@ pub use state::{
     RecoveryControl, RecoveryHead, SourceTotals, ToolStartIdentity, TurnSourceKind,
 };
 use thiserror::Error;
+pub use window::RecoveryBoundary;
 
 /// A canonical recovery operation cannot safely continue.
 #[derive(Debug, Error)]
