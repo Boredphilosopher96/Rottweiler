@@ -354,3 +354,9 @@ Source bytes remain charged through the last reader. Callback and host-command
 traffic use separate bounded lanes, and source admission is revoked when the
 callback settles. Shared journal decoding owns its own input admission; the
 encoded line limit is not a claim about arbitrary JSON heap amplification.
+
+### Driver-scoped navigation
+
+An active extension command can request `session.control({ action: "navigate", target })`. A target is either `{ kind: "session", session_id }` or `{ kind: "transcript", sequence }`. The host validates the target, retains at most one navigation request with the command, and emits `SessionNavigationRequested` only after successful handler settlement under the same driver and runtime generation. Background pushes cannot navigate. The built-in `/goto session <id>` and `/goto sequence <number>` commands use the same control owner.
+
+Navigation is a connection-scoped request to the initiating client. It grants no authority over the destination session and is neither journaled nor replayed. Clients use their ordinary session open and bounded transcript read paths. Transcript navigation rejects future sequences; a discarded source resolves to the nearest surviving row at or before the requested sequence and exposes that replacement to the client.

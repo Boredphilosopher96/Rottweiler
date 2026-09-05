@@ -79,6 +79,14 @@ pub(super) async fn apply(
             let mut submitted_prompt = None;
             let mut deferred_command_completion = false;
             match output.action {
+                SessionCommandAction::Navigate { target } => {
+                    if let Err(error) =
+                        super::navigation::request(state, events, &command_meta, target)
+                    {
+                        let _ = respond.send(Err(error));
+                        return;
+                    }
+                }
                 SessionCommandAction::Interrupt => {
                     if let Some(running) = &state.running
                         && running.id == observed_turn

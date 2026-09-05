@@ -23,6 +23,7 @@ mod model_preparation;
 mod model_selection;
 mod modes;
 mod mutation_checkpoints;
+mod navigation;
 mod permissions;
 mod persistence;
 mod plan;

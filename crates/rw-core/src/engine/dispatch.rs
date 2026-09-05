@@ -12,6 +12,7 @@ mod message_input;
 mod messages;
 pub(super) mod model_job;
 mod model_switch;
+mod navigation;
 mod permissions;
 mod plugin_control;
 mod plugin_messages;

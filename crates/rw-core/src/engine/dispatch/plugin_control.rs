@@ -134,6 +134,21 @@ pub(super) async fn control(
         return Ok(Some(ExtensionControlOutcome::Busy {}));
     }
     match control {
+        ExtensionControl::Navigate { target } => {
+            if !own_command {
+                return Err(invalid("navigation requires an active driver command"));
+            }
+            let pending = state
+                .pending_command
+                .as_ref()
+                .ok_or_else(|| invalid("navigation command is absent"))?;
+            super::navigation::validate(state, pending.meta(), &target)?;
+            state
+                .pending_command
+                .as_mut()
+                .ok_or_else(|| invalid("navigation command is absent"))?
+                .queue_navigation(target)?;
+        }
         ExtensionControl::PinContext { item_id } => {
             super::context_surgery::apply_registered_context_surgery(
                 state, config, events, item_id, true,

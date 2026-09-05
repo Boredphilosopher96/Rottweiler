@@ -66,9 +66,35 @@ pub enum ExtensionContextPage {
     },
 }
 
+/// A request to the initiating client, resolved through its ordinary session/history APIs.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, JsonSchema, TS, Allocation)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SessionNavigationTarget {
+    Session {
+        session_id: crate::SessionId,
+    },
+    /// Select the nearest surviving transcript row at or before this durable sequence.
+    Transcript {
+        sequence: SequenceId,
+    },
+}
+impl SessionNavigationTarget {
+    /// # Errors
+    /// Rejects unsafe session identities. Transcript bounds are checked by the actor.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        match self {
+            Self::Session { session_id } => crate::SessionId::validate(&session_id.0)
+                .map_err(|_| "invalid navigation session identity"),
+            Self::Transcript { .. } => Ok(()),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, TS, Allocation)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExtensionControl {
+    /// Only an active driver command may request client navigation.
+    Navigate { target: SessionNavigationTarget },
     PinContext {
         #[schemars(schema_with = "context_item_schema")]
         item_id: ContextItemId,
@@ -125,6 +151,7 @@ impl ExtensionControl {
     /// Rejects empty, oversized or control-bearing identities.
     pub fn validate(&self) -> Result<(), &'static str> {
         match self {
+            Self::Navigate { target } => target.validate(),
             Self::PinContext { item_id } | Self::EvictContext { item_id } => {
                 validate_context_item_id(&item_id.0)
             }

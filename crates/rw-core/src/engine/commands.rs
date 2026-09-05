@@ -1,3 +1,4 @@
+mod navigation;
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
@@ -90,6 +91,9 @@ pub enum SessionCommandAction {
     #[default]
     None,
     Interrupt,
+    Navigate {
+        target: rw_types::extension_control::SessionNavigationTarget,
+    },
     Rewind {
         to_turn: u64,
     },
@@ -997,6 +1001,13 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for RewindComma
 pub fn builtin_command_registry()
 -> Result<CommandRegistry<SessionCommandContext, SessionCommandOutput>, AgentLoopError> {
     let mut registry = CommandRegistry::new();
+    registry
+        .register(
+            CommandDescriptor::new("goto", "Navigate to a session or transcript sequence")
+                .with_argument_hint("session <id> | sequence <number>"),
+            navigation::NavigateCommand,
+        )
+        .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
     registry
         .register(
             CommandDescriptor::new("help", "List available commands"),

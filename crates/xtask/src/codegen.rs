@@ -378,6 +378,7 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(Attachment);
     declaration!(StoredAttachment);
     declaration!(SessionDescriptor);
+    declaration!(rw_types::extension_control::SessionNavigationTarget);
     declaration!(CommandDescriptor);
     declaration!(CommandSource);
     declaration!(ModelCacheBehavior);

@@ -45,6 +45,11 @@ pub const TRANSIENT_ENGINE_EVENT_TYPES: &[&str] = &[
 #[derive(Allocation)]
 #[serde(deny_unknown_fields)]
 pub enum EngineEvent {
+    SessionNavigationRequested {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        target: crate::extension_control::SessionNavigationTarget,
+    },
     UiCatalogReady {
         meta: CommandAckMeta,
         session_id: SessionId,
@@ -677,7 +682,8 @@ impl EngineEvent {
     #[must_use]
     pub fn command_meta_mut(&mut self) -> Option<&mut CommandAckMeta> {
         match self {
-            Self::UiCatalogReady { meta, .. }
+            Self::SessionNavigationRequested { meta, .. }
+            | Self::UiCatalogReady { meta, .. }
             | Self::UiPanelsReady { meta, .. }
             | Self::TodosRead { meta, .. }
             | Self::TranscriptPageReady { meta, .. }
@@ -788,7 +794,8 @@ impl EngineEvent {
     #[must_use]
     pub fn meta(&self) -> Option<&EventMeta> {
         match self {
-            Self::TranscriptPageReady { .. }
+            Self::SessionNavigationRequested { .. }
+            | Self::TranscriptPageReady { .. }
             | Self::TranscriptContentReady { .. }
             | Self::UiCatalogReady { .. }
             | Self::UiPanelsReady { .. }
@@ -886,7 +893,8 @@ impl EngineEvent {
     #[must_use]
     pub fn meta_mut(&mut self) -> Option<&mut EventMeta> {
         match self {
-            Self::TranscriptPageReady { .. }
+            Self::SessionNavigationRequested { .. }
+            | Self::TranscriptPageReady { .. }
             | Self::TranscriptContentReady { .. }
             | Self::UiCatalogReady { .. }
             | Self::UiPanelsReady { .. }

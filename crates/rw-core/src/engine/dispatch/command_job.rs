@@ -45,6 +45,7 @@ pub(in crate::engine) struct PendingCommand {
     driver: Option<ClientId>,
     meta: CommandMeta,
     name: String,
+    navigation: Option<rw_types::extension_control::SessionNavigationTarget>,
     observed_turn: u64,
     reply: CommandReply,
 }
@@ -204,6 +205,7 @@ fn admit(
                 driver: context.state.control.driver(),
                 meta,
                 name,
+                navigation: None,
                 observed_turn,
                 reply,
             });
@@ -225,7 +227,7 @@ pub(in crate::engine) async fn wait(pending: &mut Option<PendingCommand>) -> Exe
     }
 }
 
-pub(in crate::engine) async fn finish(result: Execution, context: DispatchContext<'_>) {
+pub(in crate::engine) async fn finish(mut result: Execution, context: DispatchContext<'_>) {
     let Some(pending) = context.state.pending_command.take() else {
         return;
     };
@@ -256,6 +258,18 @@ pub(in crate::engine) async fn finish(result: Execution, context: DispatchContex
             "command completion authority is no longer current".into(),
         )));
         return;
+    }
+    if let Some(target) = pending.navigation
+        && let Ok(prepared) = &mut result
+    {
+        if prepared.output.action != crate::engine::commands::SessionCommandAction::None {
+            prepared.change.abort(&pending.owner).await;
+            let _ = pending.reply.send(Err(AgentLoopError::InvalidConfiguration(
+                "navigation cannot accompany another command action".into(),
+            )));
+            return;
+        }
+        prepared.output.action = crate::engine::commands::SessionCommandAction::Navigate { target };
     }
     let previous_cause = context
         .state
@@ -326,6 +340,10 @@ pub(super) fn admit_while_pending(command: &rw_types::ClientCommand) -> bool {
 }
 
 impl PendingCommand {
+    pub(super) fn meta(&self) -> &CommandMeta {
+        &self.meta
+    }
+
     pub(super) fn allows(
         &self,
         origin: &rw_types::extension_invocation::ExtensionInvocationId,
@@ -333,6 +351,18 @@ impl PendingCommand {
         driver: Option<&ClientId>,
     ) -> bool {
         &self.origin == origin && Arc::ptr_eq(&self.owner, config) && self.driver.as_ref() == driver
+    }
+    pub(super) fn queue_navigation(
+        &mut self,
+        target: rw_types::extension_control::SessionNavigationTarget,
+    ) -> Result<(), AgentLoopError> {
+        if self.navigation.is_some() {
+            return Err(AgentLoopError::InvalidConfiguration(
+                "navigation is already requested by this command".into(),
+            ));
+        }
+        self.navigation = Some(target);
+        Ok(())
     }
     pub(super) fn update_mode(&mut self, mode: ModeId) {
         self.mode = mode;
