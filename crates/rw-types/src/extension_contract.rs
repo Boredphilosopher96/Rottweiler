@@ -26,7 +26,7 @@ pub struct ExtensionDeliveryCursor {
     pub sequence: SequenceId,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, JsonSchema, TS, Allocation)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS, Allocation)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExtensionStateMutation {
     Set { key: String, value: Value },
@@ -45,7 +45,7 @@ impl ExtensionStateMutation {
 /// One compare-and-swap against the host-bound plugin namespace.
 /// The committed event sequence becomes its revision. An acknowledgement and
 /// its state changes share the same durable commit.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, JsonSchema, TS, Allocation)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS, Allocation)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionStateTransaction {
     #[serde(deserialize_with = "Option::deserialize")]
@@ -55,7 +55,7 @@ pub struct ExtensionStateTransaction {
     pub acknowledged: Option<ExtensionDeliveryCursor>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, JsonSchema, TS, Allocation)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS, Allocation)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionStateEntry {
     pub key: String,
@@ -63,7 +63,7 @@ pub struct ExtensionStateEntry {
 }
 
 /// A bounded projection of one namespace at a captured journal prefix.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, JsonSchema, TS, Allocation)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS, Allocation)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionStateSnapshot {
     #[serde(deserialize_with = "Option::deserialize")]
