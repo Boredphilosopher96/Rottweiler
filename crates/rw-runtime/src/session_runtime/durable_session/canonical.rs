@@ -203,3 +203,6 @@ impl DurableEventSink {
             .await
     }
 }
+
+#[cfg(test)]
+mod tests;

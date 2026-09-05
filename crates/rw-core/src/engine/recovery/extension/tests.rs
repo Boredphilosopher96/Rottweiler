@@ -205,3 +205,42 @@ fn indexed_extension_state_rejects_regressed_ack_after_rewind() {
     );
     assert!(recovery.advance(&journal.read_view(), &modes).is_err());
 }
+
+#[test]
+fn indexed_extension_state_enforces_session_bytes_before_index_publication() {
+    let root = tempfile::tempdir().expect("root");
+    let modes = ModeRegistry::builtins().expect("modes");
+    let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
+    let transaction = |plugin: usize, count: usize| PendingEvent::ExtensionStateCommitted {
+        plugin_id: format!("plugin-{plugin}"),
+        transaction: ExtensionStateTransaction {
+            expected_revision: None,
+            mutations: (0..count)
+                .map(|key| ExtensionStateMutation::Set {
+                    key: format!("k{key:02}"),
+                    value: json!("x".repeat(16_382)),
+                })
+                .collect(),
+            acknowledged: None,
+        },
+    };
+    append(
+        &mut journal,
+        (0..4).map(|plugin| transaction(plugin, 15)).collect(),
+    );
+    let mut recovery =
+        CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("recovery");
+    catch_up(&mut recovery, &journal.read_view(), &modes);
+    append(&mut journal, vec![transaction(4, 4)]);
+    assert!(recovery.advance(&journal.read_view(), &modes).is_err());
+    let state = recovery
+        .snapshot()
+        .expect("snapshot")
+        .bind_source(&journal.read_view())
+        .expect("source")
+        .extension_state("plugin-4")
+        .expect("state");
+    assert!(state.snapshot.revision.is_none());
+    assert_eq!(state.namespaces, 4);
+    assert_eq!(state.session_bytes, 4 * 15 * (3 + 16_384));
+}

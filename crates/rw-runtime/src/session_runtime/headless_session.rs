@@ -208,9 +208,18 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
         &extension_user_rottweiler,
         options.dangerously_trust,
     )?);
-    let validated_modes =
-        crate::mode_recovery::compose_and_project(&extension_catalog, &load_session_events(&log)?)?;
-    let runtime_modes = Arc::new(validated_modes.modes);
+    let inherited_journal_through = if resuming {
+        super::session_metadata::load_session_metadata_any(&storage_root, &session_id)?
+            .inherited_journal_through
+    } else {
+        None
+    };
+    let runtime_modes = crate::mode_recovery::compose_and_validate(
+        &extension_catalog,
+        log.read_view(),
+        inherited_journal_through,
+    )
+    .await?;
     if resuming
         && let Some(generation) = restore_persisted_workspace_roots(
             &checkpoint_root(&storage_root, &workspace, &session_id),

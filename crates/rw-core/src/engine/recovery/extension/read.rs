@@ -54,7 +54,7 @@ impl CanonicalHistory {
                 .transpose()?,
         };
         if let Some(current) = current {
-            let namespace: Namespace = self
+            let mut namespace: Namespace = self
                 .read
                 .get(key(NAMESPACES, 0, current.revision.0))?
                 .map(|row| serde_json::from_slice(&row.payload))
@@ -65,34 +65,51 @@ impl CanonicalHistory {
                 source: &self.source,
                 events: VecDeque::new(),
             };
+            namespace
+                .entries
+                .sort_unstable_by_key(|entry| (entry.sequence, entry.mutation));
+            let mut cached: Option<(rw_types::SequenceId, EngineEvent)> = None;
             for entry in namespace.entries {
                 if entry.sequence > current.revision {
                     return Err(RecoveryError::Invalid("extension source revision"));
                 }
-                let EngineEvent::ExtensionStateCommitted {
-                    plugin_id,
-                    transaction,
-                    ..
-                } = source.event(entry.sequence)?
+                if cached
+                    .as_ref()
+                    .is_none_or(|(sequence, _)| *sequence != entry.sequence)
+                {
+                    cached = Some((entry.sequence, source.event(entry.sequence)?));
+                }
+                let Some((
+                    _,
+                    EngineEvent::ExtensionStateCommitted {
+                        plugin_id,
+                        transaction,
+                        ..
+                    },
+                )) = &cached
                 else {
                     return Err(RecoveryError::Invalid("extension value source"));
                 };
                 let Some(ExtensionStateMutation::Set { key, value }) =
-                    transaction.mutations.into_iter().nth(entry.mutation)
+                    transaction.mutations.get(entry.mutation)
                 else {
                     return Err(RecoveryError::Invalid("extension mutation source"));
                 };
                 if plugin_id != plugin
-                    || key != entry.key
-                    || state_value_bytes(&value)
+                    || key != &entry.key
+                    || state_value_bytes(value)
                         .map_err(|_| RecoveryError::Invalid("extension source value bytes"))?
                         != entry.bytes
                 {
                     return Err(RecoveryError::Invalid("extension value identity"));
                 }
-                snapshot.entries.push(ExtensionStateEntry { key, value });
+                snapshot.entries.push(ExtensionStateEntry {
+                    key: key.clone(),
+                    value: value.clone(),
+                });
             }
         }
+        snapshot.entries.sort_unstable_by(|a, b| a.key.cmp(&b.key));
         if let Some(row) = self.read.get(acknowledgement_key(plugin))? {
             let ack: Acknowledgement = serde_json::from_slice(&row.payload)?;
             if ack.plugin != plugin
