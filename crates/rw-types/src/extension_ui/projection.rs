@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    MAX_UI_SURFACE_BYTES, MAX_UI_VALUE_BYTES, UiContractError, UiField, UiProjectedField,
+    UiProjectedFields, UiSelectorStep, validate_projected_fields, validation,
+};
+use serde_json::Value;
 
 /// # Errors
 /// Rejects an invalid descriptor. Projection visits at most the declared field,
