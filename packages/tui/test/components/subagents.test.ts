@@ -13,7 +13,7 @@ import { stringCellWidth } from "../../src/render"
 import { createInitialState, type RottweilerState } from "../../src/state"
 import { createStreamingTail } from "../../src/state/model"
 import { kennelTheme } from "../../src/theme"
-import { emptyHistoryReader, historyReaderFor, conversationItem, waitForHistory } from "../fixtures/history"
+import { emptySessionReader, sessionReaderFor, conversationItem, waitForHistory } from "../fixtures/history"
 import { meta, neverUsage } from "./fixtures"
 
 describe("subagents components", () => {
@@ -25,7 +25,7 @@ describe("subagents components", () => {
     renderer = setup.renderer
     const notifications: string[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       notifications: {
         notify(notification) {
           notifications.push(notification.kind)
@@ -124,7 +124,7 @@ describe("subagents components", () => {
         },
       },
     }
-    const app = createRottweilerApp(renderer, { historyReader: historyReaderFor(items), initialState: initial })
+    const app = createRottweilerApp(renderer, { sessionReader: sessionReaderFor(items), initialState: initial })
     renderer.root.add(app)
     await setup.flush()
 

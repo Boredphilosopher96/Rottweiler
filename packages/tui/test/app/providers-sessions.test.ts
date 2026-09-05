@@ -6,7 +6,7 @@ import {
 } from "../../src/app"
 import type { ClientCommand, CommandOutcome } from "../../src/protocol"
 import { createInitialState } from "../../src/state"
-import { emptyHistoryReader } from "../fixtures/history"
+import { emptySessionReader } from "../fixtures/history"
 
 describe("Rottweiler providers-sessions", () => {
   let renderer: TestRenderer | undefined
@@ -22,7 +22,7 @@ describe("Rottweiler providers-sessions", () => {
     const openedUrls: string[] = []
     const copiedText: string[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         providers: [
@@ -220,7 +220,7 @@ describe("Rottweiler providers-sessions", () => {
     const setup = await createTestRenderer({ width: 100, height: 24, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         providers: [{
@@ -262,7 +262,7 @@ describe("Rottweiler providers-sessions", () => {
     const commands: ClientCommand[] = []
     const selected: string[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       requestId: () => "new-session-request",
       initialState: {
         ...createInitialState(),
@@ -312,7 +312,7 @@ describe("Rottweiler providers-sessions", () => {
     const selected: string[] = []
     let request = 0
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       sessionId: "active-session",
       initialState: {
         ...createInitialState(),
@@ -384,7 +384,7 @@ describe("Rottweiler providers-sessions", () => {
     const commands: ClientCommand[] = []
     const activations: string[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         providers: [{
@@ -444,7 +444,7 @@ describe("Rottweiler providers-sessions", () => {
     const authorizationUrl =
       "https://auth.example.test/authorize?state=challenge-canary"
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       onCommand() {
         return { type: "accepted" }
       },
@@ -516,7 +516,7 @@ describe("Rottweiler providers-sessions", () => {
     const commands: ClientCommand[] = []
     const submissions: Array<{ provider: string; apiKey: string }> = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       onCommand(command) {
         commands.push(command)
         return { type: "accepted" }
@@ -557,7 +557,7 @@ describe("Rottweiler providers-sessions", () => {
       retryable: false,
     }))
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       requestId: () => "rejected-model-switch",
       onCommand(command) {
         commands.push(command)
@@ -620,7 +620,7 @@ describe("Rottweiler providers-sessions", () => {
     const commands: ClientCommand[] = []
     let request = 0
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       requestId: () => `model-correlation-${request++}`,
       onCommand(command) {
         commands.push(command)
@@ -674,7 +674,7 @@ describe("Rottweiler providers-sessions", () => {
     const selected: string[] = []
     let sequence = 0
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader, sessionId: "first",
+      sessionReader: emptySessionReader, sessionId: "first",
       requestId: () => `creation-${++sequence}`,
       initialState: { ...createInitialState(), workspaceRoots: {
         generation: "1", effectiveFromTurn: "0", roots: ["/workspace/project"],

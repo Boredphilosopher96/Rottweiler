@@ -6,7 +6,7 @@ import {
 } from "../../src/app"
 import type { ClientCommand, CommandOutcome, EngineEvent } from "../../src/protocol"
 import { createInitialState } from "../../src/state"
-import { emptyHistoryReader } from "../fixtures/history"
+import { emptySessionReader } from "../fixtures/history"
 
 describe("Rottweiler discovery", () => {
   let renderer: TestRenderer | undefined
@@ -23,7 +23,7 @@ describe("Rottweiler discovery", () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         connection: { phase: "connected", attempt: 0, error: null, gap: null },
@@ -67,7 +67,7 @@ describe("Rottweiler discovery", () => {
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         connection: { phase: "connected", attempt: 0, error: null, gap: null },
@@ -106,7 +106,7 @@ describe("Rottweiler discovery", () => {
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         connection: { phase: "connected", attempt: 0, error: null, gap: null },
@@ -197,7 +197,7 @@ describe("Rottweiler discovery", () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         connection: { phase: "connected", attempt: 0, error: null, gap: null },
@@ -250,7 +250,7 @@ describe("Rottweiler discovery", () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       sessionId: "session-restored",
       initialState: {
         ...createInitialState(),
@@ -287,7 +287,7 @@ describe("Rottweiler discovery", () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       sessionId: "session-restored",
       initialState: {
         ...createInitialState(),
@@ -324,7 +324,7 @@ describe("Rottweiler discovery", () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         connection: { phase: "connected", attempt: 0, error: null, gap: null },
@@ -352,7 +352,7 @@ describe("Rottweiler discovery", () => {
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         connection: { phase: "connected", attempt: 0, error: null, gap: null },
@@ -409,7 +409,7 @@ describe("Rottweiler discovery", () => {
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         connection: { phase: "connected", attempt: 0, error: null, gap: null },
@@ -450,7 +450,7 @@ describe("Rottweiler discovery", () => {
     renderer = setup.renderer
     let attempts = 0
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       onCommand(command) {
         if (command.type !== "list_commands") return { type: "accepted" }
         attempts += 1
@@ -492,7 +492,7 @@ describe("Rottweiler discovery", () => {
     })
     let postDestroyCommands = 0
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       onCommand(command) {
         if (command.type === "list_commands") return deferredProjection
         postDestroyCommands += 1
@@ -537,7 +537,7 @@ describe("Rottweiler discovery", () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       onCommand(command) {
         if (command.type !== "list_models") return { type: "accepted" }
         return Promise.reject(new Error("provider discovery timed out"))
@@ -560,7 +560,7 @@ describe("Rottweiler discovery", () => {
   test("presents model and provider loading as non-selectable picker status", async () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader })
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader })
     renderer.root.add(app)
 
     app.openProviderPicker()
@@ -585,7 +585,7 @@ describe("Rottweiler discovery", () => {
     let request = 0
     const commands: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       requestId: () => `empty-${++request}`,
       onCommand(command) {
         commands.push(command)

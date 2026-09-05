@@ -1,4 +1,4 @@
-import { emptyHistoryReader, conversationItem, historyReaderFor } from "./fixtures/history"
+import { emptySessionReader, conversationItem, sessionReaderFor } from "./fixtures/history"
 import { createStreamingTail } from "../src/state/model"
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
@@ -82,7 +82,7 @@ describe("retained transcript layout", () => {
             "",
             `CARD_${index}_END`,
           ].join("\n")))
-    const app = createRottweilerApp(renderer.renderer, { historyReader: historyReaderFor(items),
+    const app = createRottweilerApp(renderer.renderer, { sessionReader: sessionReaderFor(items),
       treeSitterClient: treeSitter,
 
     })
@@ -172,7 +172,7 @@ describe("retained transcript layout", () => {
       "",
       "STREAMING_TAIL_SENTINEL",
     ].join("\n")
-    const app = createRottweilerApp(renderer.renderer, { historyReader: emptyHistoryReader,
+    const app = createRottweilerApp(renderer.renderer, { sessionReader: emptySessionReader,
       treeSitterClient: treeSitter,
       initialState: {
         ...createInitialState(),
@@ -222,7 +222,7 @@ describe("retained transcript layout", () => {
         finished: null,
       }),
     }
-    const app = createRottweilerApp(renderer.renderer, { historyReader: emptyHistoryReader,
+    const app = createRottweilerApp(renderer.renderer, { sessionReader: emptySessionReader,
       treeSitterClient: treeSitter,
       initialState: initial,
     })
@@ -281,7 +281,7 @@ describe("retained transcript layout", () => {
   test("retains one Markdown renderer while compaction text and thoughts stream", async () => {
     renderer = await createTestRenderer({ width: 80, height: 24, useThread: false })
     const initial = createInitialState()
-    const app = createRottweilerApp(renderer.renderer, { historyReader: emptyHistoryReader, initialState: initial })
+    const app = createRottweilerApp(renderer.renderer, { sessionReader: emptySessionReader, initialState: initial })
     renderer.renderer.root.add(app)
     const markdown = app.transcript.compactionMarkdown
     const chunks = ["# Context summary", "\n\nThe **workspace**", " remains ready."]
@@ -322,7 +322,7 @@ describe("retained transcript layout", () => {
     })
     await treeSitter.initialize()
     renderer = await createTestRenderer({ width: 82, height: 40, useThread: false })
-    const app = createRottweilerApp(renderer.renderer, { historyReader: historyReaderFor([
+    const app = createRottweilerApp(renderer.renderer, { sessionReader: sessionReaderFor([
 conversationItem(1, "assistant", [
                   "## Previous answer",
                   "",
@@ -377,7 +377,7 @@ conversationItem(2, "user", "FOLLOW_UP_QUESTION_START\nCan you continue?")
         finished: null,
       }),
     }
-    const app = createRottweilerApp(renderer.renderer, { historyReader: emptyHistoryReader, initialState: initial })
+    const app = createRottweilerApp(renderer.renderer, { sessionReader: emptySessionReader, initialState: initial })
     renderer.renderer.root.add(app)
     await renderer.flush()
 

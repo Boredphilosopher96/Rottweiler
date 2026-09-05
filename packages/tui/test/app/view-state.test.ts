@@ -12,7 +12,7 @@ import {
   systemThemeFor,
   themeCatalogFor
 } from "../../src/theme"
-import { emptyHistoryReader } from "../fixtures/history"
+import { emptySessionReader } from "../fixtures/history"
 import { initialEvent, ManualPresentationFrame } from "./fixtures"
 
 describe("Rottweiler view-state", () => {
@@ -28,7 +28,7 @@ describe("Rottweiler view-state", () => {
     let request = 0
     const commands: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       requestId: () => `projection-${++request}`,
       initialState: {
         ...createInitialState(),
@@ -125,7 +125,7 @@ describe("Rottweiler view-state", () => {
     const commands: ClientCommand[] = []
     const presentationFrame = new ManualPresentationFrame()
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       presentationFrame,
       onCommand(command) {
         commands.push(command)
@@ -203,7 +203,7 @@ describe("Rottweiler view-state", () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         commands: Array.from({ length: 20 }, (_, index) => ({
@@ -239,7 +239,7 @@ describe("Rottweiler view-state", () => {
     const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       theme: systemThemeFor("dark"),
       initialState: {
         ...createInitialState(),

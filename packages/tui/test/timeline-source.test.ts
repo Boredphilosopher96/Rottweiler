@@ -3,11 +3,11 @@ import { ComposerDraftStore } from "../src/composer-drafts"
 import { ClientCache } from "../src/history/cache"
 import { HistoryController, type HistoryCacheValue } from "../src/history/controller"
 import { TimelineController, readTimelineDraft } from "../src/history/timeline"
-import { conversationItem, historyReaderFor } from "./fixtures/history"
+import { conversationItem, sessionReaderFor } from "./fixtures/history"
 
 function fixture(text: string) {
   const item = conversationItem(9, "user", "preview only")
-  const pages = historyReaderFor([item])
+  const pages = sessionReaderFor([item])
   const calls: number[] = []
   const bytes = Buffer.from(text)
   const reader = { ...pages, content: async (_session: string, read: import("../src/protocol").TranscriptContentRead) => {
@@ -22,7 +22,7 @@ function fixture(text: string) {
 
 test("timeline pages restore sources beyond the recent live window using the shared byte owner", async () => {
   const cache = new ClientCache<HistoryCacheValue>()
-  const reader = historyReaderFor(Array.from({ length: 400 }, (_, index) => conversationItem(index, "user", `request ${index}`)))
+  const reader = sessionReaderFor(Array.from({ length: 400 }, (_, index) => conversationItem(index, "user", `request ${index}`)))
   const mounted = new HistoryController(reader, () => {}, cache)
   const timeline = new TimelineController(reader, cache, () => {})
   await mounted.open("s")

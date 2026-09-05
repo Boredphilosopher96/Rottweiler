@@ -7,7 +7,7 @@ import {
 import {
   kennelTheme
 } from "../../src/theme"
-import { waitForHistory, emptyHistoryReader, historyReaderFor, conversationItem, toolItem } from "../fixtures/history"
+import { waitForHistory, emptySessionReader, sessionReaderFor, conversationItem, toolItem } from "../fixtures/history"
 import { rgba } from "./fixtures"
 
 describe("Rottweiler history-interaction", () => {
@@ -26,7 +26,7 @@ describe("Rottweiler history-interaction", () => {
     })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: historyReaderFor([toolItem(1, "read", '{"path":"keyboard.txt"}', "keyboard output")]),
+      sessionReader: sessionReaderFor([toolItem(1, "read", '{"path":"keyboard.txt"}', "keyboard output")]),
 
     })
     renderer.root.add(app)
@@ -52,7 +52,7 @@ describe("Rottweiler history-interaction", () => {
     renderer = setup.renderer
     const copied: string[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: historyReaderFor([conversationItem(1, "assistant", "Selectable transcript text")]),
+      sessionReader: sessionReaderFor([conversationItem(1, "assistant", "Selectable transcript text")]),
 
       textClipboard: {
         async writeText(value) {
@@ -106,7 +106,7 @@ describe("Rottweiler history-interaction", () => {
     const setup = await createTestRenderer({ width: 80, height: 16, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: historyReaderFor(Array.from({ length: 40 }, (_, index) => conversationItem(index + 1, "assistant", `Retained line ${index}`))),
+      sessionReader: sessionReaderFor(Array.from({ length: 40 }, (_, index) => conversationItem(index + 1, "assistant", `Retained line ${index}`))),
 
     })
     renderer.root.add(app)
@@ -126,8 +126,8 @@ describe("Rottweiler history-interaction", () => {
     const setup = await createTestRenderer({ width: 80, height: 16, useThread: false })
     renderer = setup.renderer
     const items = Array.from({ length: 1000 }, (_, index) => conversationItem(index + 1, "assistant", `Retained line ${index} with wrapping text. `.repeat(5)))
-    const reader = historyReaderFor(items)
-    const app = createRottweilerApp(renderer, { historyReader: reader })
+    const reader = sessionReaderFor(items)
+    const app = createRottweilerApp(renderer, { sessionReader: reader })
     renderer.root.add(app)
     await setup.flush()
     app.transcript.scrollTo(0)
@@ -146,7 +146,7 @@ describe("Rottweiler history-interaction", () => {
 
     const recreated = await createTestRenderer({ width: 45, height: 16, useThread: false })
     renderer = recreated.renderer
-    const replacement = createRottweilerApp(renderer, { historyReader: reader })
+    const replacement = createRottweilerApp(renderer, { sessionReader: reader })
     renderer.root.add(replacement)
     replacement.restoreRecycleState(saved)
     await recreated.flush()
@@ -164,7 +164,7 @@ describe("Rottweiler history-interaction", () => {
     const copied: string[] = []
     const complete: Array<() => void> = []
     const app = createRottweilerApp(renderer, {
-      historyReader: historyReaderFor([conversationItem(1, "assistant", "First selectable value")]),
+      sessionReader: sessionReaderFor([conversationItem(1, "assistant", "First selectable value")]),
 
       textClipboard: {
         writeText(value) {
@@ -214,7 +214,7 @@ describe("Rottweiler history-interaction", () => {
     ]
     const setup = await createTestRenderer({ width: 88, height: 18, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, { historyReader: historyReaderFor(messages.map((text, index) => ({
+    const app = createRottweilerApp(renderer, { sessionReader: sessionReaderFor(messages.map((text, index) => ({
       id: String(index + 1), ordinal: String(index), revision: String(index + 1), agent_turn: null,
       content: { type: "command", name: "extension", message: { text, format: "text", complete: true,
         source: { sequence: String(index + 1), selector: { type: "command_message" } } } },
@@ -235,7 +235,7 @@ describe("Rottweiler history-interaction", () => {
     const setup = await createTestRenderer({ width: 88, height: 18, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       textClipboard: {
         async writeText() {
           throw new Error("clipboard unavailable")

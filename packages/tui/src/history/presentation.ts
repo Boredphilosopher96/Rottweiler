@@ -1,6 +1,6 @@
 import type { ClientDiagnostics } from "../client-diagnostics"
 import { HistoryController, type HistorySnapshot } from "./controller"
-import type { HistoryReader } from "./reader"
+import type { SessionReader } from "../session-reader"
 
 /** Coalesce source invalidations without cancelling a page read that is making progress. */
 export class HistoryPresentation {
@@ -13,7 +13,7 @@ export class HistoryPresentation {
   #disposed = false
   #nextReadAt = 0
 
-  constructor(reader: HistoryReader, changed: (snapshot: HistorySnapshot) => void, diagnostics?: ClientDiagnostics) {
+  constructor(reader: Pick<SessionReader, "page" | "content">, changed: (snapshot: HistorySnapshot) => void, diagnostics?: ClientDiagnostics) {
     this.#diagnostics = diagnostics
     this.#changed = changed
     this.controller = new HistoryController(reader, () => {

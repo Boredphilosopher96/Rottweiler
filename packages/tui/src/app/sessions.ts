@@ -12,7 +12,7 @@ import { presentError } from "../render"
 import type { ComposerDraftStore, DraftSubmission } from "../composer-drafts"
 import type { ClientCache } from "../history/cache"
 import type { HistoryCacheValue } from "../history/controller"
-import type { HistoryReader } from "../history/reader"
+import type { SessionReader } from "../session-reader"
 import { TimelineController, readTimelineDraft, type TimelineChoice } from "../history/timeline"
 import type { RottweilerState } from "../state"
 import type { RottweilerTheme } from "../theme"
@@ -21,7 +21,7 @@ import { boundedUiText, queuedMessageLabel, timelineTurnLabel } from "../ui-pres
 
 type SessionPickerKind = "timeline" | "timelineActions" | "queuedMessages" | "exportFormat" | "exportOverwrite" | "exportPath" | "sessions" | "sessionActions" | "sessionRename"
 interface SessionUiHost {
-  readonly historyReader: HistoryReader
+  readonly sessionReader: SessionReader
   readonly historyCache: ClientCache<HistoryCacheValue>
   readonly drafts: ComposerDraftStore
   readonly draftScope: string
@@ -211,7 +211,7 @@ export class SessionUiController {
     this.#timelineTurn = null
     this.#host.pickerController.begin("timeline")
     this.#timeline?.dispose()
-    this.#timeline = new TimelineController(this.#host.historyReader, this.#host.historyCache, () => {
+    this.#timeline = new TimelineController(this.#host.sessionReader, this.#host.historyCache, () => {
       if (this.#host.pickerController.kind === "timeline") this.#host.pickerController.refresh()
     })
     void this.#timeline.open(this.#host.sessionId, anchor)
@@ -414,7 +414,7 @@ export class SessionUiController {
     let draft: DraftSubmission | null = null
     try {
       if (turn.view.through === null) throw new Error("The selected source has no committed history prefix.")
-      if (action !== "rewind") draft = await readTimelineDraft(this.#host.historyReader, turn, this.#host.drafts, scope, request.signal)
+      if (action !== "rewind") draft = await readTimelineDraft(this.#host.sessionReader, turn, this.#host.drafts, scope, request.signal)
       request.signal.throwIfAborted()
       if (this.#host.destroyed || this.#host.sessionId !== turn.view.session_id || this.#host.draftScope !== scope) {
         draft?.settle(true); return

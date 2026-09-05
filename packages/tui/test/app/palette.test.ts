@@ -5,7 +5,7 @@ import {
 } from "../../src/app"
 import type { CommandOutcome } from "../../src/protocol"
 import { createInitialState } from "../../src/state"
-import { emptyHistoryReader } from "../fixtures/history"
+import { emptySessionReader } from "../fixtures/history"
 
 describe("Rottweiler palette", () => {
   let renderer: TestRenderer | undefined
@@ -17,7 +17,7 @@ describe("Rottweiler palette", () => {
   test("keeps local slash actions and the full action palette useful before engine projections", async () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader })
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader })
     renderer.root.add(app)
 
     await setup.mockInput.typeText("/")
@@ -50,7 +50,7 @@ describe("Rottweiler palette", () => {
   test("opens the command palette as a split list and selected-only detail surface", async () => {
     const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader })
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader })
     renderer.root.add(app)
     app.openCommandPicker()
     await setup.renderOnce()
@@ -77,7 +77,7 @@ describe("Rottweiler palette", () => {
     renderer = setup.renderer
     const pending = new Promise<CommandOutcome>(() => { })
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       onCommand(command) {
         return command.type === "list_commands" ? pending : { type: "accepted" }
       },
@@ -96,7 +96,7 @@ describe("Rottweiler palette", () => {
     renderer = setup.renderer
     let attempts = 0
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       onCommand(command) {
         if (command.type !== "list_commands") return { type: "accepted" }
         attempts += 1
@@ -126,7 +126,7 @@ describe("Rottweiler palette", () => {
     const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         commands: [{ name: "deploy", description: "Deploy project", usage: "/deploy", source: "project" }],
@@ -144,7 +144,7 @@ describe("Rottweiler palette", () => {
     const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         commands: [{ name: "deploy", description: "Deploy project", usage: "/deploy" }],
@@ -175,7 +175,7 @@ describe("Rottweiler palette", () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         commands: [{
@@ -211,7 +211,7 @@ describe("Rottweiler palette", () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       keybindings: {
         bindings: { global: { open_model_picker: "ctrl+k" } },
       },

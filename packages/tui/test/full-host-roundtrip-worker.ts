@@ -11,7 +11,7 @@ if (reportFile === undefined) throw new Error("ROTTWEILER_TEST_REPORT_FILE is re
 const setup = await createTestRenderer({ width: 100, height: 28, useThread: false })
 const runtime = await createEngineRuntimeFromEnvironment()
 if (runtime === null) throw new Error("supervised engine runtime was not configured")
-const app = createRottweilerApp(setup.renderer, { historyReader: runtime.historyReader,
+const app = createRottweilerApp(setup.renderer, { sessionReader: runtime.sessionReader,
   onCommand(command) {
     return runtime.sendCommand(command)
   },

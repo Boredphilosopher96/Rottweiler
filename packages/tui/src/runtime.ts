@@ -1,7 +1,7 @@
 import type { EngineEvent } from "./protocol"
 import type { ClientDiagnostics } from "./client-diagnostics"
 import { CLIENT_COMMAND_EXECUTION } from "./protocol"
-import type { HistoryReader } from "./history/reader"
+import type { SessionReader } from "./session-reader"
 import { chmod, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises"
 import { basename, dirname, isAbsolute, join } from "node:path"
 
@@ -149,9 +149,17 @@ export class EngineRuntimeError extends Error {
  * synchronous; durable cursor persistence is coalesced in the background.
  */
 export class TuiEngineRuntime {
-  readonly historyReader: HistoryReader = {
+  readonly sessionReader: SessionReader = {
+    todos: async (sessionId, signal) => {
+      const reply = await this.#readSession({ type: "get_todos", meta: this.#meta(), session_id: sessionId }, signal)
+      const event = reply.events[0]
+      if (reply.events.length !== 1 || event?.type !== "todos_read" || event.session_id !== sessionId) {
+        throw new EngineRuntimeError("task reply is missing its session-bound result")
+      }
+      return event.result
+    },
     page: async (sessionId, read, signal) => {
-      const reply = await this.#readHistory({ type: "read_transcript", meta: this.#meta(), session_id: sessionId, read }, signal)
+      const reply = await this.#readSession({ type: "read_transcript", meta: this.#meta(), session_id: sessionId, read }, signal)
       const event = reply.events[0]
       if (reply.events.length !== 1 || event?.type !== "transcript_page_ready") {
         throw new EngineRuntimeError("transcript page reply is missing its result")
@@ -159,7 +167,7 @@ export class TuiEngineRuntime {
       return event.result
     },
     content: async (sessionId, read, signal) => {
-      const reply = await this.#readHistory({ type: "read_transcript_content", meta: this.#meta(), session_id: sessionId, read }, signal)
+      const reply = await this.#readSession({ type: "read_transcript_content", meta: this.#meta(), session_id: sessionId, read }, signal)
       const event = reply.events[0]
       if (reply.events.length !== 1 || event?.type !== "transcript_content_ready") {
         throw new EngineRuntimeError("transcript content reply is missing its result")
@@ -750,13 +758,13 @@ export class TuiEngineRuntime {
     return reply.outcome
   }
 
-  async #readHistory(
-    command: Extract<ClientCommand, { type: "read_transcript" | "read_transcript_content" }>,
+  async #readSession(
+    command: Extract<ClientCommand, { type: "read_transcript" | "read_transcript_content" | "get_todos" }>,
     signal: AbortSignal,
   ): Promise<Extract<CommandReply, { type: "read" }>> {
     await this.#ready
     if (!this.#driverReady || this.#subscriptionController === null) {
-      throw new EngineRuntimeError("history connection is unavailable")
+      throw new EngineRuntimeError("session read connection is unavailable")
     }
     const generation = this.#sessionGeneration
     const lifetime = AbortSignal.any([signal, this.#subscriptionController.signal])
@@ -764,7 +772,7 @@ export class TuiEngineRuntime {
     const reply = await this.#client.postCommand(command, lifetime)
     lifetime.throwIfAborted()
     if (generation !== this.#sessionGeneration) throw new DOMException("session changed", "AbortError")
-    if (reply.type !== "read") throw new EngineRuntimeError("history read has no typed reply")
+    if (reply.type !== "read") throw new EngineRuntimeError("session read has no typed reply")
     if (reply.outcome.type === "rejected") throw new EngineRuntimeError(reply.outcome.error.message)
     return reply
   }

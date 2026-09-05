@@ -4,7 +4,7 @@ import { createRottweilerApp } from "../../src/app"
 import type { TextPromptOptions } from "../../src/components"
 import type { ClientCommand } from "../../src/protocol"
 import { createInitialState } from "../../src/state"
-import { emptyHistoryReader } from "../fixtures/history"
+import { emptySessionReader } from "../fixtures/history"
 
 const budgetKeys = ["budget.session_cost_cap_micros_usd", "budget.daily_cost_cap_micros_usd", "budget.session_token_cap", "budget.daily_token_cap", "budget.token_rate_alarm_per_minute", "budget.warn_at_percent"]
 
@@ -18,7 +18,7 @@ describe("preference interaction ownership", () => {
       renderer = setup.renderer
       const emitted: ClientCommand[] = []
       const app = createRottweilerApp(renderer, {
-        historyReader: emptyHistoryReader, sessionId: "first",
+        sessionReader: emptySessionReader, sessionId: "first",
         initialState: { ...createInitialState(),
           settings: budgetKeys.map(key => ({ key, label: key, value: "10", choices: [], provenance: "user", appliesImmediately: true })),
           permissions: { default: "ask", effective_rules: [], project_rules: [], session_rules: [], approvals: [], truncated: false },

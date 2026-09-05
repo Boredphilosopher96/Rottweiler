@@ -3,18 +3,18 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { PROTOCOL_VERSION } from "../../../../protocol/types"
 import { createRottweilerApp } from "../../src/app"
 import type { ClientCommand, EngineEvent, TranscriptItem } from "../../src/protocol"
-import type { HistoryReader } from "../../src/history/reader"
+import type { SessionReader } from "../../src/session-reader"
 import { createInitialState } from "../../src/state"
-import { conversationItem, emptyHistoryReader, historyReaderFor, waitForHistory } from "../fixtures/history"
+import { conversationItem, emptySessionReader, sessionReaderFor, waitForHistory } from "../fixtures/history"
 
-function history(text: string, attachments = false, source = 10): HistoryReader {
+function history(text: string, attachments = false, source = 10): SessionReader {
   const item = conversationItem(source, "user", text.slice(0, 50))
   if (item.content.type === "conversation") {
     item.content.omitted_blocks = attachments
     const block = item.content.blocks[0]
     if (block?.type === "text") block.body.complete = text.length <= 50
   }
-  return { ...historyReaderFor([item]), content: async (_session, read) => {
+  return { ...sessionReaderFor([item]), content: async (_session, read) => {
     const textBytes = Buffer.from(text)
     const chunk = textBytes.subarray(read.offset, read.offset + read.max_bytes).toString()
     const end = read.offset + Buffer.byteLength(chunk)
@@ -33,13 +33,13 @@ describe("Rottweiler semantic timeline", () => {
   let renderer: TestRenderer | undefined
   afterEach(() => { renderer?.destroy(); renderer = undefined })
 
-  async function setup(reader: HistoryReader, options: Partial<Parameters<typeof createRottweilerApp>[1]> = {}) {
+  async function setup(reader: SessionReader, options: Partial<Parameters<typeof createRottweilerApp>[1]> = {}) {
     const testRenderer = await createTestRenderer({ width: 90, height: 20, useThread: false })
     renderer = testRenderer.renderer
     const commands: ClientCommand[] = []
     let request = 0
     const app = createRottweilerApp(renderer, {
-      historyReader: reader, requestId: () => `timeline-${request++}`,
+      sessionReader: reader, requestId: () => `timeline-${request++}`,
       onCommand(command) { commands.push(command); return { type: "accepted" } }, ...options,
     })
     renderer.root.add(app)
@@ -56,7 +56,7 @@ describe("Rottweiler semantic timeline", () => {
   }
 
   test("/rewind opens asynchronous semantic history without submitting a message", async () => {
-    const result = await setup(emptyHistoryReader, { initialState: {
+    const result = await setup(emptySessionReader, { initialState: {
       ...createInitialState(), commands: [{ name: "rewind", description: "Rewind the conversation", usage: "/rewind" }],
     } })
     await result.mockInput.typeText("/rew")
@@ -69,7 +69,7 @@ describe("Rottweiler semantic timeline", () => {
 
   test("newest-first pages restore old user sources independently of recent raw events", async () => {
     const items: TranscriptItem[] = Array.from({ length: 400 }, (_, index) => conversationItem(index, "user", `Request ${index}`))
-    const result = await setup(historyReaderFor(items))
+    const result = await setup(sessionReaderFor(items))
     expect("transcript" in result.app.state).toBe(false)
     result.app.openTimelinePicker()
     await waitForHistory(result, () => result.app.picker.select.options.some(option => option.value === "timeline.turn.399"))
@@ -86,7 +86,7 @@ describe("Rottweiler semantic timeline", () => {
 
   test("renderer handoff restores the selected historical timeline source", async () => {
     const items = Array.from({ length: 400 }, (_, index) => conversationItem(index, "user", `Request ${index}`))
-    const reader = historyReaderFor(items)
+    const reader = sessionReaderFor(items)
     const result = await setup(reader)
     result.app.openTimelinePicker()
     await waitForHistory(result, () => result.app.picker.select.options.some(option => option.value === "timeline.turn.399"))
@@ -102,7 +102,7 @@ describe("Rottweiler semantic timeline", () => {
     const state = result.app.recycleState()
     expect(state).not.toBeNull()
     result.app.destroyRecursively()
-    const restored = createRottweilerApp(result.renderer, { historyReader: reader })
+    const restored = createRottweilerApp(result.renderer, { sessionReader: reader })
     result.renderer.root.add(restored)
     restored.restoreRecycleState(state!)
     await waitForHistory(result, () => {

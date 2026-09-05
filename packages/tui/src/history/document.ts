@@ -3,7 +3,7 @@ import type { UiSurfaceModel } from "../ui/presentation"
 import type { TranscriptContentPage, TranscriptContentSource, TranscriptView } from "../protocol"
 import type { CacheLease, ClientCache } from "./cache"
 import type { HistoryCacheValue } from "./controller"
-import type { HistoryReader } from "./reader"
+import type { SessionReader } from "../session-reader"
 
 const CHUNK_BYTES = 4096
 const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024
@@ -20,7 +20,7 @@ export interface DocumentSnapshot {
 
 /** One paged document reader shares the transcript cache and never assembles full content. */
 export class DocumentController {
-  readonly #reader: HistoryReader
+  readonly #reader: Pick<SessionReader, "page" | "content">
   readonly #cache: ClientCache<HistoryCacheValue>
   readonly #changed: (snapshot: DocumentSnapshot) => void
   #selection: { readonly view: TranscriptView; readonly source: TranscriptContentSource; readonly key: string } | null = null
@@ -31,7 +31,7 @@ export class DocumentController {
   #loading = false
   #error: string | null = null
 
-  constructor(reader: HistoryReader, cache: ClientCache<HistoryCacheValue>, changed: (snapshot: DocumentSnapshot) => void) {
+  constructor(reader: Pick<SessionReader, "page" | "content">, cache: ClientCache<HistoryCacheValue>, changed: (snapshot: DocumentSnapshot) => void) {
     this.#reader = reader
     this.#cache = cache
     this.#changed = changed

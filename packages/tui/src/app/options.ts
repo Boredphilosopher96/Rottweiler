@@ -1,6 +1,6 @@
 import { type ThemeMode, type TreeSitterClient } from "@opentui/core"
 import type { ClientDiagnostics } from "../client-diagnostics"
-import type { HistoryReader } from "../history/reader"
+import type { SessionReader } from "../session-reader"
 import { type KeybindingConfiguration } from "../keybindings"
 import {
   type EditorAdapter,
@@ -16,7 +16,7 @@ import { type RottweilerTheme } from "../theme"
 
 export interface RottweilerAppOptions {
   readonly diagnostics?: ClientDiagnostics | undefined
-  readonly historyReader: HistoryReader
+  readonly sessionReader: SessionReader
   readonly initialEvent?: EngineEvent
   readonly initialState?: RottweilerState
   readonly sessionId?: string

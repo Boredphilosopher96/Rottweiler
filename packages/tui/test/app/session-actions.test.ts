@@ -7,7 +7,7 @@ import {
 } from "../../src/app"
 import type { ClientCommand } from "../../src/protocol"
 import { createInitialState } from "../../src/state"
-import { emptyHistoryReader } from "../fixtures/history"
+import { emptySessionReader } from "../fixtures/history"
 
 describe("Rottweiler session-actions", () => {
   let renderer: TestRenderer | undefined
@@ -21,7 +21,7 @@ describe("Rottweiler session-actions", () => {
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         queuedMessages: [
@@ -114,7 +114,7 @@ describe("Rottweiler session-actions", () => {
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       onCommand(command) {
         emitted.push(command)
         return { type: "accepted" }
@@ -138,7 +138,7 @@ describe("Rottweiler session-actions", () => {
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       replaySessionId: "historical-queue",
       initialState: {
         ...createInitialState(),
@@ -164,7 +164,7 @@ describe("Rottweiler session-actions", () => {
     const emitted: ClientCommand[] = []
     let request = 0
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       requestId: () => `export-request-${request++}`,
       onCommand(command) {
         emitted.push(command)
@@ -234,7 +234,7 @@ describe("Rottweiler session-actions", () => {
     const emitted: ClientCommand[] = []
     let request = 0
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       requestId: () => `export-${request++}`,
       onCommand(command) {
         emitted.push(command)
@@ -290,7 +290,7 @@ describe("Rottweiler session-actions", () => {
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       replaySessionId: "historical-export",
       onCommand(command) {
         emitted.push(command)
@@ -308,7 +308,7 @@ describe("Rottweiler session-actions", () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         workspaceRoots: {
@@ -348,7 +348,7 @@ describe("Rottweiler session-actions", () => {
   test("shows workspace-root loading state before the live inventory arrives", async () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader })
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader })
     renderer.root.add(app)
 
     app.openWorkspaceRootsPicker()

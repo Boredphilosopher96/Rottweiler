@@ -15,7 +15,7 @@ The terminal reads semantic transcript pages from the engine and renders a bound
 
 ## Read contract
 
-`HistoryReader` exposes only `page(sessionId, read, signal)` and `content(sessionId, read, signal)`. Live and historical views use this capability. Reads travel through the authenticated command connection and return typed `CommandReply` bodies. They do not place page bodies in the mutation acknowledgement ledger or durable SSE stream.
+`SessionReader` exposes typed transcript pages, source content and exact task snapshots for an explicitly selected session. Live, child and historical views use this read-only capability. Transcript controllers borrow only its page/content methods. Reads travel through the authenticated command connection and return typed `CommandReply` bodies. They do not place page bodies in the mutation acknowledgement ledger or durable SSE stream.
 
 A `TranscriptView` identifies the session, projection version, structural generation and exact applied journal prefix (`through`, `digest`). A page includes row ordinals, total item count, an anchor result and bounded invalidation information. Ordinals describe logical display order; they are distinct from durable event sequence IDs.
 
@@ -77,7 +77,7 @@ Timeline handoff restores the selected source through an around read. Unresolved
 
 Task state has one authoritative typed snapshot, committed independently from transformed tool presentation. The client retains no historical task-output checkpoints. A rewind immediately invalidates the displayed snapshot and records its physical sequence as the minimum acceptable read prefix. A late query cannot replace a newer live state commit.
 
-`GetTodos` uses the authenticated read channel in live and historical views. Each query advances the mode-independent index by a bounded number of transactions and returns either an exact snapshot or explicit catch-up progress. The client owns one pending task request and one catch-up timer; session changes and renderer destruction retire that timer. Task identities, item count, per-field UTF-8 bytes and aggregate text bytes are validated from the same source schema in Rust and generated client validators.
+`GetTodos` uses the authenticated read channel in live and historical views. Each query advances the mode-independent index by a bounded number of transactions and returns either an exact snapshot or explicit catch-up progress. The main view and the one presented child each own a task controller with one pending read and one catch-up timer. Opening a child loads its exact snapshot without reconstructing task state from tool output. The sidebar displays the presented session's tasks. Leaving the child, switching sessions or destroying the renderer aborts that controller; late results cannot replace another view. An authenticated reconnect refreshes the presented child's task state. Task identities, item count, per-field UTF-8 bytes and aggregate text bytes are validated from the same source schema in Rust and generated client validators.
 
 ## Asynchronous input
 

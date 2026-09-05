@@ -6,7 +6,7 @@ import {
 } from "../../src/app"
 import type { ClientCommand, CommandOutcome } from "../../src/protocol"
 import { createInitialState } from "../../src/state"
-import { emptyHistoryReader, historyReaderFor, waitForHistory, commandItem } from "../fixtures/history"
+import { emptySessionReader, sessionReaderFor, waitForHistory, commandItem } from "../fixtures/history"
 
 describe("Rottweiler composer-commands", () => {
   let renderer: TestRenderer | undefined
@@ -24,7 +24,7 @@ describe("Rottweiler composer-commands", () => {
       usage: `/command-${index}`,
     }))
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: { ...createInitialState(), commands },
       onCommand: () => ({ type: "accepted" }),
     })
@@ -75,7 +75,7 @@ describe("Rottweiler composer-commands", () => {
   test("positions the first slash palette above the composer and keeps that layout on reopen", async () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader })
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader })
     renderer.root.add(app)
 
     // Exercise the real first-input path before OpenTUI has completed a prior frame.
@@ -103,7 +103,7 @@ describe("Rottweiler composer-commands", () => {
     })
     let attempts = 0
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       onCommand(command) {
         if (command.type !== "send_message") return { type: "accepted" }
         attempts += 1
@@ -142,7 +142,7 @@ describe("Rottweiler composer-commands", () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         commands: [
@@ -166,7 +166,7 @@ describe("Rottweiler composer-commands", () => {
   test("exposes /theme and opens the live theme picker from slash autocomplete", async () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader })
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader })
     renderer.root.add(app)
 
     await setup.mockInput.typeText("/the")
@@ -186,7 +186,7 @@ describe("Rottweiler composer-commands", () => {
     const emitted: ClientCommand[] = []
     const items: import("../../src/protocol").TranscriptItem[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: historyReaderFor(items),
+      sessionReader: sessionReaderFor(items),
       initialState: {
         ...createInitialState(),
         connection: { phase: "connected", attempt: 0, error: null, gap: null },
@@ -235,7 +235,7 @@ describe("Rottweiler composer-commands", () => {
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       onCommand(command) {
         emitted.push(command)
         return { type: "accepted" }
@@ -289,7 +289,7 @@ describe("Rottweiler composer-commands", () => {
     const setup = await createTestRenderer({ width: 100, height: 18, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         connection: { phase: "disconnected", attempt: 7, error: null, gap: null },
@@ -345,7 +345,7 @@ describe("Rottweiler composer-commands", () => {
     const emitted: ClientCommand[] = []
     let exits = 0
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       onCommand(command) {
         emitted.push(command)
         return { type: "accepted" }

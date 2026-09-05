@@ -6,7 +6,7 @@ import {
 } from "../../src/app"
 import type { ClientCommand, EngineEvent } from "../../src/protocol"
 import { createInitialState } from "../../src/state"
-import { emptyHistoryReader } from "../fixtures/history"
+import { emptySessionReader } from "../fixtures/history"
 import { visionCapableState } from "./fixtures"
 
 describe("Rottweiler settings", () => {
@@ -21,7 +21,7 @@ describe("Rottweiler settings", () => {
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         connection: { phase: "connected", attempt: 0, error: null, gap: null },
@@ -218,7 +218,7 @@ describe("Rottweiler settings", () => {
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         connection: { phase: "connected", attempt: 0, error: null, gap: null },
@@ -281,7 +281,7 @@ describe("Rottweiler settings", () => {
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         connection: { phase: "connected", attempt: 0, error: null, gap: null },
@@ -355,7 +355,7 @@ describe("Rottweiler settings", () => {
     renderer = setup.renderer
     let listAttempts = 0
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         settings: [{ key: "compaction.auto", label: "Automatic compaction", value: "true", choices: ["true", "false"], provenance: "user", appliesImmediately: false }],
@@ -404,7 +404,7 @@ describe("Rottweiler settings", () => {
     const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       keybindings: { preset: "vim" },
       initialState: {
         ...createInitialState(),
@@ -446,7 +446,7 @@ describe("Rottweiler settings", () => {
     const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         settings: [{
@@ -481,7 +481,7 @@ describe("Rottweiler settings", () => {
     return setup.then(({ renderer: testRenderer }) => {
       renderer = testRenderer
       const app = createRottweilerApp(testRenderer, {
-        historyReader: emptyHistoryReader,
+        sessionReader: emptySessionReader,
         keybindings: {
           bindings: { global: { open_model_picker: "ctrl+k" } },
         },
@@ -500,7 +500,7 @@ describe("Rottweiler settings", () => {
     return setup.then(({ renderer: testRenderer }) => {
       renderer = testRenderer
       const app = createRottweilerApp(testRenderer, {
-        historyReader: emptyHistoryReader,
+        sessionReader: emptySessionReader,
         initialState: visionCapableState(),
         keybindings: {
           bindings: {
@@ -521,7 +521,7 @@ describe("Rottweiler settings", () => {
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         connection: { phase: "connected", attempt: 0, error: null, gap: null },

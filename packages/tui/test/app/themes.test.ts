@@ -12,7 +12,7 @@ import {
   themeByName,
   themeCatalog
 } from "../../src/theme"
-import { emptyHistoryReader } from "../fixtures/history"
+import { emptySessionReader } from "../fixtures/history"
 import { expectCoherentTheme, rgba } from "./fixtures"
 
 describe("Rottweiler themes", () => {
@@ -25,7 +25,7 @@ describe("Rottweiler themes", () => {
   test("constructs the complete app with the persisted startup theme", async () => {
     const setup = await createTestRenderer({ width: 72, height: 12, useThread: false })
     renderer = setup.renderer
-    renderer.root.add(createRottweilerApp(renderer, { historyReader: emptyHistoryReader, theme: daylightTheme }))
+    renderer.root.add(createRottweilerApp(renderer, { sessionReader: emptySessionReader, theme: daylightTheme }))
 
     await setup.renderOnce()
 
@@ -41,7 +41,7 @@ describe("Rottweiler themes", () => {
     renderer = setup.renderer
     const commands: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       theme: kennelTheme,
       onCommand(command) {
         commands.push(command)
@@ -103,7 +103,7 @@ describe("Rottweiler themes", () => {
     const setup = await createTestRenderer({ width: 90, height: 22, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       theme: systemThemeFor("dark"),
       systemThemeMode: "dark",
     })
@@ -126,7 +126,7 @@ describe("Rottweiler themes", () => {
     const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       theme: systemThemeFor("dark"),
       systemThemeMode: "dark",
     })
@@ -156,7 +156,7 @@ describe("Rottweiler themes", () => {
     const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       theme: themeByName("tokyonight", "dark")!,
       systemThemeMode: "dark",
     })
@@ -179,7 +179,7 @@ describe("Rottweiler themes", () => {
     const setup = await createTestRenderer({ width: 90, height: 22, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       theme: daylightTheme,
       systemThemeMode: "light",
     })
@@ -196,7 +196,7 @@ describe("Rottweiler themes", () => {
     renderer = setup.renderer
     const commands: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       theme: kennelTheme,
       onCommand(command) {
         commands.push(command)
@@ -249,7 +249,7 @@ describe("Rottweiler themes", () => {
     const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       theme: kennelTheme,
       onCommand: () => ({
         type: "rejected",
@@ -277,7 +277,7 @@ describe("Rottweiler themes", () => {
     const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       theme: systemThemeFor("dark"),
       systemThemeMode: "dark",
       keybindings: { preset: "vim" },

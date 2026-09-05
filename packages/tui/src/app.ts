@@ -225,10 +225,10 @@ export class RottweilerApp extends BoxRenderable {
       externalUrl: options.externalUrl ?? noExternalUrl,
       textClipboard: options.textClipboard ?? noTextClipboard,
     }
-    this.#history = new HistoryPresentation(options.historyReader, snapshot => {
+    this.#history = new HistoryPresentation(options.sessionReader, snapshot => {
       if (!this.#destroyed && this.transcript !== undefined) this.transcript.setHistory(snapshot)
     }, options.diagnostics)
-    this.#document = new DocumentController(options.historyReader, this.#history.controller.cache, snapshot => {
+    this.#document = new DocumentController(options.sessionReader, this.#history.controller.cache, snapshot => {
         if (!this.#destroyed && this.outputViewer !== undefined) {
           if (snapshot.open) this.outputViewer.showDocument(snapshot)
           else this.outputViewer.closePresentation()
@@ -257,7 +257,7 @@ export class RottweilerApp extends BoxRenderable {
       },
     })
     this.#todos = new TodoController({
-      requests: this.#projectionRequests, state: () => this.#state.todos,
+      reader: options.sessionReader, state: () => this.#state.todos,
       update: (todos) => this.setState({ ...this.#state, todos }),
     })
     const inputApp = this
@@ -335,6 +335,7 @@ export class RottweilerApp extends BoxRenderable {
 
     const app = this
     this.#children = new ChildUiController({
+      sessionReader: options.sessionReader,
       get state() { return app.#state }, set state(value) { app.#state = value },
       get sessionId() { return app.#sessionId }, get composer() { return app.composer },
       get banner() { return app.banner }, get theme() { return app.#theme },
@@ -347,7 +348,7 @@ export class RottweilerApp extends BoxRenderable {
       projectRejection: outcome => this.#projectRejection(outcome),
     })
     this.#sessions = new SessionUiController({
-      historyReader: options.historyReader, historyCache: this.#history.controller.cache,
+      sessionReader: options.sessionReader, historyCache: this.#history.controller.cache,
       drafts: this.#children.draftStore,
       get draftScope() { return app.#children.composerScope() },
       get state() { return app.#state }, get sessionId() { return app.#sessionId },
@@ -543,7 +544,7 @@ export class RottweilerApp extends BoxRenderable {
     const app = this
     buildSurface({
       ui: this, context: this.ctx, options: this.#options, syntaxStyle: this.#syntaxStyle,
-      retryTodos: () => this.#todos.retry(),
+      retryTodos: () => this.#children.activeId === null ? this.#todos.retry() : this.#children.retryTodos(),
       treeSitterClient: this.#treeSitterClient, input: this.#input, children: this.#children,
       history: this.#history, document: this.#document, requests: this.#projectionRequests,
       submission: this.#submission, pickerController: this.#pickerController,
@@ -755,6 +756,7 @@ export class RottweilerApp extends BoxRenderable {
       deferPresentationForEvent(event),
     )
     this.#todos.event(event)
+    if (event.type === "session_history_ready") this.#children.refreshTodos()
   }
 
   beginInitialReplayBatch(): void {
@@ -971,13 +973,7 @@ export class RottweilerApp extends BoxRenderable {
       }
     }
     this.subagentTray.update(state)
-    this.contextPanel.update(state)
-    this.contextPanel.visible =
-      this.#primaryView === "conversation" &&
-      !viewingSubagent &&
-      !state.replay.active &&
-      contextPanelHasContent(state) &&
-      (this.width === 0 ? this.ctx.width >= 100 : this.width >= 100)
+    this.contextPanel.update(presented)
     this.#applyPrimaryViewVisibility()
     this.subagentTray.setPresentationEnabled(!this.contextPanel.visible)
     this.interactionPanel.update(viewingSubagent ? childPassiveInteractionState(presented) : state)
@@ -1112,9 +1108,7 @@ export class RottweilerApp extends BoxRenderable {
     const height = this.height === 0 ? this.ctx.height : this.height
     this.contextPanel.visible =
       !toolsVisible &&
-      this.#children.activeId === null &&
-      !this.#state.replay.active &&
-      contextPanelHasContent(this.#state) &&
+      contextPanelHasContent(this.#children.presentedState()) &&
       width >= 100 &&
       height >= 12
     this.composer.setQueuedMessages(
@@ -1377,7 +1371,6 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #recordProjectionFailure(kind: ProjectionKind, message: string): void {
-    if (kind === "todos") this.#todos.failed()
     if (kind === "commands") {
       this.#pickerContent.resetCommands()
     } else if (kind === "models") {

@@ -11,7 +11,7 @@ import { createInitialState, type RottweilerState } from "../../src/state"
 import { toolOutputBuffer } from "../../src/state/display-buffer"
 import { createStreamingTail } from "../../src/state/model"
 import { kennelTheme } from "../../src/theme"
-import { emptyHistoryReader, historyReaderFor, shellItem } from "../fixtures/history"
+import { emptySessionReader, sessionReaderFor, shellItem } from "../fixtures/history"
 
 describe("tool-presentation components", () => {
   let renderer: TestRenderer | undefined
@@ -77,7 +77,7 @@ describe("tool-presentation components", () => {
       }),
     }
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: initial,
       treeSitterClient: treeSitter,
     })
@@ -276,7 +276,7 @@ describe("tool-presentation components", () => {
       timing: { kind: "unknown" as const },
     }
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         tools: { [diagnostics.invocationId]: diagnostics },
@@ -314,7 +314,7 @@ describe("tool-presentation components", () => {
     treeSitter = new MockTreeSitterClient({ autoResolveTimeout: 0 })
     treeSitter.setMockResult({ highlights: [] })
     const app = createRottweilerApp(renderer, {
-      historyReader: historyReaderFor([shellItem(1, "printf '%s\\n' hello", "hello")]),
+      sessionReader: sessionReaderFor([shellItem(1, "printf '%s\\n' hello", "hello")]),
       treeSitterClient: treeSitter,
     })
     renderer.root.add(app)

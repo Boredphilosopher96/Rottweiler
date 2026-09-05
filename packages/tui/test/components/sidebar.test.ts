@@ -13,7 +13,7 @@ import {
 } from "../../src/protocol"
 import { createInitialState } from "../../src/state"
 import { kennelTheme } from "../../src/theme"
-import { emptyHistoryReader } from "../fixtures/history"
+import { emptySessionReader } from "../fixtures/history"
 
 describe("sidebar components", () => {
   let renderer: TestRenderer | undefined
@@ -147,7 +147,7 @@ describe("sidebar components", () => {
     const setup = await createTestRenderer({ width: 112, height: 30, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       requestId: () => "workspace-diff-request",
       onCommand: () => ({ type: "accepted" }),
       initialState: {
@@ -225,7 +225,7 @@ describe("sidebar components", () => {
     renderer = setup.renderer
     const commands: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         sessions: [

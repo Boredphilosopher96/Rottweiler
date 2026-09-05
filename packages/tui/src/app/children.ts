@@ -1,3 +1,6 @@
+import { TodoController } from "../todo-controller"
+import { emptyTodos } from "../state/todos"
+import type { SessionReader } from "../session-reader"
 import { ComposerDraftStore } from "../composer-drafts"
 import { fg, t } from "@opentui/core"
 import {
@@ -33,6 +36,7 @@ interface ChildUiHost {
   readonly diagnostics: ClientDiagnostics | undefined
   readonly pickerController: PickerController
   readonly requests: ProjectionRequestBroker
+  readonly sessionReader: SessionReader
   focus(): void
   refresh(): void
   presentEvent(event: EngineEvent): void
@@ -61,7 +65,25 @@ export class ChildUiController {
   #activeSubagentId: string | null = null
   #subagentActionId: string | null = null
   #subagentErrorBaseline: RottweilerState["errors"][number] | undefined
-  constructor(host: ChildUiHost) { this.#host = host }
+  readonly #todos: TodoController
+  constructor(host: ChildUiHost) {
+    this.#host = host
+    this.#todos = new TodoController({
+      reader: host.sessionReader,
+      state: () => this.#activeChildState?.todos ?? emptyTodos(),
+      update: todos => {
+        if (this.#activeChildState === null) return
+        this.#activeChildState = { ...this.#activeChildState, todos }
+        this.#host.refresh()
+      },
+    })
+  }
+  retryTodos(): void { this.#todos.retry() }
+  refreshTodos(): void {
+    const session = this.#historicalChild?.sessionId ?? (this.#activeSubagentId === null
+      ? undefined : this.subagentDescriptor(this.#activeSubagentId)?.child_session_id)
+    if (session !== undefined) this.#todos.open(session)
+  }
   get activeId(): string | null { return this.#activeSubagentId }
   get historical(): { readonly sessionId: string; readonly task: string } | null { return this.#historicalChild }
   get drafts(): readonly { readonly id: string; readonly draft: ComposerDraft }[] {
@@ -72,6 +94,7 @@ export class ChildUiController {
       ...children.map(({ id, draft }) => ({ scope: `child:${id}`, draft }))])
   }
   reset(): void {
+    this.#todos.reset()
     this.#scope = {}
     this.#subagentListError = null; this.#subagentDescriptors = []; this.#activeChildState = null
     this.#historicalChild = null; this.draftStore.clear(); this.#activeSubagentId = null; this.#subagentActionId = null
@@ -93,6 +116,7 @@ export class ChildUiController {
     this.#historicalChild = { sessionId: child.sessionId, task: boundedUiText(child.task, 512) }
     this.#activeSubagentId = child.subagentId
     this.#activeChildState = createInitialState()
+    this.#todos.open(child.sessionId)
     this.restoreComposerDraft(child.subagentId)
     this.#host.refresh(); this.#host.focus()
   }
@@ -185,6 +209,7 @@ export class ChildUiController {
     this.restoreComposerDraft(subagentId)
     this.#subagentErrorBaseline = this.#host.state.errors.at(-1)
     this.#activeChildState = initialSubagentState(this.#host.state, descriptor)
+    this.#todos.open(descriptor.child_session_id)
     this.#host.refresh()
     this.#host.focus()
   }
@@ -192,6 +217,7 @@ export class ChildUiController {
   leaveSubagent(): void {
     if (this.#activeSubagentId === null) return
     if (!this.saveComposerDraft()) return
+    this.#todos.reset()
     this.#activeSubagentId = null
     this.#historicalChild = null
     this.#activeChildState = null
@@ -227,6 +253,7 @@ export class ChildUiController {
     const next = boundSubagentState(reduceRottweilerState(previous, engineEvent(event)))
     if (reducedAt !== undefined) this.#host.diagnostics?.finish("reducer", reducedAt)
     this.#activeChildState = next
+    this.#todos.event(event)
     this.#subagentErrorBaseline = this.#host.state.errors.at(-1)
     if (event.type === "turn_finished") this.setSubagentActivity(subagentId, "idle")
     else if (event.type === "turn_started") this.setSubagentActivity(subagentId, "running")

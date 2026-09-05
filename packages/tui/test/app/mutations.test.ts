@@ -6,7 +6,7 @@ import {
 } from "../../src/app"
 import type { ClientCommand, CommandOutcome } from "../../src/protocol"
 import { createInitialState } from "../../src/state"
-import { emptyHistoryReader } from "../fixtures/history"
+import { emptySessionReader } from "../fixtures/history"
 
 describe("Rottweiler mutations", () => {
   let renderer: TestRenderer | undefined
@@ -19,7 +19,7 @@ describe("Rottweiler mutations", () => {
     const setup = await createTestRenderer({ width: 72, height: 12, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       sessionId: "session-tui-test",
       onCommand: () => ({
         type: "rejected",
@@ -43,7 +43,7 @@ describe("Rottweiler mutations", () => {
     const setup = await createTestRenderer({ width: 72, height: 12, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       editor: { compose: async () => null },
       imagePaste: { readImage: async () => null, preparePath: () => null },
     })
@@ -61,7 +61,7 @@ describe("Rottweiler mutations", () => {
     renderer = setup.renderer
     const commands: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       sessionId: "session-before",
       onCommand: (command) => {
         commands.push(command)
@@ -82,7 +82,7 @@ describe("Rottweiler mutations", () => {
   test("projects the persisted model from the active session before the model picker opens", async () => {
     const setup = await createTestRenderer({ width: 96, height: 14, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader, sessionId: "session-restarted" })
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader, sessionId: "session-restarted" })
     renderer.root.add(app)
 
     app.handleEvent({
@@ -113,7 +113,7 @@ describe("Rottweiler mutations", () => {
     renderer = setup.renderer
     const commands: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       sessionId: "session-actions",
       requestId: () => `request-${commands.length + 1}`,
       onCommand(command) {
@@ -182,7 +182,7 @@ describe("Rottweiler mutations", () => {
     renderer = setup.renderer
     const transitions: string[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       sessionId: "session-parent",
       requestId: () => "fork-request",
       onCommand: () => ({ type: "accepted" }),
@@ -255,7 +255,7 @@ describe("Rottweiler mutations", () => {
     const transitions: string[] = []
     let app!: ReturnType<typeof createRottweilerApp>
     app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       sessionId: "fork-parent",
       requestId: () => "fork-race-request",
       async onCommand(command) {
@@ -298,7 +298,7 @@ describe("Rottweiler mutations", () => {
     renderer = setup.renderer
     const commands: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         shell: { shellId: "shell-active", active: true, status: null, capturedOutput: null },
@@ -339,7 +339,7 @@ describe("Rottweiler mutations", () => {
     renderer = setup.renderer
     const pending = Promise.withResolvers<CommandOutcome>()
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       sessionId: "first",
       onCommand: command => command.type === "get_session_review" && command.session_id === "first"
         ? pending.promise : { type: "accepted" },
@@ -370,7 +370,7 @@ describe("Rottweiler mutations", () => {
       }] },
     })
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader, sessionId: "first", initialState: state("first"),
+      sessionReader: emptySessionReader, sessionId: "first", initialState: state("first"),
       onCommand: command => {
         if (command.type !== "review_file") return { type: "accepted" }
         const pending = Promise.withResolvers<CommandOutcome>()

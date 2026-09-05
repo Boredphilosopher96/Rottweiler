@@ -1,4 +1,4 @@
-import { emptyHistoryReader, historyReaderFor, conversationItem } from "../fixtures/history"
+import { emptySessionReader, sessionReaderFor, conversationItem } from "../fixtures/history"
 import { createStreamingTail } from "../../src/state/model"
 import { afterAll, afterEach, describe, expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs"
@@ -106,7 +106,7 @@ describe("M4 executable TUI performance budgets", () => {
         finished: null,
       }),
     }
-    const app = createRottweilerApp(renderer, { historyReader: historyReaderFor(history),
+    const app = createRottweilerApp(renderer, { sessionReader: sessionReaderFor(history),
       initialState: base,
       treeSitterClient: mockTreeSitter,
     })
@@ -163,7 +163,7 @@ describe("M4 executable TUI performance budgets", () => {
       gatherStats: true,
     })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader })
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader })
     renderer.root.add(app)
     await setup.renderOnce()
     app.composer.focus()
@@ -247,7 +247,7 @@ describe("M4 executable TUI performance budgets", () => {
         call_index: index,
       }))
     }
-    const app = createRottweilerApp(renderer, { historyReader: historyReaderFor(history), initialState: state, treeSitterClient: treeSitter })
+    const app = createRottweilerApp(renderer, { sessionReader: sessionReaderFor(history), initialState: state, treeSitterClient: treeSitter })
     renderer.root.add(app)
     await setup.flush()
     expect(app.transcript.mountedEntryCount).toBe(16)
@@ -310,7 +310,7 @@ describe("M4 executable TUI performance budgets", () => {
         call_index: index,
       }))
     }
-    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader, initialState: state })
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader, initialState: state })
     renderer.root.add(app)
     app.showToolsView()
     await setup.renderOnce()
@@ -370,7 +370,7 @@ describe("M4 executable TUI performance budgets", () => {
       gatherStats: true,
     })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader, keybindings: { preset: "vim" } })
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader, keybindings: { preset: "vim" } })
     renderer.root.add(app)
     await setup.renderOnce()
     setup.mockInput.pressKey("i")

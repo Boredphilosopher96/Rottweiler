@@ -5,7 +5,7 @@ import { createRottweilerApp } from "../../src/app"
 import { PROTOCOL_VERSION, type CommandReply, type EngineEvent } from "../../src/protocol"
 import { TuiEngineRuntime } from "../../src/runtime"
 import { EngineHttpSseClient } from "../../src/transport"
-import { conversationItem, historyReaderFor, toolItem, waitForHistory } from "../fixtures/history"
+import { conversationItem, sessionReaderFor, toolItem, waitForHistory } from "../fixtures/history"
 import { AuthenticatedMockEngine, encodeSseJson, splitBytes } from "../support/mock-engine"
 
 const SESSION_ID = "session-m9-replay-golden"
@@ -17,7 +17,7 @@ test("authenticated observer reads semantic pages without replaying lifetime eve
     session_id: SESSION_ID, through_sequence: "8",
   } satisfies EngineEvent
   const diagnostics = new ClientDiagnostics()
-  const source = historyReaderFor([
+  const source = sessionReaderFor([
     conversationItem(2, "user", "Inspect the persisted project plan."),
     toolItem(4, "read", '{"path":"PROJECT.md"}', "The canonical project plan."),
     conversationItem(7, "assistant", "## Persisted replay verified\n\nRead through the authenticated observer channel."),
@@ -40,7 +40,7 @@ test("authenticated observer reads semantic pages without replaying lifetime eve
     sessionId: SESSION_ID, lastSeenSequence: null, lastSeenFile: null, replayMode: true,
   }, new EngineHttpSseClient({ socketPath: engine.socketPath, bootstrapToken: engine.bootstrapToken, diagnostics }), undefined,
   () => `m9-runtime-${nextRequest++}`)
-  const app = createRottweilerApp(setup.renderer, { historyReader: runtime.historyReader, diagnostics,
+  const app = createRottweilerApp(setup.renderer, { sessionReader: runtime.sessionReader, diagnostics,
     sessionId: SESSION_ID, replaySessionId: SESSION_ID, treeSitterClient: treeSitter })
   setup.renderer.root.add(app)
   runtime.bind(app)

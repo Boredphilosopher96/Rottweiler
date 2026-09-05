@@ -1,4 +1,4 @@
-import { emptyHistoryReader } from "./fixtures/history"
+import { emptySessionReader } from "./fixtures/history"
 import { writeFile } from "node:fs/promises"
 
 import { parseKeypress } from "@opentui/core"
@@ -12,7 +12,7 @@ if (reportFile === undefined) throw new Error("ROTTWEILER_TEST_REPORT_FILE is re
 
 const setup = await createTestRenderer({ width: 100, height: 24, useThread: false })
 let runtime: TuiEngineRuntime | null = null
-const app = createRottweilerApp(setup.renderer, { historyReader: emptyHistoryReader,
+const app = createRottweilerApp(setup.renderer, { sessionReader: emptySessionReader,
   onCommand(command) {
     return runtime?.sendCommand(command) ?? null
   },

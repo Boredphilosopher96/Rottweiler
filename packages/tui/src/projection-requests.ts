@@ -19,7 +19,6 @@ export type ProjectionKind =
   | "permissions"
   | "mcp"
   | "runtime_services"
-  | "todos"
 
 export type ProjectionRequestKind =
   | ProjectionKind
@@ -42,7 +41,7 @@ export type ProjectionCommand =
   | { readonly type: "search_workspace_files"; readonly query: string; readonly limit: number }
   | { readonly type: "preview_workspace_file"; readonly path: string; readonly max_bytes: number }
   | { readonly type: "switch_model"; readonly model: string; readonly provider?: string | null }
-  | { readonly type: "get_session_review" | "get_workspace_status" | "get_context" | "get_cost" | "get_todos" }
+  | { readonly type: "get_session_review" | "get_workspace_status" | "get_context" | "get_cost" }
   | { readonly type: "get_workspace_diff"; readonly path: string; readonly max_bytes: number }
   | { readonly type: "search_sessions"; readonly query: string; readonly limit: number }
   | { readonly type: "rename_session"; readonly sessionId: string; readonly title: string }
@@ -108,7 +107,6 @@ export class ProjectionRequestBroker {
     permissions: null,
     mcp: null,
     runtime_services: null,
-    todos: null,
     workspace_status: null,
     workspace_diff: null,
     review: null,
@@ -127,7 +125,6 @@ export class ProjectionRequestBroker {
     permissions: null,
     mcp: null,
     runtime_services: null,
-    todos: null,
     workspace_status: null,
     workspace_diff: null,
     review: null,
@@ -203,7 +200,6 @@ export class ProjectionRequestBroker {
       "permissions",
       "mcp",
       "runtime_services",
-      "todos",
       "subagents",
     ] as const) this.#forget(kind)
     this.#modelSwitchRequests.clear()
@@ -225,7 +221,6 @@ export class ProjectionRequestBroker {
       "permissions",
       "mcp",
       "runtime_services",
-      "todos",
       "subagents",
       "provider_activation_models",
     ] as const) this.#forget(kind)
@@ -277,7 +272,7 @@ export class ProjectionRequestBroker {
     const requestId = requestIdFrom(record)
     switch (event.type) {
       case "todos_read":
-        return event.session_id === this.#options.sessionId() && this.accepts("todos", requestId)
+        return false // Direct task reads settle through their session capability.
       case "workspace_status_ready":
         return this.accepts("workspace_status", requestId)
       case "runtime_services_listed":
@@ -326,9 +321,6 @@ export class ProjectionRequestBroker {
 
   completeEvent(event: EngineEvent): ProjectionKind | null {
     switch (event.type) {
-      case "todos_read":
-        this.clear("todos")
-        return "todos"
       case "command_descriptors_listed":
         this.clear("commands")
         return "commands"
@@ -387,9 +379,6 @@ export class ProjectionRequestBroker {
 
   #trackCommand(command: ProjectionCommand, requestId: string): void {
     switch (command.type) {
-      case "get_todos":
-        this.#track("todos", requestId)
-        break
       case "get_workspace_status":
         this.#track("workspace_status", requestId)
         break
@@ -536,7 +525,7 @@ export class ProjectionRequestBroker {
     if (kind === "settings") {
       if (!this.matches("settings_pending", requestId) || !this.accepts("settings", requestId)) return
     } else if (!this.matches(kind, requestId)) return
-    if (kind === "todos" || kind === "commands" || kind === "modes" || kind === "models" || kind === "permissions" || kind === "mcp" || kind === "runtime_services") {
+    if (kind === "commands" || kind === "modes" || kind === "models" || kind === "permissions" || kind === "mcp" || kind === "runtime_services") {
       this.clear(kind)
     } else if (kind === "settings") {
       this.clear("settings_pending")
@@ -547,7 +536,6 @@ export class ProjectionRequestBroker {
 
 export function projectionKind(type: ClientCommand["type"]): ProjectionKind | null {
   switch (type) {
-    case "get_todos": return "todos"
     case "list_commands": return "commands"
     case "list_modes": return "modes"
     case "list_models": return "models"
@@ -623,7 +611,6 @@ function dispatchCommand(
     case "get_workspace_status":
     case "get_context":
     case "get_cost":
-    case "get_todos":
       return { type: command.type, meta, session_id: sessionId }
     case "get_workspace_diff":
     case "search_workspace_files":

@@ -4,7 +4,7 @@ import type { TranscriptContentPage, TranscriptItemId, TranscriptPage, Transcrip
 import { TRANSCRIPT_PROJECTION_VERSION } from "../protocol"
 import { parseU64 } from "../transport/types"
 import { ClientCache, type CacheLease } from "./cache"
-import type { HistoryReader } from "./reader"
+import type { SessionReader } from "../session-reader"
 
 export type HistoryCacheValue =
   | { readonly kind: "page"; readonly page: TranscriptPage }
@@ -49,7 +49,7 @@ export const HISTORY_PAGE_BYTES = 256 * 1024
 /** Current-view ownership; cached pages never become a second transcript authority. */
 export class HistoryController {
   readonly cache: ClientCache<HistoryCacheValue>
-  readonly #reader: HistoryReader
+  readonly #reader: Pick<SessionReader, "page" | "content">
   readonly #changed: () => void
   readonly #sessions = new Map<string, SessionView>()
   #sessionId: string | null = null
@@ -63,7 +63,7 @@ export class HistoryController {
   #revision = 0
   readonly #cacheNamespace = crypto.randomUUID()
 
-  constructor(reader: HistoryReader, changed: () => void, cache = new ClientCache<HistoryCacheValue>(), readonly diagnostics?: ClientDiagnostics) {
+  constructor(reader: Pick<SessionReader, "page" | "content">, changed: () => void, cache = new ClientCache<HistoryCacheValue>(), readonly diagnostics?: ClientDiagnostics) {
     this.#reader = reader
     this.#changed = changed
     this.cache = cache

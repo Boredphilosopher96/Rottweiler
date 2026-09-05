@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { ClientCache } from "../src/history/cache"
 import { HistoryController, type HistoryCacheValue } from "../src/history/controller"
-import type { HistoryReader } from "../src/history/reader"
+import type { SessionReader } from "../src/session-reader"
 import type { TranscriptPage, TranscriptReadResult } from "../src/protocol"
 import { TRANSCRIPT_PROJECTION_VERSION } from "../src/protocol"
 
@@ -20,7 +20,7 @@ function page(session: string, first: number, text = "body", generation = "0", t
     }],
   }
 }
-function reader(read: HistoryReader["page"]): HistoryReader {
+function reader(read: SessionReader["page"]): Pick<SessionReader, "page" | "content"> {
   return { page: read, content: async () => { throw new Error("unused content") } }
 }
 function deferred<T>() {

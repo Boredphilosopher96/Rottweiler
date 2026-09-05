@@ -10,7 +10,7 @@ import {
   type RuntimeEngineClient,
 } from "../../src/runtime"
 import type { EngineSubscriptionOptions } from "../../src/transport"
-import { emptyHistoryReader, historyReaderFor, waitForHistory, shellItem } from "../fixtures/history"
+import { emptySessionReader, sessionReaderFor, waitForHistory, shellItem } from "../fixtures/history"
 
 describe("Rottweiler terminal", () => {
   let renderer: TestRenderer | undefined
@@ -26,7 +26,7 @@ describe("Rottweiler terminal", () => {
     const commands: ClientCommand[] = []
     const items: import("../../src/protocol").TranscriptItem[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: historyReaderFor(items),
+      sessionReader: sessionReaderFor(items),
       sessionId: "session-tui-test",
       terminalHandover: {
         suspend: () => ordering.push("suspend"),
@@ -104,7 +104,7 @@ describe("Rottweiler terminal", () => {
     renderer = setup.renderer
     const ordering: string[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       terminalHandover: {
         suspend: () => ordering.push("suspend"),
         resume: () => ordering.push("resume"),
@@ -207,7 +207,7 @@ describe("Rottweiler terminal", () => {
       },
     }
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       sessionId: "slow-replay-parent",
       requestId: () => "slow-replay-fork",
       onCommand: () => ({ type: "accepted" }),
@@ -248,7 +248,7 @@ describe("Rottweiler terminal", () => {
     renderer = setup.renderer
     const ordering: string[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       replaySessionId: "historical-session",
       terminalHandover: {
         suspend: () => ordering.push("suspend"),

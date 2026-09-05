@@ -9,7 +9,7 @@ import {
   kennelTheme,
   systemThemeFor
 } from "../../src/theme"
-import { emptyHistoryReader } from "../fixtures/history"
+import { emptySessionReader } from "../fixtures/history"
 import { expectCoherentTheme, visionCapableState } from "./fixtures"
 
 describe("Rottweiler attachments", () => {
@@ -24,7 +24,7 @@ describe("Rottweiler attachments", () => {
     renderer = setup.renderer
     let request = 0
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       requestId: () => `workspace-${++request}`,
       onCommand: () => ({ type: "accepted" }),
     })
@@ -55,7 +55,7 @@ describe("Rottweiler attachments", () => {
     let request = 0
     const commands: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: visionCapableState(),
       requestId: () => `attachment-${++request}`,
       onCommand(command) {
@@ -120,7 +120,7 @@ describe("Rottweiler attachments", () => {
     renderer = setup.renderer
     let request = 0
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       requestId: () => `attachment-reject-${++request}`,
       onCommand(command) {
         return command.type === "preview_workspace_file"
@@ -160,7 +160,7 @@ describe("Rottweiler attachments", () => {
     let request = 0
     const commands: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: visionCapableState(),
       requestId: () => `attachment-full-${++request}`,
       onCommand(command) {
@@ -225,7 +225,7 @@ describe("Rottweiler attachments", () => {
     let request = 0
     const commands: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: visionCapableState(),
       requestId: () => `stable-anchor-${++request}`,
       onCommand(command) {
@@ -283,7 +283,7 @@ describe("Rottweiler attachments", () => {
     const commands: ClientCommand[] = []
     let accept = false
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       imagePaste: { readImage: async () => null, preparePath: () => null },
       onCommand(command) {
         commands.push(command)
@@ -312,7 +312,7 @@ describe("Rottweiler attachments", () => {
     const setup = await createTestRenderer({ width: 88, height: 20, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       imagePaste: {
         readImage: async () => null,
         preparePath: () => async () => { throw new Error("That image path could not be read safely.") },
@@ -332,7 +332,7 @@ describe("Rottweiler attachments", () => {
     const setup = await createTestRenderer({ width: 88, height: 20, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: visionCapableState(),
       imagePaste: {
         readImage: async () => ({
@@ -360,7 +360,7 @@ describe("Rottweiler attachments", () => {
     renderer = setup.renderer
     let reads = 0
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...visionCapableState(),
         model: "openai/text",
@@ -395,7 +395,7 @@ describe("Rottweiler attachments", () => {
   test("accepts the legal two-image envelope and rejects a third image locally", async () => {
     const setup = await createTestRenderer({ width: 88, height: 20, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader, initialState: visionCapableState() })
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader, initialState: visionCapableState() })
     renderer.root.add(app)
     const image = (fill: number) => ({
       type: "inline_base64" as const,
@@ -424,7 +424,7 @@ describe("Rottweiler attachments", () => {
   test("budgets escaped attachment JSON before it can exceed the command transport", async () => {
     const setup = await createTestRenderer({ width: 88, height: 20, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader })
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader })
     renderer.root.add(app)
     const escapedMiB = "\n".repeat(1024 * 1024)
     for (let index = 0; index < 10; index += 1) {
@@ -444,7 +444,7 @@ describe("Rottweiler attachments", () => {
     renderer = setup.renderer
     let finish!: (outcome: CommandOutcome) => void
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       onCommand: () => new Promise<CommandOutcome>((resolve) => { finish = resolve }),
     })
     renderer.root.add(app)
@@ -472,7 +472,7 @@ describe("Rottweiler attachments", () => {
     renderer = setup.renderer
     let finish!: (outcome: CommandOutcome) => void
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       onCommand: () => new Promise<CommandOutcome>((resolve) => { finish = resolve }),
     })
     renderer.root.add(app)
@@ -512,7 +512,7 @@ describe("Rottweiler attachments", () => {
     renderer = setup.renderer
     let finish!: (image: { name: string; mediaType: string; base64: string }) => void
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: visionCapableState(),
       theme: systemThemeFor("dark"),
       imagePaste: { readImage: () => new Promise(resolve => { finish = resolve }), preparePath: () => null },
@@ -536,7 +536,7 @@ describe("Rottweiler attachments", () => {
     renderer = setup.renderer
     let finish!: (outcome: CommandOutcome) => void
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       theme: systemThemeFor("dark"),
       onCommand: () => new Promise<CommandOutcome>((resolve) => { finish = resolve }),
     })
@@ -571,7 +571,7 @@ describe("Rottweiler attachments", () => {
     renderer = setup.renderer
     let finish!: (outcome: CommandOutcome) => void
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       theme: kennelTheme,
       onCommand: () => new Promise<CommandOutcome>((resolve) => { finish = resolve }),
     })
@@ -601,7 +601,7 @@ describe("Rottweiler attachments", () => {
     renderer = setup.renderer
     let finish!: (outcome: CommandOutcome) => void
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       theme: kennelTheme,
       onCommand: () => new Promise<CommandOutcome>((resolve) => { finish = resolve }),
     })
@@ -623,7 +623,7 @@ describe("Rottweiler attachments", () => {
     renderer = setup.renderer
     let finish!: (outcome: CommandOutcome) => void
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       onCommand: () => new Promise<CommandOutcome>((resolve) => { finish = resolve }),
     })
     renderer.root.add(app)

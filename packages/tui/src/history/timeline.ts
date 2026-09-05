@@ -2,7 +2,7 @@ import type { ComposerDraftStore, DraftSubmission, DraftTextReservation } from "
 import type { TranscriptContentSource, TranscriptView } from "../protocol"
 import { HistoryController, type HistoryCacheValue } from "./controller"
 import type { ClientCache } from "./cache"
-import type { HistoryReader } from "./reader"
+import type { SessionReader } from "../session-reader"
 
 export interface TimelineChoice {
   readonly sequenceId: string
@@ -16,7 +16,7 @@ export interface TimelineChoice {
 /** Timeline navigation retains one semantic page, regardless of conversation length. */
 export class TimelineController {
   readonly history: HistoryController
-  constructor(readonly reader: HistoryReader, cache: ClientCache<HistoryCacheValue>, changed: () => void) {
+  constructor(readonly reader: Pick<SessionReader, "page" | "content">, cache: ClientCache<HistoryCacheValue>, changed: () => void) {
     this.history = new HistoryController(reader, changed, cache)
   }
   get choices(): readonly TimelineChoice[] {
@@ -57,7 +57,7 @@ export class TimelineController {
 const READ_BYTES = 4096
 
 /** Complete source text is admitted before joining; previews are never mutation input. */
-export async function readTimelineDraft(reader: HistoryReader, choice: TimelineChoice, drafts: ComposerDraftStore,
+export async function readTimelineDraft(reader: Pick<SessionReader, "page" | "content">, choice: TimelineChoice, drafts: ComposerDraftStore,
   scope: string, signal: AbortSignal): Promise<DraftSubmission> {
   let reservation: DraftTextReservation | null = null
   const chunks: string[] = []

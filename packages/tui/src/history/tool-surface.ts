@@ -3,7 +3,7 @@ import validatePresentation from "../../../../protocol/ui-presentation-validator
 import { MAX_UI_SURFACE_BYTES, type TranscriptContentSource, type TranscriptView } from "../protocol"
 import type { ClientCache, CacheLease } from "./cache"
 import type { HistoryCacheValue } from "./controller"
-import type { HistoryReader } from "./reader"
+import type { SessionReader } from "../session-reader"
 
 // Charge collection, UTF-16 decoding and the JSON object graph before reading.
 // Even one container per source byte fits this conservative object/string allowance.
@@ -11,7 +11,7 @@ const DECODE_CHARGE = MAX_UI_SURFACE_BYTES * 96
 const CHUNK_BYTES = 4096
 
 export async function readToolSurface(
-  reader: HistoryReader, cache: ClientCache<HistoryCacheValue>, key: string,
+  reader: Pick<SessionReader, "page" | "content">, cache: ClientCache<HistoryCacheValue>, key: string,
   view: TranscriptView, source: TranscriptContentSource, signal: AbortSignal,
 ): Promise<CacheLease<HistoryCacheValue>> {
   if (source.selector.type !== "tool_presentation") throw new Error("tool surface source is required")

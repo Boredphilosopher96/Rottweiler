@@ -3,7 +3,7 @@ import { TextRenderable } from "@opentui/core"
 import { createTestRenderer, MockTreeSitterClient } from "@opentui/core/testing"
 import { createRottweilerApp } from "../../src/app"
 import { systemThemeFor } from "../../src/theme"
-import { historyReaderFor, toolItem, waitForHistory } from "../fixtures/history"
+import { sessionReaderFor, toolItem, waitForHistory } from "../fixtures/history"
 import { fixturePresentation, surfacePage } from "../fixtures/ui"
 
 test("native tool surface opens from canonical row and survives retheming without a second read", async () => {
@@ -17,8 +17,8 @@ test("native tool surface opens from canonical row and survives retheming withou
   let reads = 0
   const app = createRottweilerApp(setup.renderer, {
     theme: systemThemeFor("dark"), treeSitterClient: new MockTreeSitterClient(),
-    historyReader: {
-      ...historyReaderFor([item]),
+    sessionReader: {
+      ...sessionReaderFor([item]),
       content: async (_session, read) => { reads++; return surfacePage(presentation, read) },
     },
   })

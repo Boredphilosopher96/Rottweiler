@@ -1,4 +1,4 @@
-import { emptyHistoryReader, fixturePage } from "./fixtures/history"
+import { emptySessionReader, fixturePage } from "./fixtures/history"
 import { createStreamingTail } from "../src/state/model"
 import { toolOutputBuffer } from "../src/state/display-buffer"
 import { afterEach, describe, expect, test } from "bun:test"
@@ -17,7 +17,7 @@ describe("client-owned renderer handoff", () => {
   test("capture, destroy, recreate and restore retains attachments, editing selection and active palette", async () => {
     const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
     renderer = setup.renderer
-    const original = createRottweilerApp(renderer, { historyReader: emptyHistoryReader, onCommand: () => null })
+    const original = createRottweilerApp(renderer, { sessionReader: emptySessionReader, onCommand: () => null })
     renderer.root.add(original)
     original.composer.value = "unfinished draft"
     original.composer.addAttachment({ name: "notes.txt", source_path: "notes.txt", media_type: "text/plain", data: { type: "text", content: "keep these notes" } })
@@ -39,7 +39,7 @@ describe("client-owned renderer handoff", () => {
     renderer.root.remove(original)
     original.destroyRecursively()
 
-    const replacement = createRottweilerApp(renderer, { historyReader: emptyHistoryReader, initialState: replayed, onCommand: () => null })
+    const replacement = createRottweilerApp(renderer, { sessionReader: emptySessionReader, initialState: replayed, onCommand: () => null })
     renderer.root.add(replacement)
     const serialized = parseTuiRecycleState(JSON.parse(JSON.stringify(saved)))
     if (serialized === null) throw new Error("handoff must round trip")
@@ -71,7 +71,7 @@ describe("client-owned renderer handoff", () => {
     const initial = { ...createInitialState(), tools: { one: tool }, streamingTail: createStreamingTail({
       turnId: "turn", text: "", thinking: "reasoning", citations: [], toolInvocationIds: ["one"], finished: null,
     }) }
-    const original = createRottweilerApp(renderer, { historyReader: emptyHistoryReader, initialState: initial })
+    const original = createRottweilerApp(renderer, { sessionReader: emptySessionReader, initialState: initial })
     renderer.root.add(original)
     await setup.renderOnce()
     original.transcript.selectNextBlock()
@@ -88,7 +88,7 @@ describe("client-owned renderer handoff", () => {
     expect(saved.tools.selectedId).not.toBeNull()
     renderer.root.remove(original)
     original.destroyRecursively()
-    const replacement = createRottweilerApp(renderer, { historyReader: emptyHistoryReader, initialState: initial })
+    const replacement = createRottweilerApp(renderer, { sessionReader: emptySessionReader, initialState: initial })
     renderer.root.add(replacement)
     replacement.restoreRecycleState(saved)
     await setup.renderOnce()
@@ -101,7 +101,7 @@ describe("client-owned renderer handoff", () => {
   test("the production memory-check path never recycles an active review or a failed handoff", async () => {
     const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader, onCommand: () => null })
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader, onCommand: () => null })
     renderer.root.add(app)
     app.openReview()
     const root = mkdtempSync(join(tmpdir(), "rw-client-recycle-"))
@@ -115,7 +115,7 @@ describe("client-owned renderer handoff", () => {
       expect(app.isDestroyed).toBe(false)
       renderer.root.remove(app)
       app.destroyRecursively()
-      const plain = createRottweilerApp(renderer, { historyReader: emptyHistoryReader })
+      const plain = createRottweilerApp(renderer, { sessionReader: emptySessionReader })
       expect(recycleTuiIfNeeded({ observedBytes: 500 * 1024 * 1024, thresholdBytes: 384 * 1024 * 1024,
         path: undefined, capture: () => plain.recycleState(), recycle: () => { exits += 1 },
       })).toBe(false)
@@ -135,11 +135,12 @@ describe("client-owned renderer handoff", () => {
     renderer = setup.renderer
     let finish!: () => void
     const pending = new Promise<void>(resolve => { finish = resolve })
-    const app = createRottweilerApp(renderer, { historyReader: {
+    const app = createRottweilerApp(renderer, { sessionReader: {
+      todos: async () => ({ type: "ready", todos: { through: "1000", snapshot: { items: [] } } }),
       page: async (session, read) => {
         if (read.position.type === "first") await pending
         return { type: "ready", page: fixturePage(session, read) }
-      }, content: emptyHistoryReader.content,
+      }, content: emptySessionReader.content,
     } })
     renderer.root.add(app)
     await setup.flush()
@@ -162,7 +163,7 @@ describe("client-owned renderer handoff", () => {
     renderer = setup.renderer
     let finish!: (image: import("../src/platform").ClipboardImage | null) => void
     const pending = new Promise<import("../src/platform").ClipboardImage | null>(resolve => { finish = resolve })
-    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader,
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader,
       imagePaste: { readImage: () => pending, preparePath: () => null },
     })
     renderer.root.add(app)
@@ -185,7 +186,7 @@ describe("client-owned renderer handoff", () => {
   test("restores a detached child draft only in its owning session", async () => {
     const setup = await createTestRenderer({ width: 90, height: 25, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader })
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader })
     renderer.root.add(app)
     const state = app.recycleState()
     if (state === null) throw new Error("expected restorable state")
@@ -199,7 +200,7 @@ describe("client-owned renderer handoff", () => {
   test("defers secret/callback interactions and oversized drafts instead of losing them", async () => {
     const setup = await createTestRenderer({ width: 90, height: 25, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader })
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader })
     renderer.root.add(app)
     app.openProviderApiKeyPrompt("openai")
     app.picker.input.value = "sk-never-write-this"

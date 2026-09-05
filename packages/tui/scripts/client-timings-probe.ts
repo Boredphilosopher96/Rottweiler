@@ -2,7 +2,7 @@ import { createTestRenderer, MockTreeSitterClient } from "@opentui/core/testing"
 import { createRottweilerApp } from "../src/app"
 import { ClientDiagnostics } from "../src/client-diagnostics"
 import { boundedJson } from "../src/transport/json"
-import { emptyHistoryReader, fixturePage } from "../test/fixtures/history"
+import { emptySessionReader, fixturePage } from "../test/fixtures/history"
 
 // Diagnostic comparison, not a replacement statistic or threshold for the M4 gates.
 const WARMUP = 200
@@ -24,7 +24,7 @@ for (const enabled of [false, true, true, false, true, false, false, true]) {
   const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
   const treeSitter = new MockTreeSitterClient({ autoResolveTimeout: 0 })
   treeSitter.setMockResult({ highlights: [] })
-  const app = createRottweilerApp(setup.renderer, { diagnostics, historyReader: emptyHistoryReader, treeSitterClient: treeSitter })
+  const app = createRottweilerApp(setup.renderer, { diagnostics, sessionReader: emptySessionReader, treeSitterClient: treeSitter })
   setup.renderer.root.add(app)
   await setup.flush()
   let historyFrameCpuMs = 0

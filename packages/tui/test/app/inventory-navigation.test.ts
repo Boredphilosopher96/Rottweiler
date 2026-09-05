@@ -5,7 +5,7 @@ import {
 } from "../../src/app"
 import type { ClientCommand } from "../../src/protocol"
 import { createInitialState } from "../../src/state"
-import { emptyHistoryReader } from "../fixtures/history"
+import { emptySessionReader } from "../fixtures/history"
 
 describe("Rottweiler inventory-navigation", () => {
   let renderer: TestRenderer | undefined
@@ -19,7 +19,7 @@ describe("Rottweiler inventory-navigation", () => {
     renderer = setup.renderer
     const commands: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       onCommand(command) {
         commands.push(command)
         if (command.type === "list_mcp_servers") return Promise.reject(new Error("MCP discovery timed out"))
@@ -42,7 +42,7 @@ describe("Rottweiler inventory-navigation", () => {
     renderer = setup.renderer
     const commands: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         mcpServers: [{
@@ -89,7 +89,7 @@ describe("Rottweiler inventory-navigation", () => {
     renderer = setup.renderer
     let attempts = 0
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       keybindings: { preset: "vim" },
       initialState: {
         ...createInitialState(),
@@ -148,7 +148,7 @@ describe("Rottweiler inventory-navigation", () => {
     const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         mcpServers: [{
@@ -209,7 +209,7 @@ describe("Rottweiler inventory-navigation", () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         models: [{ id: "openai/fast", displayName: "fast", provider: "openai", aliases: ["fast"], current: false, available: true, status: null, vision: true, thinking: true, toolCalling: true }],
@@ -228,7 +228,7 @@ describe("Rottweiler inventory-navigation", () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         commands: Array.from({ length: 12 }, (_, index) => ({
@@ -257,7 +257,7 @@ describe("Rottweiler inventory-navigation", () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         commands: Array.from({ length: 30 }, (_, index) => ({

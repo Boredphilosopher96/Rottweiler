@@ -11,7 +11,7 @@ import { createInitialState, type RottweilerState } from "../../src/state"
 import { toolOutputBuffer } from "../../src/state/display-buffer"
 import { createStreamingTail } from "../../src/state/model"
 import { kennelTheme } from "../../src/theme"
-import { emptyHistoryReader } from "../fixtures/history"
+import { emptySessionReader } from "../fixtures/history"
 
 describe("live-tools components", () => {
   let renderer: TestRenderer | undefined
@@ -54,7 +54,7 @@ describe("live-tools components", () => {
           finished: null,
         }),
       } satisfies RottweilerState
-      const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader, initialState: initial })
+      const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader, initialState: initial })
       renderer.root.add(app)
       await setup.renderOnce()
       const reasoning = app.transcript.streamingCard
@@ -304,7 +304,7 @@ describe("live-tools components", () => {
         finished: null,
       }),
     }
-    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader, initialState: initial })
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader, initialState: initial })
     renderer.root.add(app)
     await setup.renderOnce()
     const card = app.transcript.streamingCard

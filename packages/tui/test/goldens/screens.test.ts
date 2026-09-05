@@ -1,4 +1,4 @@
-import { conversationItem, toolItem, historyReaderFor, emptyHistoryReader } from "../fixtures/history"
+import { conversationItem, toolItem, sessionReaderFor, emptySessionReader } from "../fixtures/history"
 import { createStreamingTail } from "../../src/state/model"
 import { toolOutputBuffer } from "../../src/state/display-buffer"
 import { afterEach, describe, expect, test } from "bun:test"
@@ -533,8 +533,8 @@ describe("M4 golden screens", () => {
       treeSitter.setMockResult({ highlights: [] })
       const items = scenario.history ?? conversationItems()
       let reads = 0
-      const source = historyReaderFor(items)
-      const app = createRottweilerApp(renderer, { historyReader: { ...source, page: async (...args) => {
+      const source = sessionReaderFor(items)
+      const app = createRottweilerApp(renderer, { sessionReader: { ...source, page: async (...args) => {
         const result = await source.page(...args)
         reads += 1
         return result
@@ -577,7 +577,7 @@ describe("M4 golden screens", () => {
   test("Tools workspace keeps exact production cells at 110 by 32", async () => {
     const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader,
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader,
       initialState: toolsFixtureState(),
       nowMs: () => TOOLS_FIXTURE_NOW_MS,
     })
@@ -602,7 +602,7 @@ describe("M4 golden screens", () => {
   test("Tools workspace removes its rail below 100 columns", async () => {
     const setup = await createTestRenderer({ width: 99, height: 32, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader,
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader,
       initialState: toolsFixtureState(),
       nowMs: () => TOOLS_FIXTURE_NOW_MS,
     })
@@ -619,7 +619,7 @@ describe("M4 golden screens", () => {
   test("Tools workspace keeps a usable scroller on a short terminal", async () => {
     const setup = await createTestRenderer({ width: 110, height: 11, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader,
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader,
       initialState: toolsFixtureState(),
       nowMs: () => TOOLS_FIXTURE_NOW_MS,
     })

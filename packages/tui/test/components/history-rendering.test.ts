@@ -5,7 +5,7 @@ import { ReasoningBlockRenderable } from "../../src/components"
 import type { TranscriptItem } from "../../src/protocol"
 import { createInitialState, type RottweilerState } from "../../src/state"
 import { createStreamingTail } from "../../src/state/model"
-import { commandItem, conversationItem, historyReaderFor, toolItem, waitForHistory } from "../fixtures/history"
+import { commandItem, conversationItem, sessionReaderFor, toolItem, waitForHistory } from "../fixtures/history"
 import { neverUsage, permissionState } from "./fixtures"
 
 let renderer: TestRenderer | undefined
@@ -13,7 +13,7 @@ async function fixture(items: TranscriptItem[], state = createInitialState(), he
   const setup = await createTestRenderer({ width: 90, height, useThread: false })
   renderer = setup.renderer
   const app = createRottweilerApp(renderer, {
-    historyReader: historyReaderFor(items), initialState: state,
+    sessionReader: sessionReaderFor(items), initialState: state,
     treeSitterClient: new MockTreeSitterClient({ autoResolveTimeout: 0 })
   })
   renderer.root.add(app)

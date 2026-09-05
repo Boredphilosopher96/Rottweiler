@@ -2,7 +2,7 @@ import { createTestRenderer, type TestRenderer } from "@opentui/core/testing"
 import { afterEach, describe, expect, test } from "bun:test"
 import { createRottweilerApp, type RottweilerAppOptions } from "../../src/app"
 import { PROTOCOL_VERSION, type ClientCommand, type EngineEvent } from "../../src/protocol"
-import { emptyHistoryReader } from "../fixtures/history"
+import { emptySessionReader } from "../fixtures/history"
 
 type CredentialResult = Awaited<ReturnType<NonNullable<RottweilerAppOptions["onProviderApiKey"]>>>
 const authEvent = (attemptId: string): EngineEvent => ({
@@ -33,7 +33,7 @@ describe("provider UI lifetime", () => {
         const started = Promise.withResolvers<void>()
         const commands: ClientCommand[] = []
         const app = createRottweilerApp(renderer, {
-          historyReader: emptyHistoryReader,
+          sessionReader: emptySessionReader,
           onCommand(command) { commands.push(command); return { type: "accepted" } },
           onProviderApiKey() { started.resolve(); return pending.promise },
         })
@@ -63,7 +63,7 @@ describe("provider UI lifetime", () => {
     const second = Promise.withResolvers<void>()
     const urls: string[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       onCommand() { return { type: "accepted" } },
       externalUrl: { open(url) { urls.push(url); return urls.length === 1 ? first.promise : second.promise } },
     })

@@ -19,7 +19,8 @@ async function childHarness(activity: "running" | "idle") {
   const sessions: string[] = []
   const app = createRottweilerApp(harness.renderer, {
     sessionId: "parent", treeSitterClient: new MockTreeSitterClient(),
-    historyReader: {
+    sessionReader: {
+      todos: async () => ({ type: "ready", todos: { through: "1000", snapshot: { items: [] } } }),
       page: async (session, read) => { sessions.push(session); return { type: "ready", page: fixturePage(session, read) } },
       content: async () => { throw new Error("unused content") },
     },

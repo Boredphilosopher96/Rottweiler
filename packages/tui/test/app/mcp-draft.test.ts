@@ -3,7 +3,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { createRottweilerApp } from "../../src/app"
 import { MCP_ENVIRONMENT_DRAFT_LIMITS } from "../../src/app/mcp-draft"
 import { PROTOCOL_VERSION, type ClientCommand } from "../../src/protocol"
-import { emptyHistoryReader } from "../fixtures/history"
+import { emptySessionReader } from "../fixtures/history"
 
 describe("MCP draft interaction", () => {
   let renderer: TestRenderer | undefined
@@ -14,7 +14,7 @@ describe("MCP draft interaction", () => {
     renderer = setup.renderer
     const commands: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       onCommand(command) { commands.push(command); return { type: "accepted" } },
     })
     renderer.root.add(app)
@@ -58,7 +58,7 @@ describe("MCP draft interaction", () => {
     renderer = setup.renderer
     const commands: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       onCommand(command) { commands.push(command); return { type: "accepted" } },
     })
     renderer.root.add(app)

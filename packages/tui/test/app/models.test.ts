@@ -6,7 +6,7 @@ import {
 } from "../../src/app"
 import type { ClientCommand } from "../../src/protocol"
 import { createInitialState } from "../../src/state"
-import { emptyHistoryReader } from "../fixtures/history"
+import { emptySessionReader } from "../fixtures/history"
 
 describe("Rottweiler models", () => {
   let renderer: TestRenderer | undefined
@@ -20,7 +20,7 @@ describe("Rottweiler models", () => {
     renderer = setup.renderer
     const commands: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         models: [
@@ -86,7 +86,7 @@ describe("Rottweiler models", () => {
     renderer = setup.renderer
     const commands: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         models: [
@@ -209,7 +209,7 @@ describe("Rottweiler models", () => {
     const commands: ClientCommand[] = []
     let request = 0
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       sessionId: "session-model-context",
       requestId: () => `model-context-${request++}`,
       initialState: {
@@ -307,7 +307,7 @@ describe("Rottweiler models", () => {
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         commands: [{

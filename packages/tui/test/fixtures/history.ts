@@ -23,7 +23,8 @@ export function fixturePage(session: string, read: TranscriptRead): TranscriptPa
 }
 
 /** Explicit read capability for interaction tests that have no historical content. */
-export const emptyHistoryReader: import("../../src/history/reader").HistoryReader = {
+export const emptySessionReader: import("../../src/session-reader").SessionReader = {
+  todos: async () => ({ type: "ready", todos: { through: "1000", snapshot: { items: [] } } }),
   page: async (session, read) => {
     const page = fixturePage(session, read)
     return { type: "ready", page: { ...page, first_ordinal: "0", total_items: "0", items: [] } }
@@ -57,8 +58,9 @@ export function conversationItem(id: number, role: "user" | "assistant", text: s
 }
 
 /** Native semantic fixture data, kept outside the app's bounded read cache. */
-export function historyReaderFor(items: readonly import("../../src/protocol").TranscriptItem[], head?: () => Pick<import("../../src/protocol").TranscriptView, "generation" | "through">): import("../../src/history/reader").HistoryReader {
+export function sessionReaderFor(items: readonly import("../../src/protocol").TranscriptItem[], head?: () => Pick<import("../../src/protocol").TranscriptView, "generation" | "through">): import("../../src/session-reader").SessionReader {
   return {
+    todos: emptySessionReader.todos,
     page: async (session, read) => {
       const position = read.position
       const limit = Math.min(read.max_items, items.length)

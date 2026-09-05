@@ -3,7 +3,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { createRottweilerApp } from "../../src/app"
 import type { ClientCommand, CommandOutcome } from "../../src/protocol"
 import { kennelTheme, themeByName, themeCatalog } from "../../src/theme"
-import { emptyHistoryReader } from "../fixtures/history"
+import { emptySessionReader } from "../fixtures/history"
 import { expectCoherentTheme } from "./fixtures"
 
 describe("theme confirmation lifetime", () => {
@@ -16,7 +16,7 @@ describe("theme confirmation lifetime", () => {
     const pending = Promise.withResolvers<CommandOutcome>()
     const commands: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader, theme: kennelTheme,
+      sessionReader: emptySessionReader, theme: kennelTheme,
       onCommand(command) {
         commands.push(command)
         return command.type === "set_setting" && command.key === "ui.theme"

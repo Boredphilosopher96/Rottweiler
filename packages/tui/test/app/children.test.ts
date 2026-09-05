@@ -5,7 +5,7 @@ import {
   createRottweilerApp
 } from "../../src/app"
 import type { ClientCommand, CommandOutcome } from "../../src/protocol"
-import { emptyHistoryReader } from "../fixtures/history"
+import { emptySessionReader } from "../fixtures/history"
 
 describe("Rottweiler children", () => {
   let renderer: TestRenderer | undefined
@@ -19,7 +19,7 @@ describe("Rottweiler children", () => {
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       sessionId: "parent-session",
       onCommand(command) {
         emitted.push(command)
@@ -42,7 +42,7 @@ describe("Rottweiler children", () => {
     const emitted: ClientCommand[] = []
     let request = 0
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       sessionId: "parent-session",
       requestId: () => `request-${++request}`,
       onCommand(command) {
@@ -108,7 +108,7 @@ describe("Rottweiler children", () => {
     const emitted: ClientCommand[] = []
     let request = 0
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       sessionId: "parent-session",
       keybindings: { preset: "vim" },
       requestId: () => `request-${++request}`,
@@ -159,7 +159,7 @@ describe("Rottweiler children", () => {
     const emitted: ClientCommand[] = []
     let request = 0
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       sessionId: "parent-session",
       requestId: () => `request-${++request}`,
       onCommand(command) {
@@ -217,7 +217,7 @@ describe("Rottweiler children", () => {
     renderer = setup.renderer
     let attempts = 0
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       sessionId: "parent-session",
       onCommand(command) {
         if (command.type === "list_subagents") {
@@ -251,7 +251,7 @@ describe("Rottweiler children", () => {
     let rejectFollowUp: ((outcome: CommandOutcome) => void) | undefined
     let request = 0
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       sessionId: "parent-session",
       requestId: () => `request-${++request}`,
       onCommand(command) {
@@ -322,7 +322,7 @@ describe("Rottweiler children", () => {
     let acceptShell: ((outcome: CommandOutcome) => void) | undefined
     let request = 0
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       sessionId: "parent-session",
       requestId: () => `request-${++request}`,
       terminalHandover: { suspend() { }, resume() { } },

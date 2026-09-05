@@ -8,7 +8,7 @@ import {
 } from "../../src/app"
 import type { ClientCommand, EngineEvent } from "../../src/protocol"
 import { createInitialState } from "../../src/state"
-import { emptyHistoryReader } from "../fixtures/history"
+import { emptySessionReader } from "../fixtures/history"
 import { initialEvent, ManualPresentationFrame } from "./fixtures"
 
 describe("Rottweiler presentation", () => {
@@ -23,7 +23,7 @@ describe("Rottweiler presentation", () => {
     renderer = setup.renderer
     const commands: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       sessionId: "session-services",
       requestId: () => `request-${commands.length + 1}`,
       onCommand(command) {
@@ -72,7 +72,7 @@ describe("Rottweiler presentation", () => {
     const setup = await createTestRenderer({ width: 100, height: 18, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       sessionId: "session-services",
       initialState: {
         ...createInitialState(),
@@ -136,7 +136,7 @@ describe("Rottweiler presentation", () => {
       useThread: false,
     })
     renderer = setup.renderer
-    renderer.root.add(createRottweilerApp(renderer, { historyReader: emptyHistoryReader, initialEvent }))
+    renderer.root.add(createRottweilerApp(renderer, { sessionReader: emptySessionReader, initialEvent }))
 
     await setup.renderOnce()
 
@@ -155,7 +155,7 @@ describe("Rottweiler presentation", () => {
     const setup = await createTestRenderer({ width: 112, height: 24, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         connection: { phase: "connected", attempt: 0, error: null, gap: null },
@@ -185,7 +185,7 @@ describe("Rottweiler presentation", () => {
     const setup = await createTestRenderer({ width: 72, height: 12, useThread: false })
     renderer = setup.renderer
     const frame = new ManualPresentationFrame()
-    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader, presentationFrame: frame })
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader, presentationFrame: frame })
     renderer.root.add(app)
     app.handleEvent({
       type: "turn_started",
@@ -269,7 +269,7 @@ describe("Rottweiler presentation", () => {
     const setup = await createTestRenderer({ width: 72, height: 12, useThread: false })
     renderer = setup.renderer
     const frame = new ManualPresentationFrame()
-    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader, presentationFrame: frame })
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader, presentationFrame: frame })
     renderer.root.add(app)
     app.handleEvent({
       type: "compaction_started",
@@ -365,7 +365,7 @@ describe("Rottweiler presentation", () => {
       const setup = await createTestRenderer({ width: 72, height: 12, useThread: false })
       renderer = setup.renderer
       const frame = new ManualPresentationFrame()
-      const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader, presentationFrame: frame, onCommand: () => ({ type: "accepted" }) })
+      const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader, presentationFrame: frame, onCommand: () => ({ type: "accepted" }) })
       renderer.root.add(app)
       app.handleEvent({
         type: "turn_started",

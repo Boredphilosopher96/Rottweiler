@@ -5,7 +5,7 @@ import {
   createRottweilerApp
 } from "../../src/app"
 import type { ClientCommand } from "../../src/protocol"
-import { emptyHistoryReader } from "../fixtures/history"
+import { emptySessionReader } from "../fixtures/history"
 
 describe("Rottweiler mcp-permissions", () => {
   let renderer: TestRenderer | undefined
@@ -19,7 +19,7 @@ describe("Rottweiler mcp-permissions", () => {
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       onCommand(command) {
         emitted.push(command)
         return { type: "accepted" }
@@ -230,7 +230,7 @@ describe("Rottweiler mcp-permissions", () => {
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       onCommand(command) {
         emitted.push(command)
         return { type: "accepted" }
@@ -302,7 +302,7 @@ describe("Rottweiler mcp-permissions", () => {
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       replaySessionId: "historical-session",
       onCommand(command) {
         emitted.push(command)
@@ -321,7 +321,7 @@ describe("Rottweiler mcp-permissions", () => {
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
     const app = createRottweilerApp(setup.renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       sessionId: "session-permissions",
       clientId: "permission-driver",
       onCommand(command) {

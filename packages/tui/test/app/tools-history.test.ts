@@ -7,7 +7,7 @@ import {
 import type { ClientCommand } from "../../src/protocol"
 import { createInitialState, type ToolProjection } from "../../src/state"
 import { toolOutputBuffer } from "../../src/state/display-buffer"
-import { emptyHistoryReader, historyReaderFor, conversationItem } from "../fixtures/history"
+import { emptySessionReader, sessionReaderFor, conversationItem } from "../fixtures/history"
 import { toolsAppState } from "./fixtures"
 
 describe("Rottweiler tools-history", () => {
@@ -22,7 +22,7 @@ describe("Rottweiler tools-history", () => {
     renderer = setup.renderer
     const commands: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: historyReaderFor([
+      sessionReader: sessionReaderFor([
         conversationItem(1, "user", "Show the saved result."),
         conversationItem(2, "assistant", "Historical answer rendered through the retained tree."),
       ]),
@@ -55,15 +55,14 @@ describe("Rottweiler tools-history", () => {
     expect(app.banner.plainText).toContain("history available")
     expect(app.transcript.mountedEntryCount).toBe(2)
     expect(setup.captureCharFrame()).toContain("Historical answer rendered")
-    expect(commands.map(command => command.type)).toEqual(["get_todos"])
-    expect(commands[0]).toMatchObject({ session_id: "session-historical" })
+    expect(commands).toHaveLength(0)
   })
 
   test("defers hidden Tools binding and preserves its selection and current output on return", async () => {
     const setup = await createTestRenderer({ width: 110, height: 24, useThread: false })
     renderer = setup.renderer
     const initial = toolsAppState()
-    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader, initialState: initial })
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader, initialState: initial })
     renderer.root.add(app)
     await setup.renderOnce()
     const updates = spyOn(app.toolsWorkspace, "update")
@@ -105,7 +104,7 @@ describe("Rottweiler tools-history", () => {
     renderer = setup.renderer
     let nowMs = Date.parse("2026-01-01T12:00:41.000Z")
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: toolsAppState(),
       nowMs: () => nowMs,
     })
@@ -128,7 +127,7 @@ describe("Rottweiler tools-history", () => {
   test("switches mounted conversation and Tools views from the palette without sharing scroll state", async () => {
     const setup = await createTestRenderer({ width: 110, height: 24, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, { historyReader: historyReaderFor(Array.from({ length: 24 }, (_, index) => conversationItem(index + 1, "assistant", `Historical response ${index}\nsecond line`))), initialState: toolsAppState() })
+    const app = createRottweilerApp(renderer, { sessionReader: sessionReaderFor(Array.from({ length: 24 }, (_, index) => conversationItem(index + 1, "assistant", `Historical response ${index}\nsecond line`))), initialState: toolsAppState() })
     renderer.root.add(app)
     await setup.flush()
     app.transcript.scrollTo(app.transcript.scroller.scrollHeight)
@@ -177,7 +176,7 @@ describe("Rottweiler tools-history", () => {
   test("keeps approval focus above Tools and preserves existing output viewer lifecycle", async () => {
     const setup = await createTestRenderer({ width: 110, height: 24, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader, initialState: toolsAppState() })
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader, initialState: toolsAppState() })
     renderer.root.add(app)
     app.showToolsView()
     await setup.renderOnce()
@@ -248,7 +247,7 @@ describe("Rottweiler tools-history", () => {
       timing: { kind: "unknown" },
     })
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         turns: Object.fromEntries(["1", "2"].map((turnId) => [turnId, {
@@ -296,7 +295,7 @@ describe("Rottweiler tools-history", () => {
     const commands: ClientCommand[] = []
     const base = toolsAppState()
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...base,
         replay: { active: true, sessionId: "session-tools", completedThrough: "80" },

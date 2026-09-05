@@ -11,7 +11,7 @@ import {
 } from "../../src/protocol"
 import { createInitialState, type RottweilerState } from "../../src/state"
 import { toolOutputBuffer } from "../../src/state/display-buffer"
-import { emptyHistoryReader } from "../fixtures/history"
+import { emptySessionReader } from "../fixtures/history"
 import { permissionState } from "./fixtures"
 
 describe("approvals components", () => {
@@ -52,7 +52,7 @@ describe("approvals components", () => {
       },
     }
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: state,
       sessionId: "session-components",
       clientId: "client-components",
@@ -129,7 +129,7 @@ describe("approvals components", () => {
       timing: { kind: "unknown" as const },
     }
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: { ...createInitialState(), tools: { [tool.invocationId]: tool } },
       onCommand(command) {
         commands.push(command)
@@ -217,7 +217,7 @@ describe("approvals components", () => {
       timing: { kind: "unknown" as const },
     }
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         permissions: permissionState("strict"),
@@ -324,7 +324,7 @@ describe("approvals components", () => {
       },
     }
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: state,
       sessionId: "session-components",
       clientId: "client-components",
@@ -369,7 +369,7 @@ describe("approvals components", () => {
       },
     }
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: state,
       onCommand(command) {
         if (command.type !== "approve_tool") return { type: "accepted" }
@@ -404,7 +404,7 @@ describe("approvals components", () => {
     renderer = setup.renderer
     const commands: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         mode: "plan",

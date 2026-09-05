@@ -3,17 +3,18 @@ import { expect, test } from "bun:test"
 import { createTestRenderer, MockTreeSitterClient } from "@opentui/core/testing"
 import { createRottweilerApp } from "../src/app"
 import type { TranscriptRead } from "../src/protocol"
-import type { HistoryReader } from "../src/history/reader"
+import type { SessionReader } from "../src/session-reader"
 
 
 test("production app reads native semantic rows and navigates beyond its mounted window", async () => {
   const harness = await createTestRenderer({ width: 100, height: 30 })
   const reads: TranscriptRead[] = []
-  const reader: HistoryReader = {
+  const reader: SessionReader = {
+      todos: async () => ({ type: "ready", todos: { through: "1000", snapshot: { items: [] } } }),
     page: async (session, read) => { reads.push(read); return { type: "ready", page: fixturePage(session, read) } },
     content: async () => { throw new Error("unused") },
   }
-  const app = createRottweilerApp(harness.renderer, { sessionId: "history", historyReader: reader, treeSitterClient: new MockTreeSitterClient() })
+  const app = createRottweilerApp(harness.renderer, { sessionId: "history", sessionReader: reader, treeSitterClient: new MockTreeSitterClient() })
   harness.renderer.root.add(app)
   try {
     await Bun.sleep(0)
@@ -55,7 +56,8 @@ test("complete-content interaction pages bounded bodies and releases the overlay
   const offsets: number[] = []
   const app = createRottweilerApp(harness.renderer, {
     sessionId: "history", treeSitterClient: new MockTreeSitterClient(),
-    historyReader: {
+    sessionReader: {
+      todos: async () => ({ type: "ready", todos: { through: "1000", snapshot: { items: [] } } }),
       page: async (session, read) => {
         const page = fixturePage(session, read)
         for (const item of page.items) if (item.content.type === "command") item.content.message.complete = false

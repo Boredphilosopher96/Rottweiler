@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { createTestRenderer, MockTreeSitterClient } from "@opentui/core/testing"
 import { createRottweilerApp } from "../src/app"
-import { conversationItem, historyReaderFor } from "./fixtures/history"
+import { conversationItem, sessionReaderFor } from "./fixtures/history"
 import type { TranscriptItem } from "../src/protocol"
 
 function toolItem(): TranscriptItem {
@@ -22,7 +22,7 @@ test("native tool row keeps identity, expansion and selection across final revis
   const harness = await createTestRenderer({ width: 90, height: 25, useThread: false })
   const item = toolItem()
   const items = [conversationItem(1, "assistant", "Inspecting output"), item]
-  const app = createRottweilerApp(harness.renderer, { sessionId: "history", historyReader: historyReaderFor(items), treeSitterClient: new MockTreeSitterClient() })
+  const app = createRottweilerApp(harness.renderer, { sessionId: "history", sessionReader: sessionReaderFor(items), treeSitterClient: new MockTreeSitterClient() })
   harness.renderer.root.add(app)
   try {
     await Bun.sleep(0)
@@ -63,7 +63,7 @@ test("native tool row keeps identity, expansion and selection across final revis
 test("reasoning and tool rows remain separate keyboard blocks in visual order", async () => {
   const harness = await createTestRenderer({ width: 90, height: 25, useThread: false })
   const app = createRottweilerApp(harness.renderer, {
-    historyReader: historyReaderFor([
+    sessionReader: sessionReaderFor([
       conversationItem(1, "assistant", "Answer", "Inspect the source first."), toolItem(),
     ]), treeSitterClient: new MockTreeSitterClient()
   })

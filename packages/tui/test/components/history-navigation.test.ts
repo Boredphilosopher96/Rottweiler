@@ -7,7 +7,7 @@ import { createInitialState, type ToolProjection } from "../../src/state"
 import { createStreamingTail } from "../../src/state/model"
 import { toolOutputBuffer } from "../../src/state/display-buffer"
 import type { TranscriptItem } from "../../src/protocol"
-import { commandItem, conversationItem, historyReaderFor, toolItem, waitForHistory } from "../fixtures/history"
+import { commandItem, conversationItem, sessionReaderFor, toolItem, waitForHistory } from "../fixtures/history"
 import { meta } from "./fixtures"
 
 function liveTool(): ToolProjection {
@@ -37,7 +37,7 @@ describe("semantic history navigation", () => {
     const items: TranscriptItem[] = []
     const tool = liveTool()
     const app = createRottweilerApp(renderer, {
-      sessionId: "session-components", historyReader: historyReaderFor(items),
+      sessionId: "session-components", sessionReader: sessionReaderFor(items),
       treeSitterClient: new MockTreeSitterClient(), initialState: {
         ...createInitialState(), tools: { [tool.invocationId]: tool },
         streamingTail: createStreamingTail({ turnId: "1", text: "", thinking: "", citations: [], toolInvocationIds: [tool.invocationId], finished: null })
@@ -72,7 +72,7 @@ describe("semantic history navigation", () => {
   test("reasoning and tools navigate in semantic order without wrapping", async () => {
     const setup = await createTestRenderer({ width: 90, height: 24, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, { historyReader: historyReaderFor(blockItems()), treeSitterClient: new MockTreeSitterClient() })
+    const app = createRottweilerApp(renderer, { sessionReader: sessionReaderFor(blockItems()), treeSitterClient: new MockTreeSitterClient() })
     renderer.root.add(app)
     await setup.flush()
     const order: Array<string | null> = []
@@ -90,7 +90,7 @@ describe("semantic history navigation", () => {
     renderer = setup.renderer
     const tool = liveTool()
     const app = createRottweilerApp(renderer, {
-      historyReader: historyReaderFor(blockItems()), treeSitterClient: new MockTreeSitterClient(),
+      sessionReader: sessionReaderFor(blockItems()), treeSitterClient: new MockTreeSitterClient(),
       initialState: {
         ...createInitialState(), tools: { [tool.invocationId]: tool }, streamingTail: createStreamingTail({
           turnId: "2", text: "", thinking: "Next inspection", citations: [], toolInvocationIds: [tool.invocationId], finished: null
@@ -108,7 +108,7 @@ describe("semantic history navigation", () => {
     const setup = await createTestRenderer({ width: 90, height: 18, useThread: false })
     renderer = setup.renderer
     const items = [...Array.from({ length: 15 }, (_, index) => commandItem(index, "fixture", "Leading history")), toolItem(15, "read", "{}")]
-    const app = createRottweilerApp(renderer, { historyReader: historyReaderFor(items), treeSitterClient: new MockTreeSitterClient() })
+    const app = createRottweilerApp(renderer, { sessionReader: sessionReaderFor(items), treeSitterClient: new MockTreeSitterClient() })
     renderer.root.add(app)
     await setup.flush()
     app.transcript.setScrollOffset(0)
@@ -126,7 +126,7 @@ describe("semantic history navigation", () => {
     const setup = await createTestRenderer({ width: 90, height: 24, useThread: false })
     renderer = setup.renderer
     const items = [toolItem(1, "read", "{}")]
-    const app = createRottweilerApp(renderer, { historyReader: historyReaderFor(items), treeSitterClient: new MockTreeSitterClient() })
+    const app = createRottweilerApp(renderer, { sessionReader: sessionReaderFor(items), treeSitterClient: new MockTreeSitterClient() })
     renderer.root.add(app)
     await setup.flush()
     app.transcript.selectNextBlock()
@@ -149,7 +149,7 @@ describe("semantic history navigation", () => {
     const setup = await createTestRenderer({ width: 90, height: 24, useThread: false })
     renderer = setup.renderer
     const items = Array.from({ length: 60 }, (_, index) => toolItem(index, "read", "{}"))
-    const app = createRottweilerApp(renderer, { historyReader: historyReaderFor(items), treeSitterClient: new MockTreeSitterClient() })
+    const app = createRottweilerApp(renderer, { sessionReader: sessionReaderFor(items), treeSitterClient: new MockTreeSitterClient() })
     renderer.root.add(app)
     await setup.flush()
     const row = app.transcript.mountedCards.get("59")
@@ -169,7 +169,7 @@ describe("semantic history navigation", () => {
     renderer = setup.renderer
     const items = [toolItem(1, "read", "{}")]
     let generation = "0"
-    const app = createRottweilerApp(renderer, { historyReader: historyReaderFor(items, () => ({ generation, through: "2" })), treeSitterClient: new MockTreeSitterClient() })
+    const app = createRottweilerApp(renderer, { sessionReader: sessionReaderFor(items, () => ({ generation, through: "2" })), treeSitterClient: new MockTreeSitterClient() })
     renderer.root.add(app)
     await setup.flush()
     app.transcript.selectNextBlock()

@@ -1,4 +1,4 @@
-import { conversationItem, historyReaderFor } from "../test/fixtures/history"
+import { conversationItem, sessionReaderFor } from "../test/fixtures/history"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
@@ -33,7 +33,7 @@ const treeSitter = new TreeSitterClient({
 await treeSitter.initialize()
 
 try {
-  const app = createRottweilerApp(setup.renderer, { historyReader: historyReaderFor([conversationItem(1, "user", "Add reconnect-safe streaming. The cursor double-advances after a dropped SSE connection.")]),
+  const app = createRottweilerApp(setup.renderer, { sessionReader: sessionReaderFor([conversationItem(1, "user", "Add reconnect-safe streaming. The cursor double-advances after a dropped SSE connection.")]),
     initialState: scenarioState(scenarioInput),
     requestId: () => "visual-proof-request",
     treeSitterClient: treeSitter,

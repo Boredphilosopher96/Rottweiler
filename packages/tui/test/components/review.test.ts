@@ -11,7 +11,7 @@ import {
   type CommandOutcome
 } from "../../src/protocol"
 import { createInitialState } from "../../src/state"
-import { emptyHistoryReader } from "../fixtures/history"
+import { emptySessionReader } from "../fixtures/history"
 import { waitFor } from "./fixtures"
 
 describe("review components", () => {
@@ -46,7 +46,7 @@ describe("review components", () => {
       ],
     }
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: { ...createInitialState(), review },
       sessionId: "session-review",
       clientId: "review-client",
@@ -99,7 +99,7 @@ describe("review components", () => {
     const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         review: {
@@ -192,7 +192,7 @@ describe("review components", () => {
       resolveDecision = resolve
     })
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         review: {

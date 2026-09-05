@@ -7,7 +7,7 @@ import {
 import type { ClientCommand } from "../../src/protocol"
 import { createInitialState } from "../../src/state"
 import { toolOutputBuffer } from "../../src/state/display-buffer"
-import { emptyHistoryReader } from "../fixtures/history"
+import { emptySessionReader } from "../fixtures/history"
 
 describe("Rottweiler layout", () => {
   let renderer: TestRenderer | undefined
@@ -26,7 +26,7 @@ describe("Rottweiler layout", () => {
     renderer = setup.renderer
     const commands: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       onCommand(command) {
         commands.push(command)
         return { type: "accepted" }
@@ -61,7 +61,7 @@ describe("Rottweiler layout", () => {
   test("keeps a long composer draft bounded and internally scrolled at 45x10", async () => {
     const setup = await createTestRenderer({ width: 45, height: 10, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader })
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader })
     renderer.root.add(app)
     app.composer.value = Array.from({ length: 20 }, (_, index) => `draft-${index}`).join("\n")
     app.composer.editor.gotoBufferEnd()
@@ -80,7 +80,7 @@ describe("Rottweiler layout", () => {
   test("grows the composer for one visually wrapped logical line on a narrow terminal", async () => {
     const setup = await createTestRenderer({ width: 20, height: 18, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader })
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader })
     renderer.root.add(app)
     app.composer.value = "wrapped-draft ".repeat(12).trim()
     await setup.renderOnce()
@@ -94,7 +94,7 @@ describe("Rottweiler layout", () => {
     for (const height of [8, 12, 18]) {
       const setup = await createTestRenderer({ width: 45, height, useThread: false })
       renderer = setup.renderer
-      const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader })
+      const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader })
       renderer.root.add(app)
       app.composer.value = Array.from({ length: 24 }, (_, index) => `line-${index}`).join("\n")
       app.composer.editor.gotoBufferEnd()
@@ -115,7 +115,7 @@ describe("Rottweiler layout", () => {
     const setup = await createTestRenderer({ width: 72, height: 10, useThread: false })
     renderer = setup.renderer
     const base = createInitialState()
-    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader })
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader })
     renderer.root.add(app)
 
     const expectExclusiveInteraction = async () => {
@@ -210,7 +210,7 @@ describe("Rottweiler layout", () => {
       const setup = await createTestRenderer({ width: 45, height, useThread: false })
       renderer = setup.renderer
       const app = createRottweilerApp(renderer, {
-        historyReader: emptyHistoryReader,
+        sessionReader: emptySessionReader,
         initialState: {
           ...createInitialState(),
           commands: Array.from({ length: 20 }, (_, index) => ({
@@ -234,7 +234,7 @@ describe("Rottweiler layout", () => {
   test("collapses image preview before it can hide the short-terminal editor", async () => {
     const setup = await createTestRenderer({ width: 45, height: 8, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, { historyReader: emptyHistoryReader })
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader })
     renderer.root.add(app)
     app.composer.addImage({ name: "screen.png", mediaType: "image/png", base64: "AA==" })
     app.composer.value = "visible draft"
@@ -253,7 +253,7 @@ describe("Rottweiler layout", () => {
       const setup = await createTestRenderer({ width: 112, height, useThread: false })
       renderer = setup.renderer
       const app = createRottweilerApp(renderer, {
-        historyReader: emptyHistoryReader,
+        sessionReader: emptySessionReader,
         requestId: () => `short-diff-${height}`,
         onCommand: () => ({ type: "accepted" }),
         initialState: {
@@ -314,7 +314,7 @@ describe("Rottweiler layout", () => {
     renderer = setup.renderer
     const commands: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      historyReader: emptyHistoryReader,
+      sessionReader: emptySessionReader,
       requestId: () => "stable-workspace-diff",
       onCommand(command) {
         commands.push(command)
