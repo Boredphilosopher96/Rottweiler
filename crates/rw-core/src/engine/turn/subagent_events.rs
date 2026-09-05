@@ -29,6 +29,7 @@ pub(in crate::engine) struct OrderedSubagentCoordinator {
     pub(super) spawned: Notify,
     pub(super) finished: Notify,
     pub(super) signals: mpsc::UnboundedSender<TurnSignal>,
+    progress_memory: Arc<tokio::sync::Semaphore>,
 }
 
 impl OrderedSubagentCoordinator {
@@ -61,6 +62,9 @@ impl OrderedSubagentCoordinator {
             spawned: Notify::new(),
             finished: Notify::new(),
             signals,
+            progress_memory: Arc::new(tokio::sync::Semaphore::new(
+                super::child_progress::PROGRESS_MEMORY_BYTES,
+            )),
         }
     }
 
@@ -109,6 +113,7 @@ pub(in crate::engine) struct ActorSubagentEventSink {
 pub(in crate::engine) struct ActorSubagentLifecycleState {
     pub(super) single_spawned: bool,
     pub(super) active: HashMap<SubagentId, SessionId>,
+    progress: HashMap<SubagentId, Arc<super::child_progress::ChildProgressSlot>>,
 }
 
 #[async_trait]
@@ -129,6 +134,11 @@ impl SubagentEventSink for ActorSubagentEventSink {
                 if (!multiple && state.single_spawned) || state.active.contains_key(&subagent_id) {
                     return Err(ToolError::Output(
                         "subagent lifecycle emitted a duplicate active spawn".to_owned(),
+                    ));
+                }
+                if state.active.len() >= crate::orchestration::MAX_RETAINED_SUBAGENTS {
+                    return Err(ToolError::Output(
+                        "child lifecycle capacity exceeded".into(),
                     ));
                 }
                 state.single_spawned = true;
@@ -163,6 +173,7 @@ impl SubagentEventSink for ActorSubagentEventSink {
                     ));
                 }
                 state.active.remove(&subagent_id);
+                state.progress.remove(&subagent_id);
                 (
                     PendingEvent::SubagentFinished {
                         subagent_id,
@@ -202,9 +213,23 @@ impl SubagentEventSink for ActorSubagentEventSink {
     }
 
     async fn progress(&self, event: SubagentProgressEvent) -> Result<(), ToolError> {
-        self.coordinator
-            .signals
-            .send(TurnSignal::SubagentProgress(event))
-            .map_err(|_| ToolError::Cancelled)
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.active.get(&event.subagent_id) != Some(&event.child_session_id) {
+            return Err(ToolError::Output(
+                "child progress has no matching active spawn".into(),
+            ));
+        }
+        let slot = state
+            .progress
+            .entry(event.subagent_id.clone())
+            .or_insert_with(|| {
+                super::child_progress::ChildProgressSlot::new(
+                    self.coordinator.progress_memory.clone(),
+                )
+            });
+        slot.publish(event, &self.coordinator.signals)
     }
 }

@@ -55,7 +55,7 @@ pub(super) fn encode(
         invalidation(sequence)
     }
 }
-pub(super) fn admit(sequence: Option<u64>, event: Value) -> Result<Value, OrchestrationError> {
+pub(crate) fn admit(sequence: Option<u64>, event: Value) -> Result<Value, OrchestrationError> {
     if event.is_null() || !fits(&event)? {
         invalidation(sequence)
     } else {

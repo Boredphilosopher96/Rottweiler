@@ -496,7 +496,7 @@ mod startup;
 
 mod policy;
 mod presentation;
-mod progress;
+pub(crate) mod progress;
 pub use policy::diff_artifact_reference;
 use policy::{
     bound_turn_result, bounded_cancel, bounded_close, control_timeout,

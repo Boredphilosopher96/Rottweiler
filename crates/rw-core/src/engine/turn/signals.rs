@@ -20,7 +20,6 @@ use crate::engine::turn::title::start_session_title_generation;
 use crate::engine::wire_turn_id;
 use rw_context::Budgeter;
 use rw_tools::AskUserInput;
-use rw_tools::SubagentProgressEvent;
 use rw_types::AccountingAttribution;
 use rw_types::ApprovalDecision;
 use rw_types::Cost;
@@ -124,7 +123,11 @@ pub(in crate::engine) async fn handle_turn_signal(
                 });
             }
         }
-        TurnSignal::SubagentProgress(progress) => {
+        TurnSignal::SubagentProgress(slot) => {
+            let Some(admitted) = slot.take() else {
+                return Ok(());
+            };
+            let progress = admitted.event;
             let event = EngineEvent::SubagentProgress {
                 parent_session_id: state.session_id.clone(),
                 subagent_id: progress.subagent_id,
@@ -457,7 +460,7 @@ pub(in crate::engine) enum TurnSignal {
         kind: PendingEvent,
         respond: oneshot::Sender<Result<EventMeta, AgentLoopError>>,
     },
-    SubagentProgress(SubagentProgressEvent),
+    SubagentProgress(Arc<super::child_progress::ChildProgressSlot>),
     ToolProgress(Arc<ProgressSlot>),
     CompactionProgress(CompactionProgress),
     Approval {

@@ -60,7 +60,8 @@ ALLOWED = {
         "rw-tools",
         "rw-types",
     },
-    "xtask": {"rw-types", "rw-operation-contract", "rw-plugin-protocol", "rw-providers", "rw-store"},
+    # Codegen imports each contract from its implementation owner.
+    "xtask": {"rw-types", "rw-operation-contract", "rw-plugin-protocol", "rw-providers", "rw-store", "rw-tools"},
 }
 
 RUNTIME_COMPOSITION_FILES = {
