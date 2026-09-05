@@ -27,7 +27,7 @@ struct Lane {
 impl Default for CommandIngress {
     fn default() -> Self {
         Self {
-            normal: Lane::new(16, 64 * 1024),
+            normal: Lane::new(16, 96 * 1024),
             urgent: Lane::new(8, 4 * 1024),
         }
     }
@@ -63,7 +63,8 @@ pub(super) enum AdmissionError {
 
 pub(super) struct InputLease {
     _slot: OwnedSemaphorePermit,
-    _bytes: OwnedSemaphorePermit,
+    bytes: OwnedSemaphorePermit,
+    pool: Arc<Semaphore>,
     _client: OwnedSemaphorePermit,
     pub(super) limit: usize,
     pub(super) urgent: bool,
@@ -84,15 +85,9 @@ impl CommandIngress {
             return Err(AdmissionError::BodyLimit);
         }
         let wire = length.unwrap_or(limit);
-        // Collection and parser scratch can coexist with the owned typed tree.
-        // The shape preflight bounds collection/object bookkeeping independently
-        // of a payload's encoded strings before typed decoding begins.
-        let nodes = (wire / 2).min(MAX_JSON_NODES);
-        let units = wire
-            .saturating_mul(3)
-            .saturating_add(nodes * 128)
-            .saturating_add(4096)
-            .div_ceil(UNIT);
+        // The borrowed preflight owns only the wire body and string scratch.
+        // Typed allocation credit is acquired from its source-derived shape.
+        let units = wire.saturating_mul(2).saturating_add(4096).div_ceil(UNIT);
         let slot = owner
             .slots
             .clone()
@@ -109,7 +104,8 @@ impl CommandIngress {
             .map_err(|_| AdmissionError::Busy)?;
         Ok(InputLease {
             _slot: slot,
-            _bytes: bytes,
+            bytes,
+            pool: Arc::clone(&owner.bytes),
             _client: client,
             limit: wire,
             urgent,
@@ -121,80 +117,79 @@ pub(super) struct ParsedCommand {
     pub(super) command: ClientCommand,
     pub(super) lease: InputLease,
 }
+#[derive(Debug, Eq, PartialEq)]
+pub(super) enum DecodeError {
+    Busy,
+    Invalid(&'static str),
+}
 pub(super) async fn decode(
     bytes: hyper::body::Bytes,
-    lease: InputLease,
-) -> Result<ParsedCommand, &'static str> {
+    mut lease: InputLease,
+) -> Result<ParsedCommand, DecodeError> {
     tokio::task::spawn_blocking(move || {
-        let mut remaining = MAX_JSON_NODES;
-        let mut parser = serde_json::Deserializer::from_slice(&bytes);
-        serde::de::DeserializeSeed::deserialize(Shape(&mut remaining), &mut parser)
-            .map_err(|_| "command JSON shape exceeds its limits")?;
-        parser
-            .end()
-            .map_err(|_| "command body is not valid protocol JSON")?;
-        let command: ClientCommand = serde_json::from_slice(&bytes)
-            .map_err(|_| "command body is not valid protocol JSON")?;
-        if command.is_urgent() != lease.urgent {
-            return Err("command does not belong to its declared lane");
+        use rw_types::allocation::{AllocationPlan, PrepareAllocation as _};
+        use rw_types::json_structure::{JsonStructureLimits, preflight_json};
+        let shape = preflight_json(
+            &bytes,
+            JsonStructureLimits {
+                max_encoded_bytes: lease.limit,
+                max_nodes: MAX_JSON_NODES,
+                max_string_bytes: lease.limit,
+                max_depth: 64,
+            },
+        )
+        .map_err(|_| DecodeError::Invalid("command JSON shape exceeds its limits"))?;
+        let decode_bytes = shape
+            .decode_bytes::<ClientCommand>()
+            .filter(|bytes| *bytes <= 64 * 1024 * 1024)
+            .ok_or(DecodeError::Invalid(
+                "command decode allocation exceeds its limit",
+            ))?;
+        let required = bytes
+            .len()
+            .checked_add(decode_bytes)
+            .ok_or(DecodeError::Invalid("command allocation overflow"))?
+            .div_ceil(UNIT);
+        let additional = required.saturating_sub(lease.bytes.num_permits());
+        if additional > 0 {
+            let extra = lease
+                .pool
+                .clone()
+                .try_acquire_many_owned(u32::try_from(additional).map_err(|_| DecodeError::Busy)?)
+                .map_err(|_| DecodeError::Busy)?;
+            lease.bytes.merge(extra);
         }
-        use rw_types::allocation::PrepareAllocation as _;
+        let command: ClientCommand = serde_json::from_slice(&bytes)
+            .map_err(|_| DecodeError::Invalid("command body is not valid protocol JSON"))?;
+        if command.is_urgent() != lease.urgent {
+            return Err(DecodeError::Invalid(
+                "command does not belong to its declared lane",
+            ));
+        }
+        let retained_limit = if lease.urgent {
+            URGENT_BODY_LIMIT
+        } else {
+            COMMAND_BODY_LIMIT
+        };
         if command
             .prepared_bytes()
-            .is_none_or(|bytes| bytes > COMMAND_BODY_LIMIT)
+            .is_none_or(|bytes| bytes > retained_limit)
         {
-            return Err("command retained allocation exceeds its limit");
+            return Err(DecodeError::Invalid(
+                "command retained allocation exceeds its limit",
+            ));
         }
+        let plan = AllocationPlan::new(command)
+            .map_err(|_| DecodeError::Invalid("command retained allocation is invalid"))?;
+        let retained = plan.bytes().div_ceil(UNIT);
+        let command = plan.prepare().into_inner();
+        drop(bytes);
+        let unused = lease.bytes.num_permits().saturating_sub(retained);
+        drop(lease.bytes.split(unused));
         Ok(ParsedCommand { command, lease })
     })
     .await
-    .map_err(|_| "command decoder failed")?
-}
-
-struct Shape<'a>(&'a mut usize);
-impl<'de> serde::de::DeserializeSeed<'de> for Shape<'_> {
-    type Value = ();
-    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
-        *self.0 = self
-            .0
-            .checked_sub(1)
-            .ok_or_else(|| serde::de::Error::custom("command JSON node limit"))?;
-        deserializer.deserialize_any(self)
-    }
-}
-impl<'de> serde::de::Visitor<'de> for Shape<'_> {
-    type Value = ();
-    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-        formatter.write_str("bounded command JSON")
-    }
-    fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<(), E> {
-        Ok(())
-    }
-    fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<(), E> {
-        Ok(())
-    }
-    fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<(), E> {
-        Ok(())
-    }
-    fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<(), E> {
-        Ok(())
-    }
-    fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<(), E> {
-        Ok(())
-    }
-    fn visit_unit<E: serde::de::Error>(self) -> Result<(), E> {
-        Ok(())
-    }
-    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut values: A) -> Result<(), A::Error> {
-        while values.next_element_seed(Shape(self.0))?.is_some() {}
-        Ok(())
-    }
-    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut values: A) -> Result<(), A::Error> {
-        while values.next_key_seed(Shape(self.0))?.is_some() {
-            values.next_value_seed(Shape(self.0))?;
-        }
-        Ok(())
-    }
+    .map_err(|_| DecodeError::Invalid("command decoder failed"))?
 }
 
 #[cfg(test)]
@@ -208,6 +203,9 @@ mod tests {
         let input = ingress
             .acquire(&client, "normal", None)
             .expect("large input");
+        let second = ingress
+            .acquire(&ClientId("second".into()), "normal", None)
+            .expect("second large input");
         assert!(
             ingress
                 .acquire(&ClientId("other".into()), "normal", None)
@@ -217,6 +215,7 @@ mod tests {
             .acquire(&client, "urgent", Some(1024))
             .expect("urgent is independent");
         drop(input);
+        drop(second);
         drop(urgent);
         ingress
             .acquire(&client, "normal", None)
@@ -257,7 +256,9 @@ mod tests {
             .expect("input");
         assert!(matches!(
             decode(body, lease).await,
-            Err("command does not belong to its declared lane")
+            Err(DecodeError::Invalid(
+                "command does not belong to its declared lane"
+            ))
         ));
         let body = hyper::body::Bytes::from(format!("[{}0]", "0,".repeat(MAX_JSON_NODES)));
         let lease = ingress

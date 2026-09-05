@@ -776,7 +776,11 @@ async fn handle_request(
                                 Err(error) => error_response(StatusCode::BAD_GATEWAY, &error),
                             }
                         }
-                        Err(_) => error_response(
+                        Err(command_input::DecodeError::Busy) => error_response(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "command decode admission exhausted",
+                        ),
+                        Err(command_input::DecodeError::Invalid(_)) => error_response(
                             StatusCode::BAD_REQUEST,
                             "command body is not valid protocol JSON",
                         ),

@@ -621,8 +621,9 @@ async fn any_failed_settlement_keeps_foreground_admission_closed() {
             .expect("failed owner proof returns promptly"),
         Err(ToolError::EffectsUnsettled(_))
     ));
+    let next_context = ToolContext::new(root.path()).expect("independent next invocation");
     assert!(matches!(
-        tool.execute(&context, json!({"command":"printf next"}))
+        tool.execute(&next_context, json!({"command":"printf next"}))
             .await,
         Err(ToolError::EffectsUnsettled(_))
     ));

@@ -134,7 +134,10 @@ impl CommandReceipts {
                 return Err(ReceiptError::Conflict);
             }
             return match completion {
-                Some(bytes) => Ok(ReceiptAdmission::Completed(serde_json::from_slice(&bytes)?)),
+                Some(bytes) => {
+                    validate_encoded(&bytes)?;
+                    Ok(ReceiptAdmission::Completed(serde_json::from_slice(&bytes)?))
+                }
                 None => Ok(ReceiptAdmission::Indeterminate),
             };
         }
@@ -158,6 +161,7 @@ impl CommandReceipts {
         validate(operation, fingerprint)?;
         let mut encoded = BoundedWriter(Vec::new());
         serde_json::to_writer(&mut encoded, receipt)?;
+        validate_encoded(&encoded.0)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -169,6 +173,26 @@ impl CommandReceipts {
         Ok(())
     }
 }
+fn validate_encoded(bytes: &[u8]) -> Result<(), ReceiptError> {
+    use rw_types::json_structure::{JsonStructureLimits, preflight_json};
+    let shape = preflight_json(
+        bytes,
+        JsonStructureLimits {
+            max_encoded_bytes: MAX_RECEIPT_BYTES,
+            max_nodes: 65_536,
+            max_string_bytes: MAX_RECEIPT_BYTES,
+            max_depth: 64,
+        },
+    )?;
+    if shape
+        .decode_bytes::<CommandReceipt>()
+        .is_none_or(|bytes| bytes > 64 * 1024 * 1024)
+    {
+        return Err(ReceiptError::Invalid);
+    }
+    Ok(())
+}
+
 fn validate(operation: &RequestId, fingerprint: &str) -> Result<(), ReceiptError> {
     if !operation.is_valid()
         || fingerprint.len() != 64
