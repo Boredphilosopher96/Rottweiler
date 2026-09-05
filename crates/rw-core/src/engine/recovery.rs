@@ -3,7 +3,9 @@
 mod active;
 pub use active::InterruptedTurnInputs;
 mod accounting;
-pub use accounting::{MAX_ACCOUNTING_PAGE_BYTES, RecoveryAccountingPage};
+pub use accounting::{
+    AccountingReconciliationPage, MAX_ACCOUNTING_PAGE_BYTES, RecoveryAccountingPage,
+};
 mod control;
 pub use control::{
     MAX_CONTROL_SOURCE_BYTES, RecoveredMessage, RecoveredModelSelection, RecoveryBootstrap,

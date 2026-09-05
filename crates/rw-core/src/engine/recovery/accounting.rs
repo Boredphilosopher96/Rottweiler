@@ -1,6 +1,7 @@
 //! Incremental accounting reconciliation reads exact durable facts by source sequence.
 
 use super::{CanonicalHistory, RecoveryError, read::SourceReader, state::ACCOUNTING};
+use rw_store::session::journal::{JournalPrefixIdentity, JournalReadView};
 use rw_store::session::recovery_index::{MAX_RECOVERY_BATCH_BYTES, MAX_RECOVERY_BATCH_ROWS};
 use rw_types::{EngineEvent, SequenceId};
 use std::collections::VecDeque;
@@ -15,7 +16,39 @@ pub struct RecoveryAccountingPage {
     pub source_bytes: u64,
 }
 
+/// A bounded source page plus the exact prefix committed with its accounting facts.
+pub struct AccountingReconciliationPage {
+    pub page: RecoveryAccountingPage,
+    pub source: JournalReadView,
+}
+
 impl CanonicalHistory {
+    /// Validate the ledger's previous content identity and resolve its next source page.
+    /// A final page advances over non-accounting events to this exact captured tail.
+    ///
+    /// # Errors
+    /// Rejects a foreign, modified, or future prefix and invalid page admission.
+    pub fn accounting_reconciliation_page(
+        &self,
+        after: Option<JournalPrefixIdentity>,
+        max_events: usize,
+        max_source_bytes: u64,
+    ) -> Result<AccountingReconciliationPage, RecoveryError> {
+        if let Some(prefix) = after {
+            self.source.at_prefix(prefix)?;
+        }
+        let cursor = after
+            .and_then(|prefix| prefix.next_sequence.checked_sub(1))
+            .map(SequenceId);
+        let page = self.accounting_page(cursor, max_events, max_source_bytes)?;
+        let source = if page.has_more {
+            self.source.prefix_through(page.next_cursor)?
+        } else {
+            self.source.clone()
+        };
+        Ok(AccountingReconciliationPage { page, source })
+    }
+
     /// Read exact accounting events after a source cursor, at this captured prefix.
     /// A byte-limited page advances only through events returned to the caller.
     ///

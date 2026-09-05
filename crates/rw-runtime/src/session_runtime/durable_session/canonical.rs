@@ -38,6 +38,9 @@ fn persistence(error: impl std::fmt::Display) -> AgentLoopError {
     AgentLoopError::Persistence(error.to_string())
 }
 impl CanonicalSession {
+    pub(super) const fn inherited_journal_through(&self) -> Option<rw_types::SequenceId> {
+        self.inherited_journal_through
+    }
     fn admit(self: &Arc<Self>) -> Result<Operation, AgentLoopError> {
         let mut jobs = self
             .jobs

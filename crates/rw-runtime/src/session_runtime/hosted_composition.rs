@@ -295,7 +295,7 @@ pub(crate) async fn compose_hosted_actor(
     durable_sink
         .reconcile_provider_attempts(&options.provider_admission)
         .await?;
-    durable_sink.reconcile_accounting(&recovered_events)?;
+    durable_sink.reconcile_indexed_accounting().await?;
     let checkpoint_coordinator = Arc::new(DurableCheckpointCoordinator::from_stores(
         session_checkpoint_root,
         checkpoint_stores,

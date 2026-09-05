@@ -1,9 +1,8 @@
+mod accounting;
 mod canonical;
 mod provider_recovery;
 use super::accounting_projection::compact_title;
-use super::accounting_projection::inherited_journal_through;
 use super::accounting_projection::is_session_projection_boundary;
-use super::accounting_projection::project_accounting;
 use super::accounting_projection::session_projection_updated_at;
 use super::accounting_projection::upsert_session_projection;
 use super::prompt_shapes::PromptShapeJournal;
@@ -98,7 +97,9 @@ pub(super) struct DurableEventSink {
     pub(super) session_id: String,
     pub(super) hosted_projection: Option<Mutex<HostedSessionProjection>>,
     pub(super) prompt_shapes: Arc<PromptShapeJournal>,
-    pub(super) accounting_dirty: AtomicBool,
+    pub(super) accounting_dirty: Arc<AtomicBool>,
+    accounting_progress:
+        Arc<tokio::sync::Mutex<Option<rw_store::session::journal::JournalPrefixIdentity>>>,
 }
 
 pub(super) struct HostedSessionProjection {
@@ -215,7 +216,8 @@ impl DurableEventSink {
             session_id,
             hosted_projection: hosted_projection.map(Mutex::new),
             prompt_shapes,
-            accounting_dirty: AtomicBool::new(false),
+            accounting_dirty: Arc::new(AtomicBool::new(false)),
+            accounting_progress: Arc::new(tokio::sync::Mutex::new(None)),
         }))
     }
 
@@ -356,10 +358,8 @@ impl SessionEventSink for DurableEventSink {
         &self,
         query: BudgetLedgerQuery,
     ) -> std::result::Result<BudgetLedgerTotals, AgentLoopError> {
-        if self.accounting_dirty.swap(false, Ordering::AcqRel) {
-            let repair = self
-                .load()
-                .and_then(|events| self.reconcile_accounting(&events));
+        if self.accounting_dirty.load(Ordering::Acquire) {
+            let repair = self.reconcile_indexed_accounting().await;
             if let Err(error) = repair {
                 self.accounting_dirty.store(true, Ordering::Release);
                 return Err(AgentLoopError::Persistence(error.to_string()));
@@ -403,19 +403,6 @@ impl SessionEventSink for DurableEventSink {
             daily_cost_unavailable_entries: totals.day_unavailable_turns,
             daily_non_usd_monetary_entries: totals.day_non_usd_monetary_turns,
         })
-    }
-}
-
-impl DurableEventSink {
-    pub(super) fn reconcile_accounting(&self, events: &[EngineEvent]) -> Result<()> {
-        let inherited_through = inherited_journal_through(&self.storage_root, &self.session_id)?;
-        let entries = project_accounting(&self.session_id, events, inherited_through)?;
-        if entries.is_empty() {
-            return Ok(());
-        }
-        AccountingLedger::open(&self.storage_root)
-            .and_then(|ledger| ledger.reconcile(&entries))
-            .map_err(|error| miette!("session accounting could not reconcile: {error}"))
     }
 }
 
@@ -514,7 +501,7 @@ impl DurableEventSink {
                 }
             }
             self.update_hosted_projection(persisted);
-            if let Err(error) = self.reconcile_accounting(persisted) {
+            if let Err(error) = self.reconcile_committed_accounting(persisted) {
                 self.accounting_dirty.store(true, Ordering::Release);
                 tracing::warn!(
                     session_id = %self.session_id,

@@ -1,4 +1,5 @@
 //! Durable accounting facts, reconciliation, and bounded reporting.
+mod progress;
 use super::{
     SessionStoreError,
     journal_io::validate_session_id,

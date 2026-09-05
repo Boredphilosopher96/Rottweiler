@@ -1,4 +1,4 @@
-//! Current-schema admission for the shared `SQLite` authority and derived tables.
+//! Schema admission for the shared `SQLite` authority and derived tables.
 use super::SessionStoreError;
 use rusqlite::{Connection, OptionalExtension as _};
 use std::path::Path;
@@ -14,6 +14,11 @@ pub(super) const ACCOUNTING_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS turn_acco
            cost_json TEXT NOT NULL,
            PRIMARY KEY(session_id,sequence_id)
          );";
+const ACCOUNTING_PROGRESS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS accounting_progress(
+    session_id TEXT NOT NULL PRIMARY KEY,
+    next_sequence TEXT NOT NULL,
+    digest BLOB NOT NULL CHECK(length(digest)=32)
+);";
 pub(super) const SESSIONS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS sessions(
                id TEXT NOT NULL UNIQUE,
                title TEXT NOT NULL,
@@ -43,6 +48,11 @@ pub(super) const SEARCH_SCHEMA: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS sessi
 
 pub(super) fn validate_accounting(connection: &Connection) -> Result<(), SessionStoreError> {
     validate_table(connection, "turn_accounting", ACCOUNTING_SCHEMA)?;
+    validate_table(
+        connection,
+        "accounting_progress",
+        ACCOUNTING_PROGRESS_SCHEMA,
+    )?;
     let extra_unique = connection.query_row("SELECT 1 FROM pragma_index_list('turn_accounting') WHERE \"unique\" != 0 AND origin != 'pk' LIMIT 1", [], |_| Ok(())).optional()?;
     if extra_unique.is_some() {
         return Err(SessionStoreError::UnsupportedSqliteSchema {
@@ -90,6 +100,7 @@ pub(super) fn configure_connection(connection: &Connection) -> Result<(), Sessio
 pub(super) fn ensure_accounting_schema(connection: &Connection) -> Result<(), SessionStoreError> {
     validate_accounting(connection)?;
     connection.execute_batch(ACCOUNTING_SCHEMA)?;
+    connection.execute_batch(ACCOUNTING_PROGRESS_SCHEMA)?;
     connection.execute_batch("CREATE INDEX IF NOT EXISTS turn_accounting_session_time ON turn_accounting(session_id,emitted_at_utc); CREATE INDEX IF NOT EXISTS turn_accounting_day_time ON turn_accounting(utc_day,emitted_at_utc); CREATE INDEX IF NOT EXISTS turn_accounting_time ON turn_accounting(emitted_at_utc);")?;
     Ok(())
 }

@@ -335,7 +335,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
             .reconcile_provider_attempts(&provider_admission)
             .await?;
     }
-    durable_sink.reconcile_accounting(&recovered_events)?;
+    durable_sink.reconcile_indexed_accounting().await?;
     let checkpoint_coordinator = Arc::new(DurableCheckpointCoordinator::from_stores(
         checkpoint_root.clone(),
         checkpoint_stores,
