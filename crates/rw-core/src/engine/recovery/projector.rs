@@ -5,15 +5,15 @@ use rw_store::session::{
     journal::{JournalPrefixIdentity, JournalReadView},
     recovery_index::{
         MAX_RECOVERY_BATCH_BYTES, MAX_RECOVERY_BATCH_ROWS, MAX_RECOVERY_HEAD_BYTES,
-        MAX_RECOVERY_ROW_BYTES, RecoveryIndex, RecoveryKey, RecoveryMutation, RecoveryReadView,
-        RecoveryRow,
+        MAX_RECOVERY_ROW_BYTES, RecoveryIndex, RecoveryKey, RecoveryLookup, RecoveryMutation,
+        RecoveryReadView, RecoveryRow,
     },
 };
 use rw_types::{EngineEvent, SequenceId};
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeMap;
 
-pub(super) const VERSION: u32 = 5;
+pub(super) const VERSION: u32 = 6;
 const EVENTS_PER_BATCH: usize = 64;
 
 /// One cancellable, durable canonical projection step.
@@ -167,11 +167,13 @@ impl CanonicalRecovery {
         }
         let through = head.next_sequence.checked_sub(1).map(SequenceId);
         let advance = page.proof.advance(previous, through)?;
+        let lookups: Vec<_> = rows.lookups.into_values().collect();
         let mutations: Vec<_> = rows.changes.into_values().collect();
         self.index.apply(
             &advance,
             &encode(&head, MAX_RECOVERY_HEAD_BYTES)?,
             &mutations,
+            &lookups,
         )?;
         Ok(progress(&head, interpreted, source))
     }
@@ -204,6 +206,8 @@ pub(super) struct BatchRows {
     pub(super) read: RecoveryReadView,
     pub(super) changes: BTreeMap<RecoveryKey, RecoveryMutation>,
     undo: BTreeMap<RecoveryKey, Option<RecoveryMutation>>,
+    lookups: BTreeMap<(u8, Vec<u8>), RecoveryLookup>,
+    lookup_undo: BTreeMap<(u8, Vec<u8>), Option<RecoveryLookup>>,
 }
 impl BatchRows {
     pub(super) fn new(read: RecoveryReadView) -> Self {
@@ -211,15 +215,27 @@ impl BatchRows {
             read,
             changes: BTreeMap::new(),
             undo: BTreeMap::new(),
+            lookups: BTreeMap::new(),
+            lookup_undo: BTreeMap::new(),
         }
     }
     fn begin_event(&mut self) {
         self.undo.clear();
+        self.lookup_undo.clear();
     }
     fn commit_event(&mut self) {
         self.undo.clear();
+        self.lookup_undo.clear();
     }
     fn rollback_event(&mut self) {
+        for (key, value) in std::mem::take(&mut self.lookup_undo) {
+            if let Some(value) = value {
+                self.lookups.insert(key, value);
+            } else {
+                self.lookups.remove(&key);
+            }
+        }
+
         for (key, value) in std::mem::take(&mut self.undo) {
             match value {
                 Some(value) => {
@@ -260,16 +276,62 @@ impl BatchRows {
         );
         Ok(())
     }
+    pub(super) fn lookup<T: DeserializeOwned>(
+        &self,
+        namespace: u8,
+        key: &[u8],
+    ) -> Result<Option<T>, RecoveryError> {
+        let payload = self
+            .lookups
+            .get(&(namespace, key.to_vec()))
+            .map(|row| row.payload.clone())
+            .map_or_else(|| self.read.lookup(namespace, key), |value| Ok(Some(value)))?;
+        payload
+            .map(|bytes| serde_json::from_slice(&bytes).map_err(RecoveryError::from))
+            .transpose()
+    }
+    pub(super) fn put_lookup(
+        &mut self,
+        namespace: u8,
+        key: Vec<u8>,
+        value: &impl Serialize,
+    ) -> Result<(), RecoveryError> {
+        if key.len() > rw_store::session::recovery_index::MAX_RECOVERY_LOOKUP_KEY_BYTES {
+            return Err(RecoveryError::Limit("lookup identity"));
+        }
+        let identity = (namespace, key.clone());
+        self.lookup_undo
+            .entry(identity.clone())
+            .or_insert_with(|| self.lookups.get(&identity).cloned());
+        self.lookups.insert(
+            identity,
+            RecoveryLookup {
+                namespace,
+                key,
+                payload: encode(value, MAX_RECOVERY_ROW_BYTES)?,
+            },
+        );
+        Ok(())
+    }
     fn fits(&self, head_bytes: usize) -> bool {
-        self.changes.len() <= MAX_RECOVERY_BATCH_ROWS
-            && self.changes.values().fold(head_bytes, |bytes, change| {
-                bytes
-                    + 24
-                    + match change {
-                        RecoveryMutation::Put(row) => row.payload.len(),
-                        RecoveryMutation::Delete(_) => 0,
-                    }
-            }) <= MAX_RECOVERY_BATCH_BYTES
+        let lookup_bytes = self
+            .lookups
+            .values()
+            .map(|row| row.key.len() + row.payload.len() + 24)
+            .sum::<usize>();
+        self.changes.len() + self.lookups.len() <= MAX_RECOVERY_BATCH_ROWS
+            && self
+                .changes
+                .values()
+                .fold(head_bytes + lookup_bytes, |bytes, change| {
+                    bytes
+                        + 24
+                        + match change {
+                            RecoveryMutation::Put(row) => row.payload.len(),
+                            RecoveryMutation::Delete(_) => 0,
+                        }
+                })
+                <= MAX_RECOVERY_BATCH_BYTES
     }
 }
 pub(super) const fn key(namespace: u8, scope: u64, ordinal: u64) -> RecoveryKey {

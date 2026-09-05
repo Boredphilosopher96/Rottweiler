@@ -144,6 +144,7 @@ impl CanonicalRecovery {
             &cut.prove_advance(previous)?,
             &encode(&head, MAX_RECOVERY_HEAD_BYTES)?,
             &mutations,
+            &[],
         )?;
         Ok(progress(&head, 0, source))
     }

@@ -14,6 +14,7 @@ mod extension;
 mod maintenance;
 mod projector;
 mod read;
+mod receipts;
 mod reduce;
 pub use read::{
     CanonicalHistory, HistoryMaterializationLimits, MAX_MATERIALIZED_HISTORY_BYTES,

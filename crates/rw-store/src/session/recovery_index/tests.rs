@@ -34,7 +34,7 @@ fn consistent_snapshot_retains_prefix_rows_and_lock_across_commit_and_owner_drop
         .prove_advance(JournalPrefixIdentity::empty())
         .expect("advance");
     index
-        .apply(&first, b"one", &[put(0, b"old")])
+        .apply(&first, b"one", &[put(0, b"old")], &[])
         .expect("apply");
     let old = index.read().expect("old snapshot");
     journal.append_batch([2_u64]).expect("append");
@@ -43,7 +43,7 @@ fn consistent_snapshot_retains_prefix_rows_and_lock_across_commit_and_owner_drop
         .prove_advance(first.next().prefix_identity())
         .expect("advance");
     index
-        .apply(&second, b"two", &[put(0, b"new"), put(1, b"added")])
+        .apply(&second, b"two", &[put(0, b"new"), put(1, b"added")], &[])
         .expect("apply");
     assert_eq!(old.head().checkpoint, b"one");
     assert_eq!(
@@ -129,7 +129,7 @@ fn stale_and_foreign_transitions_preserve_rows_and_checkpoint() {
         Err(RecoveryIndexError::Invalid("foreign journal"))
     ));
     index
-        .apply(&advance, b"right", &[put(0, b"right")])
+        .apply(&advance, b"right", &[put(0, b"right")], &[])
         .expect("apply");
     assert!(matches!(
         index.apply(&advance, b"stale", &[put(0, b"stale")]),
@@ -214,6 +214,7 @@ fn pages_seek_by_key_and_report_truthful_byte_boundaries() {
             &advance,
             b"",
             &(0..10).map(|i| put(i * 100, b"four")).collect::<Vec<_>>(),
+            &[],
         )
         .expect("apply");
     let read = index.read().expect("read");
@@ -260,6 +261,7 @@ fn incompatible_schema_requires_explicit_derived_rebuild_without_raw_changes() {
                 .expect("advance"),
             b"state",
             &[put(0, b"row")],
+            &[],
         )
         .expect("apply");
     drop(index);
@@ -292,5 +294,63 @@ fn incompatible_schema_requires_explicit_derived_rebuild_without_raw_changes() {
             .events
             .len(),
         2
+    );
+}
+
+#[test]
+fn identity_lookups_publish_atomically_and_reject_oversized_keys_before_mutation() {
+    use super::{MAX_RECOVERY_LOOKUP_KEY_BYTES, RecoveryLookup};
+    let root = tempdir().expect("root");
+    let mut journal = SegmentedJournal::open(root.path(), "lookups").expect("journal");
+    journal.append_batch([1_u64]).expect("source");
+    let view = journal.read_view();
+    let mut index = RecoveryIndex::open(
+        &view,
+        crate::session::recovery_index::RecoveryProjection::Conversation,
+        1,
+    )
+    .expect("index");
+    let advance = view
+        .prove_advance(JournalPrefixIdentity::empty())
+        .expect("proof");
+    let before = index.read().expect("prior view");
+    assert!(
+        index
+            .apply(
+                &advance,
+                b"invalid",
+                &[],
+                &[RecoveryLookup {
+                    namespace: 1,
+                    key: vec![0; MAX_RECOVERY_LOOKUP_KEY_BYTES + 1],
+                    payload: b"source".to_vec()
+                }]
+            )
+            .is_err()
+    );
+    assert_eq!(
+        index.head().expect("head").prefix,
+        JournalPrefixIdentity::empty()
+    );
+    index
+        .apply(
+            &advance,
+            b"ready",
+            &[],
+            &[RecoveryLookup {
+                namespace: 1,
+                key: b"call:attempt".to_vec(),
+                payload: b"source".to_vec(),
+            }],
+        )
+        .expect("publish");
+    assert_eq!(before.lookup(1, b"call:attempt").expect("old lookup"), None);
+    assert_eq!(
+        index
+            .read()
+            .expect("view")
+            .lookup(1, b"call:attempt")
+            .expect("lookup"),
+        Some(b"source".to_vec())
     );
 }

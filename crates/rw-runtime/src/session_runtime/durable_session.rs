@@ -1,4 +1,5 @@
 mod canonical;
+mod provider_recovery;
 use super::accounting_projection::compact_title;
 use super::accounting_projection::inherited_journal_through;
 use super::accounting_projection::is_session_projection_boundary;

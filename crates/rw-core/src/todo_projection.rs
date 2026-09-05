@@ -14,7 +14,7 @@ use rw_types::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const BATCH_EVENTS: usize = 64;
 const BOUNDARIES: u8 = 1;
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -90,6 +90,7 @@ impl TodoProjector {
             &advance,
             &encode(&head)?,
             &boundaries.into_values().collect::<Vec<_>>(),
+            &[],
         )?;
         Ok(head.rewind.is_some() || head.next < source.prefix_identity().next_sequence)
     }
@@ -118,6 +119,7 @@ impl TodoProjector {
             &cut.prove_advance(read.head().prefix)?,
             &encode(&head)?,
             &mutations,
+            &[],
         )?;
         Ok(head.rewind.is_some() || head.next < source.prefix_identity().next_sequence)
     }

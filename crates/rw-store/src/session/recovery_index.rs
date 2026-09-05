@@ -24,6 +24,8 @@ const CACHE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_DATABASE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 type StoredHead<'a> = (u32, u64, &'a [u8], &'a [u8]);
 const HEAD: TableDefinition<u8, StoredHead<'_>> = TableDefinition::new("recovery_head_v1");
+const LOOKUPS: TableDefinition<(u8, &[u8]), &[u8]> = TableDefinition::new("recovery_lookups_v1");
+pub const MAX_RECOVERY_LOOKUP_KEY_BYTES: usize = 1024;
 const ROWS: TableDefinition<(u8, u64, u64), &[u8]> = TableDefinition::new("recovery_rows_v1");
 
 /// Core owns namespace meanings; scope identifies an independent generation or index.
@@ -43,6 +45,14 @@ impl RecoveryKey {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveryRow {
     pub key: RecoveryKey,
+    pub payload: Vec<u8>,
+}
+
+/// Exact bounded identity key; payloads are source selectors, never historical bodies.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryLookup {
+    pub namespace: u8,
+    pub key: Vec<u8>,
     pub payload: Vec<u8>,
 }
 
@@ -182,6 +192,7 @@ impl RecoveryIndex {
         if missing {
             let transaction = index.owner.database.begin_write().map_err(storage)?;
             transaction.open_table(ROWS).map_err(storage)?;
+            transaction.open_table(LOOKUPS).map_err(storage)?;
             transaction
                 .open_table(HEAD)
                 .map_err(storage)?
@@ -223,6 +234,7 @@ impl RecoveryIndex {
         advance: &JournalAdvance,
         checkpoint: &[u8],
         mutations: &[RecoveryMutation],
+        lookups: &[RecoveryLookup],
     ) -> Result<(), RecoveryIndexError> {
         use std::os::unix::fs::MetadataExt as _;
         let incoming = advance.next().derived_directory()?.metadata()?;
@@ -230,7 +242,9 @@ impl RecoveryIndex {
         if incoming.dev() != owned.dev() || incoming.ino() != owned.ino() {
             return Err(RecoveryIndexError::Invalid("foreign journal"));
         }
-        if checkpoint.len() > MAX_RECOVERY_HEAD_BYTES || mutations.len() > MAX_RECOVERY_BATCH_ROWS {
+        if checkpoint.len() > MAX_RECOVERY_HEAD_BYTES
+            || mutations.len().saturating_add(lookups.len()) > MAX_RECOVERY_BATCH_ROWS
+        {
             return Err(RecoveryIndexError::Limit("head/batch rows"));
         }
         let mut charged = checkpoint.len();
@@ -243,6 +257,16 @@ impl RecoveryIndex {
                 return Err(RecoveryIndexError::Limit("row bytes"));
             }
             charged += payload + 24;
+            if charged > MAX_RECOVERY_BATCH_BYTES {
+                return Err(RecoveryIndexError::Limit("batch bytes"));
+            }
+        }
+        for lookup in lookups {
+            validate_lookup(&lookup.key, &lookup.payload)?;
+            charged = charged
+                .saturating_add(lookup.key.len())
+                .saturating_add(lookup.payload.len())
+                .saturating_add(24);
             if charged > MAX_RECOVERY_BATCH_BYTES {
                 return Err(RecoveryIndexError::Limit("batch bytes"));
             }
@@ -264,6 +288,17 @@ impl RecoveryIndex {
                         rows.remove(key.stored()).map_err(storage)?;
                     }
                 }
+            }
+        }
+        {
+            let mut table = transaction.open_table(LOOKUPS).map_err(storage)?;
+            for lookup in lookups {
+                table
+                    .insert(
+                        (lookup.namespace, lookup.key.as_slice()),
+                        lookup.payload.as_slice(),
+                    )
+                    .map_err(storage)?;
             }
         }
         let prefix = advance.next().prefix_identity();
@@ -349,6 +384,23 @@ impl RecoveryReadView {
         rows.get(key.stored())
             .map_err(storage)?
             .map(|value| decode_row(key, value.value()))
+            .transpose()
+    }
+
+    /// Read an exact identity selector from this consistent source prefix.
+    ///
+    /// # Errors
+    /// Rejects oversized keys/payloads and storage failures.
+    pub fn lookup(&self, namespace: u8, key: &[u8]) -> Result<Option<Vec<u8>>, RecoveryIndexError> {
+        validate_lookup(key, &[])?;
+        let table = self.read.open_table(LOOKUPS).map_err(storage)?;
+        table
+            .get((namespace, key))
+            .map_err(storage)?
+            .map(|value| {
+                validate_lookup(key, value.value())?;
+                Ok(value.value().to_vec())
+            })
             .transpose()
     }
 
@@ -450,6 +502,15 @@ impl RecoveryReadView {
     }
 }
 
+fn validate_lookup(key: &[u8], payload: &[u8]) -> Result<(), RecoveryIndexError> {
+    if key.is_empty()
+        || key.len() > MAX_RECOVERY_LOOKUP_KEY_BYTES
+        || payload.len() > MAX_RECOVERY_ROW_BYTES
+    {
+        return Err(RecoveryIndexError::Limit("lookup key/payload bytes"));
+    }
+    Ok(())
+}
 fn decode_row(key: RecoveryKey, payload: &[u8]) -> Result<RecoveryRow, RecoveryIndexError> {
     if payload.len() > MAX_RECOVERY_ROW_BYTES {
         return Err(RecoveryIndexError::Invalid("row bytes"));

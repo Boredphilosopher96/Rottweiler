@@ -329,8 +329,11 @@ pub(super) fn reduce(
                 rows.put(key(ACCOUNTING, 0, sequence.0), &sequence)?;
             }
         }
-        PendingEvent::ProviderCallAccounted { .. }
-        | PendingEvent::CompactionAttemptFinished { .. } => {
+        PendingEvent::ProviderCallAccounted { call, actuals } => {
+            super::receipts::index(head, meta, call, actuals, rows)?;
+            rows.put(key(ACCOUNTING, 0, sequence.0), &sequence)?;
+        }
+        PendingEvent::CompactionAttemptFinished { .. } => {
             rows.put(key(ACCOUNTING, 0, sequence.0), &sequence)?;
         }
         PendingEvent::Error { .. } | PendingEvent::CompactionFailed { .. } => {

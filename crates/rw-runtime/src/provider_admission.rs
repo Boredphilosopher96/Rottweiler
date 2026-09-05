@@ -134,6 +134,32 @@ impl DurableProviderAdmission {
         self.enqueue(action)?.await.map_err(|_| stopped())?.result
     }
 
+    /// Read a bounded page of source-session reservations awaiting settlement.
+    ///
+    /// # Errors
+    /// Rejects invalid identities, oversized pages, or unavailable storage admission.
+    pub async fn pending_for_session(
+        &self,
+        session_id: String,
+        after: Option<ProviderCallIdentity>,
+        limit: u16,
+    ) -> Result<Vec<rw_store::session::reservations::PendingProviderCall>, Error> {
+        self.request(move |ledger| ledger.pending_for_session(&session_id, after.as_ref(), limit))
+            .await
+    }
+
+    /// Cancel an unstarted reservation after exclusive source-session ownership.
+    ///
+    /// # Errors
+    /// Refuses started or ambiguous calls and propagates authority errors.
+    pub(crate) async fn recover_unstarted(
+        &self,
+        identity: ProviderCallIdentity,
+    ) -> Result<(), Error> {
+        self.request(move |ledger| ledger.cancel_unstarted(&identity))
+            .await
+    }
+
     /// Reconciles one exact receipt read from a verified durable journal prefix.
     ///
     /// # Errors
