@@ -226,6 +226,7 @@ pub enum AttachmentData {
 /// User-provided content attached to a message.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(deny_unknown_fields)]
+#[derive(Allocation)]
 pub struct Attachment {
     pub name: String,
     /// Optional normalized workspace-relative source path. Local absolute paths
@@ -363,6 +364,7 @@ pub struct McpApprovalReview {
 /// debug formatting.
 #[derive(Clone, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(deny_unknown_fields)]
+#[derive(Allocation)]
 pub struct McpEnvironmentEntry {
     pub key: String,
     pub value: String,

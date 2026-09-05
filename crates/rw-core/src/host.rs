@@ -2,6 +2,7 @@ mod contracts;
 pub use contracts::*;
 mod commands;
 mod control;
+mod control_admission;
 mod control_owner;
 mod events;
 mod lifecycle;
@@ -363,7 +364,7 @@ pub struct EngineHost {
     registry: Arc<tokio::sync::Mutex<HostRegistry>>,
     dedupe: Arc<Mutex<DedupeRegistry>>,
     read_channel: HostReadChannel,
-    control_admission: Arc<tokio::sync::Semaphore>,
+    control_admission: Arc<control_admission::ControlAdmission>,
     control_owner: Arc<control_owner::ControlOwner>,
     client_events: Arc<Mutex<ClientEventRegistry>>,
     provider_auth: Arc<PendingProviderAuths>,
@@ -410,7 +411,7 @@ impl EngineHost {
             registry: Arc::new(tokio::sync::Mutex::new(HostRegistry::default())),
             dedupe,
             read_channel,
-            control_admission: Arc::new(tokio::sync::Semaphore::new(64)),
+            control_admission: Arc::new(control_admission::ControlAdmission::default()),
             control_owner: Arc::default(),
             client_events: Arc::new(Mutex::new(ClientEventRegistry::default())),
             provider_auth: Arc::new(PendingProviderAuths::default()),

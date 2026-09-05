@@ -14,7 +14,7 @@ enum ControlRequest {
     Running(watch::Receiver<Option<Arc<CachedDispatch>>>),
     Launch {
         completion: watch::Receiver<Option<Arc<CachedDispatch>>>,
-        admission: tokio::sync::OwnedSemaphorePermit,
+        admission: super::control_admission::ControlLease,
     },
 }
 
@@ -27,20 +27,32 @@ impl EngineHost {
         mut command: ClientCommand,
     ) -> CommandOutcome {
         command.meta_mut().client_id = bound.client_id.clone();
+        let Ok(plan) = rw_types::allocation::AllocationPlan::new(command) else {
+            return rejected("control_limit", "command allocation cannot be bounded");
+        };
+        let admission = match self.control_admission.acquire(plan.value(), plan.bytes()) {
+            Ok(admission) => admission,
+            Err(message) => return rejected("control_busy", message),
+        };
+        let command = plan.prepare().into_inner();
         let Ok(payload_hash) = super::read::command_hash(&command) else {
             return rejected("command_serialization", "command could not serialize");
         };
         let key = (bound.client_id.clone(), command.meta().request_id.clone());
-        let request = match self.reserve_control(&key, &payload_hash) {
+        let request = match self.reserve_control(&key, &payload_hash, admission) {
             Ok(request) => request,
             Err(ControlRejection(code, message)) => return rejected(code, message),
         };
         let (mut completion, owns_execution) = match request {
             ControlRequest::Complete(dispatch) => {
+                drop(command);
                 self.emit_many(&bound.client_id, &dispatch.events).await;
                 return dispatch.outcome.clone();
             }
-            ControlRequest::Running(completion) => (completion, false),
+            ControlRequest::Running(completion) => {
+                drop(command);
+                (completion, false)
+            }
             ControlRequest::Launch {
                 completion,
                 admission,
@@ -71,6 +83,7 @@ impl EngineHost {
         &self,
         key: &(ClientId, RequestId),
         payload_hash: &str,
+        admission: super::control_admission::ControlLease,
     ) -> Result<ControlRequest, ControlRejection> {
         let mut dedupe = self
             .dedupe
@@ -112,11 +125,6 @@ impl EngineHost {
                 Ok(ControlRequest::Running(completion.subscribe()))
             }
             None => {
-                let admission = Arc::clone(&self.control_admission)
-                    .try_acquire_owned()
-                    .map_err(|_| {
-                        ControlRejection("control_busy", "host control admission exhausted")
-                    })?;
                 let (completion, wait) = watch::channel(None);
                 dedupe.entries.insert(
                     key.clone(),
@@ -139,7 +147,7 @@ impl EngineHost {
         command: ClientCommand,
         key: (ClientId, RequestId),
         payload_hash: String,
-        admission: tokio::sync::OwnedSemaphorePermit,
+        admission: super::control_admission::ControlLease,
     ) {
         let shutdown = matches!(command, ClientCommand::ShutdownHost { .. });
         let meta = command.meta().clone();
