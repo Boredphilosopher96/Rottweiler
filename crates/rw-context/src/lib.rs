@@ -15,8 +15,8 @@ pub use assembly::{
     ContextProvenance, PromptDump, TokenTotals,
 };
 pub use budget::{
-    BudgetEstimate, BudgetSnapshot, Budgeter, OverflowDecision, OverflowPolicy,
-    OverflowPolicyError, Reconciliation,
+    BudgetEstimate, BudgetSnapshot, Budgeter, InvalidBudgetSnapshot, OverflowDecision,
+    OverflowPolicy, OverflowPolicyError, Reconciliation,
 };
 pub use cache::{CacheObservation, CacheRuleProfile, CacheSimulation, CacheSimulator};
 pub use compaction::{

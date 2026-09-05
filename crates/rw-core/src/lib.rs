@@ -43,6 +43,9 @@ pub use admin::{
     refresh_model_catalog, resolve_provider_api_key, store_provider_api_key,
     validate_stored_provider_credential,
 };
+#[cfg(unix)]
+pub use engine::recovery;
+
 pub use engine::{
     AgentLoopError, AgentTurnStatus, BudgetLedgerQuery, BudgetLedgerTotals, CommandToolCall,
     CommandToolOutputKind, ContextSurgeryAction, EventClock, FolderTrustController,

@@ -70,6 +70,8 @@ use crate::{
 mod commands;
 mod dispatch;
 mod projection;
+#[cfg(unix)]
+pub mod recovery;
 mod replay;
 pub use replay::{SessionEventReadView, SessionReplayLimits};
 mod session;
