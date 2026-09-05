@@ -94,7 +94,7 @@ test("tool callbacks require an invocation and preserve canonical output identit
   await expect(absent.callTool("read", {})).rejects.toThrow("active command")
   expect(calls).toBe(0)
   const origin = "ab".repeat(16)
-  const reply = { turn_id: "1", invocation_id: "turn-1:extension-0", is_error: false, output: { type: "text", text: "value" } }
+  const reply = { turn_id: "1", invocation_id: "turn-1:extension-0", is_error: false, output: { type: "text" as const, text: "value" } }
   const session = hostStateContext(async (method, params) => {
     expect(method).toBe(RPC_METHODS.sessionToolCall)
     expect(params).toEqual({ origin, name: "read", input: { path: "a" } })
