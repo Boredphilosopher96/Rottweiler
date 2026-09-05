@@ -276,11 +276,11 @@ pub(super) async fn apply_accepted(
             let result = match action {
                 Err(error) => Err(error),
                 Ok(bound) => {
-                    let content = format!("/{}", bound.name());
+                    let command_text = format!("/{}", bound.name());
                     let (respond, receive) = oneshot::channel();
                     super::messages::dispatch_message(
                         meta,
-                        content,
+                        command_text,
                         Vec::new(),
                         Some(bound),
                         active_turn.load(Ordering::Acquire),
