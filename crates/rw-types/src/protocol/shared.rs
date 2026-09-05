@@ -748,7 +748,22 @@ pub enum PlanDecision {
 #[derive(Allocation)]
 pub enum RewindTarget {
     Turn { turn_id: TurnId },
-    Checkpoint { checkpoint_id: String },
+    Source {
+        expected_through: SequenceId,
+        source: SequenceId,
+        turn_id: TurnId,
+        position: RewindSourcePosition,
+    },
+}
+
+/// Completed boundary relative to an effective committed user source.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
+pub enum RewindSourcePosition {
+    Before,
+    Through,
 }
 
 /// Driver decision for one file in the cumulative session review.

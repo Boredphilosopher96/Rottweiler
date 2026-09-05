@@ -32,7 +32,7 @@ use rw_types::{
     ProgressAmount, PromptDump, PromptTool, ProviderAuthAttemptId, ProviderAuthChallenge,
     ProviderAuthKind, ProviderCallActuals, ProviderCallIdentity, ProviderDescriptor,
     ProviderNextAction, Question, QuestionId, QuestionOption, QuestionResponseKind, RequestId,
-    ReviewFileDecision, ReviewFileStatus, RewindTarget, Role, RuntimeServiceDescriptor,
+    ReviewFileDecision, ReviewFileStatus, RewindSourcePosition, RewindTarget, Role, RuntimeServiceDescriptor,
     RuntimeServiceKind, SequenceId, SessionDescriptor, SessionId, SessionReview, SessionReviewFile,
     ShellId, StoredAttachment, SubagentActivity, SubagentDescriptor, SubagentId, SubagentIsolation,
     SubagentResult, SubagentStatus, TRANSIENT_ENGINE_EVENT_TYPES, ToolCallId, ToolCapability,
@@ -266,6 +266,7 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(PlanStep);
     declaration!(PlanArtifact);
     declaration!(PlanDecision);
+    declaration!(RewindSourcePosition);
     declaration!(RewindTarget);
     declaration!(ReviewFileDecision);
     declaration!(ReviewFileStatus);
@@ -714,8 +715,11 @@ fn contract_fixture() -> ContractFixture {
             ClientCommand::Rewind {
                 meta: command_meta.clone(),
                 session_id: SessionId("session-fixture".to_owned()),
-                target: RewindTarget::Checkpoint {
-                    checkpoint_id: "checkpoint-1".to_owned(),
+                target: RewindTarget::Source {
+                    expected_through: SequenceId(42),
+                    source: SequenceId(3),
+                    turn_id: TurnId("2".to_owned()),
+                    position: RewindSourcePosition::Before,
                 },
             },
             ClientCommand::TakeDriver {
