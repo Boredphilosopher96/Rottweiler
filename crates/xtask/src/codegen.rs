@@ -217,6 +217,14 @@ fn generate_typescript() -> Result<String, XtaskError> {
             rw_types::extension_ui::MAX_UI_SURFACE_BYTES,
         ),
         (
+            "MAX_PENDING_TOOL_APPROVAL_BYTES",
+            rw_types::tool_admission::MAX_PENDING_TOOL_APPROVAL_BYTES,
+        ),
+        (
+            "MAX_PENDING_TOOL_APPROVAL_PREPARED_BYTES",
+            rw_types::tool_admission::MAX_PENDING_TOOL_APPROVAL_PREPARED_BYTES,
+        ),
+        (
             "MAX_PENDING_TOOL_INVOCATIONS",
             rw_types::tool_admission::MAX_PENDING_TOOL_INVOCATIONS,
         ),

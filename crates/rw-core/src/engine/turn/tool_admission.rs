@@ -1,3 +1,4 @@
+mod approvals;
 use super::tool_requests::PendingToolCall;
 use rw_types::{
     allocation::PrepareAllocation,
@@ -17,6 +18,8 @@ pub(super) struct PendingToolBudget {
     encoded: usize,
     prepared: usize,
     streamed: usize,
+    approval_encoded: usize,
+    approval_prepared: usize,
 }
 impl PendingToolBudget {
     pub(super) fn from_calls(calls: &[PendingToolCall]) -> Result<Self, String> {
@@ -88,18 +91,26 @@ fn measure(value: &Value) -> Result<(usize, usize), String> {
         .prepared_bytes()
         .filter(|bytes| *bytes <= MAX_PENDING_TOOL_PREPARED_BYTES)
         .ok_or("pending tool argument allocation exceeds admission")?;
-    let mut counter = Counter(0);
-    serde_json::to_writer(&mut counter, value)
+    let encoded = encoded_bytes(value, MAX_PENDING_TOOL_ARGUMENT_BYTES)
         .map_err(|_| "pending tool argument bytes exceed admission".to_owned())?;
-    Ok((counter.0, prepared))
+    Ok((encoded, prepared))
 }
-struct Counter(usize);
+fn encoded_bytes(value: &impl serde::Serialize, limit: usize) -> Result<usize, String> {
+    let mut counter = Counter { bytes: 0, limit };
+    serde_json::to_writer(&mut counter, value)
+        .map_err(|_| "tool payload byte admission".to_owned())?;
+    Ok(counter.bytes)
+}
+struct Counter {
+    bytes: usize,
+    limit: usize,
+}
 impl Write for Counter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0 = self
-            .0
+        self.bytes = self
+            .bytes
             .checked_add(bytes.len())
-            .filter(|n| *n <= MAX_PENDING_TOOL_ARGUMENT_BYTES)
+            .filter(|n| *n <= self.limit)
             .ok_or_else(|| io::Error::other("argument admission"))?;
         Ok(bytes.len())
     }

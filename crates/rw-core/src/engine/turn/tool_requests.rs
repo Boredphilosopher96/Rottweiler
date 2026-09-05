@@ -235,6 +235,7 @@ pub(super) fn background_control_call(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn authorize_tool_call(
+    budget: &mut super::tool_admission::PendingToolBudget,
     turn: u64,
     call: &PendingToolCall,
     arguments: &Value,
@@ -257,12 +258,15 @@ pub(super) async fn authorize_tool_call(
         approval_diff: None,
     };
     request.approval_diff = current_approval_diff(tool, context, &request).await?;
+    budget.approval_payload(&request, 1)?;
     let authorization = AuthorizedToolBinding {
         approval_diff: request.approval_diff.as_ref().map(diff_binding),
         execution_identity: PermissionGate::registered_execution_identity(&request, semantics),
         capabilities: request.capabilities.clone(),
     };
     let displayed = redacted_permission_request(request.clone(), config.secret_redactor.as_ref());
+    // Preview and approval publications may each retain their own displayed copy.
+    budget.approval_payload(&displayed, 2)?;
     if let Some(diff) = displayed.approval_diff.clone() {
         send_event(
             signals,
@@ -389,6 +393,7 @@ pub(super) async fn prepare_tool_call(
         ));
     }
     let mut authorization = match authorize_tool_call(
+        admission,
         turn,
         &call,
         &arguments,
@@ -486,6 +491,7 @@ pub(super) async fn prepare_tool_call(
     }
     if call.name != original_name || arguments != original_arguments {
         authorization = match authorize_tool_call(
+            admission,
             turn,
             &call,
             &arguments,

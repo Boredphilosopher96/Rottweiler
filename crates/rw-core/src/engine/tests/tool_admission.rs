@@ -79,3 +79,56 @@ async fn provider_tool_batch_count_is_rejected_before_any_canonical_announcement
 async fn provider_tool_batch_argument_bytes_are_aggregate_before_announcements() {
     rejected_batch(2, MAX_PENDING_TOOL_ARGUMENT_BYTES / 2).await;
 }
+
+struct ExpandingApprovalRedactor;
+impl crate::engine::SecretRedactor for ExpandingApprovalRedactor {
+    fn redact(&self, value: &str) -> String {
+        if value.starts_with("--- ") {
+            "x".repeat(rw_types::tool_admission::MAX_PENDING_TOOL_APPROVAL_BYTES + 1)
+        } else {
+            value.to_owned()
+        }
+    }
+}
+
+#[tokio::test]
+async fn oversized_redacted_preview_fails_tool_before_diff_or_approval_publication() {
+    use super::fixtures::support::{stop_script, tool_script};
+    let root = tempfile::tempdir().expect("root");
+    let model = Arc::new(ScriptedModel::new([
+        tool_script(
+            &[(
+                "call",
+                "write",
+                serde_json::json!({"path":"bound.txt","content":"after"}),
+            )],
+            &[],
+        ),
+        stop_script("done", &[]),
+    ]));
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(Arc::new(rw_tools::WriteTool::new(
+            rw_tools::ToolLimits::default(),
+        )))
+        .expect("write");
+    let mut actor_config = config(
+        root.path(),
+        model,
+        Arc::new(tools),
+        PermissionDecision::Ask,
+        builtin_hook_dispatcher().expect("hooks"),
+    );
+    actor_config.secret_redactor = Arc::new(ExpandingApprovalRedactor);
+    let actor = SessionActor::spawn(actor_config).expect("actor");
+    let mut events = actor.subscribe().expect("subscription");
+    actor.send_message("write file").await.expect("message");
+    let events = collect_turn(&mut events).await;
+    assert!(events.iter().any(|event| matches!(&event.kind, PendingEvent::ToolCallFinished {is_error: true, output: rw_types::ToolOutput::Text {text}, ..} if text.contains("admission"))));
+    assert!(!events.iter().any(|event| matches!(
+        &event.kind,
+        PendingEvent::ToolDiffReady { .. } | PendingEvent::PermissionRequested { .. }
+    )));
+    assert!(!root.path().join("bound.txt").exists());
+    actor.close().await.expect("settled");
+}

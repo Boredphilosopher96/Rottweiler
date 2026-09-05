@@ -68,3 +68,46 @@ fn redacted_announcement_must_fit_before_the_batch_can_execute() {
     };
     assert!(AdmittedToolBatch::new(vec![call], &ExpandingRedactor).is_err());
 }
+
+fn approval(diff_bytes: usize) -> crate::PermissionRequest {
+    crate::PermissionRequest {
+        id: "call".into(),
+        invocation_id: rw_types::ToolInvocationId("invocation".into()),
+        tool_name: "write".into(),
+        arguments: Value::Null,
+        capabilities: vec![],
+        approval_diff: Some(rw_types::UnifiedDiff {
+            proposal_id: "proposal".into(),
+            path: "file".into(),
+            unified_diff: "x".repeat(diff_bytes),
+            arguments_hash: "args".into(),
+            base_hash: "base".into(),
+            diff_hash: "diff".into(),
+            truncated: false,
+        }),
+    }
+}
+
+#[test]
+fn approval_revisions_share_aggregate_admission_and_excess_capacity_is_charged() {
+    let mut budget = PendingToolBudget::default();
+    let request = approval(rw_types::tool_admission::MAX_PENDING_TOOL_APPROVAL_BYTES / 4);
+    budget.approval_payload(&request, 1).expect("first preview");
+    budget
+        .approval_payload(&request, 1)
+        .expect("second preview");
+    budget.approval_payload(&request, 1).expect("third preview");
+    assert!(budget.approval_payload(&request, 1).is_err());
+    assert!(budget.approval_payload(&request, 1).is_err());
+    let mut request = approval(0);
+    request.capabilities = Vec::with_capacity(
+        rw_types::tool_admission::MAX_PENDING_TOOL_APPROVAL_PREPARED_BYTES
+            / std::mem::size_of::<rw_types::ToolCapability>()
+            + 1,
+    );
+    assert!(
+        PendingToolBudget::default()
+            .approval_payload(&request, 1)
+            .is_err()
+    );
+}
