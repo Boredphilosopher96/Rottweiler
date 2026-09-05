@@ -28,6 +28,9 @@ export type ExtensionStateSnapshot = { revision: SequenceId | null, entries: Arr
  */
 delivery_start: ExtensionDeliveryCursor | null, };
 export type ExtensionStateTransaction = { expected_revision: SequenceId | null, mutations: Array<ExtensionStateMutation>, acknowledged: ExtensionDeliveryCursor | null, };
+export type ExtensionToolCall = { origin: ExtensionInvocationId, name: string, input: JsonValue, };
+export type ExtensionToolOutcome = { turn_id: TurnId, invocation_id: ToolInvocationId, is_error: boolean, output: ToolOutput | null, };
+export type ImageRef = { "type": "inline_base64", data: string, } | { "type": "url", url: string, };
 export type JsonValue = number | string | boolean | Array<JsonValue> | { [key in string]: JsonValue } | null;
 export type ModeId = string;
 export type ModelAlias = string;
@@ -35,4 +38,7 @@ export type QuestionId = string;
 export type SequenceId = string;
 export type SessionId = string;
 export type SessionNavigationTarget = { "kind": "session", session_id: SessionId, } | { "kind": "transcript", sequence: SequenceId, };
+export type ToolInvocationId = string;
+export type ToolOutput = { "type": "text", text: string, } | { "type": "structured", value: JsonValue, } | { "type": "mixed", parts: Array<ToolOutputPart>, };
+export type ToolOutputPart = { "type": "text", text: string, } | { "type": "structured", value: JsonValue, } | { "type": "image", media_type: string, data: ImageRef, };
 export type TurnId = string;
