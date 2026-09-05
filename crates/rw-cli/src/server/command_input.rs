@@ -68,10 +68,10 @@ pub(super) enum AdmissionError {
 }
 
 pub(super) struct InputLease {
-    _slot: OwnedSemaphorePermit,
+    slot: OwnedSemaphorePermit,
     bytes: OwnedSemaphorePermit,
     pool: Arc<Semaphore>,
-    _client: OwnedSemaphorePermit,
+    client: OwnedSemaphorePermit,
     pub(super) limit: usize,
     pub(super) urgent: bool,
 }
@@ -109,10 +109,10 @@ impl CommandIngress {
             .try_acquire_owned()
             .map_err(|_| AdmissionError::Busy)?;
         Ok(InputLease {
-            _slot: slot,
+            slot,
             bytes,
             pool: Arc::clone(&owner.bytes),
-            _client: client,
+            client,
             limit: wire,
             urgent,
         })
@@ -200,8 +200,8 @@ pub(super) async fn decode(
         let retained = RetainedInput {
             _bytes: lease.bytes,
         };
-        drop(lease._slot);
-        drop(lease._client);
+        drop(lease.slot);
+        drop(lease.client);
         Ok(ParsedCommand {
             command,
             lease: retained,
