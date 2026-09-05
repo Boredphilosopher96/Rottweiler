@@ -1,3 +1,6 @@
+mod presentation;
+use presentation::{ANSWER_PRESENTATION, PLAN_PRESENTATION};
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -68,7 +71,8 @@ impl Tool for SubmitPlanTool {
         }
         let data = serde_json::to_value(&artifact)
             .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
-        Ok(ToolResult::new("plan submitted for approval", data))
+        Ok(ToolResult::new("plan submitted for approval", data)
+            .with_presentation(PLAN_PRESENTATION.plan()?))
     }
 }
 
@@ -143,7 +147,8 @@ impl Tool for AskUserTool {
                 limit: self.max_answer_bytes,
             });
         }
-        Ok(ToolResult::new(answer.clone(), json!({"answer": answer})))
+        Ok(ToolResult::new(answer.clone(), json!({"answer": answer}))
+            .with_presentation(ANSWER_PRESENTATION.plan()?))
     }
 }
 

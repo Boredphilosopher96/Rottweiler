@@ -10,7 +10,7 @@ mod files;
 mod intelligence;
 mod interaction;
 mod invocation_effects;
-mod presentation;
+pub mod presentation;
 mod protocol;
 pub use presentation::ToolPresentationPlan;
 mod registry;

@@ -1,3 +1,6 @@
+mod presentation;
+use presentation::APPLY_PRESENTATION;
+
 use std::collections::{BTreeSet, HashMap};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -295,7 +298,8 @@ impl Tool for ApplyWorktreeDiffTool {
                 "base_commit": artifact.base_commit,
                 "touched_files": artifact.touched_files,
             }),
-        ))
+        )
+        .with_presentation(APPLY_PRESENTATION.plan()?))
     }
 
     async fn approval_preview(

@@ -1,3 +1,8 @@
+mod presentation;
+use presentation::{
+    EDIT_PRESENTATION, MULTI_EDIT_PRESENTATION, READ_PRESENTATION, WRITE_PRESENTATION,
+};
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -105,7 +110,8 @@ impl Tool for ReadTool {
                         "total_lines": total_lines,
                         "bytes": text.len(),
                     }),
-                ))
+                )
+                .with_presentation(READ_PRESENTATION.plan()?))
             })
             .await
     }
@@ -212,7 +218,8 @@ impl Tool for WriteTool {
                 Ok(ToolResult::new(
                     format!("wrote {} bytes", input.content.len()),
                     json!({"path": context.relative_display(&path), "bytes": input.content.len()}),
-                ))
+                )
+                .with_presentation(WRITE_PRESENTATION.plan()?))
             })
             .await
     }
@@ -347,7 +354,8 @@ impl Tool for EditTool {
                 Ok(ToolResult::new(
                     "applied 1 edit",
                     json!({"path": context.relative_display(&path), "match_mode": mode}),
-                ))
+                )
+                .with_presentation(EDIT_PRESENTATION.plan()?))
             })
             .await
     }
@@ -476,7 +484,8 @@ impl Tool for MultiEditTool {
                         "edits": modes.len(),
                         "match_modes": modes,
                     }),
-                ))
+                )
+                .with_presentation(MULTI_EDIT_PRESENTATION.plan()?))
             })
             .await
     }

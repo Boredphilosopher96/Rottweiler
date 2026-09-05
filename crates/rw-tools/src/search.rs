@@ -1,3 +1,6 @@
+mod presentation;
+use presentation::{GLOB_PRESENTATION, GREP_PRESENTATION, LS_PRESENTATION};
+
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -150,7 +153,8 @@ impl Tool for GrepTool {
         let mut result = ToolResult::new(
             model_text,
             json!({"matches": findings, "count": findings.len(), "truncated": truncated}),
-        );
+        )
+        .with_presentation(GREP_PRESENTATION.plan()?);
         result.truncated = truncated;
         Ok(result)
     }
@@ -237,7 +241,8 @@ impl Tool for GlobTool {
         let mut result = ToolResult::new(
             model_text,
             json!({"paths": paths, "count": paths.len(), "truncated": truncated}),
-        );
+        )
+        .with_presentation(GLOB_PRESENTATION.plan()?);
         result.truncated = truncated;
         Ok(result)
     }
@@ -354,7 +359,8 @@ impl Tool for LsTool {
         let mut result = ToolResult::new(
             model_text,
             json!({"entries": entries, "count": entries.len(), "truncated": truncated}),
-        );
+        )
+        .with_presentation(LS_PRESENTATION.plan()?);
         result.truncated = truncated;
         Ok(result)
     }

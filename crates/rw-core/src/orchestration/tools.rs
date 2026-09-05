@@ -201,7 +201,8 @@ impl Tool for SpawnAgentTool {
                     },
                     "completed": true,
                 }),
-            ));
+            )
+            .with_presentation(super::presentation::CONTROL.plan()?));
         }
         let result = match action {
             SpawnAgentAction::FollowUp {
@@ -270,7 +271,8 @@ impl Tool for SpawnAgentTool {
             }
             SpawnAgentAction::Cancel { .. } | SpawnAgentAction::Close { .. } => unreachable!(),
         };
-        Ok(model_facing_subagent_tool_result(&result))
+        Ok(model_facing_subagent_tool_result(&result)
+            .with_presentation(super::presentation::RESULT.plan()?))
     }
 }
 

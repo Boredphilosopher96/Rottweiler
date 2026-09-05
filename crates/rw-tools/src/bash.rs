@@ -1,3 +1,6 @@
+mod presentation;
+use presentation::{BACKGROUND_START_PRESENTATION, BASH_PRESENTATION};
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -369,7 +372,8 @@ impl Tool for BashTool {
             return Ok(ToolResult::new(
                 format!("background process started: {}", process.process_id),
                 json!({ "background_process": process }),
-            ));
+            )
+            .with_presentation(BACKGROUND_START_PRESENTATION.plan()?));
         }
         let outcome = self
             .run_foreground(request, context.cancellation.clone(), capture.clone())
@@ -387,7 +391,8 @@ impl Tool for BashTool {
                 "stdout_truncated": captured.stdout_truncated,
                 "stderr_truncated": captured.stderr_truncated,
             }),
-        );
+        )
+        .with_presentation(BASH_PRESENTATION.plan()?);
         result.truncated = captured.stdout_truncated || captured.stderr_truncated;
         Ok(result)
     }

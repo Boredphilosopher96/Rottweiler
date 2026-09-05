@@ -1,3 +1,9 @@
+mod presentation;
+use crate::presentation::BuiltinToolPresentation;
+use presentation::{
+    DEFINITION_PRESENTATION, DIAGNOSTICS_PRESENTATION, REFERENCES_PRESENTATION, RENAME_PRESENTATION,
+};
+
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -405,6 +411,7 @@ impl Tool for DiagnosticsTool {
             &result.items,
             json!({"backend": result.backend, "diagnostics": result.items, "note": result.note}),
             self.limits,
+            &DIAGNOSTICS_PRESENTATION,
         )
     }
 }
@@ -435,7 +442,7 @@ impl Tool for DefinitionTool {
             .definition(&input.path, position(&input))
             .await;
         result.items.truncate(self.limits.max_search_results);
-        location_result("definitions", result, self.limits)
+        location_result("definitions", result, self.limits, &DEFINITION_PRESENTATION)
     }
 }
 
@@ -465,7 +472,7 @@ impl Tool for ReferencesTool {
             .references(&input.path, position(&input))
             .await;
         result.items.truncate(self.limits.max_search_results);
-        location_result("references", result, self.limits)
+        location_result("references", result, self.limits, &REFERENCES_PRESENTATION)
     }
 }
 
@@ -507,6 +514,7 @@ impl Tool for RenameTool {
             &result.edits,
             json!({"backend":result.backend, "edits":result.edits, "applied":false, "note":result.note}),
             self.limits,
+            &RENAME_PRESENTATION,
         )
     }
 }
@@ -534,6 +542,7 @@ fn location_result(
     label: &'static str,
     result: IntelligenceResult<Location>,
     limits: ToolLimits,
+    presentation: &BuiltinToolPresentation,
 ) -> Result<ToolResult, ToolError> {
     let IntelligenceResult {
         backend,
@@ -541,7 +550,7 @@ fn location_result(
         note,
     } = result;
     let data = json!({"backend":backend, label:&items, "note":note});
-    untrusted_result(label, &items, data, limits)
+    untrusted_result(label, &items, data, limits, presentation)
 }
 
 fn untrusted_result<T: serde::Serialize>(
@@ -549,6 +558,7 @@ fn untrusted_result<T: serde::Serialize>(
     items: &[T],
     mut data: Value,
     limits: ToolLimits,
+    presentation: &BuiltinToolPresentation,
 ) -> Result<ToolResult, ToolError> {
     let encoded = serde_json::to_string(items)
         .map_err(|_| ToolError::Intelligence("could not encode intelligence result".to_owned()))?;
@@ -570,7 +580,9 @@ fn untrusted_result<T: serde::Serialize>(
     let truncated = end < escaped.len();
     let content = format!("{prefix}{}{suffix}", &escaped[..end]);
     sanitize_json_strings(&mut data);
-    let mut result = ToolResult::new(content, data).with_protected_framing(prefix, suffix);
+    let mut result = ToolResult::new(content, data)
+        .with_protected_framing(prefix, suffix)
+        .with_presentation(presentation.plan()?);
     result.truncated = truncated;
     Ok(result)
 }

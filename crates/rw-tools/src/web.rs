@@ -1,3 +1,6 @@
+mod presentation;
+use presentation::{FETCH_PRESENTATION, SEARCH_PRESENTATION};
+
 use crate::invocation_effects::{InvocationEffect, InvocationEffects};
 
 struct SearchEffect(Arc<dyn WebSearcher>);
@@ -383,7 +386,7 @@ impl Tool for WebSearchTool {
             retained.push(result);
         }
         model_text.push_str(&suffix);
-        let mut result = ToolResult::new(model_text, json!({"source": response.source, "results": retained, "count": retained.len(), "truncated": truncated})).with_protected_framing(prefix, suffix);
+        let mut result = ToolResult::new(model_text, json!({"source": response.source, "results": retained, "count": retained.len(), "truncated": truncated})).with_presentation(SEARCH_PRESENTATION.plan()?).with_protected_framing(prefix, suffix);
         result.truncated = truncated;
         Ok(result)
     }
@@ -526,6 +529,7 @@ impl Tool for WebFetchTool {
                 "truncated": truncated,
             }),
         )
+        .with_presentation(FETCH_PRESENTATION.plan()?)
         .with_protected_framing(prefix, suffix);
         result.truncated = truncated;
         Ok(result)

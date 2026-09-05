@@ -1,4 +1,5 @@
 mod oauth;
+mod presentation;
 pub use oauth::*;
 
 use std::{
@@ -1111,7 +1112,7 @@ impl Tool for ToolSearchTool {
             "truncated": truncated,
         });
         let content = encode_toon(&data).map_err(|error| ToolError::Output(error.to_string()))?;
-        Ok(untrusted_result(&content, data))
+        presentation::SEARCH.attach(untrusted_result(&content, data))
     }
 }
 
@@ -1168,7 +1169,7 @@ impl Tool for McpCallTool {
             .call_tool(&server, &input.name, input.arguments)
             .await
             .map_err(mcp_tool_error)?;
-        Ok(capped_result(&server, &input.name, response))
+        presentation::CALL.attach(capped_result(&server, &input.name, response))
     }
 }
 
@@ -1209,7 +1210,7 @@ impl Tool for McpResourceTool {
             .read_resource(&server, &input.uri)
             .await
             .map_err(mcp_tool_error)?;
-        Ok(capped_result(&server, &input.uri, response))
+        presentation::RESOURCE.attach(capped_result(&server, &input.uri, response))
     }
 }
 
@@ -1246,7 +1247,7 @@ impl Tool for McpPromptTool {
             .get_prompt(&server, &input.name, input.arguments)
             .await
             .map_err(mcp_tool_error)?;
-        Ok(capped_result(&server, &input.name, response))
+        presentation::PROMPT.attach(capped_result(&server, &input.name, response))
     }
 }
 
@@ -1304,7 +1305,7 @@ impl Tool for McpOverflowReadTool {
             "returned_bytes": selected.len(),
             "truncated": selected.len() < text.len().saturating_sub(input.offset),
         });
-        Ok(untrusted_result(&selected, data))
+        presentation::OVERFLOW.attach(untrusted_result(&selected, data))
     }
 }
 

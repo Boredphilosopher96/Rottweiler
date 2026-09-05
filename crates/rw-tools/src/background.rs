@@ -1,3 +1,6 @@
+mod presentation;
+use presentation::{KILL_PRESENTATION, OUTPUT_PRESENTATION, STATUS_PRESENTATION};
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -781,7 +784,8 @@ impl Tool for BackgroundStatusTool {
             serde_json::to_string_pretty(&processes)
                 .map_err(|error| ToolError::Output(error.to_string()))?,
             json!({ "processes": processes }),
-        ))
+        )
+        .with_presentation(STATUS_PRESENTATION.plan()?))
     }
 }
 
@@ -840,10 +844,10 @@ impl Tool for BackgroundOutputTool {
             write!(rendered, "[{stream}] {}", chunk.content)
                 .map_err(|error| ToolError::Output(error.to_string()))?;
         }
-        Ok(ToolResult::new(
-            rendered,
-            json!({ "process": process, "chunks": chunks }),
-        ))
+        Ok(
+            ToolResult::new(rendered, json!({ "process": process, "chunks": chunks }))
+                .with_presentation(OUTPUT_PRESENTATION.plan()?),
+        )
     }
 }
 
@@ -890,7 +894,8 @@ impl Tool for BackgroundKillTool {
         Ok(ToolResult::new(
             format!("{}: {:?}", process.process_id, process.status),
             json!({ "process": process }),
-        ))
+        )
+        .with_presentation(KILL_PRESENTATION.plan()?))
     }
 }
 

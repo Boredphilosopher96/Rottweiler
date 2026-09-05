@@ -1,4 +1,7 @@
 //! Task mutations are serialized and durably acknowledged by the session owner.
+mod presentation;
+use presentation::TODO_PRESENTATION;
+
 use crate::invocation_effects::{InvocationEffect, InvocationEffects};
 use crate::registry::{input_schema, parse_input};
 use crate::{
@@ -161,7 +164,8 @@ pub fn prepare_todo_update(
     let result = ToolResult::new(
         text,
         serde_json::to_value(&next).map_err(|error| ToolError::Output(error.to_string()))?,
-    );
+    )
+    .with_presentation(TODO_PRESENTATION.plan()?);
     if serde_json::to_vec(&result)
         .map_err(|error| ToolError::Output(error.to_string()))?
         .len()

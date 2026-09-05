@@ -1,4 +1,7 @@
 //! Host-owned display projection plans. Plugin responses cannot deserialize them.
+mod builtin;
+pub use builtin::BuiltinToolPresentation;
+pub mod fields;
 use rw_types::{
     ToolOutput, ToolOutputPart,
     extension_ui::{

@@ -1,3 +1,6 @@
+mod presentation;
+use presentation::SYMBOLS_PRESENTATION;
+
 use std::{
     collections::BTreeMap,
     path::{Component, Path, PathBuf},
@@ -325,7 +328,8 @@ impl Tool for SymbolsTool {
         let mut result = ToolResult::new(
             model_text,
             json!({"matches": retained, "count": retained.len(), "truncated": truncated}),
-        );
+        )
+        .with_presentation(SYMBOLS_PRESENTATION.plan()?);
         result.truncated = truncated;
         Ok(result)
     }
