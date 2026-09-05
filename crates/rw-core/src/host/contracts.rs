@@ -260,7 +260,7 @@ pub trait SessionFactory: Send + Sync + 'static {
     /// Authorizes the command's workspace and durably reserves its stable request identity.
     async fn admit_command_receipt(
         &self,
-        command: &ClientCommand,
+        command: &rw_types::ClientCommand,
         fingerprint: &str,
     ) -> Result<rw_types::command_receipt::ReceiptAdmission, HostError>;
 

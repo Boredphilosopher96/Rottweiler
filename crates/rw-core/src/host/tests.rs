@@ -682,6 +682,7 @@ mod closure;
 mod control_ownership;
 mod delivery;
 mod models;
+mod operation_receipts;
 mod provider_auth;
 mod session_queries;
 mod sessions;
