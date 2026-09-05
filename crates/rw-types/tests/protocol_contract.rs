@@ -104,19 +104,29 @@ fn additive_event_fields_are_tolerated() {
 }
 
 #[test]
-fn generated_schemas_do_not_forbid_additive_fields() {
-    for name in [
-        "block.schema.json",
-        "tool-output.schema.json",
-        "client-command.schema.json",
-        "engine-event.schema.json",
-    ] {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../protocol/schema")
-            .join(name);
-        let schema = fs::read_to_string(path).expect("generated schema should be present");
-        assert!(!schema.contains("\"additionalProperties\": false"));
+fn generated_operation_values_reject_unknown_fields_at_their_owner() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../protocol/schema/engine-event.schema.json");
+    let schema: Value =
+        serde_json::from_slice(&fs::read(path).expect("generated schema")).expect("schema JSON");
+    for name in ["ToolProgress", "ProgressAmount"] {
+        assert_eq!(
+            schema["$defs"][name]["additionalProperties"],
+            Value::Bool(false)
+        );
     }
+    assert!(
+        serde_json::from_value::<rw_types::ToolProgress>(serde_json::json!({
+            "message": "working", "surprise": true,
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<rw_types::ProgressAmount>(serde_json::json!({
+            "completed": 1, "total": 2, "surprise": true,
+        }))
+        .is_err()
+    );
 }
 
 #[test]
