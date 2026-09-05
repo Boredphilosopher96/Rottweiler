@@ -14,7 +14,7 @@ pub(super) fn synchronize(root: &Path, session: &str, source: &JournalReadView) 
     let index = match SessionIndex::open(root) {
         Ok(index) => index,
         Err(SessionStoreError::UnsupportedSqliteSchema {
-            table: "sessions" | "search_documents",
+            table: "sessions" | "search_documents" | "sessions_fts" | "search_invocations",
         }) => SessionIndex::reset_derived(root).into_diagnostic()?,
         Err(error) => return Err(error).into_diagnostic(),
     };
@@ -148,14 +148,22 @@ fn documents(
             }
             Ok(())
         }
+        EngineEvent::ToolCallStarted {
+            turn_id,
+            invocation_id,
+            ..
+        } => writer.start_tool(&invocation_id.0, search_turn(turn_id)?),
         EngineEvent::ToolCallFinished {
-            turn_id, output, ..
+            turn_id,
+            invocation_id,
+            output,
+            ..
         } => {
-            let turn = turn_id
-                .0
-                .parse::<u64>()
-                .map_err(|_| SessionStoreError::CorruptEvent("non-numeric search turn"))?;
-            tool_fields(writer, turn, meta.sequence_id, &mut part, output)
+            let turn = search_turn(turn_id)?;
+            if writer.finish_tool(&invocation_id.0, turn)? {
+                tool_fields(writer, turn, meta.sequence_id, &mut part, output)?;
+            }
+            Ok(())
         }
         EngineEvent::ConversationRewound { to_agent_turn, .. } => writer.rewind(*to_agent_turn),
         _ => Ok(()),
@@ -226,3 +234,18 @@ fn json_fields(
         scalar => text_field(writer, turn, sequence, part, &scalar.to_string()),
     }
 }
+
+fn search_turn(turn: &rw_types::TurnId) -> Result<u64, SessionStoreError> {
+    let value = turn
+        .0
+        .parse::<u64>()
+        .map_err(|_| SessionStoreError::CorruptEvent("non-numeric search turn"))?;
+    if value.to_string() != turn.0 {
+        return Err(SessionStoreError::CorruptEvent("non-canonical search turn"));
+    }
+    Ok(value)
+}
+
+#[cfg(test)]
+#[path = "search_projection_tests.rs"]
+mod tests;

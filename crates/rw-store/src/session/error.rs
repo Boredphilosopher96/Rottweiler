@@ -59,6 +59,9 @@ pub enum SessionStoreError {
     EventPageCursorAhead,
     #[error("session search query exceeds 512 bytes")]
     SearchQueryTooLarge,
+    /// A derived title or searchable field exceeds its storage admission limit.
+    #[error("session search field exceeds {max_bytes} bytes")]
+    SearchDocumentTooLarge { max_bytes: usize },
     #[error("session search internal limit exceeds 1001")]
     SearchLimitTooLarge,
     #[error("accounting query limit exceeds 1000000 entries")]

@@ -50,6 +50,12 @@ pub(super) const DOCUMENTS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS search_doc
     body TEXT NOT NULL,
     UNIQUE(session_id,kind,sequence_id,part)
 );";
+pub(super) const INVOCATIONS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS search_invocations(
+    session_id TEXT NOT NULL,
+    invocation_id TEXT NOT NULL,
+    agent_turn TEXT NOT NULL,
+    PRIMARY KEY(session_id,invocation_id)
+) WITHOUT ROWID;";
 pub(super) const FTS_SCHEMA: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
     body,content='search_documents',content_rowid='rowid'
 );";
@@ -90,8 +96,9 @@ pub(super) fn validate_sessions(connection: &Connection) -> Result<(), SessionSt
     validate_table(connection, "sessions", SESSIONS_SCHEMA)?;
     validate_table(connection, "search_documents", DOCUMENTS_SCHEMA)?;
     validate_table(connection, "sessions_fts", FTS_SCHEMA)?;
-    let count: u32 = connection.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('sessions','search_documents','sessions_fts')", [], |row| row.get(0))?;
-    if count != 0 && count != 3 {
+    validate_table(connection, "search_invocations", INVOCATIONS_SCHEMA)?;
+    let count: u32 = connection.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('sessions','search_documents','sessions_fts','search_invocations')", [], |row| row.get(0))?;
+    if count != 0 && count != 4 {
         return Err(SessionStoreError::UnsupportedSqliteSchema {
             table: "search_documents",
         });
@@ -169,6 +176,7 @@ pub(super) fn ensure_sessions_schema(connection: &Connection) -> Result<(), Sess
     let result = (|| {
         connection.execute_batch(SESSIONS_SCHEMA)?;
         connection.execute_batch(DOCUMENTS_SCHEMA)?;
+        connection.execute_batch(INVOCATIONS_SCHEMA)?;
         connection.execute_batch(FTS_SCHEMA)?;
         connection.execute_batch(SEARCH_SCHEMA)?;
         Ok::<(), SessionStoreError>(())

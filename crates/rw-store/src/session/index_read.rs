@@ -25,7 +25,9 @@ pub(super) fn read_index<T>(
     if !same_index_file(&before, &validate_read_only_index(&path)?) {
         return Err(SessionStoreError::UnsafeSessionIndex);
     }
+    connection.execute_batch("BEGIN DEFERRED")?;
     let result = read(&connection);
+    connection.execute_batch("ROLLBACK")?;
     if !same_index_file(&before, &validate_read_only_index(&path)?) {
         return Err(SessionStoreError::UnsafeSessionIndex);
     }

@@ -47,8 +47,6 @@ use journal_io::{
 };
 use rw_types::SequenceId;
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
-use sqlite_snapshot::{MAX_SEARCH_INDEX_BYTES, MAX_SEARCH_INDEX_WAL_BYTES};
 
 /// Public JSONL envelope version for durable session events.
 pub const SESSION_EVENT_SCHEMA_VERSION: u16 = 1;

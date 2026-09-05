@@ -98,6 +98,10 @@ impl SessionIndex {
             "DELETE FROM search_documents WHERE session_id=?1",
             [session_id],
         )?;
+        transaction.execute(
+            "DELETE FROM search_invocations WHERE session_id=?1",
+            [session_id],
+        )?;
         transaction.execute("DELETE FROM sessions WHERE id=?1", [session_id])?;
         transaction.commit()?;
         Ok(())
@@ -116,7 +120,7 @@ impl SessionIndex {
         configure_connection(&connection)?;
         ensure_accounting_schema(&connection)?;
         let transaction = connection.transaction()?;
-        transaction.execute_batch("DROP TRIGGER IF EXISTS search_documents_ai; DROP TRIGGER IF EXISTS search_documents_ad; DROP TRIGGER IF EXISTS search_documents_au; DROP TABLE IF EXISTS sessions_fts; DROP TABLE IF EXISTS search_documents; DROP TABLE IF EXISTS sessions;")?;
+        transaction.execute_batch("DROP TRIGGER IF EXISTS search_documents_ai; DROP TRIGGER IF EXISTS search_documents_ad; DROP TRIGGER IF EXISTS search_documents_au; DROP TABLE IF EXISTS sessions_fts; DROP TABLE IF EXISTS search_documents; DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS search_invocations;")?;
         sqlite_schema::ensure_sessions_schema(&transaction)?;
         transaction.commit()?;
         Ok(index)
@@ -339,7 +343,7 @@ pub(super) fn upsert_projection(
 ) -> Result<(), SessionStoreError> {
     validate_session_id(&projection.summary.id)?;
     if projection.summary.title.len() > 4096 {
-        return Err(SessionStoreError::SearchQueryTooLarge);
+        return Err(SessionStoreError::SearchDocumentTooLarge { max_bytes: 4096 });
     }
     connection.execute("INSERT INTO sessions(id,title,updated_unix_ms,cost_micros,turn_count,explicit_title,search_complete,next_sequence,source_digest) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(id) DO UPDATE SET title=excluded.title,updated_unix_ms=excluded.updated_unix_ms,cost_micros=excluded.cost_micros,turn_count=excluded.turn_count,explicit_title=excluded.explicit_title,search_complete=excluded.search_complete,next_sequence=excluded.next_sequence,source_digest=excluded.source_digest", params![projection.summary.id,projection.summary.title,projection.summary.updated_unix_ms,projection.summary.cost_micros,projection.summary.turn_count,projection.explicit_title,projection.complete,projection.source.next_sequence.to_string(),projection.source.digest.as_slice()])?;
     connection.execute("INSERT INTO search_documents(session_id,kind,agent_turn,sequence_id,part,body) VALUES(?1,0,'0','0',0,?2) ON CONFLICT(session_id,kind,sequence_id,part) DO UPDATE SET body=excluded.body WHERE body<>excluded.body", params![projection.summary.id,projection.summary.title])?;
@@ -393,17 +397,55 @@ impl SearchDocumentWriter<'_> {
         text: &str,
     ) -> Result<(), SessionStoreError> {
         if text.len() > 16 * 1024 * 1024 {
-            return Err(SessionStoreError::SearchQueryTooLarge);
+            return Err(SessionStoreError::SearchDocumentTooLarge {
+                max_bytes: 16 * 1024 * 1024,
+            });
         }
         self.connection.execute("INSERT INTO search_documents(session_id,kind,agent_turn,sequence_id,part,body) VALUES(?1,1,?2,?3,?4,?5)", params![self.session,agent_turn.to_string(),sequence.0.to_string(),part,text])?;
         Ok(())
     }
+    /// Records the host-owned invocation whose result may add searchable fields.
+    /// # Errors
+    /// Rejects duplicate identities and failed SQLite writes.
+    pub fn start_tool(&self, invocation: &str, agent_turn: u64) -> Result<(), SessionStoreError> {
+        self.connection.execute(
+            "INSERT INTO search_invocations(session_id,invocation_id,agent_turn) VALUES(?1,?2,?3)",
+            params![self.session, invocation, agent_turn.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Consumes a live invocation; discarded or already settled calls have no result authority.
+    /// # Errors
+    /// Rejects a contradictory turn or failed SQLite access.
+    pub fn finish_tool(
+        &self,
+        invocation: &str,
+        agent_turn: u64,
+    ) -> Result<bool, SessionStoreError> {
+        let turn: Option<String> = self.connection.query_row("SELECT agent_turn FROM search_invocations WHERE session_id=?1 AND invocation_id=?2", params![self.session,invocation], |row| row.get(0)).optional()?;
+        let Some(turn) = turn else {
+            return Ok(false);
+        };
+        if turn != agent_turn.to_string() {
+            return Err(SessionStoreError::CorruptEvent(
+                "search invocation turn mismatch",
+            ));
+        }
+        self.connection.execute(
+            "DELETE FROM search_invocations WHERE session_id=?1 AND invocation_id=?2",
+            params![self.session, invocation],
+        )?;
+        Ok(true)
+    }
+
     /// Removes documents belonging to discarded agent turns in the same transaction.
     /// # Errors
     /// Returns a SQLite write failure.
     pub fn rewind(&self, through: u64) -> Result<(), SessionStoreError> {
         let turn = through.to_string();
         self.connection.execute("DELETE FROM search_documents WHERE session_id=?1 AND kind=1 AND (length(agent_turn)>length(?2) OR (length(agent_turn)=length(?2) AND agent_turn>?2))", params![self.session,turn])?;
+        self.connection.execute("DELETE FROM search_invocations WHERE session_id=?1 AND (length(agent_turn)>length(?2) OR (length(agent_turn)=length(?2) AND agent_turn>?2))", params![self.session,turn])?;
         Ok(())
     }
 }

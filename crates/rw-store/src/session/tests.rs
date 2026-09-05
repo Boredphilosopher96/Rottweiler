@@ -4,11 +4,10 @@ use tempfile::tempdir;
 use rw_types::{AccountingAttribution, Cost, SequenceId, TurnId, Usage};
 
 use super::{
-    AccountingLedger, EVENT_READ_HOOK, EventEnvelope, MAX_SEARCH_INDEX_BYTES,
-    MAX_SEARCH_INDEX_WAL_BYTES, ProjectionStatus, SessionEventLog, SessionEventPageLimits,
-    SessionIndex, SessionProjection, SessionStoreError, SessionSummary, TurnAccountingEntry,
-    UtcDayKey, UtcTimestamp, garbage_collect_empty_sessions, install_append_fault, journal,
-    upsert_projection,
+    AccountingLedger, EVENT_READ_HOOK, EventEnvelope, ProjectionStatus, SessionEventLog,
+    SessionEventPageLimits, SessionIndex, SessionProjection, SessionStoreError, SessionSummary,
+    TurnAccountingEntry, UtcDayKey, UtcTimestamp, garbage_collect_empty_sessions,
+    install_append_fault, journal, upsert_projection,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
