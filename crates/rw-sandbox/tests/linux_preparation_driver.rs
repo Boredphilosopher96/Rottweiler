@@ -152,7 +152,9 @@ mod linux {
                     PreparationExecutable::capture(Path::new(&host)).expect("host identity"),
                 )
                 .expect("compiler view");
-                let policy = SandboxPolicy::for_preparation(layout).expect("compiler policy");
+                let policy = SandboxPolicy::for_preparation(layout)
+                    .expect("compiler policy")
+                    .without_process_creation();
                 let mut args = vec![
                     OsString::from(operation),
                     root.join("code").into_os_string(),

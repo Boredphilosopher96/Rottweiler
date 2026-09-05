@@ -16,6 +16,11 @@ name = "linux_preparation_driver"
 path = "tests/linux_preparation_driver.rs"
 harness = false
 
+[[test]]
+name = "process_creation_driver"
+path = "tests/process_creation_driver.rs"
+harness = false
+
 [dependencies]
 base64.workspace = true
 blake3.workspace = true

@@ -1,0 +1,116 @@
+   Compiling rw-sandbox v0.1.4 (/workspace/crates/rw-sandbox)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.85s
+     Running unittests src/lib.rs (target/debug/deps/rw_sandbox-19d0b0c6139622b9)
+
+running 20 tests
+test preparation::tests::replaced_root_does_not_match_captured_identity ... ok
+test preparation::tests::executable_snapshot_is_immutable_after_original_inode_changes ... ok
+test proxy::tests::client_hello_parser_fails_closed_for_absent_ech_only_and_malformed_sni ... ok
+test preparation::tests::roots_are_disjoint_and_projection_cannot_escape ... ok
+test proxy::tests::corporate_connect_pins_ip_while_preserving_host_and_client_sni ... ok
+test proxy::tests::corporate_proxy_receives_only_pinned_target_and_injected_auth ... ok
+test proxy::tests::corporate_proxy_resolution_is_captured_once_before_credentials ... ok
+test proxy::tests::corporate_proxy_url_rejects_paths_and_inline_credentials ... ok
+test proxy::tests::connect_sni_mismatch_never_reaches_shared_ip_upstream ... ok
+test proxy::tests::plain_http_closes_after_one_message_and_rejects_smuggling_framing ... ok
+test proxy::tests::proxy_blocks_private_targets_and_tunnels_only_after_global_opt_out ... ok
+test proxy::tests::proxy_forwards_plain_http_absolute_form_without_proxy_credentials ... ok
+test proxy::tests::dropping_proxy_closes_active_tunnel_and_joins_connection_worker ... ok
+test tests::egress_gate_requires_domain_approval_and_hard_denies_ssrf_answers ... ok
+test tests::helper_marker_is_unambiguous_and_normal_invocations_are_ignored ... ok
+test tests::network_grant_fails_closed_until_the_policy_proxy_is_present ... ok
+test tests::policy_canonicalizes_deduplicates_and_requires_roots ... ok
+test tests::running_helper_is_pinned_even_inside_write_root_and_injected_copy_is_refused ... ok
+test tests::sensitive_home_policy_includes_shell_history_and_agent_credentials ... ok
+test proxy::tests::validated_pin_prevents_a_second_dns_resolution ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running unittests src/bin/rw-sandbox-helper.rs (target/debug/deps/rw_sandbox_helper-3fc60a4df1e5c518)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/linux_egress.rs (target/debug/deps/linux_egress-ed4ac64d7394378b)
+
+running 16 tests
+
+running 1 test
+test sandboxed_default_read_policy_child ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+
+running 1 test
+test sandboxed_default_read_policy_child ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+
+running 1 test
+test sandboxed_default_read_policy_child ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+test default_read_policy_excludes_home_secrets_but_keeps_required_roots ... ok
+
+running 1 test
+test sandboxed_tokio_unix_pair_child_completes_a_bounded_handshake ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+
+running 1 test
+test sandboxed_tokio_unix_pair_child_completes_a_bounded_handshake ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+test deny_and_proxy_modes_allow_only_unix_socketpairs_for_runtime_ipc ... ok
+test approved_sandboxed_write_outside_workspace_is_denied_at_the_syscall ... ok
+test deny_mode_uses_an_empty_netns_and_blocks_udp_raw_send_and_io_uring_syscalls ... ok
+test netns_routes_only_the_inner_policy_proxy_and_blocks_direct_and_unix_bypasses ... ok
+test policy_egress_probe_distinguishes_container_or_kernel_refusal ... ok
+
+running 1 test
+test sandboxed_unix_datagram_pair_cannot_reach_a_bound_path ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+test policy_proxy_blocks_unix_datagram_pair_path_bypass ... ok
+
+running 1 test
+test sandboxed_exact_file_read_child ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+test regular_file_read_roots_allow_exact_data_and_executable_files ... ok
+test regular_file_write_root_allows_only_that_file ... ok
+sandbox helper failed: sandbox filesystem root changed type before enforcement
+sandbox helper failed: sandbox filesystem root changed type before enforcement
+test root_type_swaps_after_policy_creation_fail_closed ... ok
+test sandboxed_default_read_policy_child ... ok
+test sandboxed_exact_file_read_child ... ok
+test sandboxed_tokio_unix_pair_child_completes_a_bounded_handshake ... ok
+test sandboxed_unix_datagram_pair_cannot_reach_a_bound_path ... ok
+test two_write_roots_do_not_grant_their_parent_or_sibling ... ok
+test pid_namespace_kills_setsid_descendants_before_launch_returns ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.57s
+
+     Running tests/linux_helper_driver.rs (target/debug/deps/linux_helper_driver-168ac05c42be62ff)
+     Running tests/linux_preparation_driver.rs (target/debug/deps/linux_preparation_driver-edaaa19a94a161ba)
+/proc/self/fd/5: 9: cannot create /plugin/entry.ts: Read-only file system
+production preparation view boundaries pass
+production compiler graph and bundle pass: {"abi":1,"format":"bun-esm-v1","inputs":[{"path":"entry.ts","bytes":25},{"path":"package.json","bytes":44}]}
+production executable replacement and content changes rejected
+     Running tests/process_creation_driver.rs (target/debug/deps/process_creation_driver-7e986a5850cee027)
+    Checking serde_json v1.0.151
+    Checking serde v1.0.229
+    Checking blake3 v1.8.6
+    Checking ts-rs v12.0.1
+    Checking schemars v1.2.2
+    Checking rw-operation-contract v0.1.4 (/workspace/crates/rw-operation-contract)
+    Checking rw-types v0.1.4 (/workspace/crates/rw-types)
+    Checking rw-sandbox v0.1.4 (/workspace/crates/rw-sandbox)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 10.04s

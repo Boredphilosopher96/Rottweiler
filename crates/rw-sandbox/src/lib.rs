@@ -103,6 +103,7 @@ pub struct SandboxPolicy {
     #[serde(default)]
     read_root_kinds: Option<Vec<RootKind>>,
     network: NetworkPolicy,
+    allow_process_creation: bool,
     #[cfg(target_os = "linux")]
     preparation: Option<PreparationFilesystem>,
     #[cfg(target_os = "macos")]
@@ -172,12 +173,21 @@ impl SandboxPolicy {
             write_root_kinds,
             read_roots: None,
             read_root_kinds: None,
+            allow_process_creation: true,
             #[cfg(target_os = "linux")]
             preparation: None,
             #[cfg(target_os = "macos")]
             read_directory_ancestors: Vec::new(),
             network,
         })
+    }
+
+    /// Forbids native child processes while retaining threads and in-place exec.
+    /// Host-brokered process work needs its own separately owned sandbox.
+    #[must_use]
+    pub fn without_process_creation(mut self) -> Self {
+        self.allow_process_creation = false;
+        self
     }
 
     /// Canonical roots to which writes may be made.
@@ -244,6 +254,7 @@ impl SandboxPolicy {
             write_root_kinds: self.write_root_kinds.clone(),
             read_roots: self.read_roots.clone(),
             read_root_kinds: self.read_root_kinds.clone(),
+            allow_process_creation: self.allow_process_creation,
             #[cfg(target_os = "linux")]
             preparation: self.preparation.clone(),
             #[cfg(target_os = "macos")]
@@ -261,6 +272,7 @@ impl SandboxPolicy {
             write_root_kinds: Vec::new(),
             read_roots: self.read_roots.clone(),
             read_root_kinds: self.read_root_kinds.clone(),
+            allow_process_creation: self.allow_process_creation,
             #[cfg(target_os = "linux")]
             preparation: self.preparation.clone(),
             #[cfg(target_os = "macos")]
@@ -822,6 +834,11 @@ fn audited_linux_tool(candidates: &[&str]) -> Option<PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn seatbelt_profile(policy: &SandboxPolicy) -> String {
+    let process_rule = if policy.allow_process_creation {
+        ""
+    } else {
+        "(deny process-fork)"
+    };
     let writable = (0..policy.write_roots.len())
         .map(|index| format!("(subpath (param \"RW_WRITE_{index}\"))"))
         .collect::<Vec<_>>()
@@ -861,7 +878,7 @@ fn seatbelt_profile(policy: &SandboxPolicy) -> String {
         format!("(deny file-read* (require-any {secret_roots}))")
     };
     format!(
-        "(version 1) (allow default) {read_rule} {secret_rule} (deny file-write* (require-not (require-any (literal \"/dev/null\") {writable}))) {network}"
+        "(version 1) (allow default) {process_rule} {read_rule} {secret_rule} (deny file-write* (require-not (require-any (literal \"/dev/null\") {writable}))) {network}"
     )
 }
 
@@ -893,7 +910,12 @@ where
     S: Into<OsString>,
 {
     let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
-    if args.get(1).and_then(|value| value.to_str()) != Some(HELPER_ARG) {
+    let entry = args.get(1).and_then(|value| value.to_str());
+    #[cfg(target_os = "linux")]
+    if entry == Some(linux::process_creation::WORKER_ARG) {
+        return linux::process_creation::run_worker(&args).map(|never| match never {});
+    }
+    if entry != Some(HELPER_ARG) {
         return Ok(false);
     }
     #[cfg(target_os = "linux")]

@@ -105,6 +105,7 @@ pub(super) fn run(
     let executable_path = fd_path(&executable).into_os_string();
     install_landlock(&projected, &executable_path)?;
     install_network_floor(false)?;
+    super::process_creation::restrict_if_requested(policy)?;
     lock_mount_authority()?;
     let mut command = command_without_helper_pin(&executable_path, &args, helper_pin)?;
     command

@@ -1,4 +1,5 @@
 mod preparation;
+pub(super) mod process_creation;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::TryInto as _;
@@ -75,6 +76,7 @@ pub(super) fn run_helper(args: &[OsString]) -> Result<std::convert::Infallible, 
     }
     install_landlock(&policy, &args[3])?;
     install_network_floor(false)?;
+    process_creation::restrict_if_requested(&policy)?;
     let error = command_without_helper_pin(&args[3], &args[4..], helper_pin)?.exec();
     Err(SandboxError::Exec(error))
 }
@@ -99,6 +101,13 @@ fn command_without_helper_pin(
     args: &[OsString],
     helper_pin: Option<u32>,
 ) -> Result<Command, SandboxError> {
+    close_helper_pin(helper_pin)?;
+    let mut command = Command::new(program);
+    command.args(args);
+    Ok(command)
+}
+
+fn close_helper_pin(helper_pin: Option<u32>) -> Result<(), SandboxError> {
     if let Some(helper_pin) = helper_pin {
         struct InheritedHelperPin(i32);
 
@@ -116,9 +125,7 @@ fn command_without_helper_pin(
         // ownership to nix 0.31 and close it before launching the target.
         nix::unistd::close(InheritedHelperPin(helper_pin)).map_err(sandbox_backend)?;
     }
-    let mut command = Command::new(program);
-    command.args(args);
-    Ok(command)
+    Ok(())
 }
 
 fn run_proxy_helper(
@@ -147,11 +154,15 @@ fn run_proxy_helper(
         .spawn(move || serve_namespace_relay(&listener, &relay_path, &relay_running))
         .map_err(SandboxError::Proxy)?;
 
-    install_landlock(policy, program)?;
-    install_network_floor(true)?;
-    let status = command_without_helper_pin(program, args, helper_pin)?
-        .status()
-        .map_err(SandboxError::Exec)?;
+    let status = if policy.allow_process_creation {
+        install_landlock(policy, program)?;
+        install_network_floor(true)?;
+        command_without_helper_pin(program, args, helper_pin)?
+            .status()
+            .map_err(SandboxError::Exec)?
+    } else {
+        process_creation::run_proxy_worker(policy, program, args, helper_pin)?
+    };
     running.store(false, Ordering::Release);
     let _ = TcpStream::connect_timeout(
         &(Ipv4Addr::LOCALHOST, port).into(),
