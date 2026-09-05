@@ -154,7 +154,7 @@ async fn timed_out_proof_stays_failed_while_exact_cleanup_futures_continue() {
     assert!(closure.close(Duration::from_secs(3)).await.is_err());
     assert_eq!(
         child.dropped.load(Ordering::SeqCst),
-        0,
-        "failed proof retains the native handle"
+        1,
+        "actual retirement releases the native handle while the missed deadline stays failed"
     );
 }

@@ -1045,7 +1045,9 @@ struct ToolSearchTool {
 #[async_trait]
 impl Tool for ToolSearchTool {
     async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
-        Ok(())
+        self.manager.settle_effects().await.map_err(|_| {
+            ToolError::EffectsUnsettled("MCP invocation effects remain owned".to_owned())
+        })
     }
 
     fn descriptor(&self) -> ToolDescriptor {
@@ -1117,7 +1119,9 @@ struct McpCallTool {
 #[async_trait]
 impl Tool for McpCallTool {
     async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
-        Ok(())
+        self.manager.settle_effects().await.map_err(|_| {
+            ToolError::EffectsUnsettled("MCP invocation effects remain owned".to_owned())
+        })
     }
 
     fn descriptor(&self) -> ToolDescriptor {
@@ -1172,7 +1176,9 @@ struct McpResourceTool {
 #[async_trait]
 impl Tool for McpResourceTool {
     async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
-        Ok(())
+        self.manager.settle_effects().await.map_err(|_| {
+            ToolError::EffectsUnsettled("MCP invocation effects remain owned".to_owned())
+        })
     }
 
     fn descriptor(&self) -> ToolDescriptor {
@@ -1211,7 +1217,9 @@ struct McpPromptTool {
 #[async_trait]
 impl Tool for McpPromptTool {
     async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
-        Ok(())
+        self.manager.settle_effects().await.map_err(|_| {
+            ToolError::EffectsUnsettled("MCP invocation effects remain owned".to_owned())
+        })
     }
 
     fn descriptor(&self) -> ToolDescriptor {

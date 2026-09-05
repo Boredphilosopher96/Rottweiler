@@ -203,7 +203,7 @@ impl Default for McpLimits {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Clone, Debug, Error)]
 pub enum McpError {
     #[error("MCP effects unsettled for {server}: {message}")]
     EffectsUnsettled {

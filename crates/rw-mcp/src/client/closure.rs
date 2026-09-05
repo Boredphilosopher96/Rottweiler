@@ -29,12 +29,19 @@ impl ConnectionClosure {
         service: RunningService<RoleClient, ()>,
         child: Option<Box<dyn ProtocolProcessHandle>>,
     ) -> Self {
+        Self::from_resources(Resources {
+            service: Some(service),
+            child,
+        })
+    }
+
+    fn from_resources(resources: Resources) -> Self {
         let (stop, wait) = oneshot::channel();
         let (finished, completion) = watch::channel(None);
         let owner = CloseOwner {
-            resources: Some(Resources { service, child }),
+            resources: Some(resources),
             finished,
-            failed: false,
+            proven: false,
             armed: true,
         };
         // The guard exists before spawning, including if this task never polls.
@@ -84,14 +91,14 @@ impl Drop for ConnectionClosure {
 }
 
 struct Resources {
-    service: RunningService<RoleClient, ()>,
+    service: Option<RunningService<RoleClient, ()>>,
     child: Option<Box<dyn ProtocolProcessHandle>>,
 }
 
 struct CloseOwner {
     resources: Option<Resources>,
     finished: watch::Sender<Option<Proof>>,
-    failed: bool,
+    proven: bool,
     armed: bool,
 }
 
@@ -109,7 +116,6 @@ impl CloseOwner {
             if let Ok(result) = tokio::time::timeout_at(deadline, &mut work).await {
                 result
             } else {
-                self.failed = true;
                 self.finished.send_replace(Some(Err(Arc::from(
                     "MCP close proof deadline expired; resources remain owned",
                 ))));
@@ -118,7 +124,7 @@ impl CloseOwner {
                 work.await
             }
         };
-        self.failed |= result.is_err();
+        self.proven = result.is_ok();
         self.finished.send_if_modified(|current| {
             if current.is_some() {
                 return false;
@@ -127,7 +133,7 @@ impl CloseOwner {
             true
         });
         self.armed = false;
-        if self.failed {
+        if !self.proven {
             self.retain();
         }
     }
@@ -156,12 +162,15 @@ impl Drop for CloseOwner {
 
 async fn settle(resources: &mut Resources, timeout: Duration) -> Proof {
     let service = async {
-        resources
-            .service
-            .close()
-            .await
-            .map(|_| ())
-            .map_err(|_| Arc::from("MCP service close task failed"))
+        if let Some(service) = &mut resources.service {
+            service
+                .close()
+                .await
+                .map(|_| ())
+                .map_err(|_| Arc::from("MCP service close task failed"))
+        } else {
+            Ok(())
+        }
     };
     let process = async {
         if let Some(child) = &mut resources.child {
@@ -182,6 +191,18 @@ async fn prove(work: impl std::future::Future<Output = Proof>) -> Proof {
         .catch_unwind()
         .await
         .unwrap_or_else(|_| Err(Arc::from("MCP cleanup panicked before proof")))
+}
+
+pub(super) async fn retire_process(
+    child: Box<dyn ProtocolProcessHandle>,
+    timeout: Duration,
+) -> Proof {
+    ConnectionClosure::from_resources(Resources {
+        service: None,
+        child: Some(child),
+    })
+    .close(timeout)
+    .await
 }
 
 #[cfg(test)]

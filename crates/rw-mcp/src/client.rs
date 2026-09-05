@@ -210,7 +210,13 @@ where
                 .await
                 .ok()
                 .flatten();
-            let _ = handle.terminate_and_reap(Duration::from_secs(3)).await;
+            closure::retire_process(handle, Duration::from_secs(3))
+                .await
+                .map_err(|_| McpError::EffectsUnsettled {
+                    server: config.id.clone(),
+                    message: "MCP initialization failed without native process settlement"
+                        .to_owned(),
+                })?;
             early_exit.map_or_else(
                 || Err(protocol_failure()),
                 |status| {
