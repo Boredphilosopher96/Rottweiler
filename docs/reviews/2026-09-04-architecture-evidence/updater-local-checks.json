@@ -1,0 +1,45 @@
+[
+  {
+    "log": "rw-updater-47-tui-tests.log",
+    "sha256": "264278523d85fceaafe81499b60b681b0a6d316fa8390ff1b12cc556eb3af05a",
+    "tail": [
+      "",
+      "test/goldens/m9-replay-e2e.test.ts:",
+      "(pass) M9 persisted replay golden > authenticated observer replay renders the persisted event log [76.03ms]",
+      "",
+      " 546 pass",
+      " 0 fail",
+      " 21 snapshots, 12203 expect() calls",
+      "Ran 546 tests across 40 files. [17.69s]"
+    ]
+  },
+  {
+    "log": "rw-updater-47-tui-typecheck.log",
+    "sha256": "8366207267355d3e3d5bf3bf6e8c94c5f93f6078c34f08973fa2b38cdda6cc92",
+    "tail": [
+      "$ tsc --noEmit"
+    ]
+  },
+  {
+    "log": "rw-updater-47-tui-build.log",
+    "sha256": "b7342ed4a765588d47431acb3434428c106ce02c5a74a0ca9725ef55f0940e7c",
+    "tail": [
+      "$ bun run build.ts",
+      "Release TUI bundle bytes: 83743792 (executable 78247376, native 5496416; budget <100000000)"
+    ]
+  },
+  {
+    "log": "rw-updater-48-sdk-tests.log",
+    "sha256": "ec3a938fd97cd4d21e148b04a39ef32edc50af05b8cdc1d11e6d46a4141c10e6",
+    "tail": [
+      "(pass) scaffold > preflights every target and refuses symlink replacement [1.49ms]",
+      "(pass) scaffold > failed builds clean their system-temp staging directory [29.85ms]",
+      "(pass) scaffold > builds byte-identically from two checkout roots [291.31ms]",
+      "",
+      " 65 pass",
+      " 0 fail",
+      " 232 expect() calls",
+      "Ran 65 tests across 4 files. [4.91s]"
+    ]
+  }
+]

@@ -24,6 +24,6 @@ These are admission bounds, not measured performance guarantees. An oversized wo
 
 ## Verification
 
-The complete store suite passed 198 tests with two ignored performance tests, plus the documentation test. Strict store clippy passed for all targets and features. Runtime completion-owner tests still await the engine settlement API integration. Regression coverage exercises aggregate accounting, depth, cancellation before reads, oversized sparse metadata, blocked Git stdout cancellation and process reaping, excessive Git output, plus existing capture/rewind/recovery behavior.
+The complete store suite passed 198 tests with two ignored performance tests, plus the documentation test. Strict store clippy passed for all targets and features. The six focused runtime checkpoint tests also passed, including cancelled-caller ownership, panic poisoning, shared-workspace serialization, multi-root recovery and live-root replacement. Full turn/actor settlement integration and its fallible contract are still being completed. Regression coverage exercises aggregate accounting, depth, cancellation before reads, oversized sparse metadata, blocked Git stdout cancellation and process reaping, excessive Git output, plus existing capture/rewind/recovery behavior.
 
 The semantic extraction separated coordination, path resolution and recovery. Its pre-change and post-change Rust function-token multisets match. All new checkpoint modules are below 1,500 lines; the remaining runtime entrypoint still needs its broader split.

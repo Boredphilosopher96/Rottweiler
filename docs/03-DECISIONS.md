@@ -892,3 +892,17 @@ removes capabilities and mount-changing syscall authority before compiler exec;
 view setup errors fail closed. The preparation owner retains the private view
 directory until actual process settlement, including cancellation and panic.
 Required user and mount namespaces remain a deployment prerequisite.
+
+## ADR-037: Workflow tasks retain durable ownership across interruption
+
+**Status:** Implementation in progress; acceptance is tracked under A31.
+
+**Decision:** Extend the existing DAG runner with a required durable journal. A run has a random identity, a parent session, an exact definition digest and a bounded task map. The runner claims a whole wave before starting effects, binds each created child before its first turn and persists terminal outcomes only after cleanup. Reopening reuses completed dependencies. A started task without a terminal receipt remains unresolved and cannot repeat automatically. This applies to both agent and command nodes.
+
+A separate writer lock survives atomic snapshot replacement. Snapshots contain at most 64 tasks and 1 MiB of immutable shared outcome payloads, with a 2 MiB serialized ceiling. Readers can inspect an active run without acquiring its writer lock. Status reads validate the caller's parent session. Run identity appears in command and tool results so an observer can attach later.
+
+Creation, caller delivery and cleanup have explicit owners. A child startup reply must be acknowledged; an unclaimed reply triggers cancellation and close. Pre-turn cleanup records Closed when the parent Spawned acknowledgement is uncertain. Recovery reconciles the parent journal before removing that receipt and never reattaches the closed workspace. Confirmed lifecycle publication requires a durable terminal before removal.
+
+Failed cleanup returns an explicit unsettled error while retaining its resource and accounting obligations. It neither acknowledges ordinary completion nor makes a settlement caller wait forever. Tool and model interfaces must propagate this distinction through turn and shutdown barriers.
+
+**Consequences:** The first resumable unit is the current workflow runner. No distributed scheduler, compatibility adapter or replay-based permission to repeat effects is added. Automatic reconciliation of an ambiguously completed step needs a separate proof; operator retries cannot bypass the started state. Native process-kill recovery and shared control-latency qualification remain acceptance work.
