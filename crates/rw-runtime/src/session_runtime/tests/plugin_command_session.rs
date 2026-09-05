@@ -55,21 +55,7 @@ async fn bundle_fixture(root: &Path) -> (PathBuf, rw_plugin_protocol::PluginMani
     )
 }
 
-#[tokio::test]
-async fn sdk_command_controls_state_and_panel_reenter_the_live_actor() {
-    let _admission = crate::native_fixture::admit().await;
-    let root = tempfile::tempdir().expect("fixture root");
-    let storage = root.path().join("storage");
-    let workspace = root.path().join("workspace");
-    std::fs::create_dir(&storage).expect("storage");
-    std::fs::create_dir(&workspace).expect("workspace");
-    #[cfg(unix)]
-    std::fs::set_permissions(
-        &storage,
-        std::os::unix::fs::PermissionsExt::from_mode(0o700),
-    )
-    .expect("private storage");
-    let workspace = workspace.canonicalize().expect("workspace identity");
+async fn configure_plugin(root: &Path, storage: &Path, workspace: &Path) {
     let package = workspace.join("fixture");
     std::fs::create_dir(&package).expect("package");
     let (bun, manifest) = bundle_fixture(&package).await;
@@ -90,9 +76,9 @@ async fn sdk_command_controls_state_and_panel_reenter_the_live_actor() {
         toml::to_string(&settings).expect("plugin config"),
     )
     .expect("settings file");
-    let discovered = discover_executable_configs(root.path(), &workspace, true).expect("discovery");
+    let discovered = discover_executable_configs(root, workspace, true).expect("discovery");
     let plugin = discovered.plugins.first().expect("configured plugin");
-    let approvals = PrivatePluginApprovalStore::open(&storage).expect("approval owner");
+    let approvals = PrivatePluginApprovalStore::open(storage).expect("approval owner");
     rw_ext::approve_plugin_launch(
         &approvals,
         &manifest,
@@ -100,6 +86,24 @@ async fn sdk_command_controls_state_and_panel_reenter_the_live_actor() {
         &format!("project:{}", config_path.display()),
     )
     .expect("exact fixture approval");
+}
+
+#[tokio::test]
+async fn sdk_command_controls_state_and_panel_reenter_the_live_actor() {
+    let _admission = crate::native_fixture::admit().await;
+    let root = tempfile::tempdir().expect("fixture root");
+    let storage = root.path().join("storage");
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&storage).expect("storage");
+    std::fs::create_dir(&workspace).expect("workspace");
+    #[cfg(unix)]
+    std::fs::set_permissions(
+        &storage,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .expect("private storage");
+    let workspace = workspace.canonicalize().expect("workspace identity");
+    configure_plugin(root.path(), &storage, &workspace).await;
     let mut config = Config::default();
     config.models.default = "fast".into();
     config
