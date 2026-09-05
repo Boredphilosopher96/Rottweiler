@@ -332,8 +332,8 @@ impl UiActionRequest {
         validation::identifier(&self.contribution_id)?;
         validation::identifier(&self.action_id)?;
         match &self.target {
-            UiActionTarget::Tool { invocation_id } => ToolInvocationId::validate(&invocation_id.0)
-                .map_err(|_| UiContractError("tool invocation identity")),
+            // Opaque invocation identities resolve only through the canonical session source.
+            UiActionTarget::Tool { .. } => Ok(()),
             UiActionTarget::Panel { revision } if *revision > 0 => Ok(()),
             UiActionTarget::Panel { .. } => Err(UiContractError("panel revision")),
         }
