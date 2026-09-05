@@ -399,8 +399,9 @@ pub(super) async fn handle_actor_command(
             .map(|_| ());
             let _ = respond.send(result);
         }
-        ActorCommand::PublishSubagentProgressBatch { progress, respond } => {
-            for progress in progress {
+        ActorCommand::PublishSubagentProgress(slot) => {
+            if let Some(admitted) = slot.take() {
+                let progress = admitted.event;
                 let _ = events.send(RoutedEvent {
                     target: None,
                     event: EngineEvent::SubagentProgress {
@@ -412,7 +413,6 @@ pub(super) async fn handle_actor_command(
                     },
                 });
             }
-            let _ = respond.send(Ok(()));
         }
         ActorCommand::UiCatalog { respond } => {
             let _ = respond.send(config.ui.catalog());

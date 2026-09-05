@@ -50,6 +50,7 @@ use tokio::sync::oneshot;
 /// Cloneable command/event boundary for one session actor.
 #[derive(Clone)]
 pub struct SessionHandle {
+    pub(super) child_progress: Arc<super::child_progress::HostedChildProgress>,
     pub(super) shutdown: shutdown::ActorShutdown,
     pub(in crate::engine) commands: mpsc::Sender<ActorCommand>,
     pub(super) events: broadcast::Sender<RoutedEvent>,
@@ -242,6 +243,8 @@ impl SessionHandle {
         child_session_id: SessionId,
         task: String,
     ) -> Result<(), AgentLoopError> {
+        self.child_progress
+            .register(&subagent_id, &child_session_id)?;
         let (respond, receive) = oneshot::channel();
         self.commands
             .send(ActorCommand::RecordSubagentSpawned {
@@ -265,30 +268,27 @@ impl SessionHandle {
         &self,
         result: rw_types::SubagentResult,
     ) -> Result<(), AgentLoopError> {
+        let child = result.subagent_id.clone();
         let (respond, receive) = oneshot::channel();
         self.commands
             .send(ActorCommand::RecordSubagentFinished { result, respond })
             .await
             .map_err(|_| AgentLoopError::Closed)?;
-        receive.await.map_err(|_| AgentLoopError::Closed)?
+        receive.await.map_err(|_| AgentLoopError::Closed)??;
+        self.child_progress.finish(&child);
+        Ok(())
     }
 
-    /// Broadcasts display-only child progress without appending it to the
-    /// parent journal.
+    /// Publishes a bounded child observation. Saturated display delivery is
+    /// coalesced into a canonical source invalidation without delaying effects.
     ///
     /// # Errors
-    ///
-    /// Returns when the parent actor is closed.
-    pub async fn publish_subagent_progress_batch(
+    /// Returns for invalid progress or a child without an active durable spawn.
+    pub fn publish_subagent_progress(
         &self,
-        progress: Vec<SubagentProgressEvent>,
+        progress: SubagentProgressEvent,
     ) -> Result<(), AgentLoopError> {
-        let (respond, receive) = oneshot::channel();
-        self.commands
-            .send(ActorCommand::PublishSubagentProgressBatch { progress, respond })
-            .await
-            .map_err(|_| AgentLoopError::Closed)?;
-        receive.await.map_err(|_| AgentLoopError::Closed)?
+        self.child_progress.publish(progress, &self.commands)
     }
 
     /// Completes a foreground shell on behalf of the trusted CLI TTY broker.

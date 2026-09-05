@@ -18,9 +18,6 @@ use rw_types::SessionId;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::mpsc;
-use tokio::sync::oneshot;
 
 pub(super) struct ChildActorTemplate {
     pub(super) budget_session_id: SessionId,
@@ -132,12 +129,6 @@ impl ChildActorTemplate {
     }
 }
 
-pub(super) const SUBAGENT_PROGRESS_QUEUE_CAPACITY: usize = 512;
-
-pub(super) const SUBAGENT_PROGRESS_BATCH_EVENTS: usize = 64;
-
-pub(super) const SUBAGENT_PROGRESS_BATCH_INTERVAL: Duration = Duration::from_millis(8);
-
 pub(super) struct HostedSubagentController {
     pub(super) parent: rw_core::SessionHandle,
     pub(super) orchestrator: SubagentOrchestrator,
@@ -157,89 +148,10 @@ impl HostedSubagentController {
 
 pub(super) struct HostedSubagentObserver {
     pub(super) parent: rw_core::SessionHandle,
-    pub(super) progress: mpsc::Sender<HostedSubagentProgressMessage>,
 }
-
-pub(super) enum HostedSubagentProgressMessage {
-    Event(SubagentProgressEvent),
-    Flush(oneshot::Sender<Result<(), String>>),
-}
-
 impl HostedSubagentObserver {
     pub(super) fn new(parent: rw_core::SessionHandle) -> Self {
-        let (progress, receiver) = mpsc::channel(SUBAGENT_PROGRESS_QUEUE_CAPACITY);
-        tokio::spawn(forward_subagent_progress(parent.clone(), receiver));
-        Self { parent, progress }
-    }
-
-    pub(super) async fn flush_progress(&self) -> Result<(), rw_core::OrchestrationError> {
-        let (send, receive) = oneshot::channel();
-        self.progress
-            .send(HostedSubagentProgressMessage::Flush(send))
-            .await
-            .map_err(|_| {
-                rw_core::OrchestrationError::Observer(
-                    "child progress forwarder is unavailable".to_owned(),
-                )
-            })?;
-        receive
-            .await
-            .map_err(|_| {
-                rw_core::OrchestrationError::Observer(
-                    "child progress forwarder stopped before flushing".to_owned(),
-                )
-            })?
-            .map_err(rw_core::OrchestrationError::Observer)
-    }
-}
-
-pub(super) async fn forward_subagent_progress(
-    parent: rw_core::SessionHandle,
-    mut receiver: mpsc::Receiver<HostedSubagentProgressMessage>,
-) {
-    let mut batch = Vec::with_capacity(SUBAGENT_PROGRESS_BATCH_EVENTS);
-    let mut interval = tokio::time::interval(SUBAGENT_PROGRESS_BATCH_INTERVAL);
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    interval.tick().await;
-    loop {
-        tokio::select! {
-            message = receiver.recv() => match message {
-                Some(HostedSubagentProgressMessage::Event(event)) => {
-                    batch.push(event);
-                    if batch.len() >= SUBAGENT_PROGRESS_BATCH_EVENTS
-                        && parent.publish_subagent_progress_batch(std::mem::take(&mut batch)).await.is_err()
-                    {
-                        return;
-                    }
-                }
-                Some(HostedSubagentProgressMessage::Flush(respond)) => {
-                    let result = if batch.is_empty() {
-                        Ok(())
-                    } else {
-                        parent
-                            .publish_subagent_progress_batch(std::mem::take(&mut batch))
-                            .await
-                            .map_err(|error| error.to_string())
-                    };
-                    let failed = result.is_err();
-                    let _ = respond.send(result);
-                    if failed {
-                        return;
-                    }
-                }
-                None => {
-                    if !batch.is_empty() {
-                        let _ = parent.publish_subagent_progress_batch(batch).await;
-                    }
-                    return;
-                }
-            },
-            _ = interval.tick(), if !batch.is_empty() => {
-                if parent.publish_subagent_progress_batch(std::mem::take(&mut batch)).await.is_err() {
-                    return;
-                }
-            }
-        }
+        Self { parent }
     }
 }
 
@@ -264,7 +176,6 @@ impl SubagentObserver for HostedSubagentObserver {
         &self,
         result: &rw_core::SubagentResult,
     ) -> Result<(), rw_core::OrchestrationError> {
-        self.flush_progress().await?;
         self.parent
             .record_subagent_finished(result.clone())
             .await
@@ -277,21 +188,14 @@ impl SubagentObserver for HostedSubagentObserver {
         child_sequence: Option<u64>,
         event: serde_json::Value,
     ) -> Result<(), rw_core::OrchestrationError> {
-        self.progress
-            .send(HostedSubagentProgressMessage::Event(
-                SubagentProgressEvent {
-                    subagent_id: handle.subagent_id.clone(),
-                    child_session_id: handle.session_id.clone(),
-                    child_sequence,
-                    event,
-                },
-            ))
-            .await
-            .map_err(|_| {
-                rw_core::OrchestrationError::Observer(
-                    "child progress forwarder is unavailable".to_owned(),
-                )
+        self.parent
+            .publish_subagent_progress(SubagentProgressEvent {
+                subagent_id: handle.subagent_id.clone(),
+                child_session_id: handle.session_id.clone(),
+                child_sequence,
+                event,
             })
+            .map_err(|error| rw_core::OrchestrationError::Observer(error.to_string()))
     }
 }
 

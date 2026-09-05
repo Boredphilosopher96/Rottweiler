@@ -104,6 +104,7 @@ impl SessionActor {
         let handle = SessionHandle {
             shutdown: shutdown.clone(),
             commands: command_tx,
+            child_progress: super::child_progress::HostedChildProgress::new(),
             events: event_tx.clone(),
             active_turn: active_turn.clone(),
             session_id: config.session_id.clone(),

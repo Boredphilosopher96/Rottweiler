@@ -1,30 +1,32 @@
 //! Coalesced child observations never hold up durable lifecycle settlement.
-use super::TurnSignal;
 use rw_tools::{SubagentProgressEvent, ToolError};
 use rw_types::allocation::PrepareAllocation;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-pub(super) const PROGRESS_MEMORY_BYTES: usize = 8 * 1024 * 1024;
+pub(in crate::engine) const PROGRESS_MEMORY_BYTES: usize = 8 * 1024 * 1024;
 pub(in crate::engine) struct ChildProgressSlot {
     pending: Mutex<Option<AdmittedProgress>>,
     budget: Arc<Semaphore>,
+    missed: AtomicBool,
 }
-pub(super) struct AdmittedProgress {
-    pub(super) event: SubagentProgressEvent,
+pub(in crate::engine) struct AdmittedProgress {
+    pub(in crate::engine) event: SubagentProgressEvent,
     _permit: OwnedSemaphorePermit,
 }
 impl ChildProgressSlot {
-    pub(super) fn new(budget: Arc<Semaphore>) -> Arc<Self> {
+    pub(in crate::engine) fn new(budget: Arc<Semaphore>) -> Arc<Self> {
         Arc::new(Self {
             pending: Mutex::new(None),
             budget,
+            missed: AtomicBool::new(false),
         })
     }
-    pub(super) fn publish(
+    pub(in crate::engine) fn publish(
         self: &Arc<Self>,
         mut event: SubagentProgressEvent,
-        signals: &mpsc::UnboundedSender<TurnSignal>,
+        enqueue: impl FnOnce(Arc<Self>) -> bool,
     ) -> Result<(), ToolError> {
         event.event = crate::orchestration::progress::admit(event.child_sequence, event.event)
             .map_err(|error| ToolError::Output(error.to_string()))?;
@@ -32,6 +34,12 @@ impl ChildProgressSlot {
             .pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.missed.load(Ordering::Relaxed) {
+            if event.child_sequence.is_none() {
+                return Ok(());
+            }
+            event.event = serde_json::Value::Null;
+        }
         let queued = pending.is_some();
         if let Some(previous) = pending.as_ref() {
             let Some(sequence) = event.child_sequence else {
@@ -92,16 +100,16 @@ impl ChildProgressSlot {
             _permit: permit,
         });
         if !queued {
-            signals
-                .send(TurnSignal::SubagentProgress(self.clone()))
-                .map_err(|_| {
-                    pending.take();
-                    ToolError::Cancelled
-                })?;
+            if enqueue(self.clone()) {
+                self.missed.store(false, Ordering::Relaxed);
+            } else {
+                pending.take();
+                self.missed.store(true, Ordering::Relaxed);
+            }
         }
         Ok(())
     }
-    pub(super) fn take(&self) -> Option<AdmittedProgress> {
+    pub(in crate::engine) fn take(&self) -> Option<AdmittedProgress> {
         self.pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -112,7 +120,9 @@ impl ChildProgressSlot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::turn::TurnSignal;
     use rw_types::{SessionId, SubagentId};
+    use tokio::sync::mpsc;
     fn event(sequence: u64, text: String) -> SubagentProgressEvent {
         SubagentProgressEvent {
             subagent_id: SubagentId("child".into()),
@@ -127,8 +137,10 @@ mod tests {
         let slot = ChildProgressSlot::new(budget.clone());
         let (send, mut receive) = mpsc::unbounded_channel();
         for sequence in 0..10_000 {
-            slot.publish(event(sequence, "delta".into()), &send)
-                .expect("progress");
+            slot.publish(event(sequence, "delta".into()), |slot| {
+                send.send(TurnSignal::SubagentProgress(slot)).is_ok()
+            })
+            .expect("progress");
         }
         assert_eq!(receive.len(), 1);
         let TurnSignal::SubagentProgress(queued) = receive.try_recv().expect("signal") else {
@@ -139,8 +151,10 @@ mod tests {
         assert!(value.event.event.is_null());
         drop(value);
         assert_eq!(budget.available_permits(), PROGRESS_MEMORY_BYTES);
-        slot.publish(event(10_000, "next".into()), &send)
-            .expect("next");
+        slot.publish(event(10_000, "next".into()), |slot| {
+            send.send(TurnSignal::SubagentProgress(slot)).is_ok()
+        })
+        .expect("next");
         assert_eq!(receive.len(), 1);
     }
     #[test]
@@ -150,10 +164,14 @@ mod tests {
         let second = ChildProgressSlot::new(budget.clone());
         let (send, receive) = mpsc::unbounded_channel();
         first
-            .publish(event(1, "x".repeat(2500)), &send)
+            .publish(event(1, "x".repeat(2500)), |slot| {
+                send.send(TurnSignal::SubagentProgress(slot)).is_ok()
+            })
             .expect("first");
         second
-            .publish(event(2, "x".repeat(2500)), &send)
+            .publish(event(2, "x".repeat(2500)), |slot| {
+                send.send(TurnSignal::SubagentProgress(slot)).is_ok()
+            })
             .expect("second");
         assert_eq!(receive.len(), 2);
         let marker = second.take().expect("marker");

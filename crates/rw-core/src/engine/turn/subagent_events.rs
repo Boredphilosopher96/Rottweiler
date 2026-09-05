@@ -230,6 +230,11 @@ impl SubagentEventSink for ActorSubagentEventSink {
                     self.coordinator.progress_memory.clone(),
                 )
             });
-        slot.publish(event, &self.coordinator.signals)
+        slot.publish(event, |slot| {
+            self.coordinator
+                .signals
+                .send(TurnSignal::SubagentProgress(slot))
+                .is_ok()
+        })
     }
 }

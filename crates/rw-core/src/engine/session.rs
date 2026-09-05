@@ -1,4 +1,5 @@
 mod actor;
+mod child_progress;
 mod config;
 mod control;
 mod handle;

@@ -13,7 +13,6 @@ use crate::engine::task_ownership;
 use crate::engine::turn::RunningTurn;
 use rw_context::Budgeter;
 use rw_ext::ModeRegistry;
-use rw_tools::SubagentProgressEvent;
 use rw_types::ApprovalBinding;
 use rw_types::ApprovalDecision;
 use rw_types::Attachment;
@@ -74,10 +73,7 @@ pub(in crate::engine) enum ActorCommand {
         result: rw_types::SubagentResult,
         respond: oneshot::Sender<Result<(), AgentLoopError>>,
     },
-    PublishSubagentProgressBatch {
-        progress: Vec<SubagentProgressEvent>,
-        respond: oneshot::Sender<Result<(), AgentLoopError>>,
-    },
+    PublishSubagentProgress(Arc<crate::engine::turn::child_progress::ChildProgressSlot>),
     PluginInjectMessage {
         plugin_id: String,
         content: String,
