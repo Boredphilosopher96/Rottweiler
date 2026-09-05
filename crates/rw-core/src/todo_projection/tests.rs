@@ -136,7 +136,7 @@ fn catch_up_is_bounded_and_failed_or_presentation_only_tool_results_do_not_repla
     for index in 0..130 {
         append(&mut journal, |meta| EngineEvent::UserMessageAccepted {
             meta,
-            turn_id: TurnId(index.to_string()),
+            agent_turn: index,
             content: "input".into(),
             attachments: vec![],
         });

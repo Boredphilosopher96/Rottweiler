@@ -4,7 +4,7 @@ use super::read_todos;
 use crate::journal_service::JournalService;
 use rw_store::session::journal::SegmentedJournal;
 use rw_types::{
-    EngineEvent, EventMeta, PROTOCOL_VERSION, SequenceId, SessionId, TurnId,
+    EngineEvent, EventMeta, PROTOCOL_VERSION, SequenceId, SessionId,
     todo::{TodoReadResult, TodoSnapshot},
 };
 use std::sync::Arc;
@@ -25,7 +25,7 @@ async fn active_and_offline_queries_use_acknowledged_prefix_and_bounded_catch_up
             };
             EngineEvent::UserMessageAccepted {
                 meta,
-                turn_id: TurnId(sequence.to_string()),
+                agent_turn: sequence,
                 content: "input".into(),
                 attachments: vec![],
             }
