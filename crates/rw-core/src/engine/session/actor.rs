@@ -326,6 +326,7 @@ pub(super) async fn run_actor(
         if state.closing
             && state.tasks.idle()
             && state.pending_command.is_none()
+            && state.pending_model_preparation.is_none()
             && signals.is_empty()
             && cleanup.is_none()
         {
@@ -340,6 +341,7 @@ pub(super) async fn run_actor(
             && !state.initialization_running
             && state.active_shell.is_none()
             && state.pending_command.is_none()
+            && state.pending_model_preparation.is_none()
             && !state.queued.is_empty()
         {
             state.queued_positions.clear();
@@ -365,6 +367,13 @@ pub(super) async fn run_actor(
         }
         let tasks = state.tasks.clone();
         tokio::select! {
+            result = crate::engine::dispatch::model_job::wait(&mut state.pending_model_preparation) => {
+                crate::engine::dispatch::model_job::finish(result, crate::engine::dispatch::DispatchContext {
+                    state: &mut state, config: &mut config, tool_context: &mut tool_context,
+                    turn_signals: &turn_signals, events: &events, active_turn: &active_turn,
+                    command_descriptors: &command_descriptors, mode_registry: &mode_registry,
+                }).await;
+            }
             result = crate::engine::dispatch::command_job::wait(&mut state.pending_command) => {
                 crate::engine::dispatch::command_job::finish(result, crate::engine::dispatch::DispatchContext {
                     state: &mut state, config: &mut config, tool_context: &mut tool_context,

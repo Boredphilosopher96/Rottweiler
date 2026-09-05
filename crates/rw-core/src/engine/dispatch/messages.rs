@@ -27,6 +27,12 @@ pub(super) async fn dispatch_message(
         command_descriptors,
         mode_registry,
     } = context;
+    if content.trim_start().starts_with('/') && state.pending_model_preparation.is_some() {
+        let _ = respond.send(Err(AgentLoopError::InvalidConfiguration(
+            "model preparation owns the session selection".into(),
+        )));
+        return;
+    }
     if content.trim_start().starts_with('/') {
         let bound = config.commands.bind_line(&content);
         super::command_job::start(
@@ -50,7 +56,10 @@ pub(super) async fn dispatch_message(
         let _ = respond.send(Err(AgentLoopError::InvalidConfiguration(
             "workspace initialization is still running".to_owned(),
         )));
-    } else if state.running.is_some() || state.pending_command.is_some() {
+    } else if state.running.is_some()
+        || state.pending_command.is_some()
+        || state.pending_model_preparation.is_some()
+    {
         let content = config.secret_redactor.redact(&content);
         let Some(position) = state
             .queued_positions

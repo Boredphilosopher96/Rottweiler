@@ -148,6 +148,8 @@ pub(in crate::engine) enum ProtocolCompletion {
 
 #[allow(clippy::struct_excessive_bools)]
 pub(in crate::engine) struct ActorState {
+    pub(in crate::engine) pending_model_preparation:
+        Option<crate::engine::dispatch::model_job::PendingPreparation>,
     pub(in crate::engine) pending_command:
         Option<crate::engine::dispatch::command_job::PendingCommand>,
     pub(in crate::engine) session_id: SessionId,
@@ -280,6 +282,7 @@ impl ActorState {
             queued_positions,
             running: None,
             pending_command: None,
+            pending_model_preparation: None,
             pending_approvals: BTreeMap::new(),
             next_turn: recovered
                 .next_turn

@@ -109,7 +109,8 @@ pub(super) async fn control(
     events: &broadcast::Sender<RoutedEvent>,
     origin: Option<&rw_types::extension_invocation::ExtensionInvocationId>,
     control: ExtensionControl,
-) -> Result<ExtensionControlOutcome, AgentLoopError> {
+    prepared: bool,
+) -> Result<Option<ExtensionControlOutcome>, AgentLoopError> {
     control.validate().map_err(invalid)?;
     let own_command = match (&state.pending_command, origin) {
         (Some(pending), Some(origin))
@@ -121,6 +122,7 @@ pub(super) async fn control(
         _ => false,
     };
     if (state.pending_command.is_some() && !own_command)
+        || state.pending_model_preparation.is_some()
         || state.running.is_some()
         || state.active_shell.is_some()
         || state.initialization_running
@@ -129,7 +131,7 @@ pub(super) async fn control(
         || state.unsettled.is_some()
         || !state.pending_model_switches.is_empty()
     {
-        return Ok(ExtensionControlOutcome::Busy {});
+        return Ok(Some(ExtensionControlOutcome::Busy {}));
     }
     match control {
         ExtensionControl::PinContext { item_id } => {
@@ -171,21 +173,23 @@ pub(super) async fn control(
                 .iter()
                 .any(|turn| turn.role != Role::System)
                 && (state.model_alias != model.0 || state.provider != provider);
-            if !needs_choice {
-                config.model.prepare_model(&model.0).await?;
+            if !needs_choice && !prepared {
+                return Ok(None);
             }
             if let Some(question_id) =
                 super::model_switch::request_model_selection(state, config, events, model, provider)
                     .await?
             {
-                return Ok(ExtensionControlOutcome::ContextChoiceRequired { question_id });
+                return Ok(Some(ExtensionControlOutcome::ContextChoiceRequired {
+                    question_id,
+                }));
             }
         }
     }
     if own_command && let Some(pending) = &mut state.pending_command {
         pending.update_mode(state.mode_id.clone());
     }
-    Ok(ExtensionControlOutcome::Applied {})
+    Ok(Some(ExtensionControlOutcome::Applied {}))
 }
 fn invalid(message: &str) -> AgentLoopError {
     AgentLoopError::InvalidConfiguration(message.into())

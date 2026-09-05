@@ -9,6 +9,7 @@ mod context_surgery;
 mod initialization;
 mod message_input;
 mod messages;
+pub(super) mod model_job;
 mod model_switch;
 mod permissions;
 mod plugin_control;
@@ -38,7 +39,6 @@ use crate::engine::turn::StartTurnRuntime;
 use crate::engine::turn::TurnSignal;
 use crate::engine::turn::emit;
 pub(super) use message_input::prepare_user_message;
-pub(super) use model_switch::commit_prepared_model_switch;
 use rw_ext::CommandDescriptor;
 use rw_ext::ModeRegistry;
 use rw_tools::ToolContext;
@@ -84,6 +84,7 @@ pub(super) async fn handle_actor_command(
                 command,
                 respond,
                 completion,
+                false,
                 DispatchContext {
                     state,
                     config,
@@ -125,9 +126,17 @@ pub(super) async fn handle_actor_command(
             control,
             respond,
         } => {
-            let result =
-                plugin_control::control(state, config, events, origin.as_ref(), control).await;
-            let _ = respond.send(result);
+            model_job::dispatch_plugin(
+                state,
+                config,
+                events,
+                model_job::PluginSelection {
+                    origin,
+                    control,
+                    respond,
+                },
+            )
+            .await;
         }
         ActorCommand::PluginQuery { respond } => {
             let _ = respond.send(Ok(rw_types::extension_contract::ExtensionSessionSnapshot {

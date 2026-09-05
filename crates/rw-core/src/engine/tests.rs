@@ -18,6 +18,7 @@ mod doom_loop;
 mod event_batches;
 mod fixtures;
 mod hooks;
+mod model_preparation;
 mod model_selection;
 mod modes;
 mod mutation_checkpoints;

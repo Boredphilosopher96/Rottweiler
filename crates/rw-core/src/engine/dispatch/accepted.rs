@@ -430,20 +430,14 @@ pub(super) async fn apply_accepted(
                             | ModelContextTransfer::StartWithoutContext => {
                                 let clear_context =
                                     strategy == ModelContextTransfer::StartWithoutContext;
-                                let result =
-                                    match config.model.prepare_model(&prepared.model.0).await {
-                                        Ok(()) => {
-                                            commit_prepared_model_switch(
-                                                state,
-                                                config,
-                                                events,
-                                                prepared,
-                                                clear_context,
-                                            )
-                                            .await
-                                        }
-                                        Err(error) => Err(error),
-                                    };
+                                let result = commit_prepared_model_switch(
+                                    state,
+                                    config,
+                                    events,
+                                    prepared,
+                                    clear_context,
+                                )
+                                .await;
                                 if let Some(complete) = completion.take() {
                                     let _ =
                                         complete.send(result.map(|()| ProtocolCompletion::Unit));

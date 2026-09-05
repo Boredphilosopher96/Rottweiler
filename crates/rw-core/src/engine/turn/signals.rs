@@ -4,7 +4,6 @@ use crate::engine::AgentTurnStatus;
 use crate::engine::RoutedEvent;
 use crate::engine::SessionUsage;
 use crate::engine::diff_binding;
-use crate::engine::dispatch::commit_prepared_model_switch;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::projection::ContextSurgeryAction;
 use crate::engine::session::ActorState;
@@ -377,19 +376,18 @@ pub(in crate::engine) async fn handle_turn_signal(
                     state.replace_conversation(conversation);
                     state.context_surgery = context_surgery;
                     if let Some(model_switch) = model_switch {
-                        result = match config.model.prepare_model(&model_switch.model.0).await {
-                            Ok(()) => {
-                                commit_prepared_model_switch(
-                                    state,
-                                    config,
-                                    events,
-                                    model_switch,
-                                    false,
-                                )
-                                .await
-                            }
-                            Err(error) => Err(error),
-                        };
+                        crate::engine::dispatch::model_job::start(
+                            state,
+                            config,
+                            events,
+                            model_switch.model.0.clone(),
+                            crate::engine::dispatch::model_job::SelectionAction::Commit {
+                                prepared: model_switch,
+                                clear_context: false,
+                                completion,
+                            },
+                        );
+                        return Ok(());
                     }
                 }
             }

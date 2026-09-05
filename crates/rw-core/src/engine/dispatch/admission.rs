@@ -26,14 +26,12 @@ use crate::engine::turn::current_approval_diff;
 use crate::engine::turn::emit;
 use crate::engine::turn::normalize_manual_session_title;
 use rw_types::ApprovalDecision;
-use rw_types::AttachmentData;
 use rw_types::ClientCommand;
 use rw_types::ClientRole;
 use rw_types::CommandOutcome;
 use rw_types::EngineEvent;
 use rw_types::PROTOCOL_VERSION;
 use rw_types::RewindTarget;
-use rw_types::Role;
 use rw_types::SessionMode;
 use std::path::Path;
 use std::sync::Arc;
@@ -80,8 +78,9 @@ pub(super) async fn dispatch_protocol(
     mut command: ClientCommand,
     respond: oneshot::Sender<CommandOutcome>,
     mut completion: Option<oneshot::Sender<Result<ProtocolCompletion, AgentLoopError>>>,
+    prepared: bool,
     context: DispatchContext<'_>,
-) {
+) -> bool {
     let DispatchContext {
         state,
         config,
@@ -142,9 +141,22 @@ pub(super) async fn dispatch_protocol(
     if let Some(outcome) = rejection {
         send_ack(state, events, &meta, session, outcome.clone());
         let _ = respond.send(outcome);
-        return;
+        return false;
     }
 
+    if state.pending_model_preparation.is_some() && !super::model_job::admit_while_pending(&command)
+    {
+        let outcome = protocol_rejection(
+            "model_preparation_busy",
+            "model preparation owns the session selection",
+        );
+        send_ack(state, events, &meta, session, outcome.clone());
+        let _ = respond.send(outcome);
+        return false;
+    }
+    let preparation = (!prepared)
+        .then(|| super::model_job::protocol_alias(&command, state))
+        .flatten();
     if state.pending_command.is_some() && !super::command_job::admit_while_pending(&command) {
         let outcome = protocol_rejection(
             "command_busy",
@@ -152,7 +164,7 @@ pub(super) async fn dispatch_protocol(
         );
         send_ack(state, events, &meta, session, outcome.clone());
         let _ = respond.send(outcome);
-        return;
+        return false;
     }
 
     if let ClientCommand::InvokeUiAction { request, .. } = &command
@@ -161,20 +173,20 @@ pub(super) async fn dispatch_protocol(
         let outcome = protocol_rejection("invalid_ui_action", error.to_string());
         send_ack(state, events, &meta, session, outcome.clone());
         let _ = respond.send(outcome);
-        return;
+        return false;
     }
 
     if let Err(error) = super::source_rewind::resolve(&mut command, state, config).await {
         let outcome = protocol_rejection("invalid_rewind_source", error.to_string());
         send_ack(state, events, &meta, session, outcome.clone());
         let _ = respond.send(outcome);
-        return;
+        return false;
     }
 
     if let Some(outcome) = super::completed_turns::rejection(&command, state, config).await {
         send_ack(state, events, &meta, session, outcome.clone());
         let _ = respond.send(outcome);
-        return;
+        return false;
     }
 
     if let ClientCommand::UserShellEnded {
@@ -195,7 +207,7 @@ pub(super) async fn dispatch_protocol(
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
-            return;
+            return false;
         };
         *title = normalized;
     }
@@ -215,7 +227,7 @@ pub(super) async fn dispatch_protocol(
                 );
                 send_ack(state, events, &meta, session, outcome.clone());
                 let _ = respond.send(outcome);
-                return;
+                return false;
             }
         }
         ClientCommand::SendMessage { .. } if state.active_shell.is_some() => {
@@ -225,7 +237,7 @@ pub(super) async fn dispatch_protocol(
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
-            return;
+            return false;
         }
         ClientCommand::AttachDevelopmentPlugin { source, .. }
             if state.running.is_some()
@@ -241,7 +253,7 @@ pub(super) async fn dispatch_protocol(
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
-            return;
+            return false;
         }
         ClientCommand::DetachDevelopmentPlugin { .. }
             if state.running.is_some()
@@ -254,10 +266,12 @@ pub(super) async fn dispatch_protocol(
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
-            return;
+            return false;
         }
         ClientCommand::SendMessage { attachments, .. }
-            if (state.running.is_some() || state.pending_command.is_some())
+            if (state.running.is_some()
+                || state.pending_command.is_some()
+                || state.pending_model_preparation.is_some())
                 && !attachments.is_empty() =>
         {
             let outcome = protocol_rejection(
@@ -266,7 +280,7 @@ pub(super) async fn dispatch_protocol(
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
-            return;
+            return false;
         }
         ClientCommand::SendMessage {
             content,
@@ -279,41 +293,25 @@ pub(super) async fn dispatch_protocol(
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
-            return;
+            return false;
         }
         ClientCommand::SendMessage {
             content,
             attachments,
             ..
         } => {
-            if attachments.iter().any(|attachment| {
-                matches!(&attachment.data, AttachmentData::InlineBase64 { .. })
-                    && matches!(
-                        attachment.media_type.as_str(),
-                        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
-                    )
-            }) && let Err(error) = config.model.prepare_model(&state.model_alias).await
+            if preparation.is_none()
+                && let Err(message) = prepare_user_message(
+                    content,
+                    attachments,
+                    &state.model_alias,
+                    config.model.as_ref(),
+                )
             {
-                let outcome = protocol_rejection(
-                    "model_unavailable",
-                    format!(
-                        "the selected model could not be prepared for image attachments: {error}"
-                    ),
-                );
-                send_ack(state, events, &meta, session, outcome.clone());
-                let _ = respond.send(outcome);
-                return;
-            }
-            if let Err(message) = prepare_user_message(
-                content,
-                attachments,
-                &state.model_alias,
-                config.model.as_ref(),
-            ) {
                 let outcome = protocol_rejection("invalid_attachment", message);
                 send_ack(state, events, &meta, session, outcome.clone());
                 let _ = respond.send(outcome);
-                return;
+                return false;
             }
         }
         ClientCommand::SwitchModel { .. }
@@ -327,7 +325,7 @@ pub(super) async fn dispatch_protocol(
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
-            return;
+            return false;
         }
         ClientCommand::SwitchModel { .. } if !state.pending_model_switches.is_empty() => {
             let outcome = protocol_rejection(
@@ -336,7 +334,7 @@ pub(super) async fn dispatch_protocol(
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
-            return;
+            return false;
         }
         ClientCommand::SwitchModel {
             model, provider, ..
@@ -348,7 +346,7 @@ pub(super) async fn dispatch_protocol(
                 );
                 send_ack(state, events, &meta, session, outcome.clone());
                 let _ = respond.send(outcome);
-                return;
+                return false;
             }
             if let Some(provider) = provider
                 && !config.model.has_provider_for_alias(&model.0, provider)
@@ -362,21 +360,7 @@ pub(super) async fn dispatch_protocol(
                 );
                 send_ack(state, events, &meta, session, outcome.clone());
                 let _ = respond.send(outcome);
-                return;
-            }
-            let has_prior_context = state
-                .conversation
-                .iter()
-                .any(|turn| turn.role != Role::System);
-            let requires_context_choice = has_prior_context
-                && (state.model_alias != model.0 || state.provider.as_ref() != provider.as_ref());
-            if !requires_context_choice
-                && let Err(error) = config.model.prepare_model(&model.0).await
-            {
-                let outcome = protocol_rejection("unknown_model_alias", error.to_string());
-                send_ack(state, events, &meta, session, outcome.clone());
-                let _ = respond.send(outcome);
-                return;
+                return false;
             }
         }
         ClientCommand::SwitchMode { mode, .. } if config.modes.get(&mode.0).is_none() => {
@@ -386,7 +370,7 @@ pub(super) async fn dispatch_protocol(
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
-            return;
+            return false;
         }
         ClientCommand::SwitchMode { mode, .. }
             if config.modes.get(&mode.0).is_some_and(|definition| {
@@ -399,7 +383,7 @@ pub(super) async fn dispatch_protocol(
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
-            return;
+            return false;
         }
         ClientCommand::ApprovePlan { .. } if state.pending_plan.is_none() => {
             let outcome = protocol_rejection(
@@ -408,7 +392,7 @@ pub(super) async fn dispatch_protocol(
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
-            return;
+            return false;
         }
         ClientCommand::UserShellStarted { command, .. }
             if command.trim().is_empty()
@@ -422,7 +406,7 @@ pub(super) async fn dispatch_protocol(
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
-            return;
+            return false;
         }
         ClientCommand::UserShellEnded {
             shell_id,
@@ -439,7 +423,7 @@ pub(super) async fn dispatch_protocol(
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
-            return;
+            return false;
         }
         ClientCommand::GetSessionReview { .. }
             if state.running.is_some()
@@ -452,7 +436,7 @@ pub(super) async fn dispatch_protocol(
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
-            return;
+            return false;
         }
         ClientCommand::ReviewFile {
             path, current_hash, ..
@@ -468,7 +452,7 @@ pub(super) async fn dispatch_protocol(
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
-            return;
+            return false;
         }
         ClientCommand::ApproveTool {
             tool_call_id,
@@ -482,7 +466,7 @@ pub(super) async fn dispatch_protocol(
             let outcome = protocol_rejection("unknown_approval", "tool approval is not pending");
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
-            return;
+            return false;
         }
         ClientCommand::ApproveTool {
             tool_call_id,
@@ -499,7 +483,7 @@ pub(super) async fn dispatch_protocol(
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
-            return;
+            return false;
         }
         ClientCommand::ApproveTool {
             tool_call_id,
@@ -520,7 +504,7 @@ pub(super) async fn dispatch_protocol(
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
-            return;
+            return false;
         }
         ClientCommand::AnswerQuestion {
             question_id,
@@ -538,7 +522,7 @@ pub(super) async fn dispatch_protocol(
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
-            return;
+            return false;
         }
         ClientCommand::AnswerQuestion {
             question_id,
@@ -553,7 +537,7 @@ pub(super) async fn dispatch_protocol(
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
-            return;
+            return false;
         }
         ClientCommand::AnswerQuestion { question_id, .. }
             if state
@@ -573,14 +557,14 @@ pub(super) async fn dispatch_protocol(
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
-            return;
+            return false;
         }
         ClientCommand::Compact { .. } if state.running.is_some() => {
             let outcome =
                 protocol_rejection("turn_running", "manual compaction requires an idle session");
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
-            return;
+            return false;
         }
         ClientCommand::PinContext { item_id, .. } | ClientCommand::EvictContext { item_id, .. } => {
             if state.running.is_some() {
@@ -588,7 +572,7 @@ pub(super) async fn dispatch_protocol(
                     protocol_rejection("turn_running", "context surgery requires an idle session");
                 send_ack(state, events, &meta, session, outcome.clone());
                 let _ = respond.send(outcome);
-                return;
+                return false;
             }
             if !item_id.0.starts_with("conversation:") {
                 let outcome = protocol_rejection(
@@ -597,7 +581,7 @@ pub(super) async fn dispatch_protocol(
                 );
                 send_ack(state, events, &meta, session, outcome.clone());
                 let _ = respond.send(outcome);
-                return;
+                return false;
             }
             let known = assemble_session_context(
                 config,
@@ -615,10 +599,25 @@ pub(super) async fn dispatch_protocol(
                 );
                 send_ack(state, events, &meta, session, outcome.clone());
                 let _ = respond.send(outcome);
-                return;
+                return false;
             }
         }
         _ => {}
+    }
+
+    if let Some(alias) = preparation {
+        super::model_job::start(
+            state,
+            config,
+            events,
+            alias,
+            super::model_job::SelectionAction::Protocol {
+                command: Box::new(command),
+                respond,
+                completion,
+            },
+        );
+        return false;
     }
 
     if let ClientCommand::ApproveTool {
@@ -676,7 +675,7 @@ pub(super) async fn dispatch_protocol(
                         );
                         send_ack(state, events, &meta, session, outcome.clone());
                         let _ = respond.send(outcome);
-                        return;
+                        return false;
                     }
                 } else if let Some(pending) = state.pending_approvals.remove(&tool_call_id.0) {
                     let _ = pending.respond.send(ApprovalDecision::Deny);
@@ -687,7 +686,7 @@ pub(super) async fn dispatch_protocol(
                 );
                 send_ack(state, events, &meta, session, outcome.clone());
                 let _ = respond.send(outcome);
-                return;
+                return false;
             }
         }
     }
@@ -717,7 +716,7 @@ pub(super) async fn dispatch_protocol(
                     "queued message removal failed".to_owned(),
                 )));
             }
-            return;
+            return false;
         };
         let queued_position = state.queued_positions[index];
         state.transient_cause = Some(meta.request_id.clone());
@@ -755,7 +754,7 @@ pub(super) async fn dispatch_protocol(
                 }
             }
         }
-        return;
+        return false;
     }
 
     if matches!(&command, ClientCommand::ClearQueuedMessages { .. }) {
@@ -771,7 +770,7 @@ pub(super) async fn dispatch_protocol(
                     "queued message clear failed".to_owned(),
                 )));
             }
-            return;
+            return false;
         }
         state.transient_cause = Some(meta.request_id.clone());
         let persisted = emit(
@@ -806,7 +805,7 @@ pub(super) async fn dispatch_protocol(
                 }
             }
         }
-        return;
+        return false;
     }
 
     if matches!(
@@ -855,7 +854,7 @@ pub(super) async fn dispatch_protocol(
                 }
             }
         }
-        return;
+        return false;
     }
 
     if let ClientCommand::AttachSession {
@@ -871,7 +870,7 @@ pub(super) async fn dispatch_protocol(
                 );
                 send_ack(state, events, &meta, session, outcome.clone());
                 let _ = respond.send(outcome);
-                return;
+                return false;
             }
         };
         if last_seen_sequence
@@ -883,7 +882,7 @@ pub(super) async fn dispatch_protocol(
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
-            return;
+            return false;
         }
         match view
             .read_page(*last_seen_sequence, SessionReplayLimits::default())
@@ -897,7 +896,7 @@ pub(super) async fn dispatch_protocol(
                     );
                     send_ack(state, events, &meta, session, outcome.clone());
                     let _ = respond.send(outcome);
-                    return;
+                    return false;
                 }
             }
             Err(error) => {
@@ -907,7 +906,7 @@ pub(super) async fn dispatch_protocol(
                 );
                 send_ack(state, events, &meta, session, outcome.clone());
                 let _ = respond.send(outcome);
-                return;
+                return false;
             }
         }
     }
@@ -957,7 +956,7 @@ pub(super) async fn dispatch_protocol(
         if let Some(complete) = completion.take() {
             let _ = complete.send(Err(error));
         }
-        return;
+        return false;
     }
     let mut precommitted_answer = None;
     if let ClientCommand::AnswerQuestion {
@@ -985,7 +984,7 @@ pub(super) async fn dispatch_protocol(
                 );
                 send_ack(state, events, &meta, session, outcome.clone());
                 let _ = respond.send(outcome);
-                return;
+                return false;
             };
             PrecommittedAnswer::Model(pending, strategy)
         } else {
@@ -996,7 +995,7 @@ pub(super) async fn dispatch_protocol(
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
-            return;
+            return false;
         };
         let turn = match &pending {
             PrecommittedAnswer::Turn(pending, _) => pending.turn,
@@ -1037,7 +1036,7 @@ pub(super) async fn dispatch_protocol(
             if let Some(complete) = completion.take() {
                 let _ = complete.send(Err(error));
             }
-            return;
+            return false;
         }
         precommitted_answer = Some(pending);
     }
@@ -1096,7 +1095,7 @@ pub(super) async fn dispatch_protocol(
                 }
             }
         }
-        return;
+        return false;
     }
     if matches!(
         command,
@@ -1156,7 +1155,7 @@ pub(super) async fn dispatch_protocol(
                 }
             }
         }
-        return;
+        return false;
     }
     let accepted = CommandOutcome::Accepted {};
     send_ack(state, events, &meta, session, accepted.clone());
@@ -1178,4 +1177,5 @@ pub(super) async fn dispatch_protocol(
         },
     )
     .await;
+    true
 }
