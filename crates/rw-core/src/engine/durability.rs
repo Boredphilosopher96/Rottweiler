@@ -247,7 +247,7 @@ pub(super) fn completed_turn_in_memory(
             {
                 boundary = Some(index);
             }
-            EngineEvent::ConversationRewound { to_turn, .. } if *to_turn < turn => {
+            EngineEvent::ConversationRewound { to_agent_turn, .. } if *to_agent_turn < turn => {
                 boundary = None;
             }
             _ => {}

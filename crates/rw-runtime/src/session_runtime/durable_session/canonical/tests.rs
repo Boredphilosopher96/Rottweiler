@@ -267,7 +267,7 @@ async fn completed_turn_query_uses_effective_source_after_rewind_and_reopen() {
                 emitted_at: "2026-09-05T00:00:00Z".into(),
                 caused_by: None,
             },
-            to_turn: 1,
+            to_agent_turn: 1,
             operation_id: "rewind".into(),
             unrestorable_paths: vec![],
         }],
