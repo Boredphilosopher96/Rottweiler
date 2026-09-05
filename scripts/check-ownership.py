@@ -202,8 +202,10 @@ def validate_repository(repo_root: Path, manifest: Path) -> list[str]:
         sources = [shadow_file]
         if shadow_file.suffix == ".rs":
             # A Rust file's child modules retain the same ownership constraints.
-            module_directory = shadow_file.with_suffix("")
-            sources.extend(sorted(module_directory.rglob("*.rs")))
+            module_directory = (shadow_file.parent if shadow_file.name == "mod.rs"
+                                else shadow_file.with_suffix(""))
+            sources.extend(sorted(source for source in module_directory.rglob("*.rs")
+                                  if source != shadow_file))
         for source in sources:
             if compiled.search(source.read_text(encoding="utf-8")):
                 failures.append(

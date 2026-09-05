@@ -165,14 +165,15 @@ class OwnershipCheckerTests(unittest.TestCase):
             self.assertTrue(any("legacy-session-validator" in failure for failure in failures))
 
     def test_rust_child_module_retains_shadow_checks(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            manifest = self.make_valid_repository(root)
-            manifest.write_text(valid_manifest().replace("client/session.ts", "client/session.rs"))
-            write(root, "client/session.rs", "mod nested;\n")
-            write(root, "client/session/nested.rs", "function validateSessionId() {}\n")
-            failures = self.checker.validate_repository(root, manifest)
-            self.assertTrue(any("client/session/nested.rs" in failure for failure in failures))
+        for entrypoint in ["client/session.rs", "client/session/mod.rs"]:
+            with self.subTest(entrypoint=entrypoint), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                manifest = self.make_valid_repository(root)
+                manifest.write_text(valid_manifest().replace("client/session.ts", entrypoint))
+                write(root, entrypoint, "mod nested;\n")
+                write(root, "client/session/nested.rs", "function validateSessionId() {}\n")
+                failures = self.checker.validate_repository(root, manifest)
+                self.assertTrue(any("client/session/nested.rs" in failure for failure in failures))
 
     def test_owner_and_output_paths_must_be_safe_and_unique(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
