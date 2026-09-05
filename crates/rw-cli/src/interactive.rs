@@ -10,8 +10,8 @@ use std::{
 use async_trait::async_trait;
 use miette::{IntoDiagnostic, Result, miette};
 use rw_core::{
-    ClientCommand, ClientId, CommandOutcome, CreateSessionRequest, EngineEvent, EngineHostConfig,
-    ProviderApiKey, SequenceId, SessionId,
+    ClientCommand, ClientId, CreateSessionRequest, EngineEvent, EngineHostConfig, ProviderApiKey,
+    SequenceId, SessionId,
 };
 use rw_runtime::session;
 use rw_types::PermissionModeDescriptor as PermissionMode;
