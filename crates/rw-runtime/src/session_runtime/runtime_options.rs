@@ -1,4 +1,3 @@
-use crate::OutputFormat;
 use crate::journal_service::JournalService;
 use miette::miette;
 use rw_core::AgentLoopError;
@@ -24,9 +23,7 @@ pub(super) const MAX_GLOBAL_REVIEW_DIFF_BYTES: usize = 2 * 1024 * 1024;
 
 pub(super) const MAX_WORKSPACE_ROOTS: usize = 32;
 
-pub struct RunOptions {
-    pub prompt: Option<String>,
-    pub output_format: OutputFormat,
+pub struct LocalSessionOptions {
     pub permission_mode: Option<PermissionMode>,
     pub max_turns: usize,
     pub resume: Option<String>,
@@ -35,16 +32,17 @@ pub struct RunOptions {
     pub record_replay_script: Option<PathBuf>,
     pub in_memory_replay_script: Option<PathBuf>,
     pub record_script_delay_ms: u64,
-    pub perf_markers: bool,
+    /// Compose executable extensions in an offline fixture session.
+    pub activate_fixture_extensions: bool,
     pub replay_provider: String,
     pub model: Option<String>,
     pub additional_workspaces: Vec<PathBuf>,
     pub dangerously_trust: bool,
-    pub action: RunAction,
+    pub purpose: LocalSessionPurpose,
 }
 
-pub enum RunAction {
-    Agent,
+pub enum LocalSessionPurpose {
+    Conversation { interactive: bool },
     PromptDump { turn: Option<u64> },
 }
 

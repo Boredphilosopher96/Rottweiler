@@ -63,7 +63,7 @@ impl DeferredToolProxy {
                 .resolve_authorized(&CredentialReference::new(reference))
                 .map_err(|error| format!("global proxy credential could not resolve: {error}"))?;
             for warning in resolved.warnings() {
-                eprintln!("warning: {warning}");
+                tracing::warn!("{warning}");
             }
             Ok(resolved.secret().expose_secret().clone())
         });
@@ -147,7 +147,7 @@ impl DeferredWebSearchHeaders {
                     format!("web-search credential {reference:?} could not resolve: {error}")
                 })?;
             for warning in resolved.warnings() {
-                eprintln!("warning: {warning}");
+                tracing::warn!("{warning}");
             }
             Ok(resolved.secret().expose_secret().clone())
         });
@@ -243,7 +243,7 @@ pub(super) fn resolve_tool_proxy(
                 .resolve(&CredentialReference::new(reference))
                 .map_err(|error| miette!("global proxy credential could not resolve: {error}"))?;
             for warning in resolved.warnings() {
-                eprintln!("warning: {warning}");
+                tracing::warn!("{warning}");
             }
             Ok(resolved.secret().expose_secret().clone())
         },

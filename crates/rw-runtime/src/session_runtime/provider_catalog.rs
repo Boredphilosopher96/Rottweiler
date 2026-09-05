@@ -40,7 +40,7 @@ pub async fn discover_model_catalog(refresh: bool) -> Result<ModelCatalogSnapsho
     let credentials_path = loader.credentials_path().clone();
     let effective = loader.load().into_diagnostic()?;
     for warning in effective.warnings() {
-        eprintln!("warning: {}", warning.message());
+        tracing::warn!("{}", warning.message());
     }
     let pricing = load_effective_pricing_table().await?;
     let cache_path = credentials_path
@@ -65,7 +65,7 @@ pub async fn discover_model_catalog(refresh: bool) -> Result<ModelCatalogSnapsho
         && initialize_private_storage_root(storage_root).is_ok()
         && store_model_catalog_cache(&cache_path, &snapshot).is_err()
     {
-        eprintln!("warning: refreshed models could not be cached securely");
+        tracing::warn!("refreshed models could not be cached securely");
     }
     Ok(snapshot)
 }

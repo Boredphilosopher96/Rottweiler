@@ -12,7 +12,6 @@ use super::DeferredWebSearchHeaders;
 use super::ExecutionLease;
 use super::FixtureRedactor;
 use super::FolderTrustStore;
-use super::HeadlessQuestionAsker;
 use super::IntelligenceBackend;
 use super::MultiRootCodeIntelligence;
 use super::Ordering;
@@ -20,6 +19,7 @@ use super::Path;
 use super::PathBuf;
 use super::Position;
 use super::SharedCommandFixtureRedactor;
+use super::UnboundQuestionAsker;
 use super::WebSearchConfig;
 use super::WorkspaceSymbolIndex;
 use super::build_tools;
@@ -58,7 +58,7 @@ fn build_tools_registers_intelligence_and_only_configured_live_websearch() {
         index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
         workspace_roots: &[root.path().to_path_buf()],
         trusted_lsp_roots: &[false],
-        question_asker: Arc::new(HeadlessQuestionAsker),
+        question_asker: Arc::new(UnboundQuestionAsker),
         offline: false,
         global_proxy: None,
         deferred_global_proxy: None,
@@ -105,7 +105,7 @@ fn build_tools_registers_intelligence_and_only_configured_live_websearch() {
         index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
         workspace_roots: &[root.path().to_path_buf()],
         trusted_lsp_roots: &[false],
-        question_asker: Arc::new(HeadlessQuestionAsker),
+        question_asker: Arc::new(UnboundQuestionAsker),
         offline: true,
         global_proxy: None,
         deferred_global_proxy: None,
@@ -131,7 +131,7 @@ fn build_tools_registers_intelligence_and_only_configured_live_websearch() {
         index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
         workspace_roots: &[root.path().to_path_buf()],
         trusted_lsp_roots: &[false],
-        question_asker: Arc::new(HeadlessQuestionAsker),
+        question_asker: Arc::new(UnboundQuestionAsker),
         offline: true,
         global_proxy: None,
         deferred_global_proxy: None,
@@ -310,7 +310,7 @@ async fn tool_composition_defers_all_external_credential_backend_reads() {
         index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
         workspace_roots: &[root.path().to_path_buf()],
         trusted_lsp_roots: &[false],
-        question_asker: Arc::new(HeadlessQuestionAsker),
+        question_asker: Arc::new(UnboundQuestionAsker),
         offline: false,
         global_proxy: None,
         deferred_global_proxy: Some(deferred_proxy.clone()),

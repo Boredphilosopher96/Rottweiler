@@ -78,6 +78,15 @@ rottweiler/
 └── tests/                     # cross-crate integration + replay fixtures + protocol contract tests
 ```
 
+`rw-runtime::session::compose_local_session` returns an owned `LocalSession` with
+its command/event handle and a validated prompt inspection result when requested.
+The CLI owns readline, approval input, text/JSON rendering, standard streams, and
+performance markers. Runtime composition does not depend on terminal libraries or
+write to standard streams; diagnostics go to the client's tracing subscriber.
+Closing a local session waits for actor effects, finalizes durable projections and
+session-local state, then settles services. Dropping a client or a cleanup waiter
+requests that same independently owned shutdown; it cannot cancel cleanup.
+
 Dependency rule: arrows point downward only. No Rust crate depends on anything in `packages/`. `rw-operation-contract` is a dependency leaf. `rw-types` consumes the operation contract and the allocation derive macro. `rw-plugin-protocol` consumes the operation and shared-type contracts. `rw-sandbox` owns policy and calls the dependency-free macOS bootstrap crate for Mach authority clearing. `xtask` consumes the type, provider, plugin, operation, and storage owners to generate schemas and SDK projections; product crates never depend on it. `rw-core` is independent of `rw-runtime` and all executable frontends. `rw-runtime` owns concrete storage/provider/tool/MCP/extension assembly and injects it into the core engine. `rw-cli` consumes that owned composition API; its direct lower-level dependencies are explicit, narrow administrative and transport commands, not a re-export facade. The metadata and source-layout rules are enforced in CI by `scripts/check-dependency-direction.py`.
 
 Each piece of contract data and each feature catalog has one hand-maintained

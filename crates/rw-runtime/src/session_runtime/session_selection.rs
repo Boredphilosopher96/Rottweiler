@@ -2,7 +2,7 @@ use super::accounting_projection::refresh_session_index;
 use super::session_metadata::{
     ensure_real_directory, load_session_metadata, new_session_id, validate_session_id,
 };
-use super::{RunAction, RunOptions};
+use super::{LocalSessionOptions, LocalSessionPurpose};
 use miette::{Result, miette};
 use rw_store::session::SessionIndex;
 use rw_tools::ExecutionLease;
@@ -15,7 +15,7 @@ use std::{
 pub(super) fn select_session(
     storage_root: &Path,
     workspace: &Path,
-    options: &RunOptions,
+    options: &LocalSessionOptions,
 ) -> Result<String> {
     if let Some(session) = &options.resume {
         return Ok(session.clone());
@@ -65,8 +65,11 @@ pub fn select_interactive_session(
     new_session_id()
 }
 
-pub(super) fn is_zero_turn_prompt_dump(options: &RunOptions) -> bool {
-    matches!(options.action, RunAction::PromptDump { turn: None })
+pub(super) fn is_zero_turn_prompt_dump(options: &LocalSessionOptions) -> bool {
+    matches!(
+        options.purpose,
+        LocalSessionPurpose::PromptDump { turn: None }
+    )
 }
 
 pub(super) fn latest_workspace_session(

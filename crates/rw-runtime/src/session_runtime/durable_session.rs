@@ -4,7 +4,6 @@ use super::accounting_projection::is_session_projection_boundary;
 use super::accounting_projection::project_accounting;
 use super::accounting_projection::session_projection_updated_at;
 use super::accounting_projection::upsert_session_projection;
-use super::append_tool_output;
 use super::prompt_shapes::PromptShapeJournal;
 use super::restore_todo_state;
 use crate::journal_service::JournalReadLease;
@@ -31,6 +30,7 @@ use rw_store::session::SessionSummary;
 use rw_store::session::UtcTimestamp;
 use rw_tools::TodoTool;
 use rw_types::SessionId;
+use rw_types::ToolOutput;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -537,3 +537,13 @@ impl DurableEventSink {
 
 #[cfg(test)]
 mod commit_tests;
+
+pub(super) fn append_tool_output(target: &mut String, output: &ToolOutput) {
+    match output {
+        ToolOutput::Text { text } => target.push_str(text),
+        ToolOutput::Structured { value } => target.push_str(&value.to_string()),
+        ToolOutput::Mixed { parts } => {
+            let _ = std::fmt::Write::write_fmt(target, format_args!("{parts:?}"));
+        }
+    }
+}

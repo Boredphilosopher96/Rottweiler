@@ -239,75 +239,83 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for McpCommand 
                 let confirm_with = format!("/mcp approve {id} {}", summary.new_fingerprint);
                 render_mcp_approval(&summary, &confirm_with)
             }
-            ["approve", server, confirmation] => {
-                let id = server_id(server)?;
-                let approvals = self.approvals.as_ref().ok_or_else(|| {
-                    CommandExecutionError::new(
-                        "mcp_approval_unavailable",
-                        "MCP configuration approval is unavailable on this host",
-                    )
-                })?;
-                let summary = approvals.approval_summary(&id).map_err(|error| {
-                    CommandExecutionError::new("mcp_approval_failed", error.to_string())
-                })?;
-                if *confirmation != summary.new_fingerprint {
-                    return Err(CommandExecutionError::new(
-                        "mcp_approval_confirmation_mismatch",
-                        "MCP approval confirmation did not match the displayed configuration fingerprint",
-                    ));
-                }
-                let config_approval_changed = approvals.approve_server(&id).map_err(|error| {
-                    CommandExecutionError::new("mcp_approval_failed", error.to_string())
-                })?;
-                // Approval is durable authority, while a live connection is
-                // session state. Establish it for a new approval, or repair a
-                // failed connection when the exact confirmation is repeated.
-                // Ready, pending-schema, and deliberately disabled servers
-                // retain their current live state.
-                if config_approval_changed {
-                    self.manager
-                        .set_enabled(&id, true)
-                        .await
-                        .map_err(|error| mcp_command_error(&error))?;
-                } else {
-                    self.manager
-                        .reconnect_if_failed(&id)
-                        .await
-                        .map_err(|error| mcp_command_error(&error))?;
-                }
-                // Configuration approval does not grant a disabled server a
-                // live schema. Only a connected pending catalog needs approval.
-                let has_pending_schema = self.manager.statuses().await.iter().any(|status| {
-                    status.id == id && matches!(status.state, rw_mcp::ServerState::ApprovalRequired)
-                });
-                let schema_approved = if has_pending_schema {
-                    self.manager
-                        .approve_pending_tools(&id)
-                        .await
-                        .map_err(|error| mcp_command_error(&error))?
-                } else {
-                    false
-                };
-                format!(
-                    "MCP server {id} is approved.\nConfiguration: {}\nTool schema: {}",
-                    if config_approval_changed {
-                        "new approval saved"
-                    } else {
-                        "already approved"
-                    },
-                    if schema_approved {
-                        "approved"
-                    } else {
-                        "unchanged"
-                    },
-                )
-            }
+            ["approve", server, confirmation] => self.approve(server, confirmation).await?,
             _ => return Err(invalid_mcp_command()),
         };
         Ok(SessionCommandOutput {
             message,
             action: SessionCommandAction::None,
         })
+    }
+}
+
+impl McpCommand {
+    async fn approve(
+        &self,
+        server: &str,
+        confirmation: &str,
+    ) -> std::result::Result<String, CommandExecutionError> {
+        let id = server_id(server)?;
+        let approvals = self.approvals.as_ref().ok_or_else(|| {
+            CommandExecutionError::new(
+                "mcp_approval_unavailable",
+                "MCP configuration approval is unavailable on this host",
+            )
+        })?;
+        let summary = approvals.approval_summary(&id).map_err(|error| {
+            CommandExecutionError::new("mcp_approval_failed", error.to_string())
+        })?;
+        if confirmation != summary.new_fingerprint {
+            return Err(CommandExecutionError::new(
+                "mcp_approval_confirmation_mismatch",
+                "MCP approval confirmation did not match the displayed configuration fingerprint",
+            ));
+        }
+        let config_approval_changed = approvals.approve_server(&id).map_err(|error| {
+            CommandExecutionError::new("mcp_approval_failed", error.to_string())
+        })?;
+        // Approval is durable authority, while a live connection is
+        // session state. Establish it for a new approval, or repair a
+        // failed connection when the exact confirmation is repeated.
+        // Ready, pending-schema, and deliberately disabled servers
+        // retain their current live state.
+        if config_approval_changed {
+            self.manager
+                .set_enabled(&id, true)
+                .await
+                .map_err(|error| mcp_command_error(&error))?;
+        } else {
+            self.manager
+                .reconnect_if_failed(&id)
+                .await
+                .map_err(|error| mcp_command_error(&error))?;
+        }
+        // Configuration approval does not grant a disabled server a
+        // live schema. Only a connected pending catalog needs approval.
+        let has_pending_schema = self.manager.statuses().await.iter().any(|status| {
+            status.id == id && matches!(status.state, rw_mcp::ServerState::ApprovalRequired)
+        });
+        let schema_approved = if has_pending_schema {
+            self.manager
+                .approve_pending_tools(&id)
+                .await
+                .map_err(|error| mcp_command_error(&error))?
+        } else {
+            false
+        };
+        Ok(format!(
+            "MCP server {id} is approved.\nConfiguration: {}\nTool schema: {}",
+            if config_approval_changed {
+                "new approval saved"
+            } else {
+                "already approved"
+            },
+            if schema_approved {
+                "approved"
+            } else {
+                "unchanged"
+            },
+        ))
     }
 }
 

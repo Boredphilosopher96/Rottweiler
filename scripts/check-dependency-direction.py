@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tomllib
 
 
 ALLOWED = {
@@ -95,6 +96,18 @@ def validate_source_layout(repo_root: Path) -> list[str]:
             failures.append("rw-runtime must not re-export lower-layer crate APIs")
     else:
         failures.append("rw-runtime/src/lib.rs is missing")
+
+    runtime_manifest = repo_root / "crates" / "rw-runtime" / "Cargo.toml"
+    if runtime_manifest.is_file():
+        dependencies = tomllib.loads(runtime_manifest.read_text()).get("dependencies", {})
+        terminal_dependencies = {"rustyline", "crossterm", "ratatui", "clap"} & dependencies.keys()
+        if terminal_dependencies:
+            failures.append(f"rw-runtime must not depend on terminal clients: {sorted(terminal_dependencies)}")
+    for path in runtime_source.rglob("*.rs"):
+        if "tests" in path.parts or path.name == "tests.rs":
+            continue
+        if re.search(r"\b(?:e?print(?:ln)?!|(?:std::)?io::std(?:in|out|err)\s*\()", path.read_text()):
+            failures.append(f"terminal I/O belongs to clients: {path.relative_to(repo_root)}")
 
     missing_runtime_files = sorted(
         name for name in RUNTIME_COMPOSITION_FILES if not (runtime_source / name).is_file()

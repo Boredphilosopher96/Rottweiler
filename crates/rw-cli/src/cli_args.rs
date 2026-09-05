@@ -82,16 +82,6 @@ pub(super) enum OutputFormat {
     StreamJson,
 }
 
-impl From<OutputFormat> for rw_runtime::OutputFormat {
-    fn from(value: OutputFormat) -> Self {
-        match value {
-            OutputFormat::Text => Self::Text,
-            OutputFormat::Json => Self::Json,
-            OutputFormat::StreamJson => Self::StreamJson,
-        }
-    }
-}
-
 pub(super) const DEFAULT_MAX_TURNS: usize = 32;
 
 #[derive(Debug, Default, Args)]

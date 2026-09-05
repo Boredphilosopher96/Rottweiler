@@ -16,7 +16,6 @@ use super::FolderTrustController;
 use super::FolderTrustOperation;
 use super::FolderTrustStore;
 use super::HashMap;
-use super::HeadlessQuestionAsker;
 use super::JournalService;
 use super::MutationCheckpointOutcome;
 use super::MutationScope;
@@ -42,6 +41,7 @@ use super::ToolCapability;
 use super::ToolContext;
 use super::ToolchainConfig;
 use super::ToolchainRuntime;
+use super::UnboundQuestionAsker;
 use super::WebSearchConfig;
 use super::WorkspaceRootAuthorization;
 use super::abort_checkpoint_root_generation;
@@ -279,7 +279,7 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
         journal_service: JournalService::new(&private).expect("journal reads"),
         checkpoint_root: checkpoint_root.clone(),
         storage_root: private.clone(),
-        question_asker: Arc::new(HeadlessQuestionAsker),
+        question_asker: Arc::new(UnboundQuestionAsker),
         offline: false,
         global_proxy: None,
         deferred_global_proxy: None,
@@ -624,7 +624,7 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
         journal_service: JournalService::new(&private).expect("journal reads"),
         checkpoint_root: checkpoint_root.clone(),
         storage_root: private.clone(),
-        question_asker: Arc::new(HeadlessQuestionAsker),
+        question_asker: Arc::new(UnboundQuestionAsker),
         offline: false,
         global_proxy: None,
         deferred_global_proxy: None,

@@ -4,7 +4,6 @@ use super::checkpoint_journal::preview_persisted_workspace_roots;
 use super::checkpoint_journal::restore_persisted_workspace_roots;
 use super::checkpoints::DurableCheckpointCoordinator;
 use super::checkpoints::recover_rewind_transactions;
-use super::cli_output::HeadlessQuestionAsker;
 use super::command_execution::CommandFixtureMode;
 use super::credential_resolution::DeferredToolProxy;
 use super::credential_resolution::DeferredWebSearchHeaders;
@@ -20,6 +19,7 @@ use super::extension_discovery::skill_index_turn;
 use super::folder_trust::RuntimeFolderTrustController;
 use super::folder_trust::project_approval_path;
 use super::initial_memory::fresh_initial_session_context;
+use super::interaction_policy::UnboundQuestionAsker;
 use super::native_search::AliasAwareWebSearchModel;
 use super::native_search::provider_native_search_available;
 use super::nested_instructions::NestedInstructionsModel;
@@ -310,7 +310,7 @@ pub(crate) async fn compose_hosted_actor(
     let websearch_headers = BTreeMap::new();
     let tool_workspace_roots = workspace_roots.clone();
     let tool_execution_lease = Arc::clone(&execution_lease);
-    let root_question_asker: Arc<dyn QuestionAsker> = Arc::new(HeadlessQuestionAsker);
+    let root_question_asker: Arc<dyn QuestionAsker> = Arc::new(UnboundQuestionAsker);
     let command_safety = Arc::new(
         CommandSafetyClassifier::new(&options.config.sandbox.safe_list)
             .map_err(|error| miette!(error))?,
@@ -386,7 +386,7 @@ pub(crate) async fn compose_hosted_actor(
             derived_project_trusted || options.dangerously_trust,
         )?;
         for warning in &catalog.warnings {
-            eprintln!("warning: {warning}");
+            tracing::warn!("{warning}");
         }
         catalog
     };
@@ -456,7 +456,7 @@ pub(crate) async fn compose_hosted_actor(
             &options.plugin_activation,
         )?);
         for pending in &runtime.pending {
-            eprintln!("warning: plugin {pending}");
+            tracing::warn!("plugin {pending}");
         }
         if !runtime.tools.is_empty() {
             let names = built_tools

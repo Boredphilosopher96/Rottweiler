@@ -1,17 +1,11 @@
-#![cfg(test)]
-use super::ApprovalDecision;
-use super::EngineEvent;
-use super::EventMeta;
-use super::PendingInteraction;
-use super::QuestionId;
-use super::SESSION_EVENT_VERSION;
-use super::SequenceId;
-use super::SessionId;
-use super::ToolCapability;
-use super::TurnId;
-use super::VecDeque;
-use super::parse_approval;
-use super::public_cli_event;
+#![allow(clippy::expect_used)]
+use super::{PendingInteraction, parse_approval, public_cli_event};
+use rw_core::SESSION_EVENT_VERSION;
+use rw_types::{
+    ApprovalDecision, EngineEvent, EventMeta, QuestionId, SequenceId, SessionId, ToolCapability,
+    TurnId,
+};
+use std::collections::VecDeque;
 
 #[test]
 fn headless_approval_parser_fails_closed() {

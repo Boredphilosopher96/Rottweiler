@@ -14,6 +14,7 @@ pub(super) fn own(
     wasm: Arc<rw_ext::WasmWorkerPool>,
     admission: Arc<DurableProviderAdmission>,
     journal: Arc<crate::journal_service::JournalService>,
+    finalize: impl Future<Output = Proof> + Send + 'static,
 ) -> Arc<RuntimeSessionResources> {
     let retained = (
         actor.clone(),
@@ -24,7 +25,13 @@ pub(super) fn own(
     );
     RuntimeSessionResources::own_cleanup(retained, async move {
         settle(
-            async move { actor.close().await.map_err(message) },
+            async move {
+                prove("session actor", async {
+                    actor.close().await.map_err(message)
+                })
+                .await?;
+                prove("session finalization", finalize).await
+            },
             async move { plugins.close().map_err(message) },
             async move { wasm.shutdown().await.map_err(message) },
             async move { admission.shutdown().await.map_err(message) },

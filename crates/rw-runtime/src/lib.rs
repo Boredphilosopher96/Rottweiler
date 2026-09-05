@@ -53,10 +53,11 @@ pub mod executable_config {
 /// Intentional session-runtime surface consumed by headless frontends.
 pub mod session {
     pub use crate::session_runtime::{
-        HostedProviderMode, RunAction, RunOptions, discover_model_catalog,
-        discover_runtime_extensions, extension_user_roots, initialize_private_storage_root,
+        HostedProviderMode, LocalSession, LocalSessionOptions, LocalSessionPurpose,
+        compose_local_session, discover_model_catalog, discover_runtime_extensions,
+        extension_user_roots, initialize_private_storage_root,
         load_inherited_accounting_boundary_bounded, locate_wasm_host_executable, new_session_id,
-        register_credential_environment, run, select_interactive_session,
+        register_credential_environment, select_interactive_session,
     };
 }
 
@@ -64,15 +65,6 @@ pub mod session {
 pub mod plugin {
     pub use crate::plugin_process::SandboxedPluginLauncher;
     pub use crate::source_plugin::resolve_plugin_process;
-}
-
-/// Provider-output rendering selected by a non-interactive runtime client.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum OutputFormat {
-    #[default]
-    Text,
-    Json,
-    StreamJson,
 }
 
 #[cfg(unix)]

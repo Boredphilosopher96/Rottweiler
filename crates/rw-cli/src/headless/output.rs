@@ -1,6 +1,5 @@
-use super::runtime_options::display_agent_error;
-use crate::OutputFormat;
-use async_trait::async_trait;
+use super::display_agent_error;
+use crate::cli_args::OutputFormat;
 use miette::IntoDiagnostic;
 use miette::Result;
 use miette::miette;
@@ -12,14 +11,9 @@ use rw_core::QuestionId;
 use rw_core::ToolOutputStream;
 use rw_core::TurnStatus;
 use rw_core::Usage;
-use rw_tools::AskUserInput;
-use rw_tools::CancellationToken;
-use rw_tools::QuestionAsker;
-use rw_tools::ToolError;
 use rw_types::ApprovalBinding;
 use rw_types::ApprovalDecision;
 use rw_types::ToolCapability;
-use rw_types::ToolOutput;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::io;
@@ -27,27 +21,6 @@ use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
-
-pub(super) struct HeadlessQuestionAsker;
-
-#[async_trait]
-impl QuestionAsker for HeadlessQuestionAsker {
-    async fn ask(
-        &self,
-        request: AskUserInput,
-        _cancellation: CancellationToken,
-    ) -> std::result::Result<String, ToolError> {
-        if let Some(first) = request.options.first() {
-            Ok(first.clone())
-        } else if request.allow_free_text {
-            Ok("No interactive answer is available in headless mode.".to_owned())
-        } else {
-            Err(ToolError::Interaction(
-                "headless ask_user has no selectable default".to_owned(),
-            ))
-        }
-    }
-}
 
 #[allow(clippy::too_many_lines)]
 pub(super) async fn run_print(
@@ -606,12 +579,5 @@ pub(super) fn parse_approval(input: &str) -> ApprovalDecision {
     }
 }
 
-pub(super) fn append_tool_output(target: &mut String, output: &ToolOutput) {
-    match output {
-        ToolOutput::Text { text } => target.push_str(text),
-        ToolOutput::Structured { value } => target.push_str(&value.to_string()),
-        ToolOutput::Mixed { parts } => {
-            let _ = std::fmt::Write::write_fmt(target, format_args!("{parts:?}"));
-        }
-    }
-}
+#[cfg(test)]
+mod tests;

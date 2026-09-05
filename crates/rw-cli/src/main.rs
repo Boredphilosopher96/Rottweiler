@@ -14,6 +14,7 @@ use tracing_subscriber::EnvFilter;
 
 mod auth_cli;
 mod cli_args;
+mod headless;
 #[cfg(unix)]
 mod history_replay;
 #[cfg(unix)]
@@ -82,7 +83,11 @@ fn main() -> Result<()> {
 #[allow(clippy::too_many_lines)]
 async fn run() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(
+            EnvFilter::builder()
+                .with_default_directive(tracing::Level::WARN.into())
+                .from_env_lossy(),
+        )
         .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
         .with_writer(std::io::stderr)
         .init();
@@ -156,24 +161,32 @@ async fn run() -> Result<()> {
             let max_turns = max_turns(cli.max_turns, options.engine.max_turns)?;
             let resume = merge_cli_option("--resume", cli.resume.clone(), options.resume)?;
             let model = merge_cli_option("--model", cli.model, options.model)?;
-            session::run(session::RunOptions {
-                prompt: None,
-                output_format: output_format.into(),
-                permission_mode,
-                max_turns,
-                continue_latest: resume.is_none(),
-                resume,
-                replay_dir: None,
-                record_replay_script: None,
-                in_memory_replay_script: None,
-                record_script_delay_ms: 0,
-                perf_markers: false,
-                replay_provider: "prompt-dump-offline".to_owned(),
-                model,
-                additional_workspaces: merge_workspace_roots(cli.add_dirs, options.engine.add_dirs),
-                dangerously_trust: cli.dangerously_trust || options.engine.dangerously_trust,
-                action: session::RunAction::PromptDump { turn },
-            })
+            headless::run(
+                session::LocalSessionOptions {
+                    permission_mode,
+                    max_turns,
+                    continue_latest: resume.is_none(),
+                    resume,
+                    replay_dir: None,
+                    record_replay_script: None,
+                    in_memory_replay_script: None,
+                    record_script_delay_ms: 0,
+                    activate_fixture_extensions: false,
+                    replay_provider: "prompt-dump-offline".to_owned(),
+                    model,
+                    additional_workspaces: merge_workspace_roots(
+                        cli.add_dirs,
+                        options.engine.add_dirs,
+                    ),
+                    dangerously_trust: cli.dangerously_trust || options.engine.dangerously_trust,
+                    purpose: session::LocalSessionPurpose::PromptDump { turn },
+                },
+                headless::ClientOptions {
+                    prompt: None,
+                    format: output_format,
+                    perf_markers: false,
+                },
+            )
             .await?;
         }
         Some(Command::Config {
@@ -625,26 +638,33 @@ async fn run() -> Result<()> {
                 || cli.record_replay_script.is_some()
                 || cli.perf_markers;
             if headless {
-                session::run(session::RunOptions {
-                    prompt: cli.prompt,
-                    output_format: cli.output_format.unwrap_or_default().into(),
-                    permission_mode: cli.permission_mode,
-                    max_turns: cli.max_turns.unwrap_or(DEFAULT_MAX_TURNS),
-                    resume: cli.resume,
-                    continue_latest: cli.continue_latest,
-                    replay_dir: cli.replay_dir,
-                    record_replay_script: cli.record_replay_script,
-                    in_memory_replay_script: cli.in_memory_replay_script,
-                    record_script_delay_ms: cli.record_script_delay_ms.unwrap_or_default(),
-                    perf_markers: cli.perf_markers,
-                    replay_provider: cli
-                        .replay_provider
-                        .unwrap_or_else(|| "cli-replay".to_owned()),
-                    model: cli.model,
-                    additional_workspaces: cli.add_dirs,
-                    dangerously_trust: cli.dangerously_trust,
-                    action: session::RunAction::Agent,
-                })
+                headless::run(
+                    session::LocalSessionOptions {
+                        permission_mode: cli.permission_mode,
+                        max_turns: cli.max_turns.unwrap_or(DEFAULT_MAX_TURNS),
+                        resume: cli.resume,
+                        continue_latest: cli.continue_latest,
+                        replay_dir: cli.replay_dir,
+                        record_replay_script: cli.record_replay_script,
+                        in_memory_replay_script: cli.in_memory_replay_script,
+                        record_script_delay_ms: cli.record_script_delay_ms.unwrap_or_default(),
+                        activate_fixture_extensions: cli.perf_markers,
+                        replay_provider: cli
+                            .replay_provider
+                            .unwrap_or_else(|| "cli-replay".to_owned()),
+                        model: cli.model,
+                        additional_workspaces: cli.add_dirs,
+                        dangerously_trust: cli.dangerously_trust,
+                        purpose: session::LocalSessionPurpose::Conversation {
+                            interactive: cli.prompt.is_none(),
+                        },
+                    },
+                    headless::ClientOptions {
+                        prompt: cli.prompt,
+                        format: cli.output_format.unwrap_or_default(),
+                        perf_markers: cli.perf_markers,
+                    },
+                )
                 .await?;
             } else {
                 run_local_tui(&cli).await?;

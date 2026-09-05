@@ -44,6 +44,17 @@ class DependencyDirectionSourceContractTests(unittest.TestCase):
             self.assertTrue(any("facade laundering" in failure for failure in failures))
             self.assertTrue(any("must not own runtime" in failure for failure in failures))
 
+    def test_runtime_terminal_dependency_and_output_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_layout(root)
+            runtime = root / "crates" / "rw-runtime"
+            (runtime / "Cargo.toml").write_text('[dependencies]\nrustyline = "18"\n')
+            (runtime / "src" / "output.rs").write_text('fn output() { println!("hello"); }')
+            failures = CHECKER.validate_source_layout(root)
+            self.assertTrue(any("terminal clients" in failure for failure in failures))
+            self.assertTrue(any("terminal I/O belongs to clients" in failure for failure in failures))
+
     def test_wildcard_reexport_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

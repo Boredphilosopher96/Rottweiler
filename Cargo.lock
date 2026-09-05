@@ -2968,7 +2968,6 @@ dependencies = [
  "nix 0.31.3",
  "portable-pty",
  "rustix",
- "rustyline",
  "rw-core",
  "rw-ext",
  "rw-mcp",

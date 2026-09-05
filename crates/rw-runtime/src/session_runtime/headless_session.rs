@@ -5,9 +5,6 @@ use super::checkpoint_journal::preview_persisted_workspace_roots;
 use super::checkpoint_journal::restore_persisted_workspace_roots;
 use super::checkpoints::DurableCheckpointCoordinator;
 use super::checkpoints::recover_rewind_transactions;
-use super::cli_output::HeadlessQuestionAsker;
-use super::cli_output::run_print;
-use super::cli_output::run_repl;
 use super::command_execution::CommandFixtureMode;
 use super::credential_resolution::DeferredToolProxy;
 use super::credential_resolution::DeferredWebSearchHeaders;
@@ -23,6 +20,7 @@ use super::extension_discovery::skill_index_turn;
 use super::folder_trust::RuntimeFolderTrustController;
 use super::folder_trust::project_approval_path;
 use super::initial_memory::fresh_initial_session_context;
+use super::interaction_policy::UnboundQuestionAsker;
 use super::native_search::AliasAwareWebSearchModel;
 use super::native_search::provider_model_for_alias;
 use super::native_search::provider_native_search_available;
@@ -42,8 +40,8 @@ use super::runtime_options::AbortOnDropTask;
 use super::runtime_options::DEFAULT_DOOM_LOOP_LIMIT;
 use super::runtime_options::DEFAULT_EVENT_CAPACITY;
 use super::runtime_options::DEFAULT_MAX_OUTPUT_TOKENS;
-use super::runtime_options::RunAction;
-use super::runtime_options::RunOptions;
+use super::runtime_options::LocalSessionOptions;
+use super::runtime_options::LocalSessionPurpose;
 use super::runtime_options::display_agent_error;
 use super::script_provider::ScriptProvider;
 use super::script_provider::load_provider_script;
@@ -89,7 +87,6 @@ use rw_core::SubagentLimits;
 use rw_core::SubagentOrchestrator;
 use rw_core::SubagentSessionFactory;
 use rw_core::SystemEventClock;
-use rw_core::TurnStatus;
 use rw_core::WorktreeSubagentSessionFactory;
 use rw_core::project_session_events;
 use rw_ext::compose_agent_registry;
@@ -116,7 +113,6 @@ use rw_types::SessionId;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
-use std::io;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -124,11 +120,11 @@ use std::sync::OnceLock;
 use std::sync::RwLock;
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-/// Runs a local print, line, or inspection session.
+/// Composes an owned local conversation or prompt-inspection session.
 ///
 /// # Errors
-/// Returns an error when session composition, execution, or output rendering fails.
-pub async fn run(options: RunOptions) -> Result<()> {
+/// Returns an error when configuration, durable recovery, or composition fails.
+pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super::LocalSession> {
     if options.max_turns == 0 {
         return Err(miette!("--max-turns must be greater than zero"));
     }
@@ -168,7 +164,7 @@ pub async fn run(options: RunOptions) -> Result<()> {
     let index_pool = Arc::new(rw_tools::WorkspaceIndexPool::default());
     let loaded_config = config_loader.load().into_diagnostic()?;
     for warning in loaded_config.warnings() {
-        eprintln!("warning: {}", warning.message());
+        tracing::warn!("{}", warning.message());
     }
 
     let session_id = select_session(&storage_root, &workspace, &options)?;
@@ -225,21 +221,22 @@ pub async fn run(options: RunOptions) -> Result<()> {
     }
     // Exact Git-root validation can create private worktree state, so it starts
     // only after persisted mode fingerprints have been accepted.
-    let worktree_isolation_task = if matches!(&options.action, RunAction::Agent) {
-        let repository_root = workspace.clone();
-        let private_root = storage_root.join("worktrees");
-        Some(AbortOnDropTask::new(tokio::spawn(async move {
-            WorktreeIsolation::new(
-                repository_root,
-                private_root,
-                WorktreeLimits::default(),
-                CancellationToken::default(),
-            )
-            .await
-        })))
-    } else {
-        None
-    };
+    let worktree_isolation_task =
+        if matches!(&options.purpose, LocalSessionPurpose::Conversation { .. }) {
+            let repository_root = workspace.clone();
+            let private_root = storage_root.join("worktrees");
+            Some(AbortOnDropTask::new(tokio::spawn(async move {
+                WorktreeIsolation::new(
+                    repository_root,
+                    private_root,
+                    WorktreeLimits::default(),
+                    CancellationToken::default(),
+                )
+                .await
+            })))
+        } else {
+            None
+        };
     let execution_lease_path = workspace_execution_lease_path(&storage_root, &workspace)?;
     // The event writer above already excludes a live process resuming this
     // exact session. If a crashed process's command watchdog is the only
@@ -321,9 +318,9 @@ pub async fn run(options: RunOptions) -> Result<()> {
         checkpoint_stores,
     ));
 
-    let prompt_dump_turn = match options.action {
-        RunAction::Agent => None,
-        RunAction::PromptDump { turn } => Some(turn),
+    let prompt_dump_turn = match options.purpose {
+        LocalSessionPurpose::Conversation { .. } => None,
+        LocalSessionPurpose::PromptDump { turn } => Some(turn),
     };
     let inspection = prompt_dump_turn.is_some();
     let recorded_prompt_shape = if let Some(turn) = prompt_dump_turn.flatten() {
@@ -333,7 +330,7 @@ pub async fn run(options: RunOptions) -> Result<()> {
                 .shape_for_turn(turn)?
                 .ok_or_else(|| {
                     miette!(
-                        "exact request shape is unavailable for historical turn {turn}; the session predates prompt-shape recording or its metadata is missing"
+                        "exact request shape is unavailable for historical turn {turn}; its required prompt-shape metadata is missing"
                     )
                 })?,
         )
@@ -342,8 +339,11 @@ pub async fn run(options: RunOptions) -> Result<()> {
     } else {
         None
     };
-    let interactive = !inspection && options.prompt.is_none();
-    let question_asker: Arc<dyn QuestionAsker> = Arc::new(HeadlessQuestionAsker);
+    let interactive = matches!(
+        options.purpose,
+        LocalSessionPurpose::Conversation { interactive: true }
+    );
+    let question_asker: Arc<dyn QuestionAsker> = Arc::new(UnboundQuestionAsker);
     let offline_fixture =
         inspection || options.replay_dir.is_some() || options.in_memory_replay_script.is_some();
     let fixture_redactor = FixtureRedactor::default();
@@ -465,20 +465,21 @@ pub async fn run(options: RunOptions) -> Result<()> {
     // The hidden release gate uses an in-memory provider while deliberately
     // exercising production executable discovery. Other offline/replay runs
     // keep executable project configuration inert.
-    let executable_catalog = if inspection || (offline_fixture && !options.perf_markers) {
-        crate::extension_config::ExecutableConfigCatalog::default()
-    } else {
-        let (user_home, _) = extension_user_roots(&config_loader.credentials_path());
-        let catalog = crate::extension_config::discover_executable_configs(
-            &user_home,
-            &workspace,
-            derived_project_trusted || options.dangerously_trust,
-        )?;
-        for warning in &catalog.warnings {
-            eprintln!("warning: {warning}");
-        }
-        catalog
-    };
+    let executable_catalog =
+        if inspection || (offline_fixture && !options.activate_fixture_extensions) {
+            crate::extension_config::ExecutableConfigCatalog::default()
+        } else {
+            let (user_home, _) = extension_user_roots(&config_loader.credentials_path());
+            let catalog = crate::extension_config::discover_executable_configs(
+                &user_home,
+                &workspace,
+                derived_project_trusted || options.dangerously_trust,
+            )?;
+            for warning in &catalog.warnings {
+                tracing::warn!("{warning}");
+            }
+            catalog
+        };
     let mcp_runtime = (if executable_catalog.mcp_servers.is_empty() {
         None
     } else {
@@ -613,7 +614,7 @@ pub async fn run(options: RunOptions) -> Result<()> {
             &plugin_activation,
         )?;
         for pending in &runtime.pending {
-            eprintln!("warning: plugin {pending}");
+            tracing::warn!("plugin {pending}");
         }
         if !runtime.tools.is_empty() {
             let names = actor_tools
@@ -1097,74 +1098,65 @@ pub async fn run(options: RunOptions) -> Result<()> {
         event_capacity: DEFAULT_EVENT_CAPACITY,
     })
     .map_err(display_agent_error)?;
+    let final_sink = Arc::clone(&durable_sink);
+    let final_root = storage_root.clone();
+    let final_session = session_id.clone();
+    let todo = built_tools.todo.clone();
     let lifetime = super::headless_lifetime::own(
         actor.clone(),
         Arc::clone(&plugin_activation),
         Arc::clone(&wasm_workers),
         Arc::clone(&provider_admission),
         Arc::clone(&journal_service),
+        async move {
+            let indexed = if interactive {
+                update_one_session_index(&final_root, &final_session, &final_sink)
+            } else {
+                Ok(())
+            };
+            todo.clear_session(&SessionId(final_session)).await;
+            indexed.map_err(|error| Arc::<str>::from(error.to_string()))
+        },
     );
-    let execution = async {
+    let prepared = async {
         if let Some(plugins) = &plugin_runtime {
             plugins.bind_push(&actor)?;
         }
-        if options.perf_markers {
-            // Emitted only after provider/tool/command composition, MCP catalog
-            // initialization, and actor creation. The M8 subprocess gate measures
-            // process spawn through observing this line on stderr.
-            eprintln!("rw_perf_prompt_ready=1");
-        }
-
-        let outcome = if let Some(turn) = prompt_dump_turn {
-            let dump = actor
-                .dump_prompt(turn.map(|turn| rw_core::TurnId(turn.to_string())))
-                .await
-                .map_err(display_agent_error)?;
-            if let (Some(_), Some((profile, record))) = (turn, &recorded_prompt_shape) {
-                let tools = dump
-                    .tools
-                    .iter()
-                    .map(|tool| ToolDefinition {
-                        name: tool.name.clone(),
-                        description: tool.description.clone(),
-                        input_schema: tool.input_schema.clone(),
-                    })
-                    .collect::<Vec<_>>();
-                validate_historical_prompt_shape(&dump, &tools, profile, record)?;
-            }
-            serde_json::to_writer_pretty(io::stdout().lock(), &dump).into_diagnostic()?;
-            println!();
-            None
-        } else if let Some(prompt) = options.prompt {
-            run_print(
-                &actor,
-                &session_id,
-                &prompt,
-                options.output_format,
-                options.perf_markers,
-            )
-            .await?
-        } else {
-            run_repl(&actor, &storage_root, options.output_format).await?
+        let Some(turn) = prompt_dump_turn else {
+            return Ok::<_, miette::Report>(None);
         };
-        if interactive {
-            update_one_session_index(&storage_root, &session_id, &durable_sink)?;
+        let dump = actor
+            .dump_prompt(turn.map(|turn| rw_core::TurnId(turn.to_string())))
+            .await
+            .map_err(display_agent_error)?;
+        if let (Some(_), Some((profile, record))) = (turn, &recorded_prompt_shape) {
+            let tools = dump
+                .tools
+                .iter()
+                .map(|tool| ToolDefinition {
+                    name: tool.name.clone(),
+                    description: tool.description.clone(),
+                    input_schema: tool.input_schema.clone(),
+                })
+                .collect::<Vec<_>>();
+            validate_historical_prompt_shape(&dump, &tools, profile, record)?;
         }
-        built_tools
-            .todo
-            .clear_session(&SessionId(session_id.clone()))
-            .await;
-        Ok::<_, miette::Report>(outcome)
+        Ok(Some(dump))
     }
     .await;
-    rw_core::SessionResources::shutdown(lifetime.as_ref())
-        .await
-        .map_err(display_agent_error)?;
-    let outcome = execution?;
-    if let Some(status) = outcome
-        && status != TurnStatus::Completed
-    {
-        return Err(miette!("agent turn ended with status {status:?}"));
+    match prepared {
+        Ok(dump) => Ok(super::LocalSession::new(
+            actor,
+            session_id,
+            storage_root,
+            dump,
+            lifetime,
+        )),
+        Err(error) => {
+            rw_core::SessionResources::shutdown(lifetime.as_ref())
+                .await
+                .map_err(display_agent_error)?;
+            Err(error)
+        }
     }
-    Ok(())
 }
