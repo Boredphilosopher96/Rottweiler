@@ -2135,6 +2135,7 @@ pub async fn run(options: RunOptions) -> Result<()> {
                     orchestrator.clone(),
                     agents,
                     Arc::clone(&extension_catalog),
+                    storage_root.clone(),
                 )))
                 .map_err(|error| miette!("workflow tool could not register: {error}"))?;
         }
@@ -2974,6 +2975,7 @@ pub(crate) async fn compose_hosted_actor(
                 orchestrator.clone(),
                 agents,
                 Arc::clone(&extension_catalog),
+                options.storage_root.clone(),
             )))
             .map_err(|error| miette!("workflow tool could not register: {error}"))?;
     }
@@ -9238,7 +9240,7 @@ fn compose_runtime_commands(
         storage_root.to_path_buf(),
     )
     .map_err(|error| miette!("project commands could not register: {error}"))?;
-    crate::workflow_runtime::register_workflow_command(&mut registry, catalog, tools)
+    crate::workflow_runtime::register_workflow_command(&mut registry, catalog, tools, storage_root)
         .map_err(|error| miette!("workflow command could not register: {error}"))?;
     let mut definitions = catalog
         .commands()

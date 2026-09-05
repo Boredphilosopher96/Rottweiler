@@ -152,6 +152,13 @@ pub(super) fn normalize_spawn_agent_input(
 
 #[async_trait]
 impl Tool for SpawnAgentTool {
+    async fn settle_effects(&self) -> Result<(), ToolError> {
+        self.orchestrator
+            .settle_startups()
+            .await
+            .map_err(|error| ToolError::EffectsUnsettled(error.to_string()))
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "spawn_agent".to_owned(),

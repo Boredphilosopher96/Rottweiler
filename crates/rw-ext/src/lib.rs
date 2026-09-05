@@ -45,9 +45,10 @@ pub use registry::*;
 pub use wasm::*;
 pub use wasm_process::*;
 pub use workflow::{
-    DiscoveredWorkflow, WorkflowCondition, WorkflowOnFail, WorkflowRunError, WorkflowRunReport,
-    WorkflowRunner, WorkflowStep, WorkflowStepArtifact, WorkflowStepExecutionError,
-    WorkflowStepExecutor, WorkflowStepReport, WorkflowStepRequest, WorkflowStepTarget,
+    DiscoveredWorkflow, WorkflowCondition, WorkflowJournal, WorkflowOnFail, WorkflowRunError,
+    WorkflowRunReport, WorkflowRunner, WorkflowStep, WorkflowStepArtifact,
+    WorkflowStepExecutionError, WorkflowStepExecutor, WorkflowStepReport, WorkflowStepRequest,
+    WorkflowStepTarget,
 };
 
 /// Identifies this workspace component in diagnostics.

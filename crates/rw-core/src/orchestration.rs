@@ -304,10 +304,8 @@ pub trait SubagentSession: Send + Sync {
 
     async fn close(
         &self,
-        _durable_artifact: Option<&DiffArtifact>,
-    ) -> Result<(), OrchestrationError> {
-        self.cancel().await
-    }
+        durable_artifact: Option<&DiffArtifact>,
+    ) -> Result<(), OrchestrationError>;
 
     /// Host-private worktree identity used for restart-safe continuation.
     fn worktree_record(&self) -> Option<WorktreeLeaseRecord> {
@@ -388,6 +386,7 @@ pub struct SubagentOrchestrator {
 
 struct OrchestratorInner {
     limits: SubagentLimits,
+    startups: startup::Startups,
     factory: Arc<dyn SubagentSessionFactory>,
     base_tools: Arc<ToolRegistry>,
     tools: RwLock<Weak<ToolRegistry>>,
@@ -488,6 +487,7 @@ fn subagent_status(status: &TurnStatus) -> SubagentStatus {
 }
 
 mod lifecycle;
+mod startup;
 
 mod policy;
 pub use policy::diff_artifact_reference;

@@ -185,7 +185,7 @@ async fn recovery_metadata_preserves_exact_child_policy_before_the_first_turn() 
 }
 
 #[tokio::test]
-async fn ambiguous_spawn_observer_failure_retains_pending_metadata() {
+async fn ambiguous_spawn_observer_failure_closes_child_and_retains_closed_receipt() {
     let factory = Arc::new(FakeFactory::default());
     let orchestrator = orchestrator(SubagentLimits::default(), Arc::clone(&factory));
     let metadata = Arc::new(RecordingMetadataStore::default());
@@ -214,14 +214,15 @@ async fn ambiguous_spawn_observer_failure_retains_pending_metadata() {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .map(|record| record.phase),
-        Some(SubagentRecoveryPhase::Pending)
+        Some(SubagentRecoveryPhase::Closed)
     );
-    assert!(
+    assert_eq!(
         factory
             .closed_artifacts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_empty()
+            .len(),
+        1
     );
 }
 
@@ -922,7 +923,7 @@ async fn pending_metadata_failure_surfaces_exact_close_failure_without_spawning(
 }
 
 #[tokio::test]
-async fn promotion_failure_retains_pending_record_and_commits_terminal_lifecycle() {
+async fn promotion_failure_closes_child_commits_terminal_and_removes_metadata() {
     let factory = Arc::new(FakeFactory::default());
     let orchestrator = orchestrator(SubagentLimits::default(), Arc::clone(&factory));
     let metadata = Arc::new(FailingPromotionMetadataStore::default());
@@ -941,13 +942,21 @@ async fn promotion_failure_retains_pending_record_and_commits_terminal_lifecycle
     assert!(error.to_string().contains("metadata promotion failed"));
     assert_eq!(factory.active.load(Ordering::Acquire), 0);
     assert_eq!(factory.cancelled.load(Ordering::Acquire), 1);
-    let pending = metadata
-        .retained
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
-        .expect("pending record retained");
-    assert_eq!(pending.phase, SubagentRecoveryPhase::Pending);
+    assert!(
+        metadata
+            .retained
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none()
+    );
+    assert_eq!(
+        factory
+            .closed_artifacts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        1
+    );
     let events = recorded
         .events
         .lock()

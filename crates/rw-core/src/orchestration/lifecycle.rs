@@ -20,8 +20,8 @@ use super::{
     SessionRecord, SessionState, SubagentHandle, SubagentLaunch, SubagentLimits,
     SubagentMetadataStore, SubagentObserver, SubagentOrchestrator, SubagentProgressObserver,
     SubagentRecoveryPhase, SubagentRecoveryPolicy, SubagentRecoveryRecord, SubagentRequest,
-    SubagentSession, SubagentSessionFactory, bound_turn_result, bounded_cancel, bounded_close,
-    control_timeout, ensure_child_owner, random_id, restricted_registry, session_record_descriptor,
+    SubagentSession, SubagentSessionFactory, bound_turn_result, bounded_cancel, control_timeout,
+    ensure_child_owner, random_id, restricted_registry, session_record_descriptor,
     validate_request, zero_usage,
 };
 
@@ -45,6 +45,7 @@ impl SubagentOrchestrator {
         Ok(Self {
             inner: Arc::new(OrchestratorInner {
                 limits,
+                startups: super::startup::Startups::new(limits.max_concurrency),
                 factory,
                 base_tools: tools,
                 tools: RwLock::new(weak_tools),
@@ -189,19 +190,12 @@ impl SubagentOrchestrator {
         Ok(())
     }
 
-    /// Starts a new child and returns immediately with a stable parent handle.
-    ///
-    /// # Errors
-    ///
-    /// Returns validation, depth, concurrency, factory, or observer failures.
-    #[allow(clippy::too_many_lines)]
-    pub async fn start(
+    fn prepare_launch(
         &self,
         parent_session_id: SessionId,
         request: SubagentRequest,
-        observer: Arc<dyn SubagentObserver>,
         cancellation: CancellationToken,
-    ) -> Result<SubagentHandle, OrchestrationError> {
+    ) -> Result<SubagentLaunch, OrchestrationError> {
         validate_request(&request)?;
         let parent_depth = self
             .inner
@@ -218,22 +212,11 @@ impl SubagentOrchestrator {
                 maximum: self.inner.limits.max_depth,
             });
         }
-        let permit = Arc::clone(&self.inner.permits)
-            .try_acquire_owned()
-            .map_err(|_| OrchestrationError::ConcurrencyExceeded {
-                maximum: self.inner.limits.max_concurrency,
-            })?;
         let tools = restricted_registry(
             &self.tool_registry(),
             &request.tools,
             request.permission_mode,
         )?;
-        let capabilities = CapabilityManifest::new(
-            tools
-                .descriptors()
-                .into_iter()
-                .flat_map(|descriptor| descriptor.capabilities.capabilities().to_vec()),
-        );
         let ordinal = self
             .inner
             .sequence
@@ -247,90 +230,56 @@ impl SubagentOrchestrator {
             .max_turns
             .unwrap_or(self.inner.limits.max_turns)
             .min(self.inner.limits.max_turns);
-        let launch = SubagentLaunch {
-            handle: handle.clone(),
-            parent_session_id: parent_session_id.clone(),
+        let workspace_root = request.workspace_root.clone();
+        Ok(SubagentLaunch {
+            handle,
+            parent_session_id,
             depth,
-            request: request.clone(),
-            tools: Arc::clone(&tools),
+            request,
+            tools,
             max_turns: resolved_max_turns,
-            workspace_root: request.workspace_root.clone(),
-            cancellation: cancellation.clone(),
-        };
-        let session = self.inner.factory.create(launch).await?;
+            workspace_root,
+            cancellation,
+        })
+    }
+
+    pub(super) async fn start_owned(
+        &self,
+        parent_session_id: SessionId,
+        request: SubagentRequest,
+        observer: Arc<dyn SubagentObserver>,
+        cancellation: CancellationToken,
+        startup: &mut super::startup::ChildStartup,
+    ) -> Result<SubagentHandle, OrchestrationError> {
+        let launch = self.prepare_launch(
+            parent_session_id.clone(),
+            request.clone(),
+            cancellation.clone(),
+        )?;
+        let handle = launch.handle.clone();
+        let depth = launch.depth;
+        let session = self.inner.factory.create(launch.clone()).await?;
+        startup.session = Some(Arc::clone(&session));
+        if cancellation.is_cancelled() {
+            return Err(OrchestrationError::Session(
+                "child startup cancelled".to_owned(),
+            ));
+        }
         if session.session_id() != &handle.session_id {
             return Err(OrchestrationError::Session(
                 "child factory returned a different session id".to_owned(),
             ));
         }
-        let mut recovery_record = SubagentRecoveryRecord {
-            parent_session_id: parent_session_id.clone(),
-            handle: handle.clone(),
-            task: request.task.clone(),
-            agent: request.agent.clone(),
-            depth,
-            workspace_root: request.workspace_root.clone(),
-            isolation: request.isolation,
-            worktree: session.worktree_record(),
-            capabilities: capabilities.clone(),
-            tool_names: tools
-                .descriptors()
-                .into_iter()
-                .map(|descriptor| descriptor.name)
-                .chain(
-                    request
-                        .tools
-                        .iter()
-                        .filter(|name| name.starts_with("mcp:"))
-                        .cloned(),
-                )
-                .collect(),
-            policy: SubagentRecoveryPolicy {
-                model_alias: request.model.clone(),
-                system_prompt: request.system_prompt.clone(),
-                permission_mode: request.permission_mode,
-                max_turns: resolved_max_turns,
-            },
-            phase: SubagentRecoveryPhase::Pending,
-        };
-        let metadata = self
-            .inner
-            .metadata
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        if let Err(error) = metadata.save(recovery_record.clone()).await {
-            bounded_close(&session, None, self.inner.limits).await.map_err(|cleanup| {
-                OrchestrationError::Session(format!(
-                    "{error}; child cleanup after pending metadata failure also failed: {cleanup}"
-                ))
-            })?;
-            return Err(error);
-        }
-        if let Err(error) = observer.spawned(&handle, &request.task).await {
-            let _ = bounded_cancel(&session, self.inner.limits).await;
-            return Err(error);
-        }
+        let mut recovery_record = super::startup::recovery_record(&launch, session.as_ref());
+        let metadata = Arc::clone(&startup.metadata);
+        startup.recovery = Some(recovery_record.clone());
+        metadata.save(recovery_record.clone()).await?;
+        startup.publication = super::startup::SpawnPublication::Uncertain;
+        observer.spawned(&handle, &request.task).await?;
+        startup.publication = super::startup::SpawnPublication::Acknowledged;
         recovery_record.phase = SubagentRecoveryPhase::Active;
-        if let Err(error) = metadata.save(recovery_record).await {
-            let _ = bounded_cancel(&session, self.inner.limits).await;
-            let terminal = SubagentResult {
-                subagent_id: handle.subagent_id.clone(),
-                session_id: handle.session_id.clone(),
-                status: SubagentStatus::Failed,
-                final_text: error.to_string(),
-                touched_files: Vec::new(),
-                diff_artifact: None,
-                usage: zero_usage(),
-                cost: Cost::Unavailable {
-                    reason: "child metadata promotion failed".to_owned(),
-                },
-                turns: 0,
-                duration_millis: 0,
-            };
-            observer.finished(&terminal).await?;
-            return Err(error);
-        }
+        metadata.save(recovery_record).await?;
+        let permit = startup.permit()?;
         let (result_tx, result_rx) = watch::channel(None);
         self.inner
             .session_depths
@@ -368,6 +317,8 @@ impl SubagentOrchestrator {
             result_tx,
             permit,
         );
+        startup.session = None;
+        startup.recovery = None;
         Ok(handle)
     }
 

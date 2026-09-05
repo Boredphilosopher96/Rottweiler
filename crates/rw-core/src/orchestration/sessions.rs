@@ -433,6 +433,16 @@ impl SubagentSession for ActorSubagentSession {
         }
     }
 
+    async fn close(
+        &self,
+        _durable_artifact: Option<&DiffArtifact>,
+    ) -> Result<(), OrchestrationError> {
+        self.handle
+            .close()
+            .await
+            .map_err(|error| OrchestrationError::Session(error.to_string()))
+    }
+
     async fn cancel(&self) -> Result<(), OrchestrationError> {
         self.handle
             .interrupt()

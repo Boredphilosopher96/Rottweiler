@@ -28,7 +28,12 @@ use super::*;
 
 struct SelectedModel;
 
+#[async_trait]
 impl ModelDriver for SelectedModel {
+    async fn settle_effects(&self) -> Result<(), AgentLoopError> {
+        Ok(())
+    }
+
     fn stream(
         &self,
         _alias: &str,
@@ -252,7 +257,6 @@ struct FailingMetadataStore;
 
 #[derive(Default)]
 struct FailingPromotionMetadataStore {
-    saves: AtomicUsize,
     retained: Mutex<Option<SubagentRecoveryRecord>>,
 }
 
@@ -287,24 +291,26 @@ impl SubagentMetadataStore for FailingMetadataStore {
 #[async_trait]
 impl SubagentMetadataStore for FailingPromotionMetadataStore {
     async fn save(&self, record: SubagentRecoveryRecord) -> Result<(), OrchestrationError> {
-        if self.saves.fetch_add(1, Ordering::AcqRel) == 0 {
-            *self
-                .retained
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(record);
-            Ok(())
-        } else {
-            Err(OrchestrationError::Session(
+        if record.phase == SubagentRecoveryPhase::Active {
+            return Err(OrchestrationError::Session(
                 "metadata promotion failed".to_owned(),
-            ))
+            ));
         }
+        *self
+            .retained
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(record);
+        Ok(())
     }
-
     async fn remove(
         &self,
         _parent_session_id: &SessionId,
         _subagent_id: &SubagentId,
     ) -> Result<(), OrchestrationError> {
+        *self
+            .retained
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         Ok(())
     }
 }
@@ -495,6 +501,10 @@ struct GatewayTool(&'static str);
 
 #[async_trait]
 impl Tool for GatewayTool {
+    async fn settle_effects(&self) -> Result<(), ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: self.0.to_owned(),
@@ -522,6 +532,10 @@ impl Tool for GatewayTool {
 
 #[async_trait]
 impl Tool for MutatingTool {
+    async fn settle_effects(&self) -> Result<(), ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "write".to_owned(),
@@ -542,6 +556,10 @@ impl Tool for MutatingTool {
 
 #[async_trait]
 impl Tool for FixedResultTool {
+    async fn settle_effects(&self) -> Result<(), ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "fixed_result".to_owned(),
@@ -562,3 +580,5 @@ impl Tool for FixedResultTool {
 
 mod lifecycle;
 mod tools;
+
+mod startup;
