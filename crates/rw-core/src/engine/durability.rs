@@ -12,12 +12,24 @@ use rw_types::SequenceId;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+/// One namespace and its aggregate admission counters from the same committed prefix.
+#[derive(Clone, Debug)]
+pub struct ExtensionStateView {
+    pub snapshot: rw_types::extension_contract::ExtensionStateSnapshot,
+    pub session_bytes: usize,
+    pub namespaces: usize,
+}
+
 /// Provider/UI-neutral durability boundary for the sequenced session log.
 ///
 /// Implementations must not return until the event is durably appended. The
 /// actor invokes this boundary before making the event visible to subscribers.
 #[async_trait]
 pub trait SessionEventSink: Send + Sync {
+    /// Reads one bounded extension namespace from the canonical committed state.
+    /// Implementations must include session aggregate counters from that same prefix.
+    async fn extension_state(&self, plugin_id: &str) -> Result<ExtensionStateView, AgentLoopError>;
+
     /// Reserves all resources required to prepare, queue, commit and return this batch.
     async fn reserve(&self, plan: &EventBatchPlan)
     -> Result<EventBatchReservation, AgentLoopError>;
@@ -75,6 +87,14 @@ impl NoopSessionEventSink {
 
 #[async_trait]
 impl SessionEventSink for NoopSessionEventSink {
+    async fn extension_state(
+        &self,
+        _plugin_id: &str,
+    ) -> Result<crate::engine::ExtensionStateView, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "this ephemeral event sink does not provide durable extension state".to_owned(),
+        ))
+    }
     async fn settle_effects(&self) -> Result<(), AgentLoopError> {
         Ok(())
     }

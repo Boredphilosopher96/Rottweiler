@@ -337,6 +337,14 @@ impl BlockingDescriptorSink {
 
 #[async_trait]
 impl SessionEventSink for BlockingDescriptorSink {
+    async fn extension_state(
+        &self,
+        _plugin_id: &str,
+    ) -> Result<crate::engine::ExtensionStateView, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "this ephemeral event sink does not provide durable extension state".to_owned(),
+        ))
+    }
     async fn settle_effects(&self) -> Result<(), AgentLoopError> {
         Ok(())
     }

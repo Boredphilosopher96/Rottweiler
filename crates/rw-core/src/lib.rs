@@ -49,9 +49,9 @@ pub use engine::recovery;
 pub use engine::{
     AdmittedEventBatch, AgentLoopError, AgentTurnStatus, BudgetLedgerQuery, BudgetLedgerTotals,
     CommandToolCall, CommandToolOutputKind, ContextSurgeryAction, EventBatchPlan,
-    EventBatchReservation, EventClock, FolderTrustController, FolderTrustOperation,
-    InterruptedToolRepair, MessageDisposition, ModelContextMetadata, ModelDriver,
-    MutationCheckpoint, MutationCheckpointCoordinator, MutationCheckpointOutcome,
+    EventBatchReservation, EventClock, ExtensionStateView, FolderTrustController,
+    FolderTrustOperation, InterruptedToolRepair, MessageDisposition, ModelContextMetadata,
+    ModelDriver, MutationCheckpoint, MutationCheckpointCoordinator, MutationCheckpointOutcome,
     NoopFolderTrustController, NoopMutationCheckpointCoordinator, NoopSecretRedactor,
     NoopSessionEventSink, NoopSessionExtensionController, NoopSessionResources,
     NoopWorkspaceRootController, PluginSessionCapability, RecoveredQuestion, RewindCheckpoint,

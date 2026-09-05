@@ -34,6 +34,14 @@ pub(in crate::engine::tests) struct RecordingSink {
 
 #[async_trait]
 impl SessionEventSink for RecordingSink {
+    async fn extension_state(
+        &self,
+        _plugin_id: &str,
+    ) -> Result<crate::engine::ExtensionStateView, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "this ephemeral event sink does not provide durable extension state".to_owned(),
+        ))
+    }
     async fn settle_effects(&self) -> Result<(), AgentLoopError> {
         Ok(())
     }
@@ -110,6 +118,14 @@ pub(in crate::engine::tests) struct AccountingRecordingSink {
 
 #[async_trait]
 impl SessionEventSink for AccountingRecordingSink {
+    async fn extension_state(
+        &self,
+        _plugin_id: &str,
+    ) -> Result<crate::engine::ExtensionStateView, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "this ephemeral event sink does not provide durable extension state".to_owned(),
+        ))
+    }
     async fn settle_effects(&self) -> Result<(), AgentLoopError> {
         Ok(())
     }
@@ -212,6 +228,14 @@ pub(in crate::engine::tests) struct FailingSink;
 
 #[async_trait]
 impl SessionEventSink for FailingSink {
+    async fn extension_state(
+        &self,
+        _plugin_id: &str,
+    ) -> Result<crate::engine::ExtensionStateView, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "this ephemeral event sink does not provide durable extension state".to_owned(),
+        ))
+    }
     async fn settle_effects(&self) -> Result<(), AgentLoopError> {
         Ok(())
     }
@@ -242,6 +266,14 @@ pub(in crate::engine::tests) struct FailCompactionLedgerSink {
 
 #[async_trait]
 impl SessionEventSink for FailCompactionLedgerSink {
+    async fn extension_state(
+        &self,
+        _plugin_id: &str,
+    ) -> Result<crate::engine::ExtensionStateView, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "this ephemeral event sink does not provide durable extension state".to_owned(),
+        ))
+    }
     async fn settle_effects(&self) -> Result<(), AgentLoopError> {
         Ok(())
     }
@@ -300,6 +332,14 @@ pub(in crate::engine::tests) struct FailNextBatchSink {
 
 #[async_trait]
 impl SessionEventSink for FailNextBatchSink {
+    async fn extension_state(
+        &self,
+        _plugin_id: &str,
+    ) -> Result<crate::engine::ExtensionStateView, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "this ephemeral event sink does not provide durable extension state".to_owned(),
+        ))
+    }
     async fn settle_effects(&self) -> Result<(), AgentLoopError> {
         Ok(())
     }
@@ -339,6 +379,14 @@ pub(in crate::engine::tests) struct FailFirstTextDeltaSink {
 
 #[async_trait]
 impl SessionEventSink for FailFirstTextDeltaSink {
+    async fn extension_state(
+        &self,
+        _plugin_id: &str,
+    ) -> Result<crate::engine::ExtensionStateView, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "this ephemeral event sink does not provide durable extension state".to_owned(),
+        ))
+    }
     async fn settle_effects(&self) -> Result<(), AgentLoopError> {
         Ok(())
     }
@@ -384,6 +432,14 @@ pub(in crate::engine::tests) struct WorkspaceChangeFailingSink {
 
 #[async_trait]
 impl SessionEventSink for WorkspaceChangeFailingSink {
+    async fn extension_state(
+        &self,
+        _plugin_id: &str,
+    ) -> Result<crate::engine::ExtensionStateView, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "this ephemeral event sink does not provide durable extension state".to_owned(),
+        ))
+    }
     async fn settle_effects(&self) -> Result<(), AgentLoopError> {
         Ok(())
     }
@@ -433,6 +489,14 @@ pub(in crate::engine::tests) struct MalformedBatchSink {
 
 #[async_trait]
 impl SessionEventSink for MalformedBatchSink {
+    async fn extension_state(
+        &self,
+        _plugin_id: &str,
+    ) -> Result<crate::engine::ExtensionStateView, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "this ephemeral event sink does not provide durable extension state".to_owned(),
+        ))
+    }
     async fn settle_effects(&self) -> Result<(), AgentLoopError> {
         Ok(())
     }
@@ -501,6 +565,14 @@ impl BlockingBatchSink {
 
 #[async_trait]
 impl SessionEventSink for BlockingBatchSink {
+    async fn extension_state(
+        &self,
+        _plugin_id: &str,
+    ) -> Result<crate::engine::ExtensionStateView, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "this ephemeral event sink does not provide durable extension state".to_owned(),
+        ))
+    }
     async fn settle_effects(&self) -> Result<(), AgentLoopError> {
         Ok(())
     }
@@ -555,6 +627,14 @@ pub(in crate::engine::tests) struct OrderedRewindSink {
 
 #[async_trait]
 impl SessionEventSink for OrderedRewindSink {
+    async fn extension_state(
+        &self,
+        _plugin_id: &str,
+    ) -> Result<crate::engine::ExtensionStateView, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "this ephemeral event sink does not provide durable extension state".to_owned(),
+        ))
+    }
     async fn settle_effects(&self) -> Result<(), AgentLoopError> {
         Ok(())
     }
@@ -621,6 +701,14 @@ pub(in crate::engine::tests) struct CorruptGapSink {
 
 #[async_trait]
 impl SessionEventSink for CorruptGapSink {
+    async fn extension_state(
+        &self,
+        _plugin_id: &str,
+    ) -> Result<crate::engine::ExtensionStateView, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "this ephemeral event sink does not provide durable extension state".to_owned(),
+        ))
+    }
     async fn settle_effects(&self) -> Result<(), AgentLoopError> {
         Ok(())
     }
@@ -653,6 +741,14 @@ impl SessionEventSink for CorruptGapSink {
 
 #[async_trait]
 impl SessionEventSink for ToggleLeaseSink {
+    async fn extension_state(
+        &self,
+        _plugin_id: &str,
+    ) -> Result<crate::engine::ExtensionStateView, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "this ephemeral event sink does not provide durable extension state".to_owned(),
+        ))
+    }
     async fn settle_effects(&self) -> Result<(), AgentLoopError> {
         Ok(())
     }
@@ -739,6 +835,14 @@ pub(in crate::engine::tests) struct CountedReplaySink {
 
 #[async_trait]
 impl SessionEventSink for CountedReplaySink {
+    async fn extension_state(
+        &self,
+        _plugin_id: &str,
+    ) -> Result<crate::engine::ExtensionStateView, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "this ephemeral event sink does not provide durable extension state".to_owned(),
+        ))
+    }
     async fn settle_effects(&self) -> Result<(), AgentLoopError> {
         Ok(())
     }

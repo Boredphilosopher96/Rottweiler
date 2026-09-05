@@ -94,6 +94,10 @@ pub(super) enum PendingEvent {
         plugin_id: String,
         status: String,
     },
+    ExtensionStateCommitted {
+        plugin_id: String,
+        transaction: rw_types::extension_contract::ExtensionStateTransaction,
+    },
     UiNotification {
         plugin_id: String,
         title: String,
@@ -388,6 +392,14 @@ impl PendingEvent {
                 meta,
                 plugin_id,
                 status,
+            },
+            Self::ExtensionStateCommitted {
+                plugin_id,
+                transaction,
+            } => EngineEvent::ExtensionStateCommitted {
+                meta,
+                plugin_id,
+                transaction,
             },
             Self::UiNotification {
                 plugin_id,

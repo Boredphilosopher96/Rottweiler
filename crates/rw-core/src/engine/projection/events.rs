@@ -72,6 +72,14 @@ pub(in crate::engine) fn recovered_pending_event(
             plugin_id: plugin_id.clone(),
             status: status.clone(),
         },
+        EngineEvent::ExtensionStateCommitted {
+            plugin_id,
+            transaction,
+            ..
+        } => PendingEvent::ExtensionStateCommitted {
+            plugin_id: plugin_id.clone(),
+            transaction: transaction.clone(),
+        },
         EngineEvent::UiNotification {
             plugin_id,
             title,

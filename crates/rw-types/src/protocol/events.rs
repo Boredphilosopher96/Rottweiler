@@ -301,6 +301,12 @@ pub enum EngineEvent {
         plugin_id: String,
         status: String,
     },
+    /// An actor-authorized extension state transaction committed to this session.
+    ExtensionStateCommitted {
+        meta: EventMeta,
+        plugin_id: String,
+        transaction: crate::extension_contract::ExtensionStateTransaction,
+    },
     /// Session-local UI notification published by an approved plugin.
     UiNotification {
         meta: EventMeta,
@@ -707,6 +713,7 @@ impl EngineEvent {
             | Self::SessionTitleUpdated { meta, .. }
             | Self::PluginMessageInjected { meta, .. }
             | Self::PluginStatusChanged { meta, .. }
+            | Self::ExtensionStateCommitted { meta, .. }
             | Self::UiNotification { meta, .. }
             | Self::ConversationTurnCommitted { meta, .. }
             | Self::ConversationRewound { meta, .. }
@@ -800,6 +807,7 @@ impl EngineEvent {
             | Self::SessionTitleUpdated { meta, .. }
             | Self::PluginMessageInjected { meta, .. }
             | Self::PluginStatusChanged { meta, .. }
+            | Self::ExtensionStateCommitted { meta, .. }
             | Self::UiNotification { meta, .. }
             | Self::ConversationTurnCommitted { meta, .. }
             | Self::ConversationRewound { meta, .. }

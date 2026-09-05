@@ -10,6 +10,9 @@ use rw_types::attachment_contract::{
     MAX_TOTAL_ATTACHMENT_BYTES,
 };
 use rw_types::config::{PermissionDecision, ThinkingLevel};
+use rw_types::extension_contract::{
+    ExtensionDeliveryCursor, ExtensionStateMutation, ExtensionStateTransaction,
+};
 use rw_types::{
     AccountingAttribution, Answer, ApprovalBinding, ApprovalDecision, Attachment, AttachmentData,
     Block, BudgetLevel, BudgetScope, BudgetUnit, CacheBreakpoint, ClientCommand, ClientId,
@@ -182,6 +185,9 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(ToolCallId);
     declaration!(ToolInvocationId);
     declaration!(ToolProgress);
+    declaration!(ExtensionDeliveryCursor);
+    declaration!(ExtensionStateMutation);
+    declaration!(ExtensionStateTransaction);
     declaration!(ProgressAmount);
     declaration!(SessionId);
     declaration!(ClientId);

@@ -208,6 +208,12 @@ pub(super) fn plugin_event_payload(
 
 #[async_trait]
 impl SessionEventSink for PluginFanoutEventSink {
+    async fn extension_state(
+        &self,
+        plugin_id: &str,
+    ) -> Result<rw_core::ExtensionStateView, AgentLoopError> {
+        self.inner.extension_state(plugin_id).await
+    }
     async fn settle_effects(&self) -> std::result::Result<(), AgentLoopError> {
         self.inner.settle_effects().await
     }

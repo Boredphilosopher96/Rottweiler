@@ -7,7 +7,8 @@ pub use model::ModelContextMetadata;
 pub use model::ModelDriver;
 mod durability;
 pub use durability::{
-    AdmittedEventBatch, EventBatchPlan, EventBatchReservation, NoopSessionEventSink,
+    AdmittedEventBatch, EventBatchPlan, EventBatchReservation, ExtensionStateView,
+    NoopSessionEventSink,
 };
 pub use durability::{SessionEventSink, commit_session_events};
 mod mutation_checkpoints;

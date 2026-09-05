@@ -601,6 +601,12 @@ struct FailModelChangedSink {
 
 #[async_trait]
 impl SessionEventSink for FailModelChangedSink {
+    async fn extension_state(
+        &self,
+        plugin_id: &str,
+    ) -> Result<rw_core::ExtensionStateView, AgentLoopError> {
+        self.inner.extension_state(plugin_id).await
+    }
     async fn settle_effects(&self) -> Result<(), AgentLoopError> {
         Ok(())
     }
