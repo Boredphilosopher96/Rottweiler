@@ -410,8 +410,7 @@ impl SubagentSession for ActorSubagentSession {
                 }
                 final_text.push_str(&text[..end]);
             }
-            let encoded = serde_json::to_value(&event)
-                .map_err(|error| OrchestrationError::Session(error.to_string()))?;
+            let encoded = super::progress::encode(sequence, &event)?;
             progress.progress(sequence, encoded).await?;
             if let EngineEvent::TurnFinished {
                 status,

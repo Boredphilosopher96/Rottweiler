@@ -17,8 +17,8 @@ use serde_json::{Value, json};
 use crate::ModelSource;
 
 use super::{
-    MAX_SUBAGENT_PROGRESS_BYTES, OrchestrationError, SubagentHandle, SubagentObserver,
-    SubagentOrchestrator, SubagentRequest, model_facing_subagent_tool_result,
+    OrchestrationError, SubagentHandle, SubagentObserver, SubagentOrchestrator, SubagentRequest,
+    model_facing_subagent_tool_result,
 };
 
 /// Public registry tool. Depth is derived from the parent session handle, never model input.
@@ -309,13 +309,7 @@ impl SubagentObserver for ToolObserver {
         child_sequence: Option<u64>,
         event: Value,
     ) -> Result<(), OrchestrationError> {
-        if serde_json::to_vec(&event)
-            .is_ok_and(|encoded| encoded.len() > MAX_SUBAGENT_PROGRESS_BYTES)
-        {
-            return Err(OrchestrationError::Observer(
-                "child progress event exceeds size limit".to_owned(),
-            ));
-        }
+        let event = super::progress::admit(child_sequence, event)?;
         self.events
             .progress(SubagentProgressEvent {
                 subagent_id: handle.subagent_id.clone(),

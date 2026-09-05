@@ -470,13 +470,7 @@ impl SubagentProgressObserver for ObserverProgress {
         child_sequence: Option<u64>,
         event: Value,
     ) -> Result<(), OrchestrationError> {
-        if serde_json::to_vec(&event)
-            .is_ok_and(|encoded| encoded.len() > MAX_SUBAGENT_PROGRESS_BYTES)
-        {
-            return Err(OrchestrationError::Observer(
-                "child progress event exceeds size limit".to_owned(),
-            ));
-        }
+        let event = progress::admit(child_sequence, event)?;
         self.observer
             .progress(&self.handle, child_sequence, event)
             .await
@@ -502,6 +496,7 @@ mod startup;
 
 mod policy;
 mod presentation;
+mod progress;
 pub use policy::diff_artifact_reference;
 use policy::{
     bound_turn_result, bounded_cancel, bounded_close, control_timeout,

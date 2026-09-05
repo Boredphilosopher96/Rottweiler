@@ -590,6 +590,8 @@ pub enum EngineEvent {
         subagent_id: SubagentId,
         child_session_id: SessionId,
         child_sequence: Option<SequenceId>,
+        /// Null invalidates child history at the required canonical child_sequence.
+        /// A non-null value is a bounded preview; complete content remains in the child log.
         event: Value,
     },
     ToolOutputPruned {
