@@ -1,3 +1,4 @@
+import { coveredTailDelta, preserveTail } from "./tail-recovery"
 import { readSessionState, preserveMetadata } from "./recovery"
 import { childProgressSource } from "../child-source"
 import { readControls, resolvedApproval, isControlEvent, coveredByControlSnapshot, preserveSnapshotControls } from "./controls"
@@ -127,7 +128,8 @@ export function reduceWireEvent(
   }
 
   const coveredControl = coveredByControlSnapshot(state, sequenceText)
-  if (!coveredControl || event.type !== "question_asked") assertLiveAdmission(state, event)
+  const coveredTail = coveredTailDelta(state, event, sequenceText)
+  if (!coveredTail && (!coveredControl || event.type !== "question_asked")) assertLiveAdmission(state, event)
   const withCursor: RottweilerState = {
     ...state,
     lastSequence: sequenceText,
@@ -146,7 +148,8 @@ export function reduceWireEvent(
     }
     : withCursor
 
-  const projected = preserveMetadata(state, applyKnownEvent(ready, event, sequenceText, activeSessionId), event, sequenceText)
+  const applied = coveredTail ? ready : applyKnownEvent(ready, event, sequenceText, activeSessionId)
+  const projected = preserveMetadata(state, preserveTail(state, applied, event, sequenceText), event, sequenceText)
   if (coveredControl) return preserveSnapshotControls(state, projected, event)
   return isControlEvent(event) ? { ...projected, controls: { ...projected.controls, observedThrough: sequenceText } } : projected
 }

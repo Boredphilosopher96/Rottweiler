@@ -1,13 +1,14 @@
 import { CacheRead } from "./read-allocation"
 import type { UiSurfaceModel, UiPanelModel } from "../ui/presentation"
 import type { ClientDiagnostics } from "../client-diagnostics"
-import type { UiCatalog, TranscriptContentPage, TranscriptItemId, TranscriptPage, TranscriptPosition, TranscriptView } from "../protocol"
+import type { UiCatalog, TranscriptTailPage, TranscriptContentPage, TranscriptItemId, TranscriptPage, TranscriptPosition, TranscriptView } from "../protocol"
 import { TRANSCRIPT_PROJECTION_VERSION } from "../protocol"
 import { parseU64 } from "../transport/types"
 import { ClientCache, type CacheLease } from "./cache"
 import type { SessionReader, SessionReadTarget } from "../session-reader"
 
 export type HistoryCacheValue =
+  | { readonly kind: "tail_page"; readonly page: TranscriptTailPage }
   | { readonly kind: "page"; readonly page: TranscriptPage }
   | { readonly kind: "document"; readonly page: TranscriptContentPage }
   | { readonly kind: "surface"; readonly surface: UiSurfaceModel }

@@ -9,11 +9,11 @@ import { UNKNOWN_ACTIVITY_TIMING } from "./tool-state"
 
 export interface TailReplayFence {
   readonly identity: TranscriptTailIdentity
-  readonly through: string
-  readonly textThrough: string
-  readonly thinkingThrough: string
-  readonly citationsThrough: string
-  readonly toolsThrough: string
+  readonly through: string | null
+  readonly textThrough: string | null
+  readonly thinkingThrough: string | null
+  readonly citationsThrough: string | null
+  readonly toolsThrough: string | null
   readonly invocations: Readonly<Record<string, string>>
 }
 export interface RecoveryProjection {

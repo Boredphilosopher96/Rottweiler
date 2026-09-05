@@ -1,11 +1,11 @@
-import { MAX_PENDING_TOOL_INVOCATIONS } from "../../../../protocol/types"
+import { MAX_PENDING_TOOL_INVOCATIONS, TRANSCRIPT_TAIL_TEXT_BYTES } from "../../../../protocol/types"
 import type { ToolOutputStream } from "../protocol"
 
 // The admitted live invocation set shares a fixed preview payload allowance.
 export const MAX_ACTIVE_TOOL_DISPLAY_BYTES = 8 * 1024 * 1024
 export const MAX_TOOL_DISPLAY_BYTES = Math.floor(MAX_ACTIVE_TOOL_DISPLAY_BYTES / MAX_PENDING_TOOL_INVOCATIONS)
 export const MAX_TOOL_DISPLAY_CHUNKS = 1025
-export const MAX_TAIL_TEXT_BYTES = 1024 * 1024
+export const MAX_TAIL_TEXT_BYTES = TRANSCRIPT_TAIL_TEXT_BYTES
 export const LIVE_OUTPUT_TRUNCATION_MARKER = "[live tool output truncated; command output continues to drain]"
 const MAX_WINDOW_LINES = 32
 export const MAX_PREVIEW_LINE_CODE_UNITS = 4096
@@ -131,6 +131,12 @@ export class ToolOutputBuffer {
   ) {}
 
   static empty(): ToolOutputBuffer { return new ToolOutputBuffer() }
+
+  /** A source preview cannot accept later bytes across an omitted region. */
+  static fromPreview(text: string, truncated: boolean): ToolOutputBuffer {
+    const initial = ToolOutputBuffer.empty().append({ stream: "stdout", chunk: text })
+    return new ToolOutputBuffer(initial.count, initial.retainedBytes, initial.omittedBytes, initial.truncated || truncated, initial.root, initial.node)
+  }
 
   append(value: ToolOutputChunk): ToolOutputBuffer {
     const bytes = Buffer.byteLength(value.chunk)
