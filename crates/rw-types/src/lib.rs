@@ -12,6 +12,7 @@ pub use accounting::{ProviderCallActuals, ProviderCallIdentity};
 pub mod attachment_contract;
 pub mod config;
 mod error;
+pub mod extension_contract;
 pub mod hook_contract;
 mod ir;
 pub mod mcp;
