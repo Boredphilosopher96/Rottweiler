@@ -9,6 +9,22 @@ use super::{
 
 #[async_trait]
 impl SessionFactory for RuntimeSessionFactory {
+    async fn admit_command_receipt(
+        &self,
+        command: &rw_core::ClientCommand,
+        fingerprint: &str,
+    ) -> Result<rw_types::command_receipt::ReceiptAdmission, HostError> {
+        self.admit_receipt(command, fingerprint).await
+    }
+    async fn complete_command_receipt(
+        &self,
+        operation: &rw_core::RequestId,
+        fingerprint: &str,
+        receipt: rw_types::command_receipt::CommandReceipt,
+    ) -> Result<rw_types::command_receipt::CommandReceipt, HostError> {
+        self.finish_receipt(operation, fingerprint, receipt).await
+    }
+
     async fn shutdown(&self) -> Result<(), HostError> {
         use futures_util::FutureExt as _;
         let plugins = self

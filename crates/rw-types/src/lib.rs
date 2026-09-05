@@ -5,6 +5,7 @@
 //! Schema, and TypeScript all retain the same discriminated-union shape.
 
 pub mod allocation;
+pub mod command_receipt;
 
 mod accounting;
 pub use accounting::{ProviderCallActuals, ProviderCallIdentity};

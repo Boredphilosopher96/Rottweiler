@@ -242,7 +242,7 @@ impl EngineHost {
         }
     }
 
-    pub(super) async fn execute(
+    pub(super) async fn execute_command(
         &self,
         command: ClientCommand,
         payload_hash: String,

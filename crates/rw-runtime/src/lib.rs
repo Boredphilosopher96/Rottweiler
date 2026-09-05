@@ -134,6 +134,22 @@ mod tests {
 
     #[async_trait]
     impl SessionFactory for EmptyFactory {
+        async fn admit_command_receipt(
+            &self,
+            _command: &rw_core::ClientCommand,
+            _fingerprint: &str,
+        ) -> Result<rw_types::command_receipt::ReceiptAdmission, HostError> {
+            Err(HostError::Protocol("no mutation storage configured".into()))
+        }
+        async fn complete_command_receipt(
+            &self,
+            _operation: &rw_core::RequestId,
+            _fingerprint: &str,
+            _receipt: rw_types::command_receipt::CommandReceipt,
+        ) -> Result<rw_types::command_receipt::CommandReceipt, HostError> {
+            Err(HostError::Protocol("no mutation storage configured".into()))
+        }
+
         async fn shutdown(&self) -> Result<(), HostError> {
             Ok(())
         }

@@ -648,6 +648,99 @@ pub enum EngineEvent {
 }
 
 impl EngineEvent {
+    /// Rebinds connection-scoped receipt metadata without modifying durable event identity.
+    #[must_use]
+    pub fn command_meta_mut(&mut self) -> Option<&mut CommandAckMeta> {
+        match self {
+            Self::TranscriptPageReady { meta, .. }
+            | Self::TranscriptContentReady { meta, .. }
+            | Self::CommandAcknowledged { meta, .. }
+            | Self::ContextSnapshotReady { meta, .. }
+            | Self::CostSnapshotReady { meta, .. }
+            | Self::SessionReviewReady { meta, .. }
+            | Self::SessionReviewUpdated { meta, .. }
+            | Self::PromptDumpReady { meta, .. }
+            | Self::SessionHistoryReady { meta, .. }
+            | Self::SessionReplayCompleted { meta, .. }
+            | Self::SessionForked { meta, .. }
+            | Self::SessionExported { meta, .. }
+            | Self::SessionsListed { meta, .. }
+            | Self::SubagentsListed { meta, .. }
+            | Self::SessionsSearchReady { meta, .. }
+            | Self::CommandDescriptorsListed { meta, .. }
+            | Self::ModesListed { meta, .. }
+            | Self::ModelsListed { meta, .. }
+            | Self::SettingsListed { meta, .. }
+            | Self::McpServersListed { meta, .. }
+            | Self::RuntimeServicesListed { meta, .. }
+            | Self::McpServerApprovalReviewed { meta, .. }
+            | Self::PermissionsListed { meta, .. }
+            | Self::ProviderAuthStarted { meta, .. }
+            | Self::ProviderConfigured { meta, .. }
+            | Self::ProviderAuthFinished { meta, .. }
+            | Self::ProviderActivationFinished { meta, .. }
+            | Self::WorkspaceFilesFound { meta, .. }
+            | Self::WorkspaceFilePreviewReady { meta, .. }
+            | Self::WorkspaceStatusReady { meta, .. }
+            | Self::WorkspaceDiffReady { meta, .. }
+            | Self::HostShutdown { meta, .. } => Some(meta),
+            Self::SessionCreated { .. }
+            | Self::WorkspaceRootsChanged { .. }
+            | Self::DriverChanged { .. }
+            | Self::MessageQueued { .. }
+            | Self::QueuedMessageRemoved { .. }
+            | Self::QueuedMessagesCleared { .. }
+            | Self::UserMessageAccepted { .. }
+            | Self::SessionTitleUpdated { .. }
+            | Self::PluginMessageInjected { .. }
+            | Self::PluginStatusChanged { .. }
+            | Self::ExtensionStateCommitted { .. }
+            | Self::UiNotification { .. }
+            | Self::ConversationTurnCommitted { .. }
+            | Self::ConversationRewound { .. }
+            | Self::TurnStarted { .. }
+            | Self::TextDelta { .. }
+            | Self::ThinkingDelta { .. }
+            | Self::CitationDelta { .. }
+            | Self::ToolProgress { .. }
+            | Self::ToolCallStarted { .. }
+            | Self::ToolApprovalNeeded { .. }
+            | Self::ToolDiffReady { .. }
+            | Self::ToolOutputDelta { .. }
+            | Self::ToolCallFinished { .. }
+            | Self::QuestionAsked { .. }
+            | Self::QuestionAnswered { .. }
+            | Self::ProviderCallAccounted { .. }
+            | Self::TurnFinished { .. }
+            | Self::ContextUsageUpdated { .. }
+            | Self::BudgetStatusChanged { .. }
+            | Self::CompactionStarted { .. }
+            | Self::CompactionAttemptStarted { .. }
+            | Self::CompactionTextDelta { .. }
+            | Self::CompactionThinkingDelta { .. }
+            | Self::CompactionAttemptFinished { .. }
+            | Self::CompactionFinished { .. }
+            | Self::CompactionFailed { .. }
+            | Self::SubagentSpawned { .. }
+            | Self::SubagentFinished { .. }
+            | Self::SubagentProgress { .. }
+            | Self::ToolOutputPruned { .. }
+            | Self::ModeChanged { .. }
+            | Self::PermissionModeChanged { .. }
+            | Self::PlanSubmitted { .. }
+            | Self::PlanReviewed { .. }
+            | Self::ModelChanged { .. }
+            | Self::ModelContextCleared { .. }
+            | Self::ContextItemPinned { .. }
+            | Self::ContextItemEvicted { .. }
+            | Self::UserShellStateChanged { .. }
+            | Self::HookFailed { .. }
+            | Self::CommandFinished { .. }
+            | Self::GuardTriggered { .. }
+            | Self::Error { .. } => None,
+        }
+    }
+
     /// Returns the authoritative delivery lifetime for this event variant.
     #[must_use]
     pub fn delivery(&self) -> EngineEventDelivery {

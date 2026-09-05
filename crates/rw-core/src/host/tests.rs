@@ -259,6 +259,31 @@ impl StubFactory {
 
 #[async_trait]
 impl SessionFactory for StubFactory {
+    async fn admit_command_receipt(
+        &self,
+        command: &ClientCommand,
+        fingerprint: &str,
+    ) -> Result<rw_types::command_receipt::ReceiptAdmission, HostError> {
+        rw_store::command_receipts::CommandReceipts::open(
+            &self.root.path().join("command-receipts.sqlite"),
+        )
+        .and_then(|mut store| store.admit(&command.meta().request_id, fingerprint))
+        .map_err(|error| HostError::Persistence(error.to_string()))
+    }
+    async fn complete_command_receipt(
+        &self,
+        operation: &RequestId,
+        fingerprint: &str,
+        receipt: rw_types::command_receipt::CommandReceipt,
+    ) -> Result<rw_types::command_receipt::CommandReceipt, HostError> {
+        rw_store::command_receipts::CommandReceipts::open(
+            &self.root.path().join("command-receipts.sqlite"),
+        )
+        .and_then(|mut store| store.complete(operation, fingerprint, &receipt))
+        .map_err(|error| HostError::Persistence(error.to_string()))?;
+        Ok(receipt)
+    }
+
     fn allocate_session_id(&self) -> Result<SessionId, HostError> {
         assert!(!self.panic_allocate, "injected allocation panic");
         Ok(SessionId(format!(

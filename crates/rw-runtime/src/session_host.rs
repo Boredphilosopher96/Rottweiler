@@ -1,5 +1,6 @@
 //! CLI composition for the headless multi-session engine host.
 
+mod command_receipts;
 mod factory;
 mod fork_journal;
 mod git;
@@ -243,6 +244,7 @@ impl RuntimeHostOptions {
 
 #[derive(Clone)]
 pub struct RuntimeSessionFactory {
+    receipt_io: Arc<tokio::sync::Mutex<()>>,
     plugin_activation: Arc<crate::extension_runtime::PluginActivationBudget>,
     wasm_workers: Arc<rw_ext::WasmWorkerPool>,
     index_pool: Arc<rw_tools::WorkspaceIndexPool>,
@@ -434,6 +436,7 @@ impl RuntimeSessionFactory {
                 .await
                 .map_err(|error| HostError::Persistence(error.to_string()))?;
         let factory = Self {
+            receipt_io: Arc::default(),
             provider_admission: Arc::new(provider_admission),
             transcripts: crate::transcript_service::TranscriptReader::new(Arc::clone(
                 &journal_service,

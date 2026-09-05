@@ -3,8 +3,10 @@
 //! An admitted row is never removed automatically. If effects and completion are
 //! separated by a crash, the row remains indeterminate and cannot authorize rerun.
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
-use rw_types::{CommandOutcome, EngineEvent, RequestId};
-use serde::{Deserialize, Serialize};
+use rw_types::{
+    RequestId,
+    command_receipt::{CommandReceipt, ReceiptAdmission},
+};
 use std::{fs, io::Write, path::Path, time::Duration};
 
 const MAX_RECEIPT_BYTES: usize = 16 * 1024 * 1024;
@@ -22,20 +24,6 @@ pub enum ReceiptError {
     Invalid,
     #[error("operation identity was reused for another command")]
     Conflict,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct CommandReceipt {
-    pub outcome: CommandOutcome,
-    pub events: Vec<EngineEvent>,
-}
-
-#[derive(Debug)]
-pub enum ReceiptAdmission {
-    Admitted,
-    Indeterminate,
-    Completed(CommandReceipt),
 }
 
 pub struct CommandReceipts {
@@ -71,8 +59,10 @@ impl CommandReceipts {
                 return Err(ReceiptError::Invalid);
             }
         }
+        let database_path = fs::canonicalize(path.parent().ok_or(ReceiptError::Invalid)?)?
+            .join(path.file_name().ok_or(ReceiptError::Invalid)?);
         let connection = Connection::open_with_flags(
-            path,
+            &database_path,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
         connection.busy_timeout(Duration::from_secs(2))?;
@@ -213,6 +203,7 @@ impl Write for BoundedWriter {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+    use rw_types::CommandOutcome;
     fn fingerprint() -> String {
         "a".repeat(64)
     }

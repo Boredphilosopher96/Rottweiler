@@ -257,6 +257,21 @@ impl HostedSession {
 /// CLI composition boundary for opening durable session actors.
 #[async_trait]
 pub trait SessionFactory: Send + Sync + 'static {
+    /// Authorizes the command's workspace and durably reserves its stable request identity.
+    async fn admit_command_receipt(
+        &self,
+        command: &ClientCommand,
+        fingerprint: &str,
+    ) -> Result<rw_types::command_receipt::ReceiptAdmission, HostError>;
+
+    /// Durably stores completion after accepted effects settle.
+    async fn complete_command_receipt(
+        &self,
+        operation: &RequestId,
+        fingerprint: &str,
+        receipt: rw_types::command_receipt::CommandReceipt,
+    ) -> Result<rw_types::command_receipt::CommandReceipt, HostError>;
+
     /// Allocates a storage-safe id before an asynchronous create reserves
     /// capacity.
     ///

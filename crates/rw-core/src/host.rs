@@ -7,6 +7,7 @@ mod control_completion;
 mod control_owner;
 mod events;
 mod lifecycle;
+mod operation_receipts;
 mod provider_completion;
 mod retained_control;
 use retained_control::RetainedDispatch;
