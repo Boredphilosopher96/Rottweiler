@@ -22,6 +22,7 @@ sessionQuery: "session/query",
 contextRead: "session/context_read",
 sessionControl: "session/control",
 sessionToolCall: "session/tool_call",
+effectToolCall: "effect/tool_call",
 stateRead: "extension/state_read",
 stateCommit: "extension/state_commit",
 injectMessage: "session/inject_message",
@@ -112,7 +113,7 @@ export type PluginPushMethod =
   | "session/query"
   | "session/context_read"
   | "session/control"
-  | "session/tool_call"
+  | "session/tool_call" | "effect/tool_call"
   | "extension/state_read"
   | "extension/state_commit"
   | "session/inject_message"
