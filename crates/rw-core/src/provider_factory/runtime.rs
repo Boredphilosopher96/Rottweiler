@@ -265,42 +265,67 @@ impl ProviderRuntime {
     }
 
     fn accounting_for_candidate(&self, candidate: &str, usage: rw_providers::TokenUsage) -> Cost {
+        self.accounting_metadata(candidate).map_or_else(
+            || Cost::Unavailable {
+                reason: "model candidate accounting is unavailable".to_owned(),
+            },
+            |metadata| cost_from_model_metadata(&metadata, usage),
+        )
+    }
+
+    fn accounting_metadata(&self, candidate: &str) -> Option<ProviderModelMetadata> {
         let dynamic = self
             .dynamic_models
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(model) = self
+        let model = self
             .models
             .get(candidate)
-            .or_else(|| dynamic.get(candidate))
-        else {
-            return Cost::Unavailable {
-                reason: "model candidate accounting is unavailable".to_owned(),
-            };
-        };
+            .or_else(|| dynamic.get(candidate))?;
         let dynamic_providers = self
             .dynamic_providers
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let cached_metadata = self
+        let cached = self
             .providers
             .get(candidate)
             .or_else(|| dynamic_providers.get(candidate))
-            .and_then(|provider| provider.cached_model_metadata());
-        if cached_metadata.is_some() {
-            return cost_from_model_metadata(
-                &effective_model_metadata(model, cached_metadata),
-                usage,
-            );
-        }
-        cost_from_model_metadata(
-            &ProviderModelMetadata {
+            .and_then(|provider| provider.cached_model_metadata_for(&model.model));
+        Some(cached.map_or_else(
+            || ProviderModelMetadata {
                 capabilities: model.capabilities.clone(),
                 pricing: model.pricing.clone(),
                 accounting: model.accounting,
             },
-            usage,
-        )
+            |metadata| effective_model_metadata(model, Some(metadata)),
+        ))
+    }
+
+    fn attempt_gate(
+        &self,
+        candidates: &[ModelCandidate],
+        invocation: crate::provider_admission::ProviderInvocation,
+    ) -> Result<Arc<dyn rw_providers::ProviderAttemptGate>, RouterError> {
+        if candidates.len() > 64 {
+            return Err(RouterError::OperationAdmission(
+                "provider call has more than 64 candidate routes".to_owned(),
+            ));
+        }
+        let metadata = candidates
+            .iter()
+            .filter_map(|route| {
+                let candidate = self
+                    .route_candidates
+                    .get(&route.provider)
+                    .map_or(route.provider.as_str(), String::as_str);
+                self.accounting_metadata(candidate)
+                    .map(|metadata| (route.clone(), metadata))
+            })
+            .collect();
+        Ok(Arc::new(crate::provider_admission::gate::InvocationGate {
+            invocation,
+            metadata,
+        }))
     }
 
     /// Dispatches through an alias after applying its configured thinking dial.
@@ -312,6 +337,7 @@ impl ProviderRuntime {
         &self,
         alias: &str,
         mut request: ProviderRequest,
+        invocation: crate::provider_admission::ProviderInvocation,
     ) -> Result<BoxEventStream, RouterError> {
         if self.models.contains_key(alias)
             || self
@@ -320,7 +346,7 @@ impl ProviderRuntime {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .contains_key(alias)
         {
-            return self.stream_concrete(alias, request);
+            return self.stream_concrete(alias, request, invocation);
         }
         if let Some(thinking) = self.alias_thinking.get(alias) {
             request.thinking = *thinking;
@@ -332,9 +358,15 @@ impl ProviderRuntime {
             .get(alias)
             .cloned()
         {
-            return self.router.stream_candidates(alias, candidates, request);
+            let gate = self.attempt_gate(&candidates, invocation)?;
+            return self
+                .router
+                .stream_candidates(alias, candidates, request, gate);
         }
-        self.router.stream_alias(alias, request)
+        let candidates = self.router.resolve(alias)?.to_vec();
+        let gate = self.attempt_gate(&candidates, invocation)?;
+        self.router
+            .stream_candidates(alias, candidates, request, gate)
     }
 
     /// Dispatches through exactly one configured provider for an alias.
@@ -350,6 +382,7 @@ impl ProviderRuntime {
         alias: &str,
         provider: &str,
         mut request: ProviderRequest,
+        invocation: crate::provider_admission::ProviderInvocation,
     ) -> Result<BoxEventStream, RouterError> {
         if alias
             .split_once('/')
@@ -361,7 +394,7 @@ impl ProviderRuntime {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .contains_key(alias))
         {
-            return self.stream_concrete(alias, request);
+            return self.stream_concrete(alias, request, invocation);
         }
         if let Some(thinking) = self.alias_thinking.get(alias) {
             request.thinking = *thinking;
@@ -390,7 +423,9 @@ impl ProviderRuntime {
                 provider: provider.to_owned(),
             });
         }
-        self.router.stream_candidates(alias, candidates, request)
+        let gate = self.attempt_gate(&candidates, invocation)?;
+        self.router
+            .stream_candidates(alias, candidates, request, gate)
     }
 
     /// Whether an alias has an exact route through a configured provider.
@@ -579,6 +614,7 @@ impl ProviderRuntime {
         &self,
         candidate: &str,
         mut request: ProviderRequest,
+        invocation: crate::provider_admission::ProviderInvocation,
     ) -> Result<BoxEventStream, RouterError> {
         let model = self
             .dynamic_models
@@ -598,7 +634,12 @@ impl ProviderRuntime {
         let provider =
             provider.ok_or_else(|| RouterError::AliasNotConfigured(candidate.to_owned()))?;
         request.model = model;
-        self.router.stream_provider(provider, request)
+        let route = ModelCandidate {
+            provider: candidate.to_owned(),
+            model: request.model.clone(),
+        };
+        let gate = self.attempt_gate(std::slice::from_ref(&route), invocation)?;
+        self.router.stream_provider(route, provider, request, gate)
     }
 
     /// Authenticates and binds one concrete live-discovered model so a later
