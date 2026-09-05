@@ -71,6 +71,15 @@ async fn plugin_machine_capability_preserves_driver_queue_and_durable_order() {
     let plugin = handle
         .plugin_session_capability("fixture-plugin")
         .expect("plugin capability");
+    assert!(matches!(
+        plugin
+            .control(rw_types::extension_control::ExtensionControl::SelectMode {
+                mode: rw_types::ModeId("plan".into()),
+            })
+            .await
+            .expect("busy control"),
+        rw_types::extension_control::ExtensionControlOutcome::Busy {}
+    ));
     assert_eq!(
         plugin
             .inject_message("/help KNOWN_CANARY")
@@ -238,4 +247,131 @@ async fn plugin_machine_capability_preserves_driver_queue_and_durable_order() {
             session_id,
         })
         .await;
+}
+
+#[tokio::test]
+async fn typed_controls_preserve_policy_and_page_context_without_prompt_payloads() {
+    use crate::engine::tests::fixtures::support::text_turn;
+    use rw_types::extension_control::{
+        ExtensionContextPage, ExtensionContextRead, ExtensionControl, ExtensionControlOutcome,
+    };
+    let root = TempDir::new().expect("tempdir");
+    let sink = Arc::new(RecordingSink::default());
+    let mut config = config(
+        root.path(),
+        Arc::new(PendingModel),
+        Arc::new(ToolRegistry::new()),
+        PermissionDecision::Allow,
+        builtin_hook_dispatcher().expect("hooks"),
+    );
+    config.event_sink = sink.clone();
+    config.recovered.conversation = (0..260)
+        .map(|i| text_turn(rw_types::Role::User, format!("PROMPT_CANARY_{i}")))
+        .collect();
+    let handle = SessionActor::spawn(config).expect("actor");
+    let plugin = handle
+        .plugin_session_capability("inventory")
+        .expect("capability");
+    let first = plugin
+        .read_context(ExtensionContextRead {
+            expected_sequence: None,
+            after_item_id: None,
+        })
+        .await
+        .expect("page");
+    assert!(
+        !serde_json::to_string(&first)
+            .expect("wire")
+            .contains("PROMPT_CANARY")
+    );
+    let ExtensionContextPage::Ready {
+        sequence,
+        items,
+        next_after_item_id,
+    } = first
+    else {
+        panic!("first page")
+    };
+    assert_eq!(items.len(), 128);
+    assert!(next_after_item_id.is_some());
+    let item_id = items
+        .iter()
+        .find(|item| item.item_id.0.starts_with("conversation:"))
+        .expect("conversation")
+        .item_id
+        .clone();
+    assert!(matches!(
+        plugin
+            .control(ExtensionControl::PinContext { item_id })
+            .await
+            .expect("pin"),
+        ExtensionControlOutcome::Applied {}
+    ));
+    assert!(matches!(
+        plugin
+            .read_context(ExtensionContextRead {
+                expected_sequence: sequence,
+                after_item_id: next_after_item_id
+            })
+            .await
+            .expect("stale page"),
+        ExtensionContextPage::Restart {}
+    ));
+    assert!(
+        plugin
+            .control(ExtensionControl::EvictContext {
+                item_id: rw_types::ContextItemId("system".into())
+            })
+            .await
+            .is_err()
+    );
+    assert!(matches!(
+        plugin
+            .control(ExtensionControl::SelectMode {
+                mode: rw_types::ModeId("plan".into())
+            })
+            .await
+            .expect("plan"),
+        ExtensionControlOutcome::Applied {}
+    ));
+    assert!(
+        plugin
+            .control(ExtensionControl::SelectMode {
+                mode: rw_types::ModeId("execute".into())
+            })
+            .await
+            .is_err()
+    );
+    let before = plugin.query().await.expect("snapshot");
+    assert!(matches!(
+        plugin
+            .control(ExtensionControl::SelectModel {
+                model: rw_types::ModelAlias("other".into()),
+                provider: None
+            })
+            .await
+            .expect("selection"),
+        ExtensionControlOutcome::ContextChoiceRequired { .. }
+    ));
+    assert_eq!(
+        plugin.query().await.expect("awaiting choice").model_alias,
+        before.model_alias
+    );
+    assert!(matches!(
+        plugin
+            .control(ExtensionControl::SelectMode {
+                mode: rw_types::ModeId("discuss".into())
+            })
+            .await
+            .expect("busy"),
+        ExtensionControlOutcome::Busy {}
+    ));
+    assert!(
+        sink.events
+            .lock()
+            .expect("events")
+            .iter()
+            .all(|event| !matches!(event.wire, EngineEvent::DriverChanged { .. }))
+    );
+    handle.close().await.expect("shutdown");
 }

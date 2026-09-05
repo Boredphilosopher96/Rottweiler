@@ -16,6 +16,10 @@ const schemas: readonly (readonly [string, string, string])[] = [
   ["extension-state-transaction", "ExtensionStateTransaction", "extension-contract"],
   ["extension-state-snapshot", "ExtensionStateSnapshot", "extension-contract"],
   ["extension-state-outcome", "ExtensionStateCommitOutcome", "extension-contract"],
+  ["extension-context-read", "ExtensionContextRead", "extension-contract"],
+  ["extension-context-page", "ExtensionContextPage", "extension-contract"],
+  ["extension-control", "ExtensionControl", "extension-contract"],
+  ["extension-control-outcome", "ExtensionControlOutcome", "extension-contract"],
   ["extension-session-snapshot", "ExtensionSessionSnapshot", "extension-contract"],
 ]
 for (const [name, typeName, contract] of schemas) {

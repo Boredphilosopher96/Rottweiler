@@ -152,6 +152,17 @@ failure, or unproven settlement prevents successful turn completion.
 
 Plugins can also *push*: `session/inject_message`, `session/set_status`, `ui/notify` — enough to build things like pi's live extensions (todo watchers, budget guards, custom status widgets).
 
+`session/context_read` returns revision-bound pages of at most 128 context item
+identities, semantic kinds, provenance classes, token estimates and surgery state.
+It exposes no prompt bodies, tool outputs or local paths. A changed revision returns
+`restart`; plugins start a fresh inventory read. `session/control` accepts explicit
+pin, eviction, mode and model selections. Each method requires its own approved
+manifest capability. Session identity is fixed by the host, never a supplied driver
+identity. Controls return `busy` during active work or unresolved model selection;
+context protection, plan approval and the ordinary model context-transfer question
+remain actor-owned. `applied` follows durable commit; a model awaiting a context
+choice returns its question identity instead.
+
 ### Provider plugins
 
 A plugin can register an inference route (capability `providers`): the router

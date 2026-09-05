@@ -119,7 +119,9 @@ fn error_reply(
 }
 // Completions are constructed by the host and have no wire deserializer.
 impl rw_types::allocation::DecodeAllocation for CachedDispatch {
-    fn decode_node_bytes() -> Option<usize> { None }
+    fn decode_node_bytes() -> Option<usize> {
+        None
+    }
 }
 impl PrepareAllocation for CachedDispatch {
     fn prepared_heap_bytes(&self) -> Option<usize> {

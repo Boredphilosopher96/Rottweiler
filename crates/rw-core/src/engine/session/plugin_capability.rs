@@ -30,6 +30,45 @@ impl fmt::Debug for PluginSessionCapability {
 }
 
 impl PluginSessionCapability {
+    /// Read one revision-bound page of prompt inventory metadata.
+    /// # Errors
+    /// Rejects invalid cursors, exhausted actor admission or closure.
+    pub async fn read_context(
+        &self,
+        request: rw_types::extension_control::ExtensionContextRead,
+    ) -> Result<rw_types::extension_control::ExtensionContextPage, AgentLoopError> {
+        if let Some(id) = &request.after_item_id {
+            rw_types::extension_control::validate_name(&id.0)
+                .map_err(|error| AgentLoopError::InvalidConfiguration(error.into()))?;
+        }
+        let (respond, receive) = oneshot::channel();
+        self.commands
+            .try_send(ActorCommand::PluginContextRead { request, respond })
+            .map_err(|_| {
+                AgentLoopError::InvalidConfiguration("plugin control admission unavailable".into())
+            })?;
+        receive.await.map_err(|_| AgentLoopError::Closed)?
+    }
+
+    /// Apply an explicit operation under this session's existing policy.
+    /// # Errors
+    /// Rejects invalid identities, exhausted admission, policy or persistence failure.
+    pub async fn control(
+        &self,
+        control: rw_types::extension_control::ExtensionControl,
+    ) -> Result<rw_types::extension_control::ExtensionControlOutcome, AgentLoopError> {
+        control
+            .validate()
+            .map_err(|error| AgentLoopError::InvalidConfiguration(error.into()))?;
+        let (respond, receive) = oneshot::channel();
+        self.commands
+            .try_send(ActorCommand::PluginControl { control, respond })
+            .map_err(|_| {
+                AgentLoopError::InvalidConfiguration("plugin control admission unavailable".into())
+            })?;
+        receive.await.map_err(|_| AgentLoopError::Closed)?
+    }
+
     /// Reads bounded operational state from the attached session actor.
     ///
     /// # Errors

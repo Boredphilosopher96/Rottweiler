@@ -569,6 +569,26 @@ pub(super) fn validate_push_params(method: &str, params: &Value) -> Result<(), P
     let object = params
         .as_object()
         .ok_or_else(|| rpc_error("invalid_push", "plugin push parameters must be an object"))?;
+    if method == METHOD_SESSION_CONTROL {
+        let control: rw_types::extension_control::ExtensionControl =
+            serde_json::from_value(params.clone())
+                .map_err(|_| rpc_error("invalid_push", "invalid session control"))?;
+        return control
+            .validate()
+            .map_err(|error| rpc_error("invalid_push", error));
+    }
+    if method == METHOD_SESSION_CONTEXT_READ {
+        let request: rw_types::extension_control::ExtensionContextRead =
+            serde_json::from_value(params.clone())
+                .map_err(|_| rpc_error("invalid_push", "invalid context read"))?;
+        return request
+            .after_item_id
+            .as_ref()
+            .map(|id| rw_types::extension_control::validate_name(&id.0))
+            .transpose()
+            .map(|_| ())
+            .map_err(|error| rpc_error("invalid_push", error));
+    }
     if method == METHOD_EVENT_READ {
         let read: rw_plugin_protocol::ExtensionEventRead =
             serde_json::from_value(params.clone())

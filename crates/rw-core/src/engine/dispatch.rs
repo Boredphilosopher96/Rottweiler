@@ -7,6 +7,7 @@ mod message_input;
 mod messages;
 mod model_switch;
 mod permissions;
+mod plugin_control;
 mod plugin_messages;
 mod replies;
 mod rewind;
@@ -109,6 +110,13 @@ pub(super) async fn handle_actor_command(
                 },
             )
             .await;
+            let _ = respond.send(result);
+        }
+        ActorCommand::PluginContextRead { request, respond } => {
+            let _ = respond.send(plugin_control::read_context(state, config, request));
+        }
+        ActorCommand::PluginControl { control, respond } => {
+            let result = plugin_control::control(state, config, events, control).await;
             let _ = respond.send(result);
         }
         ActorCommand::PluginQuery { respond } => {

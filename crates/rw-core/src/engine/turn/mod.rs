@@ -27,6 +27,7 @@ pub(super) use compaction::compact_during_turn;
 pub(super) use context::assemble_session_context;
 pub(super) use context::context_snapshot;
 pub(super) use context::prompt_dump;
+pub(super) use context::protocol_context_kind;
 pub(super) use hooks::hook_event_name;
 pub(super) use journal_events::emit;
 pub(super) use journal_events::emit_batch;

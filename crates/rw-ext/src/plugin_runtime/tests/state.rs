@@ -50,3 +50,31 @@ fn state_pushes_require_individual_manifest_authority() {
             .is_err()
     );
 }
+
+#[test]
+fn typed_session_controls_reject_implicit_actions_and_foreign_authority() {
+    use super::super::incoming::validate_push_params;
+    assert!(
+        validate_push_params(
+            METHOD_SESSION_CONTROL,
+            &json!({"action":"select_model","model":"fast","provider":null})
+        )
+        .is_ok()
+    );
+    for value in [
+        json!({"model":"fast","provider":null}),
+        json!({"action":"select_model","model":"fast"}),
+        json!({"action":"select_mode","mode":"plan","session_id":"other"}),
+        json!({"action":"pin_context","item_id":"x".repeat(257)}),
+    ] {
+        assert!(validate_push_params(METHOD_SESSION_CONTROL, &value).is_err());
+    }
+    assert!(
+        validate_push_params(
+            METHOD_SESSION_CONTEXT_READ,
+            &json!({"expected_sequence":null,"after_item_id":null})
+        )
+        .is_ok()
+    );
+    assert!(validate_push_params(METHOD_SESSION_CONTEXT_READ, &json!({})).is_err());
+}

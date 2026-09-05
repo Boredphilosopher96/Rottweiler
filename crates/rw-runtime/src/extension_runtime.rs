@@ -52,8 +52,8 @@ use rw_mcp::{
 };
 use rw_plugin_protocol::{
     METHOD_EVENT_READ, METHOD_EXTENSION_STATE_COMMIT, METHOD_EXTENSION_STATE_READ,
-    METHOD_SESSION_INJECT_MESSAGE, METHOD_SESSION_QUERY, METHOD_SESSION_SET_STATUS,
-    METHOD_UI_NOTIFY, PluginManifest,
+    METHOD_SESSION_CONTEXT_READ, METHOD_SESSION_CONTROL, METHOD_SESSION_INJECT_MESSAGE,
+    METHOD_SESSION_QUERY, METHOD_SESSION_SET_STATUS, METHOD_UI_NOTIFY, PluginManifest,
 };
 use rw_store::config::ConfigLoader;
 use rw_store::credentials::{CredentialManager, CredentialReference};
@@ -604,6 +604,16 @@ impl PushHandler for SessionPluginPushHandler {
                 serde_json::to_value(self.event_sources.read(&read)?).map_err(|_| {
                     plugin_push_error("event_read_failed", "event source encoding failed")
                 })
+            }
+            METHOD_SESSION_CONTEXT_READ => {
+                let request = serde_json::from_value(params)
+                    .map_err(|_| plugin_push_error("invalid_push", "invalid context read"))?;
+                plugin_push_result(capability.read_context(request).await)
+            }
+            METHOD_SESSION_CONTROL => {
+                let control = serde_json::from_value(params)
+                    .map_err(|_| plugin_push_error("invalid_push", "invalid session control"))?;
+                plugin_push_result(capability.control(control).await)
             }
             METHOD_SESSION_QUERY => plugin_push_result(capability.query().await),
             METHOD_EXTENSION_STATE_READ => plugin_push_result(capability.read_state().await),

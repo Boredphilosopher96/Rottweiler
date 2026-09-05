@@ -230,7 +230,7 @@ pub(in crate::engine) fn assemble_session_context(
     .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))
 }
 
-pub(super) fn protocol_context_kind(
+pub(in crate::engine) fn protocol_context_kind(
     kind: AssemblyContextItemKind,
     role: Option<&Role>,
 ) -> ContextItemKind {

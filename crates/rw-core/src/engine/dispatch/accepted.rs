@@ -9,7 +9,6 @@ use crate::engine::dispatch::replies::query_meta;
 use crate::engine::dispatch::replies::send_connection_event;
 use crate::engine::dispatch::rewind::rewind_state;
 use crate::engine::mode_permission_base;
-use crate::engine::model_switch_question;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::projection::ContextSurgeryAction;
 use crate::engine::projection::RecoveredUserShell;
@@ -20,7 +19,6 @@ use crate::engine::projection::plan_review_context_turn;
 use crate::engine::projection::project_journal_prefix;
 use crate::engine::projection::shell_context_turn;
 use crate::engine::session::ActorCommand;
-use crate::engine::session::PendingModelSwitch;
 use crate::engine::session::PrecommittedAnswer;
 use crate::engine::session::PreparedModelSwitch;
 use crate::engine::session::ProtocolCompletion;
@@ -40,7 +38,6 @@ use rw_types::ModeId;
 use rw_types::ModelContextTransfer;
 use rw_types::PlanArtifact;
 use rw_types::PlanDecision;
-use rw_types::QuestionId;
 use rw_types::RewindTarget;
 use rw_types::Role;
 use rw_types::ShellId;
@@ -201,51 +198,12 @@ pub(super) async fn apply_accepted(
         ClientCommand::SwitchModel {
             model, provider, ..
         } => {
-            let thinking = config.model.thinking_for_model(&model.0, state.thinking);
-            let prepared = PreparedModelSwitch {
-                model: model.clone(),
-                provider: provider.clone(),
-                thinking,
-            };
-            let has_prior_context = state
-                .conversation
-                .iter()
-                .any(|turn| turn.role != Role::System);
-            let result = if has_prior_context
-                && (state.model_alias != model.0 || state.provider != provider)
-            {
-                let question_id = QuestionId(format!("model-switch-{}", state.next_question));
-                state.next_question = state.next_question.saturating_add(1);
-                let question =
-                    model_switch_question(question_id.clone(), model.clone(), provider.clone());
-                let result = emit(
-                    state,
-                    events,
-                    &config.event_sink,
-                    PendingEvent::QuestionAsked {
-                        turn: state.completed_turns,
-                        question_id: question_id.clone(),
-                        questions: vec![question],
-                    },
-                )
-                .await
-                .map(|_| ());
-                if result.is_ok() {
-                    state.pending_model_switches.insert(
-                        question_id.0,
-                        PendingModelSwitch {
-                            turn: state.completed_turns,
-                            model,
-                            provider,
-                        },
-                    );
-                }
-                result
-            } else {
-                commit_prepared_model_switch(state, config, events, prepared, false).await
-            };
+            let result = super::model_switch::request_model_selection(
+                state, config, events, model, provider,
+            )
+            .await;
             if let Some(complete) = completion.take() {
-                let _ = complete.send(result.map(|()| ProtocolCompletion::Unit));
+                let _ = complete.send(result.map(|_| ProtocolCompletion::Unit));
             }
         }
         ClientCommand::UserShellStarted { command, .. } => {

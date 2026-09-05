@@ -17,10 +17,10 @@ use rw_plugin_protocol::{
     METHOD_EXIT, METHOD_EXTENSION_STATE_COMMIT, METHOD_EXTENSION_STATE_READ, METHOD_HOOK_INVOKE,
     METHOD_INITIALIZE, METHOD_PROVIDER_COMPLETE, METHOD_PROVIDER_CREDIT, METHOD_PROVIDER_EVENT,
     METHOD_PROVIDER_HTTP, METHOD_PROVIDER_HTTP_CANCEL, METHOD_PROVIDER_HTTP_EVENT,
-    METHOD_PROVIDER_MODELS, METHOD_SESSION_INJECT_MESSAGE, METHOD_SESSION_QUERY,
-    METHOD_SESSION_SET_STATUS, METHOD_SHUTDOWN, METHOD_TOOL_CALL, METHOD_TOOL_PROGRESS,
-    METHOD_UI_NOTIFY, PLUGIN_HOST_ID, PROTOCOL_VERSION, PROVIDER_WINDOW_BYTES,
-    PROVIDER_WINDOW_EVENTS,
+    METHOD_PROVIDER_MODELS, METHOD_SESSION_CONTEXT_READ, METHOD_SESSION_CONTROL,
+    METHOD_SESSION_INJECT_MESSAGE, METHOD_SESSION_QUERY, METHOD_SESSION_SET_STATUS,
+    METHOD_SHUTDOWN, METHOD_TOOL_CALL, METHOD_TOOL_PROGRESS, METHOD_UI_NOTIFY, PLUGIN_HOST_ID,
+    PROTOCOL_VERSION, PROVIDER_WINDOW_BYTES, PROVIDER_WINDOW_EVENTS,
 };
 use serde_json::{Value, json};
 use ts_rs::TS;
@@ -71,6 +71,8 @@ export type { ExtensionEventKind, ExtensionEventNotice, ExtensionEventOutcome, E
 export type PluginPushMethod =
   | "event/read"
   | "session/query"
+  | "session/context_read"
+  | "session/control"
   | "extension/state_read"
   | "extension/state_commit"
   | "session/inject_message"
@@ -523,6 +525,8 @@ fn methods() -> Value {
         "eventPublish": METHOD_EVENT_PUBLISH,
         "eventRead": METHOD_EVENT_READ,
         "sessionQuery": METHOD_SESSION_QUERY,
+        "contextRead": METHOD_SESSION_CONTEXT_READ,
+        "sessionControl": METHOD_SESSION_CONTROL,
         "stateRead": METHOD_EXTENSION_STATE_READ,
         "stateCommit": METHOD_EXTENSION_STATE_COMMIT,
         "injectMessage": METHOD_SESSION_INJECT_MESSAGE,
@@ -589,6 +593,8 @@ export const RPC_METHODS = Object.freeze({{\n\
   eventPublish: \"{METHOD_EVENT_PUBLISH}\",\n\
   eventRead: \"{METHOD_EVENT_READ}\",\n\
   sessionQuery: \"{METHOD_SESSION_QUERY}\",\n\
+  contextRead: \"{METHOD_SESSION_CONTEXT_READ}\",\n\
+  sessionControl: \"{METHOD_SESSION_CONTROL}\",\n\
   stateRead: \"{METHOD_EXTENSION_STATE_READ}\",\n\
   stateCommit: \"{METHOD_EXTENSION_STATE_COMMIT}\",\n\
   injectMessage: \"{METHOD_SESSION_INJECT_MESSAGE}\",\n\

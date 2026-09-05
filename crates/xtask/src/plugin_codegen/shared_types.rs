@@ -8,6 +8,9 @@ use rw_types::extension_contract::{
     ExtensionSessionSnapshot, ExtensionStateCommitOutcome, ExtensionStateSnapshot,
     ExtensionStateTransaction,
 };
+use rw_types::extension_control::{
+    ExtensionContextPage, ExtensionContextRead, ExtensionControl, ExtensionControlOutcome,
+};
 use rw_types::extension_events::{
     ExtensionEventChunk, ExtensionEventKind, ExtensionEventNotice, ExtensionEventOutcome,
     ExtensionEventRead,
@@ -60,6 +63,10 @@ pub(super) fn generate(root: &Path, check: bool) -> Result<(), String> {
     extension.visit::<ExtensionStateSnapshot>();
     extension.visit::<ExtensionStateCommitOutcome>();
     extension.visit::<ExtensionSessionSnapshot>();
+    extension.visit::<ExtensionContextRead>();
+    extension.visit::<ExtensionContextPage>();
+    extension.visit::<ExtensionControl>();
+    extension.visit::<ExtensionControlOutcome>();
     extension.visit::<ExtensionEventKind>();
     extension.visit::<ExtensionEventNotice>();
     extension.visit::<ExtensionEventOutcome>();
@@ -76,6 +83,13 @@ pub(super) fn generate(root: &Path, check: bool) -> Result<(), String> {
         (
             "ui-contribution",
             schema::<rw_types::extension_ui::UiContribution>(),
+        ),
+        ("extension-context-read", schema::<ExtensionContextRead>()),
+        ("extension-context-page", schema::<ExtensionContextPage>()),
+        ("extension-control", schema::<ExtensionControl>()),
+        (
+            "extension-control-outcome",
+            schema::<ExtensionControlOutcome>(),
         ),
         ("extension-event-kind", schema::<ExtensionEventKind>()),
         ("extension-event-notice", schema::<ExtensionEventNotice>()),

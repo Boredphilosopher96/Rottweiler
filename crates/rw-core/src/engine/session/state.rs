@@ -73,6 +73,18 @@ pub(in crate::engine) enum ActorCommand {
         content: String,
         respond: oneshot::Sender<Result<MessageDisposition, AgentLoopError>>,
     },
+    PluginContextRead {
+        request: rw_types::extension_control::ExtensionContextRead,
+        respond: oneshot::Sender<
+            Result<rw_types::extension_control::ExtensionContextPage, AgentLoopError>,
+        >,
+    },
+    PluginControl {
+        control: rw_types::extension_control::ExtensionControl,
+        respond: oneshot::Sender<
+            Result<rw_types::extension_control::ExtensionControlOutcome, AgentLoopError>,
+        >,
+    },
     PluginQuery {
         respond: oneshot::Sender<
             Result<rw_types::extension_contract::ExtensionSessionSnapshot, AgentLoopError>,
