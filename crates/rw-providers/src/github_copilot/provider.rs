@@ -292,6 +292,24 @@ impl GitHubCopilotProvider {
 
 #[async_trait]
 impl Provider for GitHubCopilotProvider {
+    async fn settle_effects(&self) -> Result<(), ProviderError> {
+        let Some(resolved) = self.resolved.get() else {
+            return Ok(());
+        };
+        let mut failure = None;
+        for provider in [
+            &resolved.user,
+            &resolved.user_vision,
+            &resolved.agent,
+            &resolved.agent_vision,
+        ] {
+            if let Err(error) = provider.settle_effects().await {
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
+
     async fn continuation_provenance(
         &self,
     ) -> Result<Option<crate::ContinuationProvenance>, ProviderError> {

@@ -444,6 +444,10 @@ struct Candidate {
 
 #[async_trait]
 impl Provider for Candidate {
+    async fn settle_effects(&self) -> Result<(), rw_providers::ProviderError> {
+        Ok(())
+    }
+
     fn name(&self) -> &'static str {
         self.name
     }

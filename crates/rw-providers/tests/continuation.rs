@@ -38,6 +38,10 @@ impl StatefulProvider {
 
 #[async_trait]
 impl Provider for StatefulProvider {
+    async fn settle_effects(&self) -> Result<(), crate::ProviderError> {
+        Ok(())
+    }
+
     fn name(&self) -> &str {
         self.name
     }

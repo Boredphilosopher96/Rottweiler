@@ -1,5 +1,9 @@
 mod redaction;
+mod replay_reads;
+mod writer;
 pub use redaction::*;
+use replay_reads::ReplayReads;
+use writer::{RecordingWriter, WriterMessage};
 
 use std::{
     collections::BTreeMap,
@@ -9,18 +13,16 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     task::{Context, Poll},
 };
 
 use async_trait::async_trait;
 use futures_core::Stream;
+use futures_util::FutureExt as _;
 use serde::{Deserialize, Serialize};
-use tokio::{
-    sync::{Notify, mpsc, oneshot},
-    task::JoinHandle,
-};
+use tokio::sync::{Notify, mpsc, oneshot};
 
 use crate::types::RawSseFrame;
 use crate::{
@@ -208,118 +210,6 @@ impl WriteJob {
     }
 }
 
-enum WriterMessage {
-    Fixture(Box<WriteJob>),
-    Barrier(oneshot::Sender<Result<(), ProviderError>>),
-    Settled(oneshot::Sender<()>),
-}
-
-struct RecordingWriter {
-    sender: mpsc::Sender<WriterMessage>,
-    receiver: Mutex<Option<mpsc::Receiver<WriterMessage>>>,
-    worker: Mutex<Option<JoinHandle<()>>>,
-}
-
-impl RecordingWriter {
-    fn new(capacity: usize) -> Self {
-        let (sender, receiver) = mpsc::channel(capacity);
-        Self {
-            sender,
-            receiver: Mutex::new(Some(receiver)),
-            worker: Mutex::new(None),
-        }
-    }
-
-    fn start(&self) {
-        let receiver = self
-            .receiver
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        let Some(mut receiver) = receiver else {
-            return;
-        };
-        let worker = tokio::task::spawn_blocking(move || {
-            let mut first_error = None;
-            while let Some(message) = receiver.blocking_recv() {
-                match message {
-                    WriterMessage::Fixture(mut job) => {
-                        let result = job.write();
-                        if first_error.is_none() {
-                            first_error = result.as_ref().err().cloned();
-                        }
-                        if let Some(completion) = job.completion.take() {
-                            let _ = completion.send(result);
-                        }
-                    }
-                    WriterMessage::Settled(completion) => {
-                        let _ = completion.send(());
-                    }
-                    WriterMessage::Barrier(completion) => {
-                        let result = first_error.take().map_or(Ok(()), Err);
-                        let _ = completion.send(result);
-                    }
-                }
-            }
-        });
-        *self
-            .worker
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(worker);
-    }
-
-    async fn reserve(&self) -> Result<mpsc::OwnedPermit<WriterMessage>, ProviderError> {
-        self.start();
-        self.sender
-            .clone()
-            .reserve_owned()
-            .await
-            .map_err(|_| self.unavailable_error())
-    }
-
-    async fn settle(&self) {
-        self.start();
-        let (completion, result) = oneshot::channel();
-        if self
-            .sender
-            .send(WriterMessage::Settled(completion))
-            .await
-            .is_err()
-            || result.await.is_err()
-        {
-            tracing::error!("recording worker exited without effect settlement proof");
-            std::future::pending::<()>().await;
-        }
-    }
-
-    async fn flush(&self) -> Result<(), ProviderError> {
-        self.start();
-        let (completion, result) = oneshot::channel();
-        self.sender
-            .send(WriterMessage::Barrier(completion))
-            .await
-            .map_err(|_| self.unavailable_error())?;
-        result.await.map_err(|_| self.unavailable_error())?
-    }
-
-    fn unavailable_error(&self) -> ProviderError {
-        let worker_finished = self
-            .worker
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            .is_some_and(JoinHandle::is_finished);
-        ProviderError::new(
-            ProviderErrorKind::Protocol,
-            if worker_finished {
-                "replay fixture writer stopped unexpectedly"
-            } else {
-                "replay fixture writer is unavailable"
-            },
-        )
-    }
-}
-
 /// Middleware that records canonical requests and normalized stream output.
 pub struct Recorder {
     inner: Arc<dyn Provider>,
@@ -328,6 +218,7 @@ pub struct Recorder {
     occurrences: Arc<Mutex<BTreeMap<String, u64>>>,
     activity: Arc<RecordingActivity>,
     writer: RecordingWriter,
+    settlement_failed: AtomicBool,
 }
 
 impl std::fmt::Debug for Recorder {
@@ -364,6 +255,7 @@ impl Recorder {
             occurrences: Arc::new(Mutex::new(BTreeMap::new())),
             activity: Arc::new(RecordingActivity::default()),
             writer: RecordingWriter::new(writer_capacity),
+            settlement_failed: AtomicBool::new(false),
         }
     }
 
@@ -406,9 +298,26 @@ impl Provider for Recorder {
     }
 
     async fn settle_effects(&self) -> std::result::Result<(), crate::ProviderError> {
-        self.inner.settle_effects().await?;
-        self.writer.settle().await;
-        Ok(())
+        let inner = std::panic::AssertUnwindSafe(self.inner.settle_effects()).catch_unwind();
+        let (inner, writer) = tokio::join!(inner, self.writer.settle());
+        let result = inner
+            .unwrap_or_else(|_| {
+                Err(ProviderError::new(
+                    ProviderErrorKind::EffectsUnsettled,
+                    "recorded provider settlement panicked",
+                ))
+            })
+            .and(writer);
+        if result.is_err() {
+            self.settlement_failed.store(true, Ordering::Release);
+        }
+        if self.settlement_failed.load(Ordering::Acquire) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::EffectsUnsettled,
+                "recorded provider did not prove local effect settlement",
+            ));
+        }
+        result
     }
 
     fn name(&self) -> &str {
@@ -442,6 +351,13 @@ impl Provider for Recorder {
     }
 
     async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
+        if self.settlement_failed.load(Ordering::Acquire) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::EffectsUnsettled,
+                "recorded provider admission is closed after failed settlement",
+            ));
+        }
+
         // Reserving bounded writer capacity happens before assigning an
         // occurrence or contacting the provider. Backpressure therefore
         // cannot create an unreplayable sequence hole, while every returned
@@ -813,6 +729,7 @@ pub struct ReplayProvider {
     recorded_capabilities: RecordedCapabilities,
     model_metadata: Option<ProviderModelMetadata>,
     occurrences: Arc<Mutex<BTreeMap<String, u64>>>,
+    reads: Arc<ReplayReads>,
 }
 
 impl ReplayProvider {
@@ -858,12 +775,17 @@ impl ReplayProvider {
             recorded_capabilities,
             model_metadata,
             occurrences: Arc::new(Mutex::new(BTreeMap::new())),
+            reads: Arc::new(ReplayReads::default()),
         })
     }
 }
 
 #[async_trait]
 impl Provider for ReplayProvider {
+    async fn settle_effects(&self) -> Result<(), ProviderError> {
+        self.reads.settle().await
+    }
+
     async fn continuation_provenance(
         &self,
     ) -> Result<Option<crate::ContinuationProvenance>, ProviderError> {
@@ -895,11 +817,15 @@ impl Provider for ReplayProvider {
     }
 
     async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
+        let read = self.reads.begin()?;
         let hash = request_hash(&request)?;
         let occurrence_key = occurrence_key(&self.name, &hash);
         let occurrence = next_occurrence(&self.occurrences, &occurrence_key);
         let path = fixture_path(&self.directory, &self.name, &hash, occurrence);
-        let bytes = tokio::fs::read(&path).await.map_err(|_| {
+        let bytes = read.read(path.clone()).await.map_err(|error| {
+            if error.kind != ProviderErrorKind::ReplayMiss {
+                return error;
+            }
             ProviderError::new(
                 ProviderErrorKind::ReplayMiss,
                 format!(
@@ -1402,6 +1328,12 @@ fn write_fixture_sync(
         )
     })?;
     let redacted = redactor.redact(&bytes);
+    if redacted.len() > replay_reads::MAX_FIXTURE_BYTES {
+        return Err(ProviderError::new(
+            ProviderErrorKind::Protocol,
+            "recording fixture exceeds encoded byte admission",
+        ));
+    }
     let target = fixture_path(directory, provider, hash, occurrence);
     let provider_hash = provider_hash(provider);
     let temporary = directory.join(format!(".{provider_hash}-{hash}-{occurrence:08}.tmp"));

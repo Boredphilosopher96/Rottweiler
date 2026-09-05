@@ -54,6 +54,10 @@ struct AuthoritativeCatalogProvider {
 
 #[async_trait]
 impl Provider for AuthoritativeCatalogProvider {
+    async fn settle_effects(&self) -> Result<(), rw_providers::ProviderError> {
+        Ok(())
+    }
+
     fn name(&self) -> &'static str {
         "authoritative-catalog-fixture"
     }
@@ -93,6 +97,10 @@ impl Provider for AuthoritativeCatalogProvider {
 
 #[async_trait]
 impl Provider for StartFailProvider {
+    async fn settle_effects(&self) -> Result<(), rw_providers::ProviderError> {
+        Ok(())
+    }
+
     fn name(&self) -> &'static str {
         "private-start-failure"
     }
@@ -111,6 +119,10 @@ impl Provider for StartFailProvider {
 
 #[async_trait]
 impl Provider for ExtensionFixtureProvider {
+    async fn settle_effects(&self) -> Result<(), rw_providers::ProviderError> {
+        Ok(())
+    }
+
     fn name(&self) -> &str {
         &self.private_name
     }

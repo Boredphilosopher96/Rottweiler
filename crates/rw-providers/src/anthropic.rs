@@ -324,6 +324,10 @@ fn nonempty(value: &str) -> Option<&str> {
 
 #[async_trait]
 impl Provider for AnthropicProvider {
+    async fn settle_effects(&self) -> Result<(), crate::ProviderError> {
+        Ok(())
+    }
+
     async fn continuation_provenance(
         &self,
     ) -> Result<Option<crate::ContinuationProvenance>, ProviderError> {

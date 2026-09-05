@@ -288,6 +288,10 @@ fn native_factory() -> rw_core::ProviderNativeWebSearchFactory {
 struct NativeProvider;
 #[async_trait::async_trait]
 impl rw_providers::Provider for NativeProvider {
+    async fn settle_effects(&self) -> Result<(), rw_providers::ProviderError> {
+        Ok(())
+    }
+
     fn name(&self) -> &'static str {
         "native-fixture"
     }

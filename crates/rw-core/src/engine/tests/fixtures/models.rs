@@ -277,6 +277,10 @@ pub(in crate::engine::tests) struct ReplaySourceProvider {
 
 #[async_trait]
 impl Provider for ReplaySourceProvider {
+    async fn settle_effects(&self) -> Result<(), rw_providers::ProviderError> {
+        Ok(())
+    }
+
     fn name(&self) -> &'static str {
         "context-replay"
     }

@@ -110,6 +110,10 @@ fn strict_key_formats_are_redacted_without_corrupting_normal_code_data() {
 
 #[async_trait]
 impl Provider for SequenceProvider {
+    async fn settle_effects(&self) -> Result<(), crate::ProviderError> {
+        Ok(())
+    }
+
     fn name(&self) -> &'static str {
         "sequence"
     }
@@ -133,6 +137,10 @@ impl Provider for SequenceProvider {
 
 #[async_trait]
 impl Provider for StartErrorProvider {
+    async fn settle_effects(&self) -> Result<(), crate::ProviderError> {
+        Ok(())
+    }
+
     fn name(&self) -> &'static str {
         "start-error"
     }
@@ -151,6 +159,10 @@ impl Provider for StartErrorProvider {
 
 #[async_trait]
 impl Provider for MetadataErrorProvider {
+    async fn settle_effects(&self) -> Result<(), crate::ProviderError> {
+        Ok(())
+    }
+
     fn name(&self) -> &'static str {
         "metadata-error"
     }
@@ -173,6 +185,10 @@ impl Provider for MetadataErrorProvider {
 
 #[async_trait]
 impl Provider for FlakyMetadataProvider {
+    async fn settle_effects(&self) -> Result<(), crate::ProviderError> {
+        Ok(())
+    }
+
     fn name(&self) -> &'static str {
         "flaky-metadata"
     }
@@ -209,6 +225,10 @@ impl Provider for FlakyMetadataProvider {
 
 #[async_trait]
 impl Provider for ResolvedMetadataStartErrorProvider {
+    async fn settle_effects(&self) -> Result<(), crate::ProviderError> {
+        Ok(())
+    }
+
     fn name(&self) -> &'static str {
         "resolved-metadata-start-error"
     }
@@ -278,6 +298,10 @@ fn flaky_metadata_items(sink: Option<&Arc<dyn WireFrameSink>>) -> BoxEventStream
 
 #[async_trait]
 impl Provider for RawPrefixProvider {
+    async fn settle_effects(&self) -> Result<(), crate::ProviderError> {
+        Ok(())
+    }
+
     fn name(&self) -> &'static str {
         "raw-prefix"
     }
@@ -326,6 +350,10 @@ fn raw_prefix_items() -> BoxEventStream {
 
 #[async_trait]
 impl Provider for InterruptibleRawProvider {
+    async fn settle_effects(&self) -> Result<(), crate::ProviderError> {
+        Ok(())
+    }
+
     fn name(&self) -> &'static str {
         "interruptible-raw"
     }
@@ -352,6 +380,10 @@ impl Provider for InterruptibleRawProvider {
 
 #[async_trait]
 impl Provider for RestrictedProvider {
+    async fn settle_effects(&self) -> Result<(), crate::ProviderError> {
+        Ok(())
+    }
+
     fn name(&self) -> &'static str {
         "restricted"
     }
@@ -402,6 +434,10 @@ fn interruptible_raw_items(sink: Option<Arc<dyn WireFrameSink>>) -> BoxEventStre
 
 #[async_trait]
 impl Provider for DelayedStartProvider {
+    async fn settle_effects(&self) -> Result<(), crate::ProviderError> {
+        Ok(())
+    }
+
     fn name(&self) -> &'static str {
         "delayed"
     }
@@ -429,6 +465,10 @@ impl Provider for DelayedStartProvider {
 
 #[async_trait]
 impl Provider for FixtureProvider {
+    async fn settle_effects(&self) -> Result<(), crate::ProviderError> {
+        Ok(())
+    }
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -449,6 +489,10 @@ impl Provider for FixtureProvider {
 
 #[async_trait]
 impl Provider for ResponsesWithoutNativeProvider {
+    async fn settle_effects(&self) -> Result<(), crate::ProviderError> {
+        Ok(())
+    }
+
     fn name(&self) -> &'static str {
         "responses-without-native"
     }

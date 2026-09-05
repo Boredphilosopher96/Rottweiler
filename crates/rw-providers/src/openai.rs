@@ -457,6 +457,10 @@ fn apply_subscription_request_shape(
 
 #[async_trait]
 impl Provider for OpenAiCompatibleProvider {
+    async fn settle_effects(&self) -> Result<(), crate::ProviderError> {
+        Ok(())
+    }
+
     async fn continuation_provenance(
         &self,
     ) -> Result<Option<crate::ContinuationProvenance>, ProviderError> {

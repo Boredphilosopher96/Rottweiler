@@ -511,6 +511,10 @@ mod tests {
 
     #[async_trait]
     impl Provider for FixtureProvider {
+        async fn settle_effects(&self) -> Result<(), crate::ProviderError> {
+            Ok(())
+        }
+
         fn name(&self) -> &str {
             &self.name
         }
@@ -549,6 +553,10 @@ mod tests {
 
     #[async_trait]
     impl Provider for PermanentFailureProvider {
+        async fn settle_effects(&self) -> Result<(), crate::ProviderError> {
+            Ok(())
+        }
+
         fn name(&self) -> &str {
             &self.name
         }

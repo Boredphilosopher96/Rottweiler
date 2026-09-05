@@ -51,6 +51,10 @@ impl ScriptProvider {
 
 #[async_trait]
 impl Provider for ScriptProvider {
+    async fn settle_effects(&self) -> std::result::Result<(), rw_providers::ProviderError> {
+        Ok(())
+    }
+
     fn name(&self) -> &str {
         &self.name
     }
