@@ -1,14 +1,11 @@
 # TypeScript source plugin host
 
-**Status:** implemented, 2026-08-22. Public SDK publication remains an exact-tag
-release operation and is not claimed by an untagged source commit.
-
-## Outcome
+## Execution model
 
 Rottweiler ships one private, release-owned TypeScript plugin host and starts
 one sandboxed host process for each active TypeScript plugin. A plugin remains a
-small source package; it no longer embeds a separate Bun runtime. Rust continues
-to own trust, approval, preparation, sandbox policy, registration, credentials,
+small source package executed by the host's Bun runtime. Rust owns trust,
+approval, preparation, sandbox policy, registration, credentials,
 replay, and process lifecycle.
 
 Production executes a sealed, content-addressed ESM bundle prepared from an exact
@@ -17,9 +14,9 @@ session-scoped grant. The generic executable JSON-RPC plugin tier remains
 supported for every language, including TypeScript authors who deliberately want
 a standalone executable.
 
-This preserves ADR-003: the Rust engine does not embed JavaScript, unrelated
-plugins do not share a process or authority, and the existing newline-delimited
-JSON-RPC contract remains the engine-facing boundary.
+As specified in ADR-003, the Rust engine does not embed JavaScript. Unrelated
+plugins have separate processes and authority. Newline-delimited JSON-RPC is the
+engine-facing boundary.
 
 ## Author contract
 
@@ -45,7 +42,7 @@ extractor would either implement a surprising TypeScript subset or grow into an
 evaluator. One inert JSON document gives authors one declaration without crossing
 the approval boundary.
 
-The production loop becomes:
+The production workflow is:
 
 ```sh
 bun install --frozen-lockfile --ignore-scripts
@@ -61,8 +58,7 @@ not make them safe.
 
 ## Ownership and module seam
 
-The first production change is deliberately narrow. A new resolver converts one
-configured artifact into the values the current runtime already consumes:
+The resolver converts a configured artifact into a process configuration:
 
 ```rust
 enum PluginTarget {
@@ -77,18 +73,18 @@ async fn resolve_plugin_process(
 ) -> Result<PluginProcessConfig>;
 ```
 
-After resolution, the existing approval store, `PluginLauncher`, `PluginHost`,
+After resolution, the approval store, `PluginLauncher`, `PluginHost`,
 capability enforcer, RPC adapters, host-mediated provider HTTP, redaction, and
 shutdown path remain authoritative. Session startup does not coordinate source
 copying, bundling, cache publication, or helper authentication itself.
 
-New responsibilities live in one deep runtime module:
+The source-host runtime owns:
 
 - authenticate and supervise the private host;
 - discover and freeze the complete source graph;
 - validate lockfile coordinates and input policy;
 - publish and validate sealed bundles;
-- resolve the bundle to the existing process configuration.
+- resolve the bundle to a process configuration.
 
 The host is a private sibling in the application bundle. It is never resolved
 from `PATH` and is not a public command. No configured TypeScript source plugin
@@ -122,7 +118,7 @@ input report remains beside the bundle. The approval record contains bounded
 summaries and digests rather than thousands of path records.
 
 Preparation limits cover input count, total bytes, depth, report bytes, output
-bytes, and wall time. The first values must come from measured fixtures. Unsupported
+bytes, and wall time. Limits are qualified against measured fixtures. Unsupported
 dependency or import forms fail before approval instead of silently escaping the
 bundle.
 
@@ -148,9 +144,8 @@ is below the owner-private bundle store. The launcher adds only that directory t
 intrinsic code reads. It never adds the store to approved workspace roots or write
 roots, so `reads-fs` and `writes-fs` cannot grant access to other cached plugins.
 
-New TypeScript-only identity fields are omitted for direct executable plugins.
-Golden tests must prove their existing serialized approval fingerprints do not
-change.
+Source-plugin approval binds the source graph and prepared bundle. Direct
+executable approval binds the executable artifact and its declared authority.
 
 ## Runtime and failure containment
 
@@ -234,8 +229,8 @@ execution time.
   scratch, credentials, or network authority.
 - One plugin crash retains fail-closed behavior and leaves other plugins and the
   engine alive.
-- Direct executable plugins use the sole current protocol generation. ADR-031
-  replaces protocol 2 with protocol 3; the manifest change requires fresh approval.
+- Direct executable plugins satisfy the protocol and manifest contracts in
+  ADR-031. Approval binds the complete manifest identity.
 - Live attach invokes real tools and hooks, keeps the last good generation after a
   broken edit, blocks capability expansion, drains old work, restores production,
   and reaps on disconnect.
@@ -247,7 +242,7 @@ execution time.
 - No shared multi-plugin JavaScript daemon.
 - No JavaScript runtime embedded in the Rust engine.
 - No runtime dependency install, native addon, remote import, or arbitrary dynamic
-  module resolution in the first source-host release.
+  module resolution.
 - No production hot reload or silent approval carry-forward after source changes.
 - No replacement of the generic any-language RPC tier.
 - No claim that process isolation is a complete CPU or memory quota.

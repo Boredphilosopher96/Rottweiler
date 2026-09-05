@@ -27,12 +27,10 @@ pub const GITHUB_COPILOT_DEVICE_CODE_ENDPOINT: &str = "https://github.com/login/
 pub const GITHUB_COPILOT_ACCESS_TOKEN_ENDPOINT: &str =
     "https://github.com/login/oauth/access_token";
 /// Public native-client identity used by GitHub Copilot CLI-compatible device
-/// flows, including `OpenCode`'s current implementation.
+/// flows.
 ///
 /// OAuth device-flow client ids are public application identifiers, not
-/// secrets. The previously pinned generic application completed GitHub device
-/// authorization but failed the live Copilot catalog; this identity matches
-/// the current known-compatible `OpenCode` flow.
+/// secrets. This application identity authorizes access to the Copilot catalog.
 pub const GITHUB_COPILOT_CLIENT_ID: &str = "Ov23li8tweQw6odWQebz";
 
 const DEVICE_SCOPE: &str = "read:user";
