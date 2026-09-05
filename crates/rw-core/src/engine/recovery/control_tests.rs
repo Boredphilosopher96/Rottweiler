@@ -212,8 +212,8 @@ fn completed_boundary_bootstrap_matches_rewind_without_materializing_history() {
         &mut journal,
         vec![
             PendingEvent::ModeChanged {
-                mode: rw_types::SessionMode::Plan,
-                mode_id: rw_types::ModeId("plan".into()),
+                mode: rw_types::ModeId("plan".into()),
+                definition_fingerprint: modes.get("plan").expect("mode").semantic_fingerprint(),
             },
             PendingEvent::TurnStarted { turn: 1 },
             PendingEvent::ConversationTurnCommitted {
@@ -226,8 +226,8 @@ fn completed_boundary_bootstrap_matches_rewind_without_materializing_history() {
             },
             super::tests::terminal(1),
             PendingEvent::ModeChanged {
-                mode: rw_types::SessionMode::Execute,
-                mode_id: rw_types::ModeId("execute".into()),
+                mode: rw_types::ModeId("execute".into()),
+                definition_fingerprint: modes.get("execute").expect("mode").semantic_fingerprint(),
             },
             PendingEvent::SessionTitleUpdated {
                 title: "Present title".into(),
