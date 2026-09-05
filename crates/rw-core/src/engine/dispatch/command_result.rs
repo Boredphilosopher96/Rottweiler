@@ -398,6 +398,7 @@ pub(super) async fn apply(
                     let rebase = config
                         .extension_development
                         .rebase(SessionExtensionSnapshot {
+                            publication: crate::RuntimePublication::Active,
                             ui: Arc::clone(&config.ui),
                             revision: base_config.workspace_generation,
                             workspace_roots: Arc::from(generation.roots.clone()),

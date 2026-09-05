@@ -240,15 +240,14 @@ fn start(
         consumer,
         redactor: rw_providers::FixtureRedactor::default(),
     };
-    (
-        PluginFanoutWorker::start(
-            "example".into(),
-            BTreeSet::from([ExtensionEventKind::PluginStatusChanged]),
-            context,
-            permit,
-        ),
-        sources,
-    )
+    let worker = PluginFanoutWorker::start(
+        "example".into(),
+        BTreeSet::from([ExtensionEventKind::PluginStatusChanged]),
+        context,
+        permit,
+    );
+    worker.activate();
+    (worker, sources)
 }
 async fn wait_for(mut condition: impl FnMut() -> bool) {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {

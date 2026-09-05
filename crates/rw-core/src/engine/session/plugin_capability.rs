@@ -20,6 +20,31 @@ pub struct PluginSessionCapability {
     pub(super) plugin_id: String,
 }
 
+/// Weak host-owned factory used when publishing a fresh native generation.
+/// It does not retain the public session handle or its shutdown lease.
+#[derive(Clone)]
+pub struct PluginSessionBinding {
+    pub(super) commands: mpsc::WeakSender<ActorCommand>,
+    pub(super) session_id: rw_types::SessionId,
+}
+impl PluginSessionBinding {
+    #[must_use]
+    pub fn session_id(&self) -> &rw_types::SessionId {
+        &self.session_id
+    }
+    /// Bind one approved plugin namespace to the still-live actor.
+    /// # Errors
+    /// Rejects invalid namespace identities or a retired actor.
+    pub fn bind(&self, plugin_id: &str) -> Result<PluginSessionCapability, AgentLoopError> {
+        validate_plugin_id(plugin_id)?;
+        let commands = self.commands.upgrade().ok_or(AgentLoopError::Closed)?;
+        Ok(PluginSessionCapability {
+            commands,
+            plugin_id: plugin_id.to_owned(),
+        })
+    }
+}
+
 impl fmt::Debug for PluginSessionCapability {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter

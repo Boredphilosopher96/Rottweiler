@@ -95,6 +95,15 @@ impl SessionHandle {
         self.model.activate_provider(provider, selected_model).await
     }
 
+    /// Returns a weak namespace binding for future host-owned extension generations.
+    #[must_use]
+    pub fn plugin_binding(&self) -> super::plugin_capability::PluginSessionBinding {
+        super::plugin_capability::PluginSessionBinding {
+            commands: self.commands.downgrade(),
+            session_id: self.session_id.clone(),
+        }
+    }
+
     /// Mints the narrow machine capability for one approved logical plugin.
     /// The capability cannot access protocol dispatch or the driver lease.
     ///

@@ -1,7 +1,9 @@
 //! Durable subscription delivery: append wakes a cursor reader without retaining payloads.
 mod encoding;
+mod generations;
 mod redaction;
 mod worker;
+pub(crate) use generations::PreparedPluginDelivery;
 
 use super::durable_session::DurableEventSink;
 use crate::extension_runtime::PluginEventRegistration;
@@ -14,9 +16,10 @@ use rw_providers::FixtureRedactor;
 use std::sync::Arc;
 use worker::PluginFanoutWorker;
 
-pub(super) struct PluginFanoutEventSink {
+pub(crate) struct PluginFanoutEventSink {
     inner: Arc<DurableEventSink>,
-    workers: Vec<PluginFanoutWorker>,
+    workers: std::sync::RwLock<generations::DeliveryGeneration>,
+    redactor: FixtureRedactor,
 }
 impl PluginFanoutEventSink {
     pub(super) fn new(
@@ -24,27 +27,34 @@ impl PluginFanoutEventSink {
         registrations: Vec<PluginEventRegistration>,
         redactor: &FixtureRedactor,
     ) -> Result<Self, AgentLoopError> {
-        // Reserve every worker before starting any task, so constructor failure
-        // cannot leave a partially registered set of event consumers.
-        let permits = registrations
-            .iter()
-            .map(|registration| registration.budget.worker())
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(error)?;
-        let workers = registrations
-            .into_iter()
-            .zip(permits)
-            .map(|(registration, permit)| {
-                let source: Arc<dyn SessionEventSink> = inner.clone();
-                PluginFanoutWorker::new(source, registration, permit, redactor.clone())
-            })
-            .collect();
-        Ok(Self { inner, workers })
+        let workers = generations::workers(&inner, registrations, redactor)?;
+        for worker in &workers {
+            worker.activate();
+        }
+        Ok(Self {
+            inner,
+            redactor: redactor.clone(),
+            workers: std::sync::RwLock::new(generations::DeliveryGeneration {
+                workers: Arc::from(workers),
+                paused: false,
+                settled: false,
+                closed: false,
+                revision: 0,
+                failure: None,
+            }),
+        })
     }
+
     fn publish(&self, event: &EngineEvent) {
         if let Some(kind) = rw_types::extension_events::ExtensionEventKind::from_event(event) {
-            for worker in &self.workers {
-                worker.wake(kind);
+            let generation = self
+                .workers
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !generation.paused {
+                for worker in generation.workers.iter() {
+                    worker.wake(kind);
+                }
             }
         }
     }
@@ -85,16 +95,11 @@ impl SessionEventSink for PluginFanoutEventSink {
         self.inner.extension_state(plugin_id).await
     }
     async fn settle_effects(&self) -> Result<(), AgentLoopError> {
-        // Cancellation is broadcast before waiting on any owner.
-        for worker in &self.workers {
-            worker.cancel();
-        }
-        let mut failure = None;
-        for worker in &self.workers {
-            if let Err(error) = worker.settle().await {
-                failure.get_or_insert(error);
-            }
-        }
+        self.workers
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .closed = true;
+        let mut failure = self.pause_and_settle().await.err();
         if let Err(error) = self.inner.settle_effects().await {
             failure.get_or_insert(error);
         }

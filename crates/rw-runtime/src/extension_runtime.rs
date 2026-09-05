@@ -8,6 +8,7 @@ pub(crate) use mcp_service::*;
 
 mod activation;
 mod budget;
+pub(crate) mod generations;
 pub(crate) mod ui;
 pub(crate) use budget::PluginRuntimeBudget;
 pub(crate) mod delivery_budget;
@@ -514,6 +515,16 @@ impl PluginSessionRuntime {
             self.providers
                 .push((declaration.alias_prefix.clone(), Arc::new(adapter)));
         }
+    }
+
+    fn bind_generation(&self, binding: &rw_core::PluginSessionBinding) -> Result<()> {
+        for (plugin_id, handler) in &self.push_handlers {
+            let capability = binding
+                .bind(plugin_id)
+                .map_err(|error| miette!(error.to_string()))?;
+            handler.bind(binding.session_id().0.clone(), capability);
+        }
+        Ok(())
     }
 
     pub(crate) fn bind_push(&self, handle: &rw_core::SessionHandle) -> Result<()> {

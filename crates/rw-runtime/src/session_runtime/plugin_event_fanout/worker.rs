@@ -77,6 +77,7 @@ impl EventConsumer for PluginEventRegistration {
 pub(super) struct PluginFanoutWorker {
     subscriptions: BTreeSet<ExtensionEventKind>,
     wake: Arc<Notify>,
+    activation: Arc<Notify>,
     cancellation: CancellationToken,
     completed: watch::Receiver<Option<Result<(), String>>>,
 }
@@ -104,6 +105,8 @@ impl PluginFanoutWorker {
         permit: OwnedSemaphorePermit,
     ) -> Self {
         let wake = Arc::new(Notify::new());
+        let activation = Arc::new(Notify::new());
+        let task_activation = activation.clone();
         let cancellation = CancellationToken::default();
         let (complete, completed) = watch::channel(None);
         let task_wake = wake.clone();
@@ -111,8 +114,13 @@ impl PluginFanoutWorker {
         let task_subscriptions = subscriptions.clone();
         tokio::spawn(async move {
             let result =
-                AssertUnwindSafe(context.run(&task_subscriptions, &task_wake, &task_cancel))
-                    .catch_unwind()
+                AssertUnwindSafe(async {
+                    tokio::select! {
+                        biased;
+                        () = task_cancel.cancelled() => Ok(()),
+                        () = task_activation.notified() => context.run(&task_subscriptions, &task_wake, &task_cancel).await,
+                    }
+                }).catch_unwind()
                     .await;
             let panicked = result.is_err();
             if let Ok(Err(_)) = &result {
@@ -136,9 +144,13 @@ impl PluginFanoutWorker {
         Self {
             subscriptions,
             wake,
+            activation,
             cancellation,
             completed,
         }
+    }
+    pub(super) fn activate(&self) {
+        self.activation.notify_one();
     }
     pub(super) fn wake(&self, kind: ExtensionEventKind) {
         if self.subscriptions.contains(&kind) {

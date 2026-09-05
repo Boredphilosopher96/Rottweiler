@@ -69,10 +69,12 @@ mod projection;
 pub mod recovery;
 mod replay;
 pub use replay::{SessionEventReadView, SessionReplayLimits};
+mod runtime_publication;
 mod session;
 mod session_extension;
 mod session_resources;
 mod shutdown;
+pub use runtime_publication::{PreparedRuntimePublication, RuntimePublication};
 pub use session_resources::{NoopSessionResources, SessionResources};
 mod task_ownership;
 mod turn;
@@ -91,8 +93,8 @@ pub use projection::{
 };
 use session::ActorState;
 pub use session::{
-    PluginSessionCapability, SessionActor, SessionActorConfig, SessionHandle, SessionSubscription,
-    StartupNotification,
+    PluginSessionBinding, PluginSessionCapability, SessionActor, SessionActorConfig, SessionHandle,
+    SessionSubscription, StartupNotification,
 };
 pub use session_extension::{
     NoopSessionExtensionController, SessionExtensionController, SessionExtensionSnapshot,

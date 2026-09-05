@@ -235,6 +235,7 @@ impl RuntimeSessionExtensionController {
                 })?;
         }
         Ok(rw_core::SessionExtensionSnapshot {
+            publication: rw_core::RuntimePublication::Active,
             ui: Arc::new(rw_core::ui::CombinedUiRegistry::new(
                 Arc::clone(&base.ui),
                 candidate.ui.clone(),

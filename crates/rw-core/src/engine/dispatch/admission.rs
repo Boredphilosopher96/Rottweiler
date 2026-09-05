@@ -1103,6 +1103,7 @@ pub(super) async fn dispatch_protocol(
             | ClientCommand::DetachDevelopmentPlugin { .. }
     ) {
         let current = SessionExtensionSnapshot {
+            publication: crate::RuntimePublication::Active,
             ui: Arc::clone(&config.ui),
             revision: config.workspace_generation,
             workspace_roots: Arc::from(

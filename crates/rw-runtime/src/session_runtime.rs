@@ -23,7 +23,7 @@ mod model_selection;
 pub(crate) mod native_model_generations;
 pub(crate) mod native_search;
 mod nested_instructions;
-mod plugin_event_fanout;
+pub(crate) mod plugin_event_fanout;
 mod prompt_model;
 mod prompt_shapes;
 mod provider_activation;

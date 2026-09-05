@@ -624,6 +624,7 @@ impl rw_core::WorkspaceRootController for RuntimeWorkspaceRootController {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(generation, prepared.roots.clone());
         Ok(rw_core::WorkspaceRuntimeGeneration {
+            publication: rw_core::RuntimePublication::Active,
             ui: Arc::new(rw_core::ui::EmptyUiRegistry),
             generation,
             effective_from_turn,

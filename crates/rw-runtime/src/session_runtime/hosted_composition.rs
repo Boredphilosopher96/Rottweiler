@@ -456,43 +456,52 @@ pub(crate) async fn compose_hosted_actor(
     let plugin_redactor = Arc::new(crate::extension_runtime::SharedPluginRedactor::new(
         fixture_redactor.clone(),
     ));
-    let plugin_runtime = if executable_catalog.plugins.is_empty() {
-        None
-    } else {
-        let runtime = Arc::new(crate::extension_runtime::PluginSessionRuntime::compose(
-            &executable_catalog.plugins,
-            &options.storage_root,
-            &workspace_roots,
-            &std::env::current_exe().into_diagnostic()?,
-            &plugin_redactor,
-            &options.plugin_runtime_budget,
-            Arc::clone(&session_ui),
-        )?);
-        for pending in &runtime.pending {
-            tracing::warn!("plugin {pending}");
+    let native_extensions = crate::extension_runtime::generations::PluginGenerationOwner::compose(
+        crate::extension_runtime::generations::PluginGenerationConfig {
+            private_root: options.storage_root.clone(),
+            helper: std::env::current_exe().into_diagnostic()?,
+            redactor: plugin_redactor.clone(),
+            budget: options.plugin_runtime_budget.clone(),
+            session_ui: session_ui.clone(),
+        },
+        &executable_catalog.plugins,
+        &workspace_roots,
+    )?;
+    let plugin_runtime = native_extensions.current();
+    for pending in &plugin_runtime.pending {
+        tracing::warn!("plugin {pending}");
+    }
+    if !plugin_runtime.tools.is_empty() {
+        let names = built_tools
+            .registry
+            .descriptors()
+            .into_iter()
+            .map(|descriptor| descriptor.name)
+            .collect::<Vec<_>>();
+        let mut registry = built_tools
+            .registry
+            .subset(names.iter().map(String::as_str))
+            .map_err(|error| miette!("plugin tool registry could not clone: {error}"))?;
+        for tool in &plugin_runtime.tools {
+            registry
+                .register(Arc::clone(tool))
+                .map_err(|error| miette!("plugin tool could not register: {error}"))?;
         }
-        if !runtime.tools.is_empty() {
-            let names = built_tools
-                .registry
-                .descriptors()
-                .into_iter()
-                .map(|descriptor| descriptor.name)
-                .collect::<Vec<_>>();
-            let mut registry = built_tools
-                .registry
-                .subset(names.iter().map(String::as_str))
-                .map_err(|error| miette!("plugin tool registry could not clone: {error}"))?;
-            for tool in &runtime.tools {
-                registry
-                    .register(Arc::clone(tool))
-                    .map_err(|error| miette!("plugin tool could not register: {error}"))?;
+        built_tools.registry = Arc::new(registry);
+    }
+
+    let plugin_resources = crate::session_resources::RuntimeSessionResources::own_cleanup(
+        native_extensions.clone(),
+        {
+            let owner = native_extensions.clone();
+            async move {
+                owner
+                    .shutdown()
+                    .await
+                    .map_err(|error| Arc::<str>::from(error.to_string()))
             }
-            built_tools.registry = Arc::new(registry);
-        }
-        Some(runtime)
-    };
-    let plugin_resources =
-        crate::session_resources::RuntimeSessionResources::new(None, plugin_runtime.clone());
+        },
+    );
 
     let mut provider_recipe = None;
     let mut initial_catalog_seed = None;
@@ -504,8 +513,8 @@ pub(crate) async fn compose_hosted_actor(
         HostedProviderMode::Live => {
             let pricing = load_effective_pricing_table().await?;
             let extension_providers = plugin_runtime
+                .providers
                 .iter()
-                .flat_map(|runtime| runtime.providers.iter())
                 .map(|(prefix, provider)| (prefix.clone(), Arc::clone(provider)))
                 .collect::<Vec<_>>();
             provider_recipe = Some(NativeProviderRecipe::Live {
@@ -595,8 +604,8 @@ pub(crate) async fn compose_hosted_actor(
     };
     let children = recipe.child_composer(
         plugin_runtime
+            .providers
             .iter()
-            .flat_map(|runtime| runtime.providers.iter())
             .map(|(prefix, provider)| (prefix.clone(), Arc::clone(provider)))
             .collect(),
     );
@@ -682,21 +691,16 @@ pub(crate) async fn compose_hosted_actor(
         root_authorization: WorkspaceRootAuthorization::Hosted(allowed_workspace_roots.clone()),
     });
     let commands_cell = Arc::new(OnceLock::<Arc<RuntimeCommandRegistry>>::new());
-    let actor_event_sink: Arc<dyn SessionEventSink> = if let Some(runtime) = plugin_runtime
-        .as_ref()
-        .filter(|runtime| !runtime.event_routers.is_empty())
-    {
-        Arc::new(
-            PluginFanoutEventSink::new(
-                durable_sink.clone(),
-                runtime.event_routers.clone(),
-                &engine_redactor,
-            )
-            .map_err(|error| miette!("plugin event delivery admission: {error}"))?,
+    let plugin_delivery = Arc::new(
+        PluginFanoutEventSink::new(
+            durable_sink.clone(),
+            plugin_runtime.event_routers.clone(),
+            &engine_redactor,
         )
-    } else {
-        durable_sink.clone()
-    };
+        .map_err(|error| miette!("plugin event delivery admission: {error}"))?,
+    );
+    native_extensions.bind_delivery(plugin_delivery.clone())?;
+    let actor_event_sink: Arc<dyn SessionEventSink> = plugin_delivery.clone();
     let secret_redactor: Arc<dyn rw_core::SecretRedactor> =
         Arc::new(SharedEngineSecretRedactor(engine_redactor));
     let mut agents = compose_agent_registry(&extension_catalog)
@@ -848,12 +852,10 @@ pub(crate) async fn compose_hosted_actor(
         Arc::clone(&built_tools.code_intelligence),
         &workspace_root_controller.validated_wasm_hooks,
     )?;
-    if let Some(plugins) = &plugin_runtime {
-        for (registration, handler) in &plugins.hooks {
-            runtime_hooks
-                .register_shared(registration.clone(), Arc::clone(handler))
-                .map_err(|error| miette!("plugin hook could not register: {error}"))?;
-        }
+    for (registration, handler) in &plugin_runtime.hooks {
+        runtime_hooks
+            .register_shared(registration.clone(), Arc::clone(handler))
+            .map_err(|error| miette!("plugin hook could not register: {error}"))?;
     }
     register_nested_instruction_guard(
         &mut runtime_hooks,
@@ -877,12 +879,10 @@ pub(crate) async fn compose_hosted_actor(
         .await
         .map_err(|error| miette!("MCP command could not register: {error}"))?;
     }
-    if let Some(plugins) = &plugin_runtime {
-        for (descriptor, handler) in &plugins.commands {
-            runtime_commands
-                .register_shared(descriptor.clone(), Arc::clone(handler))
-                .map_err(|error| miette!("plugin command could not register: {error}"))?;
-        }
+    for (descriptor, handler) in &plugin_runtime.commands {
+        runtime_commands
+            .register_shared(descriptor.clone(), Arc::clone(handler))
+            .map_err(|error| miette!("plugin command could not register: {error}"))?;
     }
     let runtime_commands = Arc::new(runtime_commands);
     let _ = commands_cell.set(Arc::clone(&runtime_commands));
@@ -897,10 +897,7 @@ pub(crate) async fn compose_hosted_actor(
     );
     let initial_thinking = configured_session_thinking(&options.config, &persisted_model_alias);
     let handle = SessionActor::spawn(SessionActorConfig {
-        ui: plugin_runtime.as_ref().map_or_else(
-            || Arc::new(rw_core::ui::EmptyUiRegistry) as Arc<dyn rw_core::ui::UiRegistry>,
-            |plugins| plugins.ui.clone(),
-        ),
+        ui: plugin_runtime.ui.clone(),
         ui_tool_source: Arc::new(crate::extension_runtime::ui::source::ToolSource {
             reader: Arc::clone(&options.transcripts),
             session: options.session_id.clone(),
@@ -940,9 +937,7 @@ pub(crate) async fn compose_hosted_actor(
         event_capacity: DEFAULT_EVENT_CAPACITY,
     })
     .map_err(display_agent_error)?;
-    if let Some(plugins) = &plugin_runtime {
-        plugins.bind_push(&handle)?;
-    }
+    native_extensions.bind(handle.plugin_binding())?;
     let subagents: Arc<dyn HostSubagentService> = Arc::new(HostedSubagentController {
         parent: handle.clone(),
         orchestrator,

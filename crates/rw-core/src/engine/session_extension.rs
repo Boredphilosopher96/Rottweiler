@@ -14,6 +14,7 @@ use super::{
 /// One immutable tool/hook/command boundary activated between turns.
 #[derive(Clone)]
 pub struct SessionExtensionSnapshot {
+    pub publication: super::RuntimePublication,
     pub ui: Arc<dyn crate::ui::UiRegistry>,
     pub revision: u64,
     pub workspace_roots: Arc<[std::path::PathBuf]>,

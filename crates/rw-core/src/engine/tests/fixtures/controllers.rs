@@ -132,6 +132,7 @@ impl SessionExtensionController for FixedSessionExtensionController {
             )
             .expect("development marker command");
         Ok(SessionExtensionSnapshot {
+            publication: crate::RuntimePublication::Active,
             ui: Arc::new(crate::ui::EmptyUiRegistry),
             revision: base.revision.saturating_add(1),
             workspace_roots: base.workspace_roots,
@@ -175,6 +176,7 @@ impl SessionExtensionController for FixedSessionExtensionController {
             .expect("development marker command");
         Ok((
             SessionExtensionSnapshot {
+                publication: crate::RuntimePublication::Active,
                 ui: Arc::new(crate::ui::EmptyUiRegistry),
                 revision: current.revision.saturating_add(1),
                 workspace_roots: current.workspace_roots,
@@ -211,6 +213,7 @@ impl WorkspaceRootController for FixedWorkspaceRootController {
             )
             .expect("generation marker command");
         Ok(WorkspaceRuntimeGeneration {
+            publication: crate::RuntimePublication::Active,
             ui: Arc::new(crate::ui::EmptyUiRegistry),
             generation: current_generation + 1,
             effective_from_turn,
