@@ -39,6 +39,9 @@ type StoredHead<'a> = (u32, u64, u64, &'a [u8], &'a [u8], bool);
 const ROWS: TableDefinition<u64, StoredRow<'_>> = TableDefinition::new("transcript_rows_v1");
 const KEYS: TableDefinition<&str, u64> = TableDefinition::new("transcript_keys_v1");
 const TURNS: TableDefinition<(u64, u64), ()> = TableDefinition::new("transcript_turns_v1");
+const BINDINGS: TableDefinition<&str, &str> = TableDefinition::new("transcript_bindings_v1");
+const CHANGES: TableDefinition<(u64, u64), ()> = TableDefinition::new("transcript_changes_v1");
+const SOURCES: TableDefinition<u64, u64> = TableDefinition::new("transcript_sources_v1");
 const HEAD: TableDefinition<u8, StoredHead<'_>> = TableDefinition::new("transcript_head_v1");
 
 /// Index failures never change the authoritative journal.
@@ -111,6 +114,8 @@ pub enum TranscriptIndexMutation {
     Put(TranscriptIndexRow),
     /// Delete an identity during a rebuild.
     Delete(String),
+    /// Bind a core-owned entity identity to its current stable row.
+    Bind { binding: String, key: String },
     /// Repair one ordinal during a rebuild without decoding its payload.
     Move { key: String, ordinal: u64 },
 }
@@ -277,6 +282,9 @@ impl TranscriptIndex {
             transaction.open_table(ROWS).map_err(storage)?;
             transaction.open_table(KEYS).map_err(storage)?;
             transaction.open_table(TURNS).map_err(storage)?;
+            transaction.open_table(BINDINGS).map_err(storage)?;
+            transaction.open_table(CHANGES).map_err(storage)?;
+            transaction.open_table(SOURCES).map_err(storage)?;
             let prefix = JournalPrefixIdentity::empty();
             transaction
                 .open_table(HEAD)
@@ -350,6 +358,7 @@ impl TranscriptIndex {
             charged_bytes += match mutation {
                 TranscriptIndexMutation::Put(row) => row.payload.len() + row.key.len() + 48,
                 TranscriptIndexMutation::Delete(key) => key.len() + 48,
+                TranscriptIndexMutation::Bind { binding, key } => binding.len() + key.len() + 48,
                 TranscriptIndexMutation::Move { .. } => MAX_ROW_BYTES + MAX_KEY_BYTES + 48,
             };
             if charged_bytes > MAX_BATCH_BYTES {
@@ -361,10 +370,24 @@ impl TranscriptIndex {
             let mut catalog = RowCatalog::open(&transaction)?;
             for mutation in mutations {
                 match mutation {
-                    TranscriptIndexMutation::Put(row) => catalog.put(row, rebuilding)?,
-                    TranscriptIndexMutation::Delete(key) => catalog.delete(key, rebuilding)?,
+                    TranscriptIndexMutation::Put(row) => {
+                        catalog.put(row, rebuilding || head.rebuilding)?;
+                    }
+                    TranscriptIndexMutation::Delete(key) => {
+                        catalog.delete(key, rebuilding || head.rebuilding)?;
+                    }
+                    TranscriptIndexMutation::Bind { binding, key } => {
+                        if catalog.keys.get(key.as_str()).map_err(storage)?.is_none() {
+                            return Err(TranscriptIndexError::Invalid("missing binding row"));
+                        }
+                        transaction
+                            .open_table(BINDINGS)
+                            .map_err(storage)?
+                            .insert(binding.as_str(), key.as_str())
+                            .map_err(storage)?;
+                    }
                     TranscriptIndexMutation::Move { key, ordinal } => {
-                        catalog.move_row(key, *ordinal, rebuilding)?;
+                        catalog.move_row(key, *ordinal, rebuilding || head.rebuilding)?;
                     }
                 }
             }
@@ -420,13 +443,36 @@ impl TranscriptIndex {
         max_rows: usize,
         max_bytes: usize,
     ) -> Result<TranscriptIndexPage, TranscriptIndexError> {
+        self.read_page(first, max_rows, max_bytes, false)
+    }
+
+    /// Read a bounded working window while core repairs a hidden generation.
+    ///
+    /// # Errors
+    /// Fails for invalid limits or corrupt rows. These rows must never be served to clients.
+    pub fn maintenance_page(
+        &self,
+        first: u64,
+        max_rows: usize,
+        max_bytes: usize,
+    ) -> Result<TranscriptIndexPage, TranscriptIndexError> {
+        self.read_page(first, max_rows, max_bytes, true)
+    }
+
+    fn read_page(
+        &self,
+        first: u64,
+        max_rows: usize,
+        max_bytes: usize,
+        maintenance: bool,
+    ) -> Result<TranscriptIndexPage, TranscriptIndexError> {
         if max_rows == 0 || max_rows > MAX_PAGE_ROWS || max_bytes == 0 || max_bytes > MAX_PAGE_BYTES
         {
             return Err(TranscriptIndexError::Limit("page"));
         }
         let read = self.database.begin_read().map_err(storage)?;
         let head = read_head(&read)?;
-        if head.rebuilding {
+        if head.rebuilding && !maintenance {
             return Err(TranscriptIndexError::Rebuilding);
         }
         let table = read.open_table(ROWS).map_err(storage)?;
@@ -475,12 +521,154 @@ impl TranscriptIndex {
             .ok_or(TranscriptIndexError::Invalid("missing keyed row"))?;
         Ok(Some(owned_row(ordinal.value(), value.value())?))
     }
+    /// Resolve the latest row bound to a mutable semantic entity.
+    /// A binding whose row was removed by rewind resolves to no row.
+    ///
+    /// # Errors
+    /// Fails for invalid keys, corrupt storage or an incomplete generation.
+    pub fn bound_row(
+        &self,
+        binding: &str,
+    ) -> Result<Option<TranscriptIndexRow>, TranscriptIndexError> {
+        validate_key(binding)?;
+        let read = self.database.begin_read().map_err(storage)?;
+        if read_head(&read)?.rebuilding {
+            return Err(TranscriptIndexError::Rebuilding);
+        }
+        let bindings = read.open_table(BINDINGS).map_err(storage)?;
+        let Some(key) = bindings.get(binding).map_err(storage)? else {
+            return Ok(None);
+        };
+        read_keyed_row(&read, key.value())
+    }
+
+    /// Select at most one bounded batch of rows removed by an agent-turn rewind.
+    ///
+    /// # Errors
+    /// Fails for invalid limits or corrupt storage.
+    pub fn rows_after_turn(
+        &self,
+        turn: u64,
+        max_rows: usize,
+    ) -> Result<Vec<TranscriptIndexRow>, TranscriptIndexError> {
+        if max_rows == 0 || max_rows > MAX_PAGE_ROWS {
+            return Err(TranscriptIndexError::Limit("rewind rows"));
+        }
+        let Some(first) = turn.checked_add(1) else {
+            return Ok(Vec::new());
+        };
+        let read = self.database.begin_read().map_err(storage)?;
+        let turns = read.open_table(TURNS).map_err(storage)?;
+        let rows = read.open_table(ROWS).map_err(storage)?;
+        let mut found = Vec::with_capacity(max_rows);
+        let mut bytes = 0;
+        for entry in turns.range((first, 0)..).map_err(storage)?.take(max_rows) {
+            let (key, _) = entry.map_err(storage)?;
+            let ordinal = key.value().1;
+            let value = rows
+                .get(ordinal)
+                .map_err(storage)?
+                .ok_or(TranscriptIndexError::Invalid("missing turn row"))?;
+            let row = owned_row(ordinal, value.value())?;
+            bytes += row.payload.len() + row.key.len() + 48;
+            if bytes > MAX_PAGE_BYTES {
+                break;
+            }
+            found.push(row);
+        }
+        Ok(found)
+    }
+
+    /// Seek the surviving row at or immediately before a removed source anchor.
+    ///
+    /// # Errors
+    /// Fails for an incomplete generation or corrupt storage.
+    pub fn at_or_before_source(
+        &self,
+        source: SequenceId,
+    ) -> Result<Option<TranscriptIndexRow>, TranscriptIndexError> {
+        let read = self.database.begin_read().map_err(storage)?;
+        if read_head(&read)?.rebuilding {
+            return Err(TranscriptIndexError::Rebuilding);
+        }
+        let sources = read.open_table(SOURCES).map_err(storage)?;
+        let mut range = sources.range(..=source.0).map_err(storage)?;
+        let Some(entry) = range.next_back() else {
+            return Ok(None);
+        };
+        let (_, ordinal) = entry.map_err(storage)?;
+        let rows = read.open_table(ROWS).map_err(storage)?;
+        let value = rows
+            .get(ordinal.value())
+            .map_err(storage)?
+            .ok_or(TranscriptIndexError::Invalid("missing source row"))?;
+        Ok(Some(owned_row(ordinal.value(), value.value())?))
+    }
+
+    /// Read bounded invalidations for previously published rows, excluding appends.
+    /// `None` requires a whole-cache invalidation because the result exceeded the cap.
+    ///
+    /// # Errors
+    /// Fails for invalid limits, an incomplete generation or corrupt storage.
+    pub fn changed_keys(
+        &self,
+        after: SequenceId,
+        max_rows: usize,
+    ) -> Result<Option<Vec<String>>, TranscriptIndexError> {
+        if max_rows == 0 || max_rows > MAX_PAGE_ROWS {
+            return Err(TranscriptIndexError::Limit("invalidations"));
+        }
+        let Some(first) = after.0.checked_add(1) else {
+            return Ok(Some(Vec::new()));
+        };
+        let read = self.database.begin_read().map_err(storage)?;
+        if read_head(&read)?.rebuilding {
+            return Err(TranscriptIndexError::Rebuilding);
+        }
+        let changes = read.open_table(CHANGES).map_err(storage)?;
+        let rows = read.open_table(ROWS).map_err(storage)?;
+        let mut found = Vec::with_capacity(max_rows);
+        for entry in changes
+            .range((first, 0)..)
+            .map_err(storage)?
+            .take(max_rows + 1)
+        {
+            if found.len() == max_rows {
+                return Ok(None);
+            }
+            let (key, _) = entry.map_err(storage)?;
+            let value = rows
+                .get(key.value().1)
+                .map_err(storage)?
+                .ok_or(TranscriptIndexError::Invalid("missing changed row"))?;
+            found.push(value.value().0.to_owned());
+        }
+        Ok(Some(found))
+    }
+}
+
+fn read_keyed_row(
+    read: &redb::ReadTransaction,
+    key: &str,
+) -> Result<Option<TranscriptIndexRow>, TranscriptIndexError> {
+    let keys = read.open_table(KEYS).map_err(storage)?;
+    let Some(ordinal) = keys.get(key).map_err(storage)? else {
+        return Ok(None);
+    };
+    let rows = read.open_table(ROWS).map_err(storage)?;
+    let value = rows
+        .get(ordinal.value())
+        .map_err(storage)?
+        .ok_or(TranscriptIndexError::Invalid("missing keyed row"))?;
+    Ok(Some(owned_row(ordinal.value(), value.value())?))
 }
 
 struct RowCatalog<'a> {
     rows: redb::Table<'a, u64, StoredRow<'static>>,
     keys: redb::Table<'a, &'static str, u64>,
     turns: redb::Table<'a, (u64, u64), ()>,
+    changes: redb::Table<'a, (u64, u64), ()>,
+    sources: redb::Table<'a, u64, u64>,
 }
 impl<'a> RowCatalog<'a> {
     fn open(transaction: &'a redb::WriteTransaction) -> Result<Self, TranscriptIndexError> {
@@ -488,6 +676,8 @@ impl<'a> RowCatalog<'a> {
             rows: transaction.open_table(ROWS).map_err(storage)?,
             keys: transaction.open_table(KEYS).map_err(storage)?,
             turns: transaction.open_table(TURNS).map_err(storage)?,
+            changes: transaction.open_table(CHANGES).map_err(storage)?,
+            sources: transaction.open_table(SOURCES).map_err(storage)?,
         })
     }
     fn put(
@@ -517,7 +707,16 @@ impl<'a> RowCatalog<'a> {
                     "row identity/revision changed",
                 ));
             }
+            if revision > source {
+                self.changes.remove((revision, ordinal)).map_err(storage)?;
+            }
         } else {
+            if self.sources.get(row.source.0).map_err(storage)?.is_some() {
+                return Err(TranscriptIndexError::Invalid("duplicate row source"));
+            }
+            self.sources
+                .insert(row.source.0, row.ordinal)
+                .map_err(storage)?;
             if !rebuilding && row.ordinal != self.rows.len().map_err(storage)? {
                 return Err(TranscriptIndexError::Invalid("non-dense append"));
             }
@@ -532,6 +731,11 @@ impl<'a> RowCatalog<'a> {
                     .insert((turn, row.ordinal), ())
                     .map_err(storage)?;
             }
+        }
+        if row.revision > row.source {
+            self.changes
+                .insert((row.revision.0, row.ordinal), ())
+                .map_err(storage)?;
         }
         self.rows
             .insert(
@@ -563,6 +767,11 @@ impl<'a> RowCatalog<'a> {
                 .remove(ordinal)
                 .map_err(storage)?
                 .ok_or(TranscriptIndexError::Invalid("missing deleted row"))?;
+            let (_, source, revision, _, _) = old.value();
+            self.sources.remove(source).map_err(storage)?;
+            if revision > source {
+                self.changes.remove((revision, ordinal)).map_err(storage)?;
+            }
             if let Some(turn) = old.value().3 {
                 self.turns.remove((turn, ordinal)).map_err(storage)?;
             }
@@ -595,6 +804,17 @@ impl<'a> RowCatalog<'a> {
             .ok_or(TranscriptIndexError::Invalid("missing moved row"))?;
         let moved = owned_row(previous, old.value())?;
         drop(old);
+        self.sources
+            .insert(moved.source.0, ordinal)
+            .map_err(storage)?;
+        if moved.revision > moved.source {
+            self.changes
+                .remove((moved.revision.0, previous))
+                .map_err(storage)?;
+            self.changes
+                .insert((moved.revision.0, ordinal), ())
+                .map_err(storage)?;
+        }
         if let Some(turn) = moved.agent_turn {
             self.turns.remove((turn, previous)).map_err(storage)?;
             self.turns.insert((turn, ordinal), ()).map_err(storage)?;
@@ -687,6 +907,10 @@ fn validate_mutation(
             &row.key
         }
         TranscriptIndexMutation::Delete(key) => key,
+        TranscriptIndexMutation::Bind { binding, key } => {
+            validate_key(binding)?;
+            key
+        }
         TranscriptIndexMutation::Move { key, ordinal } => {
             if *ordinal > i64::MAX as u64 {
                 return Err(TranscriptIndexError::Limit("ordinal"));
@@ -694,6 +918,10 @@ fn validate_mutation(
             key
         }
     };
+    validate_key(key)
+}
+
+fn validate_key(key: &str) -> Result<(), TranscriptIndexError> {
     if key.is_empty() || key.len() > MAX_KEY_BYTES || key.chars().any(char::is_control) {
         return Err(TranscriptIndexError::Limit("key"));
     }

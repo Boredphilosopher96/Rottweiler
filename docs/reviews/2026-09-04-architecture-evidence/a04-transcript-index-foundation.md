@@ -59,3 +59,16 @@ Local full logs: `/tmp/rw-a04-store-all-tests.log`, `/tmp/rw-a04-redb-clippy.log
 ## Remaining A04 work
 
 The semantic projector, bounded late-row invalidation queries, rewind/resume jobs, content references, authenticated runtime service, generated protocol, aggregate client cache and native viewport are still required. Existing live replay remains necessary until the separate complete client recovery snapshot can replace it. No claim is made yet about historical UI reachability, production open latency, aggregate client RSS, or complete A04 remediation.
+
+
+## Semantic index support follow-up
+
+The index now atomically maintains mutable entity bindings, source-anchor lookup, late-revision lookup, and the existing agent-turn index. Ordinary appends do not populate the late-revision index. Repeated updates replace one revision entry; moves repair all secondary indexes; deletes remove source/revision entries. Bindings to removed rows resolve to no row, allowing a new lifecycle to bind a new stable source identity. Invalidations seek strictly after a known revision and return an explicit whole-cache reset when the bounded key result would overflow.
+
+Core can select a bounded set of rows after a rewind target and read bounded working windows while ordinal repair is hidden. Ordinary page/binding/anchor/invalidation reads refuse an incomplete generation. The final repair transaction may perform moves and publish the complete head together; it must pass the dense-ordinal invariant before commit.
+
+Focused lifecycle tests exercise revision replacement, atomic binding rollback, reopen between changes, source-anchor replacement, bounded rewind selection, ordinal repair, deletion and invalidation overflow. The full store suite passed 160 tests with two ignored qualifications. Strict store clippy passed. The actual cross-compiled Linux executable passed all 12 focused tests, with one ignored release qualification.
+
+The updated release qualification again tested 10,000 and 100,000 rows. Cold opens read 29,001 backend bytes at both sizes; 64-row reads used 8,192–16,384 bytes. A late revision wrote 33,088 bytes with one sync. Builds took 0.767 s and 4.930 s respectively; six local page samples were 0.015–0.051 ms. These are local storage observations, not a hosted percentile or an end-to-end paging claim. Source-prefix catalog costs remain separately owned by A02, whose initial prefix-through implementation is undergoing a bounded-work correction.
+
+No production reader or wire protocol uses this index yet. The semantic projection, runtime scheduling, content reader, aggregate client cache and native viewport migration remain in progress.

@@ -557,3 +557,294 @@ fn identical_prefixes_cannot_publish_into_another_sessions_index() {
     ));
     assert_eq!(index.head().expect("unchanged head"), head);
 }
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one durable lifecycle verifies all indexes across revision, repair and reopen"
+)]
+fn binding_revisions_and_rewind_indexes_follow_atomic_row_changes() {
+    let root = tempdir().expect("root");
+    let mut journal = SegmentedJournal::open(root.path(), "semantic-indexes").expect("journal");
+    journal.append_batch(0..12).expect("events");
+    let view = journal.read_view();
+    let mut index = TranscriptIndex::open(&view, 1).expect("index");
+    populate(&mut index, &view, 6);
+    let prefix = view.prefix_identity();
+    let mut updated = row(1);
+    updated.revision = SequenceId(8);
+    updated.payload = b"finished tool".to_vec();
+    index
+        .apply(
+            prefix,
+            &view,
+            0,
+            b"{}",
+            false,
+            &[
+                TranscriptIndexMutation::Put(updated.clone()),
+                TranscriptIndexMutation::Bind {
+                    binding: "tool:invocation".into(),
+                    key: updated.key.clone(),
+                },
+            ],
+        )
+        .expect("finish");
+    assert_eq!(
+        index.bound_row("tool:invocation").expect("binding"),
+        Some(updated.clone())
+    );
+    assert_eq!(
+        index.changed_keys(SequenceId(6), 4).expect("changes"),
+        Some(vec![updated.key.clone()])
+    );
+    assert_eq!(
+        index.changed_keys(SequenceId(8), 4).expect("exclusive"),
+        Some(vec![])
+    );
+    updated.revision = SequenceId(9);
+    updated.payload = b"late diff".to_vec();
+    index
+        .apply(
+            prefix,
+            &view,
+            0,
+            b"{}",
+            false,
+            &[TranscriptIndexMutation::Put(updated.clone())],
+        )
+        .expect("diff");
+    assert_eq!(
+        index.changed_keys(SequenceId(6), 4).expect("latest only"),
+        Some(vec![updated.key.clone()])
+    );
+    let affected = index
+        .rows_after_turn(0, 2)
+        .expect("bounded rewind selection");
+    assert_eq!(
+        affected.iter().map(|row| row.ordinal).collect::<Vec<_>>(),
+        vec![2, 3]
+    );
+    index
+        .apply(
+            prefix,
+            &view,
+            1,
+            b"repair",
+            true,
+            &[
+                TranscriptIndexMutation::Delete("conversation:0".into()),
+                TranscriptIndexMutation::Delete("conversation:2".into()),
+            ],
+        )
+        .expect("begin hidden repair");
+    assert!(matches!(
+        index.page(0, 4, MAX_PAGE_BYTES),
+        Err(TranscriptIndexError::Rebuilding)
+    ));
+    assert!(matches!(
+        index.bound_row("tool:invocation"),
+        Err(TranscriptIndexError::Rebuilding)
+    ));
+    assert_eq!(
+        index
+            .maintenance_page(0, 2, MAX_PAGE_BYTES)
+            .expect("working window")
+            .rows
+            .iter()
+            .map(|r| r.ordinal)
+            .collect::<Vec<_>>(),
+        vec![1, 3]
+    );
+    index
+        .apply(
+            prefix,
+            &view,
+            1,
+            b"{}",
+            false,
+            &[
+                TranscriptIndexMutation::Move {
+                    key: "conversation:1".into(),
+                    ordinal: 0,
+                },
+                TranscriptIndexMutation::Move {
+                    key: "conversation:3".into(),
+                    ordinal: 1,
+                },
+                TranscriptIndexMutation::Move {
+                    key: "conversation:4".into(),
+                    ordinal: 2,
+                },
+                TranscriptIndexMutation::Move {
+                    key: "conversation:5".into(),
+                    ordinal: 3,
+                },
+            ],
+        )
+        .expect("publish dense repaired view");
+    updated.ordinal = 0;
+    assert_eq!(
+        index
+            .bound_row("tool:invocation")
+            .expect("binding after move"),
+        Some(updated)
+    );
+    assert_eq!(
+        index
+            .at_or_before_source(SequenceId(2))
+            .expect("removed anchor")
+            .expect("predecessor")
+            .source,
+        SequenceId(1)
+    );
+    assert!(
+        index
+            .at_or_before_source(SequenceId(0))
+            .expect("before first")
+            .is_none()
+    );
+    assert_eq!(
+        index
+            .rows_after_turn(0, 4)
+            .expect("moved turn index")
+            .iter()
+            .map(|r| r.ordinal)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert_eq!(
+        index
+            .changed_keys(SequenceId(6), 4)
+            .expect("moved revision index"),
+        Some(vec!["conversation:1".into()])
+    );
+    drop(index);
+    let mut index = TranscriptIndex::open(&view, 1).expect("reopen");
+    assert_eq!(
+        index
+            .bound_row("tool:invocation")
+            .expect("durable binding")
+            .expect("row")
+            .ordinal,
+        0
+    );
+    index
+        .apply(
+            prefix,
+            &view,
+            2,
+            b"repair",
+            true,
+            &[TranscriptIndexMutation::Delete("conversation:1".into())],
+        )
+        .expect("delete bound row");
+    index
+        .apply(
+            prefix,
+            &view,
+            2,
+            b"{}",
+            false,
+            &[
+                TranscriptIndexMutation::Move {
+                    key: "conversation:3".into(),
+                    ordinal: 0,
+                },
+                TranscriptIndexMutation::Move {
+                    key: "conversation:4".into(),
+                    ordinal: 1,
+                },
+                TranscriptIndexMutation::Move {
+                    key: "conversation:5".into(),
+                    ordinal: 2,
+                },
+            ],
+        )
+        .expect("publish deletion");
+    assert!(
+        index
+            .bound_row("tool:invocation")
+            .expect("removed binding target")
+            .is_none()
+    );
+    assert_eq!(
+        index
+            .changed_keys(SequenceId(6), 4)
+            .expect("deleted revision index"),
+        Some(vec![])
+    );
+}
+
+#[test]
+fn invalidation_overflow_and_invalid_binding_roll_back_atomically() {
+    let root = tempdir().expect("root");
+    let mut journal = SegmentedJournal::open(root.path(), "invalidation-limit").expect("journal");
+    journal.append_batch(0..12).expect("events");
+    let view = journal.read_view();
+    let mut index = TranscriptIndex::open(&view, 1).expect("index");
+    populate(&mut index, &view, 4);
+    let prefix = view.prefix_identity();
+    let updates = (0..3)
+        .map(|ordinal| {
+            let mut row = row(ordinal);
+            row.revision = SequenceId(8 + ordinal);
+            TranscriptIndexMutation::Put(row)
+        })
+        .collect::<Vec<_>>();
+    index
+        .apply(prefix, &view, 0, b"{}", false, &updates)
+        .expect("updates");
+    assert!(
+        index
+            .changed_keys(SequenceId(7), 2)
+            .expect("overflow reset")
+            .is_none()
+    );
+    assert_eq!(
+        index
+            .changed_keys(SequenceId(7), 3)
+            .expect("exact cap")
+            .expect("keys")
+            .len(),
+        3
+    );
+    let before = index.head().expect("head");
+    assert!(matches!(
+        index.apply(
+            prefix,
+            &view,
+            0,
+            b"bad",
+            false,
+            &[
+                TranscriptIndexMutation::Put(row(4)),
+                TranscriptIndexMutation::Bind {
+                    binding: "tool:bad".into(),
+                    key: "missing".into()
+                },
+            ]
+        ),
+        Err(TranscriptIndexError::Invalid("missing binding row"))
+    ));
+    assert_eq!(index.head().expect("unchanged checkpoint"), before);
+    assert!(
+        index
+            .row("conversation:4")
+            .expect("rolled back append")
+            .is_none()
+    );
+    let mut duplicate = row(4);
+    duplicate.source = SequenceId(0);
+    assert!(matches!(
+        index.apply(
+            prefix,
+            &view,
+            0,
+            b"{}",
+            false,
+            &[TranscriptIndexMutation::Put(duplicate)]
+        ),
+        Err(TranscriptIndexError::Invalid("duplicate row source"))
+    ));
+}

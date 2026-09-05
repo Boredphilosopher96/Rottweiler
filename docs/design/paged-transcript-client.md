@@ -44,7 +44,8 @@ ReadTranscript {
   meta,
   session_id,
   known_view?: TranscriptView, // advisory revision for invalidation, not an old snapshot
-  position: Latest | First | Before(ItemId) | After(ItemId) | Around(ItemId),
+  position: Latest | First | Before(ItemId) | After(ItemId) | Around(ItemId)
+          | AtOrdinal { ordinal, expected_generation },
   max_items,
   max_bytes
 }
@@ -62,8 +63,7 @@ TranscriptPageReady {
 
 TranscriptItem = {
   id, ordinal, source_sequence, revision_sequence, agent_turn,
-  content: Conversation | CommandResult | ShellResult,
-  associated_tools, associated_subagents,
+  content: Conversation | ToolInvocation | CommandResult | ShellResult | Subagent,
   content_references
 }
 
@@ -79,7 +79,11 @@ TranscriptContentPageReady {
 }
 ```
 
-`Conversation` uses existing provider-neutral IR variants with bounded inline text and reference descriptors for larger bodies. Command results retain their existing semantic source payload; the TUI continues to own its structured presentation. Tool identity, arguments, completion, timing and body references are included with the historical row so a missing tool-cache entry cannot turn an old tool card into an empty placeholder. Each semantic record has an explicit projection version.
+`Conversation` projects displayable text, reasoning, images and citations from provider-neutral IR into bounded previews and source descriptors. Tool invocations and child agents are first-class rows, created by their lifecycle start events. Their completion and diff events revise the original row, even after it has left the client's cache. Provider call/result IR remains canonical audit data and does not create duplicate visible tool rows. Parent-turn metadata permits UI grouping without making page correctness depend on neighboring rows or a separate tool cache. Mutable entity bindings are indexed on disk; the semantic checkpoint does not retain a lifetime map. Host-owned invocation identity, rather than a reusable provider call ID, binds tool lifecycle events.
+
+Command results retain their authoritative command-time source message; the TUI owns structured presentation. A historical command must not borrow the current context or cost snapshot. Any richer command-time data must itself be durable before a projection can expose it. Each semantic record has an explicit projection version.
+
+An ordinal jump includes its expected structural generation. This supports scrolling into an unloaded range without manufacturing one placeholder per lifetime row. A generation mismatch returns an explicit invalidation; the client repositions around its stable anchor rather than interpreting an old ordinal in a replacement transcript.
 
 A content reference names a session, exact journal prefix/source identity and a closed semantic selector such as turn block, tool output or command output. It never contains a host filesystem path or arbitrary JSON pointer. The engine validates session access and content identity on every read. Text continuation boundaries preserve UTF-8; structured values and images use bounded typed chunks. Content is fetched through the authenticated command/event channel in remote and local modes.
 
