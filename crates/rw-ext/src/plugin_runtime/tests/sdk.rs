@@ -58,7 +58,7 @@ async fn typescript_tool_hook_event_push_and_provider_cross_rust_host() {
                     data: json!({"type":"turn_finished"}),
                 },
             },
-            &CancellationToken::new(),
+            &CancellationToken::default(),
         )
         .await
         .expect("publish event");

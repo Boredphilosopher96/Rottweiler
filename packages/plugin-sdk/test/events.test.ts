@@ -10,7 +10,7 @@ function setup(handler: EventHandler) {
   return { server, messages }
 }
 async function initialize(server: PluginServer) {
-  await server.handleLine(JSON.stringify({ jsonrpc: "2.0", id: 1, method: RPC_METHODS.initialize, params: { host: "rottweiler", protocol: 3, max_frame_bytes: PROTOCOL_LIMITS.maxFrameBytes } }))
+  await server.handleLine(JSON.stringify({ jsonrpc: "2.0", id: 1, method: RPC_METHODS.initialize, params: { host: "rottweiler", protocol: 3, max_frame_bytes: PROTOCOL_LIMITS.maxLineBytes } }))
 }
 
 test("event delivery requires exact typed envelope and a correlated request", async () => {

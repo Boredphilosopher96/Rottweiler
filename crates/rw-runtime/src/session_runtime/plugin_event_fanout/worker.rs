@@ -104,7 +104,7 @@ impl PluginFanoutWorker {
         permit: OwnedSemaphorePermit,
     ) -> Self {
         let wake = Arc::new(Notify::new());
-        let cancellation = CancellationToken::new();
+        let cancellation = CancellationToken::default();
         let (complete, completed) = watch::channel(None);
         let task_wake = wake.clone();
         let task_cancel = cancellation.clone();

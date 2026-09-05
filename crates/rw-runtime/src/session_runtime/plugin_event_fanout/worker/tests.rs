@@ -1,12 +1,13 @@
 use super::{DeliveryContext, EventConsumer, PluginFanoutWorker};
 use async_trait::async_trait;
+use rw_core::SESSION_EVENT_VERSION;
 use rw_core::{
     AgentLoopError, EngineEvent, SessionEventReadView, SessionEventSink, SessionReplayLimits,
 };
 use rw_ext::PluginRpcError;
 use rw_tools::CancellationToken;
 use rw_types::{
-    EventMeta, SESSION_EVENT_VERSION, SequenceId, SessionId,
+    EventMeta, SequenceId, SessionId,
     extension_contract::{
         ExtensionStateCommitOutcome, ExtensionStateSnapshot, ExtensionStateTransaction,
     },
@@ -54,6 +55,16 @@ impl SessionEventReadView for Journal {
 }
 #[async_trait]
 impl SessionEventSink for Journal {
+    async fn source_rewind_target(
+        &self,
+        _expected: SequenceId,
+        _source: SequenceId,
+        _turn: u64,
+        _position: rw_types::RewindSourcePosition,
+    ) -> Result<u64, AgentLoopError> {
+        Err(AgentLoopError::Closed)
+    }
+
     async fn extension_state(
         &self,
         _plugin: &str,
