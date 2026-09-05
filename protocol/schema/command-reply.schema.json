@@ -2836,28 +2836,40 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/TodoItem"
-          }
-        },
-        "count": {
-          "type": "integer",
-          "format": "uint",
-          "minimum": 0
+          },
+          "maxItems": 128
         }
       },
       "additionalProperties": false,
       "required": [
-        "items",
-        "count"
-      ]
+        "items"
+      ],
+      "x-rw-item-budget": {
+        "array": "items",
+        "identity": "id",
+        "fields": [
+          "id",
+          "content"
+        ],
+        "maxUtf8Bytes": 65536
+      }
     },
     "TodoItem": {
       "type": "object",
       "properties": {
         "id": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+          "x-rw-max-utf8-bytes": 256
         },
         "content": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+          "x-rw-max-utf8-bytes": 4096
         },
         "status": {
           "$ref": "#/$defs/TodoStatus"

@@ -17,6 +17,7 @@ providerHttp: "provider/http",
 providerHttpEvent: "provider/http_event",
 providerHttpCancel: "provider/http_cancel",
 eventPublish: "event/publish",
+eventRead: "event/read",
 sessionQuery: "session/query",
 stateRead: "extension/state_read",
 stateCommit: "extension/state_commit",
@@ -99,7 +100,11 @@ export interface ProviderDeclaration {
   readonly "credential-references"?: readonly string[]
 }
 
+import type { ExtensionEventKind } from "./extension-contract"
+export type { ExtensionEventKind, ExtensionEventNotice, ExtensionEventOutcome, ExtensionEventRead, ExtensionEventChunk } from "./extension-contract"
+
 export type PluginPushMethod =
+  | "event/read"
   | "session/query"
   | "extension/state_read"
   | "extension/state_commit"
@@ -112,7 +117,7 @@ export interface PluginCapabilities {
   readonly commands?: readonly CommandDeclaration[]
   readonly hooks?: readonly HookDeclaration[]
   readonly providers?: readonly ProviderDeclaration[]
-  readonly event_subscriptions?: readonly string[]
+  readonly event_subscriptions?: readonly ExtensionEventKind[]
   readonly push?: readonly PluginPushMethod[]
 }
 
@@ -236,11 +241,6 @@ export interface ProviderHttpResponse {
 }
 
 export type ProviderStream = AsyncIterable<ProviderEvent>
-
-export interface EventPublishParams {
-  readonly event: string
-  readonly payload: JsonObject
-}
 
 export type RpcId = number | string
 

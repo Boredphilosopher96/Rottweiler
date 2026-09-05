@@ -53,7 +53,7 @@ export type TodoItem = { id: string, content: string, status: TodoStatus, };
 
 export type TodoStatus = "pending" | "in_progress" | "completed" | "blocked";
 
-export type TodoSnapshot = { items: Array<TodoItem>, count: number, };
+export type TodoSnapshot = { items: Array<TodoItem>, };
 
 export type TodoReadSnapshot = { through?: SequenceId | null, snapshot: TodoSnapshot, };
 

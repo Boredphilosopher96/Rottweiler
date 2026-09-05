@@ -415,8 +415,7 @@ export const contractFixture = {
         "todos": {
           "through": null,
           "snapshot": {
-            "items": [],
-            "count": 0
+            "items": []
           }
         }
       }

@@ -42,6 +42,7 @@
     "providerHttpEvent": "provider/http_event",
     "providerHttpCancel": "provider/http_cancel",
     "eventPublish": "event/publish",
+    "eventRead": "event/read",
     "sessionQuery": "session/query",
     "stateRead": "extension/state_read",
     "stateCommit": "extension/state_commit",
