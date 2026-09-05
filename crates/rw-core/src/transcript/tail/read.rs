@@ -2,8 +2,7 @@
 use super::{
     CITATION_DATA_FIRST, CITATION_INDEX_FIRST, MAX_AUXILIARY_CELL_BYTES,
     MAX_PENDING_TOOL_INVOCATIONS, TEXT_FIRST, THINKING_FIRST, TOOL_CELLS, TOOL_DATA_FIRST,
-    TOOL_INDEX, TOOL_PROVIDER_FIRST, TailState, TranscriptProjectionError, index_cell, read_u32,
-    read_u64, slot,
+    TOOL_INDEX, TailState, TranscriptProjectionError, index_cell, read_u32, read_u64, slot,
 };
 use rw_store::session::transcript_index::TranscriptIndex;
 use rw_types::transcript::{
@@ -15,7 +14,7 @@ use rw_types::transcript_tail::{
     TranscriptTailIdentity, TranscriptTailPage, TranscriptTailPart, TranscriptTailRead,
     TranscriptTailResult, TranscriptTailText, TranscriptTailTool,
 };
-use rw_types::{SequenceId, SessionId, ToolCallId, TurnId};
+use rw_types::{SequenceId, SessionId, TurnId};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -263,16 +262,8 @@ fn read_tool(
     else {
         return Err(invalid("tail invocation row kind"));
     };
-    let provider = index
-        .auxiliary_cell(TOOL_PROVIDER_FIRST + super::slot(slot)?)?
-        .ok_or_else(|| invalid("tail provider identifier"))?;
-    if provider.len() > rw_types::tool_admission::MAX_TOOL_CALL_ID_BYTES {
-        return Err(invalid("tail provider identifier bytes"));
-    }
-    let tool_call_id = ToolCallId(
-        String::from_utf8(provider).map_err(|_| invalid("tail provider identifier utf8"))?,
-    );
-    let len = read_u32(&entry[8..12]) as usize;
+    let len =
+        usize::try_from(read_u32(&entry[8..12])).map_err(|_| invalid("tail preview extent"))?;
     if len > TRANSCRIPT_TAIL_TOOL_BYTES {
         return Err(invalid("tail invocation preview extent"));
     }
@@ -285,7 +276,6 @@ fn read_tool(
     Ok(TranscriptTailTool {
         source,
         turn_id: TurnId(turn.to_string()),
-        tool_call_id,
         invocation_id,
         name,
         call_index,

@@ -1,7 +1,6 @@
 use super::{
-    TOOL_CELLS, TOOL_DATA_FIRST, TOOL_INDEX, TOOL_PROVIDER_FIRST, TailState,
-    TranscriptIndexMutation, TranscriptProjectionError, TranscriptRowLookup, chunks, index_cell,
-    read_u32, read_u64,
+    TOOL_CELLS, TOOL_DATA_FIRST, TOOL_INDEX, TailState, TranscriptIndexMutation,
+    TranscriptProjectionError, TranscriptRowLookup, chunks, index_cell, read_u32, read_u64,
 };
 use rw_types::tool_admission::MAX_PENDING_TOOL_INVOCATIONS;
 use rw_types::transcript_tail::TRANSCRIPT_TAIL_TOOL_BYTES;
@@ -19,11 +18,8 @@ pub(super) fn project(
         state.tools_epoch,
         MAX_PENDING_TOOL_INVOCATIONS,
     )?;
-    if let EngineEvent::ToolCallStarted {
-        meta, tool_call_id, ..
-    } = event
-    {
-        return start(state, cell, meta.sequence_id.0, tool_call_id);
+    if let EngineEvent::ToolCallStarted { meta, .. } = event {
+        return start(state, cell, meta.sequence_id.0);
     }
     let (EngineEvent::ToolCallFinished {
         invocation_id: invocation,
@@ -111,13 +107,7 @@ fn start(
     state: &mut TailState,
     mut cell: Vec<u8>,
     source: u64,
-    tool_call_id: &rw_types::ToolCallId,
 ) -> Result<Vec<TranscriptIndexMutation>, TranscriptProjectionError> {
-    if tool_call_id.0.len() > rw_types::tool_admission::MAX_TOOL_CALL_ID_BYTES {
-        return Err(TranscriptProjectionError::Invalid(
-            "tail provider identifier bound",
-        ));
-    }
     let slot = (0..MAX_PENDING_TOOL_INVOCATIONS)
         .find(|slot| cell[8 + slot * 16 + 12] & 1 == 0)
         .ok_or(TranscriptProjectionError::Invalid(
@@ -128,14 +118,8 @@ fn start(
     cell[entry..entry + 8].copy_from_slice(&source.to_le_bytes());
     cell[entry + 12] = 1;
     state.tools_count += 1;
-    Ok(vec![
-        TranscriptIndexMutation::PutAuxiliary {
-            key: TOOL_INDEX,
-            payload: cell,
-        },
-        TranscriptIndexMutation::PutAuxiliary {
-            key: TOOL_PROVIDER_FIRST + super::slot(slot)?,
-            payload: tool_call_id.0.as_bytes().to_vec(),
-        },
-    ])
+    Ok(vec![TranscriptIndexMutation::PutAuxiliary {
+        key: TOOL_INDEX,
+        payload: cell,
+    }])
 }

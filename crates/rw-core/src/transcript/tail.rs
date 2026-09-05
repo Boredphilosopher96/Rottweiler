@@ -24,10 +24,9 @@ const TOOL_INDEX: u16 =
     CITATION_DATA_FIRST + const_slot(CITATION_ENCODED_LIMIT.div_ceil(MAX_AUXILIARY_CELL_BYTES));
 const TOOL_DATA_FIRST: u16 = TOOL_INDEX + 1;
 const TOOL_CELLS: u16 = const_slot(TRANSCRIPT_TAIL_TOOL_BYTES / MAX_AUXILIARY_CELL_BYTES);
-const TOOL_PROVIDER_FIRST: u16 =
-    TOOL_DATA_FIRST + TOOL_CELLS * const_slot(MAX_PENDING_TOOL_INVOCATIONS);
 const _: () = assert!(
-    TOOL_PROVIDER_FIRST as usize + MAX_PENDING_TOOL_INVOCATIONS <= MAX_AUXILIARY_CELLS as usize
+    TOOL_DATA_FIRST as usize + TOOL_CELLS as usize * MAX_PENDING_TOOL_INVOCATIONS
+        <= MAX_AUXILIARY_CELLS as usize
 );
 
 /// Scalar progress only; byte chunks and fixed-size entity indexes live in auxiliary cells.

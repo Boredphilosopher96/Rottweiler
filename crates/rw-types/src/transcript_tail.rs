@@ -7,7 +7,7 @@ pub const TRANSCRIPT_TAIL_TOOL_BYTES: usize = 8 * 1024;
 
 use crate::citation_admission::MAX_CITATION_TEXT_BYTES;
 use crate::transcript::{TranscriptBodyPreview, TranscriptGeneration, TranscriptView};
-use crate::{SequenceId, ToolCallId, ToolInvocationId, TurnId};
+use crate::{SequenceId, ToolInvocationId, TurnId};
 use rw_memory_derive::PrepareAllocation as Allocation;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -86,7 +86,6 @@ pub struct TranscriptTailCitation {
 pub struct TranscriptTailTool {
     pub source: SequenceId,
     pub turn_id: TurnId,
-    pub tool_call_id: ToolCallId,
     pub invocation_id: ToolInvocationId,
     pub name: String,
     pub call_index: u32,

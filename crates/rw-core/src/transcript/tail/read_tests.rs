@@ -123,7 +123,7 @@ fn tool_page_has_exact_provider_identity_source_and_bounded_prefix() {
         EngineEvent::ToolOutputDelta {
             meta: meta(2),
             turn_id: TurnId("1".into()),
-            tool_call_id: rw_types::ToolCallId("reused-provider-id".into()),
+            tool_call_id: rw_types::ToolCallId("provider-correlation".repeat(10_000)),
             invocation_id: rw_types::ToolInvocationId("invocation-0".into()),
             stream: rw_types::ToolOutputStream::Stdout,
             chunk: "x".repeat(TRANSCRIPT_TAIL_TOOL_BYTES + 1),
@@ -142,7 +142,7 @@ fn tool_page_has_exact_provider_identity_source_and_bounded_prefix() {
         panic!("tools");
     };
     assert_eq!(items.len(), 1);
-    assert_eq!(items[0].tool_call_id.0, "reused-provider-id");
+    assert!(serde_json::to_vec(&items[0]).expect("preview").len() < 32 * 1024);
     assert_eq!(items[0].source, SequenceId(1));
     assert_eq!(items[0].arguments.source.sequence, SequenceId(1));
     assert_eq!(items[0].output.text.len(), TRANSCRIPT_TAIL_TOOL_BYTES);
