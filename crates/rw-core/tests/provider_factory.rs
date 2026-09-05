@@ -615,3 +615,7 @@ mod credentials;
 mod extensions;
 #[path = "provider_factory/routing.rs"]
 mod routing;
+
+#[path = "provider_factory/admission.rs"]
+mod admission;
+use admission::invocation;

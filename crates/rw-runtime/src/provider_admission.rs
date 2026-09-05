@@ -59,24 +59,38 @@ impl DurableProviderAdmission {
             closed: closed.clone(),
             finished: completion,
         });
-        let task = tokio::task::spawn_blocking(move || {
-            let mut ledger = match BudgetLedger::open(&root) {
-                Ok(ledger) => ledger,
-                Err(error) => {
-                    let _ = ready.send(Err(error));
-                    return;
+        let (exited, exit) = oneshot::channel();
+        let task = std::thread::Builder::new()
+            .name("rw-provider-accounting".into())
+            .spawn(move || {
+                struct NotifyExit(Option<oneshot::Sender<()>>);
+                impl Drop for NotifyExit {
+                    fn drop(&mut self) {
+                        if let Some(sender) = self.0.take() {
+                            let _ = sender.send(());
+                        }
+                    }
                 }
-            };
-            let _ = ready.send(Ok(()));
-            while let Some(Job::Apply(action)) = receiver.blocking_recv() {
-                action(&mut ledger);
-            }
-        });
+                let _exit = NotifyExit(Some(exited));
+                let mut ledger = match BudgetLedger::open(&root) {
+                    Ok(ledger) => ledger,
+                    Err(error) => {
+                        let _ = ready.send(Err(error));
+                        return;
+                    }
+                };
+                let _ = ready.send(Ok(()));
+                while let Some(Job::Apply(action)) = receiver.blocking_recv() {
+                    action(&mut ledger);
+                }
+            })
+            .map_err(|error| Error::Worker(error.to_string()))?;
         // Completion follows JoinHandle settlement, including ledger/connection drops.
         tokio::spawn(async move {
-            let result = task.await;
+            let _ = exit.await;
+            let result = tokio::task::spawn_blocking(move || task.join()).await;
             closed.store(true, Ordering::Release);
-            finished.send_replace(Some(result.is_ok()));
+            finished.send_replace(Some(matches!(result, Ok(Ok(())))));
         });
         started.await.map_err(|_| stopped())??;
         Ok(Self { worker })
@@ -220,3 +234,6 @@ impl ActiveProviderCall for Active {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) mod testing;

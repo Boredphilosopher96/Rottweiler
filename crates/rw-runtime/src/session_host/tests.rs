@@ -12,8 +12,8 @@ use super::*;
 mod fork;
 mod workspace;
 
-#[test]
-fn editable_setting_keys_round_trip_through_one_grammar() {
+#[tokio::test]
+async fn editable_setting_keys_round_trip_through_one_grammar() {
     for key in [
         "ui.keybindings.preset",
         "project.models.default",
@@ -45,8 +45,8 @@ fn editable_setting_keys_round_trip_through_one_grammar() {
     }
 }
 
-#[test]
-fn setting_descriptors_render_keys_from_the_editable_contract() {
+#[tokio::test]
+async fn setting_descriptors_render_keys_from_the_editable_contract() {
     let root = tempdir().expect("root");
     let user = root.path().join("user/config.toml");
     let project = root.path().join("repo/.rottweiler/config.toml");
@@ -83,8 +83,8 @@ fn setting_descriptors_render_keys_from_the_editable_contract() {
     }
 }
 
-#[test]
-fn catalog_current_keeps_selected_alias_and_marks_actual_fallback_route() {
+#[tokio::test]
+async fn catalog_current_keeps_selected_alias_and_marks_actual_fallback_route() {
     let capabilities = ModelCapabilities {
         tool_calling: true,
         vision: false,
@@ -128,11 +128,11 @@ fn catalog_current_keeps_selected_alias_and_marks_actual_fallback_route() {
     assert!(!catalog.models[1].current);
 }
 
-fn factory(root: &Path, workspace: &Path) -> RuntimeSessionFactory {
-    factory_with_allowed_workspaces(root, vec![workspace.to_path_buf()])
+async fn factory(root: &Path, workspace: &Path) -> RuntimeSessionFactory {
+    factory_with_allowed_workspaces(root, vec![workspace.to_path_buf()]).await
 }
 
-fn factory_with_allowed_workspaces(
+async fn factory_with_allowed_workspaces(
     root: &Path,
     allowed_workspaces: Vec<PathBuf>,
 ) -> RuntimeSessionFactory {
@@ -152,6 +152,7 @@ fn factory_with_allowed_workspaces(
         dangerously_trust: false,
         wait_for_execution_lease: false,
     })
+    .await
     .expect("factory")
 }
 
@@ -188,6 +189,7 @@ async fn factory_initialization_defers_pricing_catalog_parse() {
         dangerously_trust: false,
         wait_for_execution_lease: false,
     })
+    .await
     .expect("readiness must not parse pricing");
 
     let error = factory
@@ -201,7 +203,8 @@ async fn factory_initialization_defers_pricing_catalog_parse() {
 fn durable_session_queries_tolerate_blocking_pool_scheduling_delay() {
     let root = tempdir().expect("root");
     let workspace = private_test_directory(&root.path().join("workspace"));
-    let factory = factory(root.path(), &workspace);
+    let admission_runtime = tokio::runtime::Runtime::new().expect("admission runtime");
+    let factory = admission_runtime.block_on(factory(root.path(), &workspace));
     SessionIndex::open(&factory.options.storage_root)
         .and_then(|index| {
             index.upsert(&SessionProjection {
@@ -265,7 +268,7 @@ async fn hosted_create_and_rename_are_immediately_searchable() {
 
     let root = tempdir().expect("root");
     let workspace = private_test_directory(&root.path().join("workspace"));
-    let factory = factory(root.path(), &workspace);
+    let factory = factory(root.path(), &workspace).await;
     SessionIndex::open(&factory.options.storage_root).expect("empty session index");
     let session_id = SessionId("hosted-search-freshness".to_owned());
     let driver = ClientId("hosted-search-driver".to_owned());
@@ -338,13 +341,13 @@ async fn hosted_create_and_rename_are_immediately_searchable() {
     assert_eq!(matches[0].title, "Durable Search Rename");
 }
 
-#[test]
-fn session_export_uses_cli_renderer_redaction_and_atomic_force_semantics() {
+#[tokio::test]
+async fn session_export_uses_cli_renderer_redaction_and_atomic_force_semantics() {
     use rw_core::{EventMeta, PROTOCOL_VERSION, SequenceId};
 
     let root = tempdir().expect("root");
     let workspace = private_test_directory(&root.path().join("workspace"));
-    let factory = factory(root.path(), &workspace);
+    let factory = factory(root.path(), &workspace).await;
     let session = SessionDescriptor {
         session_id: SessionId("golden".to_owned()),
         title: "Golden".to_owned(),
@@ -427,8 +430,8 @@ fn git(workspace: &Path, arguments: &[&str]) {
     );
 }
 
-#[test]
-fn model_descriptors_expose_extension_provider_names_in_fallback_order() {
+#[tokio::test]
+async fn model_descriptors_expose_extension_provider_names_in_fallback_order() {
     let providers = configured_alias_providers(&[
         "openai-work/gpt-5".to_owned(),
         "extension-provider/model".to_owned(),
@@ -448,7 +451,7 @@ async fn create_persists_remote_safe_descriptor_and_resume_recovers_exact_identi
     let workspace = root.path().join("workspace");
     fs::create_dir(&workspace).expect("workspace");
     fs::write(workspace.join("needle.rs"), "fn needle() {}\n").expect("query fixture");
-    let factory = factory(root.path(), &workspace);
+    let factory = factory(root.path(), &workspace).await;
     let session_id = SessionId("session-create-resume".to_owned());
     let created = factory
         .create(CreateSessionRequest {
@@ -509,7 +512,8 @@ async fn hosted_add_dir_enforces_allowed_roots_before_generation_or_tool_access(
     let allowed = fs::canonicalize(allowed).expect("canonical allowed");
     let outside = fs::canonicalize(outside).expect("canonical outside");
     let factory =
-        factory_with_allowed_workspaces(root.path(), vec![workspace.clone(), allowed.clone()]);
+        factory_with_allowed_workspaces(root.path(), vec![workspace.clone(), allowed.clone()])
+            .await;
     let session_id = SessionId("hosted-add-root-policy".to_owned());
     let hosted = factory
         .create(CreateSessionRequest {
@@ -569,8 +573,8 @@ async fn hosted_add_dir_enforces_allowed_roots_before_generation_or_tool_access(
     assert!(!outside.join("created-by-tool.txt").exists());
 }
 
-#[test]
-fn thinking_setting_uses_configured_alias_after_concrete_model_selection() {
+#[tokio::test]
+async fn thinking_setting_uses_configured_alias_after_concrete_model_selection() {
     let root = tempdir().expect("root");
     let user = root.path().join("user/config.toml");
     let project = root.path().join("repo/.rottweiler/config.toml");
@@ -608,8 +612,8 @@ fn thinking_setting_uses_configured_alias_after_concrete_model_selection() {
     );
 }
 
-#[test]
-fn theme_setting_leaves_choices_to_the_tui_theme_catalog() {
+#[tokio::test]
+async fn theme_setting_leaves_choices_to_the_tui_theme_catalog() {
     let root = tempdir().expect("root");
     let user = root.path().join("user/config.toml");
     let project = root.path().join("repo/.rottweiler/config.toml");
@@ -637,8 +641,8 @@ fn theme_setting_leaves_choices_to_the_tui_theme_catalog() {
     assert!(theme.choices.is_empty());
 }
 
-#[test]
-fn budget_setting_descriptors_format_human_values_without_choices() {
+#[tokio::test]
+async fn budget_setting_descriptors_format_human_values_without_choices() {
     let root = tempdir().expect("root");
     let user = root.path().join("user/config.toml");
     let project = root.path().join("repo/.rottweiler/config.toml");
@@ -687,12 +691,13 @@ fn budget_setting_descriptors_format_human_values_without_choices() {
     }
 }
 
-#[test]
-fn project_model_preferences_are_isolated_by_the_session_workspace() {
+#[tokio::test]
+async fn project_model_preferences_are_isolated_by_the_session_workspace() {
     let root = tempdir().expect("root");
     let first = private_test_directory(&root.path().join("first"));
     let second = private_test_directory(&root.path().join("second"));
-    let factory = factory_with_allowed_workspaces(root.path(), vec![first.clone(), second.clone()]);
+    let factory =
+        factory_with_allowed_workspaces(root.path(), vec![first.clone(), second.clone()]).await;
 
     factory
         .settings_loader_for(&first)
@@ -721,18 +726,18 @@ fn project_model_preferences_are_isolated_by_the_session_workspace() {
     );
 }
 
-#[test]
-fn fresh_factory_uses_the_persisted_project_model_without_catalog_interaction() {
+#[tokio::test]
+async fn fresh_factory_uses_the_persisted_project_model_without_catalog_interaction() {
     let root = tempdir().expect("root");
     let workspace = private_test_directory(&root.path().join("workspace"));
-    let first = factory(root.path(), &workspace);
+    let first = factory(root.path(), &workspace).await;
     first
         .settings_loader_for(&workspace)
         .persist_tui_project_model("openai_codex/gpt-5.6-sol")
         .expect("persist selected model");
     drop(first);
 
-    let restarted = factory(root.path(), &workspace);
+    let restarted = factory(root.path(), &workspace).await;
     assert_eq!(
         restarted
             .requested_model_for_compose(&workspace, None, false)
@@ -742,11 +747,11 @@ fn fresh_factory_uses_the_persisted_project_model_without_catalog_interaction() 
     );
 }
 
-#[test]
-fn resume_ignores_a_corrupt_project_model_preference() {
+#[tokio::test]
+async fn resume_ignores_a_corrupt_project_model_preference() {
     let root = tempdir().expect("root");
     let workspace = private_test_directory(&root.path().join("workspace"));
-    let factory = factory(root.path(), &workspace);
+    let factory = factory(root.path(), &workspace).await;
     let preference = factory
         .options
         .credentials_path

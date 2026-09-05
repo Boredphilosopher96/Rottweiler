@@ -285,6 +285,7 @@ pub(crate) async fn run_stdio(options: StdioServerOptions) -> Result<()> {
     };
     let factory = Arc::new(
         RuntimeSessionFactory::new(host_options)
+            .await
             .map_err(|_| miette!("MCP engine host could not initialize"))?,
     );
     let host = rw_runtime::HeadlessRuntimeBuilder::new(factory)

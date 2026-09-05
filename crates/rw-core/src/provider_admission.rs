@@ -86,3 +86,9 @@ pub trait ProviderAccountingSink: Send + Sync {
         actuals: ProviderCallActuals,
     ) -> Result<ProviderCallReceipt, BudgetReservationError>;
 }
+
+#[cfg(test)]
+pub(crate) mod testing;
+
+mod concrete;
+pub use concrete::concrete_attempt_gate;

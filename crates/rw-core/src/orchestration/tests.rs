@@ -33,6 +33,7 @@ impl ModelDriver for SelectedModel {
         &self,
         _alias: &str,
         _request: rw_providers::ProviderRequest,
+        _invocation: crate::provider_admission::ProviderInvocation,
     ) -> Result<rw_providers::BoxEventStream, AgentLoopError> {
         Err(AgentLoopError::Provider(
             "selected-model fixture must not stream".to_owned(),

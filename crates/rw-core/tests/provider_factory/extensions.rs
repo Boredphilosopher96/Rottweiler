@@ -9,7 +9,7 @@ async fn approved_extension_alias_stream_is_model_bound_and_replay_compatible() 
         .unwrap_or_else(|error| panic!("extension factory must build: {error}"));
 
     let events = runtime
-        .stream_alias("fast", request("model-a"))
+        .stream_alias("fast", request("model-a"), invocation())
         .unwrap_or_else(|error| panic!("extension alias must route: {error}"))
         .collect::<Vec<_>>()
         .await;
@@ -81,10 +81,15 @@ async fn approved_unaliased_extension_is_catalogued_bindable_and_dispatchable() 
         .prepare_concrete_model("custom/new-model")
         .await
         .unwrap_or_else(|error| panic!("live extension model must bind: {error}"));
-    let events = ModelDriver::stream(&runtime, "custom/new-model", request("ignored"))
-        .unwrap_or_else(|error| panic!("concrete extension stream must start: {error}"))
-        .collect::<Vec<_>>()
-        .await;
+    let events = ModelDriver::stream(
+        &runtime,
+        "custom/new-model",
+        request("ignored"),
+        invocation(),
+    )
+    .unwrap_or_else(|error| panic!("concrete extension stream must start: {error}"))
+    .collect::<Vec<_>>()
+    .await;
     assert!(events.iter().any(|event| {
         matches!(event, Ok(ProviderEvent::TextDelta { text }) if text == "extension:new-model")
     }));

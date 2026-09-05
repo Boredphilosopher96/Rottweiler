@@ -8,8 +8,8 @@ use crate::session_host::git::{
 use crate::session_host::workspace::search_workspace;
 
 #[cfg(unix)]
-#[test]
-fn workspace_search_honors_git_nested_and_tool_ignore_files_but_keeps_hidden_files() {
+#[tokio::test]
+async fn workspace_search_honors_git_nested_and_tool_ignore_files_but_keeps_hidden_files() {
     let root = tempdir().expect("root");
     let workspace = root.path().join("workspace");
     fs::create_dir_all(workspace.join(".git/info")).expect("git marker");
@@ -57,8 +57,8 @@ fn workspace_search_honors_git_nested_and_tool_ignore_files_but_keeps_hidden_fil
 }
 
 #[cfg(unix)]
-#[test]
-fn workspace_search_keeps_fuzzy_reachable_candidates_and_deterministic_bounds() {
+#[tokio::test]
+async fn workspace_search_keeps_fuzzy_reachable_candidates_and_deterministic_bounds() {
     let root = tempdir().expect("root");
     let workspace = root.path().join("workspace");
     fs::create_dir_all(workspace.join("src")).expect("source directory");
@@ -83,8 +83,8 @@ fn workspace_search_keeps_fuzzy_reachable_candidates_and_deterministic_bounds() 
 }
 
 #[cfg(unix)]
-#[test]
-fn workspace_search_supports_linked_git_worktree_excludes() {
+#[tokio::test]
+async fn workspace_search_supports_linked_git_worktree_excludes() {
     let root = tempdir().expect("root");
     let repository = root.path().join("repository");
     let workspace = root.path().join("linked-worktree");
@@ -126,8 +126,8 @@ fn workspace_search_supports_linked_git_worktree_excludes() {
 }
 
 #[cfg(unix)]
-#[test]
-fn unsafe_ignore_controls_fail_closed_for_only_the_affected_subtree() {
+#[tokio::test]
+async fn unsafe_ignore_controls_fail_closed_for_only_the_affected_subtree() {
     use std::os::unix::fs::symlink;
 
     for fixture in ["symlink", "oversized", "invalid-utf8"] {
@@ -170,8 +170,8 @@ fn unsafe_ignore_controls_fail_closed_for_only_the_affected_subtree() {
 }
 
 #[cfg(unix)]
-#[test]
-fn workspace_status_reports_modified_and_untracked_but_not_ignored_paths() {
+#[tokio::test]
+async fn workspace_status_reports_modified_and_untracked_but_not_ignored_paths() {
     let root = tempdir().expect("root");
     let workspace = root.path().join("workspace");
     fs::create_dir(&workspace).expect("workspace");
@@ -236,8 +236,8 @@ fn workspace_status_reports_modified_and_untracked_but_not_ignored_paths() {
 }
 
 #[cfg(unix)]
-#[test]
-fn workspace_diff_covers_tracked_untracked_binary_ignored_and_truncated_files() {
+#[tokio::test]
+async fn workspace_diff_covers_tracked_untracked_binary_ignored_and_truncated_files() {
     let root = tempdir().expect("root");
     let workspace = root.path().join("workspace");
     fs::create_dir(&workspace).expect("workspace");
@@ -289,8 +289,8 @@ fn workspace_diff_covers_tracked_untracked_binary_ignored_and_truncated_files() 
 }
 
 #[cfg(unix)]
-#[test]
-fn porcelain_parser_keeps_rename_destination_and_rejects_unsafe_paths() {
+#[tokio::test]
+async fn porcelain_parser_keeps_rename_destination_and_rejects_unsafe_paths() {
     let (paths, truncated) = parse_git_status(
         b"R  new.rs\0old.rs\0?? nested/untracked.rs\0?? ../escape\0?? partial.rs",
         false,
@@ -300,8 +300,8 @@ fn porcelain_parser_keeps_rename_destination_and_rejects_unsafe_paths() {
 }
 
 #[cfg(unix)]
-#[test]
-fn git_resolution_rejects_user_owned_executables_and_uses_a_system_identity() {
+#[tokio::test]
+async fn git_resolution_rejects_user_owned_executables_and_uses_a_system_identity() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let root = tempdir().expect("root");
@@ -323,8 +323,8 @@ fn git_resolution_rejects_user_owned_executables_and_uses_a_system_identity() {
 }
 
 #[cfg(unix)]
-#[test]
-fn bounded_git_kills_descendants_that_keep_stdout_open() {
+#[tokio::test]
+async fn bounded_git_kills_descendants_that_keep_stdout_open() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let root = tempdir().expect("root");
@@ -399,8 +399,8 @@ async fn fifo_preview_rejects_before_opening_under_one_hundred_milliseconds() {
 }
 
 #[cfg(unix)]
-#[test]
-fn descriptor_relative_queries_do_not_escape_during_directory_swap_race() {
+#[tokio::test]
+async fn descriptor_relative_queries_do_not_escape_during_directory_swap_race() {
     use std::{
         sync::{
             Arc,

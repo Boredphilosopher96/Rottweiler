@@ -393,6 +393,7 @@ pub trait ModelDriver: Send + Sync {
         &self,
         alias: &str,
         request: ProviderRequest,
+        invocation: crate::provider_admission::ProviderInvocation,
     ) -> Result<BoxEventStream, AgentLoopError>;
 
     /// Streams through one exact configured provider when the user selected a
@@ -407,9 +408,10 @@ pub trait ModelDriver: Send + Sync {
         alias: &str,
         provider: Option<&str>,
         request: ProviderRequest,
+        invocation: crate::provider_admission::ProviderInvocation,
     ) -> Result<BoxEventStream, AgentLoopError> {
         match provider {
-            None => self.stream(alias, request),
+            None => self.stream(alias, request, invocation),
             Some(provider) => Err(AgentLoopError::InvalidConfiguration(format!(
                 "model alias {alias:?} cannot be routed through provider {provider:?}"
             ))),
@@ -549,8 +551,9 @@ impl ModelDriver for ProviderRuntime {
         &self,
         alias: &str,
         request: ProviderRequest,
+        invocation: crate::provider_admission::ProviderInvocation,
     ) -> Result<BoxEventStream, AgentLoopError> {
-        self.stream_alias(alias, request)
+        self.stream_alias(alias, request, invocation)
             .map_err(|error| AgentLoopError::Provider(error.to_string()))
     }
 
@@ -559,10 +562,11 @@ impl ModelDriver for ProviderRuntime {
         alias: &str,
         provider: Option<&str>,
         request: ProviderRequest,
+        invocation: crate::provider_admission::ProviderInvocation,
     ) -> Result<BoxEventStream, AgentLoopError> {
         match provider {
-            None => self.stream_alias(alias, request),
-            Some(provider) => self.stream_alias_provider(alias, provider, request),
+            None => self.stream_alias(alias, request, invocation),
+            Some(provider) => self.stream_alias_provider(alias, provider, request, invocation),
         }
         .map_err(|error| AgentLoopError::Provider(error.to_string()))
     }
@@ -726,6 +730,10 @@ pub enum AgentTurnStatus {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum PendingEvent {
+    ProviderCallAccounted {
+        call: rw_types::ProviderCallIdentity,
+        actuals: rw_types::ProviderCallActuals,
+    },
     SessionCreated {
         driver_client_id: ClientId,
     },
@@ -1181,6 +1189,11 @@ impl PendingEvent {
     #[allow(clippy::too_many_lines)]
     fn stamp(self, meta: EventMeta) -> EngineEvent {
         match self {
+            Self::ProviderCallAccounted { call, actuals } => EngineEvent::ProviderCallAccounted {
+                meta,
+                call,
+                actuals,
+            },
             Self::SessionCreated { driver_client_id } => EngineEvent::SessionCreated {
                 meta,
                 driver_client_id,
@@ -2397,6 +2410,7 @@ mod tests {
             &self,
             _alias: &str,
             _request: ProviderRequest,
+            _invocation: crate::provider_admission::ProviderInvocation,
         ) -> Result<BoxEventStream, AgentLoopError> {
             Ok(Box::pin(futures_util::stream::iter([
                 Ok(ProviderEvent::MessageStart {
@@ -2426,6 +2440,7 @@ mod tests {
             &self,
             _alias: &str,
             _request: ProviderRequest,
+            _invocation: crate::provider_admission::ProviderInvocation,
         ) -> Result<BoxEventStream, AgentLoopError> {
             Err(AgentLoopError::Provider(
                 "alias fixture does not make provider calls".to_owned(),
@@ -2482,6 +2497,7 @@ mod tests {
             &self,
             alias: &str,
             request: ProviderRequest,
+            _invocation: crate::provider_admission::ProviderInvocation,
         ) -> Result<BoxEventStream, AgentLoopError> {
             self.aliases
                 .lock()
@@ -2542,6 +2558,7 @@ mod tests {
             &self,
             alias: &str,
             request: ProviderRequest,
+            _invocation: crate::provider_admission::ProviderInvocation,
         ) -> Result<BoxEventStream, AgentLoopError> {
             self.operations
                 .lock()
@@ -2649,9 +2666,17 @@ mod tests {
             &self,
             alias: &str,
             request: ProviderRequest,
+            invocation: crate::provider_admission::ProviderInvocation,
         ) -> Result<BoxEventStream, AgentLoopError> {
             self.router
-                .stream_alias(alias, request)
+                .stream_alias(
+                    alias,
+                    request,
+                    Arc::new(crate::provider_admission::gate::InvocationGate {
+                        invocation,
+                        metadata: BTreeMap::new(),
+                    }),
+                )
                 .map_err(|error| AgentLoopError::Provider(error.to_string()))
         }
 
@@ -2702,6 +2727,7 @@ mod tests {
             &self,
             _alias: &str,
             _request: ProviderRequest,
+            _invocation: crate::provider_admission::ProviderInvocation,
         ) -> Result<BoxEventStream, AgentLoopError> {
             self.requests.fetch_add(1, Ordering::SeqCst);
             Ok(Box::pin(stream::iter([
@@ -2773,6 +2799,7 @@ mod tests {
             &self,
             _alias: &str,
             _request: ProviderRequest,
+            _invocation: crate::provider_admission::ProviderInvocation,
         ) -> Result<BoxEventStream, AgentLoopError> {
             Ok(Box::pin(
                 stream::iter([
@@ -2804,6 +2831,7 @@ mod tests {
             &self,
             _alias: &str,
             _request: ProviderRequest,
+            _invocation: crate::provider_admission::ProviderInvocation,
         ) -> Result<BoxEventStream, AgentLoopError> {
             Ok(Box::pin(
                 stream::iter([Ok(ProviderEvent::MessageStart {
@@ -2825,6 +2853,7 @@ mod tests {
             &self,
             _alias: &str,
             _request: ProviderRequest,
+            _invocation: crate::provider_admission::ProviderInvocation,
         ) -> Result<BoxEventStream, AgentLoopError> {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 let started = Arc::clone(&self.started);
@@ -2855,6 +2884,7 @@ mod tests {
             &self,
             _alias: &str,
             _request: ProviderRequest,
+            _invocation: crate::provider_admission::ProviderInvocation,
         ) -> Result<BoxEventStream, AgentLoopError> {
             let delay = self.delay;
             Ok(Box::pin(
@@ -2886,6 +2916,7 @@ mod tests {
             &self,
             _alias: &str,
             _request: ProviderRequest,
+            _invocation: crate::provider_admission::ProviderInvocation,
         ) -> Result<BoxEventStream, AgentLoopError> {
             let count = self.count;
             let delay = self.delay;
@@ -2924,6 +2955,7 @@ mod tests {
             &self,
             _alias: &str,
             request: ProviderRequest,
+            _invocation: crate::provider_admission::ProviderInvocation,
         ) -> Result<BoxEventStream, AgentLoopError> {
             let steered = request.turns.iter().any(|turn| {
                 turn.role == Role::System
@@ -4760,6 +4792,7 @@ mod tests {
             modes: Arc::new(ModeRegistry::builtins().expect("built-in modes")),
             event_sink: Arc::new(NoopSessionEventSink::default()),
             event_clock: Arc::new(FixedClock),
+            provider_admission: crate::provider_admission::testing::admission(),
             secret_redactor: Arc::new(NoopSecretRedactor),
             checkpoints: Arc::new(NoopMutationCheckpointCoordinator),
             folder_trust: Arc::new(NoopFolderTrustController),
@@ -9641,9 +9674,17 @@ mod tests {
             &self,
             alias: &str,
             request: ProviderRequest,
+            invocation: crate::provider_admission::ProviderInvocation,
         ) -> Result<BoxEventStream, AgentLoopError> {
             self.0
-                .stream_alias(alias, request)
+                .stream_alias(
+                    alias,
+                    request,
+                    Arc::new(crate::provider_admission::gate::InvocationGate {
+                        invocation,
+                        metadata: BTreeMap::new(),
+                    }),
+                )
                 .map_err(|error| AgentLoopError::Provider(error.to_string()))
         }
         async fn settle_effects(&self) {
@@ -15338,7 +15379,13 @@ prompt = "The file changed after the mode was selected."
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .push(label);
-                    let _ = respond.send(Ok(()));
+                    let _ = respond.send(Ok(EventMeta {
+                        protocol_version: PROTOCOL_VERSION,
+                        session_id: SessionId("fixture".into()),
+                        sequence_id: SequenceId(0),
+                        emitted_at: FixedClock.emitted_at(),
+                        caused_by: None,
+                    }));
                 }
             }
         });
@@ -15418,7 +15465,13 @@ prompt = "The file changed after the mode was selected."
         let actor = tokio::spawn(async move {
             while let Some(signal) = receive.recv().await {
                 if let TurnSignal::DurableEvent { respond, .. } = signal {
-                    let _ = respond.send(Ok(()));
+                    let _ = respond.send(Ok(EventMeta {
+                        protocol_version: PROTOCOL_VERSION,
+                        session_id: SessionId("fixture".into()),
+                        sequence_id: SequenceId(0),
+                        emitted_at: FixedClock.emitted_at(),
+                        caused_by: None,
+                    }));
                 }
             }
         });
@@ -15493,7 +15546,13 @@ prompt = "The file changed after the mode was selected."
             while let Some(signal) = receive.recv().await {
                 if let TurnSignal::DurableEvent { respond, .. } = signal {
                     count += 1;
-                    let _ = respond.send(Ok(()));
+                    let _ = respond.send(Ok(EventMeta {
+                        protocol_version: PROTOCOL_VERSION,
+                        session_id: SessionId("fixture".into()),
+                        sequence_id: SequenceId(0),
+                        emitted_at: FixedClock.emitted_at(),
+                        caused_by: None,
+                    }));
                 }
             }
             count
@@ -15533,7 +15592,13 @@ prompt = "The file changed after the mode was selected."
             while let Some(signal) = receive.recv().await {
                 if let TurnSignal::DurableEvent { respond, .. } = signal {
                     count += 1;
-                    let _ = respond.send(Ok(()));
+                    let _ = respond.send(Ok(EventMeta {
+                        protocol_version: PROTOCOL_VERSION,
+                        session_id: SessionId("fixture".into()),
+                        sequence_id: SequenceId(0),
+                        emitted_at: FixedClock.emitted_at(),
+                        caused_by: None,
+                    }));
                 }
             }
             count

@@ -80,7 +80,7 @@ async fn explicit_provider_route_excludes_other_alias_candidates() {
     assert!(runtime.has_provider_for_alias("fast", "beta"));
     assert!(!runtime.has_provider_for_alias("fast", "missing"));
     let events = runtime
-        .stream_alias_provider("fast", "beta", request("ignored"))
+        .stream_alias_provider("fast", "beta", request("ignored"), invocation())
         .unwrap_or_else(|error| panic!("explicit beta route must resolve: {error}"))
         .collect::<Vec<_>>()
         .await;
@@ -92,7 +92,7 @@ async fn explicit_provider_route_excludes_other_alias_candidates() {
     ));
     assert!(
         runtime
-            .stream_alias_provider("fast", "missing", request("ignored"))
+            .stream_alias_provider("fast", "missing", request("ignored"), invocation())
             .is_err()
     );
 }
@@ -120,7 +120,7 @@ async fn alias_fallback_message_start_uses_exact_provider_qualified_candidate() 
         .unwrap_or_else(|error| panic!("fallback runtime must build: {error}"));
 
     let events = runtime
-        .stream_alias("fast", request("ignored"))
+        .stream_alias("fast", request("ignored"), invocation())
         .unwrap_or_else(|error| panic!("fallback stream must start: {error}"))
         .collect::<Vec<_>>()
         .await;
@@ -244,7 +244,7 @@ async fn mixed_automatic_to_explicit_fallback_preserves_anthropic_cache_control(
             tools_in_prefix: true,
         });
         let events = runtime
-            .stream_alias("fast", routed)
+            .stream_alias("fast", routed, invocation())
             .unwrap_or_else(|error| panic!("mixed alias must route: {error}"))
             .collect::<Vec<_>>()
             .await;

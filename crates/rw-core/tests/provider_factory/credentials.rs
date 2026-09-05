@@ -111,10 +111,15 @@ async fn newly_stored_provider_credential_activates_catalog_selection_and_dispat
         .prepare_concrete_model("extra/new-model")
         .await
         .unwrap_or_else(|error| panic!("activated concrete model must bind: {error}"));
-    let events = ModelDriver::stream(&runtime, "extra/new-model", request("ignored"))
-        .unwrap_or_else(|error| panic!("activated stream must start: {error}"))
-        .collect::<Vec<_>>()
-        .await;
+    let events = ModelDriver::stream(
+        &runtime,
+        "extra/new-model",
+        request("ignored"),
+        invocation(),
+    )
+    .unwrap_or_else(|error| panic!("activated stream must start: {error}"))
+    .collect::<Vec<_>>()
+    .await;
     assert!(events.iter().any(|event| {
         matches!(event, Ok(ProviderEvent::TextDelta { text }) if text == "activated-ok")
     }));
@@ -150,7 +155,7 @@ async fn missing_first_provider_credential_preserves_healthy_fallback_route() {
 
     assert!(runtime.provider("missing/model-a").is_none());
     let events = runtime
-        .stream_alias("fast", request("ignored"))
+        .stream_alias("fast", request("ignored"), invocation())
         .unwrap_or_else(|error| panic!("healthy fallback must stream: {error}"))
         .collect::<Vec<_>>()
         .await;

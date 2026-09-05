@@ -49,13 +49,13 @@ impl ProviderAttemptGate for InvocationGate {
         let input = match invocation.input {
             ProviderInputBudget::Bounded(value) | ProviderInputBudget::Estimated(value) => value,
         };
-        let charge =
-            charge_bound(metadata.as_ref(), invocation.input, output).map_err(admission_error)?;
+        let charge = charge_bound(metadata.as_ref(), invocation.input, output)
+            .map_err(|error| admission_error(&error))?;
         let plan = BudgetReservationPlan {
             identity: identity.clone(),
             admitted_at: UtcTimestamp::from_unix_millis(invocation.clock.unix_time_millis())
                 .map_err(BudgetReservationError::from)
-                .map_err(admission_error)?,
+                .map_err(|error| admission_error(&error))?,
             input_token_bound: input,
             output_token_limit: output,
             charge,
@@ -65,10 +65,10 @@ impl ProviderAttemptGate for InvocationGate {
             .admission
             .reserve(plan)
             .await
-            .map_err(admission_error)?
+            .map_err(|error| admission_error(&error))?
             .start()
             .await
-            .map_err(admission_error)?;
+            .map_err(|error| admission_error(&error))?;
         Ok(Box::new(AccountedAttempt {
             active,
             identity,
@@ -113,11 +113,11 @@ impl ProviderAttempt for AccountedAttempt {
             .accounting
             .append_accounted(self.identity, actuals)
             .await
-            .map_err(admission_error)?;
+            .map_err(|error| admission_error(&error))?;
         self.active
             .settle_accounted(receipt)
             .await
-            .map_err(admission_error)
+            .map_err(|error| admission_error(&error))
     }
 }
 
@@ -180,7 +180,7 @@ fn charge_bound(
     })
 }
 
-fn admission_error(error: BudgetReservationError) -> ProviderError {
+fn admission_error(error: &BudgetReservationError) -> ProviderError {
     ProviderError::new(ProviderErrorKind::InvalidRequest, error.to_string())
 }
 

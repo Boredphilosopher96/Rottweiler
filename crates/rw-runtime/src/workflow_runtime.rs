@@ -628,6 +628,7 @@ mod tests {
             &self,
             _alias: &str,
             request: ProviderRequest,
+            _invocation: rw_core::provider_admission::ProviderInvocation,
         ) -> Result<BoxEventStream, AgentLoopError> {
             self.requests.lock().expect("requests").push(request);
             Ok(Box::pin(futures_util::stream::iter([
@@ -1196,6 +1197,7 @@ needs = ["impl", "tests"]
                     })?),
                     event_sink: Arc::new(NoopSessionEventSink::new(None)),
                     event_clock: Arc::new(SystemEventClock),
+                    provider_admission: crate::provider_admission::testing::admission(),
                     secret_redactor: Arc::new(NoopSecretRedactor),
                     checkpoints: Arc::new(NoopMutationCheckpointCoordinator),
                     folder_trust: Arc::new(NoopFolderTrustController),
@@ -1302,6 +1304,7 @@ needs = ["impl", "tests"]
                 ),
                 event_sink: Arc::new(NoopSessionEventSink::new(None)),
                 event_clock: Arc::new(SystemEventClock),
+                provider_admission: crate::provider_admission::testing::admission(),
                 secret_redactor: Arc::new(NoopSecretRedactor),
                 checkpoints: Arc::new(NoopMutationCheckpointCoordinator),
                 folder_trust: Arc::new(NoopFolderTrustController),

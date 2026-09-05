@@ -11,6 +11,10 @@ use super::{
 impl SessionFactory for RuntimeSessionFactory {
     async fn shutdown(&self) -> Result<(), HostError> {
         self.wasm_workers.shutdown().await;
+        self.provider_admission
+            .shutdown()
+            .await
+            .map_err(|error| HostError::Persistence(error.to_string()))?;
         Ok(())
     }
 

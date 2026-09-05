@@ -10,6 +10,12 @@ pub(in crate::engine) fn recovered_pending_event(
         return Err(SessionProjectionError::NonDurableEvent);
     }
     let pending = match event {
+        EngineEvent::ProviderCallAccounted { call, actuals, .. } => {
+            PendingEvent::ProviderCallAccounted {
+                call: call.clone(),
+                actuals: actuals.clone(),
+            }
+        }
         EngineEvent::TurnStarted { turn_id, .. } => PendingEvent::TurnStarted {
             turn: parse_turn_id(turn_id)?,
         },

@@ -147,3 +147,26 @@ async fn cancelled_shutdown_wait_still_settles_prior_work() {
     service.shutdown().await.unwrap();
     assert_eq!(*service.worker.finished.borrow(), Some(true));
 }
+
+#[test]
+fn idle_accounting_owner_does_not_occupy_tokio_blocking_capacity() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let service = DurableProviderAdmission::open(root.path().to_owned())
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            tokio::task::spawn_blocking(|| 7),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        service.shutdown().await.unwrap();
+    });
+}

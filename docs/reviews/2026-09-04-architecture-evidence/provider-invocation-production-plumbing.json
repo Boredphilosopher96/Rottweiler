@@ -1,0 +1,68 @@
+{
+  "scope": "Required logical provider invocation and exact durable accounting receipt plumbing; verified incremental implementation, not complete A02/A03/A12 qualification",
+  "base": "ce57f4b plus cdb3355 and 9efcbaa (local 576210b)",
+  "runtime": "Rust 1.97.1 macOS aarch64; Bun 1.3.14; private /tmp/rw-storage-target",
+  "verification": [
+    {
+      "command": "PATH=/tmp/rw-tools/bun-1.3.14/bun-darwin-aarch64:$PATH CARGO_TARGET_DIR=/tmp/rw-storage-target cargo test -p rw-core -p rw-runtime --lib",
+      "result": "core 353 passed / 1 ignored; runtime 244 passed / 1 ignored"
+    },
+    {
+      "command": "CARGO_TARGET_DIR=/tmp/rw-storage-target cargo clippy -p rw-core -p rw-runtime -p rw-cli --all-targets -- -D warnings",
+      "result": "passed"
+    }
+  ],
+  "proved": [
+    "Required invocation reaches main, compaction, title, forwarding wrappers and direct ProviderModel stream paths",
+    "Factory admission opens explicitly through async startup; child templates share the service",
+    "Accounting sink awaits exact durable EventMeta and returns its sequence/time",
+    "Idle accounting owner does not occupy the only Tokio blocking thread; shutdown follows actual native worker join",
+    "ProviderCallAccounted has explicit pending-event decode and canonical accounting-source indexing"
+  ],
+  "qualification_notes": [
+    "First async fixture conversion exposed nested-runtime misuse and premature runtime-drop hang; corrected lifecycle fixtures",
+    "Cold plugin-host fixture needs built plugin SDK before host dependency install; pinned SDK build plus frozen host reinstall restores fixture",
+    "An unchanged transcript reopen test exposed inherited flock-description lifetime; consumed independently reproduced fix 9efcbaa before final full suites"
+  ],
+  "remaining": [
+    "Parent plus descendant budget scope field and native web search per-turn binding",
+    "Explicit ModelDriver wrapper effect-settlement forwarding and checkpoint settlement migration",
+    "Bounded canonical recovery production adoption, indexed context/search, writer responsiveness and source module ceiling",
+    "No Linux, 1M cold-start or eight-hour soak claim"
+  ],
+  "source_sha256": {
+    "crates/rw-cli/src/interactive.rs": "2896df6e028c704228a5d6d4bfd8aec40cf59cbd0e88745b9705f319b9f0b21b",
+    "crates/rw-cli/src/mcp_server.rs": "017de35a4704a4136bf949d4bf56725d9789736f8790c9f8db3c736a2e48229b",
+    "crates/rw-core/src/engine/dispatch.rs": "dca92363896ab0c32a61f53a00533ba044d9c2e8b516ddc8e3c2c3345b7d768a",
+    "crates/rw-core/src/engine/mod.rs": "c4476f28742205c6bfe5992fad08599960e503cdddb4e6cc8c4a6dc45413170e",
+    "crates/rw-core/src/engine/projection.rs": "1968f8568cf651d2cdd0dec291b38f86a6ba78d025c710940187bf2c44b9d3d0",
+    "crates/rw-core/src/engine/projection/events.rs": "a0abe0c96693df222babd557af69d8b496e7f2bc5f3cf982e24b7c1ab26b0ba4",
+    "crates/rw-core/src/engine/recovery/reduce.rs": "17b62e1c1c89bb30fd2efc1006e5a99b7023b1a60a93a0fc20bd0dcf892fd5ad",
+    "crates/rw-core/src/engine/session.rs": "5f8eb76c8cc7ea9f44da94999f2e5ac5df2210c92920ab99ddcd2c04da1b7449",
+    "crates/rw-core/src/engine/turn/mod.rs": "4419e51daba82c9ae375385e6ab42385baac7d3c04d7277982becbca1c9692e7",
+    "crates/rw-core/src/engine/turn/provider_calls.rs": "1c8b4445150b44557ff472a5a38a9bbc5f32628d67684a23a6696ea77e00a697",
+    "crates/rw-core/src/engine/turn/title.rs": "8cda18c7010cdb1aff7b61cb44c58f80e395f6670dbe4aab25cf888130418ed6",
+    "crates/rw-core/src/host/tests.rs": "9225973daab5bfe85c89ed9e2f112afa46fd9154159aa7aaf44278fb1db1ec49",
+    "crates/rw-core/src/orchestration/tests.rs": "55df74f757474a766df178b7599e960057808cec28c94d156ff1828f7f877ce0",
+    "crates/rw-core/src/provider_admission.rs": "6c50d1a7c78b1c5859b8b37b8bab0f8a52c98e0f490ad66480e7af0b48d75fb3",
+    "crates/rw-core/src/provider_admission/concrete.rs": "341359d42cbf463f9d78a13616aeb21a4b32c7ebdd4aa06d0e4ada49029c20b7",
+    "crates/rw-core/src/provider_admission/gate.rs": "bb4a3234d2b8f5025b4788cd74acad3a818ee32c183ff2eae635f500d1880f30",
+    "crates/rw-core/src/provider_admission/testing.rs": "7039efb38ffbb60a160a86befbfb14cfae73dd1db110d5e391d368b87f53620e",
+    "crates/rw-core/tests/provider_factory.rs": "876964417c82f63996fa84215a3c82e0e5635c7dcefb73b11dc5d58c1609d5af",
+    "crates/rw-core/tests/provider_factory/admission.rs": "6fc41750b7fcd1bfc091f90a27912ada1c409fa10aa86e4e6a2bfe244cfbc7e1",
+    "crates/rw-core/tests/provider_factory/catalog.rs": "2a0247bdfd4178177408f90f6e07c2bfb1d085d885d2dad7bd90fe49a2c1433c",
+    "crates/rw-core/tests/provider_factory/credentials.rs": "45c54827f9cd355345da7a4baa7b68f41164ee2a4bc98af79ba2763c5aab8ef7",
+    "crates/rw-core/tests/provider_factory/extensions.rs": "03b694272325018131b3ded05595ea0ebf86f3a7eede41d628eddadbef431762",
+    "crates/rw-core/tests/provider_factory/routing.rs": "563398e4281f8e6e0daa0d9d04f8296815d4d409aeedcffebd15595656d70b3e",
+    "crates/rw-runtime/src/provider_admission.rs": "d88325d5720d2a467d7e684b5ace831738b9cee9b26e0f4f4fa6eab708b71cf3",
+    "crates/rw-runtime/src/provider_admission/testing.rs": "67ae4d48a9426a5e19fe8a083ac7f154ae39c9d70a202298e73ea01d99d5ecb7",
+    "crates/rw-runtime/src/provider_admission/tests.rs": "3b5fd3ee9d604f92e4aa4a231ebd3bec084c05748a450962faee6c24fd47942e",
+    "crates/rw-runtime/src/session_host.rs": "0151d36b24e5de29469c5e0ee4871322daf484a3b592867b000cf9db7b66f8b0",
+    "crates/rw-runtime/src/session_host/factory.rs": "764f53119a230e4e9c47b028595a1a6ee2a19e8117e07823f56ff96f07c5c9bd",
+    "crates/rw-runtime/src/session_host/tests.rs": "44f298d16c61ce764d2e81c75e02f384065f65378c192ef5d48626486c83c132",
+    "crates/rw-runtime/src/session_host/tests/fork.rs": "cdedc8162b6e93fb9b4a0b8e079549b96faaa9eb64e4476ae6efa178def2d0f6",
+    "crates/rw-runtime/src/session_host/tests/workspace.rs": "ef538340c7847fd729b9106cdab66456e11c872c730aecdb810314ba626158db",
+    "crates/rw-runtime/src/session_runtime.rs": "d21573b048913d52db3d268ed1d32594ac6b7a81af461645295ca00cc5587d8b",
+    "crates/rw-runtime/src/workflow_runtime.rs": "91da4565001ef48b64ca174134135fd428de003edffeae80b13c7dcf7d9b603d"
+  }
+}

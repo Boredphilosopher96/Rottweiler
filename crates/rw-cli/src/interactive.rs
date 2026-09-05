@@ -295,6 +295,7 @@ pub(super) async fn run_serve(
         let max_sessions = options.config.engine.max_concurrent_sessions;
         let factory = Arc::new(
             rw_runtime::RuntimeSessionFactory::new(options)
+                .await
                 .map_err(|error| miette!(error.to_string()))?,
         );
         let host = rw_runtime::HeadlessRuntimeBuilder::new(factory)

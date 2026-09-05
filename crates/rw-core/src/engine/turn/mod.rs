@@ -1,4 +1,8 @@
+mod title;
+pub(super) use title::normalize_manual_session_title;
+use title::{normalize_generated_session_title, start_session_title_generation};
 mod progress;
+mod provider_calls;
 use progress::{InvocationProgress, ProgressSlot};
 
 #[allow(clippy::wildcard_imports)]
@@ -1164,227 +1168,6 @@ struct PreparedTurnStart {
     tool_calls: Vec<CommandToolCall>,
 }
 
-fn first_meaningful_user_prompt(conversation: &[Turn]) -> Option<String> {
-    conversation.iter().find_map(|turn| {
-        if turn.role != Role::User || turn.meta.synthetic {
-            return None;
-        }
-        let text = turn
-            .blocks
-            .iter()
-            .filter_map(|block| match block {
-                Block::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
-        let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        (!collapsed.is_empty()).then_some(collapsed)
-    })
-}
-
-fn has_successful_assistant_text(conversation: &[Turn]) -> bool {
-    conversation.iter().rev().any(|turn| {
-        turn.role == Role::Assistant
-            && turn
-                .blocks
-                .iter()
-                .any(|block| matches!(block, Block::Text { text } if !text.trim().is_empty()))
-    })
-}
-
-fn deterministic_session_title(prompt: &str) -> String {
-    let collapsed = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
-    let title = collapsed
-        .chars()
-        .take(SESSION_TITLE_MAX_CHARS)
-        .collect::<String>();
-    if title.is_empty() {
-        "New session".to_owned()
-    } else {
-        title
-    }
-}
-
-fn normalize_generated_session_title(raw: &str) -> Option<String> {
-    let first = raw.lines().find(|line| !line.trim().is_empty())?.trim();
-    let unquoted = first
-        .trim_matches(|character| matches!(character, '"' | '\'' | '`' | '#' | '*' | '_'))
-        .trim()
-        .trim_end_matches(['.', ':', ';']);
-    if unquoted.is_empty()
-        || unquoted.chars().count() > SESSION_TITLE_MAX_CHARS
-        || unquoted.chars().any(char::is_control)
-    {
-        return None;
-    }
-    Some(unquoted.to_owned())
-}
-
-pub(super) fn normalize_manual_session_title(raw: &str) -> Option<String> {
-    if raw.chars().any(char::is_control) {
-        return None;
-    }
-    let title = raw.trim();
-    if title.is_empty() || title.chars().count() > SESSION_TITLE_MAX_CHARS {
-        return None;
-    }
-    Some(title.to_owned())
-}
-
-fn unavailable_session_title() -> (Option<String>, SessionUsage, Cost) {
-    (
-        None,
-        SessionUsage::default(),
-        Cost::Unavailable {
-            reason: "session title generation was unavailable".to_owned(),
-        },
-    )
-}
-
-async fn generate_session_title(
-    model: Arc<dyn ModelDriver>,
-    alias: String,
-    prompt: String,
-) -> (Option<String>, SessionUsage, Cost) {
-    if model.prepare_model(&alias).await.is_err() {
-        return unavailable_session_title();
-    }
-    let prompt = prompt
-        .chars()
-        .take(SESSION_TITLE_PROMPT_CHARS)
-        .collect::<String>();
-    let request = ProviderRequest {
-        model: alias.clone(),
-        turns: vec![
-            Turn {
-                role: Role::System,
-                blocks: vec![Block::Text {
-                    text: "Name this coding session in 3 to 7 plain words. Return only the title, with no quotes, punctuation, markdown, or explanation.".to_owned(),
-                }],
-                meta: TurnMeta {
-                    synthetic: true,
-                    ..TurnMeta::default()
-                },
-            },
-            Turn {
-                role: Role::User,
-                blocks: vec![Block::Text { text: prompt }],
-                meta: TurnMeta {
-                    synthetic: true,
-                    ..TurnMeta::default()
-                },
-            },
-        ],
-        tools: Vec::new(),
-        tool_choice: ToolChoice::None,
-        max_output_tokens: 32,
-        temperature: Some(0.0),
-        thinking: ThinkingLevel::Off,
-        cache_hint: None,
-    };
-    let Ok(mut stream) = model.stream(&alias, request) else {
-        return unavailable_session_title();
-    };
-    let collect = async {
-        let mut title = String::new();
-        let mut usage = SessionUsage::default();
-        let mut reported_model = None;
-        let mut selected_route = None;
-        while let Some(event) = stream.next().await {
-            let Ok(event) = event else { return None };
-            match event {
-                ProviderEvent::RouteSelected { route } => selected_route = Some(route),
-                ProviderEvent::MessageStart { model } => reported_model = Some(model),
-                ProviderEvent::TextDelta { text } => {
-                    if title.chars().count().saturating_add(text.chars().count())
-                        > SESSION_TITLE_OUTPUT_CHARS
-                    {
-                        return None;
-                    }
-                    title.push_str(&text);
-                }
-                ProviderEvent::ToolCallStart { .. }
-                | ProviderEvent::ToolCallArgumentsDelta { .. }
-                | ProviderEvent::ToolCallEnd { .. } => return None,
-                ProviderEvent::Usage { usage: latest } => usage.update(latest),
-                _ => {}
-            }
-        }
-        let title = normalize_generated_session_title(&title)?;
-        let cost = model.cost_for_route(
-            &alias,
-            selected_route.as_deref(),
-            reported_model.as_deref(),
-            usage.into(),
-        );
-        Some((title, usage, cost))
-    };
-    let result = tokio::time::timeout(SESSION_TITLE_TIMEOUT, collect).await;
-    drop(stream);
-    model.settle_effects().await;
-    match result {
-        Ok(Some((title, usage, cost))) => (Some(title), usage, cost),
-        Ok(None) => (
-            None,
-            SessionUsage::default(),
-            Cost::Unavailable {
-                reason: "session title generation failed".to_owned(),
-            },
-        ),
-        Err(_) => (
-            None,
-            SessionUsage::default(),
-            Cost::Unavailable {
-                reason: "session title generation timed out".to_owned(),
-            },
-        ),
-    }
-}
-
-fn start_session_title_generation(
-    state: &mut ActorState,
-    config: &Arc<SessionActorConfig>,
-    signals: &mpsc::UnboundedSender<TurnSignal>,
-) {
-    if state.session_title.is_some() || state.title_generation_started {
-        return;
-    }
-    let Some(prompt) = first_meaningful_user_prompt(&state.conversation) else {
-        return;
-    };
-    if !has_successful_assistant_text(&state.conversation) {
-        return;
-    }
-    state.title_generation_started = true;
-    let fallback = deterministic_session_title(&prompt);
-    let model = Arc::clone(&config.model);
-    let budget = model.budget_config();
-    let hard_cap_configured = budget.session_cost_cap_micros_usd.is_some()
-        || budget.daily_cost_cap_micros_usd.is_some()
-        || budget.session_ai_credit_cap_micros.is_some()
-        || budget.daily_ai_credit_cap_micros.is_some()
-        || budget.session_token_cap.is_some()
-        || budget.daily_token_cap.is_some();
-    // Background metadata must never race an ordinary turn past a hard cap.
-    // Use the deterministic title in capped sessions; uncapped calls are
-    // durably accounted when their result is persisted.
-    let alias = (!hard_cap_configured)
-        .then(|| model.title_model_alias())
-        .flatten();
-    let signals = signals.clone();
-    tokio::spawn(async move {
-        let (title, usage, cost) = match alias {
-            Some(alias) => {
-                let (title, usage, cost) = generate_session_title(model, alias, prompt).await;
-                (title.unwrap_or(fallback), Some(usage), Some(cost))
-            }
-            None => (fallback, None, None),
-        };
-        let _ = signals.send(TurnSignal::SessionTitleGenerated { title, usage, cost });
-    });
-}
-
 pub(super) async fn start_turn(
     state: &mut ActorState,
     config: &Arc<SessionActorConfig>,
@@ -1621,8 +1404,11 @@ pub(super) async fn emit(
     events: &broadcast::Sender<RoutedEvent>,
     sink: &Arc<dyn SessionEventSink>,
     kind: PendingEvent,
-) -> Result<(), AgentLoopError> {
-    emit_batch(state, events, sink, vec![kind]).await
+) -> Result<EventMeta, AgentLoopError> {
+    emit_batch(state, events, sink, vec![kind])
+        .await?
+        .pop()
+        .ok_or_else(|| AgentLoopError::Persistence("missing durable event receipt".into()))
 }
 
 pub(super) async fn emit_batch(
@@ -1630,9 +1416,9 @@ pub(super) async fn emit_batch(
     events: &broadcast::Sender<RoutedEvent>,
     sink: &Arc<dyn SessionEventSink>,
     kinds: Vec<PendingEvent>,
-) -> Result<(), AgentLoopError> {
+) -> Result<Vec<EventMeta>, AgentLoopError> {
     if kinds.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let first_expected = match state.sequence {
         Some(sequence) => sequence
@@ -1705,13 +1491,18 @@ pub(super) async fn emit_batch(
         .last()
         .and_then(EngineEvent::meta)
         .map(|meta| meta.sequence_id.0);
+    let receipts = persisted
+        .iter()
+        .filter_map(EngineEvent::meta)
+        .cloned()
+        .collect();
     for event in persisted {
         let _ = events.send(RoutedEvent {
             target: None,
             event,
         });
     }
-    Ok(())
+    Ok(receipts)
 }
 
 struct ChannelApprover {
@@ -2455,7 +2246,7 @@ fn flush_pending_text_delta(
 pub(super) async fn persist_event(
     signals: &mpsc::UnboundedSender<TurnSignal>,
     kind: PendingEvent,
-) -> Result<(), AgentLoopError> {
+) -> Result<EventMeta, AgentLoopError> {
     let (respond, receive) = oneshot::channel();
     signals
         .send(TurnSignal::DurableEvent { kind, respond })
@@ -2476,6 +2267,7 @@ async fn persist_conversation_turn(
         },
     )
     .await
+    .map(|_| ())
 }
 
 pub(super) fn append_text(blocks: &mut Vec<Block>, delta: &str) {
@@ -4401,7 +4193,17 @@ async fn execute_compaction(
         let provider = (alias == config.model_alias)
             .then_some(config.recovered.provider.as_deref())
             .flatten();
-        let mut stream = match config.model.stream_for_provider(&alias, provider, request) {
+        let invocation = provider_calls::invocation(
+            config,
+            signals,
+            turn,
+            AccountingAttribution::Compaction,
+            &request,
+        )?;
+        let mut stream = match config
+            .model
+            .stream_for_provider(&alias, provider, request, invocation)
+        {
             Ok(stream) => stream,
             Err(error) => {
                 last_error = Some(error);
@@ -5206,10 +5008,30 @@ async fn run_turn(
         let provider_started = tracing::enabled!(target: "rw_performance", tracing::Level::TRACE)
             .then(std::time::Instant::now);
         let mut first_provider_event = true;
+        let invocation = match provider_calls::invocation(
+            &config,
+            &signals,
+            turn,
+            AccountingAttribution::Main,
+            &request,
+        ) {
+            Ok(invocation) => invocation,
+            Err(error) => {
+                send_event(
+                    &signals,
+                    PendingEvent::Error {
+                        message: error.to_string(),
+                    },
+                );
+                status = AgentTurnStatus::Failed;
+                break;
+            }
+        };
         let mut stream = match config.model.stream_for_provider(
             &config.model_alias,
             config.recovered.provider.as_deref(),
             request,
+            invocation,
         ) {
             Ok(stream) => stream,
             Err(error) => {
@@ -5851,7 +5673,7 @@ pub(super) enum TurnSignal {
     },
     DurableEvent {
         kind: PendingEvent,
-        respond: oneshot::Sender<Result<(), AgentLoopError>>,
+        respond: oneshot::Sender<Result<EventMeta, AgentLoopError>>,
     },
     SubagentProgress(SubagentProgressEvent),
     ToolProgress(Arc<ProgressSlot>),

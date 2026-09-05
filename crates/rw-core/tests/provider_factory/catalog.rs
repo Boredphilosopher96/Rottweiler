@@ -26,7 +26,7 @@ async fn live_catalog_excludes_stale_alias_candidate_before_inference() {
     ModelDriver::prepare_model(&runtime, "fast")
         .await
         .unwrap_or_else(|error| panic!("live alias must validate: {error}"));
-    let events = ModelDriver::stream(&runtime, "fast", request("ignored"))
+    let events = ModelDriver::stream(&runtime, "fast", request("ignored"), invocation())
         .unwrap_or_else(|error| panic!("validated stream must start: {error}"))
         .collect::<Vec<_>>()
         .await;
@@ -141,10 +141,15 @@ async fn configured_unaliased_concrete_model_rebinds_after_runtime_restart_and_d
         .prepare_concrete_model("extra/new-model")
         .await
         .unwrap_or_else(|error| panic!("persisted concrete model must rebind: {error}"));
-    let events = ModelDriver::stream(&resumed, "extra/new-model", request("ignored"))
-        .unwrap_or_else(|error| panic!("concrete stream must start: {error}"))
-        .collect::<Vec<_>>()
-        .await;
+    let events = ModelDriver::stream(
+        &resumed,
+        "extra/new-model",
+        request("ignored"),
+        invocation(),
+    )
+    .unwrap_or_else(|error| panic!("concrete stream must start: {error}"))
+    .collect::<Vec<_>>()
+    .await;
     assert!(events.iter().all(Result::is_ok));
     assert!(events.iter().any(|event| {
         matches!(event, Ok(ProviderEvent::TextDelta { text }) if text == "dynamic-ok")
@@ -224,7 +229,7 @@ async fn configured_route_without_live_catalog_defers_unknown_tool_capability_to
         description: "Read a workspace file".to_owned(),
         input_schema: json!({"type": "object"}),
     });
-    let events = ModelDriver::stream(&runtime, "fast", routed)
+    let events = ModelDriver::stream(&runtime, "fast", routed, invocation())
         .unwrap_or_else(|error| panic!("configured route must start: {error}"))
         .collect::<Vec<_>>()
         .await;

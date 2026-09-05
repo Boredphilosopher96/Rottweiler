@@ -6,6 +6,10 @@ mod checkpoints;
 use checkpoints::{DurableCheckpointCoordinator, recover_rewind_transactions};
 
 use crate::journal_reads::{JournalReadLease, JournalReads, JournalRegistration};
+#[cfg(test)]
+use crate::provider_admission::testing::{
+    admission as test_provider_admission, invocation as test_provider_invocation,
+};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     io::{self, Read, Write},
@@ -19,6 +23,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+#[cfg(test)]
 use futures_util::StreamExt;
 use miette::{IntoDiagnostic, Result, miette};
 use rustyline::{DefaultEditor, error::ReadlineError};
@@ -574,6 +579,7 @@ async fn recover_subagent_tree(
 }
 
 struct ChildActorTemplate {
+    provider_admission: Arc<dyn rw_core::provider_admission::ProviderAdmission>,
     storage_root: PathBuf,
     model: Arc<dyn ModelDriver>,
     permissions: Arc<PermissionGate>,
@@ -647,6 +653,7 @@ impl ChildActorTemplate {
             Arc::clone(&self.secret_redactor),
             self.permissions.as_ref(),
             self.max_turns,
+            Arc::clone(&self.provider_admission),
         )
     }
 
@@ -665,6 +672,7 @@ impl ChildActorTemplate {
             Arc::clone(&self.secret_redactor),
             self.permissions.as_ref(),
             self.max_turns,
+            Arc::clone(&self.provider_admission),
         )
     }
 }
@@ -892,6 +900,7 @@ pub enum HostedProviderMode {
 }
 
 pub(crate) struct HostedSessionComposition {
+    pub provider_admission: Arc<crate::provider_admission::DurableProviderAdmission>,
     pub wasm_workers: Arc<rw_ext::WasmWorkerPool>,
     pub index_pool: Arc<rw_tools::WorkspaceIndexPool>,
     pub journal_reads: Arc<JournalReads>,
@@ -1313,6 +1322,11 @@ pub async fn run(options: RunOptions) -> Result<()> {
     initialize_private_storage_root(&storage_root).into_diagnostic()?;
     collect_abandoned_empty_sessions(&storage_root)?;
     let journal_reads = JournalReads::new(&storage_root)?;
+    let provider_admission = Arc::new(
+        crate::provider_admission::DurableProviderAdmission::open(storage_root.clone())
+            .await
+            .map_err(|error| miette!("provider accounting authority: {error}"))?,
+    );
     let index_pool = Arc::new(rw_tools::WorkspaceIndexPool::default());
     let loaded_config = config_loader.load().into_diagnostic()?;
     for warning in loaded_config.warnings() {
@@ -1790,11 +1804,14 @@ pub async fn run(options: RunOptions) -> Result<()> {
                 .with_cache_support(cache_support),
         );
         (
-            Arc::new(ProviderModel::new(
-                scripted,
-                loaded_config.config.compaction.clone(),
-                loaded_config.config.budget.clone(),
-            )),
+            Arc::new(
+                ProviderModel::new(
+                    scripted,
+                    loaded_config.config.compaction.clone(),
+                    loaded_config.config.budget.clone(),
+                )
+                .map_err(display_agent_error)?,
+            ),
             fixture_redactor.clone(),
         )
     } else if let Some(script_path) = &options.in_memory_replay_script {
@@ -1805,11 +1822,14 @@ pub async fn run(options: RunOptions) -> Result<()> {
             0,
         ));
         (
-            Arc::new(ProviderModel::new(
-                scripted,
-                loaded_config.config.compaction.clone(),
-                loaded_config.config.budget.clone(),
-            )),
+            Arc::new(
+                ProviderModel::new(
+                    scripted,
+                    loaded_config.config.compaction.clone(),
+                    loaded_config.config.budget.clone(),
+                )
+                .map_err(display_agent_error)?,
+            ),
             fixture_redactor.clone(),
         )
     } else if let Some(script_path) = &options.record_replay_script {
@@ -1826,11 +1846,14 @@ pub async fn run(options: RunOptions) -> Result<()> {
         let recorder: Arc<dyn Provider> =
             Arc::new(Recorder::new(scripted, directory, fixture_redactor.clone()));
         (
-            Arc::new(ProviderModel::new(
-                recorder,
-                loaded_config.config.compaction.clone(),
-                loaded_config.config.budget.clone(),
-            )),
+            Arc::new(
+                ProviderModel::new(
+                    recorder,
+                    loaded_config.config.compaction.clone(),
+                    loaded_config.config.budget.clone(),
+                )
+                .map_err(display_agent_error)?,
+            ),
             fixture_redactor.clone(),
         )
     } else if let Some(directory) = &options.replay_dir {
@@ -1850,11 +1873,14 @@ pub async fn run(options: RunOptions) -> Result<()> {
             })));
         }
         (
-            Arc::new(ProviderModel::new(
-                replay,
-                loaded_config.config.compaction.clone(),
-                loaded_config.config.budget.clone(),
-            )),
+            Arc::new(
+                ProviderModel::new(
+                    replay,
+                    loaded_config.config.compaction.clone(),
+                    loaded_config.config.budget.clone(),
+                )
+                .map_err(display_agent_error)?,
+            ),
             fixture_redactor.clone(),
         )
     } else {
@@ -2021,6 +2047,7 @@ pub async fn run(options: RunOptions) -> Result<()> {
             .map_err(|error| miette!("agent tools could not resolve: {error}"))?;
         let agents = Arc::new(agents);
         let template = Arc::new(ChildActorTemplate {
+            provider_admission: provider_admission.clone(),
             storage_root: storage_root.clone(),
             model: Arc::clone(&model),
             permissions: Arc::clone(&permissions),
@@ -2207,6 +2234,7 @@ pub async fn run(options: RunOptions) -> Result<()> {
         modes: runtime_modes,
         event_sink: actor_event_sink,
         event_clock: Arc::new(SystemEventClock),
+        provider_admission: provider_admission.clone(),
         secret_redactor,
         checkpoints: checkpoint_coordinator,
         folder_trust,
@@ -2715,11 +2743,14 @@ pub(crate) async fn compose_hosted_actor(
             let provider: Arc<dyn Provider> =
                 Arc::new(ScriptProvider::new(provider_name, scripts, event_delay_ms));
             (
-                Arc::new(ProviderModel::new(
-                    provider,
-                    options.config.compaction.clone(),
-                    options.config.budget.clone(),
-                )),
+                Arc::new(
+                    ProviderModel::new(
+                        provider,
+                        options.config.compaction.clone(),
+                        options.config.budget.clone(),
+                    )
+                    .map_err(display_agent_error)?,
+                ),
                 fixture_redactor,
                 None,
             )
@@ -2855,6 +2886,7 @@ pub(crate) async fn compose_hosted_actor(
         .map_err(|error| miette!("agent tools could not resolve: {error}"))?;
     let agents = Arc::new(agents);
     let template = Arc::new(ChildActorTemplate {
+        provider_admission: options.provider_admission.clone(),
         storage_root: options.storage_root.clone(),
         model: Arc::clone(&model),
         permissions: Arc::clone(&permissions),
@@ -3035,6 +3067,7 @@ pub(crate) async fn compose_hosted_actor(
         modes: runtime_modes,
         event_sink: actor_event_sink,
         event_clock: Arc::new(SystemEventClock),
+        provider_admission: options.provider_admission.clone(),
         secret_redactor,
         checkpoints: checkpoint_coordinator,
         folder_trust,
@@ -5416,6 +5449,7 @@ impl RuntimeWorkspaceRootController {
         secret_redactor: Arc<dyn rw_core::SecretRedactor>,
         parent_permissions: &PermissionGate,
         max_turns: usize,
+        provider_admission: Arc<dyn rw_core::provider_admission::ProviderAdmission>,
     ) -> std::result::Result<SessionActorConfig, AgentLoopError> {
         let roots = vec![workspace_root.to_path_buf()];
         let trusted_roots =
@@ -5568,6 +5602,7 @@ impl RuntimeWorkspaceRootController {
             modes: Arc::new(mode_registry),
             event_sink: Arc::new(event_sink),
             event_clock: Arc::new(SystemEventClock),
+            provider_admission,
             secret_redactor,
             checkpoints: Arc::new(DurableCheckpointCoordinator::from_stores(
                 child_checkpoint_root,
@@ -6015,6 +6050,7 @@ impl FolderTrustController for RuntimeFolderTrustController {
 }
 
 struct ProviderModel {
+    operations: rw_providers::ProviderRouter,
     provider: Arc<dyn Provider>,
     model_metadata: Option<rw_core::ProviderModelMetadata>,
     compaction: rw_core::CompactionConfig,
@@ -6706,8 +6742,9 @@ impl ModelDriver for RecomposableHostedModel {
         &self,
         alias: &str,
         request: ProviderRequest,
+        invocation: rw_core::provider_admission::ProviderInvocation,
     ) -> std::result::Result<BoxEventStream, AgentLoopError> {
-        self.current().stream(alias, request)
+        self.current().stream(alias, request, invocation)
     }
 
     fn stream_for_provider(
@@ -6715,8 +6752,10 @@ impl ModelDriver for RecomposableHostedModel {
         alias: &str,
         provider: Option<&str>,
         request: ProviderRequest,
+        invocation: rw_core::provider_admission::ProviderInvocation,
     ) -> std::result::Result<BoxEventStream, AgentLoopError> {
-        self.current().stream_for_provider(alias, provider, request)
+        self.current()
+            .stream_for_provider(alias, provider, request, invocation)
     }
 
     fn context_metadata(&self, alias: &str) -> rw_core::ModelContextMetadata {
@@ -6995,6 +7034,7 @@ impl ModelDriver for UnavailableHostedModel {
         &self,
         _alias: &str,
         _request: ProviderRequest,
+        __invocation: rw_core::provider_admission::ProviderInvocation,
     ) -> std::result::Result<BoxEventStream, AgentLoopError> {
         Err(AgentLoopError::InvalidConfiguration(format!(
             "the interactive engine is ready, but its provider is unavailable: {}",
@@ -7020,34 +7060,47 @@ impl ProviderModel {
         provider: Arc<dyn Provider>,
         compaction: rw_core::CompactionConfig,
         budget: rw_core::BudgetConfig,
-    ) -> Self {
+    ) -> std::result::Result<Self, AgentLoopError> {
         let model_metadata = provider.cached_model_metadata();
-        Self {
+        Ok(Self {
+            operations: rw_providers::ProviderRouter::new(
+                BTreeMap::new(),
+                Vec::<Arc<dyn Provider>>::new(),
+                rw_providers::RetryPolicy::default(),
+            )
+            .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?,
             provider,
             model_metadata,
             compaction,
             budget,
-        }
+        })
     }
 }
 
+#[async_trait]
 impl ModelDriver for ProviderModel {
     fn stream(
         &self,
         _alias: &str,
         request: ProviderRequest,
+        invocation: rw_core::provider_admission::ProviderInvocation,
     ) -> std::result::Result<BoxEventStream, AgentLoopError> {
-        let provider = Arc::clone(&self.provider);
-        Ok(Box::pin(async_stream::stream! {
-            match provider.stream(request).await {
-                Ok(mut stream) => {
-                    while let Some(item) = stream.next().await {
-                        yield item;
-                    }
-                }
-                Err(error) => yield Err(error),
-            }
-        }))
+        let candidate = rw_providers::ModelCandidate {
+            provider: self.provider.name().to_owned(),
+            model: request.model.clone(),
+        };
+        let gate = rw_core::provider_admission::concrete_attempt_gate(
+            invocation,
+            candidate.clone(),
+            self.model_metadata.clone(),
+        );
+        self.operations
+            .stream_provider(candidate, Arc::clone(&self.provider), request, gate)
+            .map_err(|error| AgentLoopError::Provider(error.to_string()))
+    }
+
+    async fn settle_effects(&self) {
+        self.operations.settle_effects().await;
     }
 
     fn context_metadata(&self, _alias: &str) -> rw_core::ModelContextMetadata {
@@ -7091,6 +7144,7 @@ impl ModelDriver for PromptRecordingModel {
         &self,
         alias: &str,
         request: ProviderRequest,
+        invocation: rw_core::provider_admission::ProviderInvocation,
     ) -> std::result::Result<BoxEventStream, AgentLoopError> {
         let cache_support = self
             .inner
@@ -7100,7 +7154,7 @@ impl ModelDriver for PromptRecordingModel {
         self.journal
             .record_request(alias, &request, cache_support)
             .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-        self.inner.stream(alias, request)
+        self.inner.stream(alias, request, invocation)
     }
 
     fn stream_for_provider(
@@ -7108,6 +7162,7 @@ impl ModelDriver for PromptRecordingModel {
         alias: &str,
         provider: Option<&str>,
         request: ProviderRequest,
+        invocation: rw_core::provider_admission::ProviderInvocation,
     ) -> std::result::Result<BoxEventStream, AgentLoopError> {
         let cache_support = self
             .inner
@@ -7117,7 +7172,8 @@ impl ModelDriver for PromptRecordingModel {
         self.journal
             .record_request(alias, &request, cache_support)
             .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-        self.inner.stream_for_provider(alias, provider, request)
+        self.inner
+            .stream_for_provider(alias, provider, request, invocation)
     }
 
     fn context_metadata(&self, alias: &str) -> rw_core::ModelContextMetadata {
@@ -7286,9 +7342,10 @@ impl ModelDriver for NestedInstructionsModel {
         &self,
         alias: &str,
         mut request: ProviderRequest,
+        invocation: rw_core::provider_admission::ProviderInvocation,
     ) -> std::result::Result<BoxEventStream, AgentLoopError> {
         self.augment(&mut request)?;
-        self.inner.stream(alias, request)
+        self.inner.stream(alias, request, invocation)
     }
 
     fn stream_for_provider(
@@ -7296,9 +7353,11 @@ impl ModelDriver for NestedInstructionsModel {
         alias: &str,
         provider: Option<&str>,
         mut request: ProviderRequest,
+        invocation: rw_core::provider_admission::ProviderInvocation,
     ) -> std::result::Result<BoxEventStream, AgentLoopError> {
         self.augment(&mut request)?;
-        self.inner.stream_for_provider(alias, provider, request)
+        self.inner
+            .stream_for_provider(alias, provider, request, invocation)
     }
 
     fn context_metadata(&self, alias: &str) -> rw_core::ModelContextMetadata {
@@ -10962,6 +11021,7 @@ impl ModelDriver for AliasAwareWebSearchModel {
         &self,
         alias: &str,
         mut request: ProviderRequest,
+        invocation: rw_core::provider_admission::ProviderInvocation,
     ) -> std::result::Result<BoxEventStream, AgentLoopError> {
         if !self.searcher.is_available_for_alias(alias) {
             request.tools.retain(|tool| tool.name != "websearch");
@@ -10970,7 +11030,7 @@ impl ModelDriver for AliasAwareWebSearchModel {
                 (hint.stable_prefix_turns > 0 || hint.tools_in_prefix).then_some(hint)
             });
         }
-        self.inner.stream(alias, request)
+        self.inner.stream(alias, request, invocation)
     }
 
     fn stream_for_provider(
@@ -10978,6 +11038,7 @@ impl ModelDriver for AliasAwareWebSearchModel {
         alias: &str,
         provider: Option<&str>,
         mut request: ProviderRequest,
+        invocation: rw_core::provider_admission::ProviderInvocation,
     ) -> std::result::Result<BoxEventStream, AgentLoopError> {
         if !self.searcher.is_available_for_alias(alias) {
             request.tools.retain(|tool| tool.name != "websearch");
@@ -10986,7 +11047,8 @@ impl ModelDriver for AliasAwareWebSearchModel {
                 (hint.stable_prefix_turns > 0 || hint.tools_in_prefix).then_some(hint)
             });
         }
-        self.inner.stream_for_provider(alias, provider, request)
+        self.inner
+            .stream_for_provider(alias, provider, request, invocation)
     }
 
     fn context_metadata(&self, alias: &str) -> rw_core::ModelContextMetadata {
@@ -13008,6 +13070,7 @@ mod tests {
             &self,
             _alias: &str,
             _request: ProviderRequest,
+            _invocation: rw_core::provider_admission::ProviderInvocation,
         ) -> std::result::Result<BoxEventStream, AgentLoopError> {
             Ok(Box::pin(futures_util::stream::iter([
                 Ok(ProviderEvent::MessageStart {
@@ -13051,6 +13114,7 @@ mod tests {
             &self,
             _alias: &str,
             _request: ProviderRequest,
+            _invocation: rw_core::provider_admission::ProviderInvocation,
         ) -> std::result::Result<BoxEventStream, AgentLoopError> {
             Ok(Box::pin(futures_util::stream::empty()))
         }
@@ -13078,6 +13142,7 @@ mod tests {
             &self,
             _alias: &str,
             _request: ProviderRequest,
+            _invocation: rw_core::provider_admission::ProviderInvocation,
         ) -> std::result::Result<BoxEventStream, AgentLoopError> {
             Ok(Box::pin(futures_util::stream::empty()))
         }
@@ -13088,6 +13153,16 @@ mod tests {
                 "sanitized preparation failure".to_owned(),
             ))
         }
+    }
+
+    fn quick_connect_stream(
+        model: &RecomposableHostedModel,
+    ) -> std::result::Result<BoxEventStream, AgentLoopError> {
+        model.stream(
+            "openai/live-model",
+            quick_connect_request(),
+            test_provider_invocation(),
+        )
     }
 
     fn quick_connect_request() -> ProviderRequest {
@@ -13202,9 +13277,7 @@ mod tests {
         assert!(model.has_provider_for_alias("openai/live-model", "openai"));
         assert!(!model.has_provider_for_alias("openai/live-model", "github_copilot"));
         assert!(
-            model
-                .stream("openai/live-model", quick_connect_request())
-                .is_err(),
+            quick_connect_stream(&model).is_err(),
             "idle construction must not silently initialize at stream time"
         );
         assert_eq!(calls.load(Ordering::Acquire), 0);
@@ -13215,7 +13288,11 @@ mod tests {
             .expect("first model use should initialize the provider runtime");
         assert_eq!(calls.load(Ordering::Acquire), 1);
         let events = model
-            .stream("openai/live-model", quick_connect_request())
+            .stream(
+                "openai/live-model",
+                quick_connect_request(),
+                test_provider_invocation(),
+            )
             .expect("the already-durable initial model should stream after preparation")
             .collect::<Vec<_>>()
             .await;
@@ -13260,7 +13337,11 @@ mod tests {
             .expect("a staged selection must not short-circuit initial activation");
         assert_eq!(calls.load(Ordering::Acquire), 1);
         let events = model
-            .stream("openai/live-model", quick_connect_request())
+            .stream(
+                "openai/live-model",
+                quick_connect_request(),
+                test_provider_invocation(),
+            )
             .expect("the first turn must use the active connected runtime")
             .collect::<Vec<_>>()
             .await;
@@ -13306,7 +13387,11 @@ mod tests {
         assert_eq!(calls.load(Ordering::Acquire), 2);
         for _ in 0..2 {
             let events = model
-                .stream("openai/live-model", quick_connect_request())
+                .stream(
+                    "openai/live-model",
+                    quick_connect_request(),
+                    test_provider_invocation(),
+                )
                 .expect("every concurrent first-turn waiter must see the connected runtime")
                 .collect::<Vec<_>>()
                 .await;
@@ -13386,6 +13471,7 @@ mod tests {
                 inner: rw_core::NoopSessionEventSink::default(),
             }),
             event_clock: Arc::new(SystemEventClock),
+            provider_admission: test_provider_admission(),
             secret_redactor: Arc::new(rw_core::NoopSecretRedactor),
             checkpoints: Arc::new(rw_core::NoopMutationCheckpointCoordinator),
             folder_trust: Arc::new(rw_core::NoopFolderTrustController),
@@ -13426,9 +13512,7 @@ mod tests {
         );
         assert!(!post_commit_ran.load(Ordering::Acquire));
         assert!(
-            model
-                .stream("openai/live-model", quick_connect_request())
-                .is_err(),
+            quick_connect_stream(&model).is_err(),
             "the unavailable initial runtime must remain active"
         );
         model
@@ -13437,9 +13521,7 @@ mod tests {
             .expect("failed persistence must leave initialization retryable");
         assert_eq!(initialize_calls.load(Ordering::Acquire), 2);
         assert!(
-            model
-                .stream("openai/live-model", quick_connect_request())
-                .is_err(),
+            quick_connect_stream(&model).is_err(),
             "a retry must also remain staged until its durable commit"
         );
         model.discard_prepared_model("openai/live-model");
@@ -13533,11 +13615,7 @@ mod tests {
             Arc::new(QuickCatalogSource(false)),
             activate,
         );
-        assert!(
-            model
-                .stream("openai/live-model", quick_connect_request())
-                .is_err()
-        );
+        assert!(quick_connect_stream(&model).is_err());
 
         loader
             .configure_provider_profile("openai", "openai")
@@ -13560,7 +13638,11 @@ mod tests {
             "credential activation must not replace the catalog source"
         );
         let events = model
-            .stream("openai/live-model", quick_connect_request())
+            .stream(
+                "openai/live-model",
+                quick_connect_request(),
+                test_provider_invocation(),
+            )
             .expect("recomposed model must dispatch")
             .collect::<Vec<_>>()
             .await;
@@ -13700,6 +13782,7 @@ mod tests {
             modes: Arc::new(rw_ext::ModeRegistry::builtins().expect("built-in modes")),
             event_sink: Arc::new(rw_core::NoopSessionEventSink::default()),
             event_clock: Arc::new(SystemEventClock),
+            provider_admission: test_provider_admission(),
             secret_redactor: Arc::new(rw_core::NoopSecretRedactor),
             checkpoints: Arc::new(rw_core::NoopMutationCheckpointCoordinator),
             folder_trust: Arc::new(rw_core::NoopFolderTrustController),
@@ -14131,7 +14214,13 @@ mod tests {
             );
         }
         let session_id = SessionId("unavailable-concrete-resume".to_owned());
+        let provider_admission = Arc::new(
+            crate::provider_admission::DurableProviderAdmission::open(storage.clone())
+                .await
+                .expect("test authority"),
+        );
         let options = |resume, requested_model| HostedSessionComposition {
+            provider_admission: Arc::clone(&provider_admission),
             wasm_workers: rw_ext::WasmWorkerPool::new(),
             index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
             journal_reads: JournalReads::new(&storage).expect("journal reads"),
@@ -14729,11 +14818,14 @@ mod tests {
             scripts,
             0,
         ));
-        let model: Arc<dyn ModelDriver> = Arc::new(ProviderModel::new(
-            provider,
-            rw_core::CompactionConfig::default(),
-            rw_core::BudgetConfig::default(),
-        ));
+        let model: Arc<dyn ModelDriver> = Arc::new(
+            ProviderModel::new(
+                provider,
+                rw_core::CompactionConfig::default(),
+                rw_core::BudgetConfig::default(),
+            )
+            .expect("fixture concrete model"),
+        );
         let actor = SessionActor::spawn(SessionActorConfig {
             session_id: parent_session,
             workspace_root: repository.clone(),
@@ -14750,6 +14842,7 @@ mod tests {
             modes: Arc::new(rw_ext::ModeRegistry::builtins().expect("built-in modes")),
             event_sink: Arc::new(rw_core::NoopSessionEventSink::default()),
             event_clock: Arc::new(SystemEventClock),
+            provider_admission: test_provider_admission(),
             secret_redactor: Arc::new(rw_core::NoopSecretRedactor),
             checkpoints: Arc::new(rw_core::NoopMutationCheckpointCoordinator),
             folder_trust: Arc::new(rw_core::NoopFolderTrustController),
@@ -15612,6 +15705,7 @@ mod tests {
             &self,
             _alias: &str,
             request: ProviderRequest,
+            _invocation: rw_core::provider_admission::ProviderInvocation,
         ) -> std::result::Result<BoxEventStream, AgentLoopError> {
             *self
                 .request
@@ -15663,7 +15757,9 @@ mod tests {
             thinking: ThinkingLevel::Off,
             cache_hint: None,
         };
-        let _stream = wrapper.stream("fixture", request).expect("provider stream");
+        let _stream = wrapper
+            .stream("fixture", request, test_provider_invocation())
+            .expect("provider stream");
         let captured = captured
             .lock()
             .expect("captured request")
@@ -17246,7 +17342,11 @@ mod tests {
             cache_hint: None,
         };
 
-        drop(model.stream("local", request()).expect("local request"));
+        drop(
+            model
+                .stream("local", request(), test_provider_invocation())
+                .expect("local request"),
+        );
         assert!(
             captured
                 .lock()
@@ -17254,7 +17354,11 @@ mod tests {
                 .as_ref()
                 .is_some_and(|request| request.tools.is_empty())
         );
-        drop(model.stream("cloud", request()).expect("cloud request"));
+        drop(
+            model
+                .stream("cloud", request(), test_provider_invocation())
+                .expect("cloud request"),
+        );
         assert!(
             captured
                 .lock()
@@ -17308,7 +17412,7 @@ mod tests {
         };
         drop(
             configured_model
-                .stream("local", request)
+                .stream("local", request, test_provider_invocation())
                 .expect("configured fallback request"),
         );
         assert!(
@@ -17357,7 +17461,11 @@ mod tests {
                 tools_in_prefix: true,
             }),
         };
-        drop(model.stream("local", request).expect("filtered request"));
+        drop(
+            model
+                .stream("local", request, test_provider_invocation())
+                .expect("filtered request"),
+        );
 
         let (profile, _) = journal
             .shape_for_turn(1)
@@ -18288,11 +18396,14 @@ mod tests {
             ScriptProvider::new("anthropic-history".to_owned(), Vec::new(), 0)
                 .with_cache_support(profile.cache_support),
         );
-        let model: Arc<dyn ModelDriver> = Arc::new(ProviderModel::new(
-            provider,
-            rw_core::CompactionConfig::default(),
-            rw_core::BudgetConfig::default(),
-        ));
+        let model: Arc<dyn ModelDriver> = Arc::new(
+            ProviderModel::new(
+                provider,
+                rw_core::CompactionConfig::default(),
+                rw_core::BudgetConfig::default(),
+            )
+            .expect("fixture concrete model"),
+        );
         let workspace = root.path().join("workspace");
         std::fs::create_dir_all(&workspace).expect("workspace");
         let actor = SessionActor::spawn(SessionActorConfig {
@@ -18311,6 +18422,7 @@ mod tests {
             modes: Arc::new(rw_ext::ModeRegistry::builtins().expect("built-in modes")),
             event_sink: Arc::new(rw_core::NoopSessionEventSink::default()),
             event_clock: Arc::new(SystemEventClock),
+            provider_admission: test_provider_admission(),
             secret_redactor: Arc::new(rw_core::NoopSecretRedactor),
             checkpoints: Arc::new(rw_core::NoopMutationCheckpointCoordinator),
             folder_trust: Arc::new(rw_core::NoopFolderTrustController),
@@ -18503,7 +18615,8 @@ mod tests {
             subscription,
             rw_core::CompactionConfig::default(),
             rw_core::BudgetConfig::default(),
-        );
+        )
+        .expect("fixture concrete model");
         assert!(matches!(
             subscription_model.cost("fast", usage),
             Cost::SubscriptionQuota { used: Some(used), unit: Some(unit) }
@@ -18530,7 +18643,8 @@ mod tests {
             credits,
             rw_core::CompactionConfig::default(),
             rw_core::BudgetConfig::default(),
-        );
+        )
+        .expect("fixture concrete model");
         assert!(matches!(
             credit_model.cost("fast", usage),
             Cost::AiCredits {
@@ -19480,6 +19594,7 @@ mod tests {
                 Arc::new(rw_core::NoopSecretRedactor),
                 configured_permissions.as_ref(),
                 4,
+                test_provider_admission(),
             )
             .expect("rebuild parent runtime after restart");
         let resumed_parent_permissions = Arc::clone(&resumed_parent.permissions);
@@ -19503,6 +19618,7 @@ mod tests {
                 Arc::new(rw_core::NoopSecretRedactor),
                 resumed_parent_permissions.as_ref(),
                 4,
+                test_provider_admission(),
             )
             .expect("lease-root child runtime");
         assert_eq!(child.workspace_root, added);
@@ -19566,6 +19682,7 @@ mod tests {
                 Arc::new(rw_core::NoopSecretRedactor),
                 resumed_parent_permissions.as_ref(),
                 4,
+                test_provider_admission(),
             )
             .expect("trusted child runtime");
         assert!(
@@ -19955,11 +20072,14 @@ mod tests {
         }
         let scripted: Arc<dyn Provider> =
             Arc::new(ScriptProvider::new("direct-rewind".to_owned(), scripts, 0));
-        let model: Arc<dyn ModelDriver> = Arc::new(ProviderModel::new(
-            scripted,
-            rw_core::CompactionConfig::default(),
-            rw_core::BudgetConfig::default(),
-        ));
+        let model: Arc<dyn ModelDriver> = Arc::new(
+            ProviderModel::new(
+                scripted,
+                rw_core::CompactionConfig::default(),
+                rw_core::BudgetConfig::default(),
+            )
+            .expect("fixture concrete model"),
+        );
         let mut registry = ToolRegistry::new();
         registry
             .register(Arc::new(WriteTool::new(ToolLimits::default())))
@@ -19997,6 +20117,7 @@ mod tests {
             modes: Arc::new(rw_ext::ModeRegistry::builtins().expect("built-in modes")),
             event_sink: sink,
             event_clock: Arc::new(SystemEventClock),
+            provider_admission: test_provider_admission(),
             secret_redactor: Arc::new(rw_core::NoopSecretRedactor),
             checkpoints,
             folder_trust: Arc::new(rw_core::NoopFolderTrustController),
@@ -20162,6 +20283,7 @@ mod tests {
                 ),
                 event_sink: Arc::new(sink),
                 event_clock: Arc::new(SystemEventClock),
+                provider_admission: test_provider_admission(),
                 secret_redactor: Arc::new(rw_core::NoopSecretRedactor),
                 checkpoints: Arc::new(rw_core::NoopMutationCheckpointCoordinator),
                 folder_trust: Arc::new(rw_core::NoopFolderTrustController),
@@ -20390,11 +20512,14 @@ mod tests {
             scripts,
             0,
         ));
-        let model: Arc<dyn ModelDriver> = Arc::new(ProviderModel::new(
-            provider,
-            rw_core::CompactionConfig::default(),
-            rw_core::BudgetConfig::default(),
-        ));
+        let model: Arc<dyn ModelDriver> = Arc::new(
+            ProviderModel::new(
+                provider,
+                rw_core::CompactionConfig::default(),
+                rw_core::BudgetConfig::default(),
+            )
+            .expect("fixture concrete model"),
+        );
         let create_storage = storage.clone();
         let create_model = Arc::clone(&model);
         let create_tools = Arc::clone(&child_tools);

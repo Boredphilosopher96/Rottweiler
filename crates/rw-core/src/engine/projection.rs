@@ -386,6 +386,7 @@ impl SessionProjector {
                 break 'event;
             };
             match &kind {
+                PendingEvent::ProviderCallAccounted { .. } => {}
                 PendingEvent::TurnStarted { turn } => {
                     active_tool_starts.clear();
                     active_turn = Some(*turn);

@@ -34,6 +34,7 @@ async fn production_factory_fork_composes_and_resumes_child() {
         dangerously_trust: false,
         wait_for_execution_lease: false,
     })
+    .await
     .expect("factory");
     let parent_id = SessionId("production-fork-parent".to_owned());
     let driver = ClientId("production-driver".to_owned());
@@ -239,8 +240,11 @@ async fn production_factory_fork_composes_and_resumes_child() {
     drop(parent);
     drop(factory);
     tokio::task::yield_now().await;
-    let restarted =
-        Arc::new(RuntimeSessionFactory::new(restart_options.clone()).expect("restart recovery"));
+    let restarted = Arc::new(
+        RuntimeSessionFactory::new(restart_options.clone())
+            .await
+            .expect("restart recovery"),
+    );
     let promoted = restarted
         .load_fork_journal(&durable_key)
         .expect("load promoted journal")
@@ -394,8 +398,11 @@ async fn production_factory_fork_composes_and_resumes_child() {
         )
         .expect("install completed-child root-journal no-read canary");
     }
-    let reloaded =
-        Arc::new(RuntimeSessionFactory::new(restart_options).expect("completed restart"));
+    let reloaded = Arc::new(
+        RuntimeSessionFactory::new(restart_options)
+            .await
+            .expect("completed restart"),
+    );
     assert_eq!(
         reloaded
             .load_fork_operation(&durable_key)
@@ -477,7 +484,7 @@ async fn production_factory_fork_composes_and_resumes_child() {
 async fn prepared_fork_recovery_cleans_partial_trees_and_keeps_child_identity() {
     let root = tempdir().expect("root");
     let workspace = private_test_directory(&root.path().join("workspace"));
-    let factory = factory(root.path(), &workspace);
+    let factory = factory(root.path(), &workspace).await;
     let parent = factory
         .create(CreateSessionRequest {
             session_id: SessionId("journal-parent".to_owned()),
@@ -526,7 +533,9 @@ async fn prepared_fork_recovery_cleans_partial_trees_and_keeps_child_identity() 
         .join(&child.0);
     fs::create_dir_all(&checkpoint_tree).expect("partial checkpoint tree");
     fs::write(checkpoint_tree.join("partial"), b"partial").expect("partial checkpoint");
-    let restarted = RuntimeSessionFactory::new((*factory.options).clone()).expect("recover");
+    let restarted = RuntimeSessionFactory::new((*factory.options).clone())
+        .await
+        .expect("recover");
     assert!(!session_tree.exists());
     assert!(!checkpoint_tree.exists());
     assert_eq!(
@@ -547,7 +556,7 @@ async fn session_capacity_rejection_abandons_prepared_fork_journal() {
 
     let root = tempdir().expect("root");
     let workspace = private_test_directory(&root.path().join("workspace"));
-    let factory = Arc::new(factory(root.path(), &workspace));
+    let factory = Arc::new(factory(root.path(), &workspace).await);
     let host = EngineHost::new(
         EngineHostConfig {
             max_sessions: 1,
@@ -621,9 +630,9 @@ async fn session_capacity_rejection_abandons_prepared_fork_journal() {
     );
 }
 
-#[test]
+#[tokio::test]
 #[cfg(unix)]
-fn fork_journal_cross_process_lock_helper() {
+async fn fork_journal_cross_process_lock_helper() {
     let Ok(root) = std::env::var("RW_TEST_FORK_LOCK_ROOT") else {
         return;
     };
@@ -632,7 +641,7 @@ fn fork_journal_cross_process_lock_helper() {
     let ready = PathBuf::from(std::env::var("RW_TEST_FORK_LOCK_READY").expect("helper ready"));
     let release =
         PathBuf::from(std::env::var("RW_TEST_FORK_LOCK_RELEASE").expect("helper release"));
-    let factory = factory(Path::new(&root), &workspace);
+    let factory = factory(Path::new(&root), &workspace).await;
     let _lock = factory
         .acquire_fork_journal_lock()
         .expect("helper acquires lock");
@@ -644,12 +653,12 @@ fn fork_journal_cross_process_lock_helper() {
     assert!(release.exists(), "parent releases helper lock");
 }
 
-#[test]
+#[tokio::test]
 #[cfg(unix)]
-fn fork_recovery_waits_for_cross_process_journal_lock() {
+async fn fork_recovery_waits_for_cross_process_journal_lock() {
     let root = tempdir().expect("root");
     let workspace = private_test_directory(&root.path().join("workspace"));
-    let factory = factory(root.path(), &workspace);
+    let factory = factory(root.path(), &workspace).await;
     let options = (*factory.options).clone();
     let ready = root.path().join("lock-ready");
     let release = root.path().join("lock-release");
@@ -671,8 +680,10 @@ fn fork_recovery_waits_for_cross_process_journal_lock() {
 
     let (send, receive) = std::sync::mpsc::channel();
     let recovery = std::thread::spawn(move || {
-        let result = RuntimeSessionFactory::new(options);
+        let runtime = tokio::runtime::Runtime::new().expect("recovery runtime");
+        let result = runtime.block_on(RuntimeSessionFactory::new(options));
         send.send(result.is_ok()).expect("recovery result");
+        drop(result);
     });
     assert!(
         receive.recv_timeout(Duration::from_millis(100)).is_err(),
@@ -688,14 +699,14 @@ fn fork_recovery_waits_for_cross_process_journal_lock() {
     recovery.join().expect("recovery thread");
 }
 
-#[test]
+#[tokio::test]
 #[cfg(unix)]
-fn fork_journal_rejects_unexpected_symlink_hardlink_and_oversized_entries() {
+async fn fork_journal_rejects_unexpected_symlink_hardlink_and_oversized_entries() {
     use std::os::unix::fs::{PermissionsExt as _, symlink};
 
     let root = tempdir().expect("root");
     let workspace = private_test_directory(&root.path().join("workspace"));
-    let factory = factory(root.path(), &workspace);
+    let factory = factory(root.path(), &workspace).await;
     let options = (*factory.options).clone();
     let directory = factory.fork_journal_directory();
 
@@ -703,26 +714,28 @@ fn fork_journal_rejects_unexpected_symlink_hardlink_and_oversized_entries() {
     fs::write(&unpublished, br#"{"version":1"#).expect("unpublished journal temporary");
     fs::set_permissions(&unpublished, fs::Permissions::from_mode(0o600))
         .expect("private unpublished journal");
-    RuntimeSessionFactory::new(options.clone()).expect("orphan temporary is recoverable");
+    RuntimeSessionFactory::new(options.clone())
+        .await
+        .expect("orphan temporary is recoverable");
     assert!(!unpublished.exists());
 
     fs::write(directory.join("unexpected"), b"x").expect("unexpected entry");
-    assert!(RuntimeSessionFactory::new(options.clone()).is_err());
+    assert!(RuntimeSessionFactory::new(options.clone()).await.is_err());
     fs::remove_file(directory.join("unexpected")).expect("remove unexpected");
 
     let outside = root.path().join("outside");
     fs::write(&outside, b"{}").expect("outside");
     symlink(&outside, directory.join(format!("{}.json", "a".repeat(64)))).expect("symlink");
-    assert!(RuntimeSessionFactory::new(options.clone()).is_err());
+    assert!(RuntimeSessionFactory::new(options.clone()).await.is_err());
     fs::remove_file(directory.join(format!("{}.json", "a".repeat(64)))).expect("remove symlink");
 
     fs::set_permissions(&outside, fs::Permissions::from_mode(0o600)).expect("private source");
     fs::hard_link(&outside, directory.join(format!("{}.json", "b".repeat(64)))).expect("hardlink");
-    assert!(RuntimeSessionFactory::new(options.clone()).is_err());
+    assert!(RuntimeSessionFactory::new(options.clone()).await.is_err());
     fs::remove_file(directory.join(format!("{}.json", "b".repeat(64)))).expect("remove hardlink");
 
     let oversized = directory.join(format!("{}.json", "c".repeat(64)));
     fs::write(&oversized, vec![b'x'; MAX_FORK_JOURNAL_BYTES + 1]).expect("oversized");
     fs::set_permissions(&oversized, fs::Permissions::from_mode(0o600)).expect("private file");
-    assert!(RuntimeSessionFactory::new(options).is_err());
+    assert!(RuntimeSessionFactory::new(options).await.is_err());
 }

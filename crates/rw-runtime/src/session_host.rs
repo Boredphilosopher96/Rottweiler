@@ -247,6 +247,7 @@ pub struct RuntimeSessionFactory {
     index_pool: Arc<rw_tools::WorkspaceIndexPool>,
     journal_reads: Arc<crate::journal_reads::JournalReads>,
     transcripts: Arc<crate::transcript_service::TranscriptReader>,
+    provider_admission: Arc<crate::provider_admission::DurableProviderAdmission>,
     options: Arc<RuntimeHostOptions>,
     allowed_workspaces: Arc<Vec<PathBuf>>,
     model_catalog: Arc<CachedModelCatalog>,
@@ -392,7 +393,7 @@ impl RuntimeSessionFactory {
     ///
     /// # Errors
     /// Returns an error when options are invalid or durable runtime state is unsafe.
-    pub fn new(mut options: RuntimeHostOptions) -> Result<Self, HostError> {
+    pub async fn new(mut options: RuntimeHostOptions) -> Result<Self, HostError> {
         if options.max_turns == 0 || options.allowed_workspaces.is_empty() {
             return Err(HostError::Protocol(
                 "host requires a turn limit and at least one authorized workspace".to_owned(),
@@ -427,7 +428,12 @@ impl RuntimeSessionFactory {
         });
         let journal_reads = crate::journal_reads::JournalReads::new(&options.storage_root)
             .map_err(|error| HostError::Persistence(error.to_string()))?;
+        let provider_admission =
+            crate::provider_admission::DurableProviderAdmission::open(options.storage_root.clone())
+                .await
+                .map_err(|error| HostError::Persistence(error.to_string()))?;
         let factory = Self {
+            provider_admission: Arc::new(provider_admission),
             transcripts: crate::transcript_service::TranscriptReader::new(Arc::clone(
                 &journal_reads,
             )),
@@ -703,6 +709,7 @@ impl RuntimeSessionFactory {
             wasm_workers: Arc::clone(&self.wasm_workers),
             index_pool: Arc::clone(&self.index_pool),
             journal_reads: Arc::clone(&self.journal_reads),
+            provider_admission: Arc::clone(&self.provider_admission),
             workspace: workspace.clone(),
             additional_workspaces: Vec::new(),
             allowed_workspace_roots: self

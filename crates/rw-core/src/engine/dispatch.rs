@@ -234,7 +234,7 @@ async fn apply_context_surgery(
             effective_after_agent_turn,
         }
     };
-    emit(state, events, sink, pending).await?;
+    emit(state, events, sink, pending).await.map(|_| ())?;
     state.context_surgery.push(ContextSurgeryAction {
         item_id,
         pinned,
@@ -482,7 +482,9 @@ pub(super) async fn commit_prepared_model_switch(
         provider: prepared.provider.clone(),
         thinking: prepared.thinking,
     });
-    let result = emit_batch(state, events, &config.event_sink, durable).await;
+    let result = emit_batch(state, events, &config.event_sink, durable)
+        .await
+        .map(|_| ());
     if result.is_ok() {
         if clear_context {
             state.conversation.retain(|turn| turn.role == Role::System);
@@ -691,6 +693,7 @@ async fn handle_plugin_message(
             },
         )
         .await
+        .map(|_| ())
         {
             state.queued.pop_back();
             state.queued_positions.pop_back();
@@ -721,6 +724,7 @@ async fn handle_plugin_message(
         },
     )
     .await
+    .map(|_| ())
     {
         if let Some(running) = &state.running {
             running.cancellation.cancel();
@@ -1359,6 +1363,7 @@ pub(super) async fn handle_actor_command(
                                 },
                             )
                             .await
+                            .map(|_| ())
                             {
                                 if let Some(pending) =
                                     state.pending_approvals.remove(&tool_call_id.0)
@@ -1426,7 +1431,8 @@ pub(super) async fn handle_actor_command(
                         position: queued_position,
                     },
                 )
-                .await;
+                .await
+                .map(|_| ());
                 state.transient_cause = None;
                 match persisted {
                     Ok(()) => {
@@ -1476,7 +1482,8 @@ pub(super) async fn handle_actor_command(
                     &config.event_sink,
                     PendingEvent::QueuedMessagesCleared,
                 )
-                .await;
+                .await
+                .map(|_| ());
                 state.transient_cause = None;
                 match persisted {
                     Ok(()) => {
@@ -1623,7 +1630,9 @@ pub(super) async fn handle_actor_command(
                             driver_client_id: meta.client_id.clone(),
                         }
                     };
-                    emit(state, events, &config.event_sink, driver_event).await
+                    emit(state, events, &config.event_sink, driver_event)
+                        .await
+                        .map(|_| ())
                 }
                 ClientCommand::TakeDriver { .. }
                     if state.driver_client_id.as_ref() != Some(&meta.client_id) =>
@@ -1637,6 +1646,7 @@ pub(super) async fn handle_actor_command(
                         },
                     )
                     .await
+                    .map(|_| ())
                 }
                 _ => Ok(()),
             };
@@ -1708,6 +1718,7 @@ pub(super) async fn handle_actor_command(
                     },
                 )
                 .await
+                .map(|_| ())
                 {
                     if let PrecommittedAnswer::Turn(pending, _) = pending {
                         drop(pending.respond);
@@ -1890,7 +1901,8 @@ pub(super) async fn handle_actor_command(
                             cost: None,
                         },
                     )
-                    .await;
+                    .await
+                    .map(|_| ());
                     state.transient_cause = None;
                     if result.is_ok() {
                         state.session_title = Some(title);
@@ -1975,7 +1987,9 @@ pub(super) async fn handle_actor_command(
                             definition_fingerprint: definition.semantic_fingerprint(),
                         });
                     }
-                    let result = emit_batch(state, events, &config.event_sink, durable).await;
+                    let result = emit_batch(state, events, &config.event_sink, durable)
+                        .await
+                        .map(|_| ());
                     if result.is_ok() {
                         state.pending_plan = None;
                         if let Some(turn) = context_turn {
@@ -2031,7 +2045,8 @@ pub(super) async fn handle_actor_command(
                                 questions: vec![question],
                             },
                         )
-                        .await;
+                        .await
+                        .map(|_| ());
                         if result.is_ok() {
                             state.pending_model_switches.insert(
                                 question_id.0,
@@ -2073,7 +2088,8 @@ pub(super) async fn handle_actor_command(
                             captured_output: None,
                         },
                     )
-                    .await;
+                    .await
+                    .map(|_| ());
                     if result.is_ok() {
                         state.active_shell = Some(shell);
                     }
@@ -2105,7 +2121,8 @@ pub(super) async fn handle_actor_command(
                             captured_output,
                         },
                     )
-                    .await;
+                    .await
+                    .map(|_| ());
                     if result.is_ok() {
                         state.conversation.push(context);
                         state.active_shell = None;
@@ -2165,7 +2182,8 @@ pub(super) async fn handle_actor_command(
                                     ),
                                 },
                             )
-                            .await;
+                            .await
+                            .map(|_| ());
                         }
                         Err(_) => {
                             if let Some(complete) = completion.take() {
@@ -2282,6 +2300,7 @@ pub(super) async fn handle_actor_command(
                                 },
                             )
                             .await
+                            .map(|_| ())
                             .map(|()| unrestorable_paths)
                         }
                         Err(error) => Err(error),
@@ -2506,6 +2525,7 @@ pub(super) async fn handle_actor_command(
                     PendingEvent::PluginStatusChanged { plugin_id, status },
                 )
                 .await
+                .map(|_| ())
             }
             .await;
             let _ = respond.send(result);
@@ -2556,6 +2576,7 @@ pub(super) async fn handle_actor_command(
                     },
                 )
                 .await
+                .map(|_| ())
             }
             .await;
             let _ = respond.send(result);
@@ -2954,6 +2975,7 @@ pub(super) async fn handle_actor_command(
                                     },
                                 )
                                 .await
+                                .map(|_| ())
                                 {
                                     let _ = config
                                         .workspace_roots
@@ -3093,7 +3115,8 @@ pub(super) async fn handle_actor_command(
                                 unrestorable_paths,
                             },
                         )
-                        .await;
+                        .await
+                        .map(|_| ());
                         match (persisted, submitted_prompt) {
                             (Err(error), _) => Err(error),
                             (Ok(()), None) => Ok(MessageDisposition::Command),
@@ -3122,7 +3145,8 @@ pub(super) async fn handle_actor_command(
                                 message: error.to_string(),
                             },
                         )
-                        .await;
+                        .await
+                        .map(|_| ());
                         Err(persisted
                             .err()
                             .unwrap_or_else(|| AgentLoopError::Extension(error.to_string())))
@@ -3159,7 +3183,8 @@ pub(super) async fn handle_actor_command(
                         attachments: Vec::new(),
                     },
                 )
-                .await;
+                .await
+                .map(|_| ());
                 if let Err(error) = persisted {
                     state.queued.pop_back();
                     state.queued_positions.pop_back();
@@ -3237,7 +3262,8 @@ pub(super) async fn handle_actor_command(
                         captured_output,
                     },
                 )
-                .await;
+                .await
+                .map(|_| ());
                 if persisted.is_ok() {
                     state.conversation.push(context);
                     state.active_shell = None;
@@ -3262,7 +3288,8 @@ pub(super) async fn handle_actor_command(
                     task,
                 },
             )
-            .await;
+            .await
+            .map(|_| ());
             let _ = respond.send(result);
         }
         ActorCommand::RecordSubagentFinished { result, respond } => {
@@ -3276,7 +3303,8 @@ pub(super) async fn handle_actor_command(
                     result,
                 },
             )
-            .await;
+            .await
+            .map(|_| ());
             let _ = respond.send(result);
         }
         ActorCommand::PublishSubagentProgressBatch { progress, respond } => {
@@ -3387,6 +3415,7 @@ async fn rewind_state(
         },
     )
     .await
+    .map(|_| ())
     {
         state.poisoned = true;
         return Err(error);

@@ -341,7 +341,8 @@ pub(super) fn reduce(
                 rows.put(key(ACCOUNTING, 0, sequence.0), &sequence)?;
             }
         }
-        PendingEvent::CompactionAttemptFinished { .. } => {
+        PendingEvent::ProviderCallAccounted { .. }
+        | PendingEvent::CompactionAttemptFinished { .. } => {
             rows.put(key(ACCOUNTING, 0, sequence.0), &sequence)?;
         }
         PendingEvent::Error { .. } | PendingEvent::CompactionFailed { .. } => {

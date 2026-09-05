@@ -57,6 +57,7 @@ impl ModelDriver for IdleModel {
         &self,
         _alias: &str,
         _request: ProviderRequest,
+        _invocation: crate::provider_admission::ProviderInvocation,
     ) -> Result<BoxEventStream, AgentLoopError> {
         Ok(Box::pin(stream::empty()))
     }
@@ -71,6 +72,7 @@ impl ModelDriver for SummaryModel {
         &self,
         _alias: &str,
         _request: ProviderRequest,
+        _invocation: crate::provider_admission::ProviderInvocation,
     ) -> Result<BoxEventStream, AgentLoopError> {
         Ok(Box::pin(stream::iter([
             Ok(rw_providers::ProviderEvent::TextDelta {
@@ -93,6 +95,7 @@ impl ModelDriver for ActivatableModel {
         &self,
         _alias: &str,
         _request: ProviderRequest,
+        _invocation: crate::provider_admission::ProviderInvocation,
     ) -> Result<BoxEventStream, AgentLoopError> {
         Ok(Box::pin(stream::empty()))
     }
@@ -199,6 +202,7 @@ impl StubFactory {
                 .clone()
                 .unwrap_or_else(|| Arc::new(NoopSessionEventSink::default())),
             event_clock: Arc::new(SystemEventClock),
+            provider_admission: crate::provider_admission::testing::admission(),
             secret_redactor: Arc::new(NoopSecretRedactor),
             checkpoints: Arc::new(NoopMutationCheckpointCoordinator),
             folder_trust: Arc::new(NoopFolderTrustController),
