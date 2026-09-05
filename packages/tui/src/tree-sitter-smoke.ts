@@ -95,7 +95,6 @@ export async function runCompiledTreeSitterSmoke(reportPath: string): Promise<vo
     setup.renderer.destroy()
     syntax.destroy()
     await destroyTreeSitterClient()
-    await runtime.cleanup()
     delete process.env.OTUI_ASSET_ROOT
     delete process.env.OTUI_TREE_SITTER_WORKER_PATH
   }

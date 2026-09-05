@@ -131,8 +131,6 @@ export interface MaterializedTreeSitterRuntime {
   readonly root: string
   readonly workerPath: string
   readonly assetsPath: string
-  cleanup(): Promise<void>
-  cleanupSync(): void
 }
 
 export function embeddedParserConfigurations(assets: string) {
@@ -230,61 +228,79 @@ export async function materializeTreeSitterRuntime(): Promise<MaterializedTreeSi
   await mkdir(temporary, { mode: 0o700 })
   let total = 0
   try {
-    for (const [relative, embeddedPath] of embeddedAssets) {
-      let bytes = new Uint8Array(await Bun.file(embeddedPath).arrayBuffer())
-      if (bytes[0] === 0x52 && bytes[1] === 0x57 && bytes[2] === 0x54 && bytes[3] === 0x5a) {
-        if (bytes.byteLength <= COMPRESSED_ASSET_HEADER_BYTES) {
-          throw new Error(`embedded Tree-sitter asset has a truncated header: ${relative}`)
+    let nextAsset = 0
+    let failed = false
+    const writeAssets = async (): Promise<void> => {
+      while (!failed && nextAsset < embeddedAssets.length) {
+        const [relative, embeddedPath] = embeddedAssets[nextAsset++]!
+        let bytes = new Uint8Array(await Bun.file(embeddedPath).arrayBuffer())
+        if (bytes[0] === 0x52 && bytes[1] === 0x57 && bytes[2] === 0x54 && bytes[3] === 0x5a) {
+          if (bytes.byteLength <= COMPRESSED_ASSET_HEADER_BYTES) {
+            throw new Error(`embedded Tree-sitter asset has a truncated header: ${relative}`)
+          }
+          const expectedBytes = new DataView(
+            bytes.buffer,
+            bytes.byteOffset + 4,
+            4,
+          ).getUint32(0, true)
+          if (expectedBytes === 0 || expectedBytes > MAX_ASSET_BYTES) {
+            throw new Error(`embedded Tree-sitter asset declares an invalid size: ${relative}`)
+          }
+          const compressed = bytes.subarray(COMPRESSED_ASSET_HEADER_BYTES)
+          if (
+            compressed[0] !== 0x28 ||
+            compressed[1] !== 0xb5 ||
+            compressed[2] !== 0x2f ||
+            compressed[3] !== 0xfd
+          ) {
+            throw new Error(`embedded Tree-sitter asset is not a Zstandard frame: ${relative}`)
+          }
+          bytes = new Uint8Array(Bun.zstdDecompressSync(compressed))
+          if (bytes.byteLength !== expectedBytes) {
+            throw new Error(`embedded Tree-sitter asset size does not match its header: ${relative}`)
+          }
         }
-        const expectedBytes = new DataView(
-          bytes.buffer,
-          bytes.byteOffset + 4,
-          4,
-        ).getUint32(0, true)
-        if (expectedBytes === 0 || expectedBytes > MAX_ASSET_BYTES) {
-          throw new Error(`embedded Tree-sitter asset declares an invalid size: ${relative}`)
+        if (relative === "parser.worker.js") {
+          const source = new TextDecoder().decode(bytes)
+          const external = 'from "web-tree-sitter"'
+          const externalOccurrences = source.split(external).length - 1
+          const bundledDependency =
+            source.includes("node_modules/.bun/web-tree-sitter@0.25.10/") &&
+            source.includes('resolveAssetPath("web-tree-sitter/tree-sitter.wasm"')
+          if (externalOccurrences !== 1 && !bundledDependency) {
+            throw new Error("embedded Tree-sitter worker has an unexpected dependency shape")
+          }
+          if (externalOccurrences === 1) {
+            bytes = new TextEncoder().encode(
+              source.replace(external, 'from "./node_modules/web-tree-sitter/tree-sitter.js"'),
+            )
+          }
         }
-        const compressed = bytes.subarray(COMPRESSED_ASSET_HEADER_BYTES)
-        if (
-          compressed[0] !== 0x28 ||
-          compressed[1] !== 0xb5 ||
-          compressed[2] !== 0x2f ||
-          compressed[3] !== 0xfd
-        ) {
-          throw new Error(`embedded Tree-sitter asset is not a Zstandard frame: ${relative}`)
+        if (bytes.byteLength === 0 || bytes.byteLength > MAX_ASSET_BYTES) {
+          throw new Error(`embedded Tree-sitter asset has invalid size: ${relative}`)
         }
-        bytes = new Uint8Array(Bun.zstdDecompressSync(compressed))
-        if (bytes.byteLength !== expectedBytes) {
-          throw new Error(`embedded Tree-sitter asset size does not match its header: ${relative}`)
+        total += bytes.byteLength
+        if (total > MAX_RUNTIME_BYTES) {
+          throw new Error("embedded Tree-sitter runtime exceeds its size limit")
         }
+        const target = join(temporary, ...relative.split("/"))
+        const directory = dirname(target)
+        await mkdir(directory, { recursive: true, mode: 0o700 })
+        await writeFile(target, bytes, { flag: "wx", mode: 0o600 })
       }
-      if (relative === "parser.worker.js") {
-        const source = new TextDecoder().decode(bytes)
-        const external = 'from "web-tree-sitter"'
-        const externalOccurrences = source.split(external).length - 1
-        const bundledDependency =
-          source.includes("node_modules/.bun/web-tree-sitter@0.25.10/") &&
-          source.includes('resolveAssetPath("web-tree-sitter/tree-sitter.wasm"')
-        if (externalOccurrences !== 1 && !bundledDependency) {
-          throw new Error("embedded Tree-sitter worker has an unexpected dependency shape")
-        }
-        if (externalOccurrences === 1) {
-          bytes = new TextEncoder().encode(
-            source.replace(external, 'from "./node_modules/web-tree-sitter/tree-sitter.js"'),
-          )
-        }
+    }
+    // A failed writer stops new admission. Already admitted writes retain
+    // ownership until they settle, before either publication or cleanup.
+    const writers = await Promise.allSettled(Array.from({ length: 4 }, async () => {
+      try {
+        await writeAssets()
+      } catch (error) {
+        failed = true
+        throw error
       }
-      if (bytes.byteLength === 0 || bytes.byteLength > MAX_ASSET_BYTES) {
-        throw new Error(`embedded Tree-sitter asset has invalid size: ${relative}`)
-      }
-      total += bytes.byteLength
-      if (total > MAX_RUNTIME_BYTES) {
-        throw new Error("embedded Tree-sitter runtime exceeds its size limit")
-      }
-      const target = join(temporary, ...relative.split("/"))
-      const directory = dirname(target)
-      await mkdir(directory, { recursive: true, mode: 0o700 })
-      await writeFile(target, bytes, { flag: "wx", mode: 0o600 })
+    }))
+    for (const writer of writers) {
+      if (writer.status === "rejected") throw writer.reason
     }
     const packageManifest = new TextEncoder().encode(JSON.stringify({
       name: "web-tree-sitter",
@@ -326,8 +342,6 @@ function materializedRuntime(root: string): MaterializedTreeSitterRuntime {
     root,
     workerPath: join(root, "parser.worker.js"),
     assetsPath: join(root, "assets"),
-    async cleanup() {},
-    cleanupSync() {},
   }
 }
 

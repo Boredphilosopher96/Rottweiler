@@ -64,7 +64,6 @@ async function main(): Promise<void> {
     shutdownHost(): Promise<boolean>
     stop(): Promise<void>
   } | null = null
-  let treeSitterRuntime: import("./tree-sitter-runtime").MaterializedTreeSitterRuntime | null = null
   let treeSitterParsers: ReturnType<
     typeof import("./tree-sitter-runtime").embeddedParserConfigurations
   > = []
@@ -87,8 +86,6 @@ async function main(): Promise<void> {
       void runtimeForShutdown?.stop()
       void (async () => {
         await openTui.destroyTreeSitterClient()
-        await treeSitterRuntime?.cleanup()
-        treeSitterRuntime = null
         delete process.env.OTUI_ASSET_ROOT
         delete process.env.OTUI_TREE_SITTER_WORKER_PATH
       })()
@@ -192,10 +189,10 @@ async function main(): Promise<void> {
   finishStartupStage("startup_configuration")
   // OpenTUI workers require real filesystem paths. Bun embeds the selected
   // parser assets inside the executable; materialize a private, bounded runtime
-  // after first paint and remove it when the renderer shuts down.
+  // after first paint and reuse the private content-addressed cache.
   try {
     const { embeddedParserConfigurations, materializeTreeSitterRuntime } = await import("./tree-sitter-runtime")
-    treeSitterRuntime = await materializeTreeSitterRuntime()
+    const treeSitterRuntime = await materializeTreeSitterRuntime()
     const { assetsPath, root, workerPath } = treeSitterRuntime
     process.env.OTUI_ASSET_ROOT = root
     process.env.OTUI_TREE_SITTER_WORKER_PATH = workerPath
@@ -207,7 +204,7 @@ async function main(): Promise<void> {
     )
   } catch {
     // Markdown remains readable if a locked-down host cannot create the
-    // ephemeral parser runtime. Never fail application startup for highlighting.
+    // parser cache. Never fail application startup for highlighting.
   }
   const treeSitterClient = stabilizeTreeSitterClient(
     registerTreeSitterParsersLazily(
