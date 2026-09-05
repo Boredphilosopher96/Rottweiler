@@ -25,7 +25,6 @@ use rw_store::session::SessionEventPageLimits;
 use rw_store::session::UtcTimestamp;
 #[cfg(test)]
 use rw_types::ToolOutput;
-use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;

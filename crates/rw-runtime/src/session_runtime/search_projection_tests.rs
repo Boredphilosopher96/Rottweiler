@@ -1,7 +1,8 @@
 #![allow(clippy::expect_used)]
 use super::*;
+use rw_core::SESSION_EVENT_VERSION;
 use rw_store::session::journal::SegmentedJournal;
-use rw_types::{EventMeta, SESSION_EVENT_VERSION, SessionId, ToolCallId, ToolInvocationId, TurnId};
+use rw_types::{EventMeta, SessionId, ToolCallId, ToolInvocationId, TurnId};
 
 fn meta(sequence: u64) -> EventMeta {
     EventMeta {

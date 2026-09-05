@@ -33,7 +33,6 @@ use rw_types::PROTOCOL_VERSION;
 use rw_types::RewindTarget;
 use rw_types::SessionMode;
 use std::path::Path;
-use std::sync::Arc;
 use tokio::sync::oneshot;
 
 pub(super) fn requires_driver(command: &ClientCommand) -> bool {
