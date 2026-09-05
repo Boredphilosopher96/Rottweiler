@@ -518,7 +518,7 @@ where
     K: CredentialStore,
 {
     /// Inventories many references with one injected-store read and at most one
-    /// credential-file read. This path never performs migration or any write.
+    /// credential-file read. Inventory is read-only.
     ///
     /// Returned entries align exactly with `references`; secret values remain
     /// inside [`ResolvedCredential`] and its redacted debug boundary.

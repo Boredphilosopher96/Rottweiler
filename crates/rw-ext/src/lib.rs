@@ -25,11 +25,10 @@ pub use command::{
     CommandRegistryError,
 };
 pub use discovery::{
-    ArtifactKind, ArtifactLocation, ArtifactOrigin, ArtifactScope, CLAUDE_FRONTMATTER_MIGRATION,
-    CommandTemplate, DiscoveredAgent, DiscoveredCommand, DiscoveredShellHook, DiscoveredSkill,
-    ExtensionCatalog, ExtensionDiagnostic, ExtensionDiscoveryConfig, ExtensionDiscoveryError,
-    InertProjectArtifact, LoadedSkillResource, SkillResource, TemplatePart,
-    UninventoriedProjectRoot,
+    ArtifactKind, ArtifactLocation, ArtifactOrigin, ArtifactScope, CommandTemplate,
+    DiscoveredAgent, DiscoveredCommand, DiscoveredShellHook, DiscoveredSkill, ExtensionCatalog,
+    ExtensionDiagnostic, ExtensionDiscoveryConfig, ExtensionDiscoveryError, InertProjectArtifact,
+    LoadedSkillResource, SkillResource, TemplatePart, UninventoriedProjectRoot,
 };
 pub use hook::{
     HookClass, HookDirective, HookDispatchResult, HookDispatchStatus, HookDispatcher, HookEffect,

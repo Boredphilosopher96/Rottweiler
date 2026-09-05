@@ -269,7 +269,7 @@ fn authorized_resolution_retries_once_after_passive_store_failure() {
 }
 
 #[test]
-fn authorized_resolution_reports_missing_without_migration() {
+fn authorized_resolution_reports_missing_without_writes() {
     let root = tempdir().expect("temporary root should be created");
     let store = RecordingCredentialStore::default();
     let manager = CredentialManager::with_backends(

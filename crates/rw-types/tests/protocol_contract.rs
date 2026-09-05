@@ -88,19 +88,22 @@ fn fixture_exercises_every_ir_variant_shape() {
 }
 
 #[test]
-fn additive_event_fields_are_tolerated() {
-    let fixture_text =
-        fs::read_to_string(fixture_path()).expect("generated protocol fixture should be present");
-    let fixture_json: Value =
-        serde_json::from_str(&fixture_text).expect("fixture should be valid JSON");
-    let mut event = fixture_json["engine_events"][0].clone();
-    event
-        .as_object_mut()
-        .expect("fixture event should be an object")
-        .insert("future_additive_field".to_owned(), Value::Bool(true));
-
-    let decoded = serde_json::from_value::<EngineEvent>(event);
-    assert!(decoded.is_ok());
+fn event_variants_reject_unknown_fields() {
+    let fixture: Value =
+        serde_json::from_str(&fs::read_to_string(fixture_path()).expect("generated fixture"))
+            .expect("fixture JSON");
+    for event in fixture["engine_events"].as_array().expect("event fixtures") {
+        let mut invalid = event.clone();
+        invalid
+            .as_object_mut()
+            .expect("event object")
+            .insert("unrecognized_field".to_owned(), Value::Bool(true));
+        assert!(
+            serde_json::from_value::<EngineEvent>(invalid).is_err(),
+            "event {} must reject fields outside its contract",
+            event["type"]
+        );
+    }
 }
 
 #[test]

@@ -381,23 +381,33 @@ fn five_hundred_event_batch_round_trips_contiguously() {
 }
 
 #[test]
-fn event_envelope_tolerates_additive_fields() {
-    let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
-    let log = SessionEventLog::open(root.path(), "future-fields")
-        .unwrap_or_else(|error| panic!("log must open: {error}"));
-    std::fs::write(
-            log.path().join("active.jsonl"),
-            br#"{"schema_version":1,"sequence":"0","event":{"kind":"user","text":"hello","future_event_field":true},"future_envelope_field":{"nested":1}}
-"#,
-        )
-        .unwrap_or_else(|error| panic!("future fixture must write: {error}"));
+fn unknown_envelope_fields_reject_committed_records_without_rewriting() {
+    let root = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let log = SessionEventLog::open(root.path(), "invalid-fields")
+        .unwrap_or_else(|error| panic!("log: {error}"));
+    let path = log.path().join("active.jsonl");
+    let bytes =
+        b"{\"schema_version\":1,\"sequence\":\"0\",\"event\":{},\"unrecognized_field\":true}\n";
+    std::fs::write(&path, bytes).unwrap_or_else(|error| panic!("fixture: {error}"));
     drop(log);
-    let reopened = SessionEventLog::open(root.path(), "future-fields")
-        .unwrap_or_else(|error| panic!("fixture reopen: {error}"));
-    let events = reopened
-        .load::<FixtureEvent>()
-        .unwrap_or_else(|error| panic!("additive fields must load: {error}"));
-    assert_eq!(events[0].event.text, "hello");
+    assert!(SessionEventLog::open(root.path(), "invalid-fields").is_err());
+    assert_eq!(
+        std::fs::read(path).unwrap_or_else(|error| panic!("read: {error}")),
+        bytes
+    );
+}
+
+#[test]
+fn event_envelope_requires_each_declared_field() {
+    let valid = serde_json::json!({"schema_version": 1, "sequence": "0", "event": {}});
+    for field in ["schema_version", "sequence", "event"] {
+        let mut value = valid.clone();
+        value
+            .as_object_mut()
+            .unwrap_or_else(|| panic!("object"))
+            .remove(field);
+        assert!(serde_json::from_value::<EventEnvelope<serde_json::Value>>(value).is_err());
+    }
 }
 
 #[test]

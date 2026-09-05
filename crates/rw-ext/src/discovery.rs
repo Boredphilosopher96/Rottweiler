@@ -37,15 +37,6 @@ pub use shell_hook::DiscoveredShellHook;
 pub(crate) const MAX_MARKDOWN_BYTES: u64 = 1024 * 1024;
 const MAX_RESOURCE_BYTES: u64 = 16 * 1024 * 1024;
 
-/// Code-distributed migration table for Claude-style command frontmatter.
-/// Values marked `unchanged` use the same spelling in Rottweiler.
-pub const CLAUDE_FRONTMATTER_MIGRATION: &[(&str, &str)] = &[
-    ("description", "description (unchanged)"),
-    ("model", "model (unchanged)"),
-    ("allowed-tools", "allowed-tools (unchanged)"),
-    ("args", "argument-hint"),
-];
-
 /// Whether an artifact came from the project or user configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ArtifactScope {

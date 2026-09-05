@@ -47,12 +47,13 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use sqlite_snapshot::{MAX_SEARCH_INDEX_BYTES, MAX_SEARCH_INDEX_WAL_BYTES};
 
-/// Current public JSONL envelope version for durable session events.
+/// Public JSONL envelope version for durable session events.
 pub const SESSION_EVENT_SCHEMA_VERSION: u16 = 1;
 const EVENT_SCHEMA_VERSION: u16 = SESSION_EVENT_SCHEMA_VERSION;
 
 /// One versioned event in a session's public JSONL transcript.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EventEnvelope<T> {
     /// Event-log schema version.
     pub schema_version: u16,
