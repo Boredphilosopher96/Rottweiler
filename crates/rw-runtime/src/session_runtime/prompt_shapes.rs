@@ -128,7 +128,7 @@ impl PromptShapeJournal {
         request: &ProviderRequest,
         cache_support: CacheBreakpointSupport,
     ) -> Result<()> {
-        if request.tool_choice == ToolChoice::None {
+        if request.tool_choice == (ToolChoice::None {}) {
             return Ok(());
         }
         let Some(turn_id) = self
