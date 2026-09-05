@@ -1,5 +1,14 @@
 //! Allocation remains provisional until its child owner is ready.
-use super::*;
+use super::{
+    DirectoryIdentity, WorktreeIsolation, WorktreeLease, bounded_diagnostic,
+    process_worktree_finalization_gate, require_success, run_git, set_private_permissions,
+    text_stdout, validate_oid,
+};
+use crate::{CancellationToken, ToolError};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 
 /// A newly allocated worktree awaiting transfer to a child session.
 /// Dropping it without commit or successful rollback blocks further allocation.

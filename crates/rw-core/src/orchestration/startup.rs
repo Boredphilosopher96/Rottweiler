@@ -1,8 +1,16 @@
 //! Startup owns creation, lifecycle receipts and unclaimed-child cleanup.
-use super::*;
+use super::{
+    OrchestrationError, SubagentHandle, SubagentLaunch, SubagentLimits, SubagentMetadataStore,
+    SubagentObserver, SubagentOrchestrator, SubagentRecoveryPhase, SubagentRecoveryPolicy,
+    SubagentRecoveryRecord, SubagentRequest, SubagentSession, bounded_close, zero_usage,
+};
 use futures_util::FutureExt as _;
+use rw_tools::{CancellationToken, CapabilityManifest};
+use rw_types::{Cost, SessionId, SubagentResult, SubagentStatus};
 use std::panic::AssertUnwindSafe;
+use std::sync::{Arc, Mutex};
 use tokio::sync::{OwnedSemaphorePermit, oneshot};
+use tokio::sync::{Semaphore, watch};
 
 pub(super) struct Startups {
     admission: Arc<Semaphore>,
