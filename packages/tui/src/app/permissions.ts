@@ -50,10 +50,8 @@ interface PermissionUiHost {
   submitPaletteCommand(content: string): void
 }
 export class PermissionUiController {
-  #promptScope = {}
   readonly #host: PermissionUiHost
   constructor(host: PermissionUiHost) { this.#host = host }
-  pickerClosed(): void { this.#promptScope = {} }
   openPermissionPicker(): void {
     this.#host.pickerController.begin("permissions")
     this.#host.requests.command({ type: "list_permissions" })
@@ -74,10 +72,10 @@ export class PermissionUiController {
     action: PermissionDecision
   ): void {
     this.#host.pickerController.kind = "permissionInput"
-    const scope = this.#promptScope = {}
+    const scope = this.#host.pickerController.interaction
     this.#host.picker.openTextPrompt({
       title: `Add ${action} permission rule`, placeholder: "tool(glob), e.g. bash(cargo test*)", onSubmit: (pattern) => {
-        if (scope !== this.#promptScope) return
+        if (!scope?.active) return
         this.#host.closePicker()
         this.#host.requests.command({ type: "add_session_permission_rule", pattern, action })
       }, maxBytes: 2048, empty: "reject"

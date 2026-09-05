@@ -41,11 +41,10 @@ interface SettingsUiHost {
 }
 export class SettingsUiController {
   readonly #host: SettingsUiHost
-  #promptScope = {}
   #budgetSettingKey: BudgetSettingKey | null = null
   #settingChoiceKey: string | null = null
   constructor(host: SettingsUiHost) { this.#host = host }
-  pickerClosed(): void { this.#promptScope = {}; this.#budgetSettingKey = null; this.#settingChoiceKey = null }
+  pickerClosed(): void { this.#budgetSettingKey = null; this.#settingChoiceKey = null }
   openSettingsPicker(): void {
     this.#host.pickerController.begin("settings")
     this.resize(
@@ -112,10 +111,10 @@ export class SettingsUiController {
       : key.includes("token")
         ? "250000"
         : "12.50"
-    const scope = this.#promptScope = {}
+    const scope = this.#host.pickerController.interaction
     this.#host.picker.openTextPrompt({
       title: prompt, placeholder: placeholder, onSubmit: (value) => {
-        if (scope !== this.#promptScope) return
+        if (!scope?.active) return
         const selectedKey = key
         this.#host.closePicker()
         if (selectedKey !== null) {

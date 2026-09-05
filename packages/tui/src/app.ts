@@ -2188,7 +2188,6 @@ export class RottweilerApp extends BoxRenderable {
     this.#providers.pickerClosed()
     this.#mcp.pickerClosed()
     this.#settings.pickerClosed()
-    this.#permissions.pickerClosed()
     this.#subagentActionId = null
     this.#sessionActionId = null
     this.#themeBeforePreview = null
@@ -2242,10 +2241,10 @@ export class RottweilerApp extends BoxRenderable {
   override destroy(): void {
     if (this.#destroyed) return
     this.#destroyed = true
+    this.#pickerController.dispose()
     this.#providers.dispose()
     this.#mcp.pickerClosed()
     this.#settings.pickerClosed()
-    this.#permissions.pickerClosed()
     this.#document?.close()
     this.#history?.dispose()
     this.#presentation.destroy()

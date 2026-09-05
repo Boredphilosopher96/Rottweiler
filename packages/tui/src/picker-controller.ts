@@ -30,9 +30,17 @@ interface PickerControllerOptions {
   readonly onClosed: (kind: PickerKind | null, reason: PickerCloseReason) => void
 }
 
+export interface PickerInteraction { readonly active: boolean }
+
+class OwnedPickerInteraction implements PickerInteraction {
+  #active = true
+  get active(): boolean { return this.#active }
+  retire(): void { this.#active = false }
+}
+
 export class PickerController {
   readonly #options: PickerControllerOptions
-  #kind: PickerKind | null = null
+  #active: { readonly kind: PickerKind; readonly interaction: OwnedPickerInteraction } | null = null
   #anchored = false
   #query = ""
 
@@ -41,12 +49,21 @@ export class PickerController {
   }
 
   get kind(): PickerKind | null {
-    return this.#kind
+    return this.#active?.kind ?? null
   }
 
   set kind(kind: PickerKind | null) {
-    this.#kind = kind
+    if (kind !== this.kind) this.#replace(kind)
   }
+
+  get interaction(): PickerInteraction | null { return this.#active?.interaction ?? null }
+
+  #replace(kind: PickerKind | null): void {
+    this.#active?.interaction.retire()
+    this.#active = kind === null ? null : { kind, interaction: new OwnedPickerInteraction() }
+  }
+
+  dispose(): void { this.#replace(null) }
 
   get anchored(): boolean {
     return this.#anchored
@@ -68,11 +85,11 @@ export class PickerController {
     this.#anchored = anchored
     this.#query = query
     this.position(anchored)
-    this.#kind = kind
+    this.#replace(kind)
   }
 
   refresh(): void {
-    this.#options.renderPicker(this.#kind)
+    this.#options.renderPicker(this.kind)
   }
 
   show<T>(
@@ -81,8 +98,11 @@ export class PickerController {
     onSelect: (item: PickerItem<T>) => void,
   ): void {
     const picker = this.#options.picker()
-    const select = (item: PickerItem<unknown>) => onSelect(item as PickerItem<T>)
-    this.#options.withRefreshGuard(this.#kind, () => {
+    const interaction = this.interaction
+    const select = (item: PickerItem<unknown>) => {
+      if (interaction?.active) onSelect(item as PickerItem<T>)
+    }
+    this.#options.withRefreshGuard(this.kind, () => {
       if (this.#anchored) {
         picker.refreshAnchored(
           title,
@@ -113,8 +133,8 @@ export class PickerController {
   }
 
   close(reason: PickerCloseReason = "dismiss"): void {
-    const kind = this.#kind
-    this.#kind = null
+    const kind = this.kind
+    this.kind = null
     this.#options.picker().close()
     this.#anchored = false
     this.#query = ""

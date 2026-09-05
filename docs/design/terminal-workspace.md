@@ -45,3 +45,7 @@ Native components own layout and terminal rendering; feature controllers own the
 `AppClientState` describes bounded in-memory renderer handoff. Capture includes editable composer state and supported selection/focus state. Replacement waits when an active interaction cannot be captured safely or the payload exceeds the private handoff limit. This handoff is distinct from durable session history and does not persist credentials to disk.
 
 Production-renderer tests cover terminal cells, wide and narrow layout, native mouse targeting, keyboard focus, replay guards and request correlation. Performance checks measure mounted output, live streams and input through the real OpenTUI path; visual snapshots alone do not establish responsiveness.
+
+## Picker interaction lifetime
+
+The picker controller owns the active route and its interaction lease together. Opening or replacing a route retires the previous lease; refreshing its data preserves it. Selection callbacks and custom setting/permission prompts act only while their captured lease is active. Renderer destruction retires the lease without reopening a parent browser. This keeps delayed callbacks from acting on a different dialog or session.

@@ -46,6 +46,12 @@ describe("preference interaction ownership", () => {
         }
       }
       open()
+      const replaced = prompts.at(-1)!
+      app.openModePicker()
+      const replacementCommands = emitted.length
+      replaced.onSubmit(feature === "budget" ? "25" : "bash(*)")
+      expect(emitted).toHaveLength(replacementCommands)
+      open()
       const abandoned = prompts.at(-1)!
       app.picker.input.value = "unfinished"
       app.setSessionId("second")
