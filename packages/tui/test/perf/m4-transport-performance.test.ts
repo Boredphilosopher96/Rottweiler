@@ -73,16 +73,10 @@ describe("M4 transport performance gate", () => {
       attach,
       signal: controller.signal,
       onEvent(event) {
-        const sentAt = Reflect.get(event, "_sent_at_ns")
-        const streamId = Reflect.get(event, "_event_stream_id")
-        if (typeof sentAt !== "string") {
-          throw new Error("timed event omitted its monotonic send marker")
-        }
-        if (typeof streamId !== "string") {
-          throw new Error("timed event omitted its persistent-stream marker")
-        }
-        streamIds.add(streamId)
-        samples.push(Number(process.hrtime.bigint() - BigInt(sentAt)) / 1_000_000)
+        if (event.type !== "mode_changed") throw new Error("unexpected timed event")
+        const timing = engine.takeTiming(event.meta.sequence_id)
+        streamIds.add(timing.streamId)
+        samples.push(Number(process.hrtime.bigint() - timing.sentAt) / 1_000_000)
         notifySample?.()
         notifySample = null
       },
@@ -146,6 +140,14 @@ class TimedEventEngine {
   #sequence = 0
   #eventStreamRequests = 0
   #eventResponse: ServerResponse | null = null
+  #timings = new Map<string, { sentAt: bigint; streamId: string }>()
+
+  takeTiming(sequence: string): { sentAt: bigint; streamId: string } {
+    const timing = this.#timings.get(sequence)
+    if (timing === undefined) throw new Error("event has no source timing")
+    this.#timings.delete(sequence)
+    return timing
+  }
 
   constructor(eventCount: number) {
     this.eventCount = eventCount
@@ -197,13 +199,10 @@ class TimedEventEngine {
     if (url.pathname === "/v1/command") {
       if (this.#eventResponse !== null && this.#sequence < this.eventCount) {
         const sequence = ++this.#sequence
-        this.#eventResponse.write(
-          encodeSseJson({
-            ...modeEvent(sequence),
-            _sent_at_ns: process.hrtime.bigint().toString(),
-            _event_stream_id: String(this.#eventStreamRequests),
-          }),
-        )
+        this.#timings.set(String(sequence), {
+          sentAt: process.hrtime.bigint(), streamId: String(this.#eventStreamRequests),
+        })
+        this.#eventResponse.write(encodeSseJson(modeEvent(sequence)))
       }
       writeJson(response, 202, { type: "command", outcome: { type: "accepted" } })
       return
