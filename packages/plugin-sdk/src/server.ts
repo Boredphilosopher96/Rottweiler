@@ -745,7 +745,7 @@ export class PluginServer {
         this.#debug("shutdown timed out")
         this.#writer.abort(new SafeRpcError(-32800, "plugin shutdown timed out"))
         resolve()
-      }, deadlineMs)
+      }, this.#handlerTimeoutMs)
     })
     try {
       const handler = this.definition.handlers.shutdown
