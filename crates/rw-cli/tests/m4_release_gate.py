@@ -30,6 +30,7 @@ from dataclasses import dataclass
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "scripts"))
 from journal_observer import observed_envelopes, session_journals
+from m4_socket_latency import measure_socket_channels
 from m4_gate_support import (
     BLOCKED_TURN_MARKER,
     DRIVER_READY_MARKER,
@@ -466,115 +467,9 @@ def socket_latency_gate(
             "x-rottweiler-client": client_id,
             "Content-Type": "application/json",
         }
-        query_types = [
-            ("list_commands", "command_descriptors_listed"),
-            ("list_models", "models_listed"),
-        ]
-
-        # Authenticated transport readiness deliberately precedes deferred
-        # session composition. Command discovery became session-scoped once it
-        # included trusted project and extension commands, so wait outside the
-        # measured window until that actor is loaded. Rejections have no result
-        # event; inspect the HTTP outcome before waiting on SSE to avoid turning
-        # a typed startup state into an opaque socket timeout.
-        ready_deadline = time.monotonic() + 5
-        ready_attempt = 0
-        while True:
-            request_id = f"m4-latency-ready-{ready_attempt}"
-            ready_attempt += 1
-            command = json.dumps(
-                {
-                    "type": "list_commands",
-                    "meta": {
-                        "protocol_version": 1,
-                        "client_id": "transport-spoof",
-                        "request_id": request_id,
-                    },
-                    "session_id": session_id,
-                },
-                separators=(",", ":"),
-            ).encode("utf-8")
-            commands.send_request("POST", "/v1/command", headers, command)
-            status, _, response = commands.read_response()
-            if status != 202:
-                raise RuntimeError(
-                    f"session readiness query returned HTTP {status}: {response!r}"
-                )
-            outcome = json.loads(response)
-            if outcome.get("type") == "accepted":
-                events.next_matching_event(request_id, "command_descriptors_listed")
-                break
-            error = outcome.get("error")
-            if (
-                not isinstance(error, dict)
-                or error.get("code") != "session_not_loaded"
-                or time.monotonic() >= ready_deadline
-            ):
-                raise RuntimeError(
-                    f"session did not become query-ready: {outcome!r}"
-                )
-            time.sleep(0.001)
-
-        def run_query(index: int, measured: bool) -> float:
-            command_type, event_type = query_types[index % len(query_types)]
-            request_id = f"m4-latency-{'sample' if measured else 'warmup'}-{index}"
-            command_payload: dict[str, object] = {
-                "type": command_type,
-                "meta": {
-                    "protocol_version": 1,
-                    # The server must overwrite this with the authenticated
-                    # identity before dispatching the typed command.
-                    "client_id": "transport-spoof",
-                    "request_id": request_id,
-                },
-            }
-            # Command discovery is session-scoped because its runtime registry
-            # includes trusted project and extension commands. Keep the release
-            # gate on the generated protocol instead of relying on the older
-            # global-list shape.
-            if command_type == "list_commands":
-                command_payload["session_id"] = session_id
-            command = json.dumps(command_payload, separators=(",", ":")).encode("utf-8")
-            started = time.perf_counter_ns()
-            commands.send_request("POST", "/v1/command", headers, command)
-            event = events.next_matching_event(request_id, event_type)
-            elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000
-            if measured and evidence is not None:
-                evidence.sample("uds_query", elapsed_us=math.ceil(elapsed_ms * 1000))
-            meta = event.get("meta")
-            if not isinstance(meta, dict) or meta.get("client_id") != client_id:
-                raise RuntimeError(
-                    "host result did not carry the transport-bound client identity"
-                )
-            status, _, response = commands.read_response()
-            if status != 202:
-                raise RuntimeError(
-                    f"typed host query {command_type!r} returned HTTP {status}: {response!r}"
-                )
-            outcome = json.loads(response)
-            if outcome.get("type") != "accepted":
-                raise RuntimeError(
-                    f"typed host query {command_type!r} was not accepted: {outcome!r}"
-                )
-            return elapsed_ms
-
-        # Warm the persistent UDS connection, host query registry, pricing
-        # metadata, SSE chunk decoder, and Python pages before measuring p99.
-        for index in range(min(50, max(10, samples // 10))):
-            run_query(index, False)
-        latencies = [run_query(index, True) for index in range(samples)]
-        latency_p99 = percentile(latencies, 0.99)
-        print(
-            "M4 production engine-to-TUI UDS event latency: "
-            f"samples={samples}; p50={statistics.median(latencies):.3f}ms "
-            f"p99={latency_p99:.3f}ms max={max(latencies):.3f}ms; "
-            "typed_queries=list_commands,list_models"
+        return measure_socket_channels(
+            commands, events, headers, session_id, client_id, samples, evidence
         )
-        if latency_p99 >= 2:
-            raise RuntimeError(
-                f"production engine-to-TUI socket event p99 {latency_p99:.3f}ms exceeds 2ms"
-            )
-        return {"uds_event_p99_us": math.ceil(latency_p99 * 1000)}
     finally:
         if commands is not None:
             commands.close()
