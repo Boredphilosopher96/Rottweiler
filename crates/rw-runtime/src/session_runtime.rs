@@ -885,6 +885,7 @@ pub enum HostedProviderMode {
 }
 
 pub(crate) struct HostedSessionComposition {
+    pub wasm_workers: Arc<rw_ext::WasmWorkerPool>,
     pub journal_reads: Arc<JournalReads>,
     pub workspace: PathBuf,
     pub additional_workspaces: Vec<PathBuf>,
@@ -1915,8 +1916,10 @@ pub async fn run(options: RunOptions) -> Result<()> {
     if let Some(index) = skill_index_turn(&extension_catalog)? {
         initial_context.push(index);
     }
+    let wasm_workers = rw_ext::WasmWorkerPool::new();
     let (_, mut wasm_startup_notifications, validated_wasm_hooks) =
         compose_runtime_hooks_with_extensions_validated(
+            Arc::clone(&wasm_workers),
             &loaded_config.config.toolchain,
             &toolchain_runtime,
             Arc::clone(&built_tools.registry),
@@ -2259,6 +2262,7 @@ pub async fn run(options: RunOptions) -> Result<()> {
     if let Some(plugins) = &plugin_runtime {
         plugins.shutdown().await;
     }
+    wasm_workers.shutdown().await;
     if let Some(status) = outcome
         && status != TurnStatus::Completed
     {
@@ -2747,6 +2751,7 @@ pub(crate) async fn compose_hosted_actor(
     }
     let (_, mut wasm_startup_notifications, validated_wasm_hooks) =
         compose_runtime_hooks_with_extensions_validated(
+            Arc::clone(&options.wasm_workers),
             &options.config.toolchain,
             &toolchain_runtime,
             Arc::clone(&built_tools.registry),
@@ -10387,6 +10392,7 @@ fn compose_runtime_hooks_with_extensions(
 }
 
 async fn compose_runtime_hooks_with_extensions_validated(
+    wasm_workers: Arc<rw_ext::WasmWorkerPool>,
     config: &ToolchainConfig,
     runtime: &Arc<ToolchainRuntime>,
     tools: Arc<ToolRegistry>,
@@ -10399,14 +10405,16 @@ async fn compose_runtime_hooks_with_extensions_validated(
 )> {
     let mut hooks = compose_runtime_hooks(config, Arc::clone(runtime), tools, Some(intelligence))?;
     register_declarative_hooks(&mut hooks, catalog, runtime)?;
-    let (validated_wasm_hooks, notices) = register_validated_wasm_hooks(&mut hooks).await?;
+    let (validated_wasm_hooks, notices) =
+        register_validated_wasm_hooks(wasm_workers, &mut hooks).await?;
     Ok((hooks, notices, validated_wasm_hooks.into()))
 }
 
 async fn register_validated_wasm_hooks(
+    wasm_workers: Arc<rw_ext::WasmWorkerPool>,
     dispatcher: &mut HookDispatcher,
 ) -> Result<(Vec<NamedWasmHook>, Vec<StartupNotification>)> {
-    let (hosts, mut notices) = load_active_wasm_hook_proxies()?;
+    let (hosts, mut notices) = load_active_wasm_hook_proxies(&wasm_workers)?;
     let mut validated = Vec::new();
     for (name, host) in hosts {
         if host.validate().await.is_err() {
@@ -10445,7 +10453,9 @@ fn register_retained_wasm_hooks(
 type NamedWasmHook = (String, WasmProcessHook);
 type WasmHookProxyLoad = (Vec<NamedWasmHook>, Vec<StartupNotification>);
 
-fn load_active_wasm_hook_proxies() -> Result<WasmHookProxyLoad> {
+fn load_active_wasm_hook_proxies(
+    wasm_workers: &Arc<rw_ext::WasmWorkerPool>,
+) -> Result<WasmHookProxyLoad> {
     let mut notices = Vec::new();
     let mut hosts = Vec::new();
     let loader = rw_store::config::ConfigLoader::from_environment()
@@ -10480,6 +10490,7 @@ fn load_active_wasm_hook_proxies() -> Result<WasmHookProxyLoad> {
     for (manifest, component) in report.extensions {
         let name = manifest.name.clone();
         let Ok(host) = WasmProcessHook::new(
+            Arc::clone(wasm_workers),
             helper.clone(),
             manifest,
             component,
@@ -14922,6 +14933,7 @@ mod tests {
         }
         let session_id = SessionId("unavailable-concrete-resume".to_owned());
         let options = |resume, requested_model| HostedSessionComposition {
+            wasm_workers: rw_ext::WasmWorkerPool::new(),
             journal_reads: JournalReads::new(&storage).expect("journal reads"),
             workspace: workspace.clone(),
             additional_workspaces: Vec::new(),
@@ -16973,9 +16985,14 @@ mod tests {
             }"#,
         )
         .expect("manifest");
-        let host =
-            WasmProcessHook::new(helper.clone(), manifest, vec![0], WasmHookLimits::default())
-                .expect("proxy");
+        let host = WasmProcessHook::new(
+            rw_ext::WasmWorkerPool::new(),
+            helper.clone(),
+            manifest,
+            vec![0],
+            WasmHookLimits::default(),
+        )
+        .expect("proxy");
         let retained = vec![("retained-hook".to_owned(), host)];
         std::fs::remove_file(helper).expect("remove original helper");
 

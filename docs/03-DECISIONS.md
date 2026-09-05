@@ -667,3 +667,30 @@ append while scrolled away, reconnect and renderer replacement. Measure indexed
 read/update work and rebuild work independently. Assert bytes, descriptors,
 mounted cards and per-frame traversal while preserving existing frame budgets.
 The detailed contract is in `docs/design/paged-transcript-client.md`.
+## ADR-032: Reuse bounded supervised WASM workers
+
+**Status:** accepted 2026-09-04; replaces ADR-021's per-invocation helper process lifetime.
+
+**Decision.** An application-owned `WasmWorkerPool` admits bounded work and lazily
+starts private helpers. Hosted sessions share their factory's pool. Each worker
+retains one compiled generation keyed by exact component bytes, manifest, limits,
+and helper identity. Target, Wasmtime version, and engine configuration are fixed
+by that running helper. There is no on-disk executable deserialization cache.
+Every call still creates a fresh store and instance with the existing no-import,
+fuel, memory, and output restrictions. Queue, load, and execution share an
+immutable deadline. Cancelled callers leave cleanup with an owned task; a worker
+slot is not reusable until its process is reaped or returned healthy.
+
+**Alternatives.** A helper per plugin retains useful cache affinity but multiplies
+idle process memory with installed count. Recompiling in a new helper preserves
+isolation but repeats startup and compilation on the hook path. The shared pool
+bounds processes independently of plugin count and keeps Wasmtime out of `rw`.
+The initial two-worker ceiling is provisional. Worker capacity must follow cold/warm and concurrent measurements; reuse alone
+does not establish a performance budget or native Linux qualification.
+
+**Consequences.** The private helper protocol becomes a sequential load/call
+protocol and the one-shot API is removed. Traps, protocol failures, and timeouts
+retire a worker. Compiled state is immutable; mutable instance state never crosses
+calls or sessions. The pool is explicit application state, avoiding process-global
+IO objects tied to an unrelated Tokio runtime. Native RPC plugins retain their
+separate ambient-effect settlement requirements.

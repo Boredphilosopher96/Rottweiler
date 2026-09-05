@@ -1,4 +1,4 @@
-//! Private one-shot WASM runtime. It is never a public application entrypoint.
+//! Private supervised WASM runtime. It is never a public application entrypoint.
 
 use std::{io::Write as _, process::ExitCode};
 
@@ -10,8 +10,7 @@ use tokio::io::AsyncReadExt;
 
 const ABSOLUTE_MAX_COMPONENT_BYTES: usize = 8 * 1024 * 1024;
 
-// This is a one-request helper. A current-thread runtime avoids needless
-// executor migration and keeps the process resource bound deterministic.
+// One worker executes one request at a time. Compiled code is reused; stores are not.
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     match run().await {
@@ -25,46 +24,59 @@ async fn main() -> ExitCode {
 
 async fn run() -> Result<(), String> {
     let mut stdin = tokio::io::stdin();
-    let header_len = stdin.read_u32().await.map_err(io_message)? as usize;
-    let component_len = stdin.read_u32().await.map_err(io_message)? as usize;
-    if header_len > MAX_WASM_HOST_HEADER_BYTES || component_len > ABSOLUTE_MAX_COMPONENT_BYTES {
-        return Err("WASM helper request exceeds its wire limits".to_owned());
-    }
-    let mut header = vec![0; header_len];
-    stdin.read_exact(&mut header).await.map_err(io_message)?;
-    let request: WasmHostRequest = serde_json::from_slice(&header)
-        .map_err(|_| "WASM helper request is malformed".to_owned())?;
-    let mut component = vec![0; component_len];
-    stdin.read_exact(&mut component).await.map_err(io_message)?;
-    let response = match request {
-        WasmHostRequest::Validate { manifest, limits } => {
-            WasmHookHost::from_bytes(manifest, &component, limits).map_or_else(
-                |error| WasmHostResponse::Error {
-                    message: error.to_string(),
-                },
-                |_| WasmHostResponse::Valid,
-            )
+    let mut host: Option<WasmHookHost> = None;
+    loop {
+        // Clean EOF between requests is normal owner shutdown. Partial headers fail.
+        let mut first = [0; 1];
+        if stdin.read(&mut first).await.map_err(io_message)? == 0 {
+            return Ok(());
         }
-        WasmHostRequest::Invoke {
-            manifest,
-            limits,
-            event,
-            input,
-        } => match WasmHookHost::from_bytes(manifest, &component, limits) {
-            Ok(host) => match host.invoke_json(&event, &input).await {
-                Ok(HookDirective::Continue) => WasmHostResponse::Continue,
-                Ok(HookDirective::Replace(payload)) => WasmHostResponse::Replace { payload },
-                Ok(HookDirective::Block { message }) => WasmHostResponse::Block { message },
-                Err(error) => WasmHostResponse::Error {
-                    message: error.to_string(),
-                },
-            },
-            Err(error) => WasmHostResponse::Error {
-                message: error.to_string(),
-            },
-        },
-    };
-    write_response(&response)
+        let mut rest = [0; 3];
+        stdin.read_exact(&mut rest).await.map_err(io_message)?;
+        let header_len = u32::from_be_bytes([first[0], rest[0], rest[1], rest[2]]) as usize;
+        let component_len = stdin.read_u32().await.map_err(io_message)? as usize;
+        if header_len > MAX_WASM_HOST_HEADER_BYTES || component_len > ABSOLUTE_MAX_COMPONENT_BYTES {
+            return Err("WASM helper request exceeds its wire limits".to_owned());
+        }
+        let mut header = vec![0; header_len];
+        stdin.read_exact(&mut header).await.map_err(io_message)?;
+        let request: WasmHostRequest = serde_json::from_slice(&header)
+            .map_err(|_| "WASM helper request is malformed".to_owned())?;
+        let mut component = vec![0; component_len];
+        stdin.read_exact(&mut component).await.map_err(io_message)?;
+        let response = match request {
+            WasmHostRequest::Load { manifest, limits } => {
+                // Failed replacement must never retain the previous generation.
+                host = None;
+                match WasmHookHost::from_bytes(*manifest, &component, limits) {
+                    Ok(compiled) => {
+                        host = Some(compiled);
+                        WasmHostResponse::Valid
+                    }
+                    Err(error) => WasmHostResponse::Error {
+                        message: error.to_string(),
+                    },
+                }
+            }
+            WasmHostRequest::Invoke { event, input } => {
+                if component_len != 0 {
+                    return Err("WASM invocation cannot replace component bytes".to_owned());
+                }
+                let Some(compiled) = host.as_ref() else {
+                    return Err("WASM worker has no compiled generation".to_owned());
+                };
+                match compiled.invoke_json(&event, &input).await {
+                    Ok(HookDirective::Continue) => WasmHostResponse::Continue,
+                    Ok(HookDirective::Replace(payload)) => WasmHostResponse::Replace { payload },
+                    Ok(HookDirective::Block { message }) => WasmHostResponse::Block { message },
+                    Err(error) => WasmHostResponse::Error {
+                        message: error.to_string(),
+                    },
+                }
+            }
+        };
+        write_response(&response)?;
+    }
 }
 
 fn write_response(response: &WasmHostResponse) -> Result<(), String> {
