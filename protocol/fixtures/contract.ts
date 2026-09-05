@@ -394,7 +394,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "52",
+        "sequence_id": "0",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -474,7 +474,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "0",
+        "sequence_id": "1",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -485,7 +485,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "1",
+        "sequence_id": "2",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -496,7 +496,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "2",
+        "sequence_id": "3",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -507,7 +507,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "3",
+        "sequence_id": "4",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -519,7 +519,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "4",
+        "sequence_id": "5",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -532,7 +532,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "5",
+        "sequence_id": "6",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -550,7 +550,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "6",
+        "sequence_id": "7",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -572,7 +572,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "7",
+        "sequence_id": "8",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -587,7 +587,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "8",
+        "sequence_id": "9",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -626,7 +626,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "9",
+        "sequence_id": "10",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -669,7 +669,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "10",
+        "sequence_id": "11",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -689,7 +689,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "11",
+        "sequence_id": "12",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -713,7 +713,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "12",
+        "sequence_id": "13",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -744,7 +744,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "13",
+        "sequence_id": "14",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -758,7 +758,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "14",
+        "sequence_id": "15",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -769,7 +769,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "15",
+        "sequence_id": "16",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -782,7 +782,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "16",
+        "sequence_id": "17",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -814,7 +814,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "17",
+        "sequence_id": "18",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -846,7 +846,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "18",
+        "sequence_id": "19",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -858,7 +858,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "19",
+        "sequence_id": "20",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -870,7 +870,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "20",
+        "sequence_id": "21",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -883,7 +883,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "21",
+        "sequence_id": "22",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -894,7 +894,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "22",
+        "sequence_id": "23",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -906,7 +906,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "23",
+        "sequence_id": "24",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -918,7 +918,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "24",
+        "sequence_id": "25",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -933,7 +933,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "25",
+        "sequence_id": "26",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -952,7 +952,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "26",
+        "sequence_id": "27",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -976,7 +976,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "27",
+        "sequence_id": "28",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },

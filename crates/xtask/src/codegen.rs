@@ -467,12 +467,17 @@ fn contract_fixture() -> ContractFixture {
         client_id: ClientId("client-fixture".to_owned()),
         request_id: RequestId("request-fixture".to_owned()),
     };
-    let event_meta = |sequence_id| EventMeta {
-        protocol_version: rw_types::PROTOCOL_VERSION,
-        session_id: SessionId("session-fixture".to_owned()),
-        sequence_id: SequenceId(sequence_id),
-        emitted_at: "2026-01-01T00:00:00Z".to_owned(),
-        caused_by: None,
+    let mut next_sequence = 0;
+    let mut event_meta = || {
+        let sequence_id = SequenceId(next_sequence);
+        next_sequence += 1;
+        EventMeta {
+            protocol_version: rw_types::PROTOCOL_VERSION,
+            session_id: SessionId("session-fixture".to_owned()),
+            sequence_id,
+            emitted_at: "2026-01-01T00:00:00Z".to_owned(),
+            caused_by: None,
+        }
     };
     let subagent_result = |id: &str, session: &str, text: &str| SubagentResult {
         subagent_id: SubagentId(id.to_owned()),
@@ -755,7 +760,7 @@ fn contract_fixture() -> ContractFixture {
         ],
         engine_events: vec![
             EngineEvent::ProviderCallAccounted {
-                meta: event_meta(52),
+                meta: event_meta(),
                 call: ProviderCallIdentity {
                     session_id: SessionId("session-fixture".to_owned()),
                     turn_id: TurnId("turn-fixture".to_owned()),
@@ -819,30 +824,30 @@ fn contract_fixture() -> ContractFixture {
                 },
             },
             EngineEvent::SessionCreated {
-                meta: event_meta(0),
+                meta: event_meta(),
                 driver_client_id: ClientId("client-fixture".to_owned()),
             },
             EngineEvent::DriverChanged {
-                meta: event_meta(1),
+                meta: event_meta(),
                 driver_client_id: ClientId("client-fixture".to_owned()),
             },
             EngineEvent::TurnStarted {
-                meta: event_meta(2),
+                meta: event_meta(),
                 turn_id: TurnId("turn-fixture".to_owned()),
             },
             EngineEvent::TextDelta {
-                meta: event_meta(3),
+                meta: event_meta(),
                 turn_id: TurnId("turn-fixture".to_owned()),
                 text: "hello".to_owned(),
             },
             EngineEvent::ThinkingDelta {
-                meta: event_meta(4),
+                meta: event_meta(),
                 turn_id: TurnId("turn-fixture".to_owned()),
                 text: "checking".to_owned(),
                 signature: None,
             },
             EngineEvent::ToolCallStarted {
-                meta: event_meta(5),
+                meta: event_meta(),
                 turn_id: TurnId("turn-fixture".to_owned()),
                 tool_call_id: ToolCallId("tool-1".to_owned()),
                 invocation_id: ToolInvocationId("tool-1".to_owned()),
@@ -851,7 +856,7 @@ fn contract_fixture() -> ContractFixture {
                 call_index: 0,
             },
             EngineEvent::ToolApprovalNeeded {
-                meta: event_meta(6),
+                meta: event_meta(),
                 turn_id: TurnId("turn-fixture".to_owned()),
                 tool_call_id: ToolCallId("tool-1".to_owned()),
                 invocation_id: ToolInvocationId("tool-1".to_owned()),
@@ -862,7 +867,7 @@ fn contract_fixture() -> ContractFixture {
                 diff: None,
             },
             EngineEvent::ToolOutputDelta {
-                meta: event_meta(7),
+                meta: event_meta(),
                 turn_id: TurnId("turn-fixture".to_owned()),
                 tool_call_id: ToolCallId("tool-1".to_owned()),
                 invocation_id: ToolInvocationId("tool-1".to_owned()),
@@ -870,7 +875,7 @@ fn contract_fixture() -> ContractFixture {
                 chunk: "running tests".to_owned(),
             },
             EngineEvent::ToolCallFinished {
-                meta: event_meta(8),
+                meta: event_meta(),
                 turn_id: TurnId("turn-fixture".to_owned()),
                 tool_call_id: ToolCallId("tool-1".to_owned()),
                 invocation_id: ToolInvocationId("tool-1".to_owned()),
@@ -879,7 +884,7 @@ fn contract_fixture() -> ContractFixture {
                 call_index: 0,
             },
             EngineEvent::QuestionAsked {
-                meta: event_meta(9),
+                meta: event_meta(),
                 turn_id: TurnId("turn-fixture".to_owned()),
                 question_id: QuestionId("question-1".to_owned()),
                 questions: vec![
@@ -915,7 +920,7 @@ fn contract_fixture() -> ContractFixture {
                 ],
             },
             EngineEvent::QuestionAnswered {
-                meta: event_meta(10),
+                meta: event_meta(),
                 turn_id: TurnId("turn-fixture".to_owned()),
                 question_id: QuestionId("question-1".to_owned()),
                 answers: vec![Answer {
@@ -924,7 +929,7 @@ fn contract_fixture() -> ContractFixture {
                 }],
             },
             EngineEvent::TurnFinished {
-                meta: event_meta(11),
+                meta: event_meta(),
                 turn_id: TurnId("turn-fixture".to_owned()),
                 status: TurnStatus::Completed,
                 usage: Usage {
@@ -940,7 +945,7 @@ fn contract_fixture() -> ContractFixture {
                 },
             },
             EngineEvent::CompactionStarted {
-                meta: event_meta(12),
+                meta: event_meta(),
                 reason: CompactionReason::Automatic,
             },
             EngineEvent::CompactionAttemptStarted {
@@ -961,64 +966,64 @@ fn contract_fixture() -> ContractFixture {
                 text: "## Goal\nContinue the task.".to_owned(),
             },
             EngineEvent::CompactionFinished {
-                meta: event_meta(13),
+                meta: event_meta(),
                 summary_turn_id: TurnId("summary-turn".to_owned()),
                 reclaimed_tokens: 25_000,
                 usage: None,
                 cost: None,
             },
             EngineEvent::CompactionFailed {
-                meta: event_meta(14),
+                meta: event_meta(),
                 summary_turn_id: TurnId("failed-summary-turn".to_owned()),
             },
             EngineEvent::SubagentSpawned {
-                meta: event_meta(15),
+                meta: event_meta(),
                 subagent_id: SubagentId("subagent-1".to_owned()),
                 child_session_id: SessionId("child-session-1".to_owned()),
                 task: "inspect protocol".to_owned(),
             },
             EngineEvent::SubagentFinished {
-                meta: event_meta(16),
+                meta: event_meta(),
                 subagent_id: SubagentId("subagent-1".to_owned()),
                 result: subagent_result("subagent-1", "child-session-1", "done"),
             },
             EngineEvent::SubagentFinished {
-                meta: event_meta(17),
+                meta: event_meta(),
                 subagent_id: SubagentId("subagent-2".to_owned()),
                 result: subagent_result("subagent-2", "child-session-2", "three files"),
             },
             EngineEvent::ToolOutputPruned {
-                meta: event_meta(18),
+                meta: event_meta(),
                 tool_call_id: ToolCallId("tool-old".to_owned()),
                 reclaimed_tokens: 21_000,
             },
             EngineEvent::ModeChanged {
-                meta: event_meta(19),
+                meta: event_meta(),
                 mode: ModeId("plan".to_owned()),
                 definition_fingerprint: "fixture".to_owned(),
             },
             EngineEvent::ModelChanged {
-                meta: event_meta(20),
+                meta: event_meta(),
                 model: ModelAlias("fast".to_owned()),
                 provider: None,
                 thinking: Some(ThinkingLevel::Off),
             },
             EngineEvent::ModelContextCleared {
-                meta: event_meta(21),
+                meta: event_meta(),
                 strategy: ModelContextTransfer::StartWithoutContext,
             },
             EngineEvent::ContextItemPinned {
-                meta: event_meta(22),
+                meta: event_meta(),
                 item_id: ContextItemId("context-1".to_owned()),
                 effective_after_agent_turn: 3,
             },
             EngineEvent::ContextItemEvicted {
-                meta: event_meta(23),
+                meta: event_meta(),
                 item_id: ContextItemId("context-2".to_owned()),
                 effective_after_agent_turn: 3,
             },
             EngineEvent::UserShellStateChanged {
-                meta: event_meta(24),
+                meta: event_meta(),
                 shell_id: ShellId("shell-fixture".to_owned()),
                 command: Some("python".to_owned()),
                 active: false,
@@ -1026,7 +1031,7 @@ fn contract_fixture() -> ContractFixture {
                 captured_output: None,
             },
             EngineEvent::Error {
-                meta: event_meta(25),
+                meta: event_meta(),
                 error: EngineError {
                     category: EngineErrorCategory::Protocol,
                     code: "invalid_command".to_owned(),
@@ -1036,11 +1041,11 @@ fn contract_fixture() -> ContractFixture {
                 },
             },
             EngineEvent::PlanSubmitted {
-                meta: event_meta(26),
+                meta: event_meta(),
                 artifact: plan_artifact.clone(),
             },
             EngineEvent::PlanReviewed {
-                meta: event_meta(27),
+                meta: event_meta(),
                 artifact: plan_artifact,
                 decision: PlanDecision::Approve,
                 revisions: None,
