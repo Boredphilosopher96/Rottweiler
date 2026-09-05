@@ -6,6 +6,7 @@ mod command_result;
 mod command_snapshot;
 mod compaction;
 mod completed_turns;
+pub(super) mod context_job;
 mod context_surgery;
 mod controls;
 mod initialization;
@@ -129,7 +130,14 @@ pub(super) async fn handle_actor_command(
             let _ = respond.send(result);
         }
         ActorCommand::PluginContextRead { request, respond } => {
-            let _ = respond.send(plugin_control::read_context(state, config, &request));
+            context_job::start(
+                state,
+                config,
+                context_job::Target::Plugin {
+                    request,
+                    reply: respond,
+                },
+            );
         }
         ActorCommand::PluginToolCall { request, respond } => {
             crate::engine::turn::plugin_tool::start(

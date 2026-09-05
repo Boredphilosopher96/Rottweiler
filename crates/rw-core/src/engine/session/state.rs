@@ -158,6 +158,8 @@ pub(in crate::engine) enum ProtocolCompletion {
 
 #[allow(clippy::struct_excessive_bools)]
 pub(in crate::engine) struct ActorState {
+    pub(in crate::engine) pending_context_read:
+        Option<crate::engine::dispatch::context_job::PendingRead>,
     pub(in crate::engine) live: super::live_state::LiveState,
     pub(in crate::engine) pending_plugin_tool:
         Option<crate::engine::turn::plugin_tool::PendingPluginTool>,
@@ -332,6 +334,7 @@ impl ActorState {
             queued_positions,
             running: None,
             pending_command: None,
+            pending_context_read: None,
             pending_plugin_tool: None,
             pending_model_preparation: None,
             pending_approvals: BTreeMap::new(),

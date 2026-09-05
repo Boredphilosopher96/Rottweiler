@@ -128,6 +128,13 @@ async fn historical_anthropic_prompt_shape_restores_cache_and_tool_schema_offlin
     );
     let workspace = root.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("workspace");
+    let source = crate::session_runtime::test_history::open(
+        root.path(),
+        &SessionId(session_id.into()),
+        None,
+        vec![user],
+    )
+    .expect("prompt source");
     let actor = SessionActor::spawn(SessionActorConfig {
         ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),
         ui_tool_source: std::sync::Arc::new(rw_core::ui::UnavailableUiToolSource),
@@ -145,7 +152,8 @@ async fn historical_anthropic_prompt_shape_restores_cache_and_tool_schema_offlin
         hooks: Arc::new(builtin_hook_dispatcher().expect("hooks")),
         commands: Arc::new(builtin_command_registry().expect("commands")),
         modes: Arc::new(rw_ext::ModeRegistry::builtins().expect("built-in modes")),
-        event_sink: Arc::new(rw_core::NoopSessionEventSink::default()),
+        history: source.history,
+        event_sink: source.sink,
         event_clock: Arc::new(SystemEventClock),
         provider_admission: test_provider_admission(),
         secret_redactor: Arc::new(rw_core::NoopSecretRedactor),
@@ -154,10 +162,7 @@ async fn historical_anthropic_prompt_shape_restores_cache_and_tool_schema_offlin
         workspace_roots: Arc::new(rw_core::NoopWorkspaceRootController),
         extension_development: Arc::new(rw_core::NoopSessionExtensionController),
         resources: Arc::new(rw_core::NoopSessionResources),
-        recovered: rw_core::SessionRecoveredState {
-            conversation: vec![user],
-            ..rw_core::SessionRecoveredState::default()
-        },
+        recovered: source.recovered,
         max_turns: 1,
         identical_tool_failure_limit: 1,
         max_output_tokens: 512,

@@ -617,7 +617,7 @@ fn unused_hosted_activator() -> Arc<HostedProviderActivator> {
 use rw_core as rw_core_batch;
 
 struct FailModelChangedSink {
-    inner: Arc<rw_core::NoopSessionEventSink>,
+    inner: Arc<dyn SessionEventSink>,
 }
 
 #[async_trait]
@@ -632,9 +632,7 @@ impl SessionEventSink for FailModelChangedSink {
     async fn todo_state(
         &self,
     ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
-        Err(AgentLoopError::InvalidConfiguration(
-            "sink has no authoritative task state".into(),
-        ))
+        self.inner.todo_state().await
     }
     async fn source_rewind_target(
         &self,
@@ -655,13 +653,13 @@ impl SessionEventSink for FailModelChangedSink {
         self.inner.extension_state(plugin_id).await
     }
     async fn settle_effects(&self) -> Result<(), AgentLoopError> {
-        Ok(())
+        self.inner.settle_effects().await
     }
     async fn reserve(
         &self,
-        _plan: &rw_core_batch::EventBatchPlan,
+        plan: &rw_core_batch::EventBatchPlan,
     ) -> Result<rw_core_batch::EventBatchReservation, AgentLoopError> {
-        Ok(rw_core_batch::EventBatchReservation::new(()))
+        self.inner.reserve(plan).await
     }
 
     async fn commit(

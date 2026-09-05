@@ -301,6 +301,14 @@ async fn actor_applies_durable_child_artifact_then_reports_conflict_without_corr
         )
         .expect("fixture concrete model"),
     );
+    durable
+        .configure_canonical(
+            Arc::new(rw_ext::ModeRegistry::builtins().expect("modes")),
+            None,
+        )
+        .expect("canonical owner");
+    let recovered =
+        project_session_events(&durable.load().expect("parent source")).expect("parent recovery");
     let actor = SessionActor::spawn(SessionActorConfig {
         ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),
         ui_tool_source: std::sync::Arc::new(rw_core::ui::UnavailableUiToolSource),
@@ -318,7 +326,8 @@ async fn actor_applies_durable_child_artifact_then_reports_conflict_without_corr
         hooks: Arc::new(builtin_hook_dispatcher().expect("hooks")),
         commands: Arc::new(builtin_command_registry().expect("commands")),
         modes: Arc::new(rw_ext::ModeRegistry::builtins().expect("built-in modes")),
-        event_sink: Arc::new(rw_core::NoopSessionEventSink::default()),
+        history: durable.clone(),
+        event_sink: durable,
         event_clock: Arc::new(SystemEventClock),
         provider_admission: test_provider_admission(),
         secret_redactor: Arc::new(rw_core::NoopSecretRedactor),
@@ -327,7 +336,7 @@ async fn actor_applies_durable_child_artifact_then_reports_conflict_without_corr
         workspace_roots: Arc::new(rw_core::NoopWorkspaceRootController),
         extension_development: Arc::new(rw_core::NoopSessionExtensionController),
         resources: Arc::new(rw_core::NoopSessionResources),
-        recovered: rw_core::SessionRecoveredState::default(),
+        recovered,
         max_turns: 5,
         identical_tool_failure_limit: 3,
         max_output_tokens: 1_024,
@@ -710,6 +719,10 @@ async fn crashed_worktree_child_recovers_follows_up_and_applies_after_second_res
             JournalService::new(storage).expect("journal reads"),
         )
         .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+        sink.configure_canonical(
+            Arc::new(rw_ext::ModeRegistry::builtins().expect("modes")),
+            None,
+        )?;
         Ok(SessionActorConfig {
             ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),
             ui_tool_source: std::sync::Arc::new(rw_core::ui::UnavailableUiToolSource),
@@ -736,6 +749,7 @@ async fn crashed_worktree_child_recovers_follows_up_and_applies_after_second_res
                 rw_ext::ModeRegistry::builtins()
                     .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?,
             ),
+            history: sink.clone(),
             event_sink: sink,
             event_clock: Arc::new(SystemEventClock),
             provider_admission: test_provider_admission(),

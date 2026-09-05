@@ -4,7 +4,6 @@ use crate::engine::MessageDisposition;
 use crate::engine::apply_mode_change;
 use crate::engine::apply_permission_mode_change;
 use crate::engine::commands::SessionCommandAction;
-use crate::engine::commands::render_context_snapshot;
 use crate::engine::commands::render_cost_snapshot;
 use crate::engine::commands::render_permission_approvals;
 use crate::engine::commands::render_permission_snapshot;
@@ -20,12 +19,9 @@ use crate::engine::mode_permission_base;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::turn::CommandTurnOverrides;
 use crate::engine::turn::StartTurnRuntime;
-use crate::engine::turn::assemble_session_context;
 use crate::engine::turn::build_cost_snapshot;
-use crate::engine::turn::context_snapshot;
 use crate::engine::turn::emit;
 use crate::engine::turn::start_turn_with_overrides;
-use crate::engine::wire_turn_id;
 use rw_types::CommandMeta;
 use rw_types::EngineEvent;
 use rw_types::SessionMode;
@@ -126,45 +122,15 @@ pub(super) async fn apply(
                     }
                 }
                 SessionCommandAction::Context => {
-                    let snapshot = assemble_session_context(
+                    super::context_job::start(
+                        state,
                         config,
-                        &state.conversation,
-                        &state.queued,
-                        &state.context_surgery,
-                        &state.pruned_tool_outputs,
-                        false,
-                    )
-                    .map(|assembled| {
-                        context_snapshot(
-                            &assembled,
-                            &state.conversation,
-                            &state.pruned_tool_outputs,
-                            config.model.context_metadata(&config.model_alias),
-                            &config.model.compaction_config(),
-                            state
-                                .running
-                                .as_ref()
-                                .map(|running| wire_turn_id(running.id)),
-                        )
-                    });
-                    match snapshot {
-                        Ok(snapshot) => {
-                            send_connection_event(
-                                events,
-                                &command_meta.client_id,
-                                EngineEvent::ContextSnapshotReady {
-                                    meta: query_meta(state, &command_meta),
-                                    session_id: state.session_id.clone(),
-                                    snapshot: snapshot.clone(),
-                                },
-                            );
-                            output.message = render_context_snapshot(&snapshot);
-                        }
-                        Err(error) => {
-                            let _ = respond.send(Err(error));
-                            return;
-                        }
-                    }
+                        super::context_job::Target::Command {
+                            meta: command_meta,
+                            reply: respond,
+                        },
+                    );
+                    return;
                 }
                 SessionCommandAction::PinContext { item_id } => {
                     if let Err(error) = apply_registered_context_surgery(

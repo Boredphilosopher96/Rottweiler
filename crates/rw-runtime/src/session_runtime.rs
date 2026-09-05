@@ -79,6 +79,8 @@ pub(crate) use session_selection::checkpoint_root;
 pub use session_selection::select_interactive_session;
 pub use wasm_hooks::locate_wasm_host_executable;
 #[cfg(test)]
+pub(crate) mod test_history;
+#[cfg(test)]
 mod tests;
 
 mod search_projection;

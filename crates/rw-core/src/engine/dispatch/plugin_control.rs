@@ -1,34 +1,26 @@
 //! Machine controls enter the actor without creating or impersonating a driver.
 use crate::engine::session::{ActorState, SessionActorConfig};
-use crate::engine::turn::{assemble_session_context, protocol_context_kind};
+use crate::engine::turn::protocol_context_kind;
 use crate::engine::{AgentLoopError, RoutedEvent, apply_mode_change, mode_permission_base};
 use rw_types::extension_control::{
     ExtensionContextItem, ExtensionContextPage, ExtensionContextRead, ExtensionControl,
     ExtensionControlOutcome, MAX_CONTEXT_PAGE_ITEMS, validate_context_item_id,
 };
-use rw_types::{ContextItemId, ContextItemState, Role, SequenceId, SessionMode};
+use rw_types::{ContextItemId, ContextItemState, SessionMode};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
 pub(super) fn read_context(
-    state: &ActorState,
-    config: &SessionActorConfig,
+    current: &crate::engine::turn::history_context::CurrentContext,
     request: &ExtensionContextRead,
 ) -> Result<ExtensionContextPage, AgentLoopError> {
-    let sequence = state.sequence.map(SequenceId);
+    let sequence = current.through;
     if (request.after_item_id.is_some() || request.expected_sequence.is_some())
         && request.expected_sequence != sequence
     {
         return Ok(ExtensionContextPage::Restart {});
     }
-    let assembled = assemble_session_context(
-        config,
-        &state.conversation,
-        &state.queued,
-        &state.context_surgery,
-        &state.pruned_tool_outputs,
-        false,
-    )?;
+    let assembled = &current.assembled;
     let start = if let Some(id) = &request.after_item_id {
         validate_context_item_id(&id.0).map_err(invalid)?;
         match assembled
@@ -183,10 +175,8 @@ pub(super) async fn control(
             {
                 return Err(invalid("unknown provider route"));
             }
-            let needs_choice = state
-                .conversation
-                .iter()
-                .any(|turn| turn.role != Role::System)
+            let needs_choice = state.conversation_summary().turns
+                > state.conversation_summary().system_turns
                 && (state.model_alias != model.0 || state.provider != provider);
             if !needs_choice && !prepared {
                 return Ok(None);

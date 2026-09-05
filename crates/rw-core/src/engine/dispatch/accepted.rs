@@ -11,22 +11,16 @@ use crate::engine::dispatch::rewind::rewind_state;
 use crate::engine::mode_permission_base;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::projection::RecoveredUserShell;
-use crate::engine::projection::SessionRecoveredState;
-use crate::engine::projection::find_journal_boundary;
 use crate::engine::projection::parse_turn_id;
 use crate::engine::projection::plan_review_context_turn;
-use crate::engine::projection::project_journal_prefix;
 use crate::engine::projection::shell_context_turn;
 use crate::engine::session::ActorCommand;
 use crate::engine::session::PrecommittedAnswer;
 use crate::engine::session::PreparedModelSwitch;
 use crate::engine::session::ProtocolCompletion;
-use crate::engine::turn::assemble_session_context;
 use crate::engine::turn::build_cost_snapshot;
-use crate::engine::turn::context_snapshot;
 use crate::engine::turn::emit;
 use crate::engine::turn::emit_batch;
-use crate::engine::turn::prompt_dump;
 use crate::engine::wire_turn_id;
 use rw_types::ClientCommand;
 use rw_types::ClientRole;
@@ -496,41 +490,14 @@ pub(super) async fn apply_accepted(
             }
         }
         ClientCommand::GetContext { .. } => {
-            let result = assemble_session_context(
+            super::context_job::start(
+                state,
                 config,
-                &state.conversation,
-                &state.queued,
-                &state.context_surgery,
-                &state.pruned_tool_outputs,
-                false,
-            )
-            .map(|assembled| {
-                context_snapshot(
-                    &assembled,
-                    &state.conversation,
-                    &state.pruned_tool_outputs,
-                    config.model.context_metadata(&config.model_alias),
-                    &config.model.compaction_config(),
-                    state
-                        .running
-                        .as_ref()
-                        .map(|running| wire_turn_id(running.id)),
-                )
-            });
-            if let Ok(snapshot) = &result {
-                send_connection_event(
-                    events,
-                    &meta.client_id,
-                    EngineEvent::ContextSnapshotReady {
-                        meta: query_meta(state, &meta),
-                        session_id: state.session_id.clone(),
-                        snapshot: snapshot.clone(),
-                    },
-                );
-            }
-            if let Some(complete) = completion.take() {
-                let _ = complete.send(result.map(ProtocolCompletion::Context));
-            }
+                super::context_job::Target::Context {
+                    meta: meta.clone(),
+                    completion: completion.take(),
+                },
+            );
         }
         ClientCommand::GetCost { .. } => {
             let result = build_cost_snapshot(state, config).await;
@@ -551,50 +518,15 @@ pub(super) async fn apply_accepted(
             }
         }
         ClientCommand::DumpPrompt { turn_id, .. } => {
-            let historical = if let Some(requested) = &turn_id {
-                async {
-                let view = config.event_sink.capture_read_view()?;
-                let boundary = find_journal_boundary(&view, &config.session_id,
-                    |event| matches!(event, EngineEvent::ContextUsageUpdated { turn_id, .. } if turn_id == requested), false,
-                ).await?.ok_or_else(|| AgentLoopError::InvalidConfiguration(format!("no assembled prompt was recorded for turn {}", requested.0)))?;
-                project_journal_prefix(view, &config.session_id, &config.modes, Some(boundary)).await
-            }.await
-            } else {
-                Ok(SessionRecoveredState {
-                    conversation: state.conversation.clone(),
-                    queued_messages: state.queued.iter().cloned().collect(),
-                    queued_message_positions: state.queued_positions.iter().copied().collect(),
-                    context_surgery: state.context_surgery.clone(),
-                    pruned_tool_outputs: state.pruned_tool_outputs.clone(),
-                    accounting: state.accounting.clone(),
-                    ..SessionRecoveredState::default()
-                })
-            };
-            let result = historical.and_then(|historical| {
-                assemble_session_context(
-                    config,
-                    &historical.conversation,
-                    &historical.queued_messages.iter().cloned().collect(),
-                    &historical.context_surgery,
-                    &historical.pruned_tool_outputs,
-                    true,
-                )
-                .map(|assembled| prompt_dump(&assembled, &config.model_alias, turn_id))
-            });
-            if let Ok(dump) = &result {
-                send_connection_event(
-                    events,
-                    &meta.client_id,
-                    EngineEvent::PromptDumpReady {
-                        meta: query_meta(state, &meta),
-                        session_id: state.session_id.clone(),
-                        dump: dump.clone(),
-                    },
-                );
-            }
-            if let Some(complete) = completion.take() {
-                let _ = complete.send(result.map(ProtocolCompletion::Prompt));
-            }
+            super::context_job::start(
+                state,
+                config,
+                super::context_job::Target::Prompt {
+                    meta: meta.clone(),
+                    turn: turn_id,
+                    completion: completion.take(),
+                },
+            );
         }
         ClientCommand::Compact { instructions, .. } => {
             let completion = completion.take();

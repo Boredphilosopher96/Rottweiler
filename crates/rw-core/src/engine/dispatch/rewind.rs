@@ -1,7 +1,6 @@
 use crate::engine::AgentLoopError;
 use crate::engine::RoutedEvent;
 use crate::engine::pending_event::PendingEvent;
-use crate::engine::projection::project_journal_prefix;
 use crate::engine::session::ActorState;
 use crate::engine::session::SessionActorConfig;
 use crate::engine::session_mode_name;
@@ -35,23 +34,15 @@ pub(super) async fn rewind_state(
         state.poisoned = false;
         return Ok(pending.unrestorable_paths);
     }
-    let boundary = config
-        .event_sink
-        .completed_turn(to_turn)
-        .await?
-        .ok_or_else(|| {
-            AgentLoopError::InvalidConfiguration(format!(
-                "turn {to_turn} is not a completed rewind target"
-            ))
-        })?;
-    let view = config.event_sink.capture_read_view()?;
-    let historical = project_journal_prefix(
-        view,
-        &config.session_id,
-        &config.modes,
-        Some(boundary.sequence_id),
-    )
-    .await?;
+    let history = config.history.capture_history().await?;
+    if history.through().map(|sequence| sequence.0) != state.sequence {
+        return Err(AgentLoopError::InvalidConfiguration(
+            "rewind history does not match the actor's committed prefix".into(),
+        ));
+    }
+    let historical = history.recovery_at_completed_turn(to_turn).await?;
+    let budgeter = rw_context::Budgeter::from_snapshot(historical.head.budget)
+        .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
     let operation_id = format!(
         "rewind-{}-{to_turn}",
         state
@@ -78,18 +69,20 @@ pub(super) async fn rewind_state(
         state.poisoned = true;
         return Err(error);
     }
-    state.replace_conversation(historical.conversation);
-    state.context_surgery = historical.context_surgery;
-    state.pruned_tool_outputs = historical.pruned_tool_outputs;
-    state.budgeter = historical.budgeter;
-    state.mode = historical.mode;
-    state.mode_id = historical
-        .mode_id
-        .unwrap_or_else(|| ModeId(session_mode_name(historical.mode).to_owned()));
-    state.pending_plan = historical.pending_plan;
-    state.approved_plan = historical.approved_plan;
-    state.plan_gate_active = historical.plan_gate_active;
-    state.completed_turns = boundary.completed_turns;
+    // Transfer bounded controls while retaining their read allowance. Historical
+    // conversation and context edits stay in the canonical indexed authority.
+    let _applied = historical.map(|historical| {
+        state.budgeter = budgeter;
+        state.mode = historical.head.control.mode;
+        state.mode_id =
+            historical.head.control.mode_id.unwrap_or_else(|| {
+                ModeId(session_mode_name(historical.head.control.mode).to_owned())
+            });
+        state.pending_plan = historical.controls.pending_plan;
+        state.approved_plan = historical.controls.approved_plan;
+        state.plan_gate_active = historical.head.control.plan_gate_active;
+        state.completed_turns = historical.head.control.completed_turns;
+    });
     state.queued.clear();
     state.queued_positions.clear();
     state.pending_rewind = Some((to_turn, rewind.clone()));

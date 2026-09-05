@@ -21,12 +21,12 @@ use super::{
 };
 use rw_core::{
     ActorSubagentSessionFactory, AgentLoopError, ModelDriver, NoopFolderTrustController,
-    NoopMutationCheckpointCoordinator, NoopSecretRedactor, NoopSessionEventSink,
-    NoopWorkspaceRootController, OrchestrationError, PermissionGate, SessionActorConfig,
-    SessionCommandAction, SessionCommandContext, SessionCommandOutput, SubagentHandle,
-    SubagentLaunch, SubagentLimits, SubagentMetadataStore, SubagentObserver, SubagentOrchestrator,
-    SubagentProgressObserver, SubagentRecoveryRecord, SubagentSession, SubagentSessionFactory,
-    SubagentTurnResult, SystemEventClock, WorktreeSubagentSessionFactory,
+    NoopMutationCheckpointCoordinator, NoopSecretRedactor, NoopWorkspaceRootController,
+    OrchestrationError, PermissionGate, SessionActorConfig, SessionCommandAction,
+    SessionCommandContext, SessionCommandOutput, SubagentHandle, SubagentLaunch, SubagentLimits,
+    SubagentMetadataStore, SubagentObserver, SubagentOrchestrator, SubagentProgressObserver,
+    SubagentRecoveryRecord, SubagentSession, SubagentSessionFactory, SubagentTurnResult,
+    SystemEventClock, WorktreeSubagentSessionFactory,
 };
 use rw_ext::{
     CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation, CommandRegistry,
@@ -632,8 +632,15 @@ needs = ["impl", "tests"]
     let commands = Arc::new(commands);
     let child_model = Arc::clone(&model);
     let child_commands = Arc::clone(&commands);
+    let child_storage = fixture.path().join("actor-history");
     let actor_factory: Arc<dyn SubagentSessionFactory> =
         Arc::new(ActorSubagentSessionFactory::new(move |launch| {
+            let source = crate::session_runtime::test_history::open(
+                &child_storage,
+                &launch.handle.session_id,
+                None,
+                vec![],
+            )?;
             Ok(SessionActorConfig {
                 ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),
                 ui_tool_source: std::sync::Arc::new(rw_core::ui::UnavailableUiToolSource),
@@ -654,7 +661,8 @@ needs = ["impl", "tests"]
                     rw_ext::ModeRegistry::builtins()
                         .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?,
                 ),
-                event_sink: Arc::new(NoopSessionEventSink::new(None)),
+                history: source.history,
+                event_sink: source.sink,
                 event_clock: Arc::new(SystemEventClock),
                 provider_admission: crate::provider_admission::testing::admission(),
                 secret_redactor: Arc::new(NoopSecretRedactor),
@@ -663,7 +671,7 @@ needs = ["impl", "tests"]
                 workspace_roots: Arc::new(NoopWorkspaceRootController),
                 extension_development: Arc::new(rw_core::NoopSessionExtensionController),
                 resources: Arc::new(rw_core::NoopSessionResources),
-                recovered: rw_core::SessionRecoveredState::default(),
+                recovered: source.recovered,
                 max_turns: 4,
                 identical_tool_failure_limit: 5,
                 max_output_tokens: 1024,
@@ -750,8 +758,15 @@ async fn production_actor_dispatches_command_node_through_typed_registry() {
     let commands = Arc::new(commands);
     let child_model = Arc::clone(&model);
     let child_commands = Arc::clone(&commands);
+    let child_storage = fixture.path().join("actor-history");
     let child_workspace = project.clone();
     let factory = Arc::new(ActorSubagentSessionFactory::new(move |launch| {
+        let source = crate::session_runtime::test_history::open(
+            &child_storage,
+            &launch.handle.session_id,
+            None,
+            vec![],
+        )?;
         Ok(SessionActorConfig {
             ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),
             ui_tool_source: std::sync::Arc::new(rw_core::ui::UnavailableUiToolSource),
@@ -772,7 +787,8 @@ async fn production_actor_dispatches_command_node_through_typed_registry() {
                 rw_ext::ModeRegistry::builtins()
                     .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?,
             ),
-            event_sink: Arc::new(NoopSessionEventSink::new(None)),
+            history: source.history,
+            event_sink: source.sink,
             event_clock: Arc::new(SystemEventClock),
             provider_admission: crate::provider_admission::testing::admission(),
             secret_redactor: Arc::new(NoopSecretRedactor),
@@ -781,7 +797,7 @@ async fn production_actor_dispatches_command_node_through_typed_registry() {
             workspace_roots: Arc::new(NoopWorkspaceRootController),
             extension_development: Arc::new(rw_core::NoopSessionExtensionController),
             resources: Arc::new(rw_core::NoopSessionResources),
-            recovered: rw_core::SessionRecoveredState::default(),
+            recovered: source.recovered,
             max_turns: 4,
             identical_tool_failure_limit: 5,
             max_output_tokens: 1024,

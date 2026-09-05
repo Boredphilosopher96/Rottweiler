@@ -329,6 +329,7 @@ pub(super) async fn run_actor(
             && state.pending_command.is_none()
             && state.pending_model_preparation.is_none()
             && signals.is_empty()
+            && state.pending_context_read.is_none()
             && cleanup.is_none()
         {
             cleanup = Some(shutdown::start_cleanup(
@@ -368,6 +369,9 @@ pub(super) async fn run_actor(
         }
         let tasks = state.tasks.clone();
         tokio::select! {
+            result = crate::engine::dispatch::context_job::wait(&mut state.pending_context_read) => {
+                crate::engine::dispatch::context_job::finish(result, &mut state, &config, &events).await;
+            }
             result = crate::engine::dispatch::model_job::wait(&mut state.pending_model_preparation) => {
                 crate::engine::dispatch::model_job::finish(result, crate::engine::dispatch::DispatchContext {
                     state: &mut state, config: &mut config, tool_context: &mut tool_context,

@@ -111,6 +111,13 @@ async fn engine_switches_to_an_exact_model_route_staged_by_provider_activation()
 
     let workspace = tempdir().expect("workspace");
     let session_id = SessionId("staged-provider-switch".to_owned());
+    let source = crate::session_runtime::test_history::open(
+        &workspace.path().join("history"),
+        &session_id,
+        Some(ClientId("driver".into())),
+        vec![],
+    )
+    .expect("actor history");
     let actor = SessionActor::spawn(SessionActorConfig {
         ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),
         ui_tool_source: std::sync::Arc::new(rw_core::ui::UnavailableUiToolSource),
@@ -128,7 +135,8 @@ async fn engine_switches_to_an_exact_model_route_staged_by_provider_activation()
         hooks: Arc::new(builtin_hook_dispatcher().expect("hooks")),
         commands: Arc::new(builtin_command_registry().expect("commands")),
         modes: Arc::new(rw_ext::ModeRegistry::builtins().expect("built-in modes")),
-        event_sink: Arc::new(rw_core::NoopSessionEventSink::default()),
+        history: source.history,
+        event_sink: source.sink,
         event_clock: Arc::new(SystemEventClock),
         provider_admission: test_provider_admission(),
         secret_redactor: Arc::new(rw_core::NoopSecretRedactor),
@@ -137,10 +145,7 @@ async fn engine_switches_to_an_exact_model_route_staged_by_provider_activation()
         workspace_roots: Arc::new(rw_core::NoopWorkspaceRootController),
         extension_development: Arc::new(rw_core::NoopSessionExtensionController),
         resources: Arc::new(rw_core::NoopSessionResources),
-        recovered: rw_core::SessionRecoveredState {
-            driver_client_id: Some(ClientId("driver".to_owned())),
-            ..rw_core::SessionRecoveredState::default()
-        },
+        recovered: source.recovered,
         max_turns: 2,
         identical_tool_failure_limit: 2,
         max_output_tokens: 512,

@@ -107,6 +107,7 @@ async fn session_handle_rewind_restores_ten_agent_edits_to_turn_three() {
         hooks: Arc::new(builtin_hook_dispatcher().expect("hooks")),
         commands: Arc::new(builtin_command_registry().expect("commands")),
         modes: mode_registry,
+        history: sink.clone(),
         event_sink: sink,
         event_clock: Arc::new(SystemEventClock),
         provider_admission: test_provider_admission(),

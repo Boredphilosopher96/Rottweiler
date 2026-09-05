@@ -57,6 +57,28 @@ impl<T> HistoryRead<T> {
         }
     }
 
+    /// Attach another existing allowance without releasing either resource owner.
+    #[must_use]
+    pub fn retain(self, owner: impl Send + Sync + 'static) -> Self {
+        Self {
+            value: self.value,
+            owner: Box::new((self.owner, owner)),
+        }
+    }
+
+    /// Transform an admitted result, releasing its allowance only if transformation fails.
+    /// # Errors
+    /// Returns the transformation error.
+    pub fn try_map<U, E>(
+        self,
+        transform: impl FnOnce(T) -> Result<U, E>,
+    ) -> Result<HistoryRead<U>, E> {
+        Ok(HistoryRead {
+            value: transform(self.value)?,
+            owner: self.owner,
+        })
+    }
+
     /// Keep the source allowance through an asynchronous transformation and its result.
     /// The transformation must fit the admitted allocation just like `map`.
     pub async fn map_async<U, F: std::future::Future<Output = U>>(

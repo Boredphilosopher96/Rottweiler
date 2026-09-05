@@ -26,7 +26,7 @@ use super::*;
 use crate as rw_core_batch;
 use crate::{
     ModelDriver, NoopFolderTrustController, NoopMutationCheckpointCoordinator, NoopSecretRedactor,
-    NoopSessionEventSink, PermissionGate, SessionActor, SessionActorConfig, SessionCommandAction,
+    NoopSessionEventSink, PermissionGate, SessionActorConfig, SessionCommandAction,
     SessionCommandContext, SessionCommandOutput, SessionEventSink, SessionRecoveredState,
     builtin_command_registry, builtin_hook_dispatcher,
 };
@@ -193,7 +193,7 @@ impl StubFactory {
         }
     }
 
-    fn session(&self, session_id: &SessionId) -> HostedSession {
+    async fn session(&self, session_id: &SessionId) -> HostedSession {
         let workspace = self.root.path().join(&session_id.0);
         std::fs::create_dir_all(&workspace).expect("session workspace");
         let mut commands = builtin_command_registry().expect("commands");
@@ -206,7 +206,7 @@ impl StubFactory {
                 MarkerCommand,
             )
             .expect("session marker command");
-        let handle = SessionActor::spawn(SessionActorConfig {
+        let handle = crate::engine::tests::fixtures::history::spawn(SessionActorConfig {
             ui: std::sync::Arc::new(crate::ui::EmptyUiRegistry),
             ui_tool_source: std::sync::Arc::new(crate::ui::UnavailableUiToolSource),
             budget_session_id: session_id.clone(),
@@ -227,6 +227,7 @@ impl StubFactory {
                 .event_sink
                 .clone()
                 .unwrap_or_else(|| Arc::new(NoopSessionEventSink::default())),
+            history: Arc::new(crate::engine::tests::fixtures::history::UnboundHistory),
             event_clock: Arc::new(SystemEventClock),
             provider_admission: crate::provider_admission::testing::admission(),
             secret_redactor: Arc::new(NoopSecretRedactor),
@@ -242,6 +243,7 @@ impl StubFactory {
             thinking: ThinkingLevel::Off,
             event_capacity: 64,
         })
+        .await
         .expect("session actor");
         HostedSession::new(
             SessionDescriptor {
@@ -366,7 +368,7 @@ impl SessionFactory for StubFactory {
             self.create_started.notify_one();
             self.create_release.notified().await;
         }
-        Ok(self.session(&request.session_id))
+        Ok(self.session(&request.session_id).await)
     }
 
     async fn resume(&self, session_id: &SessionId) -> Result<HostedSession, HostError> {
@@ -381,7 +383,7 @@ impl SessionFactory for StubFactory {
         if self.fail_resume_once.swap(false, Ordering::AcqRel) {
             return Err(HostError::Persistence("injected resume failure".to_owned()));
         }
-        Ok(self.session(session_id))
+        Ok(self.session(session_id).await)
     }
 
     async fn fork(&self, request: ForkSessionRequest) -> Result<HostedSession, HostError> {
@@ -393,7 +395,7 @@ impl SessionFactory for StubFactory {
             self.fork_started.notify_one();
             self.fork_release.notified().await;
         }
-        Ok(self.session(&request.child_session_id))
+        Ok(self.session(&request.child_session_id).await)
     }
 
     async fn shutdown(&self) -> Result<(), HostError> {

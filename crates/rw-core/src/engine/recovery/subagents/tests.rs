@@ -178,3 +178,49 @@ fn artifact_identity_cannot_be_rebound_to_different_contents() {
     );
     assert!(index.advance(&journal.read_view()).is_err());
 }
+
+#[test]
+fn active_child_snapshot_bounds_unicode_and_rejects_excess_associations() {
+    let root = tempfile::tempdir().expect("root");
+    let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
+    let mut events = vec![PendingEvent::TurnStarted { turn: 1 }];
+    for child in 0..256 {
+        events.push(PendingEvent::SubagentSpawned {
+            subagent_id: SubagentId(format!("child-{child}")),
+            child_session_id: SessionId(format!("session-{child}")),
+            task: "犬".repeat(400),
+        });
+    }
+    append(&mut journal, events);
+    let mut index = SubagentLifecycleIndex::open(&journal.read_view()).expect("index");
+    catch_up(&mut index, &journal);
+    let view = index.snapshot(&journal.read_view()).expect("view");
+    let active = view.active_children().expect("bounded active set");
+    assert_eq!(active.len(), 256);
+    assert!(
+        active
+            .iter()
+            .all(|child| child.task_preview == "犬".repeat(341)
+                && child.task_truncated
+                && child.spawned_turn == 1)
+    );
+    append(&mut journal, vec![spawn("excess")]);
+    catch_up(&mut index, &journal);
+    assert_eq!(view.active_children().expect("immutable set").len(), 256);
+    assert!(
+        index
+            .snapshot(&journal.read_view())
+            .expect("view")
+            .active_children()
+            .is_err()
+    );
+    append(&mut journal, vec![finish("child-0", None)]);
+    catch_up(&mut index, &journal);
+    let active = index
+        .snapshot(&journal.read_view())
+        .expect("view")
+        .active_children()
+        .expect("terminal removed");
+    assert_eq!(active.len(), 256);
+    assert!(active.iter().all(|child| child.subagent_id.0 != "child-0"));
+}
