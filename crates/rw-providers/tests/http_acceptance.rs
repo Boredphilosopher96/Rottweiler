@@ -1,3 +1,6 @@
+#[path = "support/attempt_gate.rs"]
+mod attempt_gate;
+
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -638,7 +641,7 @@ async fn unreachable_primary_routes_to_live_http_fallback() {
     .unwrap_or_else(|error| panic!("fixture router must build: {error}"));
 
     let events = router
-        .stream_alias("fast", request())
+        .stream_alias("fast", request(), attempt_gate::gate())
         .unwrap_or_else(|error| panic!("fixture alias must resolve: {error}"))
         .collect::<Vec<_>>()
         .await;
@@ -671,7 +674,7 @@ async fn semantic_output_prevents_retryable_stream_failover() {
     .unwrap_or_else(|error| panic!("fixture router must build: {error}"));
 
     let events = router
-        .stream_alias("fast", request())
+        .stream_alias("fast", request(), attempt_gate::gate())
         .unwrap_or_else(|error| panic!("fixture alias must resolve: {error}"))
         .collect::<Vec<_>>()
         .await;

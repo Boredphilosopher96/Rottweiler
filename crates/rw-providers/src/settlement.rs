@@ -10,14 +10,28 @@ use futures_util::{FutureExt, Stream};
 use tokio::sync::oneshot;
 
 use crate::{
-    BoxEventStream, Provider, ProviderError, ProviderErrorKind, ProviderEvent, ProviderRequest,
+    BoxEventStream, ModelCandidate, Provider, ProviderAttempt, ProviderAttemptGate,
+    ProviderAttemptOutcome, ProviderError, ProviderErrorKind, ProviderEvent, ProviderRequest,
 };
 
 const MAX_OPERATIONS: usize = 64;
-type Completion = Shared<BoxFuture<'static, ()>>;
+type Completion = Shared<BoxFuture<'static, Result<(), ProviderError>>>;
 
 #[derive(Clone, Default)]
 pub(crate) struct ProviderOperations(Arc<Mutex<Vec<Arc<Operation>>>>);
+
+#[derive(Default)]
+struct Accounting {
+    attempt: Option<Box<dyn ProviderAttempt>>,
+    outcome: ProviderAttemptOutcome,
+    invoked: bool,
+}
+
+pub(crate) struct AttemptEntry {
+    pub(crate) candidate: ModelCandidate,
+    pub(crate) gate: Arc<dyn ProviderAttemptGate>,
+    pub(crate) number: u32,
+}
 
 struct Operation {
     provider: Arc<dyn Provider>,
@@ -30,13 +44,16 @@ impl ProviderOperations {
         &self,
         provider: Arc<dyn Provider>,
         request: ProviderRequest,
+        entry: AttemptEntry,
     ) -> Result<BoxEventStream, ProviderError> {
         let (finished, wait) = oneshot::channel();
         let completion = async move {
-            if wait.await.is_err() {
+            if let Ok(result) = wait.await {
+                result
+            } else {
                 tracing::error!("provider cleanup owner exited without effect settlement proof");
                 // A panicked cleanup owner cannot report safe completion.
-                std::future::pending::<()>().await;
+                std::future::pending::<Result<(), ProviderError>>().await
             }
         }
         .boxed()
@@ -58,20 +75,40 @@ impl ProviderOperations {
         }
         operations.push(Arc::clone(&operation));
         drop(operations);
+        let accounting = Arc::new(Mutex::new(Accounting::default()));
+        let captured = accounting.clone();
         let invoked = provider;
         let inner = async_stream::try_stream! {
+            let attempt = entry.gate.enter(&entry.candidate, &request, entry.number).await?;
+            {
+                let mut accounting = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                accounting.attempt = Some(attempt);
+                accounting.invoked = true;
+            }
             let mut stream = invoked.stream(request).await?;
             while let Some(event) = futures_util::StreamExt::next(&mut stream).await {
+                {
+                    let mut accounting = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    match &event {
+                        Ok(ProviderEvent::Usage { usage }) => accounting.outcome.usage = Some(*usage),
+                        Ok(ProviderEvent::Finished { .. }) => accounting.outcome.terminal = true,
+                        Err(_) => accounting.outcome.terminal = false,
+                        _ => {},
+                    }
+                }
                 yield event?;
             }
         };
         Ok(Box::pin(OwnedProviderStream {
             inner: Some(Box::pin(inner)),
             completion: operation.completion.clone(),
+            completion_reported: false,
+            terminal: None,
             cleanup: Some(Cleanup {
                 operation,
                 operations: self.clone(),
                 finished,
+                accounting,
             }),
         }))
     }
@@ -89,7 +126,11 @@ impl ProviderOperations {
             if pending.is_empty() {
                 return;
             }
-            futures_util::future::join_all(pending).await;
+            for result in futures_util::future::join_all(pending).await {
+                if let Err(error) = result {
+                    tracing::error!(%error, "provider effects settled but accounting remains unresolved");
+                }
+            }
         }
     }
 }
@@ -97,7 +138,8 @@ impl ProviderOperations {
 struct Cleanup {
     operation: Arc<Operation>,
     operations: ProviderOperations,
-    finished: oneshot::Sender<()>,
+    finished: oneshot::Sender<Result<(), ProviderError>>,
+    accounting: Arc<Mutex<Accounting>>,
 }
 
 impl Cleanup {
@@ -108,14 +150,32 @@ impl Cleanup {
             return;
         };
         runtime.spawn(async move {
-            self.operation.provider.settle_effects().await;
+            let (attempt, outcome, invoked) = {
+                let mut accounting = self
+                    .accounting
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                (
+                    accounting.attempt.take(),
+                    accounting.outcome,
+                    accounting.invoked,
+                )
+            };
+            if invoked {
+                self.operation.provider.settle_effects().await;
+            }
+            let result = if let Some(attempt) = attempt {
+                attempt.settle(outcome).await
+            } else {
+                Ok(())
+            };
             // Completed entries retire themselves, even if no next request arrives.
             self.operations
                 .0
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .retain(|operation| !Arc::ptr_eq(operation, &self.operation));
-            let _ = self.finished.send(());
+            let _ = self.finished.send(result);
         });
     }
 }
@@ -123,6 +183,8 @@ impl Cleanup {
 struct OwnedProviderStream {
     inner: Option<BoxEventStream>,
     completion: Completion,
+    completion_reported: bool,
+    terminal: Option<ProviderEvent>,
     cleanup: Option<Cleanup>,
 }
 
@@ -145,13 +207,54 @@ impl Stream for OwnedProviderStream {
     type Item = Result<ProviderEvent, ProviderError>;
 
     fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if let Some(inner) = &mut self.inner {
+        while let Some(inner) = &mut self.inner {
             match inner.as_mut().poll_next(context) {
+                Poll::Ready(Some(Ok(event @ ProviderEvent::Finished { .. })))
+                    if self.terminal.is_none() =>
+                {
+                    // A terminal is visible only after local effects and durable accounting settle.
+                    self.terminal = Some(event);
+                }
+                Poll::Ready(Some(Ok(_))) if self.terminal.is_some() => {
+                    if let Some(cleanup) = &self.cleanup {
+                        cleanup
+                            .accounting
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .outcome
+                            .terminal = false;
+                    }
+                    self.terminal = None;
+                    self.finish();
+                    return Poll::Ready(Some(Err(ProviderError::new(
+                        ProviderErrorKind::Protocol,
+                        "provider emitted data after its terminal",
+                    ))));
+                }
+                Poll::Ready(Some(Err(error))) => {
+                    self.terminal = None;
+                    return Poll::Ready(Some(Err(error)));
+                }
                 Poll::Ready(None) => self.finish(),
                 event => return event,
             }
         }
-        self.completion.poll_unpin(context).map(|()| None)
+        if self.completion_reported {
+            return Poll::Ready(None);
+        }
+        match self.completion.poll_unpin(context) {
+            Poll::Ready(result) => {
+                self.completion_reported = true;
+                Poll::Ready(match result {
+                    Ok(()) => self.terminal.take().map(Ok),
+                    Err(error) => {
+                        self.terminal = None;
+                        Some(Err(error))
+                    }
+                })
+            }
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
@@ -243,7 +346,7 @@ mod tests {
             ..Default::default()
         });
         let mut stream = operations
-            .stream(provider.clone(), request())
+            .stream(provider.clone(), request(), crate::attempt::fixture_entry())
             .expect("admitted provider");
         assert!(futures_util::poll!(stream.next()).is_pending());
         let task = tokio::spawn(async move {
@@ -264,7 +367,7 @@ mod tests {
         let provider = Arc::new(GatedProvider::default());
         let operations = ProviderOperations::default();
         let mut stream = operations
-            .stream(provider.clone(), request())
+            .stream(provider.clone(), request(), crate::attempt::fixture_entry())
             .expect("admit");
         let task = tokio::spawn(async move { stream.next().await });
         provider.invoked.notified().await;
@@ -293,17 +396,21 @@ mod tests {
         let mut providers = Vec::new();
         for _ in 0..MAX_OPERATIONS {
             let provider = Arc::new(GatedProvider::default());
-            drop(
-                operations
-                    .stream(provider.clone(), request())
-                    .expect("admit"),
-            );
+            let mut stream = operations
+                .stream(provider.clone(), request(), crate::attempt::fixture_entry())
+                .expect("admit");
+            assert!(futures_util::poll!(stream.next()).is_pending());
+            drop(stream);
             provider.cleanup_started.notified().await;
             providers.push(provider);
         }
         assert!(
             operations
-                .stream(Arc::new(GatedProvider::default()), request())
+                .stream(
+                    Arc::new(GatedProvider::default()),
+                    request(),
+                    crate::attempt::fixture_entry()
+                )
                 .is_err()
         );
         for provider in providers {
@@ -313,3 +420,6 @@ mod tests {
         assert!(operations.0.lock().expect("registry").is_empty());
     }
 }
+
+#[cfg(test)]
+mod accounting_tests;
