@@ -20,10 +20,12 @@ mod receipts;
 mod reduce;
 pub use read::{
     CanonicalHistory, HistoryMaterializationLimits, MAX_MATERIALIZED_HISTORY_BYTES,
-    MAX_MATERIALIZED_HISTORY_TURNS, RecoverySnapshot,
+    MAX_MATERIALIZED_HISTORY_DECODE_BYTES, MAX_MATERIALIZED_HISTORY_TURNS, RecoverySnapshot,
 };
+mod pages;
 mod state;
 mod window;
+pub use pages::ConversationPage;
 mod workspace;
 pub use projector::{CanonicalRecovery, RecoveryProgress};
 use rw_store::session::recovery_index::RecoveryIndexError;
@@ -76,3 +78,6 @@ mod source_lookup_tests;
 
 #[cfg(test)]
 mod accounting_tests;
+
+#[cfg(test)]
+mod page_tests;

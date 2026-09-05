@@ -20,6 +20,7 @@ pub struct ConversationCut {
     pub generation: u64,
     pub turns: u64,
     pub serialized_bytes: u64,
+    pub decoded_bytes: u64,
     pub estimated_tokens: u64,
 }
 
@@ -38,8 +39,10 @@ pub struct ConversationSource {
     pub agent_turn: u64,
     pub role: rw_types::Role,
     pub serialized_bytes: u64,
+    pub decoded_bytes: u64,
     pub estimated_tokens: u64,
     pub cumulative_bytes: u64,
+    pub cumulative_decoded_bytes: u64,
     pub cumulative_tokens: u64,
 }
 

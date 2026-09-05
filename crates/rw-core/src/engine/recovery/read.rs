@@ -12,6 +12,8 @@ use std::{collections::VecDeque, ops::Range};
 
 /// Hard maximum canonical JSON bytes retained by one provider/context materialization.
 pub const MAX_MATERIALIZED_HISTORY_BYTES: u64 = 32 * 1024 * 1024;
+/// Retained typed turns, independent of the raw reader's page and decode scratch.
+pub const MAX_MATERIALIZED_HISTORY_DECODE_BYTES: u64 = 64 * 1024 * 1024;
 /// Hard maximum IR turns retained by one provider/context materialization.
 pub const MAX_MATERIALIZED_HISTORY_TURNS: usize = 16_384;
 
@@ -21,12 +23,14 @@ pub const MAX_MATERIALIZED_HISTORY_TURNS: usize = 16_384;
 pub struct HistoryMaterializationLimits {
     pub max_turns: usize,
     pub max_serialized_bytes: u64,
+    pub max_decoded_bytes: u64,
 }
 impl Default for HistoryMaterializationLimits {
     fn default() -> Self {
         Self {
             max_turns: MAX_MATERIALIZED_HISTORY_TURNS,
             max_serialized_bytes: MAX_MATERIALIZED_HISTORY_BYTES,
+            max_decoded_bytes: MAX_MATERIALIZED_HISTORY_DECODE_BYTES,
         }
     }
 }
@@ -138,14 +142,19 @@ impl CanonicalHistory {
     ) -> Result<Vec<Turn>, RecoveryError> {
         if limits.max_turns > MAX_MATERIALIZED_HISTORY_TURNS
             || limits.max_serialized_bytes > MAX_MATERIALIZED_HISTORY_BYTES
+            || limits.max_decoded_bytes > MAX_MATERIALIZED_HISTORY_DECODE_BYTES
         {
             return Err(RecoveryError::Limit(
                 "materialization limits exceed hard bounds",
             ));
         }
         let bytes = self.window_bytes(range.clone())?;
+        let decoded_bytes = self.window_decoded_bytes(range.clone())?;
         let count = range.end - range.start;
-        if count > limits.max_turns as u64 || bytes > limits.max_serialized_bytes {
+        if count > limits.max_turns as u64
+            || bytes > limits.max_serialized_bytes
+            || decoded_bytes > limits.max_decoded_bytes
+        {
             return Err(RecoveryError::Limit("provider history materialization"));
         }
         let mut output = Vec::with_capacity(
@@ -156,32 +165,16 @@ impl CanonicalHistory {
             events: VecDeque::new(),
         };
         let mut observed_bytes = 0_u64;
+        let mut observed_decoded = 0_u64;
         for ordinal in range {
             let row = self.turn_source(ordinal)?;
-            let event = source.event(row.sequence)?;
-            let turn = match (row.kind, event) {
-                (
-                    TurnSourceKind::Committed,
-                    EngineEvent::ConversationTurnCommitted {
-                        agent_turn, turn, ..
-                    },
-                ) if agent_turn == row.agent_turn => turn,
-                (
-                    TurnSourceKind::Shell,
-                    EngineEvent::UserShellStateChanged {
-                        command,
-                        active: false,
-                        status: Some(status),
-                        captured_output,
-                        ..
-                    },
-                ) => crate::engine::projection::shell_context_turn(
-                    command.as_deref().unwrap_or_default(),
-                    status,
-                    captured_output.as_deref(),
-                ),
-                _ => return Err(RecoveryError::Invalid("canonical source selector")),
-            };
+            observed_decoded = observed_decoded
+                .checked_add(row.decoded_bytes)
+                .ok_or(RecoveryError::Limit("materialized decode counter"))?;
+            if observed_decoded > limits.max_decoded_bytes {
+                return Err(RecoveryError::Limit("provider decoded materialization"));
+            }
+            let turn = source.turn(&row)?;
             let actual_bytes = serialized_size(&turn)?;
             if turn.role != row.role || actual_bytes != row.serialized_bytes {
                 return Err(RecoveryError::Invalid("canonical source metadata"));
@@ -194,7 +187,7 @@ impl CanonicalHistory {
             }
             output.push(turn);
         }
-        if observed_bytes != bytes {
+        if observed_bytes != bytes || observed_decoded != decoded_bytes {
             return Err(RecoveryError::Invalid("cumulative source size"));
         }
         Ok(output)
@@ -206,6 +199,42 @@ pub(super) struct SourceReader<'a> {
     pub(super) events: VecDeque<EngineEvent>,
 }
 impl SourceReader<'_> {
+    fn turn(&mut self, row: &ConversationSource) -> Result<Turn, RecoveryError> {
+        let event = self.event(row.sequence)?;
+        let turn = match (row.kind, event) {
+            (
+                TurnSourceKind::Committed,
+                EngineEvent::ConversationTurnCommitted {
+                    agent_turn, turn, ..
+                },
+            ) if agent_turn == row.agent_turn => turn,
+            (
+                TurnSourceKind::Shell,
+                EngineEvent::UserShellStateChanged {
+                    command,
+                    active: false,
+                    status: Some(status),
+                    captured_output,
+                    ..
+                },
+            ) => crate::engine::projection::shell_context_turn(
+                command.as_deref().unwrap_or_default(),
+                status,
+                captured_output.as_deref(),
+            ),
+            _ => return Err(RecoveryError::Invalid("canonical source selector")),
+        };
+        let plan = rw_types::allocation::AllocationPlan::new(turn)
+            .map_err(|_| RecoveryError::Limit("materialized allocation overflow"))?;
+        if plan.bytes() as u64 > row.decoded_bytes {
+            return Err(RecoveryError::Invalid(
+                "canonical decoded allocation metadata",
+            ));
+        }
+        let turn = plan.prepare().into_inner();
+        Ok(turn)
+    }
+
     pub(super) fn event(&mut self, sequence: SequenceId) -> Result<EngineEvent, RecoveryError> {
         if self
             .events

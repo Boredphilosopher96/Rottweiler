@@ -99,7 +99,8 @@ fn exact_window_admission_and_snapshot_are_independent_of_later_appends() {
                 0..2,
                 HistoryMaterializationLimits {
                     max_turns: 2,
-                    max_serialized_bytes: bytes
+                    max_serialized_bytes: bytes,
+                    max_decoded_bytes: MAX_MATERIALIZED_HISTORY_DECODE_BYTES,
                 }
             )
             .expect("exact"),
@@ -110,7 +111,8 @@ fn exact_window_admission_and_snapshot_are_independent_of_later_appends() {
             0..2,
             HistoryMaterializationLimits {
                 max_turns: 2,
-                max_serialized_bytes: bytes - 1
+                max_serialized_bytes: bytes - 1,
+                max_decoded_bytes: MAX_MATERIALIZED_HISTORY_DECODE_BYTES,
             }
         ),
         Err(RecoveryError::Limit(_))
@@ -120,7 +122,8 @@ fn exact_window_admission_and_snapshot_are_independent_of_later_appends() {
             0..2,
             HistoryMaterializationLimits {
                 max_turns: 1,
-                max_serialized_bytes: bytes
+                max_serialized_bytes: bytes,
+                max_decoded_bytes: MAX_MATERIALIZED_HISTORY_DECODE_BYTES,
             }
         ),
         Err(RecoveryError::Limit(_))
@@ -402,7 +405,8 @@ fn large_source_record_does_not_inflate_metadata_or_prevent_exact_materializatio
             0..1,
             HistoryMaterializationLimits {
                 max_turns: usize::MAX,
-                max_serialized_bytes: u64::MAX
+                max_serialized_bytes: u64::MAX,
+                max_decoded_bytes: MAX_MATERIALIZED_HISTORY_DECODE_BYTES,
             }
         ),
         Err(RecoveryError::Limit(_))

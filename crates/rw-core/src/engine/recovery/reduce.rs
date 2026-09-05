@@ -480,11 +480,16 @@ fn append_turn(
 ) -> Result<(), RecoveryError> {
     let cut = head.compacting.as_mut().unwrap_or(&mut head.conversation);
     let bytes = serialized_size(turn)?;
+    let decoded_bytes = super::encoding::turn_decode_bytes(turn)?;
     let tokens = LocalTokenEstimator::turn(turn);
     cut.serialized_bytes = cut
         .serialized_bytes
         .checked_add(bytes)
         .ok_or(RecoveryError::Limit("conversation byte counter"))?;
+    cut.decoded_bytes = cut
+        .decoded_bytes
+        .checked_add(decoded_bytes)
+        .ok_or(RecoveryError::Limit("conversation decoded byte counter"))?;
     cut.estimated_tokens = cut
         .estimated_tokens
         .checked_add(tokens)
@@ -497,8 +502,10 @@ fn append_turn(
             agent_turn,
             role: turn.role.clone(),
             serialized_bytes: bytes,
+            decoded_bytes,
             estimated_tokens: tokens,
             cumulative_bytes: cut.serialized_bytes,
+            cumulative_decoded_bytes: cut.decoded_bytes,
             cumulative_tokens: cut.estimated_tokens,
         },
     )?;

@@ -100,7 +100,12 @@ impl CanonicalRecovery {
                         .estimated_tokens
                         .checked_add(item.estimated_tokens)
                         .ok_or(RecoveryError::Limit("conversation token counter"))?;
+                    to.decoded_bytes = to
+                        .decoded_bytes
+                        .checked_add(item.decoded_bytes)
+                        .ok_or(RecoveryError::Limit("clear decoded byte counter"))?;
                     item.cumulative_bytes = to.serialized_bytes;
+                    item.cumulative_decoded_bytes = to.decoded_bytes;
                     item.cumulative_tokens = to.estimated_tokens;
                     mutations.push(RecoveryMutation::Put(RecoveryRow {
                         key: key(CONVERSATION, to.generation, to.turns),
