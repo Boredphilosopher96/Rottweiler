@@ -19,6 +19,8 @@ providerHttpCancel: "provider/http_cancel",
 eventPublish: "event/publish",
 eventRead: "event/read",
 sessionQuery: "session/query",
+contextRead: "session/context_read",
+sessionControl: "session/control",
 stateRead: "extension/state_read",
 stateCommit: "extension/state_commit",
 injectMessage: "session/inject_message",
@@ -106,6 +108,8 @@ export type { ExtensionEventKind, ExtensionEventNotice, ExtensionEventOutcome, E
 export type PluginPushMethod =
   | "event/read"
   | "session/query"
+  | "session/context_read"
+  | "session/control"
   | "extension/state_read"
   | "extension/state_commit"
   | "session/inject_message"

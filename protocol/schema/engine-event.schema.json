@@ -3649,6 +3649,23 @@
         {
           "type": "object",
           "properties": {
+            "invocation_id": {
+              "$ref": "#/$defs/ToolInvocationId"
+            },
+            "type": {
+              "type": "string",
+              "const": "tool_presentation"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "invocation_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
             "type": {
               "type": "string",
               "const": "command_message"
@@ -3755,6 +3772,16 @@
             "output": {
               "$ref": "#/$defs/TranscriptBodyPreview"
             },
+            "presentation": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TranscriptToolPresentation"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "type": {
               "type": "string",
               "const": "finished"
@@ -3764,9 +3791,29 @@
           "required": [
             "type",
             "is_error",
-            "output"
+            "output",
+            "presentation"
           ]
         }
+      ]
+    },
+    "TranscriptToolPresentation": {
+      "description": "Compact reference to a complete host-projected tool surface.",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "maxLength": 128,
+          "x-rw-max-utf8-bytes": 128
+        },
+        "source": {
+          "$ref": "#/$defs/TranscriptContentSource"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "source"
       ]
     },
     "SubagentId": {

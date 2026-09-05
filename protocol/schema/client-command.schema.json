@@ -2079,6 +2079,23 @@
         {
           "type": "object",
           "properties": {
+            "invocation_id": {
+              "$ref": "#/$defs/ToolInvocationId"
+            },
+            "type": {
+              "type": "string",
+              "const": "tool_presentation"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "invocation_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
             "type": {
               "type": "string",
               "const": "command_message"
@@ -2155,6 +2172,10 @@
           ]
         }
       ]
+    },
+    "ToolInvocationId": {
+      "description": "Host-owned identity of one tool execution, independent of provider call IDs.",
+      "type": "string"
     },
     "ModelAlias": {
       "description": "Provider-blind model alias resolved by the engine router.",
@@ -2237,10 +2258,6 @@
     },
     "ToolCallId": {
       "description": "Stable identifier assigned to a model tool call.",
-      "type": "string"
-    },
-    "ToolInvocationId": {
-      "description": "Host-owned identity of one tool execution, independent of provider call IDs.",
       "type": "string"
     },
     "ApprovalDecision": {

@@ -44,6 +44,8 @@
     "eventPublish": "event/publish",
     "eventRead": "event/read",
     "sessionQuery": "session/query",
+    "contextRead": "session/context_read",
+    "sessionControl": "session/control",
     "stateRead": "extension/state_read",
     "stateCommit": "extension/state_commit",
     "injectMessage": "session/inject_message",
