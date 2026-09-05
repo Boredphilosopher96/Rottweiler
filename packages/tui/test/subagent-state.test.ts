@@ -67,7 +67,7 @@ describe("subagent state boundary", () => {
           capabilities: ["write_filesystem"],
           rationale: null,
           diff: null,
-          chunks: toolOutputBuffer([]),
+          diffSource: null, chunks: toolOutputBuffer([]),
           display: null, source: null,
           isError: null,
           callIndex: 0,

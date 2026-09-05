@@ -22,7 +22,7 @@ export function scenarioState(scenario: VisualScenario): RottweilerState {
     capabilities: ["execute"],
     rationale: "Run the focused reconnect regression suite",
     display: null, source: null,
-    chunks: toolOutputBuffer([]),
+    diffSource: null, chunks: toolOutputBuffer([]),
     isError: null,
   })
   return {
@@ -207,7 +207,7 @@ function toolsState(): RottweilerState {
     capabilities: [],
     rationale: null,
     diff: null,
-    chunks: toolOutputBuffer([]),
+    diffSource: null, chunks: toolOutputBuffer([]),
     display: prepareToolDisplay({ type: "text", text: "Completed retained output" }, null, { path: `${toolCallId}.ts` }, false), source: null,
     isError: false,
     callIndex,
@@ -295,7 +295,7 @@ function conversationState(): RottweilerState {
     capabilities: ["write_filesystem"],
     rationale: "Track the durable cursor independently",
     display: prepareToolDisplay({ type: "text", text: "Updated core/cursor.rs" }, null, { path: "core/cursor.rs" }, false), source: null,
-    chunks: toolOutputBuffer([]),
+    diffSource: null, chunks: toolOutputBuffer([]),
     isError: false,
   })
   const tests = tool({
@@ -306,7 +306,7 @@ function conversationState(): RottweilerState {
     capabilities: ["execute"],
     rationale: "Run the focused regression suite",
     display: prepareToolDisplay({ type: "text", text: "18 passed; 0 failed" }, null, { command: "cargo test -p rw-core" }, false), source: null,
-    chunks: toolOutputBuffer([]),
+    diffSource: null, chunks: toolOutputBuffer([]),
     isError: false,
   })
   const read = tool({
@@ -317,7 +317,7 @@ function conversationState(): RottweilerState {
     capabilities: ["read_filesystem"],
     rationale: "Confirm the reconnect contract",
     display: prepareToolDisplay({ type: "text", text: "184 lines" }, null, { path: "protocol/session-log.md" }, false), source: null,
-    chunks: toolOutputBuffer([]),
+    diffSource: null, chunks: toolOutputBuffer([]),
     isError: false,
   })
   return {

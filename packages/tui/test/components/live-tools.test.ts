@@ -86,7 +86,7 @@ describe("live-tools components", () => {
         capabilities: ["read_filesystem" as const],
         rationale: null,
         diff: null,
-        chunks: toolOutputBuffer([]),
+        diffSource: null, chunks: toolOutputBuffer([]),
         display: null, source: null,
         isError: null,
         callIndex: 0,
@@ -120,7 +120,7 @@ describe("live-tools components", () => {
       capabilities: [],
       rationale: null,
       diff: null,
-      chunks: toolOutputBuffer([]),
+      diffSource: null, chunks: toolOutputBuffer([]),
       display: prepareToolDisplay({ type: "text", text: "Path=src/main.rs" }, null, { path: "src/main.rs" }, false), source: null,
       isError: false,
       callIndex: 0,
@@ -155,7 +155,7 @@ describe("live-tools components", () => {
         diff_hash: "diff",
         truncated: false,
       },
-      chunks: toolOutputBuffer([]),
+      diffSource: null, chunks: toolOutputBuffer([]),
       display: prepareToolDisplay({ type: "text", text: "1 change applied" }, null, { path: "src/main.rs" }, false), source: null,
       isError: false,
       callIndex: 0,
@@ -183,7 +183,7 @@ describe("live-tools components", () => {
       capabilities: ["write_filesystem" as const],
       rationale: "Apply the requested change",
       diff: null,
-      chunks: toolOutputBuffer([]),
+      diffSource: null, chunks: toolOutputBuffer([]),
       display: null, source: null,
       isError: null,
       callIndex: 0,
@@ -234,7 +234,7 @@ describe("live-tools components", () => {
       capabilities: ["execute" as const],
       rationale: null,
       diff: null,
-      chunks: toolOutputBuffer(Array.from({ length: 12 }, (_, index) => ({
+      diffSource: null, chunks: toolOutputBuffer(Array.from({ length: 12 }, (_, index) => ({
         stream: "stdout" as const,
         chunk: `progress-${index + 1}\n`,
       }))),
@@ -280,7 +280,7 @@ describe("live-tools components", () => {
       capabilities: ["read_filesystem" as const],
       rationale: null,
       diff: null,
-      chunks: toolOutputBuffer(Array.from({ length: 12 }, (_, index) => ({
+      diffSource: null, chunks: toolOutputBuffer(Array.from({ length: 12 }, (_, index) => ({
         stream: "stdout" as const,
         chunk: `line-${index + 1}\n`,
       }))),
@@ -385,7 +385,7 @@ describe("live-tools components", () => {
       capabilities: ["read_filesystem"],
       rationale: null,
       diff: null,
-      chunks: toolOutputBuffer(Array.from({ length: 12 }, (_, index) => ({
+      diffSource: null, chunks: toolOutputBuffer(Array.from({ length: 12 }, (_, index) => ({
         stream: "stdout" as const,
         chunk: `selection-${index + 1}\n`,
       }))),

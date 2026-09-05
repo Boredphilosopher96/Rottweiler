@@ -65,7 +65,7 @@ describe("client-owned renderer handoff", () => {
     const tool: ToolProjection = {
       toolCallId: "one", turnId: "turn", name: "read", args: { path: "one.txt" }, status: "running",
       invocationId: "one",
-      capabilities: ["read_filesystem"], rationale: null, diff: null, chunks: toolOutputBuffer([{ stream: "stdout", chunk: "some output" }]),
+      capabilities: ["read_filesystem"], rationale: null, diff: null, diffSource: null, chunks: toolOutputBuffer([{ stream: "stdout", chunk: "some output" }]),
       display: null, source: null, isError: null, callIndex: 0, timing: { kind: "unknown" },
     }
     const initial = { ...createInitialState(), tools: { one: tool }, streamingTail: createStreamingTail({

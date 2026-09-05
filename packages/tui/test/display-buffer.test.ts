@@ -15,7 +15,7 @@ import { PROTOCOL_VERSION, type EngineEvent } from "../src/protocol"
 function tool(chunks = EMPTY_TOOL_OUTPUT): ToolProjection {
   return {
     toolCallId: "stream", invocationId: "stream-1", turnId: "1", name: "bash", args: { command: "echo output" },
-    status: "running", capabilities: [], rationale: null, diff: null, chunks, display: null, source: null,
+    status: "running", capabilities: [], rationale: null, diff: null, diffSource: null, chunks, display: null, source: null,
     isError: null, callIndex: 0, timing: { kind: "unknown" },
   }
 }

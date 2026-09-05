@@ -88,9 +88,13 @@ impl TranscriptDocument {
                     ..
                 },
             ) if invocation_id == &recorded => Self::json(&presentation, max_bytes),
-            (TranscriptContentSelector::ToolDiff {}, EngineEvent::ToolDiffReady { diff, .. }) => {
-                Self::json(&diff, max_bytes)
-            }
+            (
+                TranscriptContentSelector::ToolDiff {},
+                EngineEvent::ToolDiffReady { diff, .. }
+                | EngineEvent::ToolApprovalNeeded {
+                    diff: Some(diff), ..
+                },
+            ) => Self::json(&diff, max_bytes),
             (
                 TranscriptContentSelector::CommandMessage {},
                 EngineEvent::CommandFinished { message, .. },

@@ -106,6 +106,12 @@ export function buildSurface(host: SurfaceHost, theme: RottweilerTheme): void {
       onOpenChild: child => {
         host.children.openHistorical({ sessionId: child.session_id, subagentId: child.subagent_id, task: child.task.text, sourceSequence: child.task.source.sequence })
       },
+      onOpenLiveContent: source => {
+        host.outputViewerInvocationId = null
+        void host.document.openSource(host.children.readTarget, source)
+        host.ui.setState(host.ui.state)
+        host.ui.outputViewer.focusPresentation()
+      },
       onOpenContent: source => {
         const view = host.history?.controller.snapshot.page?.view
         if (view === undefined || host.document === null) return

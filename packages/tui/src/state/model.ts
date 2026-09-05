@@ -136,6 +136,7 @@ export interface ToolProjection {
   readonly status: ToolStatus
   readonly capabilities: readonly ToolCapability[]
   readonly rationale: string | null
+  readonly diffSource: TranscriptContentSource | null
   readonly diff: UnifiedDiff | null
   readonly chunks: ToolOutputBuffer
   readonly display: ToolDisplay | null

@@ -1,3 +1,4 @@
+import { retainedJsonBytes } from "../retained-json"
 import type { ToolOutput, UiPresentation } from "../protocol"
 import { formatToolSubject } from "../tool-arguments"
 import { boundedUtf8 } from "./display-buffer"
@@ -89,4 +90,14 @@ function prepare(output: ToolOutput, presentation: UiPresentation | null, args: 
   const command = args !== null && typeof args === "object" && "command" in args && typeof args.command === "string"
     ? boundedUtf8(args.command, MAX_TOOL_RESULT_PREVIEW_BYTES) : null
   return { subject: formatToolSubject(args), summary, details, truncated, permissionDenied, command }
+}
+
+
+export const MAX_COMPLETED_DIFF_BYTES = 16 * 1024
+/** Large complete proposals remain source-owned rather than retained in live cards. */
+export function retainedCompletedDiff(diff: import("../protocol").UnifiedDiff | null): import("../protocol").UnifiedDiff | null {
+  if (diff === null || retainedJsonBytes(diff, MAX_COMPLETED_DIFF_BYTES) > MAX_COMPLETED_DIFF_BYTES) return null
+  const copy = (text: string) => Buffer.from(text, "utf8").toString("utf8")
+  return { proposal_id: copy(diff.proposal_id), path: copy(diff.path), unified_diff: copy(diff.unified_diff),
+    arguments_hash: copy(diff.arguments_hash), base_hash: copy(diff.base_hash), diff_hash: copy(diff.diff_hash), truncated: diff.truncated }
 }

@@ -38,7 +38,7 @@ function tool(
     capabilities: [],
     rationale: null,
     diff: null,
-    chunks: toolOutputBuffer([]),
+    diffSource: null, chunks: toolOutputBuffer([]),
     display: prepareToolDisplay({ type: "text", text: "done" }, null, { path: `${toolCallId}.ts` }, false), source: null,
     isError: false,
     callIndex,

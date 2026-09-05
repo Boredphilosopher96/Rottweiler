@@ -35,7 +35,7 @@ describe("tool-presentation components", () => {
       capabilities: ["execute" as const],
       rationale: null,
       diff: null,
-      chunks: toolOutputBuffer([]),
+      diffSource: null, chunks: toolOutputBuffer([]),
       display: prepareToolDisplay({ type: "text" as const, text: "all tests passed" }, null, { command: "cargo test --workspace" }, false), source: null,
       isError: false,
       callIndex: 0,
@@ -63,7 +63,7 @@ describe("tool-presentation components", () => {
         diff_hash: "diff",
         truncated: false,
       },
-      chunks: toolOutputBuffer([]),
+      diffSource: null, chunks: toolOutputBuffer([]),
       display: prepareToolDisplay({ type: "text" as const, text: "applied 1 edit\nError parsing diff: Removed line count did not match for hunk at line 3" }, editPresentation, { path: "/workspace/src/main.rs" }, false), source: null,
       isError: false,
       callIndex: 1,
@@ -171,7 +171,7 @@ describe("tool-presentation components", () => {
         diff_hash: "diff",
         truncated: false,
       },
-      chunks: toolOutputBuffer([]),
+      diffSource: null, chunks: toolOutputBuffer([]),
       display: prepareToolDisplay({ type: "text", text: "26 changes applied" }, null, { path: "src/large.rs" }, false), source: null,
       isError: false,
       callIndex: 0,
@@ -216,7 +216,7 @@ describe("tool-presentation components", () => {
         diff_hash: "diff",
         truncated: false,
       },
-      chunks: toolOutputBuffer([]),
+      diffSource: null, chunks: toolOutputBuffer([]),
       display: prepareToolDisplay({ type: "text", text: "26 changes applied" }, null, { path: "src/large.rs" }, false), source: null,
       isError: false,
       callIndex: 0,
@@ -246,7 +246,7 @@ describe("tool-presentation components", () => {
       capabilities: ["read_filesystem" as const],
       rationale: null,
       diff: null,
-      chunks: toolOutputBuffer([]),
+      diffSource: null, chunks: toolOutputBuffer([]),
       display: prepareToolDisplay({
         type: "mixed" as const,
         parts: [
@@ -333,4 +333,27 @@ describe("tool-presentation components", () => {
     expect(card?.header.plainText).toBe("Terminal · done")
     expect(setup.captureCharFrame()).toContain("printf")
   })
+
+  test("source-only completed diffs expose a selectable canonical-content action", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 20, useThread: false })
+    renderer = setup.renderer
+    const source = { sequence: "7", selector: { type: "tool_diff" as const } }
+    const opened: unknown[] = []
+    const style = SyntaxStyle.create()
+    const card = new ToolBlockRenderable(renderer, kennelTheme, {
+      toolCallId: "edit", invocationId: "edit", turnId: "1", name: "edit", args: null,
+      status: "finished", capabilities: [], rationale: null, diff: null, diffSource: source,
+      chunks: toolOutputBuffer([]), display: prepareToolDisplay({ type: "text", text: "Updated file" }, null, null, false),
+      source: { sequence: "8", selector: { type: "tool_output" } }, isError: false, callIndex: 0, timing: { kind: "unknown" },
+    }, true, undefined, { syntaxStyle: style, onOpenLiveContent: value => opened.push(value) })
+    renderer.root.add(card)
+    await setup.renderOnce()
+    const link = card.getChildren().flatMap(child => child.getChildren()).find(child => child.id === "tool-diff-source-edit")!
+    expect(link).toBeDefined()
+    expect(setup.captureCharFrame()).toContain("View complete diff")
+    await setup.mockMouse.click(link.x + 2, link.y)
+    expect(opened).toEqual([source])
+    expect(card.diff).toBeNull()
+  })
+
 })

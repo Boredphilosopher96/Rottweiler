@@ -116,3 +116,6 @@ Reply collection and JSON decoding use the same cache allocation owner as retain
 
 
 The question projection owns unresolved interactions only. A durable answer releases the corresponding question body; the canonical journal retains the exchange. Question request count and serialized payload admission use generated producer limits. Citation count and UTF-8 bytes are accumulated for the active agent turn using the same source-owned ceilings. An inadmissible event is rejected before advancing the durable client cursor; unresolved interactions are never evicted to make room.
+
+
+Approval payloads remain exact while a decision is unresolved. Completion releases rationale and capability lists, retaining at most a copied 16 KiB inline diff plus its canonical diff selector. Larger proposals and late diff updates keep the source action without retaining the complete proposal in the live tool map. Complete diff inspection resolves an authenticated bounded content view; historical rows continue to use their pinned view.

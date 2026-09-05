@@ -38,6 +38,7 @@ export interface TranscriptRenderableOptions {
   readonly onInteraction?: () => void
   readonly onOpenSubagent?: (subagentId: string) => void
   readonly onOpenToolOutput?: (invocationId: string) => void
+  readonly onOpenLiveContent?: (source: import("../../protocol").TranscriptContentSource) => void
   readonly onOpenContent?: (source: import("../../protocol").TranscriptContentSource) => void
   readonly onOpenChild?: (child: Extract<TranscriptContent, { type: "subagent" }>) => void
   readonly onHistoryAnchor?: (anchor: HistoryAnchor) => void
@@ -564,7 +565,7 @@ export class ToolBlockRenderable extends BoxRenderable {
   #syncDiff(tool: ToolProjection): void {
     const proposal = readToolDiff(tool)
     const view = this.#availableWidth < 100 ? "unified" : "split"
-    const signature = proposal === null ? "" : `${view}\u0000${proposal.path}\u0000${proposal.unifiedDiff}`
+    const signature = `${tool.diffSource?.sequence ?? ""}\u0000${proposal === null ? "" : `${view}\u0000${proposal.path}\u0000${proposal.unifiedDiff}`}`
     if (signature === this.#diffSignature) return
     this.#diffSignature = signature
     if (this.#diffContainer !== null) {
@@ -573,7 +574,15 @@ export class ToolBlockRenderable extends BoxRenderable {
       this.#diffContainer = null
       this.diff = null
     }
-    if (proposal === null) return
+    if (proposal === null) {
+      if (tool.diffSource !== null) {
+        const container = new BoxRenderable(this.ctx, { width: "100%", height: 1, flexDirection: "column", flexShrink: 0 })
+        this.#appendDiffSource(container, tool)
+        this.#diffContainer = container
+        this.insertBefore(container, this.#bodyContainer)
+      }
+      return
+    }
     const inlineDiff = minimalUnifiedDiff(proposal.path, proposal.unifiedDiff)
     // DiffRenderable itself resizes in place, but crossing the view threshold
     // also changes the pre-truncated diff and its surrounding marker rows. Keep
@@ -595,7 +604,7 @@ export class ToolBlockRenderable extends BoxRenderable {
     const container = new BoxRenderable(this.ctx, {
       id: `tool-diff-row-${tool.invocationId}`,
       width: "100%",
-      height: rows + 1 + (truncated === null ? 0 : 1),
+      height: rows + 1 + (truncated === null ? 0 : 1) + (tool.diffSource === null ? 0 : 1),
       flexDirection: "column",
       flexShrink: 0,
     })
@@ -645,8 +654,20 @@ export class ToolBlockRenderable extends BoxRenderable {
         selectable: true,
       }))
     }
+    this.#appendDiffSource(container, tool)
     this.#diffContainer = container
     this.insertBefore(container, this.#bodyContainer)
+  }
+
+  #appendDiffSource(container: BoxRenderable, tool: ToolProjection): void {
+    const source = tool.diffSource
+    if (source === null) return
+    const link = new TextRenderable(this.ctx, {
+      id: `tool-diff-source-${tool.invocationId}`, content: "View complete diff", fg: this.#theme.accent,
+      height: 1, flexShrink: 0, selectable: true,
+    })
+    bindSelectableClick(this.ctx, link, () => this.#rendering?.onOpenLiveContent?.(source))
+    container.add(link)
   }
 
   get expanded(): boolean {

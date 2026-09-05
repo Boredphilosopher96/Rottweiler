@@ -1220,3 +1220,41 @@ fn tool_surface_rows_retain_only_invocation_bound_source_and_load_complete_surfa
     );
     assert!(TranscriptDocument::from_event(event, &wrong, 65536).is_err());
 }
+
+#[test]
+fn approval_diff_content_uses_its_exact_canonical_source() {
+    let EngineEvent::ToolDiffReady { diff, .. } = tool_diff(7, 0) else {
+        unreachable!("fixture produces a diff")
+    };
+    let expected = serde_json::to_value(&diff).expect("diff JSON");
+    let event = EngineEvent::ToolApprovalNeeded {
+        meta: meta(7),
+        turn_id: TurnId("1".into()),
+        tool_call_id: ToolCallId("call".into()),
+        invocation_id: rw_types::ToolInvocationId("invocation".into()),
+        name: "edit".into(),
+        args: serde_json::json!({}),
+        capabilities: vec![],
+        rationale: "review".into(),
+        diff: Some(diff),
+    };
+    let document = TranscriptDocument::from_event(
+        event.clone(),
+        &source(SequenceId(7), TranscriptContentSelector::ToolDiff {}),
+        4096,
+    )
+    .expect("canonical approval diff");
+    let chunk = document.chunk(0, 4096).expect("bounded content");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(chunk.text).expect("diff body"),
+        expected
+    );
+    assert!(
+        TranscriptDocument::from_event(
+            event,
+            &source(SequenceId(8), TranscriptContentSelector::ToolDiff {}),
+            4096
+        )
+        .is_err()
+    );
+}

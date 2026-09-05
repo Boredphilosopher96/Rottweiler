@@ -14,7 +14,7 @@ function liveTool(): ToolProjection {
   return {
     toolCallId: "provider-call", invocationId: "host-invocation", turnId: "1", name: "read",
     args: { path: "README.md" }, status: "running", capabilities: [], rationale: null, diff: null,
-    chunks: toolOutputBuffer([]), display: null, source: null, isError: false, callIndex: 0, timing: { kind: "unknown" }
+    diffSource: null, chunks: toolOutputBuffer([]), display: null, source: null, isError: false, callIndex: 0, timing: { kind: "unknown" }
   }
 }
 function liveBlocks(root: BaseRenderable): ToolBlockRenderable[] {

@@ -337,7 +337,7 @@ describe("state queries", () => {
     expect(state.turns["4"]).toMatchObject({ status: "completed", usage })
     expect(state.tools["tool-1"]).toMatchObject({
       status: "finished",
-      rationale: "fixture",
+      rationale: null,
       chunks: toolOutputBuffer([]),
       display: { details: "done" },
       args: null,

@@ -1,4 +1,5 @@
 import { assertLiveAdmission, citationBytes } from "./live-admission"
+import { retainedCompletedDiff } from "./tool-display"
 import { prepareToolDisplay } from "./tool-display"
 import { commitTodos, invalidateTodos, readTodos } from "./todos"
 import {
@@ -784,7 +785,7 @@ function applyKnownEvent(
         capabilities: [],
         rationale: null,
         diff: null,
-        chunks: EMPTY_TOOL_OUTPUT,
+        diffSource: null, chunks: EMPTY_TOOL_OUTPUT,
         display: null, source: null,
         isError: null,
         callIndex: event.call_index,
@@ -811,7 +812,7 @@ function applyKnownEvent(
         capabilities: event.capabilities,
         rationale: event.rationale,
         diff: event.diff ?? null,
-        chunks: existing?.chunks ?? EMPTY_TOOL_OUTPUT,
+        diffSource: event.diff == null ? existing?.diffSource ?? null : { sequence: event.meta.sequence_id, selector: { type: "tool_diff" } }, chunks: existing?.chunks ?? EMPTY_TOOL_OUTPUT,
         display: existing?.display ?? null, source: existing?.source ?? null,
         isError: existing?.isError ?? null,
         callIndex: existing?.callIndex ?? 0,
@@ -836,7 +837,7 @@ function applyKnownEvent(
         capabilities: [],
         rationale: null,
         diff: null,
-        chunks: EMPTY_TOOL_OUTPUT,
+        diffSource: null, chunks: EMPTY_TOOL_OUTPUT,
         display: null, source: null,
         isError: null,
         callIndex: 0,
@@ -849,7 +850,8 @@ function applyKnownEvent(
           event.invocation_id,
           {
             ...existing,
-            diff: event.diff,
+            diff: existing.status === "finished" ? retainedCompletedDiff(event.diff) : event.diff,
+            diffSource: { sequence: event.meta.sequence_id, selector: { type: "tool_diff" } },
             timing: observeActivityTiming(existing.timing, event.meta.emitted_at),
           },
         ),
@@ -869,7 +871,7 @@ function applyKnownEvent(
         capabilities: [],
         rationale: null,
         diff: null,
-        chunks: EMPTY_TOOL_OUTPUT,
+        diffSource: null, chunks: EMPTY_TOOL_OUTPUT,
         display: null, source: null,
         isError: null,
         callIndex: 0,
@@ -895,10 +897,10 @@ function applyKnownEvent(
         name: existing?.name ?? "unknown",
         args: null,
         status: "finished",
-        capabilities: existing?.capabilities ?? [],
-        rationale: existing?.rationale ?? null,
-        diff: existing?.diff ?? null,
-        chunks: EMPTY_TOOL_OUTPUT,
+        capabilities: [],
+        rationale: null,
+        diff: retainedCompletedDiff(existing?.diff ?? null),
+        diffSource: existing?.diffSource ?? null, chunks: EMPTY_TOOL_OUTPUT,
         display: prepareToolDisplay(event.output, event.presentation, existing?.args ?? null, event.is_error),
         source: { sequence: event.meta.sequence_id, selector: { type: "tool_output" } },
         isError: event.is_error,

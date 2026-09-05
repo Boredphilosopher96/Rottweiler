@@ -152,7 +152,7 @@ describe("Rottweiler layout", () => {
             diff_hash: "diff",
             truncated: false,
           },
-          chunks: toolOutputBuffer([]),
+          diffSource: null, chunks: toolOutputBuffer([]),
           display: null, source: null,
           isError: null,
           callIndex: 0,

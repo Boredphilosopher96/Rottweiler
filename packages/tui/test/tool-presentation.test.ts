@@ -92,3 +92,24 @@ test("argument subjects omit internal metadata and preserve Unicode at truncatio
   expect(subject.isWellFormed()).toBe(true)
   expect(formatToolArguments({ body: { secret: "never traverse" } })).toBe("Body=structured value")
 })
+
+
+test("completed and late diffs release large approval metadata while preserving canonical sources", () => {
+  const diff = { proposal_id: "proposal", path: "file.rs", unified_diff: "+" + "x".repeat(256 * 1024),
+    arguments_hash: "args", base_hash: "base", diff_hash: "diff", truncated: false }
+  let state = reduce(createInitialState(), { type: "tool_approval_needed", meta: meta("1"), turn_id: "turn",
+    tool_call_id: "provider", invocation_id: "invocation", name: "edit", args: { path: "file.rs" },
+    capabilities: ["write_filesystem"], rationale: "r".repeat(64 * 1024), diff })
+  expect(state.tools.invocation?.diff).toBe(diff)
+  expect(state.tools.invocation?.rationale).toHaveLength(64 * 1024)
+  state = reduce(state, { type: "tool_call_finished", meta: meta("2"), turn_id: "turn", tool_call_id: "provider",
+    invocation_id: "invocation", output: { type: "text", text: "updated" }, presentation: null, is_error: false, call_index: 0 })
+  expect(state.tools.invocation?.diff).toBeNull()
+  expect(state.tools.invocation?.rationale).toBeNull()
+  expect(state.tools.invocation?.capabilities).toEqual([])
+  expect(state.tools.invocation?.diffSource).toEqual({ sequence: "1", selector: { type: "tool_diff" } })
+  state = reduce(state, { type: "tool_diff_ready", meta: meta("3"), turn_id: "turn", tool_call_id: "provider", invocation_id: "invocation", diff })
+  expect(state.tools.invocation?.diff).toBeNull()
+  expect(state.tools.invocation?.diffSource?.sequence).toBe("3")
+  expect(JSON.stringify(state.tools.invocation).length).toBeLessThan(2000)
+})

@@ -731,6 +731,7 @@ export class TranscriptRenderable extends BoxRenderable {
             (expanded) => this.#rememberToolExpansion(tool.invocationId, expanded),
             {
               syntaxStyle: this.#syntaxStyle,
+              ...(this.#historyOptions.onOpenLiveContent === undefined ? {} : { onOpenLiveContent: this.#historyOptions.onOpenLiveContent }),
               ...(this.#treeSitterClient === undefined
                 ? {}
                 : { treeSitterClient: this.#treeSitterClient }),

@@ -278,7 +278,7 @@ describe("Rottweiler tools-history", () => {
       capabilities: [],
       rationale: null,
       diff: null,
-      chunks: toolOutputBuffer([]),
+      diffSource: null, chunks: toolOutputBuffer([]),
       display: prepareToolDisplay({ type: "text", text: `turn ${turnId}` }, null, { path: `${turnId}.txt` }, false), source: null,
       isError: false,
       callIndex: 0,
