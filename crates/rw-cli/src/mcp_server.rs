@@ -304,7 +304,8 @@ pub(crate) async fn run_stdio(options: StdioServerOptions) -> Result<()> {
     let permissions = PermissionGate::for_headless_mode(PermissionModeDescriptor::AutoSafe)
         .with_workspace_roots(&options.workspace_roots);
     let mut request_entropy = [0_u8; 16];
-    getrandom::fill(&mut request_entropy).into_diagnostic()?;
+    getrandom::fill(&mut request_entropy)
+        .map_err(|_| miette!("MCP request identity entropy is unavailable"))?;
     let bridge = Arc::new(CliMcpBridge {
         host,
         registry,

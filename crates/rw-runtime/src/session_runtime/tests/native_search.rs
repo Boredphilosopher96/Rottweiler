@@ -18,7 +18,6 @@ use super::ToolDefinition;
 use super::WebSearchRequest;
 use super::WebSearchResponse;
 use super::WebSearchSource;
-use super::WebSearcher;
 use super::historical_tool_registry;
 use super::provider_model_for_alias;
 use super::provider_native_search_available;
