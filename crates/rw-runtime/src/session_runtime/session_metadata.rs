@@ -29,7 +29,7 @@ pub(crate) struct SessionMetadata {
     pub workspace_roots: Vec<PathBuf>,
     pub(super) initial_context_workspace_root_count: usize,
     #[serde(deserialize_with = "deserialize_optional_value")]
-    pub(crate) inherited_accounting_through: Option<SequenceId>,
+    pub(crate) inherited_journal_through: Option<SequenceId>,
     #[serde(deserialize_with = "deserialize_optional_value")]
     pub(super) fork_parent_session_id: Option<String>,
     #[serde(deserialize_with = "deserialize_optional_value")]
@@ -82,7 +82,7 @@ pub(super) fn persist_session_metadata(
         workspace_generation: 0,
         workspace_roots: workspace_roots.to_vec(),
         initial_context_workspace_root_count: workspace_roots.len(),
-        inherited_accounting_through: None,
+        inherited_journal_through: None,
         fork_parent_session_id: None,
         fork_at_turn: None,
         fork_operation_id: None,
@@ -203,7 +203,7 @@ pub fn load_inherited_accounting_boundary_bounded(
     max_bytes: u64,
 ) -> Result<(Option<SequenceId>, u64)> {
     load_session_metadata_any_bounded(storage_root, session_id, max_bytes)
-        .map(|(metadata, bytes)| (metadata.inherited_accounting_through, bytes))
+        .map(|(metadata, bytes)| (metadata.inherited_journal_through, bytes))
 }
 
 #[cfg(unix)]

@@ -64,7 +64,8 @@ fn exact_window_admission_and_snapshot_are_independent_of_later_appends() {
     let root = tempdir().expect("root");
     let modes = ModeRegistry::builtins().expect("modes");
     let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
-    let mut recovery = CanonicalRecovery::open(&journal.read_view(), &modes).expect("recovery");
+    let mut recovery =
+        CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("recovery");
     let user = text(Role::User, "first");
     let answer = text(Role::Assistant, "answer\n\"🙂");
     append(
@@ -180,7 +181,7 @@ fn compaction_generation_and_rewind_restore_exact_canonical_turns_across_reopen(
             },
         ],
     );
-    let mut recovery = CanonicalRecovery::open(&journal.read_view(), &modes).expect("open");
+    let mut recovery = CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("open");
     catch_up(&mut recovery, &journal.read_view(), &modes);
     assert_ne!(recovery.head().expect("head").conversation.generation, 0);
     append(
@@ -211,8 +212,8 @@ fn compaction_generation_and_rewind_restore_exact_canonical_turns_across_reopen(
     ));
     for _ in 0..10 {
         drop(recovery);
-        recovery =
-            CanonicalRecovery::open(&journal.read_view(), &modes).expect("reopen maintenance");
+        recovery = CanonicalRecovery::open(&journal.read_view(), &modes, None)
+            .expect("reopen maintenance");
         if !recovery
             .advance(&journal.read_view(), &modes)
             .expect("maintain")
@@ -290,7 +291,7 @@ fn model_clear_retains_only_system_rows_and_resumes_bounded_batches() {
         })
         .collect();
     append(&mut journal, pending);
-    let mut recovery = CanonicalRecovery::open(&journal.read_view(), &modes).expect("open");
+    let mut recovery = CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("open");
     catch_up(&mut recovery, &journal.read_view(), &modes);
     append(
         &mut journal,
@@ -306,7 +307,7 @@ fn model_clear_retains_only_system_rows_and_resumes_bounded_batches() {
     );
     for _ in 0..10 {
         drop(recovery);
-        recovery = CanonicalRecovery::open(&journal.read_view(), &modes).expect("reopen");
+        recovery = CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("reopen");
         if !recovery
             .advance(&journal.read_view(), &modes)
             .expect("batch")
@@ -336,7 +337,7 @@ fn recovery_head_stays_small_when_canonical_payload_history_grows() {
     let root = tempdir().expect("root");
     let modes = ModeRegistry::builtins().expect("modes");
     let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
-    let mut recovery = CanonicalRecovery::open(&journal.read_view(), &modes).expect("open");
+    let mut recovery = CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("open");
     for turn in 1..=200 {
         append(
             &mut journal,
@@ -357,7 +358,7 @@ fn recovery_head_stays_small_when_canonical_payload_history_grows() {
     assert!(serde_json::to_vec(&head).expect("serialize").len() < 2048);
     assert!(head.conversation.serialized_bytes > 2_000_000);
     drop(recovery);
-    let recovery = CanonicalRecovery::open(&journal.read_view(), &modes).expect("cold open");
+    let recovery = CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("cold open");
     assert_eq!(recovery.head().expect("cold head"), head);
 }
 
@@ -374,7 +375,7 @@ fn large_source_record_does_not_inflate_metadata_or_prevent_exact_materializatio
             turn: turn.clone(),
         }],
     );
-    let mut recovery = CanonicalRecovery::open(&journal.read_view(), &modes).expect("open");
+    let mut recovery = CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("open");
     catch_up(&mut recovery, &journal.read_view(), &modes);
     assert!(
         recovery
@@ -413,7 +414,7 @@ fn changed_mode_definition_rejects_entire_batch_without_advancing_head() {
     let root = tempdir().expect("root");
     let modes = ModeRegistry::builtins().expect("modes");
     let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
-    let mut recovery = CanonicalRecovery::open(&journal.read_view(), &modes).expect("open");
+    let mut recovery = CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("open");
     append(
         &mut journal,
         vec![

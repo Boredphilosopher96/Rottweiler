@@ -256,6 +256,8 @@ impl RuntimeWorkspaceRootController {
             Arc::clone(&self.journal_service),
         )
         .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+        let mode_registry = Arc::new(mode_registry);
+        event_sink.configure_canonical(Arc::clone(&mode_registry), None)?;
         let mut initial_context = fresh_initial_session_context(storage_root, &roots)
             .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
         if let Some(index) = skill_index_turn(&catalog)
@@ -322,7 +324,7 @@ impl RuntimeWorkspaceRootController {
             permissions,
             hooks: Arc::new(hooks),
             commands: Arc::new(commands),
-            modes: Arc::new(mode_registry),
+            modes: mode_registry,
             event_sink,
             event_clock: Arc::new(SystemEventClock),
             provider_admission,

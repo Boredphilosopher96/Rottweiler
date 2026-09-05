@@ -13,7 +13,8 @@ fn live_controls_do_not_materialize_historical_conversation_and_obey_byte_admiss
     let root = tempfile::tempdir().expect("root");
     let modes = ModeRegistry::builtins().expect("modes");
     let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
-    let mut recovery = CanonicalRecovery::open(&journal.read_view(), &modes).expect("recovery");
+    let mut recovery =
+        CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("recovery");
     append(
         &mut journal,
         vec![
@@ -127,7 +128,8 @@ fn overwritten_or_removed_control_sources_are_not_recovered() {
             },
         ],
     );
-    let mut recovery = CanonicalRecovery::open(&journal.read_view(), &modes).expect("recovery");
+    let mut recovery =
+        CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("recovery");
     catch_up(&mut recovery, &journal.read_view(), &modes);
     let history = recovery
         .snapshot()

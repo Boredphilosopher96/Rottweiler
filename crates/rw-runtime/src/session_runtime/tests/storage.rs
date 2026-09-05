@@ -25,7 +25,7 @@ use super::checkpoint_root;
 use super::commit_checkpoint_root_generation;
 use super::compact_title;
 use super::fork_hosted_session_storage;
-use super::inherited_accounting_through;
+use super::inherited_journal_through;
 use super::initialize_private_storage_root;
 use super::io;
 use super::load_session_events;
@@ -125,7 +125,7 @@ fn session_metadata_reads_are_bounded_descriptor_stable_and_single_link() {
     assert_eq!(metadata.session_id, "metadata-bounds");
     assert_eq!(descriptor_bytes, expected_bytes);
     assert_eq!(
-        inherited_accounting_through(root.path(), "metadata-bounds").expect("accounting boundary"),
+        inherited_journal_through(root.path(), "metadata-bounds").expect("accounting boundary"),
         None
     );
 
@@ -139,7 +139,7 @@ fn session_metadata_reads_are_bounded_descriptor_stable_and_single_link() {
         )
         .is_err()
     );
-    assert!(inherited_accounting_through(root.path(), "metadata-bounds").is_err());
+    assert!(inherited_journal_through(root.path(), "metadata-bounds").is_err());
     std::fs::remove_file(alias).expect("remove hard link");
     std::fs::OpenOptions::new()
         .write(true)
@@ -154,7 +154,7 @@ fn session_metadata_reads_are_bounded_descriptor_stable_and_single_link() {
         )
         .is_err()
     );
-    assert!(inherited_accounting_through(root.path(), "metadata-bounds").is_err());
+    assert!(inherited_journal_through(root.path(), "metadata-bounds").is_err());
 }
 
 #[cfg(unix)]
@@ -455,7 +455,7 @@ fn fork_storage_starts_empty_review_and_skips_inherited_accounting() {
             meta, driver_client_id,
         }) if meta.session_id == child && driver_client_id == &driver)
     );
-    let inherited = inherited_accounting_through(&storage, &child.0).expect("boundary");
+    let inherited = inherited_journal_through(&storage, &child.0).expect("boundary");
     assert_eq!(inherited, Some(SequenceId(5)));
     assert!(
         project_accounting(&child.0, &child_events, inherited)

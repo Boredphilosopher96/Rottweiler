@@ -248,7 +248,7 @@ pub(super) fn persist_forked_session_metadata(
     parent: &SessionMetadata,
     workspace_generation: u64,
     workspace_roots: &[PathBuf],
-    inherited_accounting_through: Option<SequenceId>,
+    inherited_journal_through: Option<SequenceId>,
     fork_at_turn: u64,
     fork_operation_id: Option<&str>,
 ) -> Result<()> {
@@ -263,7 +263,7 @@ pub(super) fn persist_forked_session_metadata(
         workspace_generation,
         workspace_roots: workspace_roots.to_vec(),
         initial_context_workspace_root_count: parent.initial_context_workspace_root_count,
-        inherited_accounting_through,
+        inherited_journal_through,
         fork_parent_session_id: Some(parent.session_id.clone()),
         fork_at_turn: Some(fork_at_turn),
         fork_operation_id: fork_operation_id.map(str::to_owned),

@@ -11,12 +11,12 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-pub(super) fn inherited_accounting_through(
+pub(super) fn inherited_journal_through(
     storage_root: &Path,
     session_id: &str,
 ) -> Result<Option<SequenceId>> {
     super::session_metadata::load_session_metadata_any(storage_root, session_id)
-        .map(|metadata| metadata.inherited_accounting_through)
+        .map(|metadata| metadata.inherited_journal_through)
 }
 
 pub(super) fn refresh_session_index(storage_root: &Path) -> Result<()> {
@@ -39,7 +39,7 @@ pub(super) fn refresh_session_index(storage_root: &Path) -> Result<()> {
                 if session_has_user_turn(&events) {
                     projections.push(project_session(&id, &events, log.path()));
                 }
-                let inherited_through = inherited_accounting_through(storage_root, &id)?;
+                let inherited_through = inherited_journal_through(storage_root, &id)?;
                 accounting_entries.extend(project_accounting(&id, &events, inherited_through)?);
             }
         }
@@ -103,7 +103,7 @@ pub(super) fn update_one_session_index(
     let accounting_entries = project_accounting(
         session_id,
         &events,
-        inherited_accounting_through(storage_root, session_id)?,
+        inherited_journal_through(storage_root, session_id)?,
     )?;
     AccountingLedger::open(storage_root)
         .and_then(|ledger| ledger.reconcile(&accounting_entries))

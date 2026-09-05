@@ -26,7 +26,7 @@ impl WorkspaceBootstrap {
             if stored.prefix.next_sequence != 0 {
                 return Err(RecoveryError::Invalid("missing recovery checkpoint"));
             }
-            RecoveryHead::new([0; 32])
+            RecoveryHead::new([0; 32], None)
         } else {
             let head: RecoveryHead = serde_json::from_slice(&stored.checkpoint)?;
             head.validate()?;

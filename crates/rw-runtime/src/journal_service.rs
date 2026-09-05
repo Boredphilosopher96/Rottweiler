@@ -51,7 +51,7 @@ impl JournalPublication {
             .last_sequence()
     }
 
-    fn capture(&self) -> JournalReadView {
+    pub(crate) fn capture(&self) -> JournalReadView {
         self.committed
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

@@ -39,7 +39,8 @@ fn workspace_bootstrap_reads_only_unapplied_suffix_and_preserves_index_authority
     assert_eq!(bootstrap.generation, 1);
     assert_eq!(bootstrap.root_count, 2);
     assert_eq!(bootstrap.scanned_events, 2);
-    let mut recovery = CanonicalRecovery::open(&journal.read_view(), &modes).expect("recovery");
+    let mut recovery =
+        CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("recovery");
     catch_up(&mut recovery, &journal.read_view(), &modes);
     let indexed = recovery.head().expect("head");
     drop(recovery);
@@ -57,7 +58,7 @@ fn workspace_bootstrap_reads_only_unapplied_suffix_and_preserves_index_authority
     assert_eq!(bootstrap.scanned_events, 1);
     assert_eq!(bootstrap.generation, 2);
     assert_eq!(bootstrap.root_count, 3);
-    let recovery = CanonicalRecovery::open(&journal.read_view(), &modes).expect("recovery");
+    let recovery = CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("recovery");
     assert_eq!(recovery.head().expect("unchanged index"), indexed);
 }
 
@@ -89,7 +90,8 @@ fn workspace_discovery_does_not_authorize_an_unknown_mode() {
             .generation,
         1
     );
-    let mut recovery = CanonicalRecovery::open(&journal.read_view(), &modes).expect("recovery");
+    let mut recovery =
+        CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("recovery");
     assert!(matches!(
         recovery.advance(&journal.read_view(), &modes),
         Err(RecoveryError::Projection(_))

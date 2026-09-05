@@ -24,7 +24,8 @@ fn accounting_byte_cut_resumes_exactly_and_rewind_preserves_billed_history() {
     let root = tempfile::tempdir().expect("root");
     let modes = ModeRegistry::builtins().expect("modes");
     let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
-    let mut recovery = CanonicalRecovery::open(&journal.read_view(), &modes).expect("recovery");
+    let mut recovery =
+        CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("recovery");
     for turn in 1..=2 {
         append(
             &mut journal,

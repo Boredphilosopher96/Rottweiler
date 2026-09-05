@@ -16,7 +16,7 @@ fn fixture() -> SessionMetadata {
         workspace_generation: 0,
         workspace_roots: vec![PathBuf::from("/workspace")],
         initial_context_workspace_root_count: 1,
-        inherited_accounting_through: None,
+        inherited_journal_through: None,
         fork_parent_session_id: None,
         fork_at_turn: None,
         fork_operation_id: None,

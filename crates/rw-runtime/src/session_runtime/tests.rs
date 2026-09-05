@@ -3,7 +3,7 @@
 #[cfg(test)]
 use super::accounting_projection::compact_title;
 #[cfg(test)]
-use super::accounting_projection::inherited_accounting_through;
+use super::accounting_projection::inherited_journal_through;
 #[cfg(test)]
 use super::accounting_projection::project_accounting;
 #[cfg(test)]

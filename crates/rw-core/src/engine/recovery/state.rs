@@ -163,6 +163,7 @@ pub(super) struct Boundary {
     pub control: RecoveryControl,
     pub context_cut: u64,
     pub budget: rw_context::BudgetSnapshot,
+    pub(super) extension_root: Option<SequenceId>,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(super) enum RewindPhase {
@@ -191,19 +192,26 @@ pub struct RecoveryHead {
     pub session_id: Option<SessionId>,
     pub next_sequence: u64,
     pub registry_fingerprint: [u8; 32],
+    pub inherited_journal_through: Option<SequenceId>,
     pub conversation: ConversationCut,
     pub control: RecoveryControl,
     pub budget: rw_context::BudgetSnapshot,
+    pub(super) extension_root: Option<SequenceId>,
     pub(super) compacting: Option<ConversationCut>,
     pub(super) context_cut: u64,
     pub(super) maintenance: Option<Maintenance>,
 }
 impl RecoveryHead {
-    pub(super) fn new(fingerprint: [u8; 32]) -> Self {
+    pub(super) fn new(
+        fingerprint: [u8; 32],
+        inherited_journal_through: Option<SequenceId>,
+    ) -> Self {
         Self {
             session_id: None,
             next_sequence: 0,
             registry_fingerprint: fingerprint,
+            inherited_journal_through,
+            extension_root: None,
             conversation: ConversationCut::default(),
             control: RecoveryControl::default(),
             budget: rw_context::Budgeter::default().snapshot(),

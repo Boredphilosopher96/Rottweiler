@@ -1,5 +1,6 @@
+mod canonical;
 use super::accounting_projection::compact_title;
-use super::accounting_projection::inherited_accounting_through;
+use super::accounting_projection::inherited_journal_through;
 use super::accounting_projection::is_session_projection_boundary;
 use super::accounting_projection::project_accounting;
 use super::accounting_projection::session_projection_updated_at;
@@ -95,6 +96,7 @@ pub(super) struct DurableEventSink {
     pub(super) registration: JournalRegistration,
     pub(super) log: Arc<Mutex<SessionEventLog>>,
     commit_order: Arc<tokio::sync::Mutex<()>>,
+    canonical: std::sync::OnceLock<Arc<canonical::CanonicalSession>>,
     pub(super) storage_root: PathBuf,
     pub(super) session_id: String,
     pub(super) hosted_projection: Option<Mutex<HostedSessionProjection>>,
@@ -212,6 +214,7 @@ impl DurableEventSink {
             registration,
             log,
             commit_order: Arc::new(tokio::sync::Mutex::new(())),
+            canonical: std::sync::OnceLock::new(),
             storage_root,
             session_id,
             hosted_projection: hosted_projection.map(Mutex::new),
@@ -268,6 +271,12 @@ impl DurableEventSink {
 
 #[async_trait]
 impl SessionEventSink for DurableEventSink {
+    async fn extension_state(
+        &self,
+        plugin_id: &str,
+    ) -> std::result::Result<rw_core::ExtensionStateView, AgentLoopError> {
+        self.read_extension_state(plugin_id).await
+    }
     async fn settle_effects(&self) -> std::result::Result<(), AgentLoopError> {
         let settled = self
             .journal_service
@@ -275,6 +284,9 @@ impl SessionEventSink for DurableEventSink {
             .enter(Arc::clone(&self.commit_order))
             .await?;
         drop(settled);
+        if let Some(canonical) = self.canonical.get() {
+            canonical.settle().await?;
+        }
         Ok(())
     }
     async fn reserve(
@@ -374,7 +386,7 @@ impl SessionEventSink for DurableEventSink {
 
 impl DurableEventSink {
     pub(super) fn reconcile_accounting(&self, events: &[EngineEvent]) -> Result<()> {
-        let inherited_through = inherited_accounting_through(&self.storage_root, &self.session_id)?;
+        let inherited_through = inherited_journal_through(&self.storage_root, &self.session_id)?;
         let entries = project_accounting(&self.session_id, events, inherited_through)?;
         if entries.is_empty() {
             return Ok(());

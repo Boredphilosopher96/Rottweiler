@@ -78,7 +78,8 @@ fn interrupted_inputs_keep_only_uncommitted_fragments_and_unresolved_host_invoca
             text: "uncommitted".into(),
         }],
     );
-    let mut recovery = CanonicalRecovery::open(&journal.read_view(), &modes).expect("recovery");
+    let mut recovery =
+        CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("recovery");
     catch_up(&mut recovery, &journal.read_view(), &modes);
     let head = recovery.head().expect("head");
     let active = head.control.active.expect("active");
@@ -146,10 +147,11 @@ fn interrupted_inputs_follow_compaction_generation_after_reopen() {
             },
         ],
     );
-    let mut recovery = CanonicalRecovery::open(&journal.read_view(), &modes).expect("recovery");
+    let mut recovery =
+        CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("recovery");
     catch_up(&mut recovery, &journal.read_view(), &modes);
     drop(recovery);
-    let recovery = CanonicalRecovery::open(&journal.read_view(), &modes).expect("reopen");
+    let recovery = CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("reopen");
     let inputs = recovery
         .snapshot()
         .expect("snapshot")
@@ -179,7 +181,8 @@ fn oversized_active_materialization_is_rejected_from_admission_metadata() {
             }],
         );
     }
-    let mut recovery = CanonicalRecovery::open(&journal.read_view(), &modes).expect("recovery");
+    let mut recovery =
+        CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("recovery");
     catch_up(&mut recovery, &journal.read_view(), &modes);
     assert!(
         serde_json::to_vec(&recovery.head().expect("head"))

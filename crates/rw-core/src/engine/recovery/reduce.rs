@@ -104,6 +104,7 @@ pub(super) fn reduce(
             head.control.active = None;
             head.context_cut = boundary.context_cut;
             head.budget = boundary.budget;
+            head.extension_root = boundary.extension_root;
             head.compacting = None;
             head.maintenance = Some(Maintenance::Rewind {
                 sequence,
@@ -146,6 +147,7 @@ pub(super) fn reduce(
                     control: head.control.clone(),
                     context_cut: head.context_cut,
                     budget: head.budget,
+                    extension_root: head.extension_root,
                 },
             )?;
             rows.put(key(ACCOUNTING, 0, sequence.0), &sequence)?;
@@ -423,6 +425,12 @@ pub(super) fn reduce(
                 &ToolLifecycleSource::Finished(invocation_id),
             )?;
             active_source(head, rows, event, turn, ACTIVE_TOOL_RESULTS)?;
+        }
+        PendingEvent::ExtensionStateCommitted {
+            plugin_id,
+            transaction,
+        } => {
+            super::extension::apply(head, rows, sequence, &plugin_id, &transaction)?;
         }
         PendingEvent::ToolOutput { .. }
         | PendingEvent::PermissionRequested { .. }

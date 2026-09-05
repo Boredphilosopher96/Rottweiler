@@ -278,6 +278,10 @@ pub(crate) async fn compose_hosted_actor(
         &recovered_events,
         Arc::clone(&options.journal_service),
     )?;
+    durable_sink
+        .bind_canonical(Arc::clone(&runtime_modes))
+        .await
+        .map_err(|error| miette!("canonical recovery failed: {error}"))?;
     durable_sink.reconcile_accounting(&recovered_events)?;
     let checkpoint_coordinator = Arc::new(DurableCheckpointCoordinator::from_stores(
         session_checkpoint_root,

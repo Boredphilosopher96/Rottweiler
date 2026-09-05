@@ -13,7 +13,7 @@ use rw_types::{EngineEvent, SequenceId};
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeMap;
 
-pub(super) const VERSION: u32 = 2;
+pub(super) const VERSION: u32 = 3;
 const EVENTS_PER_BATCH: usize = 64;
 
 /// One cancellable, durable canonical projection step.
@@ -29,16 +29,22 @@ pub struct RecoveryProgress {
 pub struct CanonicalRecovery {
     pub(super) index: RecoveryIndex,
     fingerprint: [u8; 32],
+    inherited_journal_through: Option<SequenceId>,
 }
 impl CanonicalRecovery {
     /// Open a compatible index and validate its canonical prefix and runtime registry.
     ///
     /// # Errors
     /// Rejects unsafe storage, stale/corrupt checkpoints and changed mode definitions.
-    pub fn open(source: &JournalReadView, modes: &ModeRegistry) -> Result<Self, RecoveryError> {
+    pub fn open(
+        source: &JournalReadView,
+        modes: &ModeRegistry,
+        inherited_journal_through: Option<SequenceId>,
+    ) -> Result<Self, RecoveryError> {
         let recovery = Self {
             index: RecoveryIndex::open(source, VERSION)?,
             fingerprint: registry_fingerprint(modes),
+            inherited_journal_through,
         };
         recovery.head()?;
         Ok(recovery)
@@ -47,10 +53,15 @@ impl CanonicalRecovery {
     ///
     /// # Errors
     /// Rejects unsafe descriptors or concurrent ownership; canonical data is unchanged.
-    pub fn rebuild(source: &JournalReadView, modes: &ModeRegistry) -> Result<Self, RecoveryError> {
+    pub fn rebuild(
+        source: &JournalReadView,
+        modes: &ModeRegistry,
+        inherited_journal_through: Option<SequenceId>,
+    ) -> Result<Self, RecoveryError> {
         Ok(Self {
             index: RecoveryIndex::rebuild(source, VERSION)?,
             fingerprint: registry_fingerprint(modes),
+            inherited_journal_through,
         })
     }
     /// Read only the bounded control checkpoint, without historical message bodies.
@@ -70,12 +81,18 @@ impl CanonicalRecovery {
             if stored.prefix != JournalPrefixIdentity::empty() {
                 return Err(RecoveryError::Invalid("missing recovery checkpoint"));
             }
-            return Ok(RecoveryHead::new(self.fingerprint));
+            return Ok(RecoveryHead::new(
+                self.fingerprint,
+                self.inherited_journal_through,
+            ));
         }
         let head: RecoveryHead = serde_json::from_slice(&stored.checkpoint)?;
         head.validate()?;
         if head.next_sequence != stored.prefix.next_sequence {
             return Err(RecoveryError::Invalid("head/source prefix mismatch"));
+        }
+        if head.inherited_journal_through != self.inherited_journal_through {
+            return Err(RecoveryError::Invalid("inherited journal identity changed"));
         }
         if head.registry_fingerprint != self.fingerprint {
             return Err(RecoveryError::RegistryChanged);

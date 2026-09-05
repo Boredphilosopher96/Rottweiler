@@ -315,6 +315,10 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
         session_id.clone(),
         Arc::clone(&journal_service),
     )?;
+    durable_sink
+        .bind_canonical(Arc::clone(&runtime_modes))
+        .await
+        .map_err(|error| miette!("canonical recovery failed: {error}"))?;
     durable_sink.reconcile_accounting(&recovered_events)?;
     let checkpoint_coordinator = Arc::new(DurableCheckpointCoordinator::from_stores(
         checkpoint_root.clone(),

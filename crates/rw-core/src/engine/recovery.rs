@@ -9,6 +9,7 @@ pub use control::{
     MAX_CONTROL_SOURCE_BYTES, RecoveredMessage, RecoveredModelSelection, RecoveryControlPayloads,
 };
 mod encoding;
+mod extension;
 mod maintenance;
 mod projector;
 mod read;
