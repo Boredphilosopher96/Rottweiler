@@ -2,8 +2,6 @@ use crate::engine::PreparedUserMessage;
 use crate::engine::model::ModelDriver;
 use rw_types::Attachment;
 use rw_types::AttachmentData;
-use rw_types::Block;
-use rw_types::ImageRef;
 use rw_types::StoredAttachment;
 use rw_types::attachment_contract::MAX_ATTACHMENTS_PER_MESSAGE;
 use rw_types::attachment_contract::MAX_IMAGE_ATTACHMENT_BYTES;
@@ -34,7 +32,6 @@ fn prepare_with_vision(
     }
     let mut total_bytes = 0_usize;
     let mut stored_attachments = Vec::with_capacity(attachments.len());
-    let mut attachment_blocks = Vec::with_capacity(attachments.len());
     for attachment in attachments {
         if attachment.name.is_empty()
             || attachment.name.len() > 255
@@ -61,10 +58,7 @@ fn prepare_with_vision(
                 "attachment media types must be canonical lowercase MIME values".to_owned(),
             );
         }
-        let (byte_len, content_hash, block) = match (
-            &attachment.data,
-            attachment.media_type.as_str(),
-        ) {
+        let (byte_len, content_hash) = match (&attachment.data, attachment.media_type.as_str()) {
             (AttachmentData::Text { content }, media_type)
                 if media_type.starts_with("text/") || media_type == "application/json" =>
             {
@@ -75,12 +69,7 @@ fn prepare_with_vision(
                     ));
                 }
                 let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
-                let label = attachment
-                    .source_path
-                    .as_deref()
-                    .unwrap_or(&attachment.name);
-                let text = format!("Attached file {label:?} ({media_type}):\n{content}");
-                (content.len(), hash, Block::Text { text })
+                (content.len(), hash)
             }
             (AttachmentData::InlineBase64 { data }, media_type)
                 if matches!(
@@ -104,14 +93,7 @@ fn prepare_with_vision(
                     ));
                 }
                 let hash = blake3::hash(data.as_bytes()).to_hex().to_string();
-                (
-                    decoded_len,
-                    hash,
-                    Block::Image {
-                        media_type: media_type.to_owned(),
-                        data: ImageRef::InlineBase64 { data: data.clone() },
-                    },
-                )
+                (decoded_len, hash)
             }
             _ => {
                 return Err(format!(
@@ -134,15 +116,13 @@ fn prepare_with_vision(
             content_hash,
             byte_len: u64::try_from(byte_len).unwrap_or(u64::MAX),
         });
-        attachment_blocks.push(block);
     }
-    if content.is_empty() && attachment_blocks.is_empty() {
+    if content.is_empty() && stored_attachments.is_empty() {
         return Err("message content and attachments cannot both be empty".to_owned());
     }
     Ok(PreparedUserMessage {
         content: content.to_owned(),
         stored_attachments,
-        attachment_blocks,
     })
 }
 

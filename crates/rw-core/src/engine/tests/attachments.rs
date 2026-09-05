@@ -43,7 +43,7 @@ fn attachment_validation_is_bounded_provider_neutral_and_vision_gated() {
         Some("docs/[REDACTED] notes with spaces.txt")
     );
     assert!(matches!(
-        &prepared.attachment_blocks[0],
+        &prepared.turn(String::new()).blocks[0],
         Block::Text { text }
             if text.contains("docs/[REDACTED] notes with spaces.txt")
                 && text.contains("[REDACTED]")
@@ -74,7 +74,7 @@ fn attachment_validation_is_bounded_provider_neutral_and_vision_gated() {
         .redact(&CanarySecretRedactor)
         .expect("bounded redacted attachment");
     assert!(matches!(
-        &prepared.attachment_blocks[0],
+        &prepared.turn(String::new()).blocks[0],
         Block::Image {
             data: ImageRef::InlineBase64 { data },
             ..

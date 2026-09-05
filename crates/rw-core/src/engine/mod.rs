@@ -160,16 +160,36 @@ const MAX_PERMISSION_LABEL_BYTES: usize = 512;
 struct PreparedUserMessage {
     content: String,
     stored_attachments: Vec<StoredAttachment>,
-    attachment_blocks: Vec<Block>,
 }
 
 impl PreparedUserMessage {
     fn turn(&self, content: String) -> Turn {
-        let mut blocks = Vec::with_capacity(self.attachment_blocks.len().saturating_add(1));
+        let mut blocks = Vec::with_capacity(self.stored_attachments.len().saturating_add(1));
         if !content.is_empty() {
             blocks.push(Block::Text { text: content });
         }
-        blocks.extend(self.attachment_blocks.clone());
+        blocks.extend(
+            self.stored_attachments
+                .iter()
+                .map(|attachment| match &attachment.data {
+                    rw_types::AttachmentData::Text { content } => {
+                        let label = attachment
+                            .source_path
+                            .as_deref()
+                            .unwrap_or(&attachment.name);
+                        Block::Text {
+                            text: format!(
+                                "Attached file {label:?} ({}):\n{content}",
+                                attachment.media_type
+                            ),
+                        }
+                    }
+                    rw_types::AttachmentData::InlineBase64 { data } => Block::Image {
+                        media_type: attachment.media_type.clone(),
+                        data: rw_types::ImageRef::InlineBase64 { data: data.clone() },
+                    },
+                }),
+        );
         Turn {
             role: Role::User,
             blocks,
