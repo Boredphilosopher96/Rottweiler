@@ -298,7 +298,7 @@ mod tests {
             presentation
                 .children(
                     SessionId("parent".into()),
-                    rw_types::session_read::SessionReadScope::Root,
+                    rw_types::session_read::SessionReadScope::Session {},
                 )
                 .await
         });
