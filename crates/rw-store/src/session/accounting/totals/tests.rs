@@ -191,3 +191,46 @@ fn accounting_rejects_oversized_dispositions_before_persisting() {
             .is_empty()
     );
 }
+
+#[test]
+fn independent_sessions_can_initialize_and_charge_one_new_database() {
+    for _ in 0..4 {
+        let root = tempfile::tempdir().expect("root");
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            let jobs = (0..8)
+                .map(|index| {
+                    let barrier = &barrier;
+                    let path = root.path();
+                    scope.spawn(move || {
+                        barrier.wait();
+                        let ledger = AccountingLedger::open(path)?;
+                        ledger.record(&entry(
+                            &format!("session-{index}"),
+                            0,
+                            "2026-09-05T01:00:00.000Z",
+                            dollars(1),
+                        ))
+                    })
+                })
+                .collect::<Vec<_>>();
+            for job in jobs {
+                job.join()
+                    .expect("thread")
+                    .expect("concurrent initialization");
+            }
+        });
+        let ledger = AccountingLedger::open(root.path()).expect("ledger");
+        assert_eq!(
+            query(
+                &ledger,
+                "session-0",
+                "2026-09-05",
+                "2026-09-05T00:00:00.000Z",
+                "2026-09-05T23:59:59.999Z",
+            )
+            .day_micros_usd,
+            8
+        );
+    }
+}
