@@ -1,10 +1,7 @@
 #![cfg(test)]
 
 use crate::engine::builtin_hook_dispatcher;
-use crate::engine::dispatch;
-use crate::engine::model;
 use crate::engine::projection::project_session_events;
-use crate::engine::session;
 use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::controllers::PanicQuestionAsker;
 use crate::engine::tests::fixtures::models::ScriptedModel;
@@ -14,11 +11,9 @@ use crate::engine::tests::fixtures::support::config;
 use crate::engine::tests::fixtures::support::protocol_meta;
 use crate::engine::tests::fixtures::support::stop_script;
 use crate::engine::tests::fixtures::support::tool_script;
-use crate::engine::turn;
 use rw_tools::AskUserTool;
 use rw_tools::ToolLimits;
 use rw_tools::ToolRegistry;
-use rw_tools::ToolResult;
 use rw_types::Answer;
 use rw_types::Block;
 use rw_types::ClientCommand;

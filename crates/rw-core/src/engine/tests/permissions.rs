@@ -3,12 +3,9 @@
 use crate::PermissionGate;
 use crate::engine::MessageDisposition;
 use crate::engine::builtin_hook_dispatcher;
-use crate::engine::commands;
 use crate::engine::commands::builtin_command_registry;
-use crate::engine::model;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::session::SessionActor;
-use crate::engine::tests;
 use crate::engine::tests::fixtures::checkpoints::SingleFileCheckpoints;
 use crate::engine::tests::fixtures::controllers::PreludePromptCommand;
 use crate::engine::tests::fixtures::hooks::FixedHook;
@@ -21,7 +18,6 @@ use crate::engine::tests::fixtures::support::tool_script;
 use crate::engine::tests::fixtures::tools::FileMutatingBash;
 use crate::engine::tests::fixtures::tools::StubOutcome;
 use crate::engine::tests::fixtures::tools::StubTool;
-use crate::engine::turn;
 use rw_ext::CommandDescriptor;
 use rw_ext::HookDirective;
 use rw_ext::HookEvent;
@@ -499,9 +495,10 @@ async fn user_safe_list_cargo_test_fixture_runs_without_an_approval_event() {
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn fetched_prompt_injection_corpus_cannot_inherit_tool_approval() {
-    let corpus: Vec<String> =
-        serde_json::from_str(include_str!("../../tests/fixtures/prompt-injection.json"))
-            .expect("prompt-injection corpus");
+    let corpus: Vec<String> = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/prompt-injection.json"
+    ))
+    .expect("prompt-injection corpus");
     assert!(!corpus.is_empty());
 
     for injection in corpus {

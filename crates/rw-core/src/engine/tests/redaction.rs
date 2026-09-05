@@ -1,7 +1,6 @@
 #![cfg(test)]
 
 use crate::engine::builtin_hook_dispatcher;
-use crate::engine::model;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::redaction::NoopSecretRedactor;
 use crate::engine::redaction::StreamingSecretRedactor;
@@ -20,7 +19,6 @@ use crate::engine::tests::fixtures::support::tool_script;
 use crate::engine::tests::fixtures::tools::StubOutcome;
 use crate::engine::tests::fixtures::tools::StubTool;
 use crate::engine::turn::redacted_json;
-use futures_util::stream;
 use rw_ext::HookDirective;
 use rw_ext::HookError;
 use rw_ext::HookEvent;
@@ -29,7 +27,6 @@ use rw_ext::HookRegistration;
 use rw_tools::ToolRegistry;
 use rw_tools::ToolResult;
 use rw_types::ApprovalDecision;
-use rw_types::Block;
 use rw_types::ToolCapability;
 use rw_types::config::PermissionDecision;
 use serde_json::Value;

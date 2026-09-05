@@ -2,7 +2,6 @@
 
 use crate::engine::AgentTurnStatus;
 use crate::engine::builtin_hook_dispatcher;
-use crate::engine::model;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::models::ScriptedModel;

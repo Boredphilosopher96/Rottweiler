@@ -2,13 +2,9 @@
 
 use crate::engine::MAX_IN_FLIGHT_TOOL_OUTPUT_CHUNKS;
 use crate::engine::MAX_TOOL_EXECUTION_WINDOW;
-use crate::engine::session;
-use crate::engine::tests;
 use crate::engine::tests::fixtures::support::canonical_json_bytes;
 use crate::engine::tests::fixtures::support::descriptor;
-use crate::engine::turn::emit;
 use async_trait::async_trait;
-use futures_util::stream;
 use rw_tools::CapabilityManifest;
 use rw_tools::MutationScope;
 use rw_tools::SubagentLifecycleMode;

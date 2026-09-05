@@ -3,7 +3,6 @@
 use crate::engine::AgentTurnStatus;
 use crate::engine::SessionUsage;
 use crate::engine::builtin_hook_dispatcher;
-use crate::engine::model;
 use crate::engine::model::ModelContextMetadata;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::session::SessionActor;
@@ -17,8 +16,6 @@ use crate::engine::tests::fixtures::support::stop_script;
 use crate::engine::tests::fixtures::support::tool_script;
 use crate::engine::tests::fixtures::tools::StubOutcome;
 use crate::engine::tests::fixtures::tools::StubTool;
-use crate::engine::turn;
-use futures_util::stream;
 use rw_providers::CacheBreakpointSupport;
 use rw_providers::ProviderError;
 use rw_providers::ProviderErrorKind;

@@ -2,8 +2,6 @@
 
 use crate::engine::AgentTurnStatus;
 use crate::engine::builtin_hook_dispatcher;
-use crate::engine::dispatch;
-use crate::engine::model;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::models::M3Model;
@@ -13,7 +11,6 @@ use crate::engine::tests::fixtures::support::SessionEvent;
 use crate::engine::tests::fixtures::support::collect_turn;
 use crate::engine::tests::fixtures::support::config;
 use crate::engine::tests::fixtures::support::stop_script;
-use crate::engine::turn;
 use rw_providers::TokenUsage;
 use rw_tools::ToolRegistry;
 use rw_types::BudgetLevel;

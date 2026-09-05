@@ -1,6 +1,5 @@
 #![cfg(test)]
 
-use crate::engine::tests;
 use crate::engine::tests::fixtures::checkpoints::RecordingCheckpoints;
 use async_trait::async_trait;
 use rw_ext::HookDirective;

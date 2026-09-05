@@ -1,12 +1,9 @@
 #![cfg(test)]
 
-use crate::engine::dispatch;
-use crate::engine::model;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::projection::ContextSurgeryAction;
 use crate::engine::projection::plan_review_context_turn;
 use crate::engine::projection::project_session_events;
-use crate::engine::session;
 use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::models::ScriptedModel;
 use crate::engine::tests::fixtures::support::collect_turn;
@@ -16,7 +13,6 @@ use crate::engine::tests::fixtures::support::stop_script;
 use crate::engine::tests::fixtures::support::tool_script;
 use crate::engine::tests::fixtures::support::wire_event;
 use crate::engine::tests::fixtures::support::wire_mode;
-use crate::engine::turn;
 use rw_ext::HookDispatcher;
 use rw_tools::SubmitPlanTool;
 use rw_tools::ToolRegistry;
@@ -25,7 +21,6 @@ use rw_types::ClientCommand;
 use rw_types::ClientRole;
 use rw_types::CommandOutcome;
 use rw_types::ContextItemId;
-use rw_types::PermissionModeDescriptor;
 use rw_types::PlanArtifact;
 use rw_types::PlanDecision;
 use rw_types::SessionId;

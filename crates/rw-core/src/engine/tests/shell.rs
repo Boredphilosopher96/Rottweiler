@@ -1,17 +1,13 @@
 #![cfg(test)]
 
 use crate::engine::MAX_CAPTURED_SHELL_OUTPUT_BYTES;
-use crate::engine::dispatch;
-use crate::engine::model;
 use crate::engine::projection::project_session_events;
-use crate::engine::session;
 use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::models::AliasVisionModel;
 use crate::engine::tests::fixtures::support::ShellSecretRedactor;
 use crate::engine::tests::fixtures::support::TestEventSinkExt;
 use crate::engine::tests::fixtures::support::config;
 use crate::engine::tests::fixtures::support::protocol_meta;
-use crate::engine::turn;
 use rw_ext::HookDispatcher;
 use rw_tools::ToolRegistry;
 use rw_types::Answer;

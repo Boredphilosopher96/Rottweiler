@@ -3,11 +3,8 @@
 use crate::engine::AgentTurnStatus;
 use crate::engine::SessionUsage;
 use crate::engine::builtin_hook_dispatcher;
-use crate::engine::commands;
-use crate::engine::model;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::projection::project_session_events;
-use crate::engine::recovery;
 use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::models::ScriptedModel;
 use crate::engine::tests::fixtures::sinks::RecordingSink;
@@ -17,9 +14,7 @@ use crate::engine::tests::fixtures::support::observe_event;
 use crate::engine::tests::fixtures::support::stop_script;
 use crate::engine::tests::fixtures::support::text_turn;
 use crate::engine::tests::fixtures::support::wire_event;
-use crate::engine::turn;
 use crate::engine::unavailable_cost;
-use futures_util::StreamExt;
 use rw_tools::ToolRegistry;
 use rw_types::CompactionReason;
 use rw_types::Role;
@@ -29,7 +24,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 use tempfile::TempDir;
-use thiserror::Error;
 use tokio::time::timeout;
 
 #[test]

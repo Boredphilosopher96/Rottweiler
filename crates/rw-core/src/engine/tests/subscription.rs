@@ -1,13 +1,10 @@
 #![cfg(test)]
+use crate::engine::SessionEventSink;
 
 use crate::engine::AgentLoopError;
 use crate::engine::builtin_hook_dispatcher;
-use crate::engine::dispatch;
 use crate::engine::pending_event::PendingEvent;
-use crate::engine::projection;
 use crate::engine::projection::project_session_events;
-use crate::engine::replay;
-use crate::engine::session;
 use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::models::PendingModel;
 use crate::engine::tests::fixtures::models::ScriptedModel;
@@ -19,7 +16,6 @@ use crate::engine::tests::fixtures::support::config;
 use crate::engine::tests::fixtures::support::protocol_meta;
 use crate::engine::tests::fixtures::support::stop_script;
 use crate::engine::tests::fixtures::support::wire_event;
-use crate::engine::turn;
 use rw_tools::ToolRegistry;
 use rw_types::ClientCommand;
 use rw_types::ClientId;

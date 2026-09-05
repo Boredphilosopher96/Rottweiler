@@ -1,24 +1,18 @@
 #![cfg(test)]
 
 use crate::engine::AgentLoopError;
-use crate::engine::model;
 use crate::engine::model::ModelDriver;
 use crate::engine::pending_event::PendingEvent;
-use crate::engine::session;
 use crate::engine::session::SessionActor;
 use crate::engine::session::SessionHandle;
-use crate::engine::session_resources::SessionResources;
-use crate::engine::shutdown;
 use crate::engine::tests::fixtures::checkpoints::RecordingCheckpoints;
 use crate::engine::tests::fixtures::models::ScriptedModel;
 use crate::engine::tests::fixtures::sinks::RecordingSink;
 use crate::engine::tests::fixtures::support::config;
-use crate::engine::tests::fixtures::support::descriptor;
 use crate::engine::tests::fixtures::support::stop_script;
 use crate::engine::tests::fixtures::support::tool_script;
 use crate::engine::tests::fixtures::tools::StubOutcome;
 use crate::engine::tests::fixtures::tools::StubTool;
-use crate::engine::turn;
 use async_trait::async_trait;
 use futures_util::stream;
 use rw_ext::HookDirective;
@@ -50,7 +44,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::Notify;
-use tokio::time::timeout;
 
 #[derive(Default)]
 struct CleanupTool {

@@ -1,10 +1,8 @@
 #![cfg(test)]
 
 use crate::engine::MAX_APPROVAL_DIFF_BYTES;
-use crate::engine::approval_diff;
 use crate::engine::builtin_hook_dispatcher;
 use crate::engine::diff_binding;
-use crate::engine::model;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::models::ScriptedModel;
@@ -13,7 +11,6 @@ use crate::engine::tests::fixtures::support::config;
 use crate::engine::tests::fixtures::support::next_matching;
 use crate::engine::tests::fixtures::support::stop_script;
 use crate::engine::tests::fixtures::support::tool_script;
-use crate::engine::turn;
 use rw_tools::ToolLimits;
 use rw_tools::ToolRegistry;
 use rw_tools::WriteTool;

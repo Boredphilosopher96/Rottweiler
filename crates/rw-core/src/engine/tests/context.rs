@@ -2,11 +2,9 @@
 
 use crate::engine::builtin_hook_dispatcher;
 use crate::engine::durability::NoopSessionEventSink;
-use crate::engine::model;
 use crate::engine::model::ModelContextMetadata;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::projection::ContextSurgeryAction;
-use crate::engine::session;
 use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::models::M3Model;
 use crate::engine::tests::fixtures::models::PendingModel;
@@ -21,7 +19,6 @@ use crate::engine::tests::fixtures::support::tool_script;
 use crate::engine::tests::fixtures::tools::StubOutcome;
 use crate::engine::tests::fixtures::tools::StubTool;
 use crate::engine::turn;
-use crate::engine::turn::context_snapshot;
 use crate::engine::turn::prompt_turn;
 use rw_context::AssemblyInput;
 use rw_context::ContextAssembler;
@@ -29,7 +26,6 @@ use rw_context::LocalTokenEstimator;
 use rw_context::PRUNED_TOOL_OUTPUT_REPLACEMENT;
 use rw_context::ToonPromptEncoder;
 use rw_providers::CacheBreakpointSupport;
-use rw_tools::Tool;
 use rw_tools::ToolRegistry;
 use rw_tools::ToolResult;
 use rw_types::Block;

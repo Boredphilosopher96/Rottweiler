@@ -1,14 +1,11 @@
 #![cfg(test)]
 
-use crate::engine::commands;
 use crate::engine::commands::CommandToolOutputKind;
 use crate::engine::commands::SessionCommandAction;
 use crate::engine::commands::SessionCommandContext;
 use crate::engine::commands::builtin_command_registry;
 use crate::engine::commands::render_context_snapshot;
 use crate::engine::commands::render_session_review;
-use crate::engine::session;
-use crate::engine::turn;
 use crate::engine::turn::frame_command_tool_output;
 use rw_ext::ModeRegistry;
 use rw_types::ContextItemId;
@@ -17,7 +14,6 @@ use rw_types::ContextItemSnapshot;
 use rw_types::ContextItemState;
 use rw_types::ContextSnapshot;
 use rw_types::ModeId;
-use rw_types::PermissionModeDescriptor;
 use rw_types::ReviewFileStatus;
 use rw_types::SessionId;
 use rw_types::SessionMode;

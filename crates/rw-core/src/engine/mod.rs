@@ -1,5 +1,3 @@
-#[cfg(test)]
-use rw_providers::BoxEventStream;
 mod redaction;
 pub use redaction::NoopSecretRedactor;
 pub use redaction::SecretRedactor;
@@ -117,11 +115,7 @@ use commands::{
     render_context_snapshot, render_cost_snapshot, render_permission_approvals,
     render_permission_snapshot, render_plan, render_session_review,
 };
-#[cfg(test)]
-use dispatch::permission_state;
 use dispatch::{commit_prepared_model_switch, handle_actor_command, prepare_user_message};
-#[cfg(test)]
-use projection::recovered_pending_event;
 pub use projection::{
     ContextSurgeryAction, InterruptedToolRepair, RecoveredQuestion, RecoveredUserShell,
     SessionProjectionError, SessionProjector, SessionRecoveredState, project_session_events,
@@ -142,11 +136,6 @@ pub use session::{
 };
 pub use session_extension::{
     NoopSessionExtensionController, SessionExtensionController, SessionExtensionSnapshot,
-};
-#[cfg(test)]
-use turn::{
-    ActorSubagentEventSink, ActorSubagentLifecycleState, OrderedSubagentCoordinator,
-    frame_command_tool_output, prompt_turn, redacted_json,
 };
 use turn::{
     BudgetUsage, CommandTurnOverrides, RunningTurn, StartTurnRuntime, TurnSignal, append_text,

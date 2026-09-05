@@ -2,9 +2,7 @@
 
 use crate::engine::AgentTurnStatus;
 use crate::engine::builtin_hook_dispatcher;
-use crate::engine::model;
 use crate::engine::pending_event::PendingEvent;
-use crate::engine::session;
 use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::hooks::FixedHook;
 use crate::engine::tests::fixtures::hooks::NeverHook;
@@ -21,7 +19,6 @@ use crate::engine::tests::fixtures::tools::StubTool;
 use rw_ext::HookDirective;
 use rw_ext::HookError;
 use rw_ext::HookEvent;
-use rw_ext::HookFailure;
 use rw_ext::HookFailurePolicy;
 use rw_ext::HookRegistration;
 use rw_tools::ToolRegistry;

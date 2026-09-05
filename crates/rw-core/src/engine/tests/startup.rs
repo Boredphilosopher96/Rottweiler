@@ -1,7 +1,6 @@
 #![cfg(test)]
 
 use crate::engine::builtin_hook_dispatcher;
-use crate::engine::model;
 use crate::engine::projection::project_session_events;
 use crate::engine::session::SessionActor;
 use crate::engine::session::StartupNotification;
@@ -10,7 +9,6 @@ use crate::engine::tests::fixtures::models::ScriptedModel;
 use crate::engine::tests::fixtures::sinks::RecordingSink;
 use crate::engine::tests::fixtures::support::collect_turn;
 use crate::engine::tests::fixtures::support::config;
-use crate::engine::turn;
 use rw_ext::HookDispatcher;
 use rw_tools::ToolRegistry;
 use rw_types::Block;
@@ -23,7 +21,6 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tempfile::TempDir;
-use tokio::time::timeout;
 
 #[tokio::test]
 async fn startup_notifications_are_persisted_as_status_and_ui_events() {

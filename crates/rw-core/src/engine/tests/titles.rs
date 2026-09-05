@@ -2,12 +2,8 @@
 
 use crate::engine::SESSION_TITLE_MAX_CHARS;
 use crate::engine::builtin_hook_dispatcher;
-use crate::engine::dispatch;
-use crate::engine::model;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::projection::project_session_events;
-use crate::engine::recovery;
-use crate::engine::replay;
 use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::models::DelayedFinishModel;
 use crate::engine::tests::fixtures::models::PendingModel;
@@ -16,7 +12,6 @@ use crate::engine::tests::fixtures::sinks::RecordingSink;
 use crate::engine::tests::fixtures::support::config;
 use crate::engine::tests::fixtures::support::next_matching;
 use crate::engine::tests::fixtures::support::stop_script;
-use crate::engine::turn;
 use rw_providers::TokenUsage;
 use rw_providers::ToolChoice;
 use rw_tools::ToolRegistry;

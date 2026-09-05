@@ -1,15 +1,12 @@
 #![cfg(test)]
+use crate::engine::SessionEventSink;
 
 use crate::engine::builtin_hook_dispatcher;
-use crate::engine::dispatch;
 use crate::engine::durability::NoopSessionEventSink;
-use crate::engine::model;
 use crate::engine::model_context_transfer_value;
 use crate::engine::model_switch_question;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::projection::project_session_events;
-use crate::engine::recovery;
-use crate::engine::session;
 use crate::engine::session::SessionActor;
 use crate::engine::session::SessionHandle;
 use crate::engine::tests::fixtures::models::M3Model;
@@ -21,8 +18,6 @@ use crate::engine::tests::fixtures::support::protocol_meta;
 use crate::engine::tests::fixtures::support::stop_script;
 use crate::engine::tests::fixtures::support::text_turn;
 use crate::engine::tests::fixtures::support::wire_event;
-use crate::engine::turn;
-use futures_util::stream;
 use rw_tools::ToolRegistry;
 use rw_types::Answer;
 use rw_types::Block;

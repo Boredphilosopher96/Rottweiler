@@ -1,14 +1,9 @@
 #![cfg(test)]
 
 use crate::engine::AgentLoopError;
-use crate::engine::model;
 use crate::engine::model::ModelContextMetadata;
 use crate::engine::model::ModelDriver;
-use crate::engine::replay;
-use crate::engine::tests;
 use crate::engine::tests::fixtures::support::stop_script;
-use crate::engine::tests::fixtures::support::wire_mode;
-use crate::engine::turn;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use futures_util::stream;
@@ -27,7 +22,6 @@ use rw_providers::TokenUsage;
 use rw_types::Block;
 use rw_types::Cost;
 use rw_types::Role;
-use rw_types::Usage;
 use rw_types::config::BudgetConfig;
 use rw_types::config::CompactionConfig;
 use rw_types::config::ThinkingLevel;

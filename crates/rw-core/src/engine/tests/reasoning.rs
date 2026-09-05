@@ -1,7 +1,6 @@
 #![cfg(test)]
 
 use crate::engine::builtin_hook_dispatcher;
-use crate::engine::model;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::projection::project_session_events;
 use crate::engine::session::SessionActor;
@@ -9,7 +8,6 @@ use crate::engine::tests::fixtures::models::ScriptedModel;
 use crate::engine::tests::fixtures::sinks::RecordingSink;
 use crate::engine::tests::fixtures::support::collect_turn;
 use crate::engine::tests::fixtures::support::config;
-use crate::engine::turn;
 use crate::engine::turn::append_thinking;
 use rw_providers::FinishReason;
 use rw_providers::ProviderEvent;

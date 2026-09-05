@@ -1,7 +1,8 @@
 #![cfg(test)]
+use crate::engine::EventClock;
+use rw_tools::SubagentEventSink;
 
 use crate::engine::pending_event::PendingEvent;
-use crate::engine::session;
 use crate::engine::tests::fixtures::support::FixedClock;
 use crate::engine::tests::fixtures::support::fixture_subagent_result;
 use crate::engine::tests::fixtures::tools::ThirdPartyLifecycleTool;
