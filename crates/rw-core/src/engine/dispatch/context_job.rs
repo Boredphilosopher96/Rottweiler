@@ -158,6 +158,7 @@ async fn read(
                             &current.assembled,
                             &config.model_alias,
                             None,
+                            current.through,
                         )))
                     } else {
                         Ok(Output::Context(context_snapshot(
@@ -167,6 +168,7 @@ async fn read(
                             config.model.context_metadata(&config.model_alias),
                             &config.model.compaction_config(),
                             active_turn,
+                            current.through,
                         )))
                     }
                 });
@@ -209,7 +211,12 @@ async fn historical_prompt(
                     true,
                 )?;
                 Ok(HistoryRead::new(
-                    Output::Prompt(prompt_dump(&assembled, &config.model_alias, Some(turn))),
+                    Output::Prompt(prompt_dump(
+                        &assembled,
+                        &config.model_alias,
+                        Some(turn),
+                        Some(boundary),
+                    )),
                     (),
                 ))
             },

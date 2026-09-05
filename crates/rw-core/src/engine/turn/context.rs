@@ -276,6 +276,7 @@ pub(in crate::engine) fn context_snapshot(
     metadata: ModelContextMetadata,
     compaction: &CompactionConfig,
     turn_id: Option<TurnId>,
+    through: Option<rw_types::SequenceId>,
 ) -> ContextSnapshot {
     let (policy, context_window_reason) = match resolved_overflow_policy(metadata, compaction) {
         Ok(Some(policy)) => (Some(policy), None),
@@ -403,6 +404,7 @@ pub(in crate::engine) fn context_snapshot(
         }
     }
     ContextSnapshot {
+        through,
         turn_id,
         stable_prefix_hash: assembled.stable_prefix_hash.clone(),
         used_tokens: assembled.token_totals.total,
@@ -428,8 +430,10 @@ pub(in crate::engine) fn prompt_dump(
     assembled: &AssembledContext,
     model_alias: &str,
     turn_id: Option<TurnId>,
+    through: Option<rw_types::SequenceId>,
 ) -> PromptDump {
     PromptDump {
+        through,
         turn_id,
         model_alias: ModelAlias(model_alias.to_owned()),
         turns: assembled.turns.clone(),

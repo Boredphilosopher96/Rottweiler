@@ -97,6 +97,7 @@ fn invalid_resolved_overflow_policy_disables_automatic_compaction() {
             ..CompactionConfig::default()
         },
         None,
+        None,
     );
     assert!(!snapshot.context_window_known);
     assert_eq!(snapshot.usable_tokens, 0);

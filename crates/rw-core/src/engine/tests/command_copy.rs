@@ -65,6 +65,7 @@ async fn built_in_command_copy_is_human_readable_and_contains_no_wire_json() {
     );
 
     let snapshot = ContextSnapshot {
+        through: None,
         turn_id: Some(TurnId("private-turn".to_owned())),
         stable_prefix_hash: "private-hash".to_owned(),
         used_tokens: 1_250,

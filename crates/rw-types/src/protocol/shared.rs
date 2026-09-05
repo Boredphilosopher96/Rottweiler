@@ -939,6 +939,9 @@ pub struct CacheBreakpoint {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 #[serde(deny_unknown_fields)]
 pub struct ContextSnapshot {
+    /// Exact canonical source prefix used to assemble this read.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub through: Option<SequenceId>,
     pub turn_id: Option<TurnId>,
     pub stable_prefix_hash: String,
     #[serde(with = "decimal_u64")]
@@ -1111,6 +1114,9 @@ pub struct PromptTool {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 #[serde(deny_unknown_fields)]
 pub struct PromptDump {
+    /// Exact canonical source prefix used to assemble this read.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub through: Option<SequenceId>,
     pub turn_id: Option<TurnId>,
     pub model_alias: ModelAlias,
     pub turns: Vec<crate::Turn>,

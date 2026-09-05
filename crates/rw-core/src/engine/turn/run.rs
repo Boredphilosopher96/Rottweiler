@@ -351,6 +351,7 @@ pub(super) async fn run_turn(
             metadata,
             &compaction,
             Some(wire_turn_id(turn)),
+            None,
         );
         snapshot.used_tokens = input_estimate.reconciled_tokens;
         let context_metrics = (
