@@ -244,20 +244,20 @@ async function main(): Promise<void> {
         if (runtime === null) throw new Error("engine runtime is unavailable")
         return runtime.sessionReader.uiPanels(sessionId, signal)
       },
-      todos: async (sessionId, signal) => {
+      todos: async (target, signal) => {
         const { runtime } = await runtimeBootstrap
         if (runtime === null) throw new Error("engine runtime is unavailable")
-        return runtime.sessionReader.todos(sessionId, signal)
+        return runtime.sessionReader.todos(target, signal)
       },
-      page: async (sessionId, read, signal) => {
+      page: async (target, read, signal) => {
         const { runtime } = await runtimeBootstrap
         if (runtime === null) throw new Error("engine runtime is unavailable")
-        return runtime.sessionReader.page(sessionId, read, signal)
+        return runtime.sessionReader.page(target, read, signal)
       },
-      content: async (sessionId, read, signal) => {
+      content: async (target, read, signal) => {
         const { runtime } = await runtimeBootstrap
         if (runtime === null) throw new Error("engine runtime is unavailable")
-        return runtime.sessionReader.content(sessionId, read, signal)
+        return runtime.sessionReader.content(target, read, signal)
       },
     },
     onCommand: async (command) => {

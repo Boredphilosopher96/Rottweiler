@@ -1,3 +1,4 @@
+import { directSessionRead } from "../src/session-reader"
 import { expect, test } from "bun:test"
 import { HistoryPresentation } from "../src/history/presentation"
 import { fixturePage } from "./fixtures/history"
@@ -7,7 +8,7 @@ test("source bursts coalesce without cancelling an admitted history read", async
   let firstSignal: AbortSignal | undefined
   let finish!: () => void
   const presentation = new HistoryPresentation({
-    page: async (session, read, signal) => {
+    page: async ({ sessionId: session }, read, signal) => {
       reads++
       if (reads === 1) {
         firstSignal = signal
@@ -18,7 +19,7 @@ test("source bursts coalesce without cancelling an admitted history read", async
     content: async () => { throw new Error("unused") },
   }, () => { })
   try {
-    presentation.present("history")
+    presentation.present(directSessionRead("history"))
     for (let event = 0; event < 100; event++) presentation.invalidate("history")
     expect(reads).toBe(1)
     expect(firstSignal?.aborted).toBe(false)

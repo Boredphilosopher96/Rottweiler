@@ -4,7 +4,7 @@ import type { UiSurfaceModel } from "../ui/presentation"
 import type { TranscriptContentPage, TranscriptContentSource, TranscriptView } from "../protocol"
 import type { CacheLease, ClientCache } from "./cache"
 import type { HistoryCacheValue } from "./controller"
-import type { SessionReader } from "../session-reader"
+import type { SessionReader, SessionReadTarget } from "../session-reader"
 
 const CHUNK_BYTES = 4096
 const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024
@@ -24,7 +24,7 @@ export class DocumentController {
   readonly #reader: Pick<SessionReader, "page" | "content">
   readonly #cache: ClientCache<HistoryCacheValue>
   readonly #changed: (snapshot: DocumentSnapshot) => void
-  #selection: { readonly view: TranscriptView; readonly source: TranscriptContentSource; readonly key: string } | null = null
+  #selection: { target: SessionReadTarget; readonly view: TranscriptView; readonly source: TranscriptContentSource; readonly key: string } | null = null
   #request: AbortController | null = null
   #active: CacheLease<HistoryCacheValue> | null = null
   #offsets = [0]
@@ -47,9 +47,10 @@ export class DocumentController {
     }
   }
 
-  open(view: TranscriptView, source: TranscriptContentSource): Promise<void> {
+  open(target: SessionReadTarget, view: TranscriptView, source: TranscriptContentSource): Promise<void> {
     this.close()
-    this.#selection = { view, source, key: JSON.stringify([view, source]) }
+    if (target.sessionId !== view.session_id) return Promise.reject(new Error("Document authority does not match its source session."))
+    this.#selection = { target, view, source, key: JSON.stringify([target, view, source]) }
     return this.#load(0, 0)
   }
 
@@ -109,16 +110,16 @@ export class DocumentController {
       const key = `document:${selection.key}:${offset}`
       let lease = this.#cache.lease(key)
       if (lease === null && selection.source.selector.type === "tool_presentation") {
-        lease = await readToolSurface(this.#reader, this.#cache, key, selection.view, selection.source, request.signal)
+        lease = await readToolSurface(this.#reader, this.#cache, selection.target, key, selection.view, selection.source, request.signal)
         if (this.#request !== request || request.signal.aborted) { lease.release(); return }
       }
       if (lease === null) {
-        const page = await this.#reader.content(selection.view.session_id, {
+        const page = await this.#reader.content(selection.target, {
           view: selection.view, source: selection.source, offset, max_bytes: CHUNK_BYTES,
         }, request.signal)
         if (this.#request !== request || request.signal.aborted) return
         const bytes = Buffer.byteLength(page.text)
-        if (JSON.stringify([page.view, page.source]) !== selection.key || page.offset !== offset
+        if (JSON.stringify([selection.target, page.view, page.source]) !== selection.key || page.offset !== offset
           || bytes > CHUNK_BYTES || page.total_bytes > MAX_DOCUMENT_BYTES
           || offset + bytes > page.total_bytes
           || (page.next_offset === null ? offset + bytes !== page.total_bytes

@@ -104,13 +104,13 @@ export function buildSurface(host: SurfaceHost, theme: RottweilerTheme): void {
         void host.children.enterSubagent(subagentId)
       },
       onOpenChild: child => {
-        host.children.openHistorical({ sessionId: child.session_id, subagentId: child.subagent_id, task: child.task.text })
+        host.children.openHistorical({ sessionId: child.session_id, subagentId: child.subagent_id, task: child.task.text, sourceSequence: child.task.source.sequence })
       },
       onOpenContent: source => {
         const view = host.history?.controller.snapshot.page?.view
         if (view === undefined || host.document === null) return
         host.outputViewerInvocationId = null
-        void host.document.open(view, source)
+        void host.document.open(host.children.readTarget, view, source)
         host.ui.setState(host.ui.state)
         host.ui.outputViewer.focusPresentation()
       },

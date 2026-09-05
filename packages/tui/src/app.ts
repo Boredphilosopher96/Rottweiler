@@ -969,7 +969,7 @@ export class RottweilerApp extends BoxRenderable {
       viewingSubagent ? childDescriptor?.agent || "Child agent" : "Rottweiler",
     )
     if (this.#history !== null) {
-      this.#history.present(childDescriptor?.child_session_id ?? this.#children.historical?.sessionId ?? this.#sessionId)
+      this.#history.present(this.#children.readTarget)
       this.transcript.setHistory(this.#history.controller.snapshot)
     }
     this.#updateToolsWorkspace(presented)

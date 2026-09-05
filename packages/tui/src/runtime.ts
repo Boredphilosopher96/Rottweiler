@@ -166,26 +166,26 @@ export class TuiEngineRuntime {
       }
       return event.panels
     },
-    todos: async (sessionId, signal) => {
-      const reply = await this.#readSession({ type: "get_todos", meta: this.#meta(), session_id: sessionId }, signal)
+    todos: async ({ sessionId, scope }, signal) => {
+      const reply = await this.#readSession({ type: "get_todos", meta: this.#meta(), session_id: sessionId, scope }, signal)
       const event = reply.events[0]
       if (reply.events.length !== 1 || event?.type !== "todos_read" || event.session_id !== sessionId) {
         throw new EngineRuntimeError("task reply is missing its session-bound result")
       }
       return event.result
     },
-    page: async (sessionId, read, signal) => {
-      const reply = await this.#readSession({ type: "read_transcript", meta: this.#meta(), session_id: sessionId, read }, signal)
+    page: async ({ sessionId, scope }, read, signal) => {
+      const reply = await this.#readSession({ type: "read_transcript", meta: this.#meta(), session_id: sessionId, scope, read }, signal)
       const event = reply.events[0]
-      if (reply.events.length !== 1 || event?.type !== "transcript_page_ready") {
+      if (reply.events.length !== 1 || event?.type !== "transcript_page_ready" || event.session_id !== sessionId) {
         throw new EngineRuntimeError("transcript page reply is missing its result")
       }
       return event.result
     },
-    content: async (sessionId, read, signal) => {
-      const reply = await this.#readSession({ type: "read_transcript_content", meta: this.#meta(), session_id: sessionId, read }, signal)
+    content: async ({ sessionId, scope }, read, signal) => {
+      const reply = await this.#readSession({ type: "read_transcript_content", meta: this.#meta(), session_id: sessionId, scope, read }, signal)
       const event = reply.events[0]
-      if (reply.events.length !== 1 || event?.type !== "transcript_content_ready") {
+      if (reply.events.length !== 1 || event?.type !== "transcript_content_ready" || event.session_id !== sessionId) {
         throw new EngineRuntimeError("transcript content reply is missing its result")
       }
       return event.page

@@ -3,7 +3,7 @@ import validatePresentation from "../../../../protocol/ui-presentation-validator
 import { MAX_UI_SURFACE_BYTES, type TranscriptContentSource, type TranscriptView } from "../protocol"
 import type { ClientCache, CacheLease } from "./cache"
 import type { HistoryCacheValue } from "./controller"
-import type { SessionReader } from "../session-reader"
+import type { SessionReader, SessionReadTarget } from "../session-reader"
 
 // Charge collection, UTF-16 decoding and the JSON object graph before reading.
 // Even one container per source byte fits this conservative object/string allowance.
@@ -11,7 +11,7 @@ const DECODE_CHARGE = MAX_UI_SURFACE_BYTES * 96
 const CHUNK_BYTES = 4096
 
 export async function readToolSurface(
-  reader: Pick<SessionReader, "page" | "content">, cache: ClientCache<HistoryCacheValue>, key: string,
+  reader: Pick<SessionReader, "page" | "content">, cache: ClientCache<HistoryCacheValue>, target: SessionReadTarget, key: string,
   view: TranscriptView, source: TranscriptContentSource, signal: AbortSignal,
 ): Promise<CacheLease<HistoryCacheValue>> {
   if (source.selector.type !== "tool_presentation") throw new Error("tool surface source is required")
@@ -26,7 +26,7 @@ export async function readToolSurface(
     let total: number | null = null
     for (let pageIndex = 0; ; pageIndex++) {
       if (pageIndex > Math.ceil(MAX_UI_SURFACE_BYTES / (CHUNK_BYTES - 3))) throw new Error("tool surface has too many content pages")
-      const page = await reader.content(view.session_id, { view, source, offset, max_bytes: CHUNK_BYTES }, signal)
+      const page = await reader.content(target, { view, source, offset, max_bytes: CHUNK_BYTES }, signal)
       signal.throwIfAborted()
       const length = Buffer.byteLength(page.text)
       if (JSON.stringify([page.view, page.source]) !== sourceKey || page.offset !== offset

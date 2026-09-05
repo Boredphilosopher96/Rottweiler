@@ -1,5 +1,5 @@
 import type { EngineEvent } from "./protocol"
-import type { SessionReader } from "./session-reader"
+import { directSessionRead, type SessionReader, type SessionReadTarget } from "./session-reader"
 import { invalidateTodos, readTodos, type TodoState } from "./state/todos"
 
 interface TodoControllerOptions {
@@ -11,13 +11,13 @@ interface TodoControllerOptions {
 /** One exact task snapshot and one read/timer, scoped to the presented session. */
 export class TodoController {
   readonly #options: TodoControllerOptions
-  #session: string | null = null
+  #session: SessionReadTarget | null = null
   #timer: ReturnType<typeof setTimeout> | null = null
   #request: AbortController | null = null
   #disposed = false
   constructor(options: TodoControllerOptions) { this.#options = options }
 
-  open(session: string, through: string | null = null): void {
+  open(session: SessionReadTarget, through: string | null = null): void {
     this.reset()
     if (this.#disposed) return
     this.#session = session
@@ -28,8 +28,8 @@ export class TodoController {
   event(event: EngineEvent): void {
     if (this.#disposed) return
     if (event.type === "session_history_ready" || event.type === "session_replay_completed") {
-      this.open(event.session_id, event.through_sequence)
-    } else if (event.type === "conversation_rewound" && this.#session === event.meta.session_id) {
+      this.open(this.#session?.sessionId === event.session_id ? this.#session : directSessionRead(event.session_id), event.through_sequence)
+    } else if (event.type === "conversation_rewound" && this.#session?.sessionId === event.meta.session_id) {
       // The reducer invalidates synchronously before a stale query can arrive.
       this.#read()
     }

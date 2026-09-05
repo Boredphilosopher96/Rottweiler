@@ -28,7 +28,7 @@ test("authenticated observer reads semantic pages without replaying lifetime eve
     if (command.type !== "read_transcript") return { type: "command", outcome: { type: "accepted" } }
     return { type: "read", outcome: { type: "accepted" }, events: [{ type: "transcript_page_ready",
       meta: { ...command.meta, emitted_at: "2026-01-01T00:00:10Z" }, session_id: command.session_id,
-      result: await source.page(command.session_id, command.read, new AbortController().signal),
+      result: await source.page({ sessionId: command.session_id, scope: command.scope }, command.read, new AbortController().signal),
     }] } satisfies CommandReply
   })
   await engine.start()

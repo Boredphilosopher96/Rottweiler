@@ -27,7 +27,7 @@ export const emptySessionReader: import("../../src/session-reader").SessionReade
   uiCatalog: async () => ({ entries: [] }),
   uiPanels: async () => ({ panels: [] }),
   todos: async () => ({ type: "ready", todos: { through: "1000", snapshot: { items: [] } } }),
-  page: async (session, read) => {
+  page: async ({ sessionId: session }, read) => {
     const page = fixturePage(session, read)
     return { type: "ready", page: { ...page, first_ordinal: "0", total_items: "0", items: [] } }
   },
@@ -65,7 +65,7 @@ export function sessionReaderFor(items: readonly import("../../src/protocol").Tr
     todos: emptySessionReader.todos,
     uiCatalog: emptySessionReader.uiCatalog,
     uiPanels: emptySessionReader.uiPanels,
-    page: async (session, read) => {
+    page: async ({ sessionId: session }, read) => {
       const position = read.position
       const limit = Math.min(read.max_items, items.length)
       const anchor = position.type === "around" || position.type === "before" || position.type === "after"

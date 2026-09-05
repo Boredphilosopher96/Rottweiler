@@ -18,7 +18,7 @@ async function setup() {
   renderer = fixture.renderer
   const reads: { session: string; signal: AbortSignal; resolve(result: TodoReadResult): void; reject(error: Error): void }[] = []
   const app = createRottweilerApp(renderer, {
-    sessionReader: { ...emptySessionReader, todos: (session, signal) => new Promise((resolve, reject) => reads.push({ session, signal, resolve, reject })) },
+    sessionReader: { ...emptySessionReader, todos: ({ sessionId: session }, signal) => new Promise((resolve, reject) => reads.push({ session, signal, resolve, reject })) },
     sessionId: "task-session", clientId: "tasks",
   })
   renderer.root.add(app)

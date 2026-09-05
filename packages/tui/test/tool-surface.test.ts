@@ -1,3 +1,4 @@
+import { directSessionRead } from "../src/session-reader"
 import { expect, test } from "bun:test"
 import { ClientCache } from "../src/history/cache"
 import type { HistoryCacheValue } from "../src/history/controller"
@@ -22,7 +23,7 @@ test("complete tool surfaces collect bounded pages under cache credit and retain
       return surfacePage(presentation, read)
     },
   }, cache, () => {})
-  await controller.open(view, source)
+  await controller.open(directSessionRead(view.session_id), view, source)
   expect(controller.snapshot.error).toBeNull()
   expect(controller.snapshot.surface?.presentation).toEqual(presentation)
   expect(controller.snapshot.surface?.fields[0]?.text).toContain("λ".repeat(2000))
@@ -30,7 +31,7 @@ test("complete tool surfaces collect bounded pages under cache credit and retain
   expect(requests).toBeLessThanOrEqual(17)
   const loaded = requests
   controller.close()
-  await controller.open(view, source)
+  await controller.open(directSessionRead(view.session_id), view, source)
   expect(requests).toBe(loaded)
   expect(cache.usage.pinnedEntries).toBe(1)
   controller.close()
@@ -48,7 +49,7 @@ test("cancelled surface reads hold credit until I/O settles and never publish la
       return surfacePage(fixturePresentation(), read)
     },
   }, cache, () => {})
-  const pending = controller.open(view, source)
+  const pending = controller.open(directSessionRead(view.session_id), view, source)
   controller.close()
   expect(cache.usage.bytes).toBeGreaterThan(0)
   finish()
@@ -70,7 +71,7 @@ test("surface loading rejects foreign source identity and mismatched fields with
         return failure === "source" ? { ...page, source: { ...source, sequence: "6" } } : page
       },
     }, cache, () => {})
-    await controller.open(view, source)
+    await controller.open(directSessionRead(view.session_id), view, source)
     expect(controller.snapshot.error).not.toBeNull()
     expect(controller.snapshot.surface).toBeNull()
     expect(cache.usage.bytes).toBe(0)

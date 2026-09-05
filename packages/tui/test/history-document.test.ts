@@ -1,3 +1,4 @@
+import { directSessionRead, descendantSessionRead } from "../src/session-reader"
 import { expect, test } from "bun:test"
 import { ClientCache } from "../src/history/cache"
 import { DocumentController } from "../src/history/document"
@@ -22,7 +23,7 @@ test("document paging restores evicted UTF-8 chunks without assembling full outp
       }
     },
   }, cache, () => { })
-  await controller.open(view, source)
+  await controller.open(directSessionRead(view.session_id), view, source)
   for (let index = 0; index < 29; index++) await controller.next()
   expect(requests).toBe(30)
   expect(controller.snapshot.page?.next_offset).toBeNull()
@@ -48,11 +49,29 @@ test("close aborts an in-flight document and its late reply cannot retain conten
       return { view: read.view, source: read.source, offset: 0, next_offset: null, total_bytes: 3, format: "text", text: "old" }
     },
   }, cache, () => { })
-  const pending = controller.open(view, source)
+  const pending = controller.open(directSessionRead(view.session_id), view, source)
   controller.close()
   expect(signal?.aborted).toBe(true)
   finish()
   await pending
   expect(controller.snapshot.open).toBe(false)
+  expect(cache.usage.bytes).toBe(0)
+})
+
+
+test("document cache identity includes its ancestry and rejects a foreign target before reading", async () => {
+  const cache = new ClientCache<HistoryCacheValue>()
+  let reads = 0
+  const controller = new DocumentController({ page: async () => { throw new Error("unused") }, content: async (_target, read) => {
+    reads++
+    return { view: read.view, source: read.source, offset: 0, next_offset: null, total_bytes: 3, format: "text", text: "one" }
+  } }, cache, () => {})
+  const target = (root: string) => descendantSessionRead(directSessionRead(root), { session_id: view.session_id, subagent_id: "child", source_sequence: "2" })
+  await controller.open(target("root-one"), view, source)
+  await controller.open(target("root-two"), view, source)
+  expect(reads).toBe(2)
+  await expect(controller.open(directSessionRead("foreign"), view, source)).rejects.toThrow("authority")
+  expect(reads).toBe(2)
+  controller.close(); cache.clear()
   expect(cache.usage.bytes).toBe(0)
 })

@@ -13,7 +13,7 @@ test("production app reads native semantic rows and navigates beyond its mounted
       uiCatalog: async () => ({ entries: [] }),
   uiPanels: async () => ({ panels: [] }),
   todos: async () => ({ type: "ready", todos: { through: "1000", snapshot: { items: [] } } }),
-    page: async (session, read) => { reads.push(read); return { type: "ready", page: fixturePage(session, read) } },
+    page: async ({ sessionId: session }, read) => { reads.push(read); return { type: "ready", page: fixturePage(session, read) } },
     content: async () => { throw new Error("unused") },
   }
   const app = createRottweilerApp(harness.renderer, { sessionId: "history", sessionReader: reader, treeSitterClient: new MockTreeSitterClient() })
@@ -62,7 +62,7 @@ test("complete-content interaction pages bounded bodies and releases the overlay
       uiCatalog: async () => ({ entries: [] }),
   uiPanels: async () => ({ panels: [] }),
   todos: async () => ({ type: "ready", todos: { through: "1000", snapshot: { items: [] } } }),
-      page: async (session, read) => {
+      page: async ({ sessionId: session }, read) => {
         const page = fixturePage(session, read)
         for (const item of page.items) if (item.content.type === "command") item.content.message.complete = false
         return { type: "ready", page }

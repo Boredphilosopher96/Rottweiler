@@ -1,6 +1,6 @@
 import type { ClientDiagnostics } from "../client-diagnostics"
 import { HistoryController, type HistorySnapshot } from "./controller"
-import type { SessionReader } from "../session-reader"
+import type { SessionReader, SessionReadTarget } from "../session-reader"
 
 /** Coalesce source invalidations without cancelling a page read that is making progress. */
 export class HistoryPresentation {
@@ -22,13 +22,13 @@ export class HistoryPresentation {
     }, undefined, diagnostics)
   }
 
-  present(sessionId: string): void {
-    if (this.#disposed || this.controller.snapshot.sessionId === sessionId) return
+  present(target: SessionReadTarget): void {
+    if (this.#disposed || this.controller.target === target) return
     this.#dirty = false
     this.#queuedAt = undefined
     this.#clearTimer()
     this.#nextReadAt = performance.now() + 100
-    void this.controller.open(sessionId)
+    void this.controller.open(target)
   }
 
   invalidate(sessionId: string): void {

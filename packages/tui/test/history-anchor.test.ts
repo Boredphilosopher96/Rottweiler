@@ -1,3 +1,4 @@
+import { directSessionRead, type SessionReadTarget } from "../src/session-reader"
 import { expect, test } from "bun:test"
 import { createTestRenderer, MockTreeSitterClient } from "@opentui/core/testing"
 import { TranscriptRenderable } from "../src/components/transcript"
@@ -18,7 +19,7 @@ test("visible source row and pixel offset survive page replacement and rewrappin
   const harness = await createTestRenderer({ width: 80, height: 20, useThread: false })
   const style = createSyntaxStyle(kennelTheme)
   const reader = {
-    page: async (session: string, read: Parameters<typeof fixturePage>[1]) => {
+    page: async ({ sessionId: session }: SessionReadTarget, read: Parameters<typeof fixturePage>[1]) => {
       const page = fixturePage(session, read)
       for (const item of page.items) if (item.content.type === "command") {
         item.content.message.text = `Row ${item.id} has enough text to wrap across narrow terminal widths. `.repeat(3)
@@ -36,7 +37,7 @@ test("visible source row and pixel offset survive page replacement and rewrappin
   transcript.update(createInitialState())
   harness.renderer.root.add(transcript)
   try {
-    await controller.open("session")
+    await controller.open(directSessionRead("session"))
     await controller.seek(400n)
     await harness.flush()
     transcript.setScrollOffset(12)
@@ -49,9 +50,9 @@ test("visible source row and pixel offset survive page replacement and rewrappin
     await harness.flush()
     expect(visibleAnchor(transcript)).toEqual(before)
     expect(transcript.mountedCards.size).toBeLessThanOrEqual(16)
-    await controller.open("child")
+    await controller.open(directSessionRead("child"))
     await harness.flush()
-    await controller.open("session")
+    await controller.open(directSessionRead("session"))
     await harness.flush()
     expect(visibleAnchor(transcript)).toEqual(before)
     await controller.seek(405n)

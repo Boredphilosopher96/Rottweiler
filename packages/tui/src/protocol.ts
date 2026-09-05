@@ -1,3 +1,5 @@
+export { MAX_SESSION_READ_ANCESTORS } from "../../../protocol/types"
+export type { SessionReadScope, SessionReadAncestor } from "../../../protocol/types"
 export {
   ENGINE_EVENT_DELIVERY,
   CLIENT_COMMAND_EXECUTION,

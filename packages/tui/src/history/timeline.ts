@@ -2,9 +2,10 @@ import type { ComposerDraftStore, DraftSubmission, DraftTextReservation } from "
 import type { TranscriptContentSource, TranscriptView } from "../protocol"
 import { HistoryController, type HistoryCacheValue } from "./controller"
 import type { ClientCache } from "./cache"
-import type { SessionReader } from "../session-reader"
+import type { SessionReader, SessionReadTarget } from "../session-reader"
 
 export interface TimelineChoice {
+  readonly target: SessionReadTarget
   readonly sequenceId: string
   readonly agentTurn: string
   readonly view: TranscriptView
@@ -21,7 +22,8 @@ export class TimelineController {
   }
   get choices(): readonly TimelineChoice[] {
     const page = this.history.snapshot.page
-    if (page === null) return []
+    const target = this.history.target
+    if (page === null || target === null) return []
     return page.items.flatMap(item => {
       const content = item.content
       if (content.type !== "conversation" || content.role !== "user" || item.agent_turn === null) return []
@@ -29,7 +31,7 @@ export class TimelineController {
       const text = first?.type === "text" && first.body.source.selector.type === "conversation_block"
         && first.body.source.selector.index === 0 ? first.body : null
       const attachment = text !== null && /^Attached file .+ \([^\n]+\):\n/.test(text.text)
-      return [{ sequenceId: content.source.sequence, agentTurn: item.agent_turn, view: page.view,
+      return [{ target, sequenceId: content.source.sequence, agentTurn: item.agent_turn, view: page.view,
         source: text === null || attachment ? null : text.source, preview: attachment ? "" : text?.text ?? "",
         hadAttachments: attachment || content.omitted_blocks || content.blocks.length > 1 || text === null }]
     }).reverse()
@@ -39,9 +41,9 @@ export class TimelineController {
     const page = this.history.snapshot.page
     return page !== null && BigInt(page.first_ordinal) + BigInt(page.items.length) < BigInt(page.total_items)
   }
-  open(sessionId: string, anchor?: string): Promise<void> {
-    return anchor === undefined ? this.history.open(sessionId)
-      : this.history.restoreViewport(sessionId, { following: false, anchor: { id: anchor, offset: 0 } })
+  open(target: SessionReadTarget, anchor?: string): Promise<void> {
+    return anchor === undefined ? this.history.open(target)
+      : this.history.restoreViewport(target, { following: false, anchor: { id: anchor, offset: 0 } })
   }
   previous(): Promise<void> {
     const first = this.history.snapshot.page?.items[0]
@@ -71,7 +73,7 @@ export async function readTimelineDraft(reader: Pick<SessionReader, "page" | "co
     let offset = 0
     let total: number | null = null
     for (;;) {
-      const page = await reader.content(choice.view.session_id, {
+      const page = await reader.content(choice.target, {
         view: choice.view, source: choice.source, offset, max_bytes: READ_BYTES,
       }, signal)
       signal.throwIfAborted()

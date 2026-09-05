@@ -1,3 +1,4 @@
+import { directSessionRead } from "../session-reader"
 import type { RottweilerApp, PrimaryView } from "../app"
 import type { PickerController } from "../picker-controller"
 import {
@@ -182,7 +183,7 @@ export class ClientRestoreController {
         ? null : this.host.resolveTheme(themeByName(picker.themeBeforePreview) ?? kennelTheme))
       this.host.pickerController.refresh()
     }
-    void this.host.history.restoreViewport(this.host.sessionId, state.history)
+    void this.host.history.restoreViewport(directSessionRead(this.host.sessionId), state.history)
     this.#pendingClientState = state
     this.host.ui.setState(this.host.ui.state)
     this.host.input.focusForInputMode()

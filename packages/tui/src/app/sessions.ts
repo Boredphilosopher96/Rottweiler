@@ -1,3 +1,4 @@
+import { directSessionRead } from "../session-reader"
 import { homedir } from "node:os"
 import type {
   ComposerRenderable,
@@ -214,7 +215,7 @@ export class SessionUiController {
     this.#timeline = new TimelineController(this.#host.sessionReader, this.#host.historyCache, () => {
       if (this.#host.pickerController.kind === "timeline") this.#host.pickerController.refresh()
     })
-    void this.#timeline.open(this.#host.sessionId, anchor)
+    void this.#timeline.open(directSessionRead(this.#host.sessionId), anchor)
     this.#host.pickerController.refresh()
   }
 

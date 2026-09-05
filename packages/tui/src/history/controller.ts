@@ -4,7 +4,7 @@ import type { UiCatalog, TranscriptContentPage, TranscriptItemId, TranscriptPage
 import { TRANSCRIPT_PROJECTION_VERSION } from "../protocol"
 import { parseU64 } from "../transport/types"
 import { ClientCache, type CacheLease } from "./cache"
-import type { SessionReader } from "../session-reader"
+import type { SessionReader, SessionReadTarget } from "../session-reader"
 
 export type HistoryCacheValue =
   | { readonly kind: "page"; readonly page: TranscriptPage }
@@ -24,6 +24,7 @@ export interface HistoryViewport {
 }
 
 interface SessionView {
+  readonly scopeKey: string
   view: TranscriptView | null
   total: bigint
   following: boolean
@@ -55,6 +56,8 @@ export class HistoryController {
   readonly #changed: () => void
   readonly #sessions = new Map<string, SessionView>()
   #sessionId: string | null = null
+  #target: SessionReadTarget | null = null
+  #targetKey = ""
   #active: CacheLease<HistoryCacheValue> | null = null
   #request: AbortController | null = null
   #loading = false
@@ -71,6 +74,8 @@ export class HistoryController {
     this.cache = cache
   }
 
+  get target(): SessionReadTarget | null { return this.#target }
+
   get snapshot(): HistorySnapshot {
     const active = this.#active?.value
     return {
@@ -82,9 +87,14 @@ export class HistoryController {
     }
   }
 
-  async open(sessionId: string): Promise<void> {
+  async open(target: SessionReadTarget): Promise<void> {
     if (this.#disposed) return
-    if (sessionId !== this.#sessionId) {
+    const sessionId = target.sessionId
+    const scopeKey = JSON.stringify(target)
+    const changed = scopeKey !== this.#targetKey
+    this.#target = target
+    this.#targetKey = scopeKey
+    if (sessionId !== this.#sessionId || changed) {
       this.#request?.abort()
       this.#request = null
       const previous = this.#active
@@ -105,8 +115,11 @@ export class HistoryController {
   }
 
   /** Restore source identity before fetching: physical window offsets are not history positions. */
-  async restoreViewport(sessionId: string, viewport: HistoryViewport): Promise<void> {
+  async restoreViewport(target: SessionReadTarget, viewport: HistoryViewport): Promise<void> {
     if (this.#disposed) return
+    const sessionId = target.sessionId
+    this.#target = target
+    this.#targetKey = JSON.stringify(target)
     this.#request?.abort()
     this.#request = null
     const previous = this.#active
@@ -124,7 +137,8 @@ export class HistoryController {
 
   async load(position: TranscriptPosition): Promise<void> {
     const sessionId = this.#sessionId
-    if (this.#disposed || sessionId === null) return
+    const target = this.#target
+    if (this.#disposed || sessionId === null || target === null) return
     this.#request?.abort()
     const request = new AbortController()
     this.#request = request
@@ -139,7 +153,7 @@ export class HistoryController {
     let retired: CacheLease<HistoryCacheValue> | null = null
     try {
       for (; ;) {
-        const result = await this.#reader.page(sessionId, {
+        const result = await this.#reader.page(target, {
           known_view: session.view, position, max_items: HISTORY_PAGE_ITEMS, max_bytes: HISTORY_PAGE_BYTES,
         }, request.signal)
         if (!this.#current(request, sessionId)) return
@@ -254,7 +268,10 @@ export class HistoryController {
 
   #session(id: string): SessionView {
     const existing = this.#sessions.get(id)
-    if (existing !== undefined) {
+    if (existing !== undefined && existing.scopeKey !== this.#targetKey) {
+      this.#invalidate(existing)
+      this.#sessions.delete(id)
+    } else if (existing !== undefined) {
       this.#sessions.delete(id)
       this.#sessions.set(id, existing)
       return existing
@@ -263,7 +280,7 @@ export class HistoryController {
       const oldest = this.#sessions.entries().next().value
       if (oldest !== undefined) { this.#invalidate(oldest[1]); this.#sessions.delete(oldest[0]) }
     }
-    const session: SessionView = { view: null, total: 0n, pages: new Map(), following: true, anchor: null, activeKey: null }
+    const session: SessionView = { scopeKey: this.#targetKey, view: null, total: 0n, pages: new Map(), following: true, anchor: null, activeKey: null }
     this.#sessions.set(id, session)
     return session
   }

@@ -139,7 +139,7 @@ describe("client-owned renderer handoff", () => {
       uiCatalog: async () => ({ entries: [] }),
   uiPanels: async () => ({ panels: [] }),
   todos: async () => ({ type: "ready", todos: { through: "1000", snapshot: { items: [] } } }),
-      page: async (session, read) => {
+      page: async ({ sessionId: session }, read) => {
         if (read.position.type === "first") await pending
         return { type: "ready", page: fixturePage(session, read) }
       }, content: emptySessionReader.content,

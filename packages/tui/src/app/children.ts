@@ -1,6 +1,6 @@
 import { TodoController } from "../todo-controller"
 import { emptyTodos } from "../state/todos"
-import type { SessionReader } from "../session-reader"
+import { directSessionRead, descendantSessionRead, type SessionReader, type SessionReadTarget } from "../session-reader"
 import { ComposerDraftStore } from "../composer-drafts"
 import { fg, t } from "@opentui/core"
 import {
@@ -60,11 +60,13 @@ export class ChildUiController {
   #subagentListError: string | null = null
   #subagentDescriptors: readonly SubagentDescriptor[] = []
   #activeChildState: RottweilerState | null = null
-  #historicalChild: { readonly sessionId: string; readonly task: string } | null = null
+  #historicalChild: { readonly sessionId: string; readonly task: string; readonly target: SessionReadTarget } | null = null
   readonly draftStore = new ComposerDraftStore()
   #activeSubagentId: string | null = null
   #subagentActionId: string | null = null
   #subagentErrorBaseline: RottweilerState["errors"][number] | undefined
+  #parentReadTarget: SessionReadTarget | null = null
+  #activeReadTarget: SessionReadTarget | null = null
   readonly #todos: TodoController
   constructor(host: ChildUiHost) {
     this.#host = host
@@ -82,7 +84,12 @@ export class ChildUiController {
   refreshTodos(): void {
     const session = this.#historicalChild?.sessionId ?? (this.#activeSubagentId === null
       ? undefined : this.subagentDescriptor(this.#activeSubagentId)?.child_session_id)
-    if (session !== undefined) this.#todos.open(session)
+    if (session !== undefined) this.#todos.open(this.readTarget)
+  }
+  get readTarget(): SessionReadTarget {
+    if (this.#activeReadTarget !== null) return this.#activeReadTarget
+    if (this.#parentReadTarget?.sessionId !== this.#host.sessionId) this.#parentReadTarget = directSessionRead(this.#host.sessionId)
+    return this.#parentReadTarget
   }
   get activeId(): string | null { return this.#activeSubagentId }
   get historical(): { readonly sessionId: string; readonly task: string } | null { return this.#historicalChild }
@@ -97,7 +104,7 @@ export class ChildUiController {
     this.#todos.reset()
     this.#scope = {}
     this.#subagentListError = null; this.#subagentDescriptors = []; this.#activeChildState = null
-    this.#historicalChild = null; this.draftStore.clear(); this.#activeSubagentId = null; this.#subagentActionId = null
+    this.#historicalChild = null; this.#activeReadTarget = null; this.draftStore.clear(); this.#activeSubagentId = null; this.#subagentActionId = null
     this.#subagentErrorBaseline = undefined
   }
   pickerClosed(): void { this.#subagentActionId = null }
@@ -108,15 +115,19 @@ export class ChildUiController {
     if (this.#activeSubagentId !== null && this.subagentDescriptor(this.#activeSubagentId) === undefined && this.#historicalChild === null) this.leaveSubagent()
     else this.#host.refresh()
   }
-  openHistorical(child: { readonly sessionId: string; readonly subagentId: string; readonly task: string }): void {
+  openHistorical(child: { readonly sessionId: string; readonly subagentId: string; readonly task: string; readonly sourceSequence: string }): void {
     if (this.subagentDescriptor(child.subagentId)?.child_session_id === child.sessionId) {
       void this.enterSubagent(child.subagentId); return
     }
+    let target: SessionReadTarget
+    try { target = descendantSessionRead(this.readTarget, { session_id: child.sessionId, subagent_id: child.subagentId, source_sequence: child.sourceSequence }) }
+    catch { this.#host.projectError("child_history_scope", "Child history exceeds the permitted ancestry path."); return }
     if (!this.saveComposerDraft()) return
-    this.#historicalChild = { sessionId: child.sessionId, task: boundedUiText(child.task, 512) }
+    this.#activeReadTarget = target
+    this.#historicalChild = { sessionId: child.sessionId, task: boundedUiText(child.task, 512), target }
     this.#activeSubagentId = child.subagentId
     this.#activeChildState = createInitialState()
-    this.#todos.open(child.sessionId)
+    this.#todos.open(target)
     this.restoreComposerDraft(child.subagentId)
     this.#host.refresh(); this.#host.focus()
   }
@@ -209,7 +220,8 @@ export class ChildUiController {
     this.restoreComposerDraft(subagentId)
     this.#subagentErrorBaseline = this.#host.state.errors.at(-1)
     this.#activeChildState = initialSubagentState(this.#host.state, descriptor)
-    this.#todos.open(descriptor.child_session_id)
+    this.#activeReadTarget = directSessionRead(descriptor.child_session_id)
+    this.#todos.open(this.#activeReadTarget)
     this.#host.refresh()
     this.#host.focus()
   }
@@ -219,6 +231,7 @@ export class ChildUiController {
     if (!this.saveComposerDraft()) return
     this.#todos.reset()
     this.#activeSubagentId = null
+    this.#activeReadTarget = null
     this.#historicalChild = null
     this.#activeChildState = null
     this.restoreComposerDraft(null)

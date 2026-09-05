@@ -99,3 +99,12 @@ The command palette exposes approved extension panels. One visible-session contr
 Native actions are declared labels and identifiers. Tab moves between content and actions; arrow keys select an action and Enter submits it. Short terminals scroll the action list within the available rows. Theme reconstruction preserves the source, content scroll and selected action focus. Rendering and keyboard handling never call extension RPC directly.
 
 A single action owner pins the exact canonical tool source or panel revision until its ordinary engine command settles. The command includes the host-stamped extension generation, contribution and action identities, and source invocation or panel revision. It carries no client-selected command arguments. Catalog removal disables actions, and the engine validates the live generation and source before executing. Closing the view does not release an unsettled action's source; renderer replacement defers until settlement.
+
+
+## Descendant read authority
+
+A history, content or task read carries a `SessionReadTarget`: its target session and an explicit scope. A direct scope authorizes that session. A descendant scope names an independently authorized root and a bounded ancestry path. Every hop contains the child session, subagent identity and canonical spawn sequence; its parent is the root or previous hop. Cycles, excess depth and mismatched target identities are rejected.
+
+The runtime resolves each hop through the effective transcript's indexed subagent binding, checking its immutable spawn source and child identity. Rewind removal or source reassignment revokes that association. The historical engine admits only paths rooted at its bound session; it never grants arbitrary session reads merely because the files exist. Ancestry and target projection share one four-transaction catch-up allowance per read.
+
+The client constructs ancestry from the selected semantic child row and carries it unchanged through history paging, content continuations and task recovery. Cached document keys include authority as well as source identity. Replacing a session's read scope retires its old page windows. The active descendant view defers process handoff, keeping its bounded path and interaction owner alive; leaving it returns to the root's direct authority.
