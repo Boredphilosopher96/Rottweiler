@@ -297,6 +297,7 @@ pub struct ToolContext {
     session_id: Option<SessionId>,
     model_alias: Option<String>,
     native_searcher: Option<Arc<dyn crate::WebSearcher>>,
+    effect_domains: Option<Arc<[String]>>,
     todo_store: Option<Arc<dyn crate::TodoStateStore>>,
     result_limit_bytes: usize,
     pub cancellation: CancellationToken,
@@ -379,6 +380,7 @@ impl ToolContext {
             session_id: None,
             model_alias: None,
             native_searcher: None,
+            effect_domains: None,
             todo_store: None,
             result_limit_bytes: ToolLimits::default().max_result_bytes,
             cancellation: CancellationToken::default(),
@@ -435,6 +437,15 @@ impl ToolContext {
     #[must_use]
     pub fn todo_store(&self) -> Option<&Arc<dyn crate::TodoStateStore>> {
         self.todo_store.as_ref()
+    }
+
+    pub(crate) fn with_effect_domains(mut self, domains: Arc<[String]>) -> Self {
+        self.effect_domains = Some(domains);
+        self
+    }
+
+    pub(crate) fn effect_domains(&self) -> Option<Arc<[String]>> {
+        self.effect_domains.clone()
     }
 
     /// Bind the admitted native backend for this turn; callbacks never enter tool JSON.
@@ -819,6 +830,8 @@ pub struct CandidateLocation {
 pub enum ToolError {
     #[error("tool effect settlement is unproven: {0}")]
     EffectsUnsettled(String),
+    #[error("delegated effect denied: {0}")]
+    DelegationDenied(String),
     #[error("invalid tool input: {0}")]
     InvalidInput(String),
     #[error("path escapes the workspace: {0}")]
@@ -929,6 +942,15 @@ pub trait Tool: Send + Sync {
     /// Declares behavior that policy adapters cannot safely infer from a name.
     fn behavior(&self) -> ToolBehavior {
         ToolBehavior::Standard
+    }
+
+    /// Source-owned support for calls made under another tool's approval.
+    /// Unspecified tools cannot acquire nested effects from capability flags.
+    ///
+    /// # Errors
+    /// Returns malformed typed input before delegated execution.
+    fn delegated_effect(&self, _input: &Value) -> Result<crate::DelegatedEffect, ToolError> {
+        Ok(crate::DelegatedEffect::Denied)
     }
 
     /// Returns workspace paths explicitly carried by this invocation.
@@ -1078,6 +1100,10 @@ impl Tool for GuardedTool {
 
     fn workspace_paths(&self, input: &Value) -> Result<Vec<PathBuf>, ToolError> {
         self.inner.workspace_paths(input)
+    }
+
+    fn delegated_effect(&self, input: &Value) -> Result<crate::DelegatedEffect, ToolError> {
+        self.inner.delegated_effect(input)
     }
 
     fn subagent_lifecycle_mode(&self) -> SubagentLifecycleMode {

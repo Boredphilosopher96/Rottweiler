@@ -57,6 +57,10 @@ impl ReadTool {
 
 #[async_trait]
 impl Tool for ReadTool {
+    fn delegated_effect(&self, _input: &Value) -> Result<crate::DelegatedEffect, ToolError> {
+        Ok(crate::DelegatedEffect::Filesystem)
+    }
+
     async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
         self.operations.settle().await
     }
@@ -150,6 +154,10 @@ impl WriteTool {
 
 #[async_trait]
 impl Tool for WriteTool {
+    fn delegated_effect(&self, _input: &Value) -> Result<crate::DelegatedEffect, ToolError> {
+        Ok(crate::DelegatedEffect::Filesystem)
+    }
+
     async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
         self.operations.settle().await
     }
@@ -280,6 +288,10 @@ impl EditTool {
 
 #[async_trait]
 impl Tool for EditTool {
+    fn delegated_effect(&self, _input: &Value) -> Result<crate::DelegatedEffect, ToolError> {
+        Ok(crate::DelegatedEffect::Filesystem)
+    }
+
     async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
         self.operations.settle().await
     }
@@ -387,6 +399,10 @@ impl MultiEditTool {
 
 #[async_trait]
 impl Tool for MultiEditTool {
+    fn delegated_effect(&self, _input: &Value) -> Result<crate::DelegatedEffect, ToolError> {
+        Ok(crate::DelegatedEffect::Filesystem)
+    }
+
     async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
         self.operations.settle().await
     }

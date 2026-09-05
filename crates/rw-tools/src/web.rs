@@ -37,6 +37,8 @@ pub struct WebFetchInput {
 /// Request passed to the host's policy-aware HTTP implementation.
 #[derive(Clone, Debug)]
 pub struct FetchRequest {
+    /// Exact optional invocation authority, enforced on every redirect.
+    pub allowed_domains: Option<Arc<[String]>>,
     pub url: Url,
     pub headers: BTreeMap<String, String>,
     pub max_bytes: usize,
@@ -223,6 +225,7 @@ impl WebSearcher for ConfiguredSearchApi {
                     url,
                     headers: self.headers.clone(),
                     max_bytes: self.max_response_bytes,
+                    allowed_domains: None,
                 },
                 cancellation,
             )
@@ -450,6 +453,17 @@ impl WebFetchTool {
 
 #[async_trait]
 impl Tool for WebFetchTool {
+    fn delegated_effect(&self, input: &Value) -> Result<crate::DelegatedEffect, ToolError> {
+        let input: WebFetchInput = parse_input(input.clone())?;
+        let url = Url::parse(&input.url).map_err(|error| ToolError::Network(error.to_string()))?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| ToolError::Network("URL has no host".into()))?;
+        Ok(crate::DelegatedEffect::Http {
+            host: host.to_owned(),
+        })
+    }
+
     async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
         Ok(())
     }
@@ -484,6 +498,7 @@ impl Tool for WebFetchTool {
                     url,
                     headers: input.headers,
                     max_bytes: self.limits.max_web_bytes.min(self.limits.max_result_bytes),
+                    allowed_domains: context.effect_domains(),
                 },
                 context.cancellation.clone(),
             ) => result?,

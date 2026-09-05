@@ -398,6 +398,20 @@ impl EgressPolicy {
         self
     }
 
+    /// Checks name authority before DNS resolution, without granting an address.
+    #[must_use]
+    pub fn allows_domain(&self, host: &str) -> bool {
+        let Some(host) = normalize_domain(host) else {
+            return false;
+        };
+        self.allowed_domains.iter().any(|allowed| {
+            host == *allowed
+                || host
+                    .strip_suffix(allowed)
+                    .is_some_and(|prefix| prefix.ends_with('.'))
+        })
+    }
+
     /// Evaluates one post-DNS proxy connection.
     #[must_use]
     pub fn evaluate(&self, host: &str, addresses: &[IpAddr]) -> EgressDecision {
@@ -413,12 +427,7 @@ impl EgressPolicy {
         let Some(host) = normalize_domain(host) else {
             return EgressDecision::HardDenied;
         };
-        if self.allowed_domains.iter().any(|allowed| {
-            host == *allowed
-                || host
-                    .strip_suffix(allowed)
-                    .is_some_and(|prefix| prefix.ends_with('.'))
-        }) {
+        if self.allows_domain(&host) {
             EgressDecision::Allowed
         } else {
             EgressDecision::ApprovalRequired

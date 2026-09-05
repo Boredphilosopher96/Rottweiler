@@ -6,6 +6,8 @@
 
 mod background;
 mod bash;
+mod delegation;
+pub use delegation::{DelegatedEffect, ToolEffectGrant, ToolEffectScope};
 mod files;
 mod intelligence;
 mod interaction;

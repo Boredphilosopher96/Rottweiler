@@ -118,6 +118,7 @@ async fn webfetch_chains_through_authenticated_proxy_after_target_pin() {
     let response = fetcher
         .fetch(
             FetchRequest {
+                allowed_domains: None,
                 url: Url::parse("http://127.0.0.1:8/target").expect("target URL"),
                 headers: BTreeMap::new(),
                 max_bytes: 64,
@@ -128,4 +129,39 @@ async fn webfetch_chains_through_authenticated_proxy_after_target_pin() {
         .expect("proxy webfetch");
     worker.join().expect("proxy worker");
     assert_eq!(response.body, b"ok");
+}
+
+#[tokio::test]
+async fn delegated_webfetch_rejects_redirect_name_before_dns_or_connection() {
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("HTTP fixture");
+    let address = listener.local_addr().expect("fixture address");
+    let server = tokio::spawn(async move {
+        let (mut connection, _) = listener.accept().await.expect("admitted request");
+        let mut bytes = [0_u8; 4096];
+        connection.read(&mut bytes).await.expect("HTTP request");
+        connection.write_all(format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://localhost:{}/outside\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            address.port()).as_bytes()).await.expect("redirect");
+    });
+    let fetcher = PolicyWebFetcher::new(true, None);
+    let error = fetcher
+        .fetch(
+            FetchRequest {
+                allowed_domains: Some(Arc::from(["127.0.0.1".to_owned()])),
+                url: Url::parse(&format!("http://{address}/allowed")).expect("fixture URL"),
+                headers: BTreeMap::new(),
+                max_bytes: 64,
+            },
+            CancellationToken::default(),
+        )
+        .await
+        .expect_err("redirect is outside invocation authority");
+    server.await.expect("fixture settled");
+    assert!(
+        matches!(error, ToolError::Network(message) if message == "network domain was not declared")
+    );
 }

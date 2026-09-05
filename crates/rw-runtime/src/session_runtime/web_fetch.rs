@@ -70,6 +70,12 @@ impl PolicyWebFetcher {
                 "webfetch requires an http(s) URL without userinfo".to_owned(),
             ));
         }
+        if !url
+            .host_str()
+            .is_some_and(|host| policy.allows_domain(host))
+        {
+            return Err(ToolError::Network("network domain was not declared".into()));
+        }
         let port = url
             .port_or_known_default()
             .ok_or_else(|| ToolError::Network("URL has no usable port".to_owned()))?;
@@ -148,12 +154,19 @@ impl WebFetcher for PolicyWebFetcher {
         cancellation: CancellationToken,
     ) -> std::result::Result<FetchResponse, ToolError> {
         let original_origin = origin(&request.url);
-        let mut policy = EgressPolicy::default().with_private_destinations(self.allow_loopback);
+        let restricted = request.allowed_domains.is_some();
+        let mut policy = request
+            .allowed_domains
+            .as_ref()
+            .map_or_else(EgressPolicy::default, |domains| {
+                EgressPolicy::new(domains.iter())
+            })
+            .with_private_destinations(self.allow_loopback);
         let original_host = request
             .url
             .host_str()
             .ok_or_else(|| ToolError::Network("URL has no host".to_owned()))?;
-        if !policy.allow_domain(original_host) {
+        if !restricted && !policy.allow_domain(original_host) {
             return Err(ToolError::Network(
                 "webfetch requested an invalid network domain".to_owned(),
             ));
