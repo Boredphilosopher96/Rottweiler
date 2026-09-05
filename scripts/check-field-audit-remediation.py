@@ -52,7 +52,8 @@ def main() -> int:
         "tool_output_delta",
         "new TreeSitterClient",
     )
-    require_contains("crates/rw-tools/src/bash.rs", "copy_stream_preserves_utf8_split_across_reads", "from_utf8(&pending)")
+    require_contains("crates/rw-tools/src/bash/tests/output.rs", "copy_stream_preserves_utf8_split_across_reads")
+    require_contains("crates/rw-tools/src/bash/output.rs", "from_utf8(&pending)")
     require_contains("packages/tui/src/transport/sse.ts", "indexOf(0x0a", "subarray")
     require_contains("packages/tui/src/recycle-state.ts", "schemaVersion", "scrollTop", "draft")
     require_contains("packages/tui/scripts/opentui-rss-harness.ts", "createTestRenderer")

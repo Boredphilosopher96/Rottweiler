@@ -1,0 +1,1037 @@
+use std::{
+    collections::HashMap,
+    path::Path,
+    sync::{Arc, Mutex, RwLock},
+    time::Instant,
+};
+
+use rw_tools::{
+    CancellationToken, CapabilityManifest, DiffArtifactAuthority, McpToolPolicy,
+    SessionDiffArtifactAuthority, ToolRegistry, WorktreeLeaseRecord, validate_mcp_virtual_tool,
+};
+use rw_types::{
+    Cost, EngineEvent, SessionId, SubagentDescriptor, SubagentId, SubagentIsolation,
+    SubagentResult, SubagentStatus,
+};
+use tokio::sync::{Semaphore, watch};
+
+use super::{
+    NoopSubagentMetadataStore, ObserverProgress, OrchestrationError, OrchestratorInner,
+    SessionRecord, SessionState, SubagentHandle, SubagentLaunch, SubagentLimits,
+    SubagentMetadataStore, SubagentObserver, SubagentOrchestrator, SubagentProgressObserver,
+    SubagentRecoveryPhase, SubagentRecoveryPolicy, SubagentRecoveryRecord, SubagentRequest,
+    SubagentSession, SubagentSessionFactory, bound_turn_result, bounded_cancel, bounded_close,
+    control_timeout, ensure_child_owner, random_id, restricted_registry, session_record_descriptor,
+    validate_request, zero_usage,
+};
+
+impl SubagentOrchestrator {
+    /// Builds an orchestrator over the same public registry used by the parent actor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-request error when a configured limit is zero.
+    pub fn new(
+        limits: SubagentLimits,
+        factory: Arc<dyn SubagentSessionFactory>,
+        tools: Arc<ToolRegistry>,
+    ) -> Result<Self, OrchestrationError> {
+        if limits.max_concurrency == 0 || limits.max_turns == 0 || limits.max_duration.is_zero() {
+            return Err(OrchestrationError::InvalidRequest(
+                "concurrency, turn, and duration limits must be greater than zero".to_owned(),
+            ));
+        }
+        let weak_tools = Arc::downgrade(&tools);
+        Ok(Self {
+            inner: Arc::new(OrchestratorInner {
+                limits,
+                factory,
+                base_tools: tools,
+                tools: RwLock::new(weak_tools),
+                permits: Arc::new(Semaphore::new(limits.max_concurrency)),
+                sequence: std::sync::atomic::AtomicU64::new(0),
+                sessions: Mutex::new(HashMap::new()),
+                session_depths: Mutex::new(HashMap::new()),
+                diff_artifact_authority: Arc::new(SessionDiffArtifactAuthority::default()),
+                latest_artifacts: Mutex::new(HashMap::new()),
+                metadata: RwLock::new(Arc::new(NoopSubagentMetadataStore)),
+            }),
+        })
+    }
+
+    #[must_use]
+    pub fn limits(&self) -> SubagentLimits {
+        self.inner.limits
+    }
+
+    /// Binds the final registry after cyclic orchestration tools are added.
+    /// Future children inherit it, allowing safe nested spawning.
+    pub fn bind_tools(&self, tools: Arc<ToolRegistry>) {
+        let weak_tools = Arc::downgrade(&tools);
+        drop(tools);
+        *self
+            .inner
+            .tools
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = weak_tools;
+    }
+
+    /// Installs atomic host-private continuation metadata persistence.
+    pub fn bind_metadata_store(&self, store: Arc<dyn SubagentMetadataStore>) {
+        *self
+            .inner
+            .metadata
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = store;
+    }
+
+    fn tool_registry(&self) -> Arc<ToolRegistry> {
+        self.inner
+            .tools
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .upgrade()
+            .unwrap_or_else(|| Arc::clone(&self.inner.base_tools))
+    }
+
+    /// Shared provenance authority for the registered `apply_worktree_diff` tool.
+    #[must_use]
+    pub fn diff_artifact_authority(&self) -> Arc<SessionDiffArtifactAuthority> {
+        Arc::clone(&self.inner.diff_artifact_authority)
+    }
+
+    /// Rebuilds one exact grant from a durable parent `SubagentFinished` result.
+    ///
+    /// # Errors
+    ///
+    /// Returns when the durable artifact is malformed.
+    pub fn record_recovered_result(
+        &self,
+        parent_session_id: SessionId,
+        result: &SubagentResult,
+    ) -> Result<(), OrchestrationError> {
+        if let Some(artifact) = &result.diff_artifact {
+            self.inner
+                .diff_artifact_authority
+                .record_durable(parent_session_id, artifact)
+                .map_err(|error| OrchestrationError::Session(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Rebuilds artifact grants exclusively from committed parent events.
+    /// Legacy text-only child results are ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns when a structured result disagrees with its durable subagent id
+    /// or contains an invalid artifact.
+    pub fn rebuild_artifact_authority(
+        &self,
+        parent_session_id: &SessionId,
+        events: &[EngineEvent],
+    ) -> Result<(), OrchestrationError> {
+        self.inner
+            .diff_artifact_authority
+            .revoke_session(parent_session_id);
+        self.inner
+            .latest_artifacts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(session, _), _| session != parent_session_id);
+        let mut artifacts = Vec::new();
+        let mut latest = HashMap::<SubagentId, Option<String>>::new();
+        for event in events {
+            let EngineEvent::SubagentFinished {
+                subagent_id,
+                result,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            if &result.subagent_id != subagent_id {
+                return Err(OrchestrationError::Session(
+                    "durable child result id does not match its lifecycle event".to_owned(),
+                ));
+            }
+            if let Some(artifact) = &result.diff_artifact {
+                self.inner
+                    .diff_artifact_authority
+                    .validate(artifact)
+                    .map_err(|error| OrchestrationError::Session(error.to_string()))?;
+                artifacts.push(artifact);
+            }
+            latest.insert(
+                subagent_id.clone(),
+                result
+                    .diff_artifact
+                    .as_ref()
+                    .map(|artifact| artifact.id.clone()),
+            );
+        }
+        for artifact in artifacts {
+            self.inner
+                .diff_artifact_authority
+                .record_durable(parent_session_id.clone(), artifact)
+                .map_err(|error| OrchestrationError::Session(error.to_string()))?;
+        }
+        let mut recovered_latest = self
+            .inner
+            .latest_artifacts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (subagent_id, artifact_id) in latest {
+            if let Some(artifact_id) = artifact_id {
+                recovered_latest.insert((parent_session_id.clone(), subagent_id), artifact_id);
+            }
+        }
+        Ok(())
+    }
+
+    /// Starts a new child and returns immediately with a stable parent handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation, depth, concurrency, factory, or observer failures.
+    #[allow(clippy::too_many_lines)]
+    pub async fn start(
+        &self,
+        parent_session_id: SessionId,
+        request: SubagentRequest,
+        observer: Arc<dyn SubagentObserver>,
+        cancellation: CancellationToken,
+    ) -> Result<SubagentHandle, OrchestrationError> {
+        validate_request(&request)?;
+        let parent_depth = self
+            .inner
+            .session_depths
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&parent_session_id)
+            .copied()
+            .unwrap_or(0);
+        let depth = parent_depth.saturating_add(1);
+        if depth > self.inner.limits.max_depth {
+            return Err(OrchestrationError::DepthExceeded {
+                requested: depth,
+                maximum: self.inner.limits.max_depth,
+            });
+        }
+        let permit = Arc::clone(&self.inner.permits)
+            .try_acquire_owned()
+            .map_err(|_| OrchestrationError::ConcurrencyExceeded {
+                maximum: self.inner.limits.max_concurrency,
+            })?;
+        let tools = restricted_registry(
+            &self.tool_registry(),
+            &request.tools,
+            request.permission_mode,
+        )?;
+        let capabilities = CapabilityManifest::new(
+            tools
+                .descriptors()
+                .into_iter()
+                .flat_map(|descriptor| descriptor.capabilities.capabilities().to_vec()),
+        );
+        let ordinal = self
+            .inner
+            .sequence
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let random = random_id()?;
+        let handle = SubagentHandle {
+            subagent_id: SubagentId(format!("agent-{ordinal}-{random}")),
+            session_id: SessionId(format!("child-{random}")),
+        };
+        let resolved_max_turns = request
+            .max_turns
+            .unwrap_or(self.inner.limits.max_turns)
+            .min(self.inner.limits.max_turns);
+        let launch = SubagentLaunch {
+            handle: handle.clone(),
+            parent_session_id: parent_session_id.clone(),
+            depth,
+            request: request.clone(),
+            tools: Arc::clone(&tools),
+            max_turns: resolved_max_turns,
+            workspace_root: request.workspace_root.clone(),
+            cancellation: cancellation.clone(),
+        };
+        let session = self.inner.factory.create(launch).await?;
+        if session.session_id() != &handle.session_id {
+            return Err(OrchestrationError::Session(
+                "child factory returned a different session id".to_owned(),
+            ));
+        }
+        let mut recovery_record = SubagentRecoveryRecord {
+            parent_session_id: parent_session_id.clone(),
+            handle: handle.clone(),
+            task: request.task.clone(),
+            agent: request.agent.clone(),
+            depth,
+            workspace_root: request.workspace_root.clone(),
+            isolation: request.isolation,
+            worktree: session.worktree_record(),
+            capabilities: capabilities.clone(),
+            tool_names: tools
+                .descriptors()
+                .into_iter()
+                .map(|descriptor| descriptor.name)
+                .chain(
+                    request
+                        .tools
+                        .iter()
+                        .filter(|name| name.starts_with("mcp:"))
+                        .cloned(),
+                )
+                .collect(),
+            policy: SubagentRecoveryPolicy {
+                model_alias: request.model.clone(),
+                system_prompt: request.system_prompt.clone(),
+                permission_mode: request.permission_mode,
+                max_turns: resolved_max_turns,
+            },
+            phase: SubagentRecoveryPhase::Pending,
+        };
+        let metadata = self
+            .inner
+            .metadata
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Err(error) = metadata.save(recovery_record.clone()).await {
+            bounded_close(&session, None, self.inner.limits).await.map_err(|cleanup| {
+                OrchestrationError::Session(format!(
+                    "{error}; child cleanup after pending metadata failure also failed: {cleanup}"
+                ))
+            })?;
+            return Err(error);
+        }
+        if let Err(error) = observer.spawned(&handle, &request.task).await {
+            let _ = bounded_cancel(&session, self.inner.limits).await;
+            return Err(error);
+        }
+        recovery_record.phase = SubagentRecoveryPhase::Active;
+        if let Err(error) = metadata.save(recovery_record).await {
+            let _ = bounded_cancel(&session, self.inner.limits).await;
+            let terminal = SubagentResult {
+                subagent_id: handle.subagent_id.clone(),
+                session_id: handle.session_id.clone(),
+                status: SubagentStatus::Failed,
+                final_text: error.to_string(),
+                touched_files: Vec::new(),
+                diff_artifact: None,
+                usage: zero_usage(),
+                cost: Cost::Unavailable {
+                    reason: "child metadata promotion failed".to_owned(),
+                },
+                turns: 0,
+                duration_millis: 0,
+            };
+            observer.finished(&terminal).await?;
+            return Err(error);
+        }
+        let (result_tx, result_rx) = watch::channel(None);
+        self.inner
+            .session_depths
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(handle.session_id.clone(), depth);
+        self.inner
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                handle.subagent_id.clone(),
+                SessionRecord {
+                    handle: handle.clone(),
+                    task: request.task.clone(),
+                    agent: request.agent.clone(),
+                    model: request.model.clone(),
+                    session: Arc::clone(&session),
+                    state: SessionState::Active,
+                    result: Some(result_rx),
+                    isolation: request.isolation,
+                    parent_session_id: parent_session_id.clone(),
+                    latest_durable_artifact_id: None,
+                    close_completed: false,
+                    close_gate: Arc::new(tokio::sync::Mutex::new(())),
+                },
+            );
+        self.spawn_turn(
+            handle.clone(),
+            parent_session_id,
+            session,
+            request.task,
+            observer,
+            cancellation,
+            result_tx,
+            permit,
+        );
+        Ok(handle)
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn spawn_turn(
+        &self,
+        handle: SubagentHandle,
+        parent_session_id: SessionId,
+        session: Arc<dyn SubagentSession>,
+        prompt: String,
+        observer: Arc<dyn SubagentObserver>,
+        cancellation: CancellationToken,
+        result_tx: watch::Sender<Option<Result<SubagentResult, String>>>,
+        permit: tokio::sync::OwnedSemaphorePermit,
+    ) {
+        let inner = Arc::clone(&self.inner);
+        tokio::spawn(async move {
+            let started = Instant::now();
+            let progress: Arc<dyn SubagentProgressObserver> = Arc::new(ObserverProgress {
+                observer: Arc::clone(&observer),
+                handle: handle.clone(),
+            });
+            let turn = tokio::select! {
+                () = cancellation.cancelled() => {
+                    let _ = bounded_cancel(&session, inner.limits).await;
+                    Err(OrchestrationError::Session("cancelled".to_owned()))
+                },
+                result = tokio::time::timeout(
+                    inner.limits.max_duration,
+                    session.run_turn(prompt, cancellation.clone(), progress),
+                ) => if let Ok(result) = result {
+                    result
+                } else {
+                        let _ = bounded_cancel(&session, inner.limits).await;
+                        Err(OrchestrationError::Session("timed out".to_owned()))
+                },
+            };
+            if turn.is_err() {
+                let _ = bounded_cancel(&session, inner.limits).await;
+            }
+            let mut result = match turn {
+                Ok(mut turn) => {
+                    bound_turn_result(&mut turn);
+                    SubagentResult {
+                        subagent_id: handle.subagent_id.clone(),
+                        session_id: handle.session_id.clone(),
+                        status: turn.status,
+                        final_text: turn.final_text,
+                        touched_files: turn.touched_files,
+                        diff_artifact: turn.diff_artifact,
+                        usage: turn.usage,
+                        cost: turn.cost,
+                        turns: turn.turns,
+                        duration_millis: u64::try_from(started.elapsed().as_millis())
+                            .unwrap_or(u64::MAX),
+                    }
+                }
+                Err(error) => SubagentResult {
+                    subagent_id: handle.subagent_id.clone(),
+                    session_id: handle.session_id.clone(),
+                    status: if cancellation.is_cancelled() {
+                        SubagentStatus::Cancelled
+                    } else if started.elapsed() >= inner.limits.max_duration {
+                        SubagentStatus::TimedOut
+                    } else {
+                        SubagentStatus::Failed
+                    },
+                    final_text: error.to_string(),
+                    touched_files: Vec::new(),
+                    diff_artifact: None,
+                    usage: zero_usage(),
+                    cost: Cost::Unavailable {
+                        reason: error.to_string(),
+                    },
+                    turns: 0,
+                    duration_millis: u64::try_from(started.elapsed().as_millis())
+                        .unwrap_or(u64::MAX),
+                },
+            };
+            if let Some(artifact) = result.diff_artifact.as_ref()
+                && let Err(error) = inner.diff_artifact_authority.validate(artifact)
+            {
+                result.status = SubagentStatus::Failed;
+                result.final_text = format!("isolated child returned an invalid diff: {error}");
+                result.diff_artifact = None;
+            }
+            let durable_result = match observer.finished(&result).await {
+                Ok(()) => {
+                    let grant = result.diff_artifact.as_ref().map_or(Ok(()), |artifact| {
+                        inner
+                            .diff_artifact_authority
+                            .record_durable(parent_session_id.clone(), artifact)
+                            .map_err(|error| error.to_string())
+                    });
+                    grant.map(|()| result)
+                }
+                Err(error) => Err(error.to_string()),
+            };
+            {
+                let mut sessions = inner
+                    .sessions
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(record) = sessions.get_mut(&handle.subagent_id) {
+                    if let Ok(durable) = &durable_result {
+                        record.latest_durable_artifact_id = durable
+                            .diff_artifact
+                            .as_ref()
+                            .map(|artifact| artifact.id.clone());
+                        let mut latest = inner
+                            .latest_artifacts
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let key = (parent_session_id.clone(), handle.subagent_id.clone());
+                        if let Some(artifact) = &durable.diff_artifact {
+                            latest.insert(key, artifact.id.clone());
+                        } else {
+                            latest.remove(&key);
+                        }
+                    }
+                    record.state = SessionState::Inactive;
+                }
+            }
+            let _ = result_tx.send(Some(durable_result));
+            drop(permit);
+        });
+    }
+
+    /// Waits for the currently running turn associated with a handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns when the handle has no pending result or its child failed.
+    pub async fn wait(
+        &self,
+        handle: &SubagentHandle,
+    ) -> Result<SubagentResult, OrchestrationError> {
+        let mut receiver = self
+            .inner
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&handle.subagent_id)
+            .and_then(|record| record.result.clone())
+            .ok_or_else(|| OrchestrationError::NoPendingResult(handle.subagent_id.0.clone()))?;
+        loop {
+            if let Some(result) = receiver.borrow().clone() {
+                return result.map_err(OrchestrationError::Session);
+            }
+            receiver.changed().await.map_err(|_| {
+                OrchestrationError::Session("child result channel closed".to_owned())
+            })?;
+        }
+    }
+
+    /// Convenience start-and-wait operation used by the public tool.
+    ///
+    /// # Errors
+    ///
+    /// Returns any start, child-session, or durable-observer failure.
+    pub async fn spawn(
+        &self,
+        parent_session_id: SessionId,
+        request: SubagentRequest,
+        observer: Arc<dyn SubagentObserver>,
+        cancellation: CancellationToken,
+    ) -> Result<SubagentResult, OrchestrationError> {
+        let handle = self
+            .start(parent_session_id, request, observer, cancellation)
+            .await?;
+        self.wait(&handle).await
+    }
+
+    /// Sends a follow-up to a completed child while retaining its context/log.
+    ///
+    /// # Errors
+    ///
+    /// Returns for unknown/running children, invalid prompts, exhausted concurrency, or failures.
+    pub async fn follow_up(
+        &self,
+        caller_parent_session_id: &SessionId,
+        subagent_id: &SubagentId,
+        prompt: String,
+        observer: Arc<dyn SubagentObserver>,
+        cancellation: CancellationToken,
+    ) -> Result<SubagentHandle, OrchestrationError> {
+        if prompt.trim().is_empty() {
+            return Err(OrchestrationError::InvalidRequest(
+                "follow-up prompt must not be empty".to_owned(),
+            ));
+        }
+        let (handle, parent_session_id, session, permit) = {
+            let mut sessions = self
+                .inner
+                .sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let record = sessions
+                .get_mut(subagent_id)
+                .ok_or_else(|| OrchestrationError::UnknownSubagent(subagent_id.0.clone()))?;
+            ensure_child_owner(caller_parent_session_id, subagent_id, record)?;
+            if record.state != SessionState::Inactive {
+                return Err(OrchestrationError::AlreadyRunning(subagent_id.0.clone()));
+            }
+            let permit = Arc::clone(&self.inner.permits)
+                .try_acquire_owned()
+                .map_err(|_| OrchestrationError::ConcurrencyExceeded {
+                    maximum: self.inner.limits.max_concurrency,
+                })?;
+            record.state = SessionState::Active;
+            (
+                record.handle.clone(),
+                record.parent_session_id.clone(),
+                Arc::clone(&record.session),
+                permit,
+            )
+        };
+        let (result_tx, result_rx) = watch::channel(None);
+        if let Some(record) = self
+            .inner
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(subagent_id)
+        {
+            record.result = Some(result_rx);
+        }
+        if let Err(error) = observer.spawned(&handle, &prompt).await {
+            let _ = bounded_cancel(&session, self.inner.limits).await;
+            if let Some(record) = self
+                .inner
+                .sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get_mut(subagent_id)
+            {
+                record.state = SessionState::Inactive;
+            }
+            return Err(error);
+        }
+        self.spawn_turn(
+            handle.clone(),
+            parent_session_id,
+            session,
+            prompt,
+            observer,
+            cancellation,
+            result_tx,
+            permit,
+        );
+        Ok(handle)
+    }
+
+    /// Cooperatively cancels one active child.
+    ///
+    /// # Errors
+    ///
+    /// Returns when the child is unknown or cancellation fails.
+    pub async fn cancel(
+        &self,
+        caller_parent_session_id: &SessionId,
+        subagent_id: &SubagentId,
+    ) -> Result<(), OrchestrationError> {
+        let session = self
+            .inner
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(subagent_id)
+            .ok_or_else(|| OrchestrationError::UnknownSubagent(subagent_id.0.clone()))
+            .and_then(|record| {
+                ensure_child_owner(caller_parent_session_id, subagent_id, record)?;
+                Ok(Arc::clone(&record.session))
+            })?;
+        bounded_cancel(&session, self.inner.limits).await
+    }
+
+    /// Permanently closes a completed child and removes its private recovery metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns for unknown/active children, unsafe worktree finalization, or metadata failure.
+    #[allow(clippy::too_many_lines)]
+    pub async fn close(
+        &self,
+        caller_parent_session_id: &SessionId,
+        subagent_id: &SubagentId,
+    ) -> Result<(), OrchestrationError> {
+        let close_gate = self
+            .inner
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(subagent_id)
+            .ok_or_else(|| OrchestrationError::UnknownSubagent(subagent_id.0.clone()))
+            .and_then(|record| {
+                ensure_child_owner(caller_parent_session_id, subagent_id, record)?;
+                Ok(Arc::clone(&record.close_gate))
+            })?;
+        let _close_guard = close_gate.lock().await;
+        let (parent_session_id, session, artifact_id, already_finalized) = {
+            let mut sessions = self
+                .inner
+                .sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let record = sessions
+                .get_mut(subagent_id)
+                .ok_or_else(|| OrchestrationError::UnknownSubagent(subagent_id.0.clone()))?;
+            ensure_child_owner(caller_parent_session_id, subagent_id, record)?;
+            match record.state {
+                SessionState::Inactive => record.state = SessionState::Closing,
+                SessionState::Closing if record.close_completed => {}
+                SessionState::Active | SessionState::Closing => {
+                    return Err(OrchestrationError::AlreadyRunning(subagent_id.0.clone()));
+                }
+            }
+            (
+                record.parent_session_id.clone(),
+                Arc::clone(&record.session),
+                record.latest_durable_artifact_id.clone(),
+                record.close_completed,
+            )
+        };
+        let durable_artifact = artifact_id
+            .as_deref()
+            .map(|id| {
+                self.inner
+                    .diff_artifact_authority
+                    .resolve(&parent_session_id, id)
+                    .ok_or_else(|| {
+                        OrchestrationError::Session(
+                            "durable child artifact authority is unavailable".to_owned(),
+                        )
+                    })
+            })
+            .transpose();
+        let durable_artifact = match durable_artifact {
+            Ok(artifact) => artifact,
+            Err(error) => {
+                if !already_finalized
+                    && let Some(record) = self
+                        .inner
+                        .sessions
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .get_mut(subagent_id)
+                {
+                    record.state = SessionState::Inactive;
+                }
+                return Err(error);
+            }
+        };
+        if !already_finalized {
+            if let Err(error) = tokio::time::timeout(
+                control_timeout(self.inner.limits),
+                session.close(durable_artifact.as_ref()),
+            )
+            .await
+            .map_err(|_| OrchestrationError::Session("child close timed out".to_owned()))
+            .and_then(std::convert::identity)
+            {
+                if let Some(record) = self
+                    .inner
+                    .sessions
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get_mut(subagent_id)
+                {
+                    record.state = SessionState::Inactive;
+                }
+                return Err(error);
+            }
+            if let Some(record) = self
+                .inner
+                .sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get_mut(subagent_id)
+            {
+                record.close_completed = true;
+            }
+        }
+        let metadata = self
+            .inner
+            .metadata
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        metadata.remove(&parent_session_id, subagent_id).await?;
+        let removed = self
+            .inner
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(subagent_id);
+        if let Some(record) = removed {
+            self.inner
+                .session_depths
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&record.handle.session_id);
+        }
+        self.inner
+            .latest_artifacts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&(parent_session_id, subagent_id.clone()));
+        Ok(())
+    }
+
+    /// Lists retained children owned directly by one parent session.
+    #[must_use]
+    pub fn list_for_parent(&self, parent_session_id: &SessionId) -> Vec<SubagentDescriptor> {
+        let mut descriptors = self
+            .inner
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .filter(|record| record.parent_session_id == *parent_session_id)
+            .map(session_record_descriptor)
+            .collect::<Vec<_>>();
+        descriptors.sort_by(|left, right| left.subagent_id.0.cmp(&right.subagent_id.0));
+        descriptors
+    }
+
+    /// Resolves one retained child only when it belongs directly to the caller parent.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same opaque unknown-child error for missing and cross-parent ids.
+    pub fn descriptor_for_parent(
+        &self,
+        parent_session_id: &SessionId,
+        subagent_id: &SubagentId,
+    ) -> Result<SubagentDescriptor, OrchestrationError> {
+        let sessions = self
+            .inner
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let record = sessions
+            .get(subagent_id)
+            .ok_or_else(|| OrchestrationError::UnknownSubagent(subagent_id.0.clone()))?;
+        ensure_child_owner(parent_session_id, subagent_id, record)?;
+        Ok(session_record_descriptor(record))
+    }
+
+    /// Rebinds a persisted child so follow-up survives a parent process restart.
+    ///
+    /// # Errors
+    ///
+    /// Returns for invalid depth, missing recovery data, or factory rebind failure.
+    pub async fn recover(
+        &self,
+        parent_session_id: SessionId,
+        handle: SubagentHandle,
+        depth: usize,
+        workspace_root: &Path,
+        worktree: Option<&WorktreeLeaseRecord>,
+        policy: &SubagentRecoveryPolicy,
+    ) -> Result<(), OrchestrationError> {
+        if depth == 0 || depth > self.inner.limits.max_depth {
+            return Err(OrchestrationError::DepthExceeded {
+                requested: depth,
+                maximum: self.inner.limits.max_depth,
+            });
+        }
+        self.ensure_recovery_identity_available(&handle)?;
+        let session = self
+            .inner
+            .factory
+            .rebind(
+                &handle.session_id,
+                Some(workspace_root),
+                worktree,
+                None,
+                policy,
+            )
+            .await?
+            .ok_or_else(|| OrchestrationError::UnknownSubagent(handle.subagent_id.0.clone()))?;
+        self.inner
+            .session_depths
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(handle.session_id.clone(), depth);
+        self.inner
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                handle.subagent_id.clone(),
+                SessionRecord {
+                    handle,
+                    task: "Recovered subagent".to_owned(),
+                    agent: "subagent".to_owned(),
+                    model: policy.model_alias.clone(),
+                    session,
+                    state: SessionState::Inactive,
+                    result: None,
+                    isolation: SubagentIsolation::Worktree,
+                    parent_session_id,
+                    latest_durable_artifact_id: None,
+                    close_completed: false,
+                    close_gate: Arc::new(tokio::sync::Mutex::new(())),
+                },
+            );
+        Ok(())
+    }
+
+    /// Restores one child solely from validated host-private metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns when depth, lease identity, or child-log recovery fails.
+    #[allow(clippy::too_many_lines)]
+    pub async fn recover_record(
+        &self,
+        record: SubagentRecoveryRecord,
+    ) -> Result<(), OrchestrationError> {
+        if record.depth == 0 || record.depth > self.inner.limits.max_depth {
+            return Err(OrchestrationError::DepthExceeded {
+                requested: record.depth,
+                maximum: self.inner.limits.max_depth,
+            });
+        }
+        self.ensure_recovery_identity_available(&record.handle)?;
+        let unique_tool_names = record
+            .tool_names
+            .iter()
+            .collect::<std::collections::HashSet<_>>();
+        if unique_tool_names.len() != record.tool_names.len() {
+            return Err(OrchestrationError::InvalidRequest(
+                "recovery tool allowlist contains duplicates".to_owned(),
+            ));
+        }
+        let mut registered_names = Vec::new();
+        let mut mcp_grants = Vec::new();
+        for name in &record.tool_names {
+            if name.starts_with("mcp:") {
+                validate_mcp_virtual_tool(name)
+                    .map_err(|error| OrchestrationError::InvalidRequest(error.to_string()))?;
+                mcp_grants.push(name.clone());
+            } else {
+                registered_names.push(name.as_str());
+            }
+        }
+        let mcp_policy = McpToolPolicy::restricted(mcp_grants)
+            .map_err(|error| OrchestrationError::InvalidRequest(error.to_string()))?;
+        let allowed_tools = Arc::new(
+            self.tool_registry()
+                .subset(registered_names)
+                .map_err(|error| OrchestrationError::InvalidRequest(error.to_string()))?
+                .with_mcp_tool_policy(mcp_policy),
+        );
+        let current_capabilities = CapabilityManifest::new(
+            allowed_tools
+                .descriptors()
+                .into_iter()
+                .flat_map(|descriptor| descriptor.capabilities.capabilities().to_vec()),
+        );
+        if current_capabilities != record.capabilities {
+            return Err(OrchestrationError::InvalidRequest(
+                "recovery capabilities differ from the current tool descriptors".to_owned(),
+            ));
+        }
+        let session = self
+            .inner
+            .factory
+            .rebind(
+                &record.handle.session_id,
+                Some(&record.workspace_root),
+                record.worktree.as_ref(),
+                Some(&allowed_tools),
+                &record.policy,
+            )
+            .await?
+            .ok_or_else(|| {
+                OrchestrationError::UnknownSubagent(record.handle.subagent_id.0.clone())
+            })?;
+        let latest_durable_artifact_id = self
+            .inner
+            .latest_artifacts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&(
+                record.parent_session_id.clone(),
+                record.handle.subagent_id.clone(),
+            ))
+            .cloned();
+        self.inner
+            .session_depths
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(record.handle.session_id.clone(), record.depth);
+        self.inner
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                record.handle.subagent_id.clone(),
+                SessionRecord {
+                    handle: record.handle,
+                    task: if record.task.is_empty() {
+                        "Recovered subagent".to_owned()
+                    } else {
+                        record.task
+                    },
+                    agent: if record.agent.is_empty() {
+                        "subagent".to_owned()
+                    } else {
+                        record.agent
+                    },
+                    model: record.policy.model_alias.clone(),
+                    session,
+                    state: SessionState::Inactive,
+                    result: None,
+                    isolation: record.isolation,
+                    parent_session_id: record.parent_session_id,
+                    latest_durable_artifact_id,
+                    close_completed: false,
+                    close_gate: Arc::new(tokio::sync::Mutex::new(())),
+                },
+            );
+        Ok(())
+    }
+
+    fn ensure_recovery_identity_available(
+        &self,
+        handle: &SubagentHandle,
+    ) -> Result<(), OrchestrationError> {
+        let sessions = self
+            .inner
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if sessions.contains_key(&handle.subagent_id)
+            || sessions
+                .values()
+                .any(|record| record.handle.session_id == handle.session_id)
+        {
+            return Err(OrchestrationError::InvalidRequest(
+                "duplicate recovered child identity".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Returns host-private recovery metadata; it must never enter model or parent logs.
+    ///
+    /// # Errors
+    ///
+    /// Returns when the child id is unknown.
+    pub fn worktree_recovery_record(
+        &self,
+        subagent_id: &SubagentId,
+    ) -> Result<Option<WorktreeLeaseRecord>, OrchestrationError> {
+        self.inner
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(subagent_id)
+            .map(|record| record.session.worktree_record())
+            .ok_or_else(|| OrchestrationError::UnknownSubagent(subagent_id.0.clone()))
+    }
+}

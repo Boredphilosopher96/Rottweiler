@@ -67,6 +67,7 @@ def main():
     cli = argparse.ArgumentParser(description=__doc__)
     cli.add_argument("--before", default="5baf21a")
     cli.add_argument("--after", default="WORKTREE")
+    cli.add_argument("--roots", nargs="+", default=ROOTS)
     args = cli.parse_args()
     parser = Parser(Language(tree_sitter_rust.language()))
     old_files = set(git("ls-tree", "-r", "--name-only", args.before).decode().splitlines())
@@ -76,7 +77,7 @@ def main():
     else:
         new_files = set(git("ls-tree", "-r", "--name-only", args.after).decode().splitlines())
         read_after = lambda path: git("show", args.after + ":" + path)
-    for path in ROOTS:
+    for path in args.roots:
         before = bodies(parser, git("show", args.before + ":" + path))
         prefix = str(Path(path).with_suffix("")) + "/"
         moved = [path, *sorted(p for p in new_files - old_files if p.startswith(prefix) and p.endswith(".rs"))]

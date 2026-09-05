@@ -199,10 +199,17 @@ def validate_repository(repo_root: Path, manifest: Path) -> list[str]:
             if shadow.get("allow_missing") is not True:
                 failures.append(f"shadow path does not exist: {path}")
             continue
-        if compiled.search(shadow_file.read_text(encoding="utf-8")):
-            failures.append(
-                f"forbidden shadow definition {shadow_id or '<invalid>'} exists in {path}"
-            )
+        sources = [shadow_file]
+        if shadow_file.suffix == ".rs":
+            # A Rust file's child modules retain the same ownership constraints.
+            module_directory = shadow_file.with_suffix("")
+            sources.extend(sorted(module_directory.rglob("*.rs")))
+        for source in sources:
+            if compiled.search(source.read_text(encoding="utf-8")):
+                failures.append(
+                    f"forbidden shadow definition {shadow_id or '<invalid>'} exists in "
+                    f"{source.relative_to(repo_root)}"
+                )
 
     return failures
 
