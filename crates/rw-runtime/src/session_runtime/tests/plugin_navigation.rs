@@ -11,13 +11,17 @@ use std::time::Duration;
 
 pub(super) async fn verify_deferred_navigation(handle: &rw_core::SessionHandle) {
     let mut events = handle.subscribe().expect("driver events");
-    let caller = tokio::spawn({
+    let mut caller = tokio::spawn({
         let handle = handle.clone();
         async move { handle.send_message("/context-panel navigate").await }
     });
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            match events.recv().await.expect("command events") {
+            let event = tokio::select! {
+                result = &mut caller => panic!("SDK command returned before navigation admission: {result:?}"),
+                event = events.recv() => event.expect("command events"),
+            };
+            match event {
                 EngineEvent::SessionNavigationRequested { .. } => {
                     panic!("navigation before callback settlement")
                 }

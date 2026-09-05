@@ -21,7 +21,7 @@ async fn state_with(handle: &rw_core::SessionHandle, key: &str) -> ExtensionStat
         }
     })
     .await
-    .expect("delivery transition deadline")
+    .unwrap_or_else(|_| panic!("delivery transition deadline waiting for {key}"))
 }
 fn value<'a>(state: &'a ExtensionStateSnapshot, key: &str) -> &'a serde_json::Value {
     &state
@@ -50,6 +50,23 @@ async fn sdk_event_process_crash_replays_only_the_unacknowledged_delivery() {
     configure_plugin(root.path(), &storage, &workspace, "event-recovery").await;
     let first =
         compose_fixture_session(&storage, &workspace, "event-recovery-session", false).await;
+    assert!(matches!(
+        first
+            .handle
+            .dispatch(rw_types::ClientCommand::AttachSession {
+                meta: rw_types::CommandMeta {
+                    protocol_version: rw_types::PROTOCOL_VERSION,
+                    client_id: rw_types::ClientId("event-fixture".into()),
+                    request_id: rw_types::RequestId("first-attach".into())
+                },
+                session_id: rw_types::SessionId("event-recovery-session".into()),
+                last_seen_sequence: None,
+                role: rw_types::ClientRole::Driver,
+            })
+            .await
+            .expect("produce canonical SessionCreated"),
+        rw_types::CommandOutcome::Accepted {}
+    ));
     let attempted = state_with(&first.handle, "attempt").await;
     assert!(
         attempted.acknowledged.is_none(),

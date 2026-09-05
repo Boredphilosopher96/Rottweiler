@@ -617,6 +617,14 @@ pub(super) fn validate_push_params(method: &str, params: &Value) -> Result<(), P
             .validate()
             .map_err(|error| rpc_error("invalid_push", &error.to_string()));
     }
+    if method == rw_plugin_protocol::METHOD_SESSION_TOOL_CALL {
+        let request: rw_types::extension_tools::ExtensionToolCall =
+            serde_json::from_value(params.clone())
+                .map_err(|_| rpc_error("invalid_push", "invalid host tool request"))?;
+        return request
+            .validate()
+            .map_err(|error| rpc_error("invalid_push", error));
+    }
     if method == METHOD_SESSION_CONTROL {
         let request: rw_types::extension_invocation::ExtensionControlRequest =
             serde_json::from_value(params.clone())
