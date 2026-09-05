@@ -357,7 +357,7 @@ jobs:
         run: |
           cargo fmt --all -- --check
           cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-          cargo test --locked --workspace --all-features
+          cargo test --locked --workspace --all-features --no-fail-fast
           cargo run --locked --quiet -p xtask -- codegen --check
           python3 scripts/release_contract.py generate-rust --check
           python3 scripts/release_contract.py generate-typescript --check
