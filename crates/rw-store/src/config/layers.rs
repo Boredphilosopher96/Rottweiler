@@ -94,7 +94,8 @@ pub(super) fn read_assessed_project_file(
     let parent = path
         .parent()
         .ok_or_else(|| ConfigError::ProjectChangedDuringLoad(path.to_owned()))?;
-    let canonical_parent = fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+    let canonical_parent = canonical_config_parent(parent)
+        .map_err(|_| ConfigError::ProjectChangedDuringLoad(path.to_owned()))?;
     let assessed_path = path
         .file_name()
         .map(|name| canonical_parent.join(name))
@@ -840,4 +841,35 @@ pub(super) fn nonempty_value<'a>(
         .get(key)
         .map(String::as_str)
         .filter(|value| !value.trim().is_empty())
+}
+
+/// Resolve existing ancestors before appending absent configuration directories.
+/// A missing .rottweiler directory must retain the workspace's canonical identity.
+fn canonical_config_parent(parent: &Path) -> std::io::Result<std::path::PathBuf> {
+    let mut missing = Vec::new();
+    let mut existing = parent;
+    loop {
+        match fs::canonicalize(existing) {
+            Ok(mut canonical) => {
+                for component in missing.into_iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if fs::symlink_metadata(existing).is_ok() {
+                    return Err(error);
+                }
+                missing.push(
+                    existing
+                        .file_name()
+                        .ok_or_else(|| std::io::Error::other("invalid configuration parent"))?,
+                );
+                existing = existing.parent().ok_or_else(|| {
+                    std::io::Error::other("configuration parent has no existing ancestor")
+                })?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }

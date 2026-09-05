@@ -1116,3 +1116,21 @@ fn provider_gateway_validation_rejects_unsafe_headers_body_and_base_queries() {
         );
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn missing_project_directory_resolves_through_the_assessed_workspace_identity() {
+    let root = tempdir().expect("root");
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).expect("workspace");
+    let alias = root.path().join("alias");
+    std::os::unix::fs::symlink(&workspace, &alias).expect("workspace alias");
+    let loaded = ConfigLoader::new(
+        root.path().join("user/config.toml"),
+        alias.join(".rottweiler/config.toml"),
+    )
+    .load()
+    .expect("absent config through an alias is still the assessed workspace");
+    assert!(!loaded.project_trusted);
+    assert!(!workspace.join(".rottweiler").exists());
+}
