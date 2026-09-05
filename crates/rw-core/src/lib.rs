@@ -72,7 +72,7 @@ pub use engine::{
 pub use host::{
     BoundClient, CompletedForkOperation, CreateSessionRequest, EngineHost, EngineHostConfig,
     ForkOperationKey, ForkOperationState, ForkSessionRequest, HostError, HostEvent,
-    HostEventBudget, HostMcpService, HostQueryService, HostReadChannel, HostReply,
+    HostEventBudget, HostMcpService, HostQueryService, HostReadChannel, HostReadResult, HostReply,
     HostRuntimeService, HostSubagentService, HostedSession, PreparedForkOperation,
     ProviderApiKeySubmission, ProviderAuthAttempt, ProviderAuthCompletion, SessionFactory,
 };

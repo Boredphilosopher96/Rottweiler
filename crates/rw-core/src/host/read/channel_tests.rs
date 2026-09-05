@@ -17,9 +17,13 @@ fn request(id: &str, session: &str) -> ClientCommand {
         session_id: SessionId(session.into()),
     }
 }
-async fn accepted(command: ClientCommand) -> Result<(CommandOutcome, Vec<EngineEvent>), HostError> {
+async fn accepted(command: ClientCommand) -> Result<HostReadResult, HostError> {
     assert_eq!(command.meta().client_id, bound().client_id);
-    Ok((CommandOutcome::Accepted {}, Vec::new()))
+    Ok(HostReadResult::new(
+        CommandOutcome::Accepted {},
+        Vec::new(),
+        (),
+    ))
 }
 fn rejected_with(reply: &HostReply, code: &str) -> bool {
     matches!(&reply.outcome, CommandOutcome::Rejected { error } if error.code == code)
@@ -117,4 +121,46 @@ async fn cancelled_backend_releases_all_read_admission() {
         .dispatch(bound(), request("pending", "session"), accepted)
         .await;
     assert_eq!(reply.outcome, CommandOutcome::Accepted {});
+}
+
+#[tokio::test]
+async fn decoded_query_owner_transfers_to_encoded_reply_admission() {
+    let channel = HostReadChannel::new(2).expect("channel");
+    let source = Arc::new(Semaphore::new(1));
+    let admitted = source
+        .clone()
+        .try_acquire_owned()
+        .expect("source admission");
+    let result = HostReadResult::new(CommandOutcome::Accepted {}, Vec::new(), admitted);
+    assert_eq!(source.available_permits(), 0);
+    let observed = Arc::clone(&source);
+    let reply = channel
+        .dispatch(bound(), request("owned", "session"), |_| async move {
+            assert_eq!(observed.available_permits(), 0);
+            Ok(result)
+        })
+        .await;
+    assert_eq!(source.available_permits(), 1);
+    assert_eq!(
+        channel.admission.global.available_permits(),
+        MAX_ACTIVE_READS - 1
+    );
+    assert!(matches!(
+        serde_json::from_slice::<CommandReply>(&reply.bytes).expect("encoded"),
+        CommandReply::Read {
+            outcome: CommandOutcome::Accepted {},
+            ..
+        }
+    ));
+    let retained = reply.bytes.clone();
+    drop(reply);
+    assert_eq!(
+        channel.admission.global.available_permits(),
+        MAX_ACTIVE_READS - 1
+    );
+    drop(retained);
+    assert_eq!(
+        channel.admission.global.available_permits(),
+        MAX_ACTIVE_READS
+    );
 }

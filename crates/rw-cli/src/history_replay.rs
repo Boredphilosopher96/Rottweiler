@@ -4,7 +4,8 @@ use async_trait::async_trait;
 use miette::{IntoDiagnostic, Result, miette};
 use rw_core::{
     BoundClient, ClientCommand, ClientId, CommandOutcome, EngineEvent, EventClock, HostError,
-    HostReadChannel, HostReply, ProviderApiKey, SequenceId, SessionId, SystemEventClock,
+    HostReadChannel, HostReadResult, HostReply, ProviderApiKey, SequenceId, SessionId,
+    SystemEventClock,
 };
 use rw_runtime::{TranscriptReader, session};
 
@@ -35,7 +36,7 @@ impl HistoricalReplayEngine {
     async fn query(
         &self,
         command: ClientCommand,
-    ) -> std::result::Result<(CommandOutcome, Vec<EngineEvent>), HostError> {
+    ) -> std::result::Result<HostReadResult, HostError> {
         let (ClientCommand::ReadTranscript {
             session_id: session,
             scope,
@@ -88,11 +89,13 @@ impl HistoricalReplayEngine {
                 ..
             } => {
                 let result = self.reader.tail(session_id.clone(), scope, read).await?;
-                EngineEvent::TranscriptTailReady {
-                    meta,
-                    session_id,
-                    result,
-                }
+                return Ok(
+                    result.into_query(|result| EngineEvent::TranscriptTailReady {
+                        meta,
+                        session_id,
+                        result,
+                    }),
+                );
             }
             ClientCommand::ReadTranscript {
                 session_id,
@@ -126,7 +129,11 @@ impl HistoricalReplayEngine {
                 ));
             }
         };
-        Ok((CommandOutcome::Accepted {}, vec![event]))
+        Ok(HostReadResult::new(
+            CommandOutcome::Accepted {},
+            vec![event],
+            (),
+        ))
     }
 }
 

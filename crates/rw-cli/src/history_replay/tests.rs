@@ -342,12 +342,12 @@ async fn historical_child_reads_require_effective_source_ancestry_and_reject_rew
         ancestry[0].source_sequence = SequenceId(1);
     }
     assert!(engine.query(command(wrong)).await.is_err());
-    let (_, events) = engine
+    let result = engine
         .query(command(scope.clone()))
         .await
         .expect("authorized tasks");
     assert!(
-        matches!(&events[..], [EngineEvent::TodosRead { session_id, result: rw_types::todo::TodoReadResult::Ready { todos }, .. }]
+        matches!(result.events(), [EngineEvent::TodosRead { session_id, result: rw_types::todo::TodoReadResult::Ready { todos }, .. }]
         if session_id.0 == "child" && todos.through == Some(SequenceId(1)))
     );
     let mut page_command = read("child-page");
@@ -360,13 +360,13 @@ async fn historical_child_reads_require_effective_source_ancestry_and_reject_rew
         *session_id = SessionId("child".into());
         *target_scope = scope.clone();
     }
-    let (_, events) = engine.query(page_command).await.expect("child page");
+    let result = engine.query(page_command).await.expect("child page");
     let [
         EngineEvent::TranscriptPageReady {
             result: TranscriptReadResult::Ready { page },
             ..
         },
-    ] = &events[..]
+    ] = result.events()
     else {
         panic!("page")
     };
@@ -377,7 +377,7 @@ async fn historical_child_reads_require_effective_source_ancestry_and_reject_rew
         },
         _ => panic!("conversation"),
     };
-    let (_, events) = engine
+    let result = engine
         .query(ClientCommand::ReadTranscriptContent {
             meta: meta("child-body"),
             session_id: SessionId("child".into()),
@@ -392,7 +392,7 @@ async fn historical_child_reads_require_effective_source_ancestry_and_reject_rew
         .await
         .expect("source");
     assert!(
-        matches!(&events[..], [EngineEvent::TranscriptContentReady { page, .. }] if page.text.contains("child body"))
+        matches!(result.events(), [EngineEvent::TranscriptContentReady { page, .. }] if page.text.contains("child body"))
     );
     let mut parent = SessionEventLog::open(root.path(), "history").expect("rewind parent");
     parent

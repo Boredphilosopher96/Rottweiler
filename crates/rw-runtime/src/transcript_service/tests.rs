@@ -604,3 +604,65 @@ fn tool_presentation_fixture() -> rw_types::extension_ui::UiPresentation {
     )
     .expect("presentation")
 }
+
+#[tokio::test]
+async fn retained_tail_results_keep_admission_until_query_consumption() {
+    use rw_types::transcript_tail::{
+        TRANSCRIPT_TAIL_MIN_PAGE_BYTES, TranscriptTailPart, TranscriptTailRead,
+    };
+    let fixture = Fixture::new(1, "bounded");
+    let request = || TranscriptTailRead {
+        expected: None,
+        part: TranscriptTailPart::Text {},
+        max_items: 1,
+        max_bytes: u32::try_from(TRANSCRIPT_TAIL_MIN_PAGE_BYTES).expect("wire budget"),
+    };
+    let mut retained = Vec::new();
+    for _ in 0..MAX_OPEN_PROJECTORS {
+        let result = fixture
+            .service
+            .tail(
+                SessionId("semantic".into()),
+                rw_types::session_read::SessionReadScope::Session {},
+                request(),
+            )
+            .await
+            .expect("admitted tail");
+        assert!(matches!(
+            result.value(),
+            rw_types::transcript_tail::TranscriptTailResult::Ready { .. }
+        ));
+        retained.push(result);
+    }
+    assert_eq!(fixture.service.workers.available_permits(), 0);
+    assert!(
+        fixture
+            .service
+            .tail(
+                SessionId("semantic".into()),
+                rw_types::session_read::SessionReadScope::Session {},
+                request()
+            )
+            .await
+            .is_err()
+    );
+    let result = retained.pop().expect("one retained");
+    let query = result.into_query(|result| EngineEvent::TranscriptTailReady {
+        meta: rw_types::CommandAckMeta {
+            protocol_version: PROTOCOL_VERSION,
+            client_id: rw_types::ClientId("client".into()),
+            request_id: rw_types::RequestId("tail".into()),
+            emitted_at: "2026-01-01T00:00:00Z".into(),
+        },
+        session_id: SessionId("semantic".into()),
+        result,
+    });
+    assert_eq!(fixture.service.workers.available_permits(), 0);
+    drop(query);
+    assert_eq!(fixture.service.workers.available_permits(), 1);
+    drop(retained);
+    assert_eq!(
+        fixture.service.workers.available_permits(),
+        MAX_OPEN_PROJECTORS
+    );
+}

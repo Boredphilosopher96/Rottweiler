@@ -14,7 +14,7 @@ mod provider_completion;
 mod retained_control;
 use retained_control::RetainedDispatch;
 mod read;
-pub use read::{HostReadChannel, HostReply};
+pub use read::{HostReadChannel, HostReadResult, HostReply};
 
 use std::{
     collections::{HashMap, VecDeque},

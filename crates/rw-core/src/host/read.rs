@@ -95,6 +95,45 @@ impl ReadAdmission {
     }
 }
 
+/// Decoded query payload and the resource owner that admitted its construction.
+/// The owner remains alive until serialization transfers the payload to reply-byte admission.
+pub struct HostReadResult {
+    outcome: CommandOutcome,
+    events: Vec<EngineEvent>,
+    owner: Box<dyn Send>,
+}
+impl HostReadResult {
+    #[must_use]
+    pub fn new(
+        outcome: CommandOutcome,
+        events: Vec<EngineEvent>,
+        owner: impl Send + 'static,
+    ) -> Self {
+        Self {
+            outcome,
+            events,
+            owner: Box::new(owner),
+        }
+    }
+    #[must_use]
+    pub fn outcome(&self) -> &CommandOutcome {
+        &self.outcome
+    }
+    #[must_use]
+    pub fn events(&self) -> &[EngineEvent] {
+        &self.events
+    }
+}
+impl std::fmt::Debug for HostReadResult {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HostReadResult")
+            .field("outcome", &self.outcome)
+            .field("events", &self.events)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Encoded direct reply. Cloning the bytes retains the same admission lease.
 #[derive(Debug)]
 pub struct HostReply {
@@ -228,7 +267,7 @@ impl EngineHost {
                     .dispatch(bound, command, |command| async {
                         self.execute_inner(command)
                             .await
-                            .map(|(outcome, _, events)| (outcome, events))
+                            .map(|(outcome, _, events)| HostReadResult::new(outcome, events, ()))
                     })
                     .await
             }
@@ -278,7 +317,7 @@ impl HostReadChannel {
     ) -> HostReply
     where
         F: FnOnce(ClientCommand) -> R,
-        R: std::future::Future<Output = Result<(CommandOutcome, Vec<EngineEvent>), HostError>>,
+        R: std::future::Future<Output = Result<HostReadResult, HostError>>,
     {
         command.meta_mut().client_id = bound.client_id.clone();
         if command.execution() != CommandExecution::Read {
@@ -337,25 +376,37 @@ impl HostReadChannel {
                 Some(lease),
             );
         }
-        let (outcome, events) = match query(command).await {
-            Ok((outcome, events))
-                if events
+        let result = match query(command).await {
+            Ok(result)
+                if result
+                    .events
                     .iter()
                     .all(|event| event.delivery() == EngineEventDelivery::Connection) =>
             {
-                (outcome, events)
+                result
             }
-            Ok(_) => (
+            Ok(_) => HostReadResult::new(
                 rejected("read_delivery", "read produced non-query events"),
                 Vec::new(),
+                (),
             ),
-            Err(error) => (
+            Err(error) => HostReadResult::new(
                 rejected(super::host_error_code(&error), &error.to_string()),
                 Vec::new(),
+                (),
             ),
         };
-        HostReply::encode(CommandReply::Read { outcome, events }, Some(lease))
+        let HostReadResult {
+            outcome,
+            events,
+            owner,
+        } = result;
+        let reply = HostReply::encode(CommandReply::Read { outcome, events }, Some(lease));
+        // The decoded payload is gone; encoded bytes now retain the host allocation lease.
+        drop(owner);
+        reply
     }
+
     fn claim_identity(
         &self,
         key: (ClientId, RequestId),
