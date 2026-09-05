@@ -26,28 +26,23 @@ use pending_event::PendingEvent;
 use std::{
     collections::{BTreeMap, VecDeque},
     fmt,
-    panic::AssertUnwindSafe,
     path::{Component, Path, PathBuf},
     sync::{
         Arc, RwLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
 
 use async_trait::async_trait;
-use futures_util::FutureExt;
 use rw_context::Budgeter;
 use rw_ext::{
     CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation, CommandRegistry,
     HookDirective, HookDispatcher, HookEvent, HookFailurePolicy, HookHandler, HookInvocation,
-    HookRegistration, ModeDefinition, ModeRegistry, ModeSource,
+    HookRegistration, ModeDefinition, ModeRegistry,
 };
 use rw_providers::TokenUsage;
-use rw_tools::{
-    ApprovalPreview, CancellationToken, MutationScope, SubagentProgressEvent, ToolContext,
-    ToolRegistry,
-};
+use rw_tools::{ApprovalPreview, CancellationToken, MutationScope, ToolContext, ToolRegistry};
 use rw_types::attachment_contract::{
     MAX_ATTACHMENTS_PER_MESSAGE, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TEXT_ATTACHMENT_BYTES,
     MAX_TOTAL_ATTACHMENT_BYTES,
@@ -61,11 +56,10 @@ use rw_types::{
     EngineError, EngineErrorCategory, EngineEvent, ImageRef, ModeId, ModelAlias,
     ModelContextTransfer, ModelSwitchQuestion, PROTOCOL_VERSION, PermissionApprovalDescriptor,
     PermissionApprovalScope, PermissionModeDescriptor, PermissionRuleDescriptor,
-    PermissionStateDescriptor, PlanArtifact, PlanDecision, PromptDump, Question, QuestionId,
-    QuestionOption, QuestionResponseKind, RequestId, ReviewFileStatus, RewindTarget, Role,
-    SequenceId, SessionId, SessionMode, SessionReview, ShellId, StoredAttachment, SubagentId,
-    ToolCallId, ToolOutput, ToolOutputStream, Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus,
-    UnifiedDiff, UnrestorablePath, Usage,
+    PermissionStateDescriptor, PlanArtifact, PlanDecision, Question, QuestionId, QuestionOption,
+    QuestionResponseKind, ReviewFileStatus, RewindTarget, Role, SequenceId, SessionId, SessionMode,
+    SessionReview, ShellId, StoredAttachment, ToolCallId, ToolOutput, ToolOutputStream, Turn,
+    TurnAccounting, TurnId, TurnMeta, TurnStatus, UnifiedDiff, UnrestorablePath, Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -99,7 +93,6 @@ use commands::{
     render_context_snapshot, render_cost_snapshot, render_permission_approvals,
     render_permission_snapshot, render_plan, render_session_review,
 };
-use dispatch::handle_actor_command;
 pub use projection::{
     ContextSurgeryAction, InterruptedToolRepair, RecoveredQuestion, RecoveredUserShell,
     SessionProjectionError, SessionProjector, SessionRecoveredState, project_session_events,
@@ -124,9 +117,9 @@ pub use session_extension::{
 use turn::{
     BudgetUsage, CommandTurnOverrides, RunningTurn, StartTurnRuntime, TurnSignal, append_text,
     append_thinking, assemble_session_context, build_cost_snapshot, compact_during_turn,
-    context_snapshot, current_approval_diff, emit, emit_batch, evaluate_budget, handle_turn_signal,
-    hook_event_name, normalize_manual_session_title, persist_event, prompt_dump,
-    session_accounting_fallback, start_turn, start_turn_with_overrides, validate_mutation_scope,
+    context_snapshot, current_approval_diff, emit, emit_batch, evaluate_budget, hook_event_name,
+    normalize_manual_session_title, persist_event, prompt_dump, session_accounting_fallback,
+    start_turn, start_turn_with_overrides, validate_mutation_scope,
 };
 
 const SESSION_TITLE_TIMEOUT: Duration = Duration::from_secs(4);
