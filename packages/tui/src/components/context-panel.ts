@@ -1,3 +1,4 @@
+import { statusContext } from "../state/context-usage"
 import {
   BoxRenderable,
   SelectRenderable,
@@ -25,7 +26,7 @@ const MAX_SIDEBAR_CHANGED_FILES = 128
 
 function contextPanelInputs(state: RottweilerState) {
   return [state.subagentOrder, state.subagents, state.todos, state.mcpServers,
-  state.runtimeServices, state.review, state.workspaceStatus, state.context, state.cost, state.provider]
+  state.runtimeServices, state.review, state.workspaceStatus, state.context, state.contextUsage, state.cost, state.provider]
 }
 
 export class ContextPanelRenderable extends BoxRenderable {
@@ -327,15 +328,15 @@ export class ContextPanelRenderable extends BoxRenderable {
       this.#changedPaths.length === 0 ? "" : String(this.#changedPaths.length),
     )
 
-    this.#showSession = state.context !== null || state.cost !== null
+    this.#showSession = statusContext(state) !== null || state.cost !== null
     this.sessionTitle.content = panelHeading(this.#theme, "SESSION", "")
-    const context = state.context === null ? "ctx    —" : formatStatusContext(state.context)
+    const context = statusContext(state) === null ? "ctx    —" : formatStatusContext(statusContext(state)!)
     const cache = state.cost === null
       ? "—"
       : `${(state.cost.cache_hit_basis_points / 100).toFixed(0)}%`
     const cost = state.cost === null
       ? "—"
-      : formatStatusSessionCost(state.cost, state.provider, state.context?.used_tokens ?? null)
+      : formatStatusSessionCost(state.cost, state.provider, statusContext(state)?.used_tokens ?? null)
     this.session.content = t`${fg(this.#theme.textMuted)("ctx    ")}${fg(this.#theme.text)(context.replace(/^ctx\s*/i, ""))}\n${fg(this.#theme.textMuted)("cache  ")}${fg(this.#theme.success)(cache)}\n${fg(this.#theme.textMuted)("spend  ")}${fg(this.#theme.text)(cost)}`
     this.#layoutSectionHeights()
   }

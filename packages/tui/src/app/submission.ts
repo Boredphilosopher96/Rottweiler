@@ -314,6 +314,7 @@ export class SubmissionController {
   async submitApproval(tool: ToolProjection, decision: ApprovalDecision): Promise<void> {
     const scope = this.#scope
     try {
+      if (tool.status !== "awaiting_approval" || tool.toolCallId === null) throw new Error("tool approval requires an authoritative pending approval")
       const outcome = await this.host.requests.emit({
         type: "approve_tool",
         meta: this.host.requests.meta(),

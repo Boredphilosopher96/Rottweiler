@@ -5,7 +5,7 @@ import {
   type StreamingTail
 } from "./model"
 
-export const MAX_COMPACTION_STREAM_BYTES = 256 * 1_024
+export const MAX_COMPACTION_STREAM_BYTES = MAX_TAIL_TEXT_BYTES
 
 export const MAX_RETAINED_TURN_PROJECTIONS = 256
 

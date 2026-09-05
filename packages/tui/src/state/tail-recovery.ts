@@ -40,7 +40,7 @@ export function installLiveTail(state: RottweilerState, pages: readonly Transcri
       if (page.view.through === null || Object.hasOwn(tools, item.invocation_id)) throw new EngineProtocolError("live tail repeated an invocation source")
       invocations[item.invocation_id] = page.view.through
       tools[item.invocation_id] = {
-        invocationId: item.invocation_id, toolCallId: item.tool_call_id, turnId: item.turn_id, name: item.name,
+        invocationId: item.invocation_id, toolCallId: null, turnId: item.turn_id, name: item.name,
         // Full arguments and diffs belong to their canonical sources or the independent approval snapshot.
         args: null, status: "running", capabilities: [], rationale: null, diffSource: item.diff?.source ?? null, diff: null,
         chunks: ToolOutputBuffer.fromPreview(item.output.text, item.output.truncated), display: null, source: null,

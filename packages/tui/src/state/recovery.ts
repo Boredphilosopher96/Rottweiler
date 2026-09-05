@@ -1,3 +1,4 @@
+import { restoreCompaction, type CompactionFence } from "./compaction-recovery"
 import type { EngineEvent, SessionStateSnapshot, TranscriptTailIdentity } from "../protocol"
 import { MAX_SESSION_STATE_BYTES, MAX_SESSION_STATE_PREPARED_BYTES } from "../../../../protocol/types"
 import { jsonEncodedBytes } from "../json-size"
@@ -17,13 +18,14 @@ export interface TailReplayFence {
   readonly invocations: Readonly<Record<string, string>>
 }
 export interface RecoveryProjection {
+  readonly compaction: CompactionFence | null
   readonly metadataThrough: string | null
   readonly metadataObservedThrough: string | null
   readonly activeTurnSource: string | null
   readonly tail: TailReplayFence | null
 }
 export function emptyRecovery(): RecoveryProjection {
-  return { metadataThrough: null, metadataObservedThrough: null, activeTurnSource: null, tail: null }
+  return { compaction: null, metadataThrough: null, metadataObservedThrough: null, activeTurnSource: null, tail: null }
 }
 
 /** A scalar snapshot does not authorize skipping durable display or interaction state. */
@@ -38,9 +40,7 @@ export function readSessionState(state: RottweilerState, sessionId: string, snap
   if (snapshot.active_turn !== null) turns[snapshot.active_turn.turn_id] = {
     turnId: snapshot.active_turn.turn_id, status: "running", usage: null, cost: null, timing: UNKNOWN_ACTIVITY_TIMING,
   }
-  const compaction = snapshot.compaction
-  const observedAttempt = compaction !== null && state.compaction.summaryTurnId === compaction.summary_turn_id
-    && state.compaction.attempt !== null && (compaction.attempt === null || state.compaction.attempt > compaction.attempt)
+  const restored = restoreCompaction(state, snapshot.compaction, snapshot.through)
   return {
     ...state, mode: snapshot.mode_id, model: snapshot.model_alias, provider: snapshot.provider,
     driverClientId: snapshot.driver_client_id, turns,
@@ -54,15 +54,12 @@ export function readSessionState(state: RottweilerState, sessionId: string, snap
       shellId: snapshot.shell.shell_id, command: snapshot.shell.command_preview, active: true, status: null,
       capturedOutput: "", outputTruncated: snapshot.shell.truncated,
     },
-    compaction: observedAttempt ? state.compaction : {
-      active: compaction !== null, reason: null, summaryTurnId: compaction?.summary_turn_id ?? null,
-      attempt: compaction?.attempt ?? null, reclaimedTokens: null, text: "", thinking: "",
-    },
+    compaction: restored.compaction,
     budgets: snapshot.budget === null ? [] : [{
       turnId: snapshot.budget.turn_id, level: snapshot.budget.level, scope: snapshot.budget.scope,
       unit: snapshot.budget.unit, current: snapshot.budget.current, limit: snapshot.budget.limit,
     }],
-    recovery: { ...state.recovery, metadataThrough: snapshot.through, metadataObservedThrough: snapshot.through,
+    recovery: { ...restored.recovery, metadataThrough: snapshot.through, metadataObservedThrough: snapshot.through,
       activeTurnSource: snapshot.active_turn?.started ?? null },
   }
 }
@@ -84,6 +81,7 @@ export function preserveMetadata(before: RottweilerState, after: RottweilerState
     ...after, mode: before.mode, model: before.model, provider: before.provider, driverClientId: before.driverClientId,
     sessions: before.sessions, turns: before.turns, queuedMessages: before.queuedMessages, shell: before.shell,
     latestShell: before.latestShell, compaction: before.compaction, budgets: before.budgets,
+    recovery: { ...after.recovery, compaction: before.recovery.compaction },
   }
   return { ...after, recovery: { ...after.recovery, metadataObservedThrough: sequence,
     activeTurnSource: event.type === "turn_started" ? sequence : (event.type === "turn_finished" || event.type === "conversation_rewound") ? null : after.recovery.activeTurnSource,

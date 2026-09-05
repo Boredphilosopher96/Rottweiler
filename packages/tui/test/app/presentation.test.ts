@@ -283,6 +283,7 @@ describe("Rottweiler presentation", () => {
     })
     app.handleEvent({
       type: "compaction_attempt_started",
+      started: "1", revision: "1",
       session_id: "session-local",
       summary_turn_id: "7",
       attempt: 0,
@@ -291,6 +292,7 @@ describe("Rottweiler presentation", () => {
     for (let index = 0; index < 200; index += 1) {
       app.handleEvent({
         type: index % 2 === 0 ? "compaction_text_delta" : "compaction_thinking_delta",
+        started: "1", revision: String(index + 2),
         session_id: "session-local",
         summary_turn_id: "7",
         attempt: 0,

@@ -54,6 +54,7 @@ describe("semantic history navigation", () => {
     final.content.invocation_id = tool.invocationId
     final.revision = "3"
     items.push(final)
+    if (tool.toolCallId === null) throw new Error("fixture requires provider correlation")
     app.handleEvent({
       type: "tool_call_finished", presentation: null, meta: meta("3"), turn_id: "1", tool_call_id: tool.toolCallId,
       invocation_id: tool.invocationId, output: { type: "text", text: "canary output" }, is_error: false, call_index: 0

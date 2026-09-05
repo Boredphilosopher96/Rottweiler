@@ -54,6 +54,7 @@ function tool(
 function sessionContext(): ContextSnapshot {
   return {
     turn_id: "turn-tools",
+    through: null,
     stable_prefix_hash: "stable",
     used_tokens: "100",
     usable_tokens: "1000",
@@ -108,7 +109,7 @@ function runningState(tools: readonly ToolProjection[]): RottweilerState {
       text: "",
       thinking: "",
       citations: [],
-      toolInvocationIds: tools.map((item) => item.toolCallId),
+      toolInvocationIds: tools.map((item) => item.invocationId),
       finished: null,
     }),
     turns: {
@@ -124,7 +125,7 @@ function runningState(tools: readonly ToolProjection[]): RottweilerState {
         },
       },
     },
-    tools: Object.fromEntries(tools.map((item) => [item.toolCallId, item])),
+    tools: Object.fromEntries(tools.map((item) => [item.invocationId, item])),
   }
 }
 

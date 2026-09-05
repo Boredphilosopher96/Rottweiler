@@ -1,3 +1,4 @@
+import { statusContext } from "../state/context-usage"
 import {
   TextRenderable,
   bg,
@@ -64,9 +65,9 @@ export class StatusLineRenderable extends TextRenderable {
       state.streamingTail !== null ||
       Object.keys(state.tools).length > 0
     const context =
-      state.context === null
+      statusContext(state) === null
         ? (hasSessionActivity ? "ctx —" : null)
-        : headlineContext(formatStatusContext(state.context))
+        : headlineContext(formatStatusContext(statusContext(state)!))
     const pluginStatus = Object.entries(state.pluginStatuses).at(-1)
     const statusModel = state.model === null
       ? null
@@ -85,7 +86,7 @@ export class StatusLineRenderable extends TextRenderable {
       : `  approval · ${toolDisplayName(waitingApproval.name)}`
     const cost = state.cost === null && !hasSessionActivity
       ? ""
-      : `  ${formatStatusSessionCost(state.cost, statusProvider, state.context?.used_tokens ?? null)}`
+      : `  ${formatStatusSessionCost(state.cost, statusProvider, statusContext(state)?.used_tokens ?? null)}`
     const branch = this.#branch === null && !hasSessionActivity ? "" : `  ${this.#branch ?? "—"}`
     const changedCount = state.workspaceStatus?.changedPaths.length ?? 0
     const changed = changedCount === 0 ? "" : `  ${changedCount} changed`

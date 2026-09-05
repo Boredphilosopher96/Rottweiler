@@ -35,9 +35,9 @@ test("scalar snapshot restores active state independently of the durable cursor 
 
 test("snapshot keeps a newer transient compaction attempt and does not fabricate a turn source", () => {
   const initial = createInitialState()
-  const state = { ...initial, compaction: { ...initial.compaction, active: true, summaryTurnId: "compact", attempt: 3, text: "current" } }
+  const state = { ...initial, recovery: { ...initial.recovery, compaction: { started: "9", revision: "3", observed: "3", stale: false, textTruncated: false, thinkingTruncated: false } }, compaction: { ...initial.compaction, active: true, summaryTurnId: "compact", attempt: 3, text: "current" } }
   const next = apply(state, ready({ ...snapshot("10"), active_turn: { turn_id: "compact", started: null },
-    compaction: { summary_turn_id: "compact", started: "9", attempt: 2 } }))
+    compaction: { summary_turn_id: "compact", started: "9", attempt: 2, revision: "2", text: {text: "old", truncated: false}, thinking: {text: "", truncated: false} } }))
   expect(next.compaction).toBe(state.compaction)
   expect(next.recovery.activeTurnSource).toBeNull()
   expect(next.streamingTail).toBeNull()

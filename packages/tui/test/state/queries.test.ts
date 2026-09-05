@@ -176,6 +176,7 @@ describe("state queries", () => {
   test("projects turns, tools, questions, snapshots, mode, model, and shell state", () => {
     const context = {
       turn_id: "4",
+      through: null,
       stable_prefix_hash: "stable",
       used_tokens: "10",
       usable_tokens: "100",

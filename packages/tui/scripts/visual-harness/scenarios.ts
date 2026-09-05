@@ -32,10 +32,10 @@ export function scenarioState(scenario: VisualScenario): RottweilerState {
       text: "I need permission before running the focused regression suite.",
       thinking: "The command executes workspace code, so it must cross the approval boundary.",
       citations: [],
-      toolInvocationIds: [approval.toolCallId],
+      toolInvocationIds: [approval.invocationId],
       finished: null,
     }),
-    tools: { [approval.toolCallId]: approval },
+    tools: { [approval.invocationId]: approval },
   }
 }
 
@@ -265,7 +265,7 @@ function toolsState(): RottweilerState {
       text: "",
       thinking: "",
       citations: [],
-      toolInvocationIds: tools.map((tool) => tool.toolCallId),
+      toolInvocationIds: tools.map((tool) => tool.invocationId),
       finished: null,
     }),
     turns: {
@@ -277,7 +277,7 @@ function toolsState(): RottweilerState {
         timing: { kind: "open", startedAtMs, lastObservedAtMs: startedAtMs + 40_000 },
       },
     },
-    tools: Object.fromEntries(tools.map((item) => [item.toolCallId, item])),
+    tools: Object.fromEntries(tools.map((item) => [item.invocationId, item])),
     queuedMessages: [
       { position: "1", content: "Run the complete suite" },
       { position: "2", content: "Inspect the direct raster" },
@@ -331,13 +331,13 @@ function conversationState(): RottweilerState {
       text: "## What changed\n\nThe stream resumes from the last **durable** sequence, not the last delivered frame.\n\n1. `cursor.rs` tracks `durable_seq` independently\n2. `sse.ts` replays from that sequence on reattach\n3. `app.ts` drops the transport-ack fast path",
       thinking: "Two acknowledgements exist here: the transport ack and\nthe durable sequence ack. The client advances its cursor\non the transport ack, so a reconnect replays from a\nsequence the UI already consumed. Keep them separate.",
       citations: [{ uri: "protocol/session-log.md", title: "Reconnect contract" }],
-      toolInvocationIds: [edit.toolCallId, tests.toolCallId, read.toolCallId],
+      toolInvocationIds: [edit.invocationId, tests.invocationId, read.invocationId],
       finished: null,
     }),
     tools: {
-      [edit.toolCallId]: edit,
-      [tests.toolCallId]: tests,
-      [read.toolCallId]: read,
+      [edit.invocationId]: edit,
+      [tests.invocationId]: tests,
+      [read.invocationId]: read,
     },
     todos: { ...emptyTodos(), phase: "ready", snapshot: { items: [
       { id: "map", content: "Map the event stream", status: "completed" },
@@ -384,6 +384,7 @@ function conversationState(): RottweilerState {
     runtimeServices: [{ kind: "lsp", name: "rust-analyzer" }],
     context: {
       turn_id: "2",
+      through: null,
       stable_prefix_hash: "visual-proof",
       used_tokens: "13200",
       usable_tokens: "32000",
@@ -401,7 +402,7 @@ function conversationState(): RottweilerState {
   }
 }
 
-function tool(fields: Omit<ToolProjection, "turnId" | "invocationId" | "diff" | "callIndex" | "timing">): ToolProjection {
+function tool(fields: Omit<ToolProjection, "turnId" | "invocationId" | "diff" | "callIndex" | "timing"> & { toolCallId: string }): ToolProjection {
   return {
     ...fields,
     invocationId: fields.toolCallId,

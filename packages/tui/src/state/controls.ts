@@ -45,7 +45,7 @@ export function readControls(state: RottweilerState, snapshot: SessionControlsSn
   }
   for (const [id, approval] of approvals) {
     const existing = tools[id]
-    if (existing !== undefined && (existing.toolCallId !== approval.tool_call_id || existing.turnId !== approval.turn_id)) {
+    if (existing !== undefined && ((existing.toolCallId !== null && existing.toolCallId !== approval.tool_call_id) || existing.turnId !== approval.turn_id)) {
       throw new EngineProtocolError("session approval conflicts with its invocation identity")
     }
     tools[id] = {

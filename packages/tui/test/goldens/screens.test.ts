@@ -35,6 +35,7 @@ function fixtureState(): RottweilerState {
     },
     context: {
       turn_id: "1",
+      through: null,
       stable_prefix_hash: "stable-fixture",
       used_tokens: "6400",
       usable_tokens: "32000",
@@ -257,7 +258,7 @@ function toolsFixtureState(): RottweilerState {
       text: "",
       thinking: "",
       citations: [],
-      toolInvocationIds: tools.map((tool) => tool.toolCallId),
+      toolInvocationIds: tools.map((tool) => tool.invocationId),
       finished: null,
     }),
     turns: {
@@ -269,7 +270,7 @@ function toolsFixtureState(): RottweilerState {
         timing: { kind: "open", startedAtMs, lastObservedAtMs: startedAtMs + 40_000 },
       },
     },
-    tools: Object.fromEntries(tools.map((tool) => [tool.toolCallId, tool])),
+    tools: Object.fromEntries(tools.map((tool) => [tool.invocationId, tool])),
     queuedMessages: [
       { position: "1", content: "Run the complete suite" },
       { position: "2", content: "Inspect the direct raster" },

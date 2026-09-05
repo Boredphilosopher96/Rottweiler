@@ -35,6 +35,8 @@ import type {
   Usage,
 } from "../protocol"
 
+export type ContextUsageProjection = Pick<ContextSnapshot, "through" | "turn_id" | "stable_prefix_hash" | "used_tokens" | "usable_tokens" | "reserved_tokens" | "context_window_known" | "context_window_reason">
+
 export type ConnectionPhase =
   | "idle"
   | "connecting"
@@ -130,7 +132,8 @@ export interface TurnProjection {
 export type ToolStatus = "running" | "awaiting_approval" | "finished"
 
 export interface ToolProjection {
-  readonly toolCallId: string
+  /** Provider correlation is absent from source-backed running previews until a lifecycle/control payload supplies it. */
+  readonly toolCallId: string | null
   readonly invocationId: string
   readonly turnId: string
   readonly name: string
@@ -380,6 +383,7 @@ export interface RottweilerState {
   readonly pluginStatuses: Readonly<Record<string, string>>
   readonly pluginNotifications: readonly PluginNotificationProjection[]
   readonly context: ContextSnapshot | null
+  readonly contextUsage: ContextUsageProjection | null
   readonly cost: CostSnapshot | null
   readonly promptDump: PromptDump | null
   readonly mode: string | null
@@ -446,6 +450,7 @@ export function createInitialState(): RottweilerState {
     pluginStatuses: {},
     pluginNotifications: [],
     context: null,
+    contextUsage: null,
     cost: null,
     promptDump: null,
     mode: "execute",

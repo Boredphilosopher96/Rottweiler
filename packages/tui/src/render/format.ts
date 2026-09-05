@@ -60,7 +60,7 @@ export function formatSessionCost(
 }
 
 /** Context capacity for the one-row status surface, without inventing a zero limit. */
-export function formatStatusContext(snapshot: ContextSnapshot): string {
+export function formatStatusContext<T extends Pick<ContextSnapshot, "context_window_known" | "used_tokens" | "usable_tokens">>(snapshot: T): string {
   if (!snapshot.context_window_known) {
     return `ctx ${formatTokenCount(snapshot.used_tokens)} · limit unknown`
   }

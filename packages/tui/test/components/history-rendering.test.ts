@@ -99,7 +99,7 @@ describe("semantic history rendering", () => {
     }
     const { app } = await fixture([conversationItem(1, "user", "What is the context?"), conversationItem(2, "assistant", "The answer"), summary], {
       ...createInitialState(), context: {
-        turn_id: "1", stable_prefix_hash: "hash", used_tokens: "5000", usable_tokens: "100000",
+        through: null, turn_id: "1", stable_prefix_hash: "hash", used_tokens: "5000", usable_tokens: "100000",
         reserved_tokens: "0", context_window_known: true, cache_breakpoints: [], items: []
       }
     })

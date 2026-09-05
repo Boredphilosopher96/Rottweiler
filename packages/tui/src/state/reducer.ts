@@ -1,3 +1,5 @@
+import { contextUsage } from "./context-usage"
+import { compactionProgress, observeCompaction } from "./compaction-recovery"
 import { coveredTailDelta, preserveTail } from "./tail-recovery"
 import { readSessionState, preserveMetadata } from "./recovery"
 import { childProgressSource } from "../child-source"
@@ -23,7 +25,7 @@ import { projectSession, projectSessionReview, providerQualifiedRoute } from "./
 import { projectShellEvent } from "./shell-state"
 import { MAX_SUBAGENT_TASK_BYTES, boundedSubagentHistory, nextSubagentArchiveKey, subagentActivity, subagentTerminalSummary } from "./subagents"
 import { UNKNOWN_ACTIVITY_TIMING, closeActivityTiming, observeActivityTiming, openActivityTiming, retainRecentTools, updateTool } from "./tool-state"
-import { MAX_COMPACTION_STREAM_BYTES, appendTailText, attachToolToTail, currentTurnId, retainRecentTurns, syncTailTools, updateTail } from "./turn-state"
+import { appendTailText, attachToolToTail, currentTurnId, retainRecentTurns, syncTailTools, updateTail } from "./turn-state"
 
 export function reduceRottweilerState(
   state: RottweilerState = createInitialState(),
@@ -148,7 +150,7 @@ export function reduceWireEvent(
     }
     : withCursor
 
-  const applied = coveredTail ? ready : applyKnownEvent(ready, event, sequenceText, activeSessionId)
+  const applied = coveredTail ? ready : observeCompaction(applyKnownEvent(ready, event, sequenceText, activeSessionId), event, sequenceText)
   const projected = preserveMetadata(state, preserveTail(state, applied, event, sequenceText), event, sequenceText)
   if (coveredControl) return preserveSnapshotControls(state, projected, event)
   return isControlEvent(event) ? { ...projected, controls: { ...projected.controls, observedThrough: sequenceText } } : projected
@@ -182,6 +184,8 @@ function applyKnownEvent(
     case "transcript_page_ready":
     case "transcript_content_ready":
       return state
+    case "session_children_ready":
+      return state
     case "session_state_ready":
       return activeSessionId !== null && event.session_id !== activeSessionId ? state : readSessionState(state, event.session_id, event.snapshot)
     case "session_controls_ready":
@@ -205,6 +209,9 @@ function applyKnownEvent(
       return {
         ...state,
         context: event.snapshot,
+        contextUsage: state.contextUsage?.through !== null && state.contextUsage?.through !== undefined
+          && (event.snapshot.through === null || BigInt(state.contextUsage.through) > BigInt(event.snapshot.through))
+          ? state.contextUsage : contextUsage(event.snapshot),
         commandAcks: responseAck(state, event.meta.request_id, event.type, event.session_id),
       }
     case "cost_snapshot_ready":
@@ -821,7 +828,7 @@ function applyKnownEvent(
     }
     case "tool_approval_needed": {
       const existing = state.tools[event.invocation_id]
-      if (existing !== undefined && (existing.toolCallId !== event.tool_call_id || existing.turnId !== event.turn_id)) return state
+      if (existing !== undefined && ((existing.toolCallId !== null && existing.toolCallId !== event.tool_call_id) || existing.turnId !== event.turn_id)) return state
       const tool: ToolProjection = {
         toolCallId: event.tool_call_id,
         invocationId: event.invocation_id,
@@ -846,7 +853,7 @@ function applyKnownEvent(
     }
     case "tool_diff_ready": {
       const observed = state.tools[event.invocation_id]
-      if (observed !== undefined && (observed.toolCallId !== event.tool_call_id || observed.turnId !== event.turn_id)) return state
+      if (observed !== undefined && ((observed.toolCallId !== null && observed.toolCallId !== event.tool_call_id) || observed.turnId !== event.turn_id)) return state
       const existing: ToolProjection = state.tools[event.invocation_id] ?? {
         toolCallId: event.tool_call_id,
         invocationId: event.invocation_id,
@@ -880,7 +887,7 @@ function applyKnownEvent(
     }
     case "tool_output_delta": {
       const observed = state.tools[event.invocation_id]
-      if (observed !== undefined && (observed.toolCallId !== event.tool_call_id || observed.turnId !== event.turn_id)) return state
+      if (observed !== undefined && ((observed.toolCallId !== null && observed.toolCallId !== event.tool_call_id) || observed.turnId !== event.turn_id)) return state
       const existing: ToolProjection = state.tools[event.invocation_id] ?? {
         toolCallId: event.tool_call_id,
         invocationId: event.invocation_id,
@@ -909,7 +916,7 @@ function applyKnownEvent(
     }
     case "tool_call_finished": {
       const existing = state.tools[event.invocation_id]
-      if (existing !== undefined && (existing.toolCallId !== event.tool_call_id || existing.turnId !== event.turn_id)) return state
+      if (existing !== undefined && ((existing.toolCallId !== null && existing.toolCallId !== event.tool_call_id) || existing.turnId !== event.turn_id)) return state
       const tool: ToolProjection = {
         toolCallId: event.tool_call_id,
         invocationId: event.invocation_id,
@@ -1011,51 +1018,9 @@ function applyKnownEvent(
         },
       }
     case "compaction_attempt_started":
-      return {
-        ...state,
-        compaction: {
-          ...state.compaction,
-          active: true,
-          summaryTurnId: event.summary_turn_id,
-          attempt: event.attempt,
-          text: "",
-          thinking: "",
-        },
-      }
-    case "compaction_text_delta": {
-      if (
-        !state.compaction.active ||
-        state.compaction.summaryTurnId !== event.summary_turn_id ||
-        state.compaction.attempt !== event.attempt
-      ) return state
-      return {
-        ...state,
-        compaction: {
-          ...state.compaction,
-          text: boundedUtf8(
-            `${state.compaction.text}${event.text}`,
-            MAX_COMPACTION_STREAM_BYTES,
-          ),
-        },
-      }
-    }
-    case "compaction_thinking_delta": {
-      if (
-        !state.compaction.active ||
-        state.compaction.summaryTurnId !== event.summary_turn_id ||
-        state.compaction.attempt !== event.attempt
-      ) return state
-      return {
-        ...state,
-        compaction: {
-          ...state.compaction,
-          thinking: boundedUtf8(
-            `${state.compaction.thinking}${event.text}`,
-            MAX_COMPACTION_STREAM_BYTES,
-          ),
-        },
-      }
-    }
+    case "compaction_text_delta":
+    case "compaction_thinking_delta":
+      return compactionProgress(state, event)
     case "compaction_finished":
       if (
         state.compaction.summaryTurnId !== null &&
@@ -1116,7 +1081,8 @@ function applyKnownEvent(
     case "context_usage_updated":
       return {
         ...state,
-        context: {
+        contextUsage: {
+          through: event.meta.sequence_id,
           turn_id: event.turn_id,
           stable_prefix_hash: event.stable_prefix_hash,
           used_tokens: event.used_tokens,
@@ -1126,8 +1092,6 @@ function applyKnownEvent(
           ...(event.context_window_reason === undefined
             ? {}
             : { context_window_reason: event.context_window_reason }),
-          cache_breakpoints: state.context?.cache_breakpoints ?? [],
-          items: state.context?.items ?? [],
         },
       }
     case "session_title_updated":

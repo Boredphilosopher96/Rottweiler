@@ -7,6 +7,7 @@ describe("bounded retained rendering", () => {
   test("keeps unknown context, route billing, and model identity truthful", () => {
     expect(formatStatusContext({
       turn_id: "1",
+      through: null,
       stable_prefix_hash: "fixture",
       used_tokens: "3900",
       usable_tokens: "0",
@@ -323,6 +324,7 @@ describe("bounded retained rendering", () => {
           type: "structured" as const,
           value: {
             data: { paths: ["README.md"], machine_local_path: "/private/repo/README.md" },
+            through: null,
             stable_prefix_hash: "internal-hash",
             source: "tool_registry",
           },

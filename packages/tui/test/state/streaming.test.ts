@@ -51,12 +51,14 @@ describe("state streaming", () => {
     })
     state = reduce(state, {
       type: "compaction_attempt_started",
+      started: "1", revision: "1",
       session_id: "session-state",
       summary_turn_id: "7",
       attempt: 0,
     })
     state = reduce(state, {
       type: "compaction_thinking_delta",
+      started: "1", revision: "2",
       session_id: "session-state",
       summary_turn_id: "7",
       attempt: 0,
@@ -64,6 +66,7 @@ describe("state streaming", () => {
     })
     state = reduce(state, {
       type: "compaction_text_delta",
+      started: "1", revision: "3",
       session_id: "session-state",
       summary_turn_id: "7",
       attempt: 0,
@@ -78,6 +81,7 @@ describe("state streaming", () => {
 
     state = reduce(state, {
       type: "compaction_attempt_started",
+      started: "1", revision: "4",
       session_id: "session-state",
       summary_turn_id: "7",
       attempt: 1,
@@ -85,6 +89,7 @@ describe("state streaming", () => {
     expect(state.compaction).toMatchObject({ attempt: 1, thinking: "", text: "" })
     state = reduce(state, {
       type: "compaction_text_delta",
+      started: "1", revision: "5",
       session_id: "session-state",
       summary_turn_id: "7",
       attempt: 1,
@@ -118,12 +123,14 @@ describe("state streaming", () => {
     })
     state = reduce(state, {
       type: "compaction_attempt_started",
+      started: "1", revision: "1",
       session_id: "session-state",
       summary_turn_id: "9",
       attempt: 0,
     })
     state = reduce(state, {
       type: "compaction_text_delta",
+      started: "1", revision: "2",
       session_id: "session-state",
       summary_turn_id: "9",
       attempt: 0,
@@ -131,6 +138,7 @@ describe("state streaming", () => {
     })
     state = reduce(state, {
       type: "compaction_text_delta",
+      started: "1", revision: "3",
       session_id: "session-state",
       summary_turn_id: "8",
       attempt: 0,
@@ -138,6 +146,7 @@ describe("state streaming", () => {
     })
     state = reduce(state, {
       type: "compaction_thinking_delta",
+      started: "1", revision: "4",
       session_id: "session-state",
       summary_turn_id: "9",
       attempt: 1,
@@ -176,6 +185,7 @@ describe("state streaming", () => {
     })
     state = reduce(state, {
       type: "compaction_attempt_started",
+      started: "1", revision: "1",
       session_id: "session-state",
       summary_turn_id: "11",
       attempt: 0,
@@ -183,6 +193,7 @@ describe("state streaming", () => {
     const oversized = "界".repeat(MAX_COMPACTION_STREAM_BYTES)
     state = reduce(state, {
       type: "compaction_text_delta",
+      started: "1", revision: "2",
       session_id: "session-state",
       summary_turn_id: "11",
       attempt: 0,
@@ -190,6 +201,7 @@ describe("state streaming", () => {
     })
     state = reduce(state, {
       type: "compaction_thinking_delta",
+      started: "1", revision: "3",
       session_id: "session-state",
       summary_turn_id: "11",
       attempt: 0,
