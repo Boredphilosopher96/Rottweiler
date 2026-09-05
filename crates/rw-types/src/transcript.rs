@@ -105,6 +105,7 @@ pub enum TranscriptContent {
         source: TranscriptContentSource,
     },
     Tool {
+        invocation_id: crate::ToolInvocationId,
         name: String,
         call_index: u32,
         arguments: TranscriptBodyPreview,

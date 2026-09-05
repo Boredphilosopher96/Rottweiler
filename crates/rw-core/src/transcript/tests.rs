@@ -30,6 +30,7 @@ fn start(sequence: u64, call_index: u32) -> EngineEvent {
         meta: meta(sequence),
         turn_id: TurnId("1".into()),
         tool_call_id: ToolCallId("reused-provider-id".into()),
+        invocation_id: rw_types::ToolInvocationId(format!("invocation-{call_index}")),
         name: "read_file".into(),
         args: serde_json::json!({"path":"example.rs"}),
         call_index,
@@ -40,9 +41,27 @@ fn finish(sequence: u64, call_index: u32, text: &str) -> EngineEvent {
         meta: meta(sequence),
         turn_id: TurnId("1".into()),
         tool_call_id: ToolCallId("reused-provider-id".into()),
+        invocation_id: rw_types::ToolInvocationId(format!("invocation-{call_index}")),
         output: ToolOutput::Text { text: text.into() },
         is_error: false,
         call_index,
+    }
+}
+fn tool_diff(sequence: u64, call_index: u32) -> EngineEvent {
+    EngineEvent::ToolDiffReady {
+        meta: meta(sequence),
+        turn_id: TurnId("1".into()),
+        tool_call_id: ToolCallId("reused-provider-id".into()),
+        invocation_id: rw_types::ToolInvocationId(format!("invocation-{call_index}")),
+        diff: rw_types::UnifiedDiff {
+            proposal_id: "first-proposal".into(),
+            path: "example.rs".into(),
+            unified_diff: "@@ -1 +1 @@\n-before\n+after".into(),
+            arguments_hash: "arguments".into(),
+            base_hash: "base".into(),
+            diff_hash: "diff".into(),
+            truncated: false,
+        },
     }
 }
 fn commit(
@@ -131,6 +150,7 @@ fn tool_identity_survives_reopen_and_provider_ir_does_not_duplicate_rows() {
         &mut index,
         &mut state,
     );
+    commit(&tool_diff(6, 0), &mut journal, &mut index, &mut state);
     let page = index.page(0, 64, 1024 * 1024).expect("semantic page");
     assert_eq!(page.rows.len(), 2);
     assert_eq!(
@@ -138,7 +158,7 @@ fn tool_identity_survives_reopen_and_provider_ir_does_not_duplicate_rows() {
             .iter()
             .map(|row| (row.source.0, row.revision.0))
             .collect::<Vec<_>>(),
-        vec![(0, 2), (4, 5)]
+        vec![(0, 6), (4, 5)]
     );
     let TranscriptContent::Tool {
         status: TranscriptToolStatus::Finished { output, .. },
@@ -157,7 +177,24 @@ fn tool_identity_survives_reopen_and_provider_ir_does_not_duplicate_rows() {
             .len(),
         2
     );
-    assert_eq!(journal.read_view().last_sequence(), Some(SequenceId(5)));
+    let TranscriptContent::Tool {
+        invocation_id,
+        diff: Some(diff),
+        ..
+    } = decode(&page.rows[0]).expect("late first-invocation diff")
+    else {
+        panic!("missing revised first tool");
+    };
+    assert_eq!(invocation_id.0, "invocation-0");
+    assert_eq!(diff.source.sequence, SequenceId(6));
+    assert!(matches!(
+        decode(&page.rows[1]).expect("second tool unchanged"),
+        TranscriptContent::Tool { diff: None, .. }
+    ));
+    assert!(
+        project_transcript_event(&start(7, 0), &state, &index).is_err(),
+        "finished invocation IDs cannot be reused"
+    );
 }
 
 #[test]
@@ -889,5 +926,35 @@ fn child_completion_retains_one_row_and_authoritative_full_result() {
     assert_eq!(
         document.chunk(0, 65536).expect("complete result").text,
         "complete output ".repeat(1000)
+    );
+}
+
+#[test]
+fn provider_correlation_size_does_not_expand_semantic_tool_rows() {
+    let root = tempdir().expect("root");
+    let mut journal = SegmentedJournal::open(root.path(), "semantic").expect("journal");
+    let mut index = TranscriptIndex::open(&journal.read_view(), 1).expect("index");
+    let mut state = TranscriptProjectionState::default();
+    let mut started = start(0, 0);
+    let mut finished = finish(1, 0, "done");
+    if let EngineEvent::ToolCallStarted { tool_call_id, .. } = &mut started {
+        tool_call_id.0 = "provider-correlation".repeat(10_000);
+    }
+    if let EngineEvent::ToolCallFinished { tool_call_id, .. } = &mut finished {
+        tool_call_id.0 = "provider-correlation".repeat(10_000);
+    }
+    commit(&started, &mut journal, &mut index, &mut state);
+    commit(&finished, &mut journal, &mut index, &mut state);
+    let page = index.page(0, 64, 1024 * 1024).expect("page");
+    assert_eq!(page.rows.len(), 1);
+    assert!(page.rows[0].payload.len() < 2048);
+    let mut invalid = start(2, 1);
+    if let EngineEvent::ToolCallStarted { invocation_id, .. } = &mut invalid {
+        invocation_id.0 = "x".repeat(129);
+    }
+    assert!(project_transcript_event(&invalid, &state, &index).is_err());
+    assert_eq!(
+        index.head().expect("unchanged head").prefix,
+        journal.read_view().prefix_identity()
     );
 }

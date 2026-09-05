@@ -2441,7 +2441,7 @@ test("reused provider IDs reject late observations from an earlier invocation", 
   state = reduce(state, { type: "tool_call_finished", meta: meta("4"), turn_id: "1", tool_call_id: "reused", invocation_id: "first", output: { type: "text", text: "stale result" }, is_error: false, call_index: 0 })
   expect(state.tools.reused?.invocationId).toBe("second")
   expect(state.tools.reused?.status).toBe("running")
-  expect(state.tools.reused?.chunks).toEqual([])
+  expect(state.tools.reused?.chunks.count).toBe(0)
   const cursor = state.lastSequence
   state = reduce(state, { type: "tool_progress", session_id: "session-state", turn_id: "1", tool_call_id: "reused", invocation_id: "first", progress: { message: "late" } })
   expect(state.lastSequence).toBe(cursor)

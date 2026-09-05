@@ -333,30 +333,27 @@ fn project_tool_start(
         EngineEvent::ToolCallStarted {
             meta,
             turn_id,
-            tool_call_id,
+            invocation_id,
             name,
             args,
             call_index,
+            ..
         } => {
-            let binding = entity_binding("tool", &[&turn_id.0, &tool_call_id.0]);
-            if let Some(prior) = rows.bound_row(&binding)?
-                && matches!(
-                    decode(&prior)?,
-                    TranscriptContent::Tool {
-                        status: TranscriptToolStatus::Running,
-                        ..
-                    }
-                )
-            {
+            if invocation_id.0.len() > 128 {
                 return Err(TranscriptProjectionError::Invalid(
-                    "overlapping tool identity",
+                    "tool invocation identifier bound",
                 ));
+            }
+            let binding = entity_binding("tool", &[&invocation_id.0]);
+            if rows.bound_row(&binding)?.is_some() {
+                return Err(TranscriptProjectionError::Invalid("reused tool invocation"));
             }
             Ok(Some(ProjectedRow {
                 prior: None,
                 agent_turn: Some(turn_number(turn_id)?),
                 binding: Some(binding),
                 content: TranscriptContent::Tool {
+                    invocation_id: invocation_id.clone(),
                     name: prefix(name, 128).to_owned(),
                     call_index: *call_index,
                     arguments: PreviewBudget(512).json(
@@ -380,23 +377,28 @@ fn project_tool_update(
         EngineEvent::ToolCallFinished {
             meta,
             turn_id,
-            tool_call_id,
+            invocation_id,
             output,
             is_error,
             call_index,
+            ..
         } => {
-            let binding = entity_binding("tool", &[&turn_id.0, &tool_call_id.0]);
+            let binding = entity_binding("tool", &[&invocation_id.0]);
             let prior = required_row(rows, &binding)?;
             let mut content = decode(&prior)?;
             let TranscriptContent::Tool {
                 status,
                 call_index: started_index,
+                invocation_id: started_invocation,
                 ..
             } = &mut content
             else {
                 return Err(TranscriptProjectionError::Invalid("tool binding kind"));
             };
-            if *started_index != *call_index || *status != TranscriptToolStatus::Running {
+            if *started_index != *call_index
+                || *status != TranscriptToolStatus::Running
+                || started_invocation != invocation_id
+            {
                 return Err(TranscriptProjectionError::Invalid(
                     "tool completion identity",
                 ));
@@ -421,17 +423,23 @@ fn project_tool_update(
         EngineEvent::ToolDiffReady {
             meta,
             turn_id,
-            tool_call_id,
+            invocation_id,
             diff,
+            ..
         } => {
-            let prior = required_row(
-                rows,
-                &entity_binding("tool", &[&turn_id.0, &tool_call_id.0]),
-            )?;
+            let prior = required_row(rows, &entity_binding("tool", &[&invocation_id.0]))?;
             let mut content = decode(&prior)?;
-            let TranscriptContent::Tool { diff: preview, .. } = &mut content else {
+            let TranscriptContent::Tool {
+                diff: preview,
+                invocation_id: started_invocation,
+                ..
+            } = &mut content
+            else {
                 return Err(TranscriptProjectionError::Invalid("tool binding kind"));
             };
+            if started_invocation != invocation_id {
+                return Err(TranscriptProjectionError::Invalid("tool diff identity"));
+            }
             *preview = Some(PreviewBudget(512).json(
                 diff,
                 source(meta.sequence_id, TranscriptContentSelector::ToolDiff),

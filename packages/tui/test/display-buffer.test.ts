@@ -12,7 +12,7 @@ import { PROTOCOL_VERSION, type EngineEvent } from "../src/protocol"
 
 function tool(chunks = EMPTY_TOOL_OUTPUT): ToolProjection {
   return {
-    toolCallId: "stream", turnId: "1", name: "bash", args: { command: "echo output" },
+    toolCallId: "stream", invocationId: "stream-1", turnId: "1", name: "bash", args: { command: "echo output" },
     status: "running", capabilities: [], rationale: null, diff: null, chunks, output: null,
     isError: null, callIndex: 0, timing: { kind: "unknown" },
   }
@@ -191,13 +191,13 @@ describe("bounded immutable display streams", () => {
 
   test("final output releases live storage while prior immutable snapshots remain readable", () => {
     const running = reduce(createInitialState(), {
-      type: "tool_output_delta", meta: meta(1), turn_id: "1", tool_call_id: "stream", stream: "stdout", chunk: "live prefix",
+      type: "tool_output_delta", meta: meta(1), turn_id: "1", tool_call_id: "stream", invocation_id: "stream-1", stream: "stdout", chunk: "live prefix",
     })
     const before = running.tools.stream
     if (before === undefined) throw new Error("expected running projection")
     before.chunks.read()
     const finished = reduce(running, {
-      type: "tool_call_finished", meta: meta(2), turn_id: "1", tool_call_id: "stream",
+      type: "tool_call_finished", meta: meta(2), turn_id: "1", tool_call_id: "stream", invocation_id: "stream-1",
       output: { type: "text", text: "authoritative final output" }, is_error: false, call_index: 0,
     })
     expect(finished.tools.stream?.chunks).toBe(EMPTY_TOOL_OUTPUT)
