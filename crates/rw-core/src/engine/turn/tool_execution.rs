@@ -276,6 +276,17 @@ pub(super) async fn execute_prepared_tool(
         .with_progress(progress.sink())
         .with_output(sink)
         .with_subagent_event_sink(subagent_events);
+    let invocation_context = if tool.delegates_effects() {
+        let delegated = Arc::new(rw_tools::DelegatedTools::new(
+            invocation_context.clone(),
+            runtime.tools.clone(),
+            rw_tools::CapabilityManifest::new(authorization.capabilities.iter().copied()),
+            mutation_scope.clone(),
+        ));
+        invocation_context.with_effect_host(delegated)
+    } else {
+        invocation_context
+    };
     let deferred_pre_result = if deferred_mutating_pre_hook {
         run_deferred_mutating_pre_hook(&call, &arguments, &cancellation, &runtime).await
     } else {

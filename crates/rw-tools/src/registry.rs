@@ -298,6 +298,7 @@ pub struct ToolContext {
     model_alias: Option<String>,
     native_searcher: Option<Arc<dyn crate::WebSearcher>>,
     effect_domains: Option<Arc<[String]>>,
+    effect_host: Option<Arc<dyn crate::ToolEffectHost>>,
     todo_store: Option<Arc<dyn crate::TodoStateStore>>,
     result_limit_bytes: usize,
     pub cancellation: CancellationToken,
@@ -381,6 +382,7 @@ impl ToolContext {
             model_alias: None,
             native_searcher: None,
             effect_domains: None,
+            effect_host: None,
             todo_store: None,
             result_limit_bytes: ToolLimits::default().max_result_bytes,
             cancellation: CancellationToken::default(),
@@ -437,6 +439,23 @@ impl ToolContext {
     #[must_use]
     pub fn todo_store(&self) -> Option<&Arc<dyn crate::TodoStateStore>> {
         self.todo_store.as_ref()
+    }
+
+    /// Bind the exact approved outer invocation's host effect lane.
+    #[must_use]
+    pub fn with_effect_host(mut self, host: Arc<dyn crate::ToolEffectHost>) -> Self {
+        self.effect_host = Some(host);
+        self
+    }
+
+    #[must_use]
+    pub fn effect_host(&self) -> Option<Arc<dyn crate::ToolEffectHost>> {
+        self.effect_host.clone()
+    }
+
+    pub(crate) fn without_effect_host(mut self) -> Self {
+        self.effect_host = None;
+        self
     }
 
     pub(crate) fn with_effect_domains(mut self, domains: Arc<[String]>) -> Self {
@@ -944,6 +963,11 @@ pub trait Tool: Send + Sync {
         ToolBehavior::Standard
     }
 
+    /// Whether this implementation uses a host-owned nested effect lane.
+    fn delegates_effects(&self) -> bool {
+        false
+    }
+
     /// Source-owned support for calls made under another tool's approval.
     /// Unspecified tools cannot acquire nested effects from capability flags.
     ///
@@ -1104,6 +1128,10 @@ impl Tool for GuardedTool {
 
     fn delegated_effect(&self, input: &Value) -> Result<crate::DelegatedEffect, ToolError> {
         self.inner.delegated_effect(input)
+    }
+
+    fn delegates_effects(&self) -> bool {
+        self.inner.delegates_effects()
     }
 
     fn subagent_lifecycle_mode(&self) -> SubagentLifecycleMode {

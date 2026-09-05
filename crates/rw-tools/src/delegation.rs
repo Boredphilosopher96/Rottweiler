@@ -1,4 +1,7 @@
 //! Nested tools execute only inside an already authorized outer invocation.
+mod host;
+pub use host::{DelegatedTools, ToolEffectHost};
+
 use crate::{
     CapabilityManifest, MutationScope, SubagentLifecycleMode, Tool, ToolBehavior, ToolContext,
     ToolError,
@@ -171,7 +174,11 @@ impl ToolEffectScope {
             MutationScope::None if !capabilities.contains(&ToolCapability::WriteFilesystem) => {
                 Ok(())
             }
-            MutationScope::Paths(paths) if !paths.is_empty() && paths.len() <= 128 => {
+            MutationScope::Paths(paths)
+                if capabilities.contains(&ToolCapability::WriteFilesystem)
+                    && !paths.is_empty()
+                    && paths.len() <= 128 =>
+            {
                 for path in paths {
                     let canonical = context.resolve_writable(&path)?;
                     match &self.checkpoint {
@@ -194,5 +201,7 @@ fn denied(message: &str) -> ToolError {
     ToolError::DelegationDenied(message.to_owned())
 }
 
+#[cfg(test)]
+mod host_tests;
 #[cfg(test)]
 mod tests;
