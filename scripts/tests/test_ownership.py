@@ -70,6 +70,24 @@ class OwnershipCheckerTests(unittest.TestCase):
         write(root, "architecture/ownership.toml", valid_manifest())
         return manifest
 
+    def test_projection_inventory_rejects_undeclared_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = self.make_valid_repository(root)
+            manifest.write_text(manifest.read_text() + '\n[[inventory]]\nid = "wire"\ngenerator = "session-protocol-typescript"\npatterns = ["generated/*.ts"]\n')
+            self.assertEqual(self.checker.validate_repository(root, manifest), [])
+            write(root, "generated/extra.ts", "unexpected projection")
+            self.assertTrue(any("undeclared generated projection" in error for error in self.checker.validate_repository(root, manifest)))
+
+    def test_projection_inventory_requires_an_owned_safe_pattern(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = self.make_valid_repository(root)
+            manifest.write_text(manifest.read_text() + '\n[[inventory]]\nid = "wire"\ngenerator = "session-protocol-typescript"\npatterns = ["../*.ts", "unowned/*.ts"]\n')
+            failures = self.checker.validate_repository(root, manifest)
+            self.assertTrue(any("unsafe file pattern" in error for error in failures))
+            self.assertTrue(any("no declared output" in error for error in failures))
+
     def test_valid_manifest_is_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

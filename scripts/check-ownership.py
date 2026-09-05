@@ -168,6 +168,31 @@ def validate_repository(repo_root: Path, manifest: Path) -> list[str]:
                     f"generated marker for {generator_id or '<invalid>'} is missing from {safe_output}"
                 )
 
+    inventory_ids: set[str] = set()
+    for inventory in _tables(document, "inventory", failures):
+        inventory_id = _unique_id(inventory, "inventory", inventory_ids, failures)
+        generator_id = inventory.get("generator")
+        generator = next((item for item in generators if item.get("id") == generator_id), None)
+        if generator is None:
+            failures.append(f"inventory {inventory_id} references unknown generator {generator_id!r}")
+            continue
+        patterns = _strings(inventory.get("patterns"))
+        if patterns is None:
+            failures.append(f"inventory {inventory_id} must declare file patterns")
+            continue
+        declared = set(_strings(generator.get("outputs")) or [])
+        for pattern in patterns:
+            if _safe_path(pattern) is None:
+                failures.append(f"inventory {inventory_id} has an unsafe file pattern: {pattern!r}")
+                continue
+            if not any(PurePosixPath(path).match(pattern) for path in declared):
+                failures.append(f"inventory {inventory_id} pattern has no declared output: {pattern}")
+                continue
+            for output in sorted(repo_root.glob(pattern)):
+                relative = output.relative_to(repo_root).as_posix()
+                if relative not in declared:
+                    failures.append(f"undeclared generated projection in {inventory_id}: {relative}")
+
     shadow_ids: set[str] = set()
     for shadow in shadows:
         shadow_id = _unique_id(shadow, "shadow", shadow_ids, failures)

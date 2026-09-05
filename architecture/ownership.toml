@@ -378,7 +378,7 @@ pattern = '''bun\s+build[^"\n]*--compile'''
 reason = "The official TypeScript scaffold is source-hosted and does not embed one Bun runtime per plugin."
 
 [[shadow]]
-id = "legacy-built-in-tool-export"
+id = "contract-built-in-tool-export"
 owner = "built-in-tool-composition"
 path = "crates/rw-tools/src/lib.rs"
 pattern = '''\bregister_builtins\b'''
@@ -405,19 +405,12 @@ path = "crates/rw-cli/src/shell_broker.rs"
 pattern = '''\bconst\s+(?:CLIENT_HEADER|CAPABILITY_HEADER)\b'''
 reason = "The shell broker imports the server-owned local transport headers."
 
-[[shadow]]
-id = "legacy-built-in-tool-registry"
-owner = "built-in-tool-composition"
-path = "crates/rw-tools/src/builtins.rs"
-pattern = '''\bpub\s+fn\s+register_builtins\b'''
-reason = "rw-tools supplies tool implementations, not a second production catalog."
-allow_missing = true
 
 [[shadow]]
 id = "core-owned-tool-behavior-classifier"
 owner = "registered-tool-semantics"
 path = "crates/rw-core/src/permission.rs"
-pattern = '''\bfn\s+(?:legacy_)?(?:permission_)?(?:tool_)?behavior\b'''
+pattern = '''\bfn\s+(?:permission_)?(?:tool_)?behavior\b'''
 reason = "Permission policy consumes behavior resolved by the registered tool; it does not infer behavior from names."
 
 [[shadow]]
@@ -537,14 +530,14 @@ id = "duplicate-core-permission-mode"
 owner = "permission-mode-contract"
 path = "crates/rw-core/src/permission.rs"
 pattern = '''(?:\bpub\s+(?:enum|type)\s+|\bpub\s+use[^\n]*\bas\s+)HeadlessPermissionMode\b'''
-reason = "The permission engine uses the protocol-owned mode type directly without a legacy name."
+reason = "The permission engine uses the protocol-owned mode type directly."
 
 [[shadow]]
 id = "duplicate-mcp-server-id-type"
 owner = "mcp-server-id-contract"
 path = "crates/rw-mcp/src/types.rs"
 pattern = '''(?:\bpub\s+(?:struct|type)\s+|\bpub\s+use[^\n]*\bas\s+)ServerId\b'''
-reason = "rw-mcp uses the identifier type owned by rw-types directly without a legacy name."
+reason = "rw-mcp uses the identifier type owned by rw-types directly."
 
 [[shadow]]
 id = "duplicate-store-mcp-server-id-grammar"
@@ -603,11 +596,11 @@ pattern = '''\bconst\s+MAX_CATALOG_BYTES\b'''
 reason = "The Copilot adapter consumes the provider-neutral catalog response limit."
 
 [[shadow]]
-id = "legacy-protocol-permission-action"
+id = "contract-protocol-permission-action"
 owner = "configuration-contracts"
 path = "crates/rw-types/src/protocol.rs"
 pattern = '''\b(?:pub\s+)?(?:enum|type)\s+PermissionAction\b'''
-reason = "The interactive protocol uses PermissionDecision directly without a legacy alias."
+reason = "The interactive protocol uses PermissionDecision directly."
 
 [[shadow]]
 id = "duplicate-core-permission-conversion"
@@ -749,21 +742,7 @@ path = "crates/rw-core/src/admin.rs"
 pattern = '''\bfn\s+begin_provider_login[\s\S]{0,1400}provider\.kind\s*=='''
 reason = "Administrative login dispatch uses the provider composition layer's AdapterKind."
 
-[[shadow]]
-id = "legacy-plugin-protocol-one-fixture"
-owner = "plugin-wire-contract"
-path = "packages/plugin-sdk/fixtures/wire/protocol-1.json"
-pattern = '''protocol'''
-allow_missing = true
-reason = "Protocol 3 is the only supported plugin generation; the old fixture must not return."
 
-[[shadow]]
-id = "legacy-plugin-protocol-one-schema"
-owner = "plugin-wire-contract"
-path = "packages/plugin-sdk/fixtures/wire/protocol-1.schema.json"
-pattern = '''protocol'''
-allow_missing = true
-reason = "Protocol 3 is the only supported plugin generation; the old schema must not return."
 
 [[shadow]]
 id = "duplicate-plugin-host-id-cli"
@@ -801,39 +780,33 @@ pattern = '''struct\s+ModelDescriptor\s*\{[^}]*\bpub\s+(?:alias|providers)\s*:''
 reason = "A model has one concrete id and one provider; role aliases remain a distinct catalog relation."
 
 [[shadow]]
-id = "legacy-tui-model-normalization"
+id = "contract-tui-model-normalization"
 owner = "client-protocol-contract"
 path = "packages/tui/src/transport/types.ts"
 pattern = '''model\.providers\s*===\s*undefined'''
-reason = "The TUI consumes the current required model descriptor directly."
+reason = "The TUI consumes the required model descriptor directly."
 
 [[shadow]]
-id = "legacy-command-argument-alias"
+id = "contract-command-argument-alias"
 owner = "engine-slash-command-catalog"
 path = "crates/rw-ext/src/discovery/markdown.rs"
-pattern = '''(?:used_legacy_args_alias|optional_scalar\([^\n]+"args"\))'''
+pattern = '''(?:optional_scalar\([^\n]+"args"\))'''
 reason = "Custom commands accept only the canonical argument-hint field."
 
 [[shadow]]
-id = "legacy-provider-kind-aliases"
+id = "contract-provider-kind-aliases"
 owner = "built-in-provider-onboarding"
 path = "crates/rw-core/src/provider_factory.rs"
 pattern = '''"(?:openai_responses|openai_subscription|openai_compatible_chat)"'''
 reason = "Each adapter kind has one canonical configuration spelling."
 
 [[shadow]]
-id = "legacy-update-single-key-build-input"
+id = "contract-update-single-key-build-input"
 owner = "signed-update-wire-contract"
 path = "crates/rw-core/src/update.rs"
 pattern = '''ROTTWEILER_UPDATE_ROOT_(?:KEY_ID|PUBLIC_KEY_B64)'''
 reason = "Signed updates accept only the threshold root-key map contract."
 
-[[shadow]]
-id = "legacy-fork-operation-id-fallback"
-owner = "client-command-contract"
-path = "crates/rw-core/src/host/control.rs"
-pattern = '''rw-legacy-fork-operation'''
-reason = "Fork callers must supply the one durable operation identity used by the host."
 
 [[shadow]]
 id = "optional-fork-operation-id"
@@ -850,28 +823,28 @@ pattern = '''definition_fingerprint:\s*Option<String>'''
 reason = "Every durable mode event carries the exact semantic fingerprint."
 
 [[shadow]]
-id = "legacy-compaction-reserve-environment"
+id = "contract-compaction-reserve-environment"
 owner = "configuration-contracts"
 path = "crates/rw-store/src/config.rs"
 pattern = '''RW_COMPACTION_RESERVED_TOKENS'''
 reason = "Compaction reserve has one environment spelling."
 
 [[shadow]]
-id = "legacy-compaction-reserve-config-alias"
+id = "contract-compaction-reserve-config-alias"
 owner = "configuration-contracts"
 path = "crates/rw-types/src/config.rs"
 pattern = '''alias\s*=\s*"reserved_tokens"'''
 reason = "Compaction reserve accepts only the canonical reserved configuration key."
 
 [[shadow]]
-id = "legacy-compaction-reserve-cli-alias"
+id = "contract-compaction-reserve-cli-alias"
 owner = "configuration-contracts"
 path = "crates/rw-store/src/config.rs"
 pattern = '''["']compaction\.reserved_tokens["']'''
 reason = "CLI overrides accept only the canonical compaction.reserved key."
 
 [[shadow]]
-id = "legacy-toolchain-rules-alias"
+id = "contract-toolchain-rules-alias"
 owner = "configuration-contracts"
 path = "crates/rw-types/src/config.rs"
 pattern = '''alias\s*=\s*"rules"'''
@@ -936,29 +909,8 @@ id = "soak-platforms"
 path = "contracts/soak-platforms.json"
 symbols = ["runner_labels", "build_job", "artifact_prefix"]
 
-[[shadow]]
-id = "legacy-plugin-protocol-two-fixture"
-owner = "plugin-wire-contract"
-path = "packages/plugin-sdk/fixtures/wire/protocol-2.json"
-pattern = '''protocol'''
-allow_missing = true
-reason = "Protocol 3 replaced protocol 2 directly; the old fixture must not return."
 
-[[shadow]]
-id = "legacy-plugin-protocol-two-schema"
-owner = "plugin-wire-contract"
-path = "packages/plugin-sdk/fixtures/wire/protocol-2.schema.json"
-pattern = '''protocol'''
-allow_missing = true
-reason = "Protocol 3 replaced protocol 2 directly; the old schema must not return."
 
-[[shadow]]
-id = "legacy-plugin-protocol-two-sdk"
-owner = "plugin-wire-contract"
-path = "packages/plugin-sdk/src/generated/protocol-2.ts"
-pattern = '''PLUGIN_PROTOCOL_VERSION'''
-allow_missing = true
-reason = "Protocol 3 replaced protocol 2 directly; the old projection must not return."
 
 [[owner]]
 id = "operation-lifetime-progress-contract"
@@ -1027,3 +979,8 @@ symbols = ["ExtensionInvocationId", "ExtensionControlRequest"]
 id = "extension-control-contract"
 path = "crates/rw-types/src/extension_control.rs"
 symbols = ["ExtensionControl", "ExtensionControlOutcome", "ExtensionContextRead", "ExtensionContextPage"]
+
+[[inventory]]
+id = "plugin-wire-projections"
+generator = "plugin-protocol"
+patterns = ["packages/plugin-sdk/src/generated/protocol-*.ts", "packages/plugin-sdk/fixtures/wire/protocol-*.json"]
