@@ -1,6 +1,7 @@
 #![allow(clippy::expect_used)]
 use super::*;
 use crate::RpcToolAdapter;
+use rw_plugin_protocol::{PluginCapabilities, PluginToolEffect};
 use rw_tools::{MutationScope, Tool, ToolContext};
 use rw_types::ToolCapability;
 use serde_json::json;
