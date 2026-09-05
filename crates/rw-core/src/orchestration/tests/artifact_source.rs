@@ -3,12 +3,12 @@ use crate::{OrchestrationError, SubagentArtifactSource};
 use async_trait::async_trait;
 use rw_tools::{AuthorizedDiffArtifact, DiffArtifactAuthority, ToolError};
 use rw_types::{SessionId, SubagentId, SubagentResult};
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{collections::HashMap, sync::Mutex};
 
 /// Models the fixture observer's acknowledged terminal store. Production uses source selectors.
 #[derive(Default)]
 pub(crate) struct TestArtifactSource {
-    results: Mutex<BTreeMap<(SessionId, SubagentId), SubagentResult>>,
+    results: Mutex<HashMap<(SessionId, SubagentId), SubagentResult>>,
 }
 #[async_trait]
 impl DiffArtifactAuthority for TestArtifactSource {
