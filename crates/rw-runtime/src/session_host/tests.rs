@@ -9,6 +9,7 @@ use rw_store::session::{SessionProjection, SessionSummary as StoredSessionSummar
 use tempfile::tempdir;
 
 use super::*;
+mod command_receipts;
 mod fork;
 mod workspace;
 
