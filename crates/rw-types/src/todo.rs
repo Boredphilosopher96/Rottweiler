@@ -44,9 +44,9 @@ pub struct TodoSnapshot {
 /// Exact source prefix applied to a complete task-list read.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 #[serde(deny_unknown_fields)]
-#[ts(optional_fields = nullable)]
 pub struct TodoReadSnapshot {
     #[serde(deserialize_with = "Option::deserialize")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<crate::SequenceId>")]
     pub through: Option<crate::SequenceId>,
     pub snapshot: TodoSnapshot,
 }
@@ -54,15 +54,16 @@ pub struct TodoReadSnapshot {
 /// One bounded read either returns an exact snapshot or reports indexed progress.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-#[ts(optional_fields = nullable)]
 pub enum TodoReadResult {
     Ready {
         todos: TodoReadSnapshot,
     },
     CatchingUp {
         #[serde(deserialize_with = "Option::deserialize")]
+        #[schemars(schema_with = "crate::schema::required_nullable::<crate::SequenceId>")]
         through: Option<crate::SequenceId>,
         #[serde(deserialize_with = "Option::deserialize")]
+        #[schemars(schema_with = "crate::schema::required_nullable::<crate::SequenceId>")]
         target: Option<crate::SequenceId>,
     },
 }
@@ -137,5 +138,41 @@ mod tests {
         assert!(snapshot.validate().is_ok());
         snapshot.items[0].content = "x".repeat(MAX_TODO_CONTENT_BYTES + 1);
         assert!(snapshot.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod read_contract_tests {
+    use super::{TodoReadResult, TodoReadSnapshot};
+    use ts_rs::TS;
+    #[test]
+    fn prefixes_are_required_nullable_keys_in_rust_schema_and_typescript() {
+        assert!(
+            serde_json::from_value::<TodoReadSnapshot>(
+                serde_json::json!({"snapshot":{"items":[]}})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TodoReadResult>(
+                serde_json::json!({"type":"catching_up","through":null})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TodoReadResult>(
+                serde_json::json!({"type":"catching_up","through":null,"target":null})
+            )
+            .is_ok()
+        );
+        let schema = serde_json::to_value(schemars::schema_for!(TodoReadSnapshot)).expect("schema");
+        assert!(
+            schema["required"]
+                .as_array()
+                .expect("required")
+                .contains(&serde_json::json!("through"))
+        );
+        assert!(!TodoReadSnapshot::decl().contains("through?"));
+        assert!(!TodoReadResult::decl().contains("target?"));
     }
 }
