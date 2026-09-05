@@ -34,7 +34,7 @@ describe("bounded retained rendering", () => {
 
     const zeroCost = {
       utc_day: "2026-08-22",
-      turns: [],
+      subscription_quota: null,
       session_usage: {
         input_tokens: "0",
         output_tokens: "0",
@@ -75,6 +75,10 @@ describe("bounded retained rendering", () => {
       .toBe("quota —")
     expect(formatStatusSessionCost(zeroCost, "github_copilot", "3900"))
       .toBe("credits —")
+    const quota = { ...zeroCost, session_monetary_accounting_complete: false,
+      session_subscription_quota_entries: "2", subscription_quota: { used: "9007199254740993.000001", unit: "requests" } }
+    expect(formatSessionCost(quota)).toBe("9007199254740993.000001 requests")
+    expect(formatSessionCost({ ...quota, subscription_quota: null })).toBe("0 tokens")
   })
 
   test("only exposes filetypes backed by the embedded parser catalog", () => {
@@ -277,12 +281,7 @@ describe("bounded retained rendering", () => {
     expect(formatSessionCost(null, "6400")).toBe("6400 tokens")
     expect(formatSessionCost({
       utc_day: "2026-01-01",
-      turns: [{
-        turn_id: "1",
-        attribution: "main",
-        usage,
-        cost: { kind: "subscription_quota", used: "736", unit: "tokens" },
-      }],
+      subscription_quota: { used: "736", unit: "tokens" },
       session_usage: usage,
       session_cost_micros_usd: "0",
       session_ai_credit_micros: "0",

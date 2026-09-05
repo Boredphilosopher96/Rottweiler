@@ -421,7 +421,7 @@ function costSnapshot(): NonNullable<RottweilerState["cost"]> {
   }
   return {
     utc_day: "2026-08-25",
-    turns: [],
+    subscription_quota: null,
     session_usage: usage,
     session_cost_micros_usd: "412000",
     session_ai_credit_micros: "0",

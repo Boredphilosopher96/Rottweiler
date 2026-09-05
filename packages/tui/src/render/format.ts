@@ -46,12 +46,12 @@ export function formatSessionCost(
   if (snapshot === null) {
     return fallbackTokens === null ? "$—" : `${fallbackTokens} tokens`
   }
-  if (!snapshot.session_monetary_accounting_complete) {
-    return `${usageTokens(snapshot.session_usage)} tokens`
-  }
   if (decimal(snapshot.session_subscription_quota_entries) > 0) {
     const quota = subscriptionQuota(snapshot)
     return quota ?? `${usageTokens(snapshot.session_usage)} tokens`
+  }
+  if (!snapshot.session_monetary_accounting_complete) {
+    return `${usageTokens(snapshot.session_usage)} tokens`
   }
   if (decimal(snapshot.session_ai_credit_micros) > 0) {
     return `${(decimal(snapshot.session_ai_credit_micros) / 1_000_000).toFixed(3)} credits`
@@ -105,16 +105,8 @@ export function formatStatusSessionCost(
 }
 
 function subscriptionQuota(snapshot: CostSnapshot): string | null {
-  const values = snapshot.turns
-    .map((turn) => turn.cost)
-    .filter((cost): cost is Extract<Cost, { kind: "subscription_quota" }> =>
-      cost.kind === "subscription_quota" && cost.used !== undefined && cost.used !== null,
-    )
-  if (values.length === 0) return null
-  const units = new Set(values.map((cost) => cost.unit ?? "quota"))
-  if (units.size !== 1) return null
-  const used = values.reduce((sum, cost) => sum + decimal(cost.used ?? "0"), 0)
-  return `${used} ${values[0]?.unit ?? "quota"}`
+  const quota = snapshot.subscription_quota
+  return quota === null ? null : `${quota.used} ${quota.unit}`
 }
 
 function usageTokens(usage: Usage): string {

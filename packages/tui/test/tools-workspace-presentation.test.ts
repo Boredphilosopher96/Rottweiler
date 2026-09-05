@@ -66,7 +66,7 @@ function sessionContext(): ContextSnapshot {
 function sessionCost(): CostSnapshot {
   return {
     utc_day: "2026-01-01",
-    turns: [],
+    subscription_quota: null,
     session_usage: usage,
     session_cost_micros_usd: "500",
     session_ai_credit_micros: "0",

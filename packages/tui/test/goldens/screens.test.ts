@@ -72,7 +72,7 @@ function fixtureState(): RottweilerState {
     },
     cost: {
       utc_day: "2026-01-01",
-      turns: [],
+      subscription_quota: null,
       session_usage: usage,
       session_cost_micros_usd: "12450",
       session_ai_credit_micros: "0",
