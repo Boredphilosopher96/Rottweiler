@@ -100,7 +100,10 @@ impl ReadOperations {
     }
     #[cfg(test)]
     pub(super) fn active(&self) -> usize {
-        self.jobs.lock().expect("read jobs").active
+        self.jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active
     }
 }
 
