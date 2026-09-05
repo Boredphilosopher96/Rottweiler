@@ -1217,6 +1217,32 @@
       ]
     },
     {
+      "description": "An actor-authorized extension state transaction committed to this session.",
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "plugin_id": {
+          "type": "string"
+        },
+        "transaction": {
+          "$ref": "#/$defs/ExtensionStateTransaction"
+        },
+        "type": {
+          "type": "string",
+          "const": "extension_state_committed"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "plugin_id",
+        "transaction"
+      ]
+    },
+    {
       "description": "Session-local UI notification published by an approved plugin.",
       "type": "object",
       "properties": {
@@ -5675,6 +5701,99 @@
         "byte_len"
       ]
     },
+    "ExtensionStateTransaction": {
+      "description": "One compare-and-swap against the host-bound plugin namespace.\nThe committed event sequence becomes its revision. An acknowledgement and\nits state changes share the same durable commit.",
+      "type": "object",
+      "properties": {
+        "expected_revision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mutations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExtensionStateMutation"
+          }
+        },
+        "acknowledged": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExtensionDeliveryCursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "mutations"
+      ]
+    },
+    "ExtensionStateMutation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "value": true,
+            "action": {
+              "type": "string",
+              "const": "set"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "action",
+            "key",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "action": {
+              "type": "string",
+              "const": "delete"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "action",
+            "key"
+          ]
+        }
+      ]
+    },
+    "ExtensionDeliveryCursor": {
+      "description": "The journal identity of one delivered event, independent of transport retries.",
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/SequenceId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "sequence"
+      ]
+    },
     "UnrestorablePath": {
       "description": "A workspace path that a rewind could not restore exactly.",
       "type": "object",
@@ -5948,6 +6067,10 @@
           "description": "Session which owns the provider request.",
           "$ref": "#/$defs/SessionId"
         },
+        "budget_session_id": {
+          "description": "Immutable root session whose cap covers this session and its descendants.",
+          "$ref": "#/$defs/SessionId"
+        },
         "turn_id": {
           "description": "Durable agent turn which owns this request.",
           "$ref": "#/$defs/TurnId"
@@ -5970,6 +6093,7 @@
       "additionalProperties": false,
       "required": [
         "session_id",
+        "budget_session_id",
         "turn_id",
         "attribution",
         "call_id",

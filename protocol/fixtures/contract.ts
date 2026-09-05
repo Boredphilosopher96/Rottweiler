@@ -400,6 +400,7 @@ export const contractFixture = {
       },
       "call": {
         "session_id": "session-fixture",
+        "budget_session_id": "session-fixture",
         "turn_id": "turn-fixture",
         "attribution": "main",
         "call_id": "provider-call-fixture",

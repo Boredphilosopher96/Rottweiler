@@ -17,6 +17,9 @@ providerHttp: "provider/http",
 providerHttpEvent: "provider/http_event",
 providerHttpCancel: "provider/http_cancel",
 eventPublish: "event/publish",
+sessionQuery: "session/query",
+stateRead: "extension/state_read",
+stateCommit: "extension/state_commit",
 injectMessage: "session/inject_message",
 setStatus: "session/set_status",
 notify: "ui/notify",
@@ -97,6 +100,9 @@ export interface ProviderDeclaration {
 }
 
 export type PluginPushMethod =
+  | "session/query"
+  | "extension/state_read"
+  | "extension/state_commit"
   | "session/inject_message"
   | "session/set_status"
   | "ui/notify"
