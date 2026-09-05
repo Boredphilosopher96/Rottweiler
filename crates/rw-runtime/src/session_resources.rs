@@ -4,6 +4,7 @@ use crate::extension_runtime::{McpSessionRuntime, PluginSessionRuntime};
 use async_trait::async_trait;
 use futures_util::FutureExt;
 use std::{
+    future::Future,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -22,40 +23,61 @@ impl RuntimeSessionResources {
         mcp: Option<Arc<McpSessionRuntime>>,
         plugins: Option<Arc<PluginSessionRuntime>>,
     ) -> Arc<Self> {
+        let retained = (mcp.clone(), plugins.clone());
+        Self::start(
+            retained,
+            settle_both(
+                async move {
+                    if let Some(mcp) = mcp {
+                        mcp.shutdown().await
+                    } else {
+                        Ok(())
+                    }
+                },
+                async move {
+                    if let Some(plugins) = plugins {
+                        plugins.shutdown().await
+                    } else {
+                        Ok(())
+                    }
+                },
+            ),
+            RESOURCE_PROOF_TIMEOUT,
+        )
+    }
+
+    fn start(
+        owners: impl Send + 'static,
+        work: impl Future<Output = Proof> + Send + 'static,
+        timeout: Duration,
+    ) -> Arc<Self> {
         let (stop, wait) = oneshot::channel();
         let (finished, completion) = watch::channel(None);
         tokio::spawn(async move {
             let _ = wait.await;
-            let work = async {
-                let mut failure = None;
-                if let Some(mcp) = &mcp
-                    && let Err(error) = mcp.shutdown().await
-                {
-                    failure = Some(error.to_string());
-                }
-                if let Some(plugins) = &plugins
-                    && let Err(error) = plugins.shutdown().await
-                {
-                    failure.get_or_insert_with(|| error.to_string());
-                }
-                failure.map_or(Ok(()), Err)
-            };
-            let result = match tokio::time::timeout(
-                RESOURCE_PROOF_TIMEOUT,
-                std::panic::AssertUnwindSafe(work).catch_unwind(),
-            )
-            .await
-            {
-                Ok(Ok(result)) => result,
-                Ok(Err(_)) => Err("session runtime cleanup panicked before proof".to_owned()),
-                Err(_) => Err("session runtime cleanup proof deadline expired".to_owned()),
+            let mut work = Box::pin(std::panic::AssertUnwindSafe(work).catch_unwind());
+            let (result, timed_out) = match tokio::time::timeout(timeout, &mut work).await {
+                Ok(Ok(result)) => (result, false),
+                Ok(Err(_)) => (
+                    Err(Arc::from("session runtime cleanup panicked before proof")),
+                    false,
+                ),
+                Err(_) => (
+                    Err(Arc::from("session runtime cleanup proof deadline expired")),
+                    true,
+                ),
             };
             let failed = result.is_err();
-            finished.send_replace(Some(result.map_err(Arc::from)));
+            finished.send_replace(Some(result));
+            if timed_out {
+                // The future may now own clients removed from a service registry.
+                // Continue polling that exact future rather than dropping its owners.
+                let _ = work.await;
+            }
             if failed {
                 std::future::pending::<()>().await;
             }
-            drop((mcp, plugins));
+            drop(owners);
         });
         Arc::new(Self {
             stop: Mutex::new(Some(stop)),
@@ -113,3 +135,22 @@ impl rw_core::SessionResources for SessionResourcePair {
         first.and(second)
     }
 }
+
+async fn settle_both(
+    mcp: impl Future<Output = miette::Result<()>>,
+    plugins: impl Future<Output = miette::Result<()>>,
+) -> Proof {
+    let (mcp, plugins) = tokio::join!(settle_one("MCP", mcp), settle_one("plugin", plugins));
+    mcp.and(plugins)
+}
+
+async fn settle_one(kind: &str, work: impl Future<Output = miette::Result<()>>) -> Proof {
+    std::panic::AssertUnwindSafe(work)
+        .catch_unwind()
+        .await
+        .map_err(|_| Arc::<str>::from(format!("{kind} cleanup panicked before proof")))?
+        .map_err(|error| Arc::from(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests;

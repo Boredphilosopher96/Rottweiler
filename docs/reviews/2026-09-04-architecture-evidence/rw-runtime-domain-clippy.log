@@ -1,0 +1,12 @@
+    Checking rw-types v0.1.4 (/Users/sumukhnitundila/MyProjects/Rottweiler/crates/rw-types)
+    Checking rw-intel v0.1.4 (/Users/sumukhnitundila/MyProjects/Rottweiler/crates/rw-intel)
+    Checking rw-sandbox v0.1.4 (/Users/sumukhnitundila/MyProjects/Rottweiler/crates/rw-sandbox)
+    Checking rw-providers v0.1.4 (/Users/sumukhnitundila/MyProjects/Rottweiler/crates/rw-providers)
+    Checking rw-store v0.1.4 (/Users/sumukhnitundila/MyProjects/Rottweiler/crates/rw-store)
+    Checking rw-tools v0.1.4 (/Users/sumukhnitundila/MyProjects/Rottweiler/crates/rw-tools)
+    Checking rw-context v0.1.4 (/Users/sumukhnitundila/MyProjects/Rottweiler/crates/rw-context)
+    Checking rw-ext v0.1.4 (/Users/sumukhnitundila/MyProjects/Rottweiler/crates/rw-ext)
+    Checking rw-mcp v0.1.4 (/Users/sumukhnitundila/MyProjects/Rottweiler/crates/rw-mcp)
+    Checking rw-core v0.1.4 (/Users/sumukhnitundila/MyProjects/Rottweiler/crates/rw-core)
+    Checking rw-runtime v0.1.4 (/Users/sumukhnitundila/MyProjects/Rottweiler/crates/rw-runtime)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 30.48s
