@@ -5,49 +5,11 @@ repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
 cd "$repo"
 
 export ROTTWEILER_CREDENTIAL_BACKEND=file
-if [ -n "${ROTTWEILER_PERF_PREBUILT_RW:-}" ]; then
-  case $ROTTWEILER_PERF_PREBUILT_RW in
-    /*) ;;
-    *)
-      echo "ROTTWEILER_PERF_PREBUILT_RW must be an absolute path" >&2
-      exit 2
-      ;;
-  esac
-  built_binary=$(python3 - "$ROTTWEILER_PERF_PREBUILT_RW" "${RUNNER_TEMP:-}" "${GITHUB_ACTIONS:-}" <<'PY'
-import os
-import pathlib
-import stat
-import sys
-
-path = pathlib.Path(sys.argv[1])
-metadata = path.lstat()
-mode = stat.S_IMODE(metadata.st_mode)
-if (
-    not stat.S_ISREG(metadata.st_mode)
-    or metadata.st_nlink != 1
-    or not mode & stat.S_IXUSR
-    or mode & 0o077
-):
-    raise SystemExit(
-        "ROTTWEILER_PERF_PREBUILT_RW must be an owner-private, single-link regular executable"
-    )
-resolved = path.resolve(strict=True)
-if sys.argv[3] == "true":
-    if not sys.argv[2]:
-        raise SystemExit("RUNNER_TEMP is required for a CI prebuilt performance binary")
-    runner_temp = pathlib.Path(sys.argv[2]).resolve(strict=True)
-    if os.path.commonpath((resolved, runner_temp)) != str(runner_temp):
-        raise SystemExit("CI prebuilt performance binary must remain under RUNNER_TEMP")
-print(resolved)
-PY
-  )
-  using_prebuilt=1
-else
-  scripts/cargo-release.sh build --locked --release -p rw-cli
-  release_dir=$(scripts/cargo-release.sh artifact-dir)
-  built_binary=$release_dir/rw
-  using_prebuilt=0
+if [ "$#" -ne 1 ]; then
+  echo "usage: perf_gate.sh CANDIDATE_DIRECTORY (build with scripts/build-native-candidate.py)" >&2
+  exit 2
 fi
+candidate=$1
 
 measurement_parent=${RUNNER_TEMP:-${TMPDIR:-/tmp}}
 temporary_root=$(mktemp -d "$measurement_parent/rottweiler-perf.XXXXXX")
@@ -55,13 +17,13 @@ root=$temporary_root.noindex
 mv "$temporary_root" "$root"
 trap 'rm -rf "$root"' EXIT HUP INT TERM
 
-python3 - "$repo" "$root" "${ROTTWEILER_PERF_OUTPUT:-}" "$built_binary" "$using_prebuilt" <<'PY'
+python3 - "$repo" "$root" "${ROTTWEILER_PERF_OUTPUT:-}" "$candidate" <<'PY'
 import json
+import hashlib
 import math
 import os
 import pathlib
 import platform
-import shutil
 import stat
 import statistics
 import subprocess
@@ -71,29 +33,36 @@ import time
 repo = pathlib.Path(sys.argv[1])
 sys.path.insert(0, str(repo / "scripts"))
 from release_contract import load_contract
+from native_candidate import verify as verify_candidate
 
 root = pathlib.Path(sys.argv[2])
 output = pathlib.Path(sys.argv[3]) if sys.argv[3] else None
-built_binary = pathlib.Path(sys.argv[4])
-using_prebuilt = sys.argv[5] == "1"
+candidate = pathlib.Path(sys.argv[4])
+receipt = verify_candidate(candidate, repo)
+engine = receipt["components"]["engine"]
+built_binary = candidate / engine["path"]
 binary = root / "rw"
 open_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
 source_fd = os.open(built_binary, open_flags)
 with os.fdopen(source_fd, "rb") as source:
     source_metadata = os.fstat(source.fileno())
     source_mode = stat.S_IMODE(source_metadata.st_mode)
-    if using_prebuilt and (
+    if (
         not stat.S_ISREG(source_metadata.st_mode)
         or source_metadata.st_uid != os.geteuid()
         or source_metadata.st_nlink != 1
         or not source_mode & stat.S_IXUSR
-        or source_mode & 0o077
     ):
         raise SystemExit(
-            "ROTTWEILER_PERF_PREBUILT_RW changed after validation or is not owner-private"
+            "candidate engine changed after validation or is not an owned executable"
         )
     with binary.open("xb") as destination:
-        shutil.copyfileobj(source, destination)
+        digest = hashlib.sha256()
+        while block := source.read(1024 * 1024):
+            digest.update(block)
+            destination.write(block)
+        if digest.hexdigest() != engine["sha256"]:
+            raise SystemExit("candidate engine changed while making the private measurement copy")
 binary.chmod(0o700)
 script = repo / "crates/rw-cli/tests/fixtures/perf-script.json"
 
@@ -198,6 +167,8 @@ if output is not None:
             }
             for index, (start_ms, turn_ms) in enumerate(samples)
         ],
+        "candidate": {"identity_sha256": receipt["identity_sha256"],
+                      "source": receipt["identity"]["source"], "engine_sha256": engine["sha256"]},
         "runner": {
             "github_actions": os.environ.get("GITHUB_ACTIONS") == "true",
             "image_os": bounded(os.environ.get("ImageOS")),

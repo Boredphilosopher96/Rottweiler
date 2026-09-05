@@ -52,7 +52,7 @@ if [[ $# -eq 2 ]]; then
 else
   command -v bun >/dev/null
   (cd packages/tui && bun install --frozen-lockfile)
-  archive=$(scripts/build-release.sh | tail -1)
+  archive=$(python3 scripts/build-native-candidate.py --print archive)
 fi
 mkdir "$work/release"
 tar -xzf "$archive" -C "$work/release"

@@ -1,7 +1,7 @@
 export const referenceSources = Object.freeze({
   "index": ["README.md", "PROJECT.md"],
   "docs": ["release/update/stable.spec.json", "docs/07-VERIFICATION.md"],
-  "docs/installation": ["packaging/homebrew/README.md", "contracts/release-contract.json", "scripts/build-release.sh"],
+  "docs/installation": ["packaging/homebrew/README.md", "contracts/release-contract.json", "scripts/build-native-candidate.py"],
   "docs/first-session": ["crates/rw-cli/src/main.rs", "crates/rw-store/src/config.rs"],
   "docs/providers": ["crates/rw-types/src/config.rs", "crates/rw-core/src/provider_factory.rs"],
   "docs/tutorials/automate-a-task": ["crates/rw-cli/src/main.rs", "crates/rw-runtime/src/session_runtime.rs"],

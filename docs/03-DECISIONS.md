@@ -920,3 +920,13 @@ Failed cleanup returns an explicit unsettled error while retaining its resource 
 **Consequences:** The first resumable unit is the current workflow runner. No distributed scheduler, compatibility adapter or replay-based permission to repeat effects is added. Automatic reconciliation of an ambiguously completed step needs a separate proof; operator retries cannot bypass the started state. Native process-kill recovery and shared control-latency qualification remain acceptance work.
 
 Host session creation, fresh preparation, resume and fork transfer their identity reservation to an owned composition task before yielding. Host shutdown first closes session admission, then settles every ready actor and accepted opener, and only then shuts down shared factory services. Final accounting and SessionEnd hooks remain able to use those services during cleanup. A failed dependent proof retains the factory. The bounded shutdown result is sticky and does not acknowledge HostShutdown on failure. See [host closure evidence](reviews/2026-09-04-architecture-evidence/host-session-closure.md).
+
+## ADR-041: Native build candidates
+
+Build and size enforcement belong to the native candidate builder. A candidate binds the source commit and working-tree content, native target, pinned compiler and Bun identities, release profile, build configuration, component paths, byte counts, and checksums. The artifact-bundle contract verifies its files. Acceptance gates consume verified candidates.
+
+Publication is atomic. A completed candidate is reused only when its build identity and every file match. Each worktree has an independent Cargo target reused across checks. Separate Cargo invocations keep engine, WASM helper, and test-fixture dependency features isolated. The release archive contains the same staged components that acceptance inspects.
+
+Linux native gates share an uploaded candidate. macOS startup measurements build on the measurement host to control executable provenance, and every gate in that job uses that candidate. The canonical Linux sandbox container is a separate build environment with its own engine and fixture.
+
+Raw samples retain candidate and measurement-host identities. Product ceilings, sample counts, and source test-renderer workloads belong to their respective contracts. A failed build or size check stops dependent runtime gates. See [CI ownership](design/ci-reliability.md).

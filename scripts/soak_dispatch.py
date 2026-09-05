@@ -51,13 +51,12 @@ class GitHub:
         raise ValueError("GitHub result exceeded pagination bound")
 
 
-def artifact_names(platform: str, run_id: int, attempt: int) -> tuple[str, str]:
+def artifact_name(platform: str, run_id: int, attempt: int) -> str:
     prefix = PLATFORMS[platform]["artifact_prefix"]
-    return (f"{prefix}-performance-rw-{run_id}-{attempt}",
-            f"{prefix}-soak-tui-{run_id}-{attempt}")
+    return f"{prefix}-native-candidate-{run_id}-{attempt}"
 
 
-def validate_candidate(api: GitHub, platform: str, run_id: int, attempt: int, sha: str) -> tuple[str, str]:
+def validate_candidate(api: GitHub, platform: str, run_id: int, attempt: int, sha: str) -> str:
     import yaml
     if run_id < 1 or attempt < 1 or re.fullmatch(r"[0-9a-f]{40}", sha) is None:
         raise ValueError("invalid candidate identity")
@@ -75,13 +74,12 @@ def validate_candidate(api: GitHub, platform: str, run_id: int, attempt: int, sh
     matching = [job for job in matching if job["run_attempt"] == producer_attempt]
     if len(matching) != 1 or matching[0]["conclusion"] != "success":
         raise ValueError("platform build did not succeed")
-    names = artifact_names(platform, run_id, producer_attempt)
+    name = artifact_name(platform, run_id, producer_attempt)
     artifacts = api.pages(f"actions/runs/{run_id}/artifacts", "artifacts")
-    for name in names:
-        matches = [item for item in artifacts if item["name"] == name]
-        if len(matches) != 1 or matches[0]["expired"]:
-            raise ValueError("candidate artifact missing, ambiguous, or expired")
-    return names
+    matches = [item for item in artifacts if item["name"] == name]
+    if len(matches) != 1 or matches[0]["expired"]:
+        raise ValueError("candidate artifact missing, ambiguous, or expired")
+    return name
 
 
 def write_report(path: Path, report: dict) -> None:
@@ -215,8 +213,8 @@ def main() -> int:
         parser.error("candidate commands require platform, run-id, attempt and sha")
     api = GitHub(args.repository)
     if args.command == "validate":
-        names = validate_candidate(api, args.platform, args.run_id, args.attempt, args.sha)
-        result = {"engine_artifact": names[0], "tui_artifact": names[1],
+        name = validate_candidate(api, args.platform, args.run_id, args.attempt, args.sha)
+        result = {"candidate_artifact": name,
                   "runner": json.dumps(PLATFORMS[args.platform]["runner_labels"])}
         write_report(args.output, result)
         with open(os.environ["GITHUB_OUTPUT"], "a") as stream:

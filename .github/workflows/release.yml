@@ -193,7 +193,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          archive=$(scripts/build-release.sh | tail -1)
+          archive=$(python3 scripts/build-native-candidate.py --print archive)
           test -f "$archive"
           test "$(basename "$archive")" = "rottweiler-${GITHUB_REF_NAME#v}-linux-x86_64.tar.gz"
           printf 'path=%s\n' "$archive" >> "$GITHUB_OUTPUT"
@@ -291,7 +291,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          archive=$(scripts/build-release.sh | tail -1)
+          archive=$(python3 scripts/build-native-candidate.py --print archive)
           test -f "$archive"
           test "$(basename "$archive")" = "rottweiler-${GITHUB_REF_NAME#v}-darwin-arm64.tar.gz"
           printf 'path=%s\n' "$archive" >> "$GITHUB_OUTPUT"

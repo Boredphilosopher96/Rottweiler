@@ -11,7 +11,7 @@ the maintainer architecture documents.
 ```sh
 rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt
 bun install --cwd packages/tui --frozen-lockfile
-scripts/build-release.sh
+python3 scripts/build-native-candidate.py --print archive
 ```
 
 The release builder compiles and validates every required sibling executable.

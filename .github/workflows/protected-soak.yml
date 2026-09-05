@@ -32,8 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      engine_artifact: ${{ steps.candidate.outputs.engine_artifact }}
-      tui_artifact: ${{ steps.candidate.outputs.tui_artifact }}
+      candidate_artifact: ${{ steps.candidate.outputs.candidate_artifact }}
       runner: ${{ steps.candidate.outputs.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -125,40 +124,25 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.candidate_sha }}
-      - name: Download isolated performance binary
+      - name: Download verified native candidate
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: ${{ needs.validate.outputs.engine_artifact }}
+          name: ${{ needs.validate.outputs.candidate_artifact }}
           run-id: ${{ inputs.candidate_run_id }}
           github-token: ${{ github.token }}
-          path: ${{ runner.temp }}/rottweiler-soak-binary.noindex
-      - name: Verify isolated performance binary
-        env:
-          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
-          SOAK_PLATFORM: ${{ inputs.platform }}
+          path: ${{ runner.temp }}/native-candidate.noindex
+      - name: Verify and prepare native candidate
+        id: components
         run: |
-          python3 scripts/artifact_bundle.py verify "$RUNNER_TEMP/rottweiler-soak-binary.noindex" --source-sha "$CANDIDATE_SHA" --platform "$SOAK_PLATFORM"
-          chmod 700 "$RUNNER_TEMP/rottweiler-soak-binary.noindex/rw"
-      - name: Download hosted soak TUI
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: ${{ needs.validate.outputs.tui_artifact }}
-          run-id: ${{ inputs.candidate_run_id }}
-          github-token: ${{ github.token }}
-          path: packages/tui/dist
-      - name: Verify hosted soak TUI
-        env:
-          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
-          SOAK_PLATFORM: ${{ inputs.platform }}
-        run: |
-          python3 scripts/artifact_bundle.py verify "packages/tui/dist" --source-sha "$CANDIDATE_SHA" --platform "$SOAK_PLATFORM"
-          chmod 700 "packages/tui/dist/rottweiler-tui"
+          python3 scripts/native_candidate.py prepare "$RUNNER_TEMP/native-candidate.noindex"
+          echo "engine=$(python3 scripts/native_candidate.py path "$RUNNER_TEMP/native-candidate.noindex" engine)" >> "$GITHUB_OUTPUT"
+          echo "tui=$(python3 scripts/native_candidate.py path "$RUNNER_TEMP/native-candidate.noindex" tui)" >> "$GITHUB_OUTPUT"
       - name: Run the real supervisor, engine, and OpenTUI for eight hours
         run: >-
           python3 scripts/ci_evidence.py --gate soak --output soak-gate.json --
           python3 scripts/run-soak.py
-          --rw "$RUNNER_TEMP/rottweiler-soak-binary.noindex/rw"
-          --tui packages/tui/dist/rottweiler-tui
+          --rw "${{ steps.components.outputs.engine }}"
+          --tui "${{ steps.components.outputs.tui }}"
           --duration-seconds 28800
           --output soak-result.json
       - name: Enforce the checked-in 10 percent regression baseline
@@ -177,8 +161,8 @@ jobs:
           path: |
             soak-result.json
             soak-gate.json
-            packages/tui/dist/bundle-identity.json
-            ${{ runner.temp }}/rottweiler-soak-binary.noindex/bundle-identity.json
+            ${{ runner.temp }}/native-candidate.noindex/bundle-identity.json
+            ${{ runner.temp }}/native-candidate.noindex/build.json
             soak-baseline-result.json
           if-no-files-found: error
           retention-days: 30
@@ -193,7 +177,7 @@ jobs:
             "$GITHUB_WORKSPACE/soak-baseline-result.json" \
             "$GITHUB_WORKSPACE/packages/tui/dist" \
             "$GITHUB_WORKSPACE/packages/tui/node_modules" \
-            "$RUNNER_TEMP/rottweiler-soak-binary.noindex"
+            "$RUNNER_TEMP/native-candidate.noindex"
 
   qualified:
     name: Soak qualification

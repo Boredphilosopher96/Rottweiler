@@ -69,13 +69,14 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertNotIn("macos-performance-build", workflow)
         self.assertNotIn("performance-linux", workflow)
         self.assertNotIn("performance-macos", workflow)
-        self.assertNotIn("needs:", smoke)
+        self.assertIn("needs: linux-candidate-build", smoke)
         required = workflow_job(workflow, "required")
         self.assertIn("security-tests", required)
         self.assertIn("performance-smoke", required)
         self.assertNotIn("\n    if:", smoke)
         self.assertIn("timeout-minutes: 45", smoke)
-        self.assertIn("Swatinem/rust-cache@", smoke)
+        self.assertNotIn("Swatinem/rust-cache@", smoke)
+        self.assertIn("native_candidate.py prepare", smoke)
         self.assertIn("ROTTWEILER_PERF_SMOKE: 1", smoke)
         self.assertIn("ROTTWEILER_PERF_SAMPLES: 100", smoke)
         self.assertIn("test:perf", smoke)
@@ -99,9 +100,9 @@ class CiHardeningContractTests(unittest.TestCase):
         )[0]
         self.assertNotIn("continue-on-error", linux_release + macos_release)
         self.assertIn(
-            "needs: linux-performance-build", linux_release
+            "needs: linux-candidate-build", linux_release
         )
-        self.assertNotIn("macos-performance-build", linux_release)
+        self.assertNotIn("macos-candidate-build", linux_release)
         self.assertNotIn("needs: runner-contract", macos_release)
         self.assertIn(
             "runs-on: ubuntu-24.04", linux_release
@@ -112,7 +113,7 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertIn("--platform darwin-arm64", macos_release)
         for release_budget in (linux_release, macos_release):
             self.assertIn("--require-measured", release_budget)
-            self.assertIn("scripts/build-release.sh", release_budget)
+            self.assertIn("m4_release_gate.sh", release_budget)
         self.assertIn("ROTTWEILER_SELF_HOSTED_RUNNERS", runner_contract)
         self.assertIn("exit 1", runner_contract)
         self.assertIn("scripts/check-runner-capacity.py", runner_contract)
@@ -121,15 +122,15 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertIn("needs: validate", soak)
         for prefix, platform in (("linux", "linux-x86_64"), ("macos", "darwin-arm64")):
             dispatch = workflow_job(workflow, prefix + "-soak-dispatch")
-            self.assertIn("needs: " + prefix + "-performance-build", dispatch)
+            self.assertIn("needs: " + prefix + "-candidate-build", dispatch)
             self.assertIn("--platform " + platform, dispatch)
             self.assertIn("scripts/check-runner-capacity.py", dispatch)
             self.assertIn("scripts/soak_dispatch.py dispatch", dispatch)
         self.assertNotIn("cargo-release.sh build", soak)
-        self.assertIn("${{ needs.validate.outputs.engine_artifact }}", soak)
-        self.assertIn("${{ needs.validate.outputs.tui_artifact }}", soak)
-        self.assertIn("rottweiler-soak-binary.noindex/rw", soak)
-        self.assertIn("packages/tui/dist/rottweiler-tui", soak)
+        self.assertIn("${{ needs.validate.outputs.candidate_artifact }}", soak)
+        self.assertIn("native_candidate.py prepare", soak)
+        self.assertIn("${{ steps.components.outputs.engine }}", soak)
+        self.assertIn("${{ steps.components.outputs.tui }}", soak)
         self.assertNotIn("bun run build", soak)
         self.assertNotIn("--require-measured", soak)
         wsl2 = workflow_job(workflow, "wsl2-acceptance")
@@ -219,7 +220,7 @@ class CiHardeningContractTests(unittest.TestCase):
 
         self.assertNotIn("runner-contract", performance)
         self.assertNotIn("ROTTWEILER_SELF_HOSTED_RUNNERS", performance)
-        self.assertIn("needs: linux-performance-build", workflow_job(performance, "performance-linux"))
+        self.assertIn("needs: linux-candidate-build", workflow_job(performance, "performance-linux"))
         self.assertNotIn("    needs:", workflow_job(performance, "performance-macos"))
         cases = (
             (
@@ -437,26 +438,12 @@ class CiHardeningContractTests(unittest.TestCase):
             for name in ("performance", "nightly", "release", "release-preflight", "protected-soak")
         }
 
-        for workflow_name in ("performance", "nightly"):
-            workflow = workflows[workflow_name]
-            with self.subTest(workflow=workflow_name, producer="linux"):
-                producer = workflow_job(workflow, "linux-performance-build")
-                self.assertIn(
-                    "name: linux-performance-rw-${{ github.run_id }}", producer
-                )
-                if workflow_name == "performance":
-                    self.assertNotIn("github.run_attempt", producer)
-                else:
-                    self.assertIn("github.run_attempt", producer)
-                    self.assertIn("engine_artifact:", producer)
-                self.assertIn("overwrite: true", producer)
-
-        macos_producer = workflow_job(workflows["nightly"], "macos-performance-build")
-        self.assertIn(
-            "name: macos-performance-rw-${{ github.run_id }}", macos_producer
-        )
-        self.assertIn("github.run_attempt", macos_producer)
-        self.assertIn("overwrite: true", macos_producer)
+        for workflow_name, platforms in (("performance", ("linux",)), ("nightly", ("linux", "macos"))):
+            for platform in platforms:
+                producer = workflow_job(workflows[workflow_name], platform + "-candidate-build")
+                self.assertIn(f"name: {platform}-native-candidate-" + "${{ github.run_id }}-${{ github.run_attempt }}", producer)
+                self.assertIn("candidate_artifact:", producer)
+                self.assertNotIn("overwrite: true", producer)
 
         release = workflows["release"]
         for platform in ("linux-x86_64", "darwin-arm64"):

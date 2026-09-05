@@ -1155,8 +1155,7 @@ def cleanup_detached_remote(session_id: str) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", type=pathlib.Path, required=True)
-    parser.add_argument("--rw", type=pathlib.Path, required=True)
-    parser.add_argument("--tui", type=pathlib.Path, required=True)
+    parser.add_argument("--candidate", type=pathlib.Path, required=True)
     parser.add_argument("--samples", type=int, default=100)
     parser.add_argument("--installed-first-samples", type=int, default=3)
     parser.add_argument("--skip-performance", action="store_true")
@@ -1184,8 +1183,14 @@ def run_gate(args: argparse.Namespace, evidence: GateEvidence) -> int:
     if args.metrics_json is not None and args.skip_performance:
         raise RuntimeError("metric output requires the complete M4 performance gate")
     repo = args.repo.resolve()
-    source_rw = args.rw.resolve()
-    source_tui = args.tui.resolve()
+    from native_candidate import verify as verify_candidate
+    candidate = args.candidate.resolve()
+    receipt = verify_candidate(candidate, repo)
+    evidence.update(candidate={"identity_sha256": receipt["identity_sha256"],
+                               "source": receipt["identity"]["source"],
+                               "components": receipt["components"]})
+    source_rw = candidate / receipt["components"]["engine"]["path"]
+    source_tui = candidate / receipt["components"]["tui"]["path"]
     source_tui_native = source_tui.with_name(opentui_native_library_name())
     if not source_rw.is_file() or not source_tui.is_file() or not source_tui_native.is_file():
         raise RuntimeError(
