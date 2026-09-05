@@ -1,12 +1,12 @@
 use crate::engine::AgentLoopError;
-use crate::engine::AgentTurnStatus;
 use crate::engine::RoutedEvent;
+use crate::engine::SessionRecoveredState;
 use crate::engine::SessionUsage;
 use crate::engine::dispatch::handle_actor_command;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::session::config::SessionActorConfig;
 use crate::engine::session::handle::SessionHandle;
-use crate::engine::session::recovery::interrupted_tool_recovery_events;
+use crate::engine::session::recovery::interrupted_turn_recovery_events;
 use crate::engine::session::recovery::recover_actor_from_journal;
 use crate::engine::session::state::ActorCommand;
 use crate::engine::session::state::ActorState;
@@ -45,7 +45,7 @@ impl SessionActor {
     /// # Errors
     ///
     /// Rejects zero guardrails, empty aliases, or an unusable workspace root.
-    pub fn spawn(config: SessionActorConfig) -> Result<SessionHandle, AgentLoopError> {
+    pub fn spawn(mut config: SessionActorConfig) -> Result<SessionHandle, AgentLoopError> {
         if SessionId::validate(&config.session_id.0).is_err()
             || SessionId::validate(&config.budget_session_id.0).is_err()
         {
@@ -115,12 +115,16 @@ impl SessionActor {
             mode_registry: Arc::clone(&mode_registry),
             model: Arc::clone(&config.model),
         };
+        // Startup input has one owner; route/workspace configuration clones must
+        // not retain a second lifetime conversation after actor initialization.
+        let recovered = std::mem::take(&mut config.recovered);
         let config = Arc::new(config);
         let retained = Arc::clone(&config);
         let task_shutdown = shutdown.clone();
         tokio::spawn(async move {
             if AssertUnwindSafe(run_actor(
                 config,
+                recovered,
                 tool_context,
                 command_rx,
                 event_tx,
@@ -190,6 +194,7 @@ pub(super) async fn dispatch_lifecycle_hook(
 #[allow(clippy::too_many_lines)]
 pub(super) async fn run_actor(
     config: Arc<SessionActorConfig>,
+    recovered: SessionRecoveredState,
     mut tool_context: ToolContext,
     mut commands: mpsc::Receiver<ActorCommand>,
     events: broadcast::Sender<RoutedEvent>,
@@ -201,16 +206,18 @@ pub(super) async fn run_actor(
         mode_registry,
         shutdown,
     } = control;
+    let interrupted_turn = recovered.interrupted_turn;
+    let interrupted_compaction = recovered.interrupted_compaction;
+    let recovery_events = interrupted_turn_recovery_events(&recovered);
     let mut state = ActorState::recover(
         config.session_id.clone(),
         Arc::clone(&config.event_clock),
         &config.model_alias,
         config.thinking,
         &config.modes,
-        &config.recovered,
+        recovered,
         Arc::clone(&shutdown.control),
     );
-    let interrupted_turn = config.recovered.interrupted_turn;
     let mut config = config;
     let (turn_signals, mut signals) = mpsc::unbounded_channel();
     'startup: {
@@ -245,7 +252,7 @@ pub(super) async fn run_actor(
             state.unsettled = Some("session startup failed before completion".to_owned());
             break 'startup;
         }
-        if config.recovered.interrupted_compaction
+        if interrupted_compaction
             && emit(
                 &mut state,
                 &events,
@@ -261,24 +268,6 @@ pub(super) async fn run_actor(
             break 'startup;
         }
         if let Some(turn) = interrupted_turn {
-            let mut recovery_events = config
-                .recovered
-                .interrupted_tool_repairs
-                .iter()
-                .flat_map(interrupted_tool_recovery_events)
-                .collect::<Vec<_>>();
-            if let Some(tool_turn) = &config.recovered.interrupted_tool_turn {
-                recovery_events.push(PendingEvent::ConversationTurnCommitted {
-                    agent_turn: turn,
-                    turn: tool_turn.clone(),
-                });
-            }
-            recovery_events.push(PendingEvent::TurnFinished {
-                turn,
-                status: AgentTurnStatus::Interrupted,
-                usage: SessionUsage::default(),
-                cost: unavailable_cost(),
-            });
             if emit_batch(&mut state, &events, &config.event_sink, recovery_events)
                 .await
                 .is_err()

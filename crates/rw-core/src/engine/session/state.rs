@@ -226,7 +226,7 @@ impl ActorState {
         default_model_alias: &str,
         default_thinking: ThinkingLevel,
         modes: &ModeRegistry,
-        recovered: &SessionRecoveredState,
+        recovered: SessionRecoveredState,
         control: Arc<super::control::SessionControl>,
     ) -> Self {
         let pending_model_switches = recovered
@@ -263,18 +263,17 @@ impl ActorState {
             .collect();
         let mode_id = recovered
             .mode_id
-            .clone()
             .unwrap_or_else(|| ModeId(session_mode_name(recovered.mode).to_owned()));
         let mode = modes
             .get(&mode_id.0)
             .map_or(recovered.mode, mode_permission_base);
         Self {
             session_id,
-            session_title: recovered.title.clone(),
             title_generation_started: recovered.title.is_some(),
+            session_title: recovered.title,
             event_clock,
-            conversation: recovered.conversation.clone(),
-            queued: recovered.queued_messages.iter().cloned().collect(),
+            conversation: recovered.conversation,
+            queued: recovered.queued_messages.into_iter().collect(),
             queued_positions,
             running: None,
             pending_command: None,
@@ -296,22 +295,21 @@ impl ActorState {
             pending_questions: BTreeMap::new(),
             pending_model_switches,
             next_question: 0,
-            context_surgery: recovered.context_surgery.clone(),
-            pruned_tool_outputs: recovered.pruned_tool_outputs.clone(),
-            accounting: recovered.accounting.clone(),
+            context_surgery: recovered.context_surgery,
+            pruned_tool_outputs: recovered.pruned_tool_outputs,
+            accounting: recovered.accounting,
             budgeter: recovered.budgeter,
             model_alias: recovered
                 .model_alias
-                .clone()
                 .unwrap_or_else(|| default_model_alias.to_owned()),
-            provider: recovered.provider.clone(),
+            provider: recovered.provider,
             thinking: recovered.thinking.unwrap_or(default_thinking),
             mode,
             mode_id,
-            pending_plan: recovered.pending_plan.clone(),
-            approved_plan: recovered.approved_plan.clone(),
+            pending_plan: recovered.pending_plan,
+            approved_plan: recovered.approved_plan,
             plan_gate_active: recovered.plan_gate_active,
-            active_shell: recovered.active_shell.clone(),
+            active_shell: recovered.active_shell,
             initialization_running: false,
         }
     }
@@ -324,3 +322,6 @@ impl ActorState {
         })
     }
 }
+
+#[cfg(test)]
+mod tests;

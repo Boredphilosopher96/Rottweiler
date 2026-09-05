@@ -105,19 +105,22 @@ pub(in crate::engine) async fn recover_actor_from_journal(
     let tasks = state.tasks.clone();
     let control = Arc::clone(&state.control);
     control.commit_driver(recovered.driver_client_id.clone());
+    let interrupted_compaction = recovered.interrupted_compaction;
+    let interrupted_turn = recovered.interrupted_turn;
+    let recovery_events = interrupted_turn_recovery_events(&recovered);
     *state = ActorState::recover(
         config.session_id.clone(),
         Arc::clone(&config.event_clock),
         &config.model_alias,
         config.thinking,
         &config.modes,
-        &recovered,
+        recovered,
         control,
     );
     state.tasks = tasks;
     state.client_roles = client_roles;
 
-    if recovered.interrupted_compaction {
+    if interrupted_compaction {
         emit(
             state,
             events,
@@ -128,14 +131,8 @@ pub(in crate::engine) async fn recover_actor_from_journal(
         )
         .await?;
     }
-    if let Some(turn) = recovered.interrupted_turn {
-        emit_batch(
-            state,
-            events,
-            &config.event_sink,
-            interrupted_turn_recovery_events(&recovered),
-        )
-        .await?;
+    if let Some(turn) = interrupted_turn {
+        emit_batch(state, events, &config.event_sink, recovery_events).await?;
         state.accounting.record(&TurnAccounting {
             turn_id: wire_turn_id(turn),
             attribution: AccountingAttribution::Main,
