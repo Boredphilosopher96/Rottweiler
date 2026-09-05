@@ -30,7 +30,7 @@ use std::{
 };
 use tokio::sync::OwnedSemaphorePermit;
 
-const MAX_PANELS: usize = 8;
+use rw_types::extension_ui::{MAX_UI_PANEL_SLOTS, MAX_UI_PANELS_BYTES};
 const MAX_PANEL_INPUT_BYTES: usize = 64 * 1024;
 const MIN_UPDATE_INTERVAL: Duration = Duration::from_millis(250);
 struct Registration {
@@ -133,7 +133,7 @@ impl RuntimeUiRegistry {
         if state.base.is_none() {
             let base = self.budget.base()?;
             state.registrations = Vec::with_capacity(MAX_UI_CONTRIBUTIONS);
-            state.panels = Vec::with_capacity(MAX_PANELS);
+            state.panels = Vec::with_capacity(MAX_UI_PANEL_SLOTS);
             state.base = Some(base);
         }
         state.registrations.push(Arc::new(Registration {
@@ -201,7 +201,7 @@ impl RuntimeUiRegistry {
             panel.surface.value().presentation.owner == *owner
                 && panel.surface.value().presentation.descriptor.id == id
         });
-        if existing.is_none() && state.panels.len() == MAX_PANELS {
+        if existing.is_none() && state.panels.len() == MAX_UI_PANEL_SLOTS {
             return Err(error("panel capacity exhausted"));
         }
         let retained: usize = state
@@ -211,7 +211,7 @@ impl RuntimeUiRegistry {
             .filter(|(index, _)| Some(*index) != existing)
             .map(|(_, panel)| panel.encoded + 1)
             .sum();
-        if retained + encoded + 32 > 512 * 1024 {
+        if retained + encoded + 32 > MAX_UI_PANELS_BYTES {
             return Err(error("panel surface capacity exhausted"));
         }
         let prepared = plan.prepare();

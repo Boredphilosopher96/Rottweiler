@@ -1,8 +1,9 @@
 //! Client-facing presentation values contain neither selectors nor executable action data.
 mod admission;
 use super::{
-    MAX_UI_DESCRIPTOR_BYTES, MAX_UI_SURFACE_BYTES, UiContractError, UiContribution, UiField,
-    UiProjectedFields, projection, validate_contributions, validation,
+    MAX_UI_DESCRIPTOR_BYTES, MAX_UI_PANEL_SLOTS, MAX_UI_PANELS_BYTES, MAX_UI_SURFACE_BYTES,
+    UiContractError, UiContribution, UiField, UiProjectedFields, projection,
+    validate_contributions, validation,
 };
 use crate::ToolInvocationId;
 use rw_memory_derive::PrepareAllocation;
@@ -288,9 +289,9 @@ mod tests;
 /// canonical result source and do not consume this ephemeral registry.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema, TS, PrepareAllocation)]
 #[serde(deny_unknown_fields)]
-#[schemars(extend("x-rw-max-json-bytes"=524_288))]
+#[schemars(extend("x-rw-max-json-bytes"=MAX_UI_PANELS_BYTES))]
 pub struct UiPanels {
-    #[schemars(length(max = 8))]
+    #[schemars(length(max = MAX_UI_PANEL_SLOTS))]
     pub panels: Vec<UiPanelSnapshot>,
 }
 

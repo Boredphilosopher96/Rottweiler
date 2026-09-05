@@ -3,8 +3,9 @@ use super::{
     UiDisplaySurface, UiPresentation,
 };
 use crate::extension_ui::{
-    MAX_UI_CONTRIBUTIONS, MAX_UI_DESCRIPTOR_BYTES, MAX_UI_SURFACE_BYTES, UiContractError, UiField,
-    UiProjectedFields, UiTableColumn, validate_projected_fields, validation,
+    MAX_UI_CONTRIBUTIONS, MAX_UI_DESCRIPTOR_BYTES, MAX_UI_PANEL_SLOTS, MAX_UI_PANELS_BYTES,
+    MAX_UI_SURFACE_BYTES, UiContractError, UiField, UiProjectedFields, UiTableColumn,
+    validate_projected_fields, validation,
 };
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -145,8 +146,8 @@ impl super::UiPanels {
     /// # Errors
     /// Rejects repeated panels, excess count/encoded bytes or invalid surfaces.
     pub fn validate(&self) -> Result<(), UiContractError> {
-        validation::encoded_bytes(self, 512 * 1024)?;
-        if self.panels.len() > 8 {
+        validation::encoded_bytes(self, MAX_UI_PANELS_BYTES)?;
+        if self.panels.len() > MAX_UI_PANEL_SLOTS {
             return Err(UiContractError("panel count"));
         }
         let mut identities = BTreeSet::new();

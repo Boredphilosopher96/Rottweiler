@@ -58,8 +58,8 @@ pub(crate) struct UiSessionBudget {
 impl Default for UiSessionBudget {
     fn default() -> Self {
         Self {
-            panels: Arc::new(Semaphore::new(8)),
-            wire: Arc::new(Semaphore::new(512 * 1024)),
+            panels: Arc::new(Semaphore::new(rw_types::extension_ui::MAX_UI_PANEL_SLOTS)),
+            wire: Arc::new(Semaphore::new(rw_types::extension_ui::MAX_UI_PANELS_BYTES)),
         }
     }
 }
