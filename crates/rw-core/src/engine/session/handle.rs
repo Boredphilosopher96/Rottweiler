@@ -676,3 +676,28 @@ impl SessionHandle {
         }
     }
 }
+
+impl SessionHandle {
+    /// Reads a bounded live catalog without running plugin code.
+    /// # Errors
+    /// Returns actor closure or registry admission errors.
+    pub async fn ui_catalog(&self) -> Result<rw_types::extension_ui::UiCatalog, AgentLoopError> {
+        let (respond, receive) = oneshot::channel();
+        self.commands
+            .send(ActorCommand::UiCatalog { respond })
+            .await
+            .map_err(|_| AgentLoopError::Closed)?;
+        receive.await.map_err(|_| AgentLoopError::Closed)?
+    }
+    /// Reads the coalesced panel surfaces without running plugin code.
+    /// # Errors
+    /// Returns actor closure or registry admission errors.
+    pub async fn ui_panels(&self) -> Result<rw_types::extension_ui::UiPanels, AgentLoopError> {
+        let (respond, receive) = oneshot::channel();
+        self.commands
+            .send(ActorCommand::UiPanels { respond })
+            .await
+            .map_err(|_| AgentLoopError::Closed)?;
+        receive.await.map_err(|_| AgentLoopError::Closed)?
+    }
+}

@@ -271,6 +271,42 @@ pub(super) async fn apply_accepted(
                 let _ = complete.send(result.map(|()| ProtocolCompletion::Unit));
             }
         }
+        ClientCommand::InvokeUiAction { request, .. } => {
+            let action = super::ui_actions::resolve(state, config, &request).await;
+            let result = match action {
+                Err(error) => Err(error),
+                Ok(bound) => {
+                    let content = format!("/{}", bound.name());
+                    let (respond, receive) = oneshot::channel();
+                    super::messages::dispatch_message(
+                        meta,
+                        content,
+                        Vec::new(),
+                        Some(bound),
+                        active_turn.load(Ordering::Acquire),
+                        respond,
+                        DispatchContext {
+                            state,
+                            config,
+                            tool_context,
+                            turn_signals,
+                            events,
+                            active_turn,
+                            command_descriptors,
+                            mode_registry,
+                        },
+                    )
+                    .await;
+                    receive
+                        .await
+                        .map_err(|_| AgentLoopError::Closed)
+                        .and_then(std::convert::identity)
+                }
+            };
+            if let Some(complete) = completion.take() {
+                let _ = complete.send(result.map(ProtocolCompletion::Message));
+            }
+        }
         ClientCommand::SendMessage {
             content,
             attachments,
@@ -581,6 +617,8 @@ pub(super) async fn apply_accepted(
         | ClientCommand::ReviewFile { .. }
         | ClientCommand::ListSessions { .. }
         | ClientCommand::SearchSessions { .. }
+        | ClientCommand::GetUiCatalog { .. }
+        | ClientCommand::GetUiPanels { .. }
         | ClientCommand::ListCommands { .. }
         | ClientCommand::ListModes { .. }
         | ClientCommand::ListModels { .. }

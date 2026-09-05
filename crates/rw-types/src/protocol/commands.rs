@@ -16,6 +16,19 @@ use ts_rs::TS;
 #[ts(tag = "type", rename_all = "snake_case", optional_fields = nullable)]
 #[serde(deny_unknown_fields)]
 pub enum ClientCommand {
+    GetUiCatalog {
+        meta: CommandMeta,
+        session_id: SessionId,
+    },
+    GetUiPanels {
+        meta: CommandMeta,
+        session_id: SessionId,
+    },
+    InvokeUiAction {
+        meta: CommandMeta,
+        session_id: SessionId,
+        request: crate::extension_ui::UiActionRequest,
+    },
     GetTodos {
         meta: CommandMeta,
         session_id: SessionId,
@@ -366,6 +379,9 @@ impl ClientCommand {
         match self {
             Self::ReadTranscript { meta, .. }
             | Self::ReadTranscriptContent { meta, .. }
+            | Self::GetUiCatalog { meta, .. }
+            | Self::GetUiPanels { meta, .. }
+            | Self::InvokeUiAction { meta, .. }
             | Self::GetTodos { meta, .. }
             | Self::CreateSession { meta, .. }
             | Self::ResumeSession { meta, .. }
@@ -442,6 +458,9 @@ impl ClientCommand {
             | Self::ShutdownHost { .. } => None,
             Self::ReadTranscript { session_id, .. }
             | Self::ReadTranscriptContent { session_id, .. }
+            | Self::GetUiCatalog { session_id, .. }
+            | Self::GetUiPanels { session_id, .. }
+            | Self::InvokeUiAction { session_id, .. }
             | Self::GetTodos { session_id, .. }
             | Self::ResumeSession { session_id, .. }
             | Self::AttachSession { session_id, .. }
@@ -509,6 +528,9 @@ impl ClientCommand {
         match self {
             Self::ReadTranscript { meta, .. }
             | Self::ReadTranscriptContent { meta, .. }
+            | Self::GetUiCatalog { meta, .. }
+            | Self::GetUiPanels { meta, .. }
+            | Self::InvokeUiAction { meta, .. }
             | Self::GetTodos { meta, .. }
             | Self::CreateSession { meta, .. }
             | Self::ResumeSession { meta, .. }
@@ -605,6 +627,8 @@ macro_rules! read_commands {
     };
 }
 read_commands!(
+    GetUiCatalog,
+    GetUiPanels,
     GetTodos,
     ReadTranscript,
     ReadTranscriptContent,

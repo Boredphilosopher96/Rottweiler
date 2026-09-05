@@ -21,6 +21,40 @@ impl EngineHost {
             return Err(HostError::ShuttingDown);
         }
         match command {
+            ClientCommand::GetUiCatalog { meta, session_id } => {
+                let session = self.ready_session(&session_id).await?;
+                let catalog = session
+                    .handle()
+                    .ui_catalog()
+                    .await
+                    .map_err(HostError::from)?;
+                Ok((
+                    CommandOutcome::Accepted {},
+                    Some(session_id.clone()),
+                    vec![EngineEvent::UiCatalogReady {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        catalog,
+                    }],
+                ))
+            }
+            ClientCommand::GetUiPanels { meta, session_id } => {
+                let session = self.ready_session(&session_id).await?;
+                let panels = session
+                    .handle()
+                    .ui_panels()
+                    .await
+                    .map_err(HostError::from)?;
+                Ok((
+                    CommandOutcome::Accepted {},
+                    Some(session_id.clone()),
+                    vec![EngineEvent::UiPanelsReady {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        panels,
+                    }],
+                ))
+            }
             ClientCommand::GetTodos { meta, session_id } => {
                 let result = self.queries.todos(&session_id).await?;
                 Ok((

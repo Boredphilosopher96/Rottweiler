@@ -265,7 +265,9 @@ pub enum UiActionTarget {
 #[serde(deny_unknown_fields)]
 pub struct UiActionRequest {
     pub owner: UiContributionOwner,
+    #[schemars(length(min=1,max=128),regex(pattern="^[A-Za-z0-9_.-]+$"),extend("x-rw-max-utf8-bytes"=128))]
     pub contribution_id: String,
+    #[schemars(length(min=1,max=128),regex(pattern="^[A-Za-z0-9_.-]+$"),extend("x-rw-max-utf8-bytes"=128))]
     pub action_id: String,
     pub target: UiActionTarget,
 }
@@ -320,4 +322,20 @@ impl UiPanelUpdate {
 pub struct UiPanelUpdated {
     #[schemars(range(min = 1))]
     pub revision: u32,
+}
+
+impl UiActionRequest {
+    /// # Errors
+    /// Rejects malformed target and contribution identities before host dispatch.
+    pub fn validate(&self) -> Result<(), UiContractError> {
+        validation::identifier(&self.owner.extension)?;
+        validation::identifier(&self.contribution_id)?;
+        validation::identifier(&self.action_id)?;
+        match &self.target {
+            UiActionTarget::Tool { invocation_id } => ToolInvocationId::validate(&invocation_id.0)
+                .map_err(|_| UiContractError("tool invocation identity")),
+            UiActionTarget::Panel { revision } if *revision > 0 => Ok(()),
+            UiActionTarget::Panel { .. } => Err(UiContractError("panel revision")),
+        }
+    }
 }

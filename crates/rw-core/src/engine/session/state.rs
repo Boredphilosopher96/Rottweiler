@@ -42,6 +42,12 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 
 pub(in crate::engine) enum ActorCommand {
+    UiCatalog {
+        respond: oneshot::Sender<Result<rw_types::extension_ui::UiCatalog, AgentLoopError>>,
+    },
+    UiPanels {
+        respond: oneshot::Sender<Result<rw_types::extension_ui::UiPanels, AgentLoopError>>,
+    },
     Protocol {
         command: ClientCommand,
         respond: oneshot::Sender<CommandOutcome>,

@@ -55,6 +55,7 @@ impl EngineHost {
 fn durable_mutation(command: &ClientCommand) -> bool {
     match command {
         ClientCommand::CreateSession { .. }
+        | ClientCommand::InvokeUiAction { .. }
         | ClientCommand::SendMessage { .. }
         | ClientCommand::ApproveTool { .. }
         | ClientCommand::ApprovePlan { .. }
@@ -84,7 +85,9 @@ fn durable_mutation(command: &ClientCommand) -> bool {
         | ClientCommand::ConfigureBuiltinProvider { .. }
         | ClientCommand::ContinueSubagent { .. }
         | ClientCommand::CloseSubagent { .. } => true,
-        ClientCommand::GetTodos { .. }
+        ClientCommand::GetUiCatalog { .. }
+        | ClientCommand::GetUiPanels { .. }
+        | ClientCommand::GetTodos { .. }
         | ClientCommand::ReadTranscript { .. }
         | ClientCommand::ReadTranscriptContent { .. }
         | ClientCommand::ResumeSession { .. }

@@ -13,6 +13,7 @@ mod plugin_messages;
 mod replies;
 mod rewind;
 mod source_rewind;
+mod ui_actions;
 use crate::engine::AgentLoopError;
 use crate::engine::MAX_CAPTURED_SHELL_OUTPUT_BYTES;
 use crate::engine::MAX_PLUGIN_NOTIFICATION_MESSAGE_BYTES;
@@ -244,6 +245,7 @@ pub(super) async fn handle_actor_command(
                 command_meta,
                 content,
                 attachments,
+                None,
                 observed_turn,
                 respond,
                 DispatchContext {
@@ -374,6 +376,12 @@ pub(super) async fn handle_actor_command(
                 });
             }
             let _ = respond.send(Ok(()));
+        }
+        ActorCommand::UiCatalog { respond } => {
+            let _ = respond.send(config.ui.catalog());
+        }
+        ActorCommand::UiPanels { respond } => {
+            let _ = respond.send(config.ui.panels());
         }
         ActorCommand::Snapshot { respond } => {
             let _ = respond.send(SessionSnapshot {

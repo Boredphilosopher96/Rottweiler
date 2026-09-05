@@ -63,6 +63,8 @@ pub(super) fn is_host_command(command: &ClientCommand) -> bool {
             | ClientCommand::ResumeSession { .. }
             | ClientCommand::Fork { .. }
             | ClientCommand::ListSessions { .. }
+            | ClientCommand::GetUiCatalog { .. }
+            | ClientCommand::GetUiPanels { .. }
             | ClientCommand::ListCommands { .. }
             | ClientCommand::ListModes { .. }
             | ClientCommand::ListModels { .. }
@@ -138,6 +140,15 @@ pub(super) async fn dispatch_protocol(
         None
     };
     if let Some(outcome) = rejection {
+        send_ack(state, events, &meta, session, outcome.clone());
+        let _ = respond.send(outcome);
+        return;
+    }
+
+    if let ClientCommand::InvokeUiAction { request, .. } = &command
+        && let Err(error) = request.validate()
+    {
+        let outcome = protocol_rejection("invalid_ui_action", error.to_string());
         send_ack(state, events, &meta, session, outcome.clone());
         let _ = respond.send(outcome);
         return;

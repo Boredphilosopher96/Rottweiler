@@ -45,6 +45,16 @@ pub const TRANSIENT_ENGINE_EVENT_TYPES: &[&str] = &[
 #[derive(Allocation)]
 #[serde(deny_unknown_fields)]
 pub enum EngineEvent {
+    UiCatalogReady {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        catalog: crate::extension_ui::UiCatalog,
+    },
+    UiPanelsReady {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        panels: crate::extension_ui::UiPanels,
+    },
     TodoStateCommitted {
         meta: EventMeta,
         snapshot: crate::todo::TodoSnapshot,
@@ -667,7 +677,9 @@ impl EngineEvent {
     #[must_use]
     pub fn command_meta_mut(&mut self) -> Option<&mut CommandAckMeta> {
         match self {
-            Self::TodosRead { meta, .. }
+            Self::UiCatalogReady { meta, .. }
+            | Self::UiPanelsReady { meta, .. }
+            | Self::TodosRead { meta, .. }
             | Self::TranscriptPageReady { meta, .. }
             | Self::TranscriptContentReady { meta, .. }
             | Self::CommandAcknowledged { meta, .. }
@@ -778,6 +790,8 @@ impl EngineEvent {
         match self {
             Self::TranscriptPageReady { .. }
             | Self::TranscriptContentReady { .. }
+            | Self::UiCatalogReady { .. }
+            | Self::UiPanelsReady { .. }
             | Self::TodosRead { .. }
             | Self::ToolProgress { .. }
             | Self::CommandAcknowledged { .. }
@@ -874,6 +888,8 @@ impl EngineEvent {
         match self {
             Self::TranscriptPageReady { .. }
             | Self::TranscriptContentReady { .. }
+            | Self::UiCatalogReady { .. }
+            | Self::UiPanelsReady { .. }
             | Self::TodosRead { .. }
             | Self::ToolProgress { .. }
             | Self::CommandAcknowledged { .. }

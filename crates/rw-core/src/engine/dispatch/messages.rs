@@ -42,6 +42,7 @@ pub(super) async fn dispatch_message(
     command_meta: CommandMeta,
     content: String,
     attachments: Vec<Attachment>,
+    bound: Option<crate::ui::BoundUiCommand>,
     observed_turn: u64,
     respond: oneshot::Sender<Result<MessageDisposition, AgentLoopError>>,
     context: DispatchContext<'_>,
@@ -56,7 +57,7 @@ pub(super) async fn dispatch_message(
         command_descriptors,
         mode_registry,
     } = context;
-    if content.trim_start().starts_with('/') {
+    if bound.is_some() || content.trim_start().starts_with('/') {
         let mut context = SessionCommandContext {
             session_id: config.session_id.clone(),
             running: state.running.is_some() || state.initialization_running,
@@ -89,7 +90,11 @@ pub(super) async fn dispatch_message(
                 .collect::<Vec<_>>()
                 .join("\n"),
         };
-        let result = config.commands.dispatch_line(&mut context, &content).await;
+        let result = if let Some(bound) = bound {
+            bound.execute(&mut context).await
+        } else {
+            config.commands.dispatch_line(&mut context, &content).await
+        };
         let disposition = match result {
             Ok(mut output) => {
                 let mut unrestorable_paths = Vec::new();
