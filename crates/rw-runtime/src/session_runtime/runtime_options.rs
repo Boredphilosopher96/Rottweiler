@@ -91,6 +91,7 @@ pub enum HostedProviderMode {
 
 pub(crate) struct HostedSessionComposition {
     pub provider_admission: Arc<crate::provider_admission::DurableProviderAdmission>,
+    pub plugin_activation: Arc<crate::extension_runtime::PluginActivationBudget>,
     pub wasm_workers: Arc<rw_ext::WasmWorkerPool>,
     pub index_pool: Arc<rw_tools::WorkspaceIndexPool>,
     pub journal_reads: Arc<JournalReads>,

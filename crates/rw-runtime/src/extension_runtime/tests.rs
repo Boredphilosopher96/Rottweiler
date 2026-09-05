@@ -4,6 +4,7 @@ use super::*;
 use crate::extension_config::{
     DiscoveredMcpServer, DiscoveredMcpTransport, ExecutableConfigOrigin,
 };
+use rw_ext::PluginLauncher;
 use rw_mcp::{McpClient, McpError, McpServerConfig, ServerState};
 use serde_json::{Value, json};
 use std::{
@@ -24,9 +25,9 @@ impl McpConnector for NoConnect {
 }
 
 #[derive(Default)]
-struct RollbackProcess {
+pub(super) struct RollbackProcess {
     killed: AtomicUsize,
-    waited: AtomicUsize,
+    pub(super) waited: AtomicUsize,
 }
 
 #[async_trait]
@@ -48,10 +49,10 @@ impl rw_ext::SupervisedPluginProcess for RollbackProcess {
     }
 }
 
-struct FailSecondPluginLauncher {
-    launches: AtomicUsize,
-    first_manifest: PluginManifest,
-    first_process: Arc<RollbackProcess>,
+pub(super) struct FailSecondPluginLauncher {
+    pub(super) launches: AtomicUsize,
+    pub(super) first_manifest: PluginManifest,
+    pub(super) first_process: Arc<RollbackProcess>,
 }
 
 #[async_trait]
@@ -139,7 +140,7 @@ impl PluginLauncher for FailSecondPluginLauncher {
     }
 }
 
-fn rollback_plugin(
+pub(super) fn rollback_plugin(
     root: &Path,
     name: &str,
 ) -> (crate::extension_config::DiscoveredPlugin, PluginManifest) {
@@ -180,58 +181,6 @@ fn rollback_plugin(
         },
         manifest,
     )
-}
-
-#[tokio::test]
-async fn one_plugin_startup_failure_does_not_tear_down_other_plugins() {
-    let root = tempfile::tempdir().expect("root");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("mode");
-    }
-    let (first, first_manifest) = rollback_plugin(root.path(), "first");
-    let (second, second_manifest) = rollback_plugin(root.path(), "second");
-    let configs = vec![first, second];
-    let store = PrivatePluginApprovalStore::open(root.path()).expect("approval store");
-    for (config, manifest) in configs
-        .iter()
-        .zip([first_manifest.clone(), second_manifest])
-    {
-        let process = config.executable_process_config().expect("process config");
-        let origin = format!("user:{}", config.origin.path().display());
-        rw_ext::approve_plugin_launch(&store, &manifest, &process, &origin).expect("approve");
-    }
-    let process = Arc::new(RollbackProcess::default());
-    let launcher = FailSecondPluginLauncher {
-        launches: AtomicUsize::new(0),
-        first_manifest,
-        first_process: process.clone(),
-    };
-    let result = PluginSessionRuntime::start_with_launcher(
-        &configs,
-        root.path(),
-        &[root.path().to_path_buf()],
-        &launcher,
-        &store,
-        Arc::new(SharedPluginRedactor::new(
-            rw_providers::FixtureRedactor::default(),
-        )),
-        Arc::new(PrivateMcpScratch::create().expect("scratch")),
-        None,
-        None,
-    )
-    .await
-    .expect("isolated plugin startup");
-
-    assert_eq!(result.hosts.len(), 1);
-    assert_eq!(result.pending.len(), 1);
-    assert!(result.pending[0].contains("second: unavailable"));
-    assert!(result.shutdown().await.is_ok());
-    assert!(
-        process.waited.load(Ordering::Acquire) >= 1,
-        "the surviving plugin must still reap during session shutdown"
-    );
 }
 
 #[test]

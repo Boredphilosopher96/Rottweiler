@@ -447,16 +447,14 @@ pub(crate) async fn compose_hosted_actor(
     let plugin_runtime = if executable_catalog.plugins.is_empty() {
         None
     } else {
-        let runtime = Arc::new(
-            crate::extension_runtime::PluginSessionRuntime::start(
-                &executable_catalog.plugins,
-                &options.storage_root,
-                &workspace_roots,
-                &std::env::current_exe().into_diagnostic()?,
-                plugin_redactor.clone(),
-            )
-            .await?,
-        );
+        let runtime = Arc::new(crate::extension_runtime::PluginSessionRuntime::compose(
+            &executable_catalog.plugins,
+            &options.storage_root,
+            &workspace_roots,
+            &std::env::current_exe().into_diagnostic()?,
+            &plugin_redactor,
+            &options.plugin_activation,
+        )?);
         for pending in &runtime.pending {
             eprintln!("warning: plugin {pending}");
         }
@@ -845,6 +843,7 @@ pub(crate) async fn compose_hosted_actor(
             options.storage_root.clone(),
             std::env::current_exe().into_diagnostic()?,
             Arc::clone(&plugin_redactor),
+            Arc::clone(&options.plugin_activation),
         ),
     );
     let initial_thinking = configured_session_thinking(&options.config, &persisted_model_alias);

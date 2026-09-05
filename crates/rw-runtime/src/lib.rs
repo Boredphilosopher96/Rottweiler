@@ -7,6 +7,9 @@ use std::sync::Arc;
 
 use rw_core::{EngineHost, EngineHostConfig, HostError, HostQueryService, SessionFactory};
 
+#[cfg(test)]
+mod native_fixture;
+
 mod extension_config;
 mod extension_runtime;
 mod history;

@@ -670,6 +670,7 @@ mod tests {
 
     #[tokio::test]
     async fn three_independent_typescript_shapes_cross_production_sandbox() {
+        let _admission = crate::native_fixture::admit().await;
         let (bun, sdk) = bun_and_sdk();
         let scratch = tempfile::tempdir().expect("scratch");
         let workspace = tempfile::tempdir().expect("workspace");
@@ -727,6 +728,7 @@ mod tests {
 
     #[tokio::test]
     async fn omitted_network_outbound_is_killed_and_surfaces_terminal_violation() {
+        let _admission = crate::native_fixture::admit().await;
         let (bun, sdk) = bun_and_sdk();
         let scratch = tempfile::tempdir().expect("scratch");
         let workspace = tempfile::tempdir().expect("workspace");
@@ -788,6 +790,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_reads_plugin_cannot_read_sibling_workspace_secret() {
+        let _admission = crate::native_fixture::admit().await;
         let (bun, sdk) = bun_and_sdk();
         let scratch = tempfile::tempdir().expect("scratch");
         let workspace = tempfile::tempdir().expect("workspace");

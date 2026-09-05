@@ -243,6 +243,7 @@ impl RuntimeHostOptions {
 
 #[derive(Clone)]
 pub struct RuntimeSessionFactory {
+    plugin_activation: Arc<crate::extension_runtime::PluginActivationBudget>,
     wasm_workers: Arc<rw_ext::WasmWorkerPool>,
     index_pool: Arc<rw_tools::WorkspaceIndexPool>,
     journal_reads: Arc<crate::journal_reads::JournalReads>,
@@ -437,6 +438,7 @@ impl RuntimeSessionFactory {
             transcripts: crate::transcript_service::TranscriptReader::new(Arc::clone(
                 &journal_reads,
             )),
+            plugin_activation: Arc::new(crate::extension_runtime::PluginActivationBudget::default()),
             wasm_workers: rw_ext::WasmWorkerPool::new(),
             index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
             journal_reads,
@@ -706,6 +708,7 @@ impl RuntimeSessionFactory {
     ) -> Result<HostedSession, HostError> {
         let requested_model = self.requested_model_for_compose(&workspace, model, resume)?;
         let runtime = compose_hosted_actor(HostedSessionComposition {
+            plugin_activation: Arc::clone(&self.plugin_activation),
             wasm_workers: Arc::clone(&self.wasm_workers),
             index_pool: Arc::clone(&self.index_pool),
             journal_reads: Arc::clone(&self.journal_reads),

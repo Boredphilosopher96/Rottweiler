@@ -29,6 +29,7 @@ impl PluginLauncher for RecordingLauncher {
 
 #[tokio::test]
 async fn source_resolver_seals_current_host_output_after_native_helpers_settle() {
+    let _admission = crate::native_fixture::admit().await;
     let root = tempfile::tempdir().expect("fixture root");
     let package = root.path().join("package");
     fs::create_dir(&package).expect("package directory");
@@ -118,6 +119,7 @@ async fn source_resolver_seals_current_host_output_after_native_helpers_settle()
 
 #[tokio::test]
 async fn preparation_directory_grants_do_not_read_siblings_or_recur() {
+    let _admission = crate::native_fixture::admit().await;
     let fixture = tempfile::tempdir().expect("fixture");
     let root = fs::canonicalize(fixture.path()).expect("root");
     let package = root.join("package");

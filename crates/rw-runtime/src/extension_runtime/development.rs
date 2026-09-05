@@ -46,6 +46,7 @@ pub(crate) struct RuntimeSessionExtensionController {
     private_root: PathBuf,
     helper: PathBuf,
     redactor: Arc<SharedPluginRedactor>,
+    activation: Arc<PluginActivationBudget>,
     state: tokio::sync::Mutex<DevelopmentExtensionState>,
     operation: tokio::sync::Mutex<()>,
     failed: std::sync::atomic::AtomicBool,
@@ -56,11 +57,13 @@ impl RuntimeSessionExtensionController {
         private_root: PathBuf,
         helper: PathBuf,
         redactor: Arc<SharedPluginRedactor>,
+        activation: Arc<PluginActivationBudget>,
     ) -> Self {
         Self {
             private_root,
             helper,
             redactor,
+            activation,
             state: tokio::sync::Mutex::new(DevelopmentExtensionState::default()),
             operation: tokio::sync::Mutex::new(()),
             failed: std::sync::atomic::AtomicBool::new(false),
@@ -160,48 +163,41 @@ impl RuntimeSessionExtensionController {
         manifest: &PluginManifest,
         workspace_roots: &[PathBuf],
     ) -> std::result::Result<PluginSessionRuntime, rw_core::AgentLoopError> {
-        let scratch = Arc::new(PrivateMcpScratch::create().map_err(development_error)?);
-        let launcher: Arc<dyn PluginLauncher> = Arc::new(
-            crate::plugin_process::SandboxedPluginLauncher::new(scratch.path(), &self.helper)
-                .map_err(development_error)?,
+        let metadata =
+            rw_ext::PluginEndpointMetadata::new(manifest.clone()).map_err(development_error)?;
+        let push_handler = Arc::new(SessionPluginPushHandler::default());
+        let endpoint: Arc<dyn rw_ext::PluginEndpoint> = Arc::new(
+            activation::DormantPluginEndpoint::new(activation::ActivationRecipe {
+                metadata,
+                approval: activation::ActivationApproval::SessionDevelopment,
+                config: plugin.clone(),
+                private_root: self.private_root.clone(),
+                workspace_roots: workspace_roots.to_vec(),
+                helper: self.helper.clone(),
+                redactor: Arc::clone(&self.redactor),
+                push_handler: Arc::clone(&push_handler),
+                budget: Arc::clone(&self.activation),
+                #[cfg(test)]
+                launcher: None,
+            }),
         );
-        let source_host = self
-            .helper
-            .parent()
-            .ok_or_else(|| development_error("Rottweiler executable has no release directory"))?
-            .join("rottweiler-plugin-host");
-        let resolver = crate::source_plugin::SourcePluginResolver::new(
-            &source_host,
-            &self.private_root,
-            Arc::clone(&scratch),
-            Arc::clone(&launcher),
-            Arc::new(crate::source_plugin::SourcePreparationBudget::default()),
-        )
-        .map_err(development_error)?;
-        let process = resolver.resolve(plugin).await.map_err(development_error)?;
-        let approvals = SessionDevelopmentApprovalStore::default();
-        let origin = format!("development:{}", plugin.manifest_path.display());
-        approve_plugin_launch(&approvals, manifest, &process, &origin)
+        let mut candidate = PluginSessionRuntime::default();
+        candidate
+            .register_endpoint(plugin, manifest, Arc::clone(&endpoint), push_handler)
             .map_err(development_error)?;
-        let candidate = PluginSessionRuntime::start_with_launcher(
-            std::slice::from_ref(plugin),
-            &self.private_root,
-            workspace_roots,
-            launcher.as_ref(),
-            &approvals,
-            Arc::clone(&self.redactor),
-            scratch,
-            Some(&resolver),
-            None,
-        )
-        .await
-        .map_err(development_error)?;
-        if candidate.pending.is_empty() {
-            return Ok(candidate);
+        match endpoint.connect(&CancellationToken::default()).await {
+            Ok(_) => Ok(candidate),
+            Err(error) => {
+                self.retire(candidate).await?;
+                if error.code == "effects_unsettled" {
+                    self.failed
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    Err(rw_core::AgentLoopError::EffectsUnsettled(error.message))
+                } else {
+                    Err(development_error(error))
+                }
+            }
         }
-        let message = candidate.pending.join("; ");
-        self.retire(candidate).await?;
-        Err(development_error(message))
     }
 
     fn compose_candidate(

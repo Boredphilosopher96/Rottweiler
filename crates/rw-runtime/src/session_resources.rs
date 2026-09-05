@@ -46,6 +46,13 @@ impl RuntimeSessionResources {
         )
     }
 
+    pub(crate) fn own_cleanup(
+        owners: impl Send + 'static,
+        work: impl Future<Output = Result<(), Arc<str>>> + Send + 'static,
+    ) -> Arc<Self> {
+        Self::start(owners, work, RESOURCE_PROOF_TIMEOUT)
+    }
+
     fn start(
         owners: impl Send + 'static,
         work: impl Future<Output = Proof> + Send + 'static,

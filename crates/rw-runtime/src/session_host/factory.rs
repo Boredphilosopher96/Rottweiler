@@ -11,6 +11,10 @@ use super::{
 impl SessionFactory for RuntimeSessionFactory {
     async fn shutdown(&self) -> Result<(), HostError> {
         use futures_util::FutureExt as _;
+        let plugins = self
+            .plugin_activation
+            .close()
+            .map_err(|error| HostError::Persistence(error.to_string()));
         let (wasm, admission) = tokio::join!(
             std::panic::AssertUnwindSafe(self.wasm_workers.shutdown()).catch_unwind(),
             std::panic::AssertUnwindSafe(self.provider_admission.shutdown()).catch_unwind(),
@@ -23,7 +27,7 @@ impl SessionFactory for RuntimeSessionFactory {
                 HostError::Persistence("provider admission shutdown owner panicked".to_owned())
             })?
             .map_err(|error| HostError::Persistence(error.to_string()));
-        wasm.and(admission)
+        plugins.and(wasm).and(admission)
     }
 
     fn allocate_session_id(&self) -> Result<SessionId, HostError> {

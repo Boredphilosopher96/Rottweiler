@@ -6,6 +6,9 @@ pub(crate) use mcp_commands::*;
 mod mcp_service;
 pub(crate) use mcp_service::*;
 
+mod activation;
+pub(crate) use activation::PluginActivationBudget;
+
 mod development;
 pub(crate) use development::*;
 
@@ -29,11 +32,10 @@ use rw_core::{
     ToonMcpEncoder, VaultMcpTokenProvider,
 };
 use rw_ext::{
-    ApprovalRequirement, ApprovalStore, ApprovalStoreError, HookHandler, HookRegistration,
-    PluginBoundaryRedactor, PluginEventRouter, PluginHost, PluginHttpStreamResponse,
-    PluginLauncher, PluginProviderHttpHandler, PluginRpcError, PushHandler, RpcCommandAdapter,
-    RpcHookHandler, RpcProviderAdapter, RpcToolAdapter, approve_plugin_launch,
-    plugin_hook_registration, plugin_launch_approval_requirement,
+    ApprovalStore, ApprovalStoreError, HookHandler, HookRegistration, PluginBoundaryRedactor,
+    PluginEventRouter, PluginHttpStreamResponse, PluginProviderHttpHandler, PluginRpcError,
+    PushHandler, RpcCommandAdapter, RpcHookHandler, RpcProviderAdapter, RpcToolAdapter,
+    plugin_hook_registration,
 };
 use rw_ext::{
     CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation, CommandRegistry,
@@ -297,8 +299,9 @@ fn plugin_http_error(code: &str, message: &str) -> PluginRpcError {
     }
 }
 
+#[derive(Default)]
 pub(crate) struct PluginSessionRuntime {
-    hosts: Vec<Arc<PluginHost>>,
+    endpoints: Vec<Arc<dyn rw_ext::PluginEndpoint>>,
     push_handlers: Vec<(String, Arc<SessionPluginPushHandler>)>,
     pub(crate) tools: Vec<Arc<dyn Tool>>,
     pub(crate) hooks: Vec<(HookRegistration, Arc<dyn HookHandler>)>,
@@ -309,189 +312,58 @@ pub(crate) struct PluginSessionRuntime {
     pub(crate) providers: Vec<(String, Arc<dyn rw_providers::Provider>)>,
     pub(crate) event_routers: Vec<(std::collections::BTreeSet<String>, Arc<PluginEventRouter>)>,
     pub(crate) pending: Vec<String>,
-    _scratch: Arc<PrivateMcpScratch>,
-    preparation: Arc<crate::source_plugin::SourcePreparations>,
-}
-
-struct PluginStartContext<'a> {
-    private_root: &'a Path,
-    workspace_roots: &'a [PathBuf],
-    launcher: &'a dyn PluginLauncher,
-    store: &'a dyn ApprovalStore,
-    redactor: Arc<SharedPluginRedactor>,
-    source_resolver: Option<&'a crate::source_plugin::SourcePluginResolver>,
-    source_error: Option<&'a str>,
 }
 
 impl PluginSessionRuntime {
-    pub(crate) async fn start(
+    pub(crate) fn compose(
         configs: &[crate::extension_config::DiscoveredPlugin],
         private_root: &Path,
         workspace_roots: &[PathBuf],
         helper: &Path,
-        redactor: Arc<SharedPluginRedactor>,
+        redactor: &Arc<SharedPluginRedactor>,
+        budget: &Arc<PluginActivationBudget>,
     ) -> Result<Self> {
-        let store = PrivatePluginApprovalStore::open(private_root)?;
-        let scratch = Arc::new(PrivateMcpScratch::create()?);
-        let launcher: Arc<dyn PluginLauncher> = Arc::new(
-            crate::plugin_process::SandboxedPluginLauncher::new(scratch.path(), helper)
-                .map_err(|error| miette!(error.to_string()))?,
-        );
-        let source_host = helper
-            .parent()
-            .ok_or_else(|| miette!("Rottweiler executable has no release directory"))?
-            .join("rottweiler-plugin-host");
-        let source_resolver = crate::source_plugin::SourcePluginResolver::new(
-            &source_host,
-            private_root,
-            Arc::clone(&scratch),
-            Arc::clone(&launcher),
-            Arc::new(crate::source_plugin::SourcePreparationBudget::default()),
-        );
-        Self::start_with_launcher(
-            configs,
-            private_root,
-            workspace_roots,
-            launcher.as_ref(),
-            &store,
-            redactor,
-            scratch,
-            source_resolver.as_ref().ok(),
-            source_resolver.as_ref().err().map(ToString::to_string),
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn start_with_launcher(
-        configs: &[crate::extension_config::DiscoveredPlugin],
-        private_root: &Path,
-        workspace_roots: &[PathBuf],
-        launcher: &dyn PluginLauncher,
-        store: &dyn ApprovalStore,
-        redactor: Arc<SharedPluginRedactor>,
-        scratch: Arc<PrivateMcpScratch>,
-        source_resolver: Option<&crate::source_plugin::SourcePluginResolver>,
-        source_error: Option<String>,
-    ) -> Result<Self> {
-        let mut runtime = Self {
-            hosts: Vec::new(),
-            push_handlers: Vec::new(),
-            tools: Vec::new(),
-            hooks: Vec::new(),
-            commands: Vec::new(),
-            providers: Vec::new(),
-            event_routers: Vec::new(),
-            pending: Vec::new(),
-            _scratch: scratch,
-            preparation: source_resolver
-                .map(crate::source_plugin::SourcePluginResolver::preparation)
-                .unwrap_or_default(),
-        };
-        let context = PluginStartContext {
-            private_root,
-            workspace_roots,
-            launcher,
-            store,
-            redactor,
-            source_resolver,
-            source_error: source_error.as_deref(),
-        };
+        let mut runtime = Self::default();
         for config in configs.iter().filter(|config| config.enabled) {
-            if let Err(error) = runtime.start_plugin(config, &context).await {
-                runtime
-                    .pending
-                    .push(format!("{}: unavailable: {error}", config.name));
-            }
+            let manifest = match config.load_manifest() {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    runtime
+                        .pending
+                        .push(format!("{}: unavailable: {error}", config.name));
+                    continue;
+                }
+            };
+            let metadata = rw_ext::PluginEndpointMetadata::new(manifest.clone())
+                .map_err(|error| miette!(error.to_string()))?;
+            let push_handler = Arc::new(SessionPluginPushHandler::default());
+            let endpoint: Arc<dyn rw_ext::PluginEndpoint> = Arc::new(
+                activation::DormantPluginEndpoint::new(activation::ActivationRecipe {
+                    metadata,
+                    approval: activation::ActivationApproval::Configured,
+                    config: config.clone(),
+                    private_root: private_root.to_path_buf(),
+                    workspace_roots: workspace_roots.to_vec(),
+                    helper: helper.to_path_buf(),
+                    redactor: Arc::clone(redactor),
+                    push_handler: Arc::clone(&push_handler),
+                    budget: Arc::clone(budget),
+                    #[cfg(test)]
+                    launcher: None,
+                }),
+            );
+            runtime.register_endpoint(config, &manifest, endpoint, push_handler)?;
         }
         Ok(runtime)
     }
 
-    async fn start_plugin(
-        &mut self,
-        config: &crate::extension_config::DiscoveredPlugin,
-        context: &PluginStartContext<'_>,
-    ) -> Result<()> {
-        let manifest = config.load_manifest()?;
-        let process = match &config.target {
-            crate::extension_config::DiscoveredPluginTarget::Executable { .. } => {
-                config.executable_process_config()?
-            }
-            crate::extension_config::DiscoveredPluginTarget::TypeScript { .. } => {
-                let resolver = context.source_resolver.ok_or_else(|| {
-                    miette!(
-                        "TypeScript source host is unavailable: {}",
-                        context
-                            .source_error
-                            .unwrap_or("release helper was not packaged")
-                    )
-                })?;
-                resolver.resolve(config).await?
-            }
-        };
-        let scope = match config.origin {
-            crate::extension_config::ExecutableConfigOrigin::User(_) => "user",
-            crate::extension_config::ExecutableConfigOrigin::TrustedProject(_) => "project",
-        };
-        let origin = format!("{scope}:{}", config.origin.path().display());
-        match plugin_launch_approval_requirement(context.store, &manifest, &process, &origin)
-            .map_err(|error| miette!(error.to_string()))?
-        {
-            ApprovalRequirement::Approved => {}
-            ApprovalRequirement::FirstLoad { .. } => {
-                self.pending
-                    .push(format!("{}: first approval required", config.name));
-                return Ok(());
-            }
-            ApprovalRequirement::ManifestChanged { .. } => {
-                self.pending
-                    .push(format!("{}: approval changed", config.name));
-                return Ok(());
-            }
-        }
-        let push_handler = Arc::new(SessionPluginPushHandler::default());
-        let registrar: Arc<dyn rw_providers::KnownSecretRegistrar> = context.redactor.clone();
-        let provider_http: Arc<dyn PluginProviderHttpHandler> =
-            Arc::new(RuntimePluginProviderHttp::new(
-                &context.private_root.join("credentials.toml"),
-                process
-                    .allowed_domains()
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .as_slice(),
-                registrar,
-            )?);
-        let boundary_redactor: Arc<dyn PluginBoundaryRedactor> = context.redactor.clone();
-        let host = PluginHost::launch_approved_with_http(
-            context.launcher,
-            context.store,
-            &process,
-            &origin,
-            context.workspace_roots,
-            manifest.clone(),
-            push_handler.clone(),
-            provider_http,
-            boundary_redactor,
-        )
-        .await
-        .map_err(|error| miette!("plugin {:?} failed to launch: {error}", config.name))?;
-        self.register_plugin(config, &manifest, host, push_handler)
-            .await
-    }
-
-    async fn register_plugin(
+    fn register_endpoint(
         &mut self,
         config: &crate::extension_config::DiscoveredPlugin,
         manifest: &PluginManifest,
-        host: PluginHost,
+        endpoint: Arc<dyn rw_ext::PluginEndpoint>,
         push_handler: Arc<SessionPluginPushHandler>,
     ) -> Result<()> {
-        let host = Arc::new(host);
-        let endpoint: Arc<dyn rw_ext::PluginEndpoint> = Arc::new(
-            rw_ext::ReadyPluginEndpoint::new(Arc::clone(&host))
-                .map_err(|error| miette!(error.to_string()))?,
-        );
         for declaration in &manifest.capabilities.tools {
             self.tools.push(Arc::new(
                 RpcToolAdapter::new(declaration.clone(), endpoint.clone())
@@ -520,7 +392,7 @@ impl PluginSessionRuntime {
                 }),
             ));
         }
-        self.register_providers(config, manifest, &endpoint).await;
+        self.register_providers(config, manifest, &endpoint);
         if !manifest.capabilities.event_subscriptions.is_empty() {
             self.event_routers.push((
                 manifest
@@ -529,15 +401,15 @@ impl PluginSessionRuntime {
                     .iter()
                     .cloned()
                     .collect(),
-                Arc::new(PluginEventRouter::new(endpoint)),
+                Arc::new(PluginEventRouter::new(endpoint.clone())),
             ));
         }
-        self.hosts.push(host);
+        self.endpoints.push(endpoint);
         self.push_handlers.push((config.name.clone(), push_handler));
         Ok(())
     }
 
-    async fn register_providers(
+    fn register_providers(
         &mut self,
         config: &crate::extension_config::DiscoveredPlugin,
         manifest: &PluginManifest,
@@ -565,14 +437,6 @@ impl PluginSessionRuntime {
                 .any(|capability| capability == "models")
             {
                 adapter = adapter.with_model_catalog();
-                if let Err(error) = rw_providers::Provider::discover_models(&adapter).await {
-                    tracing::warn!(
-                        plugin = %config.name,
-                        provider = %declaration.alias_prefix,
-                        %error,
-                        "plugin provider model catalog is unavailable"
-                    );
-                }
             }
             self.providers
                 .push((declaration.alias_prefix.clone(), Arc::new(adapter)));
@@ -591,13 +455,10 @@ impl PluginSessionRuntime {
 
     pub(crate) async fn shutdown(&self) -> Result<()> {
         let mut failure = None;
-        for host in &self.hosts {
-            if let Err(error) = host.shutdown().await {
+        for endpoint in &self.endpoints {
+            if let Err(error) = endpoint.close().await {
                 failure.get_or_insert_with(|| miette!(error.to_string()));
             }
-        }
-        if let Err(error) = self.preparation.settle_cancelled().await {
-            failure.get_or_insert(error);
         }
         failure.map_or(Ok(()), Err)
     }

@@ -13,6 +13,7 @@ mod durable_session;
 mod extension_discovery;
 mod folder_trust;
 mod fork_storage;
+mod headless_lifetime;
 mod headless_session;
 mod hosted_composition;
 mod initial_memory;

@@ -600,17 +600,18 @@ pub async fn run(options: RunOptions) -> Result<()> {
     let plugin_redactor = Arc::new(crate::extension_runtime::SharedPluginRedactor::new(
         fixture_redactor.clone(),
     ));
+    let plugin_activation = Arc::new(crate::extension_runtime::PluginActivationBudget::default());
     let plugin_runtime = (if executable_catalog.plugins.is_empty() || inspection {
         None
     } else {
-        let runtime = crate::extension_runtime::PluginSessionRuntime::start(
+        let runtime = crate::extension_runtime::PluginSessionRuntime::compose(
             &executable_catalog.plugins,
             &storage_root,
             &workspace_roots,
             &std::env::current_exe().into_diagnostic()?,
-            plugin_redactor.clone(),
-        )
-        .await?;
+            &plugin_redactor,
+            &plugin_activation,
+        )?;
         for pending in &runtime.pending {
             eprintln!("warning: plugin {pending}");
         }
@@ -1055,6 +1056,7 @@ pub async fn run(options: RunOptions) -> Result<()> {
                 storage_root.clone(),
                 std::env::current_exe().into_diagnostic()?,
                 Arc::clone(&plugin_redactor),
+                Arc::clone(&plugin_activation),
             ),
         )
     };
@@ -1095,60 +1097,69 @@ pub async fn run(options: RunOptions) -> Result<()> {
         event_capacity: DEFAULT_EVENT_CAPACITY,
     })
     .map_err(display_agent_error)?;
-    if let Some(plugins) = &plugin_runtime {
-        plugins.bind_push(&actor)?;
-    }
-    if options.perf_markers {
-        // Emitted only after provider/tool/command composition, MCP catalog
-        // initialization, and actor creation. The M8 subprocess gate measures
-        // process spawn through observing this line on stderr.
-        eprintln!("rw_perf_prompt_ready=1");
-    }
-
-    let outcome = if let Some(turn) = prompt_dump_turn {
-        let dump = actor
-            .dump_prompt(turn.map(|turn| rw_core::TurnId(turn.to_string())))
-            .await
-            .map_err(display_agent_error)?;
-        if let (Some(_), Some((profile, record))) = (turn, &recorded_prompt_shape) {
-            let tools = dump
-                .tools
-                .iter()
-                .map(|tool| ToolDefinition {
-                    name: tool.name.clone(),
-                    description: tool.description.clone(),
-                    input_schema: tool.input_schema.clone(),
-                })
-                .collect::<Vec<_>>();
-            validate_historical_prompt_shape(&dump, &tools, profile, record)?;
+    let lifetime = super::headless_lifetime::own(
+        actor.clone(),
+        Arc::clone(&plugin_activation),
+        Arc::clone(&wasm_workers),
+        Arc::clone(&provider_admission),
+    );
+    let execution = async {
+        if let Some(plugins) = &plugin_runtime {
+            plugins.bind_push(&actor)?;
         }
-        serde_json::to_writer_pretty(io::stdout().lock(), &dump).into_diagnostic()?;
-        println!();
-        None
-    } else if let Some(prompt) = options.prompt {
-        run_print(
-            &actor,
-            &session_id,
-            &prompt,
-            options.output_format,
-            options.perf_markers,
-        )
-        .await?
-    } else {
-        run_repl(&actor, &storage_root, options.output_format).await?
-    };
-    if interactive {
-        update_one_session_index(&storage_root, &session_id, &durable_sink)?;
+        if options.perf_markers {
+            // Emitted only after provider/tool/command composition, MCP catalog
+            // initialization, and actor creation. The M8 subprocess gate measures
+            // process spawn through observing this line on stderr.
+            eprintln!("rw_perf_prompt_ready=1");
+        }
+
+        let outcome = if let Some(turn) = prompt_dump_turn {
+            let dump = actor
+                .dump_prompt(turn.map(|turn| rw_core::TurnId(turn.to_string())))
+                .await
+                .map_err(display_agent_error)?;
+            if let (Some(_), Some((profile, record))) = (turn, &recorded_prompt_shape) {
+                let tools = dump
+                    .tools
+                    .iter()
+                    .map(|tool| ToolDefinition {
+                        name: tool.name.clone(),
+                        description: tool.description.clone(),
+                        input_schema: tool.input_schema.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                validate_historical_prompt_shape(&dump, &tools, profile, record)?;
+            }
+            serde_json::to_writer_pretty(io::stdout().lock(), &dump).into_diagnostic()?;
+            println!();
+            None
+        } else if let Some(prompt) = options.prompt {
+            run_print(
+                &actor,
+                &session_id,
+                &prompt,
+                options.output_format,
+                options.perf_markers,
+            )
+            .await?
+        } else {
+            run_repl(&actor, &storage_root, options.output_format).await?
+        };
+        if interactive {
+            update_one_session_index(&storage_root, &session_id, &durable_sink)?;
+        }
+        built_tools
+            .todo
+            .clear_session(&SessionId(session_id.clone()))
+            .await;
+        Ok::<_, miette::Report>(outcome)
     }
-    built_tools
-        .todo
-        .clear_session(&SessionId(session_id.clone()))
-        .await;
-    actor.close().await.map_err(display_agent_error)?;
-    wasm_workers
-        .shutdown()
+    .await;
+    rw_core::SessionResources::shutdown(lifetime.as_ref())
         .await
-        .map_err(|error| miette!(error.to_string()))?;
+        .map_err(display_agent_error)?;
+    let outcome = execution?;
     if let Some(status) = outcome
         && status != TurnStatus::Completed
     {
