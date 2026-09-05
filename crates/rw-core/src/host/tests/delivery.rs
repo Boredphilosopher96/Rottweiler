@@ -530,3 +530,70 @@ async fn stalled_subscription_does_not_block_active_sibling() {
     assert_eq!(delivered, Ok((COMMANDS, COMMANDS)));
     assert!(stalled_events < COMMANDS * 2);
 }
+
+#[tokio::test]
+async fn actor_inspections_return_payloads_in_the_admitted_direct_reply() {
+    let (host, _) = host(1);
+    let bound = BoundClient {
+        client_id: ClientId("inspection-reader".into()),
+    };
+    let session_id = SessionId("inspection-session".into());
+    assert_eq!(
+        host.dispatch(
+            bound.clone(),
+            ClientCommand::ResumeSession {
+                meta: meta("spoofed", "inspect-resume"),
+                session_id: session_id.clone(),
+                last_seen_sequence: None,
+                role: ClientRole::Driver,
+            }
+        )
+        .await
+        .outcome,
+        CommandOutcome::Accepted {}
+    );
+    let commands = [
+        ClientCommand::GetContext {
+            meta: meta("spoofed", "inspect-context"),
+            session_id: session_id.clone(),
+        },
+        ClientCommand::DumpPrompt {
+            meta: meta("spoofed", "inspect-prompt"),
+            session_id: session_id.clone(),
+            turn_id: None,
+        },
+        ClientCommand::GetCost {
+            meta: meta("spoofed", "inspect-cost"),
+            session_id: session_id.clone(),
+        },
+    ];
+    for command in commands {
+        let request_id = command.meta().request_id.clone();
+        let reply = host.dispatch(bound.clone(), command).await;
+        let rw_types::CommandReply::Read { outcome, events } =
+            serde_json::from_slice(&reply.bytes).expect("direct reply")
+        else {
+            panic!("read reply");
+        };
+        assert_eq!(outcome, CommandOutcome::Accepted {});
+        assert_eq!(
+            events.len(),
+            1,
+            "inspection payload belongs in its direct reply"
+        );
+        match &events[0] {
+            EngineEvent::ContextSnapshotReady { meta, snapshot, .. } => {
+                assert_eq!(meta.request_id, request_id);
+                assert_eq!(meta.client_id, bound.client_id);
+                assert!(snapshot.through.is_some());
+            }
+            EngineEvent::PromptDumpReady { meta, dump, .. } => {
+                assert_eq!(meta.request_id, request_id);
+                assert!(dump.through.is_some());
+            }
+            EngineEvent::CostSnapshotReady { meta, .. } => assert_eq!(meta.request_id, request_id),
+            event => panic!("unexpected inspection {event:?}"),
+        }
+    }
+    host.shutdown_sessions().await.expect("close");
+}
