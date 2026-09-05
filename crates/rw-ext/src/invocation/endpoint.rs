@@ -55,7 +55,9 @@ impl PluginEndpoint for ManagedEndpoint {
         Ok(connection.with_client(client))
     }
     async fn settle_effects(&self) -> Result<(), PluginRpcError> {
-        self.inner.settle_effects().await
+        let proof = self.inner.settle_effects().await;
+        proof?;
+        check_proof(&self.gate)
     }
     async fn close(&self) -> Result<(), PluginRpcError> {
         self.inner.close().await
@@ -74,7 +76,9 @@ impl ManagedClient {
 #[async_trait]
 impl PluginRpcClient for ManagedClient {
     async fn settle_effects(&self) -> Result<(), PluginRpcError> {
-        self.inner.settle_effects().await
+        let proof = self.inner.settle_effects().await;
+        proof?;
+        check_proof(&self.gate)
     }
     async fn request(&self, method: &str, params: Value) -> Result<Value, PluginRpcError> {
         let lease = self.admit()?;
@@ -144,7 +148,7 @@ impl ManagedStream {
                 "extension stream destructor panicked",
             ));
         }
-        self.lease.take();
+        drop(self.lease.take());
     }
 }
 impl Stream for ManagedStream {
@@ -181,4 +185,10 @@ pub(super) fn wrap_client(
         generation,
         inner,
     })
+}
+
+fn check_proof(gate: &Weak<ExtensionInvocations>) -> Result<(), PluginRpcError> {
+    let gate = upgrade(gate)?;
+    let failure = gate.lock().failure.clone();
+    failure.map_or(Ok(()), Err)
 }
