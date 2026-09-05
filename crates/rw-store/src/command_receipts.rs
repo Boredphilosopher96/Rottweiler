@@ -91,7 +91,7 @@ impl CommandReceipts {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let application_id: u32 =
             transaction.pragma_query_value(None, "application_id", |row| row.get(0))?;
-        let tables: usize = transaction.query_row(
+        let tables: u64 = transaction.query_row(
             "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
             [],
             |row| row.get(0),
@@ -130,7 +130,7 @@ impl CommandReceipts {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let existing: Option<(String, Option<Vec<u8>>)> = transaction.query_row(
             "SELECT fingerprint, CASE WHEN length(completion)<=?2 THEN completion ELSE NULL END FROM command_receipts WHERE operation_id=?1",
-            params![operation.0, MAX_RECEIPT_BYTES], |row| Ok((row.get(0)?, row.get(1)?)),
+            params![operation.0, 16 * 1024 * 1024_i64], |row| Ok((row.get(0)?, row.get(1)?)),
         ).optional()?;
         if let Some((stored, completion)) = existing {
             if stored != fingerprint {

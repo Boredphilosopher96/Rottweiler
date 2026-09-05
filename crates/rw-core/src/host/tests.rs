@@ -341,6 +341,17 @@ impl BlockingDescriptorSink {
 
 #[async_trait]
 impl SessionEventSink for BlockingDescriptorSink {
+    async fn source_rewind_target(
+        &self,
+        _expected_through: SequenceId,
+        _source: SequenceId,
+        _turn: u64,
+        _position: rw_types::RewindSourcePosition,
+    ) -> Result<u64, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no canonical source index".into(),
+        ))
+    }
     async fn extension_state(
         &self,
         _plugin_id: &str,
