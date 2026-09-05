@@ -42,7 +42,7 @@ fn transformations_preserve_identity_and_reject_cross_phase_changes() {
     let mut input = HookInput::PreTool(HookToolInput {
         id: "call".to_owned(),
         name: "read".to_owned(),
-        arguments: Default::default(),
+        arguments: serde_json::Map::new(),
     });
     let before = input.clone();
     assert!(
@@ -57,7 +57,7 @@ fn transformations_preserve_identity_and_reject_cross_phase_changes() {
         input
             .apply(HookTransform::PreTool {
                 name: "read;write".to_owned(),
-                arguments: Default::default()
+                arguments: serde_json::Map::new()
             })
             .is_err()
     );
@@ -66,7 +66,7 @@ fn transformations_preserve_identity_and_reject_cross_phase_changes() {
         input
             .apply(HookTransform::PreTool {
                 name: "search".to_owned(),
-                arguments: Default::default()
+                arguments: serde_json::Map::new()
             })
             .is_ok()
     );
@@ -82,7 +82,7 @@ fn post_tool_transforms_cannot_erase_execution_failure() {
     let mut input = HookInput::PostTool(HookToolResultInput {
         id: "call".to_owned(),
         name: "write".to_owned(),
-        arguments: Default::default(),
+        arguments: serde_json::Map::new(),
         output: ToolOutput::Text {
             text: "failed".to_owned(),
         },
