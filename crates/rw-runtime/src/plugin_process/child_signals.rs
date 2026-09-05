@@ -52,7 +52,7 @@ async fn kill_tree_signals_the_actual_child_after_it_changes_groups() {
         process_group: child.id(),
         child: Mutex::new(child),
         violation: Arc::new(Mutex::new(None)),
-        _proxy: None,
+        proxy: super::proxy_settlement::PluginProxy::new(None),
     };
     tokio::time::timeout(Duration::from_secs(2), async {
         while !ready.exists() {

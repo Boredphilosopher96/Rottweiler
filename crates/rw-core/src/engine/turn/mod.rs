@@ -3147,7 +3147,11 @@ async fn prepare_tool_call(
     .await
     {
         Ok(result) => result,
-        Err(error) => return PreparedToolCall::Complete(failed_execution(call, error.to_string())),
+        Err(error) => {
+            let mut execution = failed_execution(call, error.to_string());
+            execution.unsettled = matches!(error, AgentLoopError::EffectsUnsettled(_));
+            return PreparedToolCall::Complete(execution);
+        }
     };
     report_hook_failures(
         HookEvent::PreTool,
@@ -3430,7 +3434,10 @@ async fn run_deferred_mutating_pre_hook(
         &runtime.signals,
     )
     .await
-    .map_err(|error| ToolError::Command(error.to_string()))?;
+    .map_err(|error| match error {
+        AgentLoopError::EffectsUnsettled(message) => ToolError::EffectsUnsettled(message),
+        error => ToolError::Command(error.to_string()),
+    })?;
     report_hook_failures(
         HookEvent::PreTool,
         result.failures(),
@@ -3525,10 +3532,13 @@ async fn execute_prepared_tool(
         match begin {
             Ok(checkpoint) => Some(checkpoint),
             Err(error) => {
-                return (
-                    failed_execution(call, format!("checkpoint failed before tool: {error}")),
-                    false,
-                );
+                let mut execution =
+                    failed_execution(call, format!("checkpoint failed before tool: {error}"));
+                if let Err(proof) = runtime.checkpoints.settle_effects().await {
+                    execution.unsettled = true;
+                    mark_unsettled(&runtime.signals, &cancellation, proof.to_string());
+                }
+                return (execution, false);
             }
         }
     };
@@ -3672,6 +3682,9 @@ async fn execute_prepared_tool(
         )
         .await;
     }
+    if execution.unsettled {
+        return (execution, true);
+    }
     let checkpoint_outcome = if tool_cancelled || cancellation.is_cancelled() {
         MutationCheckpointOutcome::Cancelled
     } else if execution.is_error {
@@ -3734,6 +3747,7 @@ async fn apply_post_tool_hook(
                 text: error.to_string(),
             };
             execution.is_error = true;
+            execution.unsettled = matches!(error, AgentLoopError::EffectsUnsettled(_));
             return execution;
         }
     };

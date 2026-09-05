@@ -571,7 +571,23 @@ impl MutationCheckpointCoordinator for DurableCheckpointCoordinator {
 
     async fn settle_effects(&self) -> std::result::Result<(), AgentLoopError> {
         self.workers.settle().await;
-        self.ensure_workspace_consistent()
+        self.ensure_workspace_consistent()?;
+        if !self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+            || !self
+                .rewinds
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+        {
+            return Err(AgentLoopError::EffectsUnsettled(
+                "checkpoint handles remain active after effect settlement".to_owned(),
+            ));
+        }
+        Ok(())
     }
 }
 

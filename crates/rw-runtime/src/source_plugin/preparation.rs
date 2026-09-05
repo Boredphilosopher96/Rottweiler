@@ -14,12 +14,16 @@ use std::sync::{
 };
 use tokio::{
     io::AsyncReadExt as _,
-    sync::{Notify, OwnedSemaphorePermit, Semaphore, oneshot},
+    sync::{OwnedSemaphorePermit, Semaphore, oneshot},
     time::Instant,
 };
 
+mod ownership;
+use ownership::{Operation, Ownership};
+
 const MAX_PREPARATIONS: usize = 32;
 const CONCURRENT_PREPARATIONS: usize = 2;
+const PREPARATION_SETTLEMENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub(crate) struct SourcePreparationBudget {
     admission: Arc<Semaphore>,
@@ -37,12 +41,14 @@ impl Default for SourcePreparationBudget {
 pub(crate) struct SourcePreparations {
     budget: Arc<SourcePreparationBudget>,
     jobs: Mutex<Vec<Arc<Operation>>>,
+    closed: AtomicBool,
 }
 impl SourcePreparations {
     pub(crate) fn new(budget: Arc<SourcePreparationBudget>) -> Self {
         Self {
             budget,
             jobs: Mutex::new(Vec::new()),
+            closed: AtomicBool::new(false),
         }
     }
 }
@@ -62,57 +68,11 @@ struct CompletedPreparation {
     result: Result<PreparationOutput>,
     _admission: Option<OwnedSemaphorePermit>,
 }
-struct Operation {
-    cancellation: CancellationToken,
-    complete: AtomicBool,
-    changed: Notify,
-}
-impl Operation {
-    async fn wait(&self) {
-        loop {
-            let changed = self.changed.notified();
-            tokio::pin!(changed);
-            changed.as_mut().enable();
-            if self.complete.load(Ordering::Acquire) {
-                return;
-            }
-            changed.await;
-        }
-    }
-}
 struct CancelOnDrop(Option<Arc<Operation>>);
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
         if let Some(operation) = &self.0 {
             operation.cancellation.cancel();
-        }
-    }
-}
-// An aborted/panicking executor is not proof that launched native work stopped.
-struct Ownership {
-    scratch: Option<Arc<PrivateMcpScratch>>,
-    #[cfg(target_os = "linux")]
-    view_directory: Option<tempfile::TempDir>,
-    admission: Option<OwnedSemaphorePermit>,
-    execution: Option<OwnedSemaphorePermit>,
-    settled: bool,
-}
-impl Drop for Ownership {
-    fn drop(&mut self) {
-        if !self.settled {
-            #[cfg(target_os = "linux")]
-            if let Some(directory) = self.view_directory.take() {
-                std::mem::forget(directory);
-            }
-            if let Some(scratch) = self.scratch.take() {
-                std::mem::forget(scratch);
-            }
-            if let Some(permit) = self.admission.take() {
-                permit.forget();
-            }
-            if let Some(permit) = self.execution.take() {
-                permit.forget();
-            }
         }
     }
 }
@@ -122,30 +82,31 @@ impl SourcePreparations {
         request: PreparationRequest,
         deadline: Instant,
     ) -> Result<PreparationOutput> {
-        let admission = Arc::clone(&self.budget.admission)
-            .try_acquire_owned()
-            .map_err(|_| miette!("TypeScript preparation admission is exhausted"))?;
-        let operation = Arc::new(Operation {
-            cancellation: CancellationToken::default(),
-            complete: AtomicBool::new(false),
-            changed: Notify::new(),
-        });
-        self.jobs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(Arc::clone(&operation));
+        let mut ownership = {
+            let mut jobs = self
+                .jobs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self.closed.load(Ordering::Acquire) {
+                return Err(miette!("TypeScript preparation generation is closed"));
+            }
+            let admission = Arc::clone(&self.budget.admission)
+                .try_acquire_owned()
+                .map_err(|_| miette!("TypeScript preparation admission is exhausted"))?;
+            let operation = Arc::new(Operation::new());
+            jobs.push(Arc::clone(&operation));
+            Ownership::new(
+                Arc::clone(self),
+                operation,
+                admission,
+                Arc::clone(&request.scratch),
+            )
+        };
+        let operation = Arc::clone(&ownership.operation);
         let mut guard = CancelOnDrop(Some(Arc::clone(&operation)));
         let pool = Arc::clone(self);
         let (send, receive) = oneshot::channel();
         tokio::spawn(async move {
-            let mut ownership = Ownership {
-                scratch: Some(Arc::clone(&request.scratch)),
-                #[cfg(target_os = "linux")]
-                view_directory: None,
-                admission: Some(admission),
-                execution: None,
-                settled: false,
-            };
             let outcome = AssertUnwindSafe(pool.run(
                 request,
                 &operation.cancellation,
@@ -154,23 +115,16 @@ impl SourcePreparations {
             ))
             .catch_unwind()
             .await;
-            let Ok(outcome) = outcome else {
-                tracing::error!("source preparation panicked; settlement remains unproven");
-                std::future::pending::<()>().await;
-                return;
-            };
-            ownership.settled = true;
-            let completed = CompletedPreparation {
-                result: outcome,
-                _admission: ownership.admission.take(),
+            let completed = match outcome {
+                Ok(outcome) => ownership.complete(outcome),
+                Err(_) => CompletedPreparation {
+                    result: Err(miette!(
+                        "source preparation executor panicked; effects are unsettled"
+                    )),
+                    _admission: None,
+                },
             };
             drop(ownership);
-            pool.jobs
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .retain(|job| !Arc::ptr_eq(job, &operation));
-            operation.complete.store(true, Ordering::Release);
-            operation.changed.notify_waiters();
             let _ = send.send(completed);
         });
         let outcome = receive
@@ -229,7 +183,8 @@ impl SourcePreparations {
             let _ = &request.output_root;
             PluginSandboxMode::Preparation {}
         };
-        let child = request
+        ownership.proof_required = true;
+        let child = match request
             .launcher
             .launch(
                 &request.config,
@@ -241,7 +196,17 @@ impl SourcePreparations {
                 },
             )
             .await
-            .map_err(|error| miette!(error.to_string()))?;
+        {
+            Ok(child) => child,
+            Err(rw_ext::PluginLaunchError::Rejected(error)) => {
+                ownership.proof_required = false;
+                return Err(miette!(error.to_string()));
+            }
+            Err(rw_ext::PluginLaunchError::EffectsUnsettled { message }) => {
+                return Err(miette!("source launch effects are unsettled: {message}"));
+            }
+        };
+        ownership.process = Some(Arc::clone(&child.process));
         let process = Arc::clone(&child.process);
         drop(child.stdin);
         // Pipe readers stay in this owned task. Revocation drops both readers
@@ -264,15 +229,19 @@ impl SourcePreparations {
         if let Err(error) = process.kill_tree() {
             tracing::debug!(%error, "source helper termination signal failed");
         }
-        if let Err(error) = process.settle_effects().await {
-            tracing::error!(%error, "source helper settlement remains unproven");
-            std::future::pending::<()>().await;
+        match tokio::time::timeout(PREPARATION_SETTLEMENT_TIMEOUT, process.settle_effects()).await {
+            Ok(Ok(())) => {
+                ownership.proof_required = false;
+                ownership.process.take();
+            }
+            Ok(Err(error)) => return Err(miette!("source helper effects are unsettled: {error}")),
+            Err(_) => return Err(miette!("source helper settlement proof deadline expired")),
         }
         // Keep private staging alive until every helper effect has settled.
         drop(request.scratch);
         outcome
     }
-    pub(crate) async fn settle_cancelled(&self) {
+    pub(crate) async fn settle_cancelled(&self) -> Result<()> {
         let jobs = self
             .jobs
             .lock()
@@ -281,9 +250,15 @@ impl SourcePreparations {
             .filter(|job| job.cancellation.is_cancelled())
             .cloned()
             .collect::<Vec<_>>();
+        let mut failure = None;
         for job in jobs {
-            job.wait().await;
+            if let Err(error) = job.wait().await {
+                failure.get_or_insert(error);
+            }
         }
+        failure.map_or(Ok(()), |error| {
+            Err(miette!("source preparation effects are unsettled: {error}"))
+        })
     }
 }
 

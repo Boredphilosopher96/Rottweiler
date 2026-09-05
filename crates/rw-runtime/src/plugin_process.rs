@@ -1,5 +1,7 @@
 //! Production OS-sandboxed launcher for approved RPC plugins.
 
+mod proxy_settlement;
+
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
@@ -226,7 +228,7 @@ async fn attach_supervisor(
         child: Mutex::new(child),
         process_group,
         violation: Arc::new(Mutex::new(None)),
-        _proxy: proxy,
+        proxy: proxy_settlement::PluginProxy::new(proxy),
     });
     let mut handoff = PendingPluginHandoff {
         process: Arc::clone(&process),
@@ -308,7 +310,7 @@ struct PluginChild {
     child: Mutex<Child>,
     process_group: Option<u32>,
     violation: Arc<Mutex<Option<String>>>,
-    _proxy: Option<SupervisedEgressProxy>,
+    proxy: proxy_settlement::PluginProxy,
 }
 
 impl Drop for PluginChild {
@@ -325,10 +327,17 @@ impl Drop for PluginChild {
 #[async_trait]
 impl SupervisedPluginProcess for PluginChild {
     async fn settle_effects(&self) -> Result<(), PluginProcessError> {
-        self.wait_for_exit().await?;
-        rw_tools::terminate_and_wait_process_group(self.process_group)
-            .await
-            .map_err(|failure| error(&failure.to_string()))
+        let (process, proxy) = tokio::join!(
+            async {
+                self.wait_for_exit().await?;
+                rw_tools::terminate_and_wait_process_group(self.process_group)
+                    .await
+                    .map_err(|failure| error(&failure.to_string()))
+            },
+            self.proxy.settle()
+        );
+        process?;
+        proxy
     }
 
     fn mark_capability_violation(&self, violation: &CapabilityViolation) {

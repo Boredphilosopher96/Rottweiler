@@ -55,3 +55,38 @@ async fn lost_wait_result_is_typed_as_unsettled_launch() {
         Err(PluginLaunchError::EffectsUnsettled { .. })
     ));
 }
+
+#[tokio::test]
+async fn successful_process_settlement_stops_proxy_while_process_owner_stays_alive() {
+    let config = PluginProcessConfig::new("/bin/sh").expect("fixture config");
+    let mut command = tokio::process::Command::new("/bin/sh");
+    command
+        .args(["-c", "while :; do :; done"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    command.as_std_mut().process_group(0);
+    let child = command.spawn().expect("child");
+    let proxy =
+        SupervisedEgressProxy::start(EgressPolicy::new(std::iter::empty::<&str>())).expect("proxy");
+    let lifecycle = proxy.lifecycle();
+    let launched = attach_supervisor(child, Some(proxy), &config)
+        .await
+        .expect("handoff");
+    assert!(!lifecycle.is_stopped());
+    launched.process.kill_tree().expect("kill owned process");
+    tokio::time::timeout(Duration::from_secs(2), launched.process.settle_effects())
+        .await
+        .expect("bounded proof")
+        .expect("settled");
+    assert!(
+        lifecycle.is_stopped(),
+        "the retained process Arc cannot keep proxy workers live after settlement"
+    );
+    launched
+        .process
+        .settle_effects()
+        .await
+        .expect("idempotent settlement");
+}

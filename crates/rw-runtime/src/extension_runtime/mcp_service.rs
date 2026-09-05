@@ -905,12 +905,14 @@ impl McpSessionRuntime {
         })
     }
 
-    pub(crate) async fn shutdown(&self) {
+    pub(crate) async fn shutdown(&self) -> Result<()> {
+        let mut failure = None;
         for (server, result) in self.manager.shutdown().await {
             if let Err(error) = result {
-                tracing::warn!(%server, %error, "MCP server shutdown failed");
+                failure.get_or_insert_with(|| miette!("MCP server {server}: {error}"));
             }
         }
+        failure.map_or(Ok(()), Err)
     }
 
     pub(crate) async fn deferred_context(&self) -> Result<Option<Turn>> {

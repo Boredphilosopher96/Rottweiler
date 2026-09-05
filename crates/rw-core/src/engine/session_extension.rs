@@ -41,7 +41,11 @@ pub trait SessionExtensionController: Send + Sync {
 
     async fn detach(&self) -> Result<SessionExtensionSnapshot, AgentLoopError>;
 
-    async fn rebase(&self, current: SessionExtensionSnapshot) -> (SessionExtensionSnapshot, bool);
+    async fn rebase(
+        &self,
+        current: SessionExtensionSnapshot,
+    ) -> Result<(SessionExtensionSnapshot, bool), AgentLoopError>;
+    async fn shutdown(&self) -> Result<(), AgentLoopError>;
 }
 
 #[derive(Debug, Default)]
@@ -65,7 +69,13 @@ impl SessionExtensionController for NoopSessionExtensionController {
         ))
     }
 
-    async fn rebase(&self, current: SessionExtensionSnapshot) -> (SessionExtensionSnapshot, bool) {
-        (current, false)
+    async fn rebase(
+        &self,
+        current: SessionExtensionSnapshot,
+    ) -> Result<(SessionExtensionSnapshot, bool), AgentLoopError> {
+        Ok((current, false))
+    }
+    async fn shutdown(&self) -> Result<(), AgentLoopError> {
+        Ok(())
     }
 }

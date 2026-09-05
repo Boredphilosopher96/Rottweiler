@@ -5,6 +5,7 @@ use rw_core::MutationCheckpointOutcome;
 #[cfg(test)]
 use rw_tools::MutationScope;
 mod checkpoints;
+mod model_effects;
 use checkpoints::{DurableCheckpointCoordinator, recover_rewind_transactions};
 
 use crate::journal_reads::{JournalReadLease, JournalReads, JournalRegistration};
@@ -519,6 +520,21 @@ async fn recover_subagent_tree(
                     "persisted child depth {} does not match expected depth {expected_depth} or configured maximum {max_depth}",
                     record.depth
                 )));
+            }
+            if record.phase == rw_core::SubagentRecoveryPhase::Closed {
+                let published = repaired.iter().any(|event| matches!(event, EngineEvent::SubagentSpawned {subagent_id, ..} if subagent_id == &record.handle.subagent_id));
+                if published {
+                    validate_subagent_recovery_record(&record, &repaired)?;
+                    if validate_subagent_recovery_record(&record, &effective).is_ok()
+                        && !effective.iter().any(|event| matches!(event, EngineEvent::SubagentFinished {subagent_id, result, ..} if subagent_id == &record.handle.subagent_id && result.session_id == record.handle.session_id)) {
+                        return Err(AgentLoopError::Persistence("closed child still lacks durable terminal proof".to_owned()));
+                    }
+                }
+                metadata
+                    .remove(&record.parent_session_id, &record.handle.subagent_id)
+                    .await
+                    .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+                continue;
             }
             if !recovery_workspace_authorized(&record, &node.authorized_roots) {
                 return Err(AgentLoopError::Persistence(
@@ -1643,7 +1659,7 @@ pub async fn run(options: RunOptions) -> Result<()> {
         }
         catalog
     };
-    let mcp_runtime = if executable_catalog.mcp_servers.is_empty() {
+    let mcp_runtime = (if executable_catalog.mcp_servers.is_empty() {
         None
     } else {
         let session_root = storage_root.join("sessions").join(&session_id);
@@ -1679,8 +1695,11 @@ pub async fn run(options: RunOptions) -> Result<()> {
             initial_context.push(index);
         }
         Some(runtime)
-    };
+    })
+    .map(Arc::new);
 
+    let mcp_resources =
+        crate::session_resources::RuntimeSessionResources::new(mcp_runtime.clone(), None);
     let inspection_profile = if inspection {
         Some(recorded_prompt_shape.as_ref().map_or_else(
             || {
@@ -1761,7 +1780,7 @@ pub async fn run(options: RunOptions) -> Result<()> {
     let plugin_redactor = Arc::new(crate::extension_runtime::SharedPluginRedactor::new(
         fixture_redactor.clone(),
     ));
-    let plugin_runtime = if executable_catalog.plugins.is_empty() || inspection {
+    let plugin_runtime = (if executable_catalog.plugins.is_empty() || inspection {
         None
     } else {
         let runtime = crate::extension_runtime::PluginSessionRuntime::start(
@@ -1792,7 +1811,10 @@ pub async fn run(options: RunOptions) -> Result<()> {
             actor_tools = Arc::new(registry);
         }
         Some(runtime)
-    };
+    })
+    .map(Arc::new);
+    let plugin_resources =
+        crate::session_resources::RuntimeSessionResources::new(None, plugin_runtime.clone());
     let (model, engine_redactor): (Arc<dyn ModelDriver>, FixtureRedactor) = if inspection {
         let cache_support = inspection_profile
             .as_ref()
@@ -2241,6 +2263,10 @@ pub async fn run(options: RunOptions) -> Result<()> {
         folder_trust,
         workspace_roots: workspace_root_controller,
         extension_development,
+        resources: Arc::new(crate::session_resources::SessionResourcePair([
+            mcp_resources,
+            plugin_resources,
+        ])),
         recovered,
         max_turns: options.max_turns,
         identical_tool_failure_limit: DEFAULT_DOOM_LOOP_LIMIT,
@@ -2298,13 +2324,11 @@ pub async fn run(options: RunOptions) -> Result<()> {
         .todo
         .clear_session(&SessionId(session_id.clone()))
         .await;
-    if let Some(mcp) = &mcp_runtime {
-        mcp.shutdown().await;
-    }
-    if let Some(plugins) = &plugin_runtime {
-        plugins.shutdown().await;
-    }
-    wasm_workers.shutdown().await;
+    actor.close().await.map_err(display_agent_error)?;
+    wasm_workers
+        .shutdown()
+        .await
+        .map_err(|error| miette!(error.to_string()))?;
     if let Some(status) = outcome
         && status != TurnStatus::Completed
     {
@@ -2633,6 +2657,8 @@ pub(crate) async fn compose_hosted_actor(
         }
         Some(runtime)
     };
+    let mcp_resources =
+        crate::session_resources::RuntimeSessionResources::new(mcp_runtime.clone(), None);
     let mcp_admin: Option<Arc<dyn rw_core::HostMcpService>> = mcp_runtime.as_ref().map(|runtime| {
         Arc::new(
             crate::extension_runtime::LiveMcpAdmin::new_with_stdio_environment(
@@ -2685,6 +2711,8 @@ pub(crate) async fn compose_hosted_actor(
         }
         Some(runtime)
     };
+    let plugin_resources =
+        crate::session_resources::RuntimeSessionResources::new(None, plugin_runtime.clone());
 
     let (model, engine_redactor, model_catalog): (
         Arc<dyn ModelDriver>,
@@ -3075,6 +3103,10 @@ pub(crate) async fn compose_hosted_actor(
         folder_trust,
         workspace_roots: workspace_root_controller,
         extension_development,
+        resources: Arc::new(crate::session_resources::SessionResourcePair([
+            mcp_resources,
+            plugin_resources,
+        ])),
         recovered,
         max_turns: options.max_turns,
         identical_tool_failure_limit: DEFAULT_DOOM_LOOP_LIMIT,
@@ -3085,18 +3117,6 @@ pub(crate) async fn compose_hosted_actor(
     .map_err(display_agent_error)?;
     if let Some(plugins) = &plugin_runtime {
         plugins.bind_push(&handle)?;
-    }
-    if mcp_runtime.is_some() || plugin_runtime.is_some() {
-        let mut lifecycle = handle.subscribe().map_err(display_agent_error)?;
-        tokio::spawn(async move {
-            while lifecycle.recv().await.is_ok() {}
-            if let Some(mcp) = mcp_runtime {
-                mcp.shutdown().await;
-            }
-            if let Some(plugins) = plugin_runtime {
-                plugins.shutdown().await;
-            }
-        });
     }
     let subagents: Arc<dyn HostSubagentService> = Arc::new(HostedSubagentController {
         journal_reads: Arc::clone(&options.journal_reads),
@@ -5616,6 +5636,7 @@ impl RuntimeWorkspaceRootController {
             )),
             workspace_roots: workspace_controller,
             extension_development: Arc::new(rw_core::NoopSessionExtensionController),
+            resources: Arc::new(rw_core::NoopSessionResources),
             recovered,
             max_turns,
             identical_tool_failure_limit: DEFAULT_DOOM_LOOP_LIMIT,
@@ -6443,6 +6464,7 @@ fn lazy_live_provider_model(
 /// concrete catalog models. A timed-out blocking preparation may continue, but
 /// it owns no live session state and therefore cannot commit late.
 struct RecomposableHostedModel {
+    effects: model_effects::ModelEffects,
     model: RwLock<Arc<dyn ModelDriver>>,
     standby: RwLock<BTreeMap<String, ActivatedHostedProvider>>,
     retained: RwLock<Vec<RetainedHostedSelection>>,
@@ -6555,6 +6577,7 @@ impl RecomposableHostedModel {
     ) -> Self {
         let initial_load_pending = initialize.is_some();
         Self {
+            effects: model_effects::ModelEffects::default(),
             model: RwLock::new(inner),
             standby: RwLock::new(BTreeMap::new()),
             retained: RwLock::new(Vec::new()),
@@ -6740,13 +6763,19 @@ impl ModelCatalogSource for RecomposableHostedModel {
 
 #[async_trait]
 impl ModelDriver for RecomposableHostedModel {
+    async fn settle_effects(&self) -> std::result::Result<(), rw_core::AgentLoopError> {
+        self.effects.settle().await
+    }
+
     fn stream(
         &self,
         alias: &str,
         request: ProviderRequest,
         invocation: rw_core::provider_admission::ProviderInvocation,
     ) -> std::result::Result<BoxEventStream, AgentLoopError> {
-        self.current().stream(alias, request, invocation)
+        self.effects.stream(self.current(), |driver| {
+            driver.stream(alias, request, invocation)
+        })
     }
 
     fn stream_for_provider(
@@ -6756,8 +6785,9 @@ impl ModelDriver for RecomposableHostedModel {
         request: ProviderRequest,
         invocation: rw_core::provider_admission::ProviderInvocation,
     ) -> std::result::Result<BoxEventStream, AgentLoopError> {
-        self.current()
-            .stream_for_provider(alias, provider, request, invocation)
+        self.effects.stream(self.current(), |driver| {
+            driver.stream_for_provider(alias, provider, request, invocation)
+        })
     }
 
     fn context_metadata(&self, alias: &str) -> rw_core::ModelContextMetadata {
@@ -7031,7 +7061,12 @@ impl ModelDriver for RecomposableHostedModel {
     }
 }
 
+#[async_trait::async_trait]
 impl ModelDriver for UnavailableHostedModel {
+    async fn settle_effects(&self) -> std::result::Result<(), rw_core::AgentLoopError> {
+        Ok(())
+    }
+
     fn stream(
         &self,
         _alias: &str,
@@ -7101,8 +7136,11 @@ impl ModelDriver for ProviderModel {
             .map_err(|error| AgentLoopError::Provider(error.to_string()))
     }
 
-    async fn settle_effects(&self) {
-        self.operations.settle_effects().await;
+    async fn settle_effects(&self) -> std::result::Result<(), rw_core::AgentLoopError> {
+        self.operations
+            .settle_effects()
+            .await
+            .map_err(|error| AgentLoopError::EffectsUnsettled(error.to_string()))
     }
 
     fn context_metadata(&self, _alias: &str) -> rw_core::ModelContextMetadata {
@@ -7142,6 +7180,10 @@ struct PromptRecordingModel {
 
 #[async_trait]
 impl ModelDriver for PromptRecordingModel {
+    async fn settle_effects(&self) -> std::result::Result<(), rw_core::AgentLoopError> {
+        self.inner.settle_effects().await
+    }
+
     fn stream(
         &self,
         alias: &str,
@@ -7340,6 +7382,10 @@ impl NestedInstructionsModel {
 
 #[async_trait]
 impl ModelDriver for NestedInstructionsModel {
+    async fn settle_effects(&self) -> std::result::Result<(), rw_core::AgentLoopError> {
+        self.inner.settle_effects().await
+    }
+
     fn stream(
         &self,
         alias: &str,
@@ -7448,6 +7494,10 @@ struct NestedInstructionsPreToolGuard {
 
 #[async_trait]
 impl HookHandler for NestedInstructionsPreToolGuard {
+    async fn settle_effects(&self) -> std::result::Result<(), rw_ext::HookError> {
+        Ok(())
+    }
+
     async fn invoke(
         &self,
         invocation: HookInvocation<'_>,
@@ -7632,6 +7682,10 @@ struct HistoricalPromptTool(ToolDescriptor);
 
 #[async_trait]
 impl Tool for HistoricalPromptTool {
+    async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         self.0.clone()
     }
@@ -8402,6 +8456,15 @@ struct ToolchainTestHook {
 
 #[async_trait]
 impl HookHandler for ToolchainTestHook {
+    async fn settle_effects(&self) -> std::result::Result<(), rw_ext::HookError> {
+        let boundary = self.runtime.current();
+        let first = boundary.executor.settle_effects().await;
+        let second = boundary.read_only_executor.settle_effects().await;
+        first
+            .and(second)
+            .map_err(|error| HookError::new("effects_unsettled", error.to_string()))
+    }
+
     async fn invoke(
         &self,
         invocation: HookInvocation<'_>,
@@ -8573,6 +8636,15 @@ fn registered_file_mutation_path(
 
 #[async_trait]
 impl HookHandler for ToolchainHook {
+    async fn settle_effects(&self) -> std::result::Result<(), rw_ext::HookError> {
+        let boundary = self.runtime.current();
+        let first = boundary.executor.settle_effects().await;
+        let second = boundary.read_only_executor.settle_effects().await;
+        first
+            .and(second)
+            .map_err(|error| HookError::new("effects_unsettled", error.to_string()))
+    }
+
     async fn invoke(
         &self,
         invocation: HookInvocation<'_>,
@@ -8659,6 +8731,10 @@ struct LspDiagnosticsHook {
 
 #[async_trait]
 impl HookHandler for LspDiagnosticsHook {
+    async fn settle_effects(&self) -> std::result::Result<(), rw_ext::HookError> {
+        Ok(())
+    }
+
     async fn invoke(
         &self,
         invocation: HookInvocation<'_>,
@@ -9415,6 +9491,15 @@ impl DeclarativeShellHookHandler {
 
 #[async_trait]
 impl HookHandler for DeclarativeShellHookHandler {
+    async fn settle_effects(&self) -> std::result::Result<(), rw_ext::HookError> {
+        let boundary = self.runtime.current();
+        let first = boundary.executor.settle_effects().await;
+        let second = boundary.read_only_executor.settle_effects().await;
+        first
+            .and(second)
+            .map_err(|error| HookError::new("effects_unsettled", error.to_string()))
+    }
+
     async fn invoke(
         &self,
         invocation: HookInvocation<'_>,
@@ -10048,8 +10133,8 @@ struct ScratchGuardedCommandExecutor {
 
 #[async_trait]
 impl CommandExecutor for ScratchGuardedCommandExecutor {
-    async fn settle_effects(&self) {
-        self.inner.settle_effects().await;
+    async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
+        self.inner.settle_effects().await
     }
     fn supports_background(&self) -> bool {
         self.inner.supports_background()
@@ -10130,10 +10215,11 @@ impl DeferredCommandExecutor {
 
 #[async_trait]
 impl CommandExecutor for DeferredCommandExecutor {
-    async fn settle_effects(&self) {
+    async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
         if let Some(inner) = self.inner.get() {
-            inner.settle_effects().await;
+            inner.settle_effects().await?;
         }
+        Ok(())
     }
     fn supports_background(&self) -> bool {
         matches!(
@@ -11019,6 +11105,10 @@ impl AliasAwareWebSearchModel {
 
 #[async_trait]
 impl ModelDriver for AliasAwareWebSearchModel {
+    async fn settle_effects(&self) -> std::result::Result<(), rw_core::AgentLoopError> {
+        self.inner.settle_effects().await
+    }
+
     fn stream(
         &self,
         alias: &str,
@@ -11392,6 +11482,10 @@ impl LazySymbolsTool {
 
 #[async_trait]
 impl Tool for LazySymbolsTool {
+    async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         self.inner.descriptor()
     }
@@ -12586,6 +12680,7 @@ fn append_tool_output(target: &mut String, output: &ToolOutput) {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
+    mod closed_recovery;
 
     use super::*;
     use rw_core::{
@@ -13068,6 +13163,10 @@ mod tests {
 
     #[async_trait]
     impl ModelDriver for QuickConnectedModel {
+        async fn settle_effects(&self) -> std::result::Result<(), rw_core::AgentLoopError> {
+            Ok(())
+        }
+
         fn stream(
             &self,
             _alias: &str,
@@ -13112,6 +13211,10 @@ mod tests {
 
     #[async_trait]
     impl ModelDriver for ExistingRouteModel {
+        async fn settle_effects(&self) -> std::result::Result<(), rw_core::AgentLoopError> {
+            Ok(())
+        }
+
         fn stream(
             &self,
             _alias: &str,
@@ -13140,6 +13243,10 @@ mod tests {
 
     #[async_trait]
     impl ModelDriver for RejectingPrepareModel {
+        async fn settle_effects(&self) -> std::result::Result<(), rw_core::AgentLoopError> {
+            Ok(())
+        }
+
         fn stream(
             &self,
             _alias: &str,
@@ -13479,6 +13586,7 @@ mod tests {
             folder_trust: Arc::new(rw_core::NoopFolderTrustController),
             workspace_roots: Arc::new(rw_core::NoopWorkspaceRootController),
             extension_development: Arc::new(rw_core::NoopSessionExtensionController),
+            resources: Arc::new(rw_core::NoopSessionResources),
             recovered: rw_core::SessionRecoveredState {
                 driver_client_id: Some(ClientId("driver".to_owned())),
                 ..rw_core::SessionRecoveredState::default()
@@ -13790,6 +13898,7 @@ mod tests {
             folder_trust: Arc::new(rw_core::NoopFolderTrustController),
             workspace_roots: Arc::new(rw_core::NoopWorkspaceRootController),
             extension_development: Arc::new(rw_core::NoopSessionExtensionController),
+            resources: Arc::new(rw_core::NoopSessionResources),
             recovered: rw_core::SessionRecoveredState {
                 driver_client_id: Some(ClientId("driver".to_owned())),
                 ..rw_core::SessionRecoveredState::default()
@@ -14352,6 +14461,12 @@ mod tests {
 
     #[async_trait]
     impl rw_core::SubagentSession for RecoveryProbeSession {
+        async fn close(
+            &self,
+            _: Option<&rw_types::DiffArtifact>,
+        ) -> std::result::Result<(), rw_core::OrchestrationError> {
+            Ok(())
+        }
         fn session_id(&self) -> &SessionId {
             &self.session_id
         }
@@ -14852,6 +14967,7 @@ mod tests {
             folder_trust: Arc::new(rw_core::NoopFolderTrustController),
             workspace_roots: Arc::new(rw_core::NoopWorkspaceRootController),
             extension_development: Arc::new(rw_core::NoopSessionExtensionController),
+            resources: Arc::new(rw_core::NoopSessionResources),
             recovered: rw_core::SessionRecoveredState::default(),
             max_turns: 5,
             identical_tool_failure_limit: 3,
@@ -15705,7 +15821,12 @@ mod tests {
         request: Arc<Mutex<Option<ProviderRequest>>>,
     }
 
+    #[async_trait::async_trait]
     impl ModelDriver for CapturingModel {
+        async fn settle_effects(&self) -> std::result::Result<(), rw_core::AgentLoopError> {
+            Ok(())
+        }
+
         fn stream(
             &self,
             _alias: &str,
@@ -15977,7 +16098,9 @@ mod tests {
 
     #[async_trait]
     impl CommandExecutor for FixtureToolchainExecutor {
-        async fn settle_effects(&self) {}
+        async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
+            Ok(())
+        }
         async fn run(
             &self,
             request: CommandRequest,
@@ -18443,6 +18566,7 @@ mod tests {
             folder_trust: Arc::new(rw_core::NoopFolderTrustController),
             workspace_roots: Arc::new(rw_core::NoopWorkspaceRootController),
             extension_development: Arc::new(rw_core::NoopSessionExtensionController),
+            resources: Arc::new(rw_core::NoopSessionResources),
             recovered: rw_core::SessionRecoveredState {
                 conversation: vec![user],
                 ..rw_core::SessionRecoveredState::default()
@@ -19300,11 +19424,7 @@ mod tests {
             )
             .await
             .expect_err("mixed workspace state must block later mutation");
-        assert!(
-            blocked
-                .to_string()
-                .contains("blocked until committed rewind recovery")
-        );
+        assert!(matches!(blocked, AgentLoopError::Persistence(_)));
         assert!(
             coordinator.session_review(&session).await.is_err(),
             "mixed workspace state must not be presented as a coherent review"
@@ -19321,11 +19441,7 @@ mod tests {
             )
             .await
             .expect_err("every coordinator for the workspace must observe rewind poison");
-        assert!(
-            peer_blocked
-                .to_string()
-                .contains("blocked until committed rewind recovery")
-        );
+        assert!(matches!(peer_blocked, AgentLoopError::Persistence(_)));
 
         drop(coordinator);
         drop(peer);
@@ -20181,6 +20297,7 @@ mod tests {
             folder_trust: Arc::new(rw_core::NoopFolderTrustController),
             workspace_roots: Arc::new(rw_core::NoopWorkspaceRootController),
             extension_development: Arc::new(rw_core::NoopSessionExtensionController),
+            resources: Arc::new(rw_core::NoopSessionResources),
             recovered: rw_core::SessionRecoveredState::default(),
             max_turns: 4,
             identical_tool_failure_limit: 5,
@@ -20347,6 +20464,7 @@ mod tests {
                 folder_trust: Arc::new(rw_core::NoopFolderTrustController),
                 workspace_roots: Arc::new(rw_core::NoopWorkspaceRootController),
                 extension_development: Arc::new(rw_core::NoopSessionExtensionController),
+                resources: Arc::new(rw_core::NoopSessionResources),
                 recovered,
                 max_turns: 4,
                 identical_tool_failure_limit: 3,

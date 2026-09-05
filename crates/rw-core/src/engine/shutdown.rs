@@ -185,5 +185,16 @@ async fn cleanup(
     if let Err(error) = config.checkpoints.settle_effects().await {
         failure.get_or_insert_with(|| error.to_string());
     }
+    if let Some(failure) = failure {
+        return Err(failure);
+    }
+    config
+        .extension_development
+        .shutdown()
+        .await
+        .map_err(|error| error.to_string())?;
+    if let Err(error) = config.resources.shutdown().await {
+        failure.get_or_insert_with(|| error.to_string());
+    }
     failure.map_or(Ok(()), Err)
 }

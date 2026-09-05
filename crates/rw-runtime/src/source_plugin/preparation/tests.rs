@@ -2,7 +2,8 @@
 use super::*;
 use async_trait::async_trait;
 use rw_ext::{
-    CapabilityViolation, LaunchedPluginProcess, PluginProcessError, SupervisedPluginProcess,
+    CapabilityViolation, LaunchedPluginProcess, PluginLaunchError, PluginProcessError,
+    SupervisedPluginProcess,
 };
 use std::{path::PathBuf, sync::atomic::AtomicUsize, time::Duration};
 use tokio::io::BufReader;
@@ -68,7 +69,7 @@ impl PluginLauncher for Launcher {
         &self,
         config: &PluginProcessConfig,
         _: &PluginSandboxProfile,
-    ) -> std::result::Result<LaunchedPluginProcess, PluginProcessError> {
+    ) -> std::result::Result<LaunchedPluginProcess, PluginLaunchError> {
         use std::os::unix::process::CommandExt as _;
         let mut command = tokio::process::Command::new(config.executable());
         command
@@ -79,7 +80,9 @@ impl PluginLauncher for Launcher {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         command.as_std_mut().process_group(0);
-        let mut child = command.spawn().map_err(process_error)?;
+        let mut child = command
+            .spawn()
+            .map_err(|error| PluginLaunchError::Rejected(process_error(error)))?;
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
@@ -160,7 +163,8 @@ async fn dropping_preparation_retains_scratch_and_reaps_owned_children() {
     assert!(caller.await.expect_err("caller dropped").is_cancelled());
     tokio::time::timeout(Duration::from_secs(3), pool.settle_cancelled())
         .await
-        .expect("owned cleanup completes");
+        .expect("owned cleanup completes")
+        .expect("proof");
     assert_idle(&pool, &launcher);
     assert!(!scratch.exists());
 }
@@ -210,7 +214,8 @@ async fn queued_admission_is_bounded_and_abandoned_entries_self_retire() {
     }
     tokio::time::timeout(Duration::from_secs(3), pool.settle_cancelled())
         .await
-        .expect("all owned cleanup completes");
+        .expect("all owned cleanup completes")
+        .expect("proof");
     assert_idle(&pool, &launcher);
     assert!(launcher.launches.load(Ordering::Acquire) <= CONCURRENT_PREPARATIONS);
 }
@@ -256,7 +261,7 @@ impl PluginLauncher for PanickingLauncher {
         &self,
         _: &PluginProcessConfig,
         _: &PluginSandboxProfile,
-    ) -> std::result::Result<LaunchedPluginProcess, PluginProcessError> {
+    ) -> std::result::Result<LaunchedPluginProcess, PluginLaunchError> {
         panic!("seeded panic after preparation admission");
     }
 }
@@ -273,11 +278,11 @@ async fn executor_panic_cannot_release_admission_or_pass_the_settlement_barrier(
             .await
     });
     until(|| pool.budget.execution.available_permits() == CONCURRENT_PREPARATIONS - 1).await;
-    caller.abort();
-    assert!(caller.await.expect_err("caller dropped").is_cancelled());
+    assert!(caller.await.expect("owned panic is reported").is_err());
     assert!(
-        tokio::time::timeout(Duration::from_millis(20), pool.settle_cancelled())
+        tokio::time::timeout(Duration::from_secs(1), pool.settle_cancelled())
             .await
+            .expect("failed proof returns")
             .is_err()
     );
     assert_eq!(
@@ -296,7 +301,8 @@ async fn executor_panic_cannot_release_admission_or_pass_the_settlement_barrier(
     let other = Arc::new(SourcePreparations::new(Arc::clone(&pool.budget)));
     tokio::time::timeout(Duration::from_secs(1), other.settle_cancelled())
         .await
-        .expect("unrelated generation does not inherit an unproven barrier");
+        .expect("unrelated generation does not inherit an unproven barrier")
+        .expect("unrelated proof");
     let launcher = Arc::new(Launcher::default());
     let result = other
         .execute(
@@ -339,4 +345,128 @@ async fn undelivered_completion_keeps_its_admission_charge() {
     );
     assert_eq!(output.await.expect("owned result").stdout, b"completed");
     assert_idle(&pool, &launcher);
+}
+
+struct UnprovenProcess(Arc<dyn SupervisedPluginProcess>);
+#[async_trait]
+impl SupervisedPluginProcess for UnprovenProcess {
+    fn mark_capability_violation(&self, violation: &CapabilityViolation) {
+        self.0.mark_capability_violation(violation);
+    }
+    fn kill_tree(&self) -> std::result::Result<(), PluginProcessError> {
+        self.0.kill_tree()
+    }
+    async fn wait(&self) -> std::result::Result<Option<i32>, PluginProcessError> {
+        self.0.wait().await
+    }
+    async fn settle_effects(&self) -> std::result::Result<(), PluginProcessError> {
+        // Clean up the real fixture before supplying a failed proof outcome.
+        self.0.settle_effects().await?;
+        Err(process_error("seeded failed settlement proof"))
+    }
+}
+struct FailedProofLauncher(Arc<Launcher>);
+#[async_trait]
+impl PluginLauncher for FailedProofLauncher {
+    async fn launch(
+        &self,
+        config: &PluginProcessConfig,
+        profile: &PluginSandboxProfile,
+    ) -> std::result::Result<LaunchedPluginProcess, PluginLaunchError> {
+        let mut child = self.0.launch(config, profile).await?;
+        child.process = Arc::new(UnprovenProcess(child.process));
+        Ok(child)
+    }
+}
+
+#[tokio::test]
+async fn native_failed_proof_returns_error_and_retains_generation_resources() {
+    let pool = Arc::new(SourcePreparations::default());
+    let launcher = Arc::new(Launcher::default());
+    let mut input = request(&launcher, "printf output");
+    let scratch = input.scratch.path().to_owned();
+    input.launcher = Arc::new(FailedProofLauncher(Arc::clone(&launcher)));
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(2),
+        pool.execute(input, Instant::now() + Duration::from_secs(1)),
+    )
+    .await
+    .expect("failed proof returns");
+    assert!(
+        outcome
+            .expect_err("unproven helper")
+            .to_string()
+            .contains("unsettled")
+    );
+    assert!(pool.settle_cancelled().await.is_err());
+    assert!(pool.closed.load(Ordering::Acquire));
+    assert_eq!(
+        pool.budget.admission.available_permits(),
+        MAX_PREPARATIONS - 1
+    );
+    assert_eq!(
+        pool.budget.execution.available_permits(),
+        CONCURRENT_PREPARATIONS - 1
+    );
+    assert_eq!(pool.jobs.lock().expect("failed record retained").len(), 1);
+    assert!(scratch.exists());
+    assert!(
+        launcher
+            .children
+            .lock()
+            .expect("children")
+            .iter()
+            .all(|child| child.settled.load(Ordering::Acquire)),
+        "real fixture cleanup completed before injecting failure"
+    );
+    assert!(
+        pool.execute(
+            request(&launcher, "exit 0"),
+            Instant::now() + Duration::from_secs(1)
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(launcher.launches.load(Ordering::Acquire), 1);
+    std::fs::remove_dir_all(scratch).expect("remove inert retained fixture scratch");
+}
+
+struct RejectedLauncher;
+#[async_trait]
+impl PluginLauncher for RejectedLauncher {
+    async fn launch(
+        &self,
+        _: &PluginProcessConfig,
+        _: &PluginSandboxProfile,
+    ) -> std::result::Result<LaunchedPluginProcess, PluginLaunchError> {
+        Err(PluginLaunchError::Rejected(process_error(
+            "seeded pre-spawn rejection",
+        )))
+    }
+}
+
+#[tokio::test]
+async fn rejected_launch_releases_admission_without_poisoning_generation() {
+    let pool = Arc::new(SourcePreparations::default());
+    let launcher = Arc::new(Launcher::default());
+    let mut input = request(&launcher, "exit 0");
+    input.launcher = Arc::new(RejectedLauncher);
+    let scratch = input.scratch.path().to_owned();
+    assert!(
+        pool.execute(input, Instant::now() + Duration::from_secs(1))
+            .await
+            .is_err()
+    );
+    assert!(!pool.closed.load(Ordering::Acquire));
+    assert!(pool.settle_cancelled().await.is_ok());
+    assert!(!scratch.exists());
+    assert_idle(&pool, &launcher);
+    let output = pool
+        .execute(
+            request(&launcher, "printf healthy"),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .expect("same generation remains usable");
+    assert_eq!(output.stdout, b"healthy");
 }

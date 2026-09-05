@@ -29,12 +29,11 @@ use rw_core::{
     ToonMcpEncoder, VaultMcpTokenProvider,
 };
 use rw_ext::{
-    ApprovalRequirement, ApprovalStore, ApprovalStoreError, CapabilityEnforcer, HookHandler,
-    HookRegistration, PluginBoundaryRedactor, PluginEventRouter, PluginHost,
-    PluginHttpStreamResponse, PluginLauncher, PluginProviderHttpHandler, PluginRpcClient,
-    PluginRpcError, PushHandler, RpcCommandAdapter, RpcHookHandler, RpcProviderAdapter,
-    RpcToolAdapter, approve_plugin_launch, plugin_hook_registration,
-    plugin_launch_approval_requirement,
+    ApprovalRequirement, ApprovalStore, ApprovalStoreError, HookHandler, HookRegistration,
+    PluginBoundaryRedactor, PluginEventRouter, PluginHost, PluginHttpStreamResponse,
+    PluginLauncher, PluginProviderHttpHandler, PluginRpcError, PushHandler, RpcCommandAdapter,
+    RpcHookHandler, RpcProviderAdapter, RpcToolAdapter, approve_plugin_launch,
+    plugin_hook_registration, plugin_launch_approval_requirement,
 };
 use rw_ext::{
     CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation, CommandRegistry,
@@ -270,6 +269,7 @@ impl PluginProviderHttpHandler for RuntimePluginProviderHttp {
 fn plugin_http_guard_error(error: &rw_providers::GuardedHttpFetchError) -> PluginRpcError {
     let code = match &error {
         rw_providers::GuardedHttpFetchError::Provider(error) => match error.kind {
+            rw_providers::ProviderErrorKind::EffectsUnsettled => "effects_unsettled",
             rw_providers::ProviderErrorKind::Authentication => "provider_http_authentication",
             rw_providers::ProviderErrorKind::RateLimited => "provider_http_rate_limited",
             rw_providers::ProviderErrorKind::Timeout => "provider_http_timeout",
@@ -298,7 +298,7 @@ fn plugin_http_error(code: &str, message: &str) -> PluginRpcError {
 }
 
 pub(crate) struct PluginSessionRuntime {
-    hosts: Vec<PluginHost>,
+    hosts: Vec<Arc<PluginHost>>,
     push_handlers: Vec<(String, Arc<SessionPluginPushHandler>)>,
     pub(crate) tools: Vec<Arc<dyn Tool>>,
     pub(crate) hooks: Vec<(HookRegistration, Arc<dyn HookHandler>)>,
@@ -487,11 +487,14 @@ impl PluginSessionRuntime {
         host: PluginHost,
         push_handler: Arc<SessionPluginPushHandler>,
     ) -> Result<()> {
-        let client = host.client();
-        let enforcer = host.enforcer();
+        let host = Arc::new(host);
+        let endpoint: Arc<dyn rw_ext::PluginEndpoint> = Arc::new(
+            rw_ext::ReadyPluginEndpoint::new(Arc::clone(&host))
+                .map_err(|error| miette!(error.to_string()))?,
+        );
         for declaration in &manifest.capabilities.tools {
             self.tools.push(Arc::new(
-                RpcToolAdapter::new(declaration.clone(), client.clone(), enforcer.clone())
+                RpcToolAdapter::new(declaration.clone(), endpoint.clone())
                     .map_err(|error| miette!(error.to_string()))?,
             ));
         }
@@ -501,7 +504,7 @@ impl PluginSessionRuntime {
                     *declaration,
                     format!("plugin:{}:{}", config.name, declaration.name.as_str()),
                 ),
-                Arc::new(RpcHookHandler::new(client.clone(), enforcer.clone())),
+                Arc::new(RpcHookHandler::new(endpoint.clone())),
             ));
         }
         for declaration in &manifest.capabilities.commands {
@@ -513,16 +516,11 @@ impl PluginSessionRuntime {
             self.commands.push((
                 descriptor,
                 Arc::new(PluginSessionCommand {
-                    inner: RpcCommandAdapter::new(
-                        &declaration.name,
-                        client.clone(),
-                        enforcer.clone(),
-                    ),
+                    inner: RpcCommandAdapter::new(&declaration.name, endpoint.clone()),
                 }),
             ));
         }
-        self.register_providers(config, manifest, &client, &enforcer)
-            .await;
+        self.register_providers(config, manifest, &endpoint).await;
         if !manifest.capabilities.event_subscriptions.is_empty() {
             self.event_routers.push((
                 manifest
@@ -531,7 +529,7 @@ impl PluginSessionRuntime {
                     .iter()
                     .cloned()
                     .collect(),
-                Arc::new(PluginEventRouter::new(client, enforcer)),
+                Arc::new(PluginEventRouter::new(endpoint)),
             ));
         }
         self.hosts.push(host);
@@ -543,8 +541,7 @@ impl PluginSessionRuntime {
         &mut self,
         config: &crate::extension_config::DiscoveredPlugin,
         manifest: &PluginManifest,
-        client: &Arc<dyn PluginRpcClient>,
-        enforcer: &Arc<CapabilityEnforcer>,
+        endpoint: &Arc<dyn rw_ext::PluginEndpoint>,
     ) {
         for declaration in &manifest.capabilities.providers {
             let capabilities = rw_providers::Capabilities {
@@ -560,8 +557,7 @@ impl PluginSessionRuntime {
                 format!("plugin:{}", config.name),
                 &declaration.alias_prefix,
                 capabilities,
-                client.clone(),
-                enforcer.clone(),
+                endpoint.clone(),
             );
             if declaration
                 .capabilities
@@ -593,13 +589,17 @@ impl PluginSessionRuntime {
         Ok(())
     }
 
-    pub(crate) async fn shutdown(&self) {
+    pub(crate) async fn shutdown(&self) -> Result<()> {
+        let mut failure = None;
         for host in &self.hosts {
             if let Err(error) = host.shutdown().await {
-                tracing::warn!(%error, "plugin shutdown failed");
+                failure.get_or_insert_with(|| miette!(error.to_string()));
             }
         }
-        self.preparation.settle_cancelled().await;
+        if let Err(error) = self.preparation.settle_cancelled().await {
+            failure.get_or_insert(error);
+        }
+        failure.map_or(Ok(()), Err)
     }
 }
 

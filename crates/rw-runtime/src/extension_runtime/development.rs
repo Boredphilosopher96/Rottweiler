@@ -47,6 +47,8 @@ pub(crate) struct RuntimeSessionExtensionController {
     helper: PathBuf,
     redactor: Arc<SharedPluginRedactor>,
     state: tokio::sync::Mutex<DevelopmentExtensionState>,
+    operation: tokio::sync::Mutex<()>,
+    failed: std::sync::atomic::AtomicBool,
 }
 
 impl RuntimeSessionExtensionController {
@@ -60,7 +62,32 @@ impl RuntimeSessionExtensionController {
             helper,
             redactor,
             state: tokio::sync::Mutex::new(DevelopmentExtensionState::default()),
+            operation: tokio::sync::Mutex::new(()),
+            failed: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    fn ensure_ready(&self) -> std::result::Result<(), rw_core::AgentLoopError> {
+        if self.failed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(rw_core::AgentLoopError::EffectsUnsettled(
+                "development generation retirement is unproven".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn retire(
+        &self,
+        runtime: PluginSessionRuntime,
+    ) -> std::result::Result<(), rw_core::AgentLoopError> {
+        self.failed
+            .store(true, std::sync::atomic::Ordering::Release);
+        let resources =
+            crate::session_resources::RuntimeSessionResources::new(None, Some(Arc::new(runtime)));
+        rw_core::SessionResources::shutdown(resources.as_ref()).await?;
+        self.failed
+            .store(false, std::sync::atomic::Ordering::Release);
+        Ok(())
     }
 
     fn discovered(
@@ -173,7 +200,7 @@ impl RuntimeSessionExtensionController {
             return Ok(candidate);
         }
         let message = candidate.pending.join("; ");
-        candidate.shutdown().await;
+        self.retire(candidate).await?;
         Err(development_error(message))
     }
 
@@ -227,6 +254,8 @@ impl rw_core::SessionExtensionController for RuntimeSessionExtensionController {
         source: &Path,
         current: rw_core::SessionExtensionSnapshot,
     ) -> std::result::Result<rw_core::SessionExtensionSnapshot, rw_core::AgentLoopError> {
+        let _operation = self.operation.lock().await;
+        self.ensure_ready()?;
         let (plugin, manifest) =
             Self::discovered(source, &current.workspace_roots).map_err(development_error)?;
         let (base, ceiling, current_revision) = {
@@ -253,7 +282,7 @@ impl rw_core::SessionExtensionController for RuntimeSessionExtensionController {
         let snapshot = match Self::compose_candidate(&base, &candidate, revision) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                candidate.shutdown().await;
+                self.retire(candidate).await?;
                 return Err(error);
             }
         };
@@ -269,7 +298,7 @@ impl rw_core::SessionExtensionController for RuntimeSessionExtensionController {
             state.active.replace(candidate)
         };
         if let Some(retired) = retired {
-            retired.shutdown().await;
+            self.retire(retired).await?;
         }
         Ok(snapshot)
     }
@@ -277,6 +306,8 @@ impl rw_core::SessionExtensionController for RuntimeSessionExtensionController {
     async fn detach(
         &self,
     ) -> std::result::Result<rw_core::SessionExtensionSnapshot, rw_core::AgentLoopError> {
+        let _operation = self.operation.lock().await;
+        self.ensure_ready()?;
         let (base, active) = {
             let mut state = self.state.lock().await;
             let base = state.base.take().ok_or_else(|| {
@@ -289,7 +320,7 @@ impl rw_core::SessionExtensionController for RuntimeSessionExtensionController {
             (base, state.active.take())
         };
         if let Some(active) = active {
-            active.shutdown().await;
+            self.retire(active).await?;
         }
         Ok(base)
     }
@@ -297,11 +328,14 @@ impl rw_core::SessionExtensionController for RuntimeSessionExtensionController {
     async fn rebase(
         &self,
         current: rw_core::SessionExtensionSnapshot,
-    ) -> (rw_core::SessionExtensionSnapshot, bool) {
+    ) -> std::result::Result<(rw_core::SessionExtensionSnapshot, bool), rw_core::AgentLoopError>
+    {
+        let _operation = self.operation.lock().await;
+        self.ensure_ready()?;
         let (snapshot, retired) = {
             let mut state = self.state.lock().await;
             let Some(active) = state.active.as_ref() else {
-                return (current, false);
+                return Ok((current, false));
             };
             let revision = state.revision.max(current.revision).saturating_add(1);
             if let Ok(snapshot) = Self::compose_candidate(&current, active, revision) {
@@ -317,9 +351,19 @@ impl rw_core::SessionExtensionController for RuntimeSessionExtensionController {
             }
         };
         if let Some(retired) = retired {
-            retired.shutdown().await;
-            return (snapshot, true);
+            self.retire(retired).await?;
+            return Ok((snapshot, true));
         }
-        (snapshot, false)
+        Ok((snapshot, false))
+    }
+
+    async fn shutdown(&self) -> std::result::Result<(), rw_core::AgentLoopError> {
+        let _operation = self.operation.lock().await;
+        let earlier = self.ensure_ready();
+        let active = self.state.lock().await.active.take();
+        if let Some(active) = active {
+            self.retire(active).await?;
+        }
+        earlier
     }
 }

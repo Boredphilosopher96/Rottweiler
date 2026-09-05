@@ -141,3 +141,157 @@ async fn failed_or_panicked_model_cleanup_has_no_terminal_and_retains_owner_afte
         assert!(weak.upgrade().is_some());
     }
 }
+
+struct ResourcesProbe {
+    entered: Notify,
+    release: Notify,
+    fail: bool,
+}
+#[async_trait]
+impl crate::SessionResources for ResourcesProbe {
+    async fn shutdown(&self) -> Result<(), AgentLoopError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        if self.fail {
+            Err(AgentLoopError::EffectsUnsettled(
+                "resource owner failed".to_owned(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[tokio::test]
+async fn actor_acknowledges_runtime_resources_only_after_success_and_retains_failure() {
+    for fail in [false, true] {
+        let root = tempfile::tempdir().expect("root");
+        let resources = Arc::new(ResourcesProbe {
+            entered: Notify::new(),
+            release: Notify::new(),
+            fail,
+        });
+        let weak = Arc::downgrade(&resources);
+        let mut configuration = config(
+            root.path(),
+            Arc::new(ScriptedModel::new(Vec::new())),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            HookDispatcher::new(),
+        );
+        configuration.resources = resources.clone();
+        let handle = SessionActor::spawn(configuration).expect("actor");
+        let closing = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.close().await }
+        });
+        resources.entered.notified().await;
+        assert!(!closing.is_finished());
+        resources.release.notify_one();
+        let proof = closing.await.expect("close task");
+        assert_eq!(proof.is_err(), fail);
+        drop(resources);
+        drop(handle);
+        tokio::task::yield_now().await;
+        assert_eq!(weak.upgrade().is_some(), fail);
+    }
+}
+
+struct FailedHookProof {
+    invoked: AtomicBool,
+    entered: Notify,
+}
+#[async_trait]
+impl HookHandler for FailedHookProof {
+    async fn invoke(&self, _: HookInvocation<'_>) -> Result<HookDirective, HookError> {
+        self.invoked.store(true, Ordering::Release);
+        self.entered.notify_one();
+        Ok(HookDirective::Continue)
+    }
+    async fn settle_effects(&self) -> Result<(), HookError> {
+        if self.invoked.load(Ordering::Acquire) {
+            Err(HookError::new(
+                "effects_unsettled",
+                "fixture hook effects remain owned",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[tokio::test]
+async fn failed_hook_proof_never_finishes_tool_or_checkpoint() {
+    for (event, effect) in [
+        (HookEvent::PreTool, HookEffect::ReadOnly),
+        (HookEvent::PreTool, HookEffect::WorkspaceMutating),
+        (HookEvent::PostTool, HookEffect::WorkspaceMutating),
+    ] {
+        let root = tempfile::tempdir().expect("root");
+        let hook = Arc::new(FailedHookProof {
+            invoked: AtomicBool::new(false),
+            entered: Notify::new(),
+        });
+        let mut hooks = HookDispatcher::new();
+        hooks
+            .register_shared(
+                HookRegistration::new("failed-proof", event).with_effect(effect),
+                hook.clone(),
+            )
+            .expect("hook");
+        let mut tools = ToolRegistry::new();
+        tools
+            .register(Arc::new(StubTool::new(
+                "probe",
+                vec![ToolCapability::ReadFilesystem],
+                StubOutcome::Success(ToolResult::new("done", Value::Null)),
+            )))
+            .expect("tool");
+        let checkpoints = Arc::new(RecordingCheckpoints::default());
+        let sink = Arc::new(RecordingSink::default());
+        let mut configuration = config(
+            root.path(),
+            Arc::new(ScriptedModel::new([tool_script(
+                &[("call", "probe", json!({}))],
+                &[],
+            )])),
+            Arc::new(tools),
+            PermissionDecision::Allow,
+            hooks,
+        );
+        configuration.checkpoints = checkpoints.clone();
+        configuration.event_sink = sink.clone();
+        let handle = SessionActor::spawn(configuration).expect("actor");
+        handle
+            .send_message("run hook proof")
+            .await
+            .expect("admitted");
+        hook.entered.notified().await;
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), handle.close())
+                .await
+                .expect("bounded proof")
+                .is_err()
+        );
+        assert!(
+            checkpoints
+                .events
+                .lock()
+                .expect("checkpoints")
+                .iter()
+                .all(|event| !event.starts_with("finish:")),
+            "unproven hook cannot finalize its checkpoint"
+        );
+        assert!(
+            sink.events
+                .lock()
+                .expect("events")
+                .iter()
+                .all(|event| !matches!(
+                    event.kind,
+                    PendingEvent::ToolCallFinished { .. } | PendingEvent::TurnFinished { .. }
+                )),
+            "unproven hook cannot publish tool or turn completion"
+        );
+    }
+}

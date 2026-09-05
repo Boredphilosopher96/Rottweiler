@@ -227,7 +227,7 @@ async fn one_plugin_startup_failure_does_not_tear_down_other_plugins() {
     assert_eq!(result.hosts.len(), 1);
     assert_eq!(result.pending.len(), 1);
     assert!(result.pending[0].contains("second: unavailable"));
-    result.shutdown().await;
+    assert!(result.shutdown().await.is_ok());
     assert!(
         process.waited.load(Ordering::Acquire) >= 1,
         "the surviving plugin must still reap during session shutdown"
@@ -361,7 +361,7 @@ async fn empty_or_http_only_production_runtime_does_not_validate_stdio_helper() 
     .await
     .expect("empty hosted MCP runtime must not require a stdio helper");
     assert!(empty.manager.statuses().await.is_empty());
-    empty.shutdown().await;
+    assert!(empty.shutdown().await.is_ok());
 
     let http = DiscoveredMcpServer {
         name: "remote.docs".to_owned(),
@@ -395,7 +395,7 @@ async fn empty_or_http_only_production_runtime_does_not_validate_stdio_helper() 
     .await
     .expect("HTTP-only MCP runtime must not require a stdio helper");
     assert_eq!(http_runtime.manager.statuses().await.len(), 1);
-    http_runtime.shutdown().await;
+    assert!(http_runtime.shutdown().await.is_ok());
 }
 
 #[tokio::test]
@@ -469,7 +469,7 @@ async fn deferred_startup_does_not_resolve_mcp_credentials_or_connect() {
         1,
         "the explicit enable boundary may resolve exactly once",
     );
-    runtime.shutdown().await;
+    assert!(runtime.shutdown().await.is_ok());
 }
 
 #[cfg(unix)]
@@ -1095,7 +1095,7 @@ async fn repeated_exact_approval_reconnects_after_the_first_connection_failure()
         runtime.manager.statuses().await[0].state,
         ServerState::Ready
     ));
-    runtime.shutdown().await;
+    assert!(runtime.shutdown().await.is_ok());
 }
 
 #[tokio::test]
@@ -1164,7 +1164,7 @@ async fn three_mock_deferred_catalogs_unit_path_is_framed_and_under_2k() {
     );
     assert!(text.contains("\\u003c/rottweiler_untrusted_mcp_catalog_v1\\u003e"));
     assert_eq!(runtime.manager.deferred_tool_index().await.len(), 3);
-    runtime.shutdown().await;
+    assert!(runtime.shutdown().await.is_ok());
 }
 
 #[tokio::test]
@@ -1266,7 +1266,7 @@ async fn mcp_prompt_commands_are_namespaced_bounded_and_fail_when_disabled() {
             .await
             .is_err()
     );
-    runtime.shutdown().await;
+    assert!(runtime.shutdown().await.is_ok());
 }
 
 #[test]

@@ -76,7 +76,9 @@ mod replay;
 pub use replay::{SessionEventReadView, SessionReplayLimits};
 mod session;
 mod session_extension;
+mod session_resources;
 mod shutdown;
+pub use session_resources::{NoopSessionResources, SessionResources};
 mod task_ownership;
 mod turn;
 
@@ -4717,10 +4719,10 @@ mod tests {
         async fn rebase(
             &self,
             current: SessionExtensionSnapshot,
-        ) -> (SessionExtensionSnapshot, bool) {
+        ) -> Result<(SessionExtensionSnapshot, bool), AgentLoopError> {
             let mut stored = self.base.lock().expect("extension base");
             if stored.is_none() {
-                return (current, false);
+                return Ok((current, false));
             }
             *stored = Some(current.clone());
             let mut commands = current.commands.as_ref().clone();
@@ -4733,7 +4735,7 @@ mod tests {
                     EchoCommand,
                 )
                 .expect("development marker command");
-            (
+            Ok((
                 SessionExtensionSnapshot {
                     revision: current.revision.saturating_add(1),
                     workspace_roots: current.workspace_roots,
@@ -4742,7 +4744,10 @@ mod tests {
                     commands: Arc::new(commands),
                 },
                 false,
-            )
+            ))
+        }
+        async fn shutdown(&self) -> Result<(), AgentLoopError> {
+            Ok(())
         }
     }
 
@@ -4981,6 +4986,7 @@ mod tests {
             folder_trust: Arc::new(NoopFolderTrustController),
             workspace_roots: Arc::new(NoopWorkspaceRootController),
             extension_development: Arc::new(NoopSessionExtensionController),
+            resources: Arc::new(crate::NoopSessionResources),
             recovered: SessionRecoveredState::default(),
             max_turns: 10,
             identical_tool_failure_limit: 5,

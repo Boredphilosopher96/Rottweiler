@@ -17,6 +17,7 @@ mod project_commands;
 /// Durable provider budget admission and storage-worker settlement.
 pub mod provider_admission;
 mod session_host;
+mod session_resources;
 mod session_runtime;
 mod source_plugin;
 mod storage_root;
@@ -138,6 +139,9 @@ mod tests {
 
     #[async_trait]
     impl SessionFactory for EmptyFactory {
+        async fn shutdown(&self) -> Result<(), HostError> {
+            Ok(())
+        }
         fn allocate_session_id(&self) -> Result<rw_core::SessionId, HostError> {
             Ok(rw_core::SessionId("empty".to_owned()))
         }

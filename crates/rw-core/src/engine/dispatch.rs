@@ -3010,7 +3010,7 @@ pub(super) async fn handle_actor_command(
                                     .finalize_generation(generation.generation);
                                 let base_config =
                                     config.with_workspace_generation(&generation, &state.mode_id);
-                                let (rebased, development_detached) = config
+                                let rebase = config
                                     .extension_development
                                     .rebase(SessionExtensionSnapshot {
                                         revision: base_config.workspace_generation,
@@ -3020,6 +3020,15 @@ pub(super) async fn handle_actor_command(
                                         commands: Arc::clone(&base_config.commands),
                                     })
                                     .await;
+                                let (rebased, development_detached) = match rebase {
+                                    Ok(result) => result,
+                                    Err(error) => {
+                                        state.unsettled = Some(error.to_string());
+                                        state.tasks.cancel();
+                                        let _ = respond.send(Err(error));
+                                        return;
+                                    }
+                                };
                                 let next_config =
                                     Arc::new(base_config.with_extension_snapshot(&rebased));
                                 *command_descriptors
