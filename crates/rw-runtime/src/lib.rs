@@ -14,6 +14,8 @@ mod journal_reads;
 mod mode_recovery;
 mod plugin_process;
 mod project_commands;
+/// Durable provider budget admission and storage-worker settlement.
+pub mod provider_admission;
 mod session_host;
 mod session_runtime;
 mod source_plugin;
