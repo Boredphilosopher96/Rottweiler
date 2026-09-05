@@ -1,133 +1,56 @@
-# Paged transcript and bounded client ownership
+# Paged transcript and client history ownership
 
-Status: accepted A04 contract, 2026-09-04; implementation in progress. This document does not itself change the wire protocol. A02 owns the raw journal and pinned read views; A04 owns the semantic transcript projection and its client.
+The terminal reads semantic transcript pages from the engine and renders a bounded window of rows. Canonical journal events are authoritative. The transcript index is a rebuildable display projection; provider context and audit history have separate owners.
 
-- [x] Ground existing journal, child replay, reducer and native transcript paths.
-- [x] Compare client event paging with an engine-owned semantic index.
-- [x] Agree cross-boundary contract and ownership.
-- [ ] Implement and verify each complete vertical unit.
-- [ ] Revisit the design if implementation requires parallel authorities.
+## Ownership
 
-## User-visible behavior
+| Owner | Responsibility |
+| --- | --- |
+| `rw-types/src/transcript.rs` | Page, content, identity, revision and invalidation contracts; generated client types and validators. |
+| `rw-core/src/transcript.rs` and `transcript/` | Conversation display blocks, tool and child associations, turn summaries, command and shell records, and rewind interpretation. |
+| `rw-store/src/session/transcript_index.rs` | Indexed ordering, atomic row/checkpoint publication, journal identity binding and derived storage. |
+| `rw-runtime/src/transcript_service.rs` | Bounded source reads, projection catch-up and content lookup outside the session actor. |
+| `packages/tui/src/history/` | Read capability, session view selection, request cancellation, charged cache leases and document pages. |
+| `packages/tui/src/components/transcript.ts` | Native row mounting, expansion, selection, scrolling and live activity. |
 
-Opening a session shows its latest transcript page and live activity. Scrolling upward retrieves older messages. Home, End and a source-item jump can reach earliest, latest and specific history without downloading intervening bodies. New activity does not move a reader away from the message they were reading. Evicted pages can be fetched again. Reconnect and renderer replacement restore the selected item and position within it, rather than reusing an obsolete absolute scroll offset.
+## Read contract
 
-Historical cards contain bounded display content. Large text, reasoning, images, tool output and diffs carry engine-owned content references. Opening complete content uses a bounded document reader; it never requires mounting the entire body as one Markdown renderable.
+`HistoryReader` exposes only `page(sessionId, read, signal)` and `content(sessionId, read, signal)`. Live and historical views use this capability. Reads travel through the authenticated command connection and return typed `CommandReply` bodies. They do not place page bodies in the mutation acknowledgement ledger or durable SSE stream.
 
-## Existing contracts and the decision
+A `TranscriptView` identifies the session, projection version, structural generation and exact applied journal prefix (`through`, `digest`). A page includes row ordinals, total item count, an anchor result and bounded invalidation information. Ordinals describe logical display order; they are distinct from durable event sequence IDs.
 
-The existing `load_bounded_subagent_replay` returns raw tail/after event pages with durable sequence cursors. The top-level reducer retains 256 transcript entries; `TranscriptRenderable` mounts the latest 16 irrespective of scroll position. Tool details live separately in the reducer, while rewinds remove prior logical rows. Replaying an arbitrary raw event page cannot reconstruct those cross-page effects.
+Positions support first, latest, before, after, around and ordinal lookup. An ordinal lookup includes its expected generation. A changed ordering returns `OrderingChanged`; an incomplete projection returns `CatchingUp`. Neither result exposes an incomplete row set as a complete transcript. `Around` reports a replacement when the requested item no longer exists.
 
-Two shapes were considered:
+Each row has stable identity and a revision sequence. Tool lifecycle events bind to a host-owned invocation identity. Late completion and diff events update that row rather than creating duplicate tool output from provider IR. `TurnSummary` is sourced from `TurnFinished`; provider accounting receipts do not add a second displayed total.
 
-1. Client-owned pages of raw events, with checkpoints before every page. This keeps the current reducer but couples history reads to all control-state reduction, duplicates checkpoints across clients and makes arbitrary jumps depend on a valid earlier checkpoint. Tool finalization and rewind semantics would still require a separate authoritative index.
-2. Engine-owned, versioned semantic rows indexed against a pinned journal prefix. Clients fetch ready-to-display semantic content and independently format it. Rewind and tool association are evaluated once by the engine projection. The index is derived and rebuildable, with no authority beyond its journal prefix.
+The index serves the effective transcript at its applied prefix. Rewinds change structural generation. Item revisions and invalidations also cover changes that preserve ordering. The client rejects superseded requests and regressing views. Immutable journal history remains independently available for audit and export.
 
-Choose the second. Core owns semantic row identity, ordering, associations and rewind interpretation. Store owns bounded opaque index/checkpoint persistence and safe indexed reads. Runtime schedules bounded blocking work. The TUI owns rendering, sizing, expansion, selection and viewport position. No terminal dimensions, colors or Markdown presentation enter core.
+`SessionHistoryReady` announces history availability. It does not advance the client's durable cursor or establish that live control-state replay has completed. Loading display rows therefore does not authorize skipping approval, driver or active-operation events.
 
-## Protocol contract
+## Content and cache bounds
 
-The names below are a sketch. Rust `rw-types` owns final wire types, generated schemas, validators and fixtures. Collection/wire limits also have one Rust owner and generated client projections.
+The TUI requests at most 32 items and 256 KiB per transcript page. Historical rows contain bounded previews and typed source references. Content lookup accepts a semantic selector and exact source identity, not a filesystem path or arbitrary JSON pointer.
 
-```text
-TranscriptView = {
-  session_id,
-  projection_version,
-  projection_generation,     // changes when prior logical rows are invalidated
-  journal_prefix            // A02's exact next_sequence + digest identity
-}
+`DocumentController` reads 4 KiB UTF-8 chunks and limits the referenced document to 16 MiB. It retains bounded continuation offsets and displays one chunk at a time; it does not concatenate the full document into a Markdown renderable. Transcript pages and document chunks share `ClientCache`.
 
-TranscriptItemId = source durable sequence + semantic discriminator
-TranscriptOrdinal = logical row position in this view, not a durable sequence
+The default cache admits 16 MiB of charged values and 2,048 entries. Charges account for retained strings, structured values, keys and entry overhead. A mounted reader holds a lease on its exact revision. Removing or replacing a resident entry does not release its charge until its final reader releases it. Admission evicts unpinned entries in least-recently-used order and rejects a value that cannot fit beside pinned readers.
 
-ReadTranscript {
-  meta,
-  session_id,
-  known_view?: TranscriptView, // advisory revision for invalidation, not an old snapshot
-  position: Latest | First | Before(ItemId) | After(ItemId) | Around(ItemId)
-          | AtOrdinal { ordinal, expected_generation },
-  max_items,
-  max_bytes
-}
+`HistoryController` retains at most eight session views and 32 page-range descriptors per session. Evicted content can be fetched again through its durable source. Child transcript pages use the same cache. These limits describe the history allocation owner; they are not a process-RSS ceiling or a bound on every live-state collection.
 
-TranscriptPageReady {
-  command_ack_meta,
-  view,
-  items: [TranscriptItem],
-  first_ordinal,
-  total_items,
-  before_cursor?, after_cursor?,
-  anchor: Exact(ItemId) | Replaced { requested, replacement?, reason },
-  encoded_bytes
-}
+## Native viewport
 
-TranscriptItem = {
-  id, ordinal, source_sequence, revision_sequence, agent_turn,
-  content: Conversation | ToolInvocation | CommandResult | ShellResult | Subagent,
-  content_references
-}
+The transcript mounts at most 16 historical row cards from the active page. Scrolling moves that window and requests adjoining pages at its boundaries. A logical ordinal scrollbar permits distant navigation without creating a placeholder or measured-height record for every lifetime row.
 
-ReadTranscriptContent {
-  meta, view, content_ref,
-  position: Start | Continue(opaque_content_cursor),
-  max_bytes
-}
+Before replacing the visible window, the renderer captures the first visible item ID and its offset from the viewport. It restores that offset after OpenTUI layout, including width changes. Following latest is explicit state: newly available rows follow the tail only while that state is enabled. A removed anchor uses the engine's replacement result.
 
-TranscriptContentPageReady {
-  command_ack_meta, content_ref, content_kind,
-  content, next_cursor?, completeness
-}
-```
+Cards keep bounded previews and use OpenTUI for text selection, terminal cells, input and damage tracking. Unmounted historical cards are destroyed. Live reasoning and tool activity have a separate tail; durable row arrival transfers matching selection and expansion identity. A live delta does not rebuild the historical projection.
 
-`Conversation` projects displayable text, reasoning, images and citations from provider-neutral IR into bounded previews and source descriptors. Tool invocations and child agents are first-class rows, created by their lifecycle start events. Their completion and diff events revise the original row, even after it has left the client's cache. Provider call/result IR remains canonical audit data and does not create duplicate visible tool rows. Parent-turn metadata permits UI grouping without making page correctness depend on neighboring rows or a separate tool cache. Mutable entity bindings are indexed on disk; the semantic checkpoint does not retain a lifetime map. Host-owned invocation identity, rather than a reusable provider call ID, binds tool lifecycle events.
+Renderer handoff is governed by `AppClientState` and its private size limit. Interactions that cannot be safely captured defer replacement. History page availability and in-process anchor restoration do not themselves establish a cross-process anchor contract.
 
-Command results retain their authoritative command-time source message; the TUI owns structured presentation. A historical command must not borrow the current context or cost snapshot. Any richer command-time data must itself be durable before a projection can expose it. Each semantic record has an explicit projection version.
+## Local diagnostics
 
-An ordinal jump includes its expected structural generation. This supports scrolling into an unloaded range without manufacturing one placeholder per lifetime row. A generation mismatch returns an explicit invalidation; the client repositions around its stable anchor rather than interpreting an old ordinal in a replacement transcript.
+`ROTTWEILER_CLIENT_TIMINGS=1` enables fixed-size stage counters for event/reply decoding, reply validation, reduction, presentation, history admission/update/layout and queue age. The counters contain no payloads or session identifiers and are emitted on renderer teardown. Disabled call sites do not read a clock.
 
-A content reference names a session, exact journal prefix/source identity and a closed semantic selector such as turn block, tool output or command output. It never contains a host filesystem path or arbitrary JSON pointer. The engine validates session access and content identity on every read. Text continuation boundaries preserve UTF-8; structured values and images use bounded typed chunks. Content is fetched through the authenticated command/event channel in remote and local modes.
+Measurements are wall-clock durations. Nested stages are not additive, and asynchronous syntax parsing or terminal I/O may run outside the measured call. Process CPU and end-to-end input latency remain separate measurements.
 
-Initial limits to test: 64 items and 1 MiB per transcript response; 32 KiB inline preview per item; 64 KiB per content response; two outstanding history/content reads per connection with a shared host admission cap. Over-limit individual source bodies become references, not an error that makes history unreachable. Pages always make progress or return an explicit bounded error. Reads are connection-scoped, cancellable and do not advance the durable event cursor. They run outside the session actor's mutation path and journal writer lock.
-
-The engine returns only the prefix through which its derived projection is complete. It must not claim the latest journal tail if the index has not applied it. A02 can reopen the exact raw prefix statelessly and seek referenced source records. Retaining a client view does not retain server descriptors or a historical semantic database version.
-
-## Projection updates, mutation and recovery
-
-Canonical durable events remain the sole source of truth. The projection applies committed conversation, command and shell items; associates tool/subagent state with source rows; and interprets rewind effects across the entire logical timeline. It stores bounded row previews and content references, not lifetime body copies. Index publication records its exact applied prefix only after all effects through that prefix are complete. A crash may leave the index behind; it must never make it appear ahead. Missing, corrupt or version-incompatible indexes rebuild incrementally from bounded A02 pages. Explicit rebuild cost is measured separately from normal indexed reads.
-
-Ordinary appends preserve existing item identity and ordering. New live rows can join the visible latest window. A rewind changes the projection generation and invalidates affected cached ordering/associations. A pending response for another generation or replaced request cannot mutate the active view. Every response is internally consistent at its exact applied prefix. The service exposes the current effective transcript; it does not reopen old semantic snapshots. Immutable raw history remains available separately through the journal, audit and export. If an anchor was removed, resolve its source ordering to the nearest surviving predecessor or the first item and report the replacement.
-
-A late tool completion, diff or association change increments the affected item revision even when structural generation stays unchanged. Page replies include bounded invalidations since the supplied view, or an explicit whole-cache invalidation if the change set exceeds its cap. Clients reject responses older than the accepted applied prefix or from a superseded request; a matching structural generation alone is not evidence that cached content is current.
-
-Ordinary inserts append dense ordinals, updates address indexed item identity, and normal page reads seek an indexed ordinal without scanning or counting the historical prefix. Rewind preserves the existing logical rule: conversation and associated tool rows beyond the target turn disappear, while command and shell records remain. Restoring dense ordinals after that mutation may require work proportional to the affected suffix. Perform that work in bounded, cancellable transactions and publish the replacement generation only when complete. During rebuild, reads return an explicit progressing/retry result rather than claiming a partially rewritten index is complete. Measure total rewind/rebuild cost separately from ordinary indexed reads.
-
-A04's transcript index is distinct from A02's bounded live recovery snapshot. Historical conversation/context recovery must reference journal/projection cursors, not serialize the entire row catalog inside a live snapshot. The initial implementation must explicitly retain existing live-state replay until a complete client recovery snapshot can replace it; a transcript page alone cannot authorize skipping control, permission, todo or active-operation events. Thus successful paging does not by itself prove constant-cost initial attachment.
-
-## One aggregate cache owner
-
-Introduce `ClientHistoryStore`, owned by the app rather than individual renderers. It admits immutable transcript pages, content chunks and historical child views under one charged budget. Proposed starting limits are 16 MiB total retained payload, 2,048 row descriptors and at most 8 retained session views. Entry charges include strings, inline structured previews and content chunks; reference-only descriptors have their own count cap. Response memory is additionally bounded by the two-read admission limit. These are application allocation bounds, not a claim that JavaScript RSS equals serialized bytes.
-
-Viewport and immediate overscan pages are pinned while mounted. Evict least-recently-used unpinned pages/content first. If a requested page cannot fit beside pinned data, release the previous viewport after capturing its anchor and show a loading placeholder; do not silently exceed the cap. Empty descriptors record that a range is unloaded, not absent. Metadata itself is bounded: store sparse unloaded ranges and aggregate ordinal counts, not one placeholder per historical message.
-
-Child history uses this same store, keyed by child session and view. An inactive child's heavy projection/content can be evicted and reloaded. Its editable draft belongs to `AppClientState`, outside the evictable history cache; cache pressure must never discard it. Only the active child needs detailed live progress. Inactive children retain bounded status summaries and a recovery cursor. Selection/fold metadata is separately capped and can outlive a page; loss of a cosmetic fold preference must never imply loss of durable content.
-
-Current live operations, approvals and accepted input are not evictable artifacts. A16's live tool/text limits remain. An aggregate live-operation admission/overload policy must be coordinated with engine scheduling; historical cache eviction alone cannot bound arbitrarily many active operations.
-
-## Viewport and rendering
-
-`TranscriptViewport` owns a sparse measured-height index over logical row ranges. It computes visible items plus overscan from scroll position and mounts a bounded card pool. Unloaded/unmounted ranges use spacer heights with estimates; measured corrections preserve an item anchor. No renderer object or measured-height entry is retained per lifetime item.
-
-The anchor is `{session_id, item_id, block_id?, row_offset, affinity}` where affinity distinguishes following latest from holding an item. Capture the first visible stable item before prepend, eviction, measurement change, width change or replacement. Restore that item's viewport offset after native layout settles. A renderer recycle stores this anchor in the existing bounded private handoff, then fetches around it before restoring focus. Absolute `scrollTop` is only a local layout value.
-
-Native cards and syntax parsers receive bounded preview bodies. Larger content opens the bounded content reader, which uses the same cache and viewport machinery. Do not create an unbounded Markdown body inside a fixed-size scroll box. Keep the separate live tail and avoid recomputing historical projections for a live delta. OpenTUI remains responsible for cell rendering, damage tracking and input; the new code controls which cards exist.
-
-## Delivery and acceptance
-
-1. Core semantic projector and derived index, with cross-page tool/rewind tests, item revisions and exact applied-prefix identity checks. No client schema before this invariant is specified.
-2. Rust-owned page/content commands, generated contracts/validation, bounded runtime admission and real authenticated transport tests. Parent and child use one semantic history service.
-3. Aggregate client store and anchor/range model with deterministic eviction, stale-response, reconnect and content-paging tests.
-4. Native viewport integration and handoff migration, removing the recent-tail-only rendering path. Migrate fixtures rather than preserving a shadow implementation.
-
-Acceptance uses a real 10,000-item mixed transcript with asserted source bytes. Navigate first/middle/latest, evict and revisit pages, append while scrolled away, resize after measured heights change, jump to an item, reconnect, recycle and handle a rewind removing the anchor. Test large bodies, multiple children and repeated open/close cycles. Assert cache bytes/rows, in-flight bytes, mounted cards, per-frame visited rows and full historical reachability. Use native OpenTUI and real transport for the final path, including Tree-sitter in representative code/diff bodies. Preserve existing frame/input budgets and classify shared-host timing evidence honestly.
-
-This follows ADR-001, ADR-002, ADR-015 and ADR-028, and uses A02's new ADR-029. ADR-030 formalizes the ownership and revision decision. It need not reverse the frontend/core split or canonical event authority.
+See [Terminal workspace](terminal-workspace.md) for interaction and visual ownership.
