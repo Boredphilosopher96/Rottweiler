@@ -1,5 +1,9 @@
 //! Release-owned TypeScript source preparation and identity.
 
+mod preparation;
+use preparation::{PreparationOutput, PreparationRequest};
+pub(crate) use preparation::{SourcePreparationBudget, SourcePreparations};
+
 use std::{
     collections::BTreeSet,
     fs,
@@ -10,13 +14,8 @@ use std::{
 };
 
 use miette::{IntoDiagnostic as _, Result, miette};
-use rw_ext::{
-    PluginLauncher, PluginProcessConfig, PluginSandboxMode, PluginSandboxProfile,
-    SourcePluginIdentity,
-};
-use rw_plugin_protocol::PluginCapabilities;
+use rw_ext::{PluginLauncher, PluginProcessConfig, SourcePluginIdentity};
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncReadExt as _;
 
 use crate::extension_config::{DiscoveredPlugin, DiscoveredPluginTarget};
 
@@ -41,11 +40,12 @@ struct GraphReport {
     inputs: Vec<GraphInput>,
 }
 
-pub(crate) struct SourcePluginResolver<'a> {
+pub(crate) struct SourcePluginResolver {
     host: PathBuf,
     private_root: PathBuf,
-    scratch: PathBuf,
-    launcher: &'a dyn PluginLauncher,
+    scratch: Arc<crate::extension_runtime::PrivateMcpScratch>,
+    launcher: Arc<dyn PluginLauncher>,
+    preparation: Arc<SourcePreparations>,
 }
 
 /// Resolves one discovered plugin into the exact process identity shown at approval.
@@ -62,24 +62,33 @@ pub async fn resolve_plugin_process(
     if matches!(plugin.target, DiscoveredPluginTarget::Executable { .. }) {
         return plugin.executable_process_config();
     }
-    let scratch = crate::extension_runtime::PrivateMcpScratch::create()?;
-    let launcher = crate::plugin_process::SandboxedPluginLauncher::new(scratch.path(), helper)
-        .map_err(|error| miette!(error.to_string()))?;
+    let scratch = Arc::new(crate::extension_runtime::PrivateMcpScratch::create()?);
+    let launcher: Arc<dyn PluginLauncher> = Arc::new(
+        crate::plugin_process::SandboxedPluginLauncher::new(scratch.path(), helper)
+            .map_err(|error| miette!(error.to_string()))?,
+    );
     let host = helper
         .parent()
         .ok_or_else(|| miette!("Rottweiler executable has no release directory"))?
         .join("rottweiler-plugin-host");
-    SourcePluginResolver::new(&host, private_root, scratch.path(), &launcher)?
-        .resolve(plugin)
-        .await
+    SourcePluginResolver::new(
+        &host,
+        private_root,
+        scratch,
+        launcher,
+        Arc::new(SourcePreparationBudget::default()),
+    )?
+    .resolve(plugin)
+    .await
 }
 
-impl<'a> SourcePluginResolver<'a> {
+impl SourcePluginResolver {
     pub(crate) fn new(
         host: &Path,
         private_root: &Path,
-        scratch: &Path,
-        launcher: &'a dyn PluginLauncher,
+        scratch: Arc<crate::extension_runtime::PrivateMcpScratch>,
+        launcher: Arc<dyn PluginLauncher>,
+        budget: Arc<SourcePreparationBudget>,
     ) -> Result<Self> {
         let host = fs::canonicalize(host).into_diagnostic()?;
         if !host.is_file() {
@@ -90,9 +99,14 @@ impl<'a> SourcePluginResolver<'a> {
         Ok(Self {
             host,
             private_root: private_root.to_path_buf(),
-            scratch: scratch.to_path_buf(),
+            scratch,
             launcher,
+            preparation: Arc::new(SourcePreparations::new(budget)),
         })
+    }
+
+    pub(crate) fn preparation(&self) -> Arc<SourcePreparations> {
+        Arc::clone(&self.preparation)
     }
 
     pub(crate) async fn resolve(&self, plugin: &DiscoveredPlugin) -> Result<PluginProcessConfig> {
@@ -111,7 +125,10 @@ impl<'a> SourcePluginResolver<'a> {
         let discovered = self.graph(package_root, entry).await?;
         validate_report(&discovered)?;
 
-        let staging = self.scratch.join(format!("source-{}", random_suffix()?));
+        let staging = self
+            .scratch
+            .path()
+            .join(format!("source-{}", random_suffix()?));
         fs::create_dir(&staging).into_diagnostic()?;
         copy_graph(package_root, &staging, &discovered)?;
         let staged_entry = staging.join(entry.strip_prefix(package_root).into_diagnostic()?);
@@ -126,7 +143,10 @@ impl<'a> SourcePluginResolver<'a> {
             &package_bytes,
             &lock_bytes,
         )?;
-        let output = self.scratch.join(format!("bundle-{}", random_suffix()?));
+        let output = self
+            .scratch
+            .path()
+            .join(format!("bundle-{}", random_suffix()?));
         fs::create_dir(&output).into_diagnostic()?;
         let rebuilt = self.bundle(&staging, &staged_entry, &output).await?;
         if rebuilt != discovered {
@@ -199,50 +219,21 @@ impl<'a> SourcePluginResolver<'a> {
             .and_then(|config| config.with_cwd(root))
             .and_then(|config| config.with_code_root(root))
             .map_err(|error| miette!(error.to_string()))?;
-        let child = self
-            .launcher
-            .launch(
-                &config,
-                &PluginSandboxProfile {
-                    mode: PluginSandboxMode::Preparation,
-                    capabilities: PluginCapabilities::default(),
-                    approved_roots: Vec::new(),
-                    allowed_domains: Vec::new(),
+        let PreparationOutput {
+            stdout: output,
+            stderr: errors,
+            status,
+        } = self
+            .preparation
+            .execute(
+                PreparationRequest {
+                    config,
+                    launcher: Arc::clone(&self.launcher),
+                    scratch: Arc::clone(&self.scratch),
                 },
+                tokio::time::Instant::now() + HOST_DEADLINE,
             )
-            .await
-            .map_err(|error| miette!(error.to_string()))?;
-        let stdout = child.stdout;
-        let stderr = child.stderr;
-        let process = Arc::clone(&child.process);
-        let timeout_process = Arc::clone(&child.process);
-        drop(child.stdin);
-        let completed = tokio::time::timeout(HOST_DEADLINE, async move {
-            let mut output = Vec::new();
-            let mut errors = Vec::new();
-            let mut bounded_stdout = stdout.take(MAX_REPORT_BYTES.saturating_add(1));
-            let mut bounded_stderr = stderr.take(MAX_REPORT_BYTES.saturating_add(1));
-            let stdout_result = bounded_stdout.read_to_end(&mut output);
-            let stderr_result = bounded_stderr.read_to_end(&mut errors);
-            let (stdout_result, stderr_result, status) =
-                tokio::join!(stdout_result, stderr_result, process.wait());
-            stdout_result.into_diagnostic()?;
-            stderr_result.into_diagnostic()?;
-            let status = status.map_err(|error| miette!(error.to_string()))?;
-            Result::<_, miette::Report>::Ok((output, errors, status))
-        })
-        .await;
-        let (output, errors, status) = if let Ok(result) = completed {
-            result?
-        } else {
-            let _ = timeout_process.kill_tree();
-            return Err(miette!(
-                "TypeScript plugin preparation exceeded its deadline"
-            ));
-        };
-        if output.len() as u64 > MAX_REPORT_BYTES || errors.len() as u64 > MAX_REPORT_BYTES {
-            return Err(miette!("TypeScript plugin host output exceeded its bound"));
-        }
+            .await?;
         if status != Some(0) {
             let error = String::from_utf8_lossy(&errors);
             return Err(miette!(
@@ -660,3 +651,6 @@ mod tests {
         assert!(!destination.path().join("src/index.ts").exists());
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod native_tests;

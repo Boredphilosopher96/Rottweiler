@@ -309,7 +309,8 @@ pub(crate) struct PluginSessionRuntime {
     pub(crate) providers: Vec<(String, Arc<dyn rw_providers::Provider>)>,
     pub(crate) event_routers: Vec<(std::collections::BTreeSet<String>, Arc<PluginEventRouter>)>,
     pub(crate) pending: Vec<String>,
-    _scratch: PrivateMcpScratch,
+    _scratch: Arc<PrivateMcpScratch>,
+    preparation: Arc<crate::source_plugin::SourcePreparations>,
 }
 
 struct PluginStartContext<'a> {
@@ -318,7 +319,7 @@ struct PluginStartContext<'a> {
     launcher: &'a dyn PluginLauncher,
     store: &'a dyn ApprovalStore,
     redactor: Arc<SharedPluginRedactor>,
-    source_resolver: Option<&'a crate::source_plugin::SourcePluginResolver<'a>>,
+    source_resolver: Option<&'a crate::source_plugin::SourcePluginResolver>,
     source_error: Option<&'a str>,
 }
 
@@ -331,9 +332,11 @@ impl PluginSessionRuntime {
         redactor: Arc<SharedPluginRedactor>,
     ) -> Result<Self> {
         let store = PrivatePluginApprovalStore::open(private_root)?;
-        let scratch = PrivateMcpScratch::create()?;
-        let launcher = crate::plugin_process::SandboxedPluginLauncher::new(scratch.path(), helper)
-            .map_err(|error| miette!(error.to_string()))?;
+        let scratch = Arc::new(PrivateMcpScratch::create()?);
+        let launcher: Arc<dyn PluginLauncher> = Arc::new(
+            crate::plugin_process::SandboxedPluginLauncher::new(scratch.path(), helper)
+                .map_err(|error| miette!(error.to_string()))?,
+        );
         let source_host = helper
             .parent()
             .ok_or_else(|| miette!("Rottweiler executable has no release directory"))?
@@ -341,14 +344,15 @@ impl PluginSessionRuntime {
         let source_resolver = crate::source_plugin::SourcePluginResolver::new(
             &source_host,
             private_root,
-            scratch.path(),
-            &launcher,
+            Arc::clone(&scratch),
+            Arc::clone(&launcher),
+            Arc::new(crate::source_plugin::SourcePreparationBudget::default()),
         );
         Self::start_with_launcher(
             configs,
             private_root,
             workspace_roots,
-            &launcher,
+            launcher.as_ref(),
             &store,
             redactor,
             scratch,
@@ -366,8 +370,8 @@ impl PluginSessionRuntime {
         launcher: &dyn PluginLauncher,
         store: &dyn ApprovalStore,
         redactor: Arc<SharedPluginRedactor>,
-        scratch: PrivateMcpScratch,
-        source_resolver: Option<&crate::source_plugin::SourcePluginResolver<'_>>,
+        scratch: Arc<PrivateMcpScratch>,
+        source_resolver: Option<&crate::source_plugin::SourcePluginResolver>,
         source_error: Option<String>,
     ) -> Result<Self> {
         let mut runtime = Self {
@@ -380,6 +384,9 @@ impl PluginSessionRuntime {
             event_routers: Vec::new(),
             pending: Vec::new(),
             _scratch: scratch,
+            preparation: source_resolver
+                .map(crate::source_plugin::SourcePluginResolver::preparation)
+                .unwrap_or_default(),
         };
         let context = PluginStartContext {
             private_root,
@@ -592,6 +599,7 @@ impl PluginSessionRuntime {
                 tracing::warn!(%error, "plugin shutdown failed");
             }
         }
+        self.preparation.settle_cancelled().await;
     }
 }
 

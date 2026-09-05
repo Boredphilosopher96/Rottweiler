@@ -12,6 +12,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+#[cfg(target_os = "macos")]
+mod directory_reads;
+
 mod proxy;
 pub use proxy::{EgressPin, ProxyDenials, ProxyLifecycle, SupervisedEgressProxy, UpstreamProxy};
 
@@ -95,6 +98,8 @@ pub struct SandboxPolicy {
     #[serde(default)]
     read_root_kinds: Option<Vec<RootKind>>,
     network: NetworkPolicy,
+    #[cfg(target_os = "macos")]
+    read_directory_ancestors: Vec<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -160,6 +165,8 @@ impl SandboxPolicy {
             write_root_kinds,
             read_roots: None,
             read_root_kinds: None,
+            #[cfg(target_os = "macos")]
+            read_directory_ancestors: Vec::new(),
             network,
         })
     }
@@ -228,6 +235,8 @@ impl SandboxPolicy {
             write_root_kinds: self.write_root_kinds.clone(),
             read_roots: self.read_roots.clone(),
             read_root_kinds: self.read_root_kinds.clone(),
+            #[cfg(target_os = "macos")]
+            read_directory_ancestors: self.read_directory_ancestors.clone(),
             network,
         }
     }
@@ -241,6 +250,8 @@ impl SandboxPolicy {
             write_root_kinds: Vec::new(),
             read_roots: self.read_roots.clone(),
             read_root_kinds: self.read_root_kinds.clone(),
+            #[cfg(target_os = "macos")]
+            read_directory_ancestors: self.read_directory_ancestors.clone(),
             network: self.network.clone(),
         }
     }
@@ -649,6 +660,7 @@ pub fn shell_launch_plan(
                 args.push(definition);
             }
         }
+        directory_reads::append_parameters(policy, &mut args);
         for (index, root) in sensitive_read_roots().iter().enumerate() {
             args.push(OsString::from("-D"));
             let mut definition = OsString::from(format!("RW_SECRET_{index}="));
@@ -803,9 +815,17 @@ fn seatbelt_profile(policy: &SandboxPolicy) -> String {
             "(deny network-outbound (require-not (remote ip \"localhost:{port}\"))) (deny network-bind) (deny network-inbound)"
         ),
     };
+    let directory_entries = (0..policy.read_directory_ancestors.len())
+        .map(|index| {
+            format!(
+                "(require-all (literal (param \"RW_DIRECTORY_{index}\")) (vnode-type DIRECTORY))"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
     let read_rule = readable.map_or_else(String::new, |readable| {
         format!(
-            "(deny file-read* (require-not (require-any (literal \"/\") (literal \"/dev/null\") {writable} {readable})))"
+            "(deny file-read* (require-not (require-any (literal \"/\") (literal \"/dev/null\") {writable} {readable} {directory_entries})))"
         )
     });
     let secret_roots = (0..sensitive_read_roots().len())

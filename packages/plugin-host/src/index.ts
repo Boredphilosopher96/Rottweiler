@@ -197,7 +197,12 @@ if (import.meta.main) {
   try {
     await main(process.argv.slice(2))
   } catch (error) {
-    const message = error instanceof Error ? error.message : "plugin host failed"
+    const causes: readonly unknown[] = error instanceof AggregateError ? error.errors : []
+    const message = [error, ...causes.slice(0, 8)]
+      .map((cause) => (cause instanceof Error || isRecord(cause)) && typeof cause.message === "string"
+        ? cause.message
+        : "plugin host failed")
+      .join("\n")
     process.stderr.write(`${message.slice(0, 4096)}\n`)
     process.exitCode = 1
   }

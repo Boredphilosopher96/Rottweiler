@@ -812,3 +812,55 @@ Known USD, credit, and subscription-token bounds remain distinct. Unknown pricin
 **Validation required:** Two independent engine processes competing for one remainder; cancellation during admission/start/terminal writes; crashes; ambiguous failures; exact and conflicting retries; actual usage corrections; mixed billing units; and attribution-specific accounting transfer. No A12 completion claim is made by the interface alone.
 
 Admission totals use a fixed-depth time index over the validated UTC calendar key. A transaction updates separate session and root totals using checked 128-bit integers stored as fixed-width bytes. This preserves all u64 provider charges without SQLite signed-integer overflow or floating-point rounding. Queries exclude future receipts and include unfinished reservations from earlier days. Neither receipt count nor session age changes the maximum lookup depth. Turn-only historical databases cannot prove exact attempt accounting and are refused for new admission without deleting their records.
+
+
+## ADR-035: Register dormant plugins and own activation through settlement
+
+**Status:** Accepted; implementation proceeds through separately verified preparation
+and activation units. **Date:** 2026-09-04.
+
+Session composition reads and validates bounded plugin manifests, then registers
+inert tool, hook, command, provider, and event descriptors. It does not launch
+native plugins, compile WASM, prepare TypeScript bundles, or eagerly query model
+catalogs. The first operation needing an extension activates its immutable
+manifest generation. Explicit development attachment remains eager: publication
+of its generation requires successful approval and initialization.
+
+The host owns one activation per generation, with bounded process/startup
+admission and an immutable monotonic total deadline. Concurrent first uses share
+that activation. Exact executable/source identity, approval, workspace roots,
+and initialized manifest are checked before the generation becomes ready.
+Inert metadata grants no execution authority. Failure is cached for the generation;
+a changed configuration creates a new generation instead of retrying implicitly.
+
+Activation owns its subprocesses, preparation jobs, pipes, and cleanup task. A
+waiter's cancellation or future drop closes the shared generation while it is
+starting. This may fail other first uses of the same native plugin: startup can
+create ambient effects, so isolated waiter cancellation cannot honestly prove
+settlement. After activation, the existing ordinary-request and provider-stream
+settlement contracts remain authoritative.
+
+Source preparation uses owned execution after subprocess launch. Timeout, output
+overflow, cancellation, and a dropped caller revoke work and close the pipes,
+then require actual process-tree settlement. Sending a kill signal, observing
+only the leader's exit, dropping a future, or aborting a Tokio task is not proof.
+Admitted ownership remains charged while cleanup is unproven. Completed operation
+records retire themselves; cleanup cannot depend on a later request.
+
+A borrowed `OnceCell::get_or_init` future is rejected because caller cancellation
+could abandon preparation or initialization. Background eager startup is also
+rejected: it still spends startup resources on unused plugins and complicates
+approval/error ownership. Resident process limits and concurrent preparation
+limits are separate from per-operation RPC/stream admission.
+
+Revisit limits using measured cold and warm activation distributions, memory,
+and cancellation latency. Preserve the fixed total deadline, effect settlement,
+and independent control/response liveness when changing capacity.
+
+The preparation foundation exposed Bun's ancestor-directory enumeration during
+graph construction. macOS preparation grants only exact directory entries; normal
+plugin execution does not receive that authority. Landlock's recursive directory
+rules cannot represent that grant. Linux must use a controlled preparation
+filesystem or hermetic resolver instead of broadening ancestor access. The
+native Linux arm64 failure and macOS production checks are recorded in
+[preparation evidence](reviews/2026-09-04-architecture-evidence/source-preparation-settlement.md).

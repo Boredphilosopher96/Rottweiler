@@ -215,7 +215,7 @@ async fn one_plugin_startup_failure_does_not_tear_down_other_plugins() {
         Arc::new(SharedPluginRedactor::new(
             rw_providers::FixtureRedactor::default(),
         )),
-        PrivateMcpScratch::create().expect("scratch"),
+        Arc::new(PrivateMcpScratch::create().expect("scratch")),
         None,
         None,
     )

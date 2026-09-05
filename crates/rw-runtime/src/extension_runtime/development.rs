@@ -133,10 +133,11 @@ impl RuntimeSessionExtensionController {
         manifest: &PluginManifest,
         workspace_roots: &[PathBuf],
     ) -> std::result::Result<PluginSessionRuntime, rw_core::AgentLoopError> {
-        let scratch = PrivateMcpScratch::create().map_err(development_error)?;
-        let launcher =
+        let scratch = Arc::new(PrivateMcpScratch::create().map_err(development_error)?);
+        let launcher: Arc<dyn PluginLauncher> = Arc::new(
             crate::plugin_process::SandboxedPluginLauncher::new(scratch.path(), &self.helper)
-                .map_err(development_error)?;
+                .map_err(development_error)?,
+        );
         let source_host = self
             .helper
             .parent()
@@ -145,8 +146,9 @@ impl RuntimeSessionExtensionController {
         let resolver = crate::source_plugin::SourcePluginResolver::new(
             &source_host,
             &self.private_root,
-            scratch.path(),
-            &launcher,
+            Arc::clone(&scratch),
+            Arc::clone(&launcher),
+            Arc::new(crate::source_plugin::SourcePreparationBudget::default()),
         )
         .map_err(development_error)?;
         let process = resolver.resolve(plugin).await.map_err(development_error)?;
@@ -158,7 +160,7 @@ impl RuntimeSessionExtensionController {
             std::slice::from_ref(plugin),
             &self.private_root,
             workspace_roots,
-            &launcher,
+            launcher.as_ref(),
             &approvals,
             Arc::clone(&self.redactor),
             scratch,

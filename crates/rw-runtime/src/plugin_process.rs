@@ -58,7 +58,7 @@ impl PluginLauncher for SandboxedPluginLauncher {
         profile: &PluginSandboxProfile,
     ) -> Result<LaunchedPluginProcess, PluginProcessError> {
         let (child, proxy) = spawn_sandboxed_plugin(config, profile, &self.scratch, &self.helper)?;
-        attach_supervisor(child, proxy, config)
+        attach_supervisor(child, proxy, config).await
     }
 }
 
@@ -136,6 +136,14 @@ fn spawn_sandboxed_plugin(
     let policy = SandboxPolicy::new(&roots, network)
         .and_then(|policy| policy.with_read_roots(read_roots))
         .map_err(|sandbox| error(&sandbox.to_string()))?;
+    #[cfg(target_os = "macos")]
+    let policy = if profile.mode == rw_ext::PluginSandboxMode::Preparation {
+        policy
+            .with_read_directory_ancestors(config.cwd())
+            .map_err(|sandbox| error(&sandbox.to_string()))?
+    } else {
+        policy
+    };
     let args = config.argv().to_vec();
     #[allow(unused_mut)]
     let mut plan = shell_launch_plan(&policy, helper, config.executable(), &args)
@@ -173,24 +181,15 @@ fn spawn_sandboxed_plugin(
     Ok((child, proxy))
 }
 
-fn attach_supervisor(
+async fn attach_supervisor(
     mut child: Child,
     proxy: SupervisedEgressProxy,
     config: &PluginProcessConfig,
 ) -> Result<LaunchedPluginProcess, PluginProcessError> {
     let process_group = child.id();
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| error("plugin stdin is unavailable"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| error("plugin stdout is unavailable"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| error("plugin stderr is unavailable"))?;
+    let stdin = child.stdin.take();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
     let denials = proxy.denials();
     let process = Arc::new(PluginChild {
         child: Mutex::new(child),
@@ -198,6 +197,15 @@ fn attach_supervisor(
         violation: Arc::new(Mutex::new(None)),
         _proxy: proxy,
     });
+    let (Some(stdin), Some(stdout), Some(stderr)) = (stdin, stdout, stderr) else {
+        // A failed handoff still owns the process and every descendant.
+        let _ = process.kill_tree();
+        if let Err(error) = process.settle_effects().await {
+            tracing::error!(%error, "failed plugin launch has unproven settlement");
+            std::future::pending::<()>().await;
+        }
+        return Err(error("plugin stdio is unavailable"));
+    };
     let weak = Arc::downgrade(&process);
     tokio::spawn(async move {
         loop {
@@ -770,5 +778,60 @@ mod tests {
         assert_eq!(response["content"], "denied");
         assert!(!response.to_string().contains("SIBLING_SECRET_CANARY"));
         host.shutdown().await.expect("fixture shutdown");
+    }
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn failed_stdio_handoff_settles_the_spawned_process_tree() {
+        use tokio::io::AsyncReadExt as _;
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command
+            .args(["-c", "sleep 60 & echo $!; wait"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .process_group(0);
+        let mut child = command.spawn().expect("native fixture");
+        let mut pid = Vec::new();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let byte = child
+                    .stdout
+                    .as_mut()
+                    .expect("stdout")
+                    .read_u8()
+                    .await
+                    .expect("child pid");
+                if byte == b'\n' {
+                    break;
+                }
+                pid.push(byte);
+            }
+        })
+        .await
+        .expect("descendant published");
+        let pid: u32 = String::from_utf8(pid)
+            .expect("pid text")
+            .parse()
+            .expect("pid number");
+        let proxy = SupervisedEgressProxy::start(EgressPolicy::new(std::iter::empty::<&str>()))
+            .expect("private proxy");
+        let config = PluginProcessConfig::new("/bin/sh").expect("identity");
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(3),
+            attach_supervisor(child, proxy, &config),
+        )
+        .await
+        .expect("failed handoff settles");
+        assert!(outcome.is_err());
+        let observed = std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "stat="])
+            .output()
+            .expect("observe descendant");
+        let status = String::from_utf8(observed.stdout).expect("process status");
+        assert!(
+            status.trim().is_empty() || status.trim().starts_with('Z'),
+            "descendant is still executing: {status}"
+        );
     }
 }
