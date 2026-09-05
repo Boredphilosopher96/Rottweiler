@@ -316,3 +316,44 @@ fn strict_zero_cap_also_stops_unpriced_requests() {
         Err(BudgetReservationError::UnresolvedCharge)
     ));
 }
+
+#[test]
+fn pending_recovery_pages_skip_settled_history_and_preserve_attempt_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let mut ledger = BudgetLedger::open(root.path()).unwrap();
+    let settled = plan("session", "older", 0);
+    ledger
+        .reconcile_accounted(&receipt(&settled, 5, 0))
+        .unwrap();
+    let mut expected = Vec::new();
+    for index in 0..9 {
+        let mut request = plan("session", &format!("pending-{index}"), 0);
+        request.identity.attempt = index;
+        ledger.reserve(&request).unwrap();
+        if index % 2 == 0 {
+            ledger.start(&request.identity).unwrap();
+        }
+        expected.push(request.identity);
+    }
+    ledger.reserve(&plan("different", "pending", 0)).unwrap();
+    let mut cursor = None;
+    let mut found = Vec::new();
+    loop {
+        let page = ledger
+            .pending_for_session("session", cursor.as_ref(), 2)
+            .unwrap();
+        assert!(page.len() <= 2);
+        if page.is_empty() {
+            break;
+        }
+        cursor = page.last().map(|call| call.identity.clone());
+        found.extend(page.into_iter().map(|call| call.identity));
+    }
+    assert_eq!(found, expected);
+    let cursor = plan("different", "pending", 0).identity;
+    assert!(matches!(
+        ledger.pending_for_session("session", Some(&cursor), 2),
+        Err(BudgetReservationError::IdentityConflict)
+    ));
+    assert!(ledger.pending_for_session("session", None, 129).is_err());
+}

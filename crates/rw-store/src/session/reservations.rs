@@ -6,7 +6,7 @@ mod schema;
 #[cfg(test)]
 mod tests;
 
-pub use ledger::{BudgetLedger, MAX_ACTIVE_PROVIDER_CALLS, ProviderCallPhase};
+pub use ledger::{BudgetLedger, MAX_ACTIVE_PROVIDER_CALLS, PendingProviderCall, ProviderCallPhase};
 
 use rw_types::{BudgetScope, BudgetUnit, SequenceId, config::BudgetConfig};
 use serde::{Deserialize, Serialize};

@@ -35,6 +35,27 @@ pub enum ProviderCallPhase {
     Cancelled,
 }
 
+/// One unfinished identity returned by bounded startup recovery reads.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingProviderCall {
+    /// Exact host call/attempt to reconcile after acquiring its session writer lease.
+    pub identity: ProviderCallIdentity,
+    /// Unstarted calls can be released only after proving their previous owner is gone.
+    pub phase: ProviderCallPhase,
+}
+
+impl ProviderCallPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Reserved => "reserved",
+            Self::Started => "started",
+            Self::Accounted => "accounted",
+            Self::Ambiguous => "ambiguous",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 struct Call {
     identity: ProviderCallIdentity,
@@ -238,6 +259,64 @@ impl BudgetLedger {
         Ok(())
     }
 
+    /// Reads at most 128 unfinished attempts from the session's partial index.
+    /// The cursor is the final identity of the prior page. Settled history is not scanned.
+    ///
+    /// # Errors
+    /// Rejects invalid session/cursor identities, page limits, or corrupt stored rows.
+    pub fn pending_for_session(
+        &self,
+        session_id: &str,
+        after: Option<&ProviderCallIdentity>,
+        limit: u16,
+    ) -> Result<Vec<PendingProviderCall>, Error> {
+        validate_session_id(session_id)?;
+        if limit == 0 || limit > 128 {
+            return Err(Error::InvalidPlan(
+                "pending provider page limit must be 1 through 128",
+            ));
+        }
+        if let Some(after) = after {
+            validate_identity(after)?;
+            if after.session_id.0 != session_id {
+                return Err(Error::IdentityConflict);
+            }
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT call_id,attempt,phase,CASE WHEN length(CAST(data AS BLOB)) <= ?5 THEN data ELSE NULL END FROM provider_calls WHERE session_id=?1 AND phase IN ('reserved','started','ambiguous') AND (call_id,attempt) > (?2,?3) ORDER BY call_id,attempt LIMIT ?4"
+        )?;
+        let mut rows = statement.query(params![
+            session_id,
+            after.map_or("", |identity| identity.call_id.as_str()),
+            after.map_or(0, |identity| identity.attempt),
+            limit,
+            i64::try_from(MAX_ROW_BYTES).map_err(|_| Error::Arithmetic)?
+        ])?;
+        let mut result = Vec::new();
+        while let Some(row) = rows.next()? {
+            let call_id: String = row.get(0)?;
+            let attempt: u32 = row.get(1)?;
+            let phase: String = row.get(2)?;
+            let data: Option<String> = row.get(3)?;
+            let call: Call = serde_json::from_str(
+                &data.ok_or(Error::InvalidPlan("oversized provider accounting row"))?,
+            )?;
+            validate_identity(&call.identity)?;
+            if call.identity.session_id.0 != session_id
+                || call.identity.call_id != call_id
+                || call.identity.attempt != attempt
+                || call.phase.as_str() != phase
+            {
+                return Err(Error::IdentityConflict);
+            }
+            result.push(PendingProviderCall {
+                identity: call.identity,
+                phase: call.phase,
+            });
+        }
+        Ok(result)
+    }
+
     /// Reads the retained identity state without materializing other receipt rows.
     ///
     /// # Errors
@@ -396,8 +475,8 @@ fn save(connection: &Connection, call: &Call) -> Result<(), Error> {
         ));
     }
     connection.execute(
-        "INSERT INTO provider_calls(session_id,call_id,attempt,data) VALUES(?1,?2,?3,?4) ON CONFLICT(session_id,call_id,attempt) DO UPDATE SET data=excluded.data",
-        params![call.identity.session_id.0, call.identity.call_id, call.identity.attempt, data],
+        "INSERT INTO provider_calls(session_id,call_id,attempt,phase,data) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(session_id,call_id,attempt) DO UPDATE SET phase=excluded.phase,data=excluded.data",
+        params![call.identity.session_id.0, call.identity.call_id, call.identity.attempt, call.phase.as_str(), data],
     )?;
     Ok(())
 }

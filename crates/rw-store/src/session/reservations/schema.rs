@@ -7,6 +7,7 @@ const CALLS: &str = "CREATE TABLE IF NOT EXISTS provider_calls(
     session_id TEXT NOT NULL,
     call_id TEXT NOT NULL,
     attempt INTEGER NOT NULL,
+    phase TEXT NOT NULL,
     data TEXT NOT NULL,
     PRIMARY KEY(session_id,call_id,attempt)
 );";
@@ -59,6 +60,7 @@ pub(super) fn ensure(connection: &Connection) -> Result<(), Error> {
         validate(connection)?;
         connection.execute_batch(CALLS)?;
         connection.execute_batch(SUMS)?;
+        connection.execute_batch("CREATE INDEX IF NOT EXISTS provider_calls_unsettled ON provider_calls(session_id,call_id,attempt) WHERE phase IN ('reserved','started','ambiguous')")?;
         connection.execute_batch("COMMIT")?;
         Ok(())
     })();
