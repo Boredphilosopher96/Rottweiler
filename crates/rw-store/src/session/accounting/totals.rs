@@ -37,7 +37,7 @@ impl Sum {
                 sum.0[QUOTA] = 1;
                 match cost.subscription_token_accounting() {
                     SubscriptionTokenAccounting::Metered(tokens) => {
-                        sum.0[TOKENS] = u128::from(tokens)
+                        sum.0[TOKENS] = u128::from(tokens);
                     }
                     SubscriptionTokenAccounting::Unavailable => sum.0[UNMETERED] = 1,
                     SubscriptionTokenAccounting::NotApplicable => {}
