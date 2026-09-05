@@ -2,6 +2,7 @@
 
 use std::{fs::File, io};
 
+#[derive(Debug)]
 pub(crate) struct ExclusiveFileLock(File);
 
 impl ExclusiveFileLock {

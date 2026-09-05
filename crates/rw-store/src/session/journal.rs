@@ -531,7 +531,6 @@ impl std::io::Write for BoundedBatch {
 #[derive(Debug)]
 pub struct SegmentedJournal {
     directory: Arc<Directory>,
-    _writer_lock: File,
     segments: Arc<SegmentCatalog>,
     segment_count: usize,
     active: Arc<File>,
@@ -543,6 +542,7 @@ pub struct SegmentedJournal {
     sealed_identity: blake3::Hash,
     next_sequence: u64,
     poisoned: bool,
+    _writer_lock: super::exclusive_lock::ExclusiveFileLock,
 }
 
 /// Immutable logical prefix; later append/rotation cannot change its tail.
@@ -620,7 +620,7 @@ impl SegmentedJournal {
     pub fn open(root: &Path, session_id: &str) -> Result<Self, SessionStoreError> {
         let directory = Arc::new(Directory::open(root, session_id, true)?);
         let writer_lock = directory.file("writer.lock", true, true)?;
-        super::lock_writer(&writer_lock)?;
+        let writer_lock = super::exclusive_lock::ExclusiveFileLock::try_acquire(writer_lock)?;
         let segments = Arc::new(SegmentCatalog::from_segments(directory.catalog()?));
         let segment_count = segments.len();
         let active_first = segment_count
@@ -876,7 +876,7 @@ impl JournalReadView {
             Err(error) => return Err(error),
         };
         let ownership = directory.file("writer.lock", false, false)?;
-        super::lock_writer(&ownership)?;
+        let _ownership = super::exclusive_lock::ExclusiveFileLock::try_acquire(ownership)?;
         let segments = Arc::new(SegmentCatalog::from_segments(directory.catalog()?));
         let segment_count = segments.len();
         let active = Arc::new(directory.file("active.jsonl", false, false)?);

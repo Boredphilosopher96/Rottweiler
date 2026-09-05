@@ -471,6 +471,26 @@ fn incomplete_active_tail_repairs_but_complete_corruption_fails() {
 }
 
 #[test]
+#[allow(clippy::used_underscore_binding)]
+fn writer_drop_releases_ownership_despite_inherited_description() {
+    let root = tempdir().expect("root");
+    let first = SegmentedJournal::open(root.path(), "inherited").expect("first owner");
+    let inherited = first
+        ._writer_lock
+        .descriptor()
+        .try_clone()
+        .expect("inherited descriptor");
+    assert!(SegmentedJournal::open(root.path(), "inherited").is_err());
+    drop(first);
+    let second = SegmentedJournal::open(root.path(), "inherited")
+        .expect("logical owner drop must release ownership before inherited descriptor closes");
+    drop(inherited);
+    assert!(SegmentedJournal::open(root.path(), "inherited").is_err());
+    drop(second);
+    SegmentedJournal::open(root.path(), "inherited").expect("second owner released");
+}
+
+#[test]
 fn single_writer_lock_is_independent_of_segment_rotation() {
     let root = tempdir().expect("root");
     let mut journal = SegmentedJournal::open(root.path(), "writer").expect("journal");

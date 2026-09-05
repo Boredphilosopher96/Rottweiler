@@ -344,31 +344,6 @@ pub(super) fn sync_event_file(file: &File) -> std::io::Result<()> {
     file.sync_all()
 }
 
-#[cfg(unix)]
-pub(super) fn lock_writer(file: &File) -> Result<(), SessionStoreError> {
-    const MAX_TRANSIENT_RETRIES: usize = 20;
-    for attempt in 0..=MAX_TRANSIENT_RETRIES {
-        match rustix::fs::flock(file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
-            Ok(()) => return Ok(()),
-            Err(source)
-                if source.kind() == std::io::ErrorKind::WouldBlock
-                    && attempt < MAX_TRANSIENT_RETRIES =>
-            {
-                // A concurrent fork can briefly inherit the old writer's descriptor before
-                // CLOEXEC closes it. Bound the retry so a real second writer still fails closed.
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-            Err(source) => return Err(std::io::Error::from(source).into()),
-        }
-    }
-    unreachable!("bounded writer-lock loop always returns")
-}
-
-#[cfg(not(unix))]
-pub(super) fn lock_writer(_file: &File) -> Result<(), SessionStoreError> {
-    Ok(())
-}
-
 pub(super) fn validate_session_id(value: &str) -> Result<(), SessionStoreError> {
     rw_types::SessionId::validate(value).map_err(|_| SessionStoreError::InvalidSessionId)
 }
