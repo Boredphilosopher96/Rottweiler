@@ -1,9 +1,6 @@
 # 01 — Product Feature Reference
 
-This is an intent document grouped by product area, not a current user manual or
-an issue tracker. The public site documents the implemented product as one
-surface. Source, executable tests, and exact release evidence own shipped
-status.
+Product requirements and behavior, grouped by area. The [public documentation site](https://boredphilosopher96.github.io/Rottweiler/) contains usage guides and references.
 
 ## 1. Interaction model
 

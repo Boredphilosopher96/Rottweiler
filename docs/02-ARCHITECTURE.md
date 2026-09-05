@@ -1,9 +1,6 @@
 # 02 — Architecture
 
-This document records the intended architecture and the boundaries present in
-the source; it is not independent evidence that every diagrammed subsystem or
-acceptance behavior is complete. Current provider/plugin limitations are called
-out in [04 — Extensibility](04-EXTENSIBILITY.md) and the roadmap.
+The engine, clients, and extension hosts have explicit owners for state, effects, and resource limits. [Extensibility](04-EXTENSIBILITY.md) defines the plugin and provider contracts.
 
 ## Big picture
 

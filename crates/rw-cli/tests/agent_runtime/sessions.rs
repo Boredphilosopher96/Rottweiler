@@ -36,13 +36,13 @@ fn sessions_verify_checks_the_journal_and_rejects_unsupported_layout() {
         report,
         json!({"session_id": "verified", "events": 1, "bytes": bytes})
     );
-    let legacy = home.join("sessions/unsupported");
-    fs::create_dir_all(&legacy).expect("legacy directory");
+    let unsupported = home.join("sessions/unsupported");
+    fs::create_dir_all(&unsupported).expect("unsupported directory");
     fs::write(
-        legacy.join("events.jsonl"),
+        unsupported.join("events.jsonl"),
         b"nonempty unsupported journal\n",
     )
-    .expect("legacy fixture");
+    .expect("unsupported fixture");
     let output = base_command(&workspace, &home)
         .args(["sessions", "verify", "unsupported"])
         .output()
@@ -53,7 +53,7 @@ fn sessions_verify_checks_the_journal_and_rejects_unsupported_layout() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(!legacy.join("journal").exists());
+    assert!(!unsupported.join("journal").exists());
 }
 
 #[cfg(unix)]

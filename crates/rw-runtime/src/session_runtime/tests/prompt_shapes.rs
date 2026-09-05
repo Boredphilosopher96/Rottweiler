@@ -65,8 +65,8 @@ async fn historical_anthropic_prompt_shape_restores_cache_and_tool_schema_offlin
         description: "Historical read schema".to_owned(),
         input_schema: serde_json::json!({
             "type": "object",
-            "properties": {"legacy_path": {"type": "string"}},
-            "required": ["legacy_path"]
+            "properties": {"undeclared_path": {"type": "string"}},
+            "required": ["undeclared_path"]
         }),
     };
     let request = ProviderRequest {
