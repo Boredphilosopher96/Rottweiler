@@ -222,11 +222,11 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(renderer.getSelection()).not.toBeNull()
     await setup.mockMouse.emitMouseEvent(
       "drag",
-      card!.markdown.x + "Selectable".length,
+      card!.markdown.x + "Selectable".length - 1,
       card!.markdown.y,
     )
     await setup.mockMouse.release(
-      card!.markdown.x + "Selectable".length,
+      card!.markdown.x + "Selectable".length - 1,
       card!.markdown.y,
     )
     await setup.waitFor(() => copied.length === 1)
@@ -242,7 +242,7 @@ describe("Rottweiler OpenTUI shell", () => {
     await setup.mockMouse.drag(
       app.composer.editor.x + 1,
       app.composer.editor.y,
-      app.composer.editor.x + "composer".length,
+      app.composer.editor.x + "composer".length - 1,
       app.composer.editor.y,
     )
     await setup.waitFor(() => copied.length === 2)
