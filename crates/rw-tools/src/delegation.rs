@@ -28,7 +28,7 @@ pub struct ToolEffectScope {
 }
 enum CheckpointExtent {
     None,
-    Paths(Vec<PathBuf>),
+    Paths(Arc<[PathBuf]>),
     Workspace,
 }
 
@@ -89,7 +89,8 @@ impl ToolEffectScope {
                     paths
                         .iter()
                         .map(|path| context.resolve_writable(path))
-                        .collect::<Result<Vec<_>, _>>()?,
+                        .collect::<Result<Vec<_>, _>>()?
+                        .into(),
                 )
             }
         };
@@ -140,7 +141,13 @@ impl ToolEffectScope {
                 }
             }
         }
-        Ok(context.clone().with_effect_domains(grant.domains()))
+        let mut context = context.clone().with_effect_domains(grant.domains());
+        if capabilities.contains(&ToolCapability::WriteFilesystem)
+            && let CheckpointExtent::Paths(paths) = &self.checkpoint
+        {
+            context = context.with_effect_paths(paths.clone());
+        }
+        Ok(context)
     }
 
     fn authorize_files(

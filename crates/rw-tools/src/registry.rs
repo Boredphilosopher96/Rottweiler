@@ -298,6 +298,7 @@ pub struct ToolContext {
     model_alias: Option<String>,
     native_searcher: Option<Arc<dyn crate::WebSearcher>>,
     effect_domains: Option<Arc<[String]>>,
+    effect_paths: Option<Arc<[PathBuf]>>,
     effect_host: Option<Arc<dyn crate::ToolEffectHost>>,
     todo_store: Option<Arc<dyn crate::TodoStateStore>>,
     result_limit_bytes: usize,
@@ -382,6 +383,7 @@ impl ToolContext {
             model_alias: None,
             native_searcher: None,
             effect_domains: None,
+            effect_paths: None,
             effect_host: None,
             todo_store: None,
             result_limit_bytes: ToolLimits::default().max_result_bytes,
@@ -455,6 +457,11 @@ impl ToolContext {
 
     pub(crate) fn without_effect_host(mut self) -> Self {
         self.effect_host = None;
+        self
+    }
+
+    pub(crate) fn with_effect_paths(mut self, paths: Arc<[PathBuf]>) -> Self {
+        self.effect_paths = Some(paths);
         self
     }
 
@@ -555,7 +562,21 @@ impl ToolContext {
         if self.root_index_for(&canonical).is_none() {
             return Err(ToolError::PathEscape(path.to_path_buf()));
         }
+        self.check_effect_path(&canonical)?;
         Ok(canonical)
+    }
+
+    fn check_effect_path(&self, path: &Path) -> Result<(), ToolError> {
+        if self
+            .effect_paths
+            .as_ref()
+            .is_some_and(|paths| !paths.iter().any(|allowed| allowed == path))
+        {
+            return Err(ToolError::DelegationDenied(
+                "file IO exceeds the captured checkpoint paths".into(),
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn resolve_writable(&self, path: &Path) -> Result<PathBuf, ToolError> {
@@ -586,7 +607,9 @@ impl ToolContext {
         let file_name = candidate
             .file_name()
             .ok_or_else(|| ToolError::InvalidInput("path must name a file".to_owned()))?;
-        Ok(canonical_parent.join(file_name))
+        let resolved = canonical_parent.join(file_name);
+        self.check_effect_path(&resolved)?;
+        Ok(resolved)
     }
 
     pub(crate) fn relative_display(&self, path: &Path) -> PathBuf {
@@ -659,6 +682,7 @@ impl ToolContext {
     /// This closes the symlink-swap window for direct read/write/edit operations on Unix.
     #[cfg(unix)]
     pub(crate) fn secure_parent(&self, path: &Path) -> Result<(OwnedFd, OsString), ToolError> {
+        self.check_effect_path(path)?;
         let root_index = self
             .root_index_for(path)
             .ok_or_else(|| ToolError::PathEscape(path.to_path_buf()))?;

@@ -200,3 +200,39 @@ fn cancellation_remains_owned_by_the_outer_invocation() {
         Err(crate::ToolError::Cancelled)
     ));
 }
+
+#[tokio::test]
+#[cfg(unix)]
+async fn retargeted_input_link_cannot_escape_the_captured_checkpoint() {
+    let (root, context) = fixture();
+    let link = root.path().join("input-link");
+    std::os::unix::fs::symlink("approved.txt", &link).expect("input link");
+    let scope = ToolEffectScope::new(
+        &context,
+        CapabilityManifest::new([ReadFilesystem, WriteFilesystem]),
+        &MutationScope::Paths(vec!["approved.txt".into()]),
+    )
+    .expect("checkpoint scope");
+    let tool = WriteTool::new(ToolLimits::default());
+    let input = json!({"path":"input-link","content":"outside checkpoint"});
+    let authorized = scope
+        .authorize(&context, &grant(), &tool, &input)
+        .expect("initial covered target");
+    std::fs::remove_file(&link).expect("replace link");
+    std::os::unix::fs::symlink("other.txt", &link).expect("uncovered target");
+    let error = crate::Tool::execute(&tool, &authorized, input)
+        .await
+        .expect_err("actual IO rejects changed authority");
+    assert!(matches!(error, crate::ToolError::DelegationDenied(_)));
+    crate::Tool::settle_effects(&tool)
+        .await
+        .expect("no file effect remains");
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("approved.txt")).expect("covered file"),
+        "before"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("other.txt")).expect("other file"),
+        "other"
+    );
+}
