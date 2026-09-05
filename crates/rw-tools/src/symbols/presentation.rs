@@ -23,7 +23,8 @@ mod tests {
     use super::*;
     #[test]
     fn source_declarations_are_valid_and_generation_stable() {
-        for declaration in [&SYMBOLS_PRESENTATION] {
+        {
+            let declaration = &SYMBOLS_PRESENTATION;
             let first = declaration.plan().unwrap_or_else(|error| panic!("{error}"));
             let second = declaration.plan().unwrap_or_else(|error| panic!("{error}"));
             assert_eq!(first, second);

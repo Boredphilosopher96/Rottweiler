@@ -126,7 +126,7 @@ impl ToolEffectScope {
                 return Err(denied("tool does not expose a delegated effect"));
             }
             DelegatedEffect::Filesystem => {
-                self.authorize_files(context, tool, input, &capabilities)?
+                self.authorize_files(context, tool, input, &capabilities)?;
             }
             DelegatedEffect::Http { host } => {
                 if tool.behavior() != ToolBehavior::WebFetch

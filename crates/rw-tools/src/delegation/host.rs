@@ -212,14 +212,13 @@ impl ToolEffectHost for DelegatedTools {
             }
             Ok(())
         };
-        match tokio::time::timeout(EFFECT_SETTLEMENT_DEADLINE, proof).await {
-            Ok(result) => result,
-            Err(_) => {
-                self.failed.store(true, Ordering::Release);
-                Err(ToolError::EffectsUnsettled(
-                    "nested effect settlement deadline expired".into(),
-                ))
-            }
+        if let Ok(result) = tokio::time::timeout(EFFECT_SETTLEMENT_DEADLINE, proof).await {
+            result
+        } else {
+            self.failed.store(true, Ordering::Release);
+            Err(ToolError::EffectsUnsettled(
+                "nested effect settlement deadline expired".into(),
+            ))
         }
     }
 }

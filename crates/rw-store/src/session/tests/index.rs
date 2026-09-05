@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used)]
 use super::*;
 
 fn summary(id: &str, title: &str, updated: i64) -> SessionSummary {

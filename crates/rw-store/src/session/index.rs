@@ -28,7 +28,7 @@ pub struct SessionSummary {
     pub turn_count: i64,
 }
 
-/// Bounded listing state for one exact journal prefix. Search documents live in SQLite.
+/// Bounded listing state for one exact journal prefix. Search documents live in `SQLite`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionProjection {
     /// Listing fields derived from the log.
@@ -78,7 +78,7 @@ impl SessionIndex {
 
     /// Atomically writes bounded listing metadata and its title document.
     /// # Errors
-    /// Rejects malformed identities and failed SQLite writes.
+    /// Rejects malformed identities and failed `SQLite` writes.
     pub fn upsert(&self, projection: &SessionProjection) -> Result<(), SessionStoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
@@ -89,7 +89,7 @@ impl SessionIndex {
 
     /// Removes one disposable projection and its searchable documents.
     /// # Errors
-    /// Rejects malformed identities and failed SQLite writes.
+    /// Rejects malformed identities and failed `SQLite` writes.
     pub fn remove(&self, session_id: &str) -> Result<(), SessionStoreError> {
         validate_session_id(session_id)?;
         let mut connection = self.connection()?;
@@ -109,7 +109,7 @@ impl SessionIndex {
 
     /// Clears rebuildable search state without touching accounting or reservations.
     /// # Errors
-    /// Rejects unsupported authoritative schemas and failed SQLite writes.
+    /// Rejects unsupported authoritative schemas and failed `SQLite` writes.
     pub fn reset_derived(root: &Path) -> Result<Self, SessionStoreError> {
         fs::create_dir_all(root)?;
         let index = Self {
@@ -128,7 +128,7 @@ impl SessionIndex {
 
     /// Reads bounded metadata and its exact source identity.
     /// # Errors
-    /// Rejects corrupt identities and failed SQLite reads.
+    /// Rejects corrupt identities and failed `SQLite` reads.
     pub fn projection(&self, id: &str) -> Result<Option<SessionProjection>, SessionStoreError> {
         validate_session_id(id)?;
         read_projection(&self.connection()?, id)
@@ -136,7 +136,7 @@ impl SessionIndex {
 
     /// Compares one row's source watermark with the authoritative log.
     /// # Errors
-    /// Rejects malformed identities, watermarks and failed SQLite reads.
+    /// Rejects malformed identities, watermarks and failed `SQLite` reads.
     pub fn projection_status(
         &self,
         id: &str,
@@ -247,8 +247,8 @@ impl SessionIndex {
         read_index(root, |connection| query_search(connection, query, limit))
     }
 
-    /// Lists newest sessions using a live SQLite read transaction.
-    /// SQLite may maintain its transient WAL coordination files; stored rows are read-only.
+    /// Lists newest sessions using a live `SQLite` read transaction.
+    /// `SQLite` may maintain its transient WAL coordination files; stored rows are read-only.
     ///
     /// # Errors
     ///
@@ -388,7 +388,7 @@ pub struct SearchDocumentWriter<'a> {
 impl SearchDocumentWriter<'_> {
     /// Adds one source field, with exact turn/sequence identity for replay and rewind.
     /// # Errors
-    /// Rejects an oversized body and failed SQLite writes.
+    /// Rejects an oversized body and failed `SQLite` writes.
     pub fn text(
         &self,
         agent_turn: u64,
@@ -406,7 +406,7 @@ impl SearchDocumentWriter<'_> {
     }
     /// Records the host-owned invocation whose result may add searchable fields.
     /// # Errors
-    /// Rejects duplicate identities and failed SQLite writes.
+    /// Rejects duplicate identities and failed `SQLite` writes.
     pub fn start_tool(&self, invocation: &str, agent_turn: u64) -> Result<(), SessionStoreError> {
         self.connection.execute(
             "INSERT INTO search_invocations(session_id,invocation_id,agent_turn) VALUES(?1,?2,?3)",
@@ -417,7 +417,7 @@ impl SearchDocumentWriter<'_> {
 
     /// Consumes a live invocation; discarded or already settled calls have no result authority.
     /// # Errors
-    /// Rejects a contradictory turn or failed SQLite access.
+    /// Rejects a contradictory turn or failed `SQLite` access.
     pub fn finish_tool(
         &self,
         invocation: &str,
@@ -441,7 +441,7 @@ impl SearchDocumentWriter<'_> {
 
     /// Removes documents belonging to discarded agent turns in the same transaction.
     /// # Errors
-    /// Returns a SQLite write failure.
+    /// Returns a `SQLite` write failure.
     pub fn rewind(&self, through: u64) -> Result<(), SessionStoreError> {
         let turn = through.to_string();
         self.connection.execute("DELETE FROM search_documents WHERE session_id=?1 AND kind=1 AND (length(agent_turn)>length(?2) OR (length(agent_turn)=length(?2) AND agent_turn>?2))", params![self.session,turn])?;

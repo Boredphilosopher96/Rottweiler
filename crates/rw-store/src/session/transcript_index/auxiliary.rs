@@ -1,6 +1,6 @@
 //! Fixed-slot opaque cells share the projection prefix transaction.
 use super::{TranscriptIndex, TranscriptIndexError, storage};
-use redb::{ReadableDatabase as _, ReadableTable as _, TableDefinition};
+use redb::{ReadableDatabase as _, TableDefinition};
 
 /// Cells are overwritten in place across logical epochs; keys cannot accumulate.
 pub const MAX_AUXILIARY_CELLS: u16 = 2048;
@@ -78,6 +78,7 @@ pub(super) fn validate(key: u16, value: &[u8]) -> Result<(), TranscriptIndexErro
 mod tests {
     use super::*;
     use crate::session::{journal::SegmentedJournal, transcript_index::TranscriptIndexMutation};
+    use redb::ReadableTableMetadata as _;
 
     #[test]
     #[allow(clippy::expect_used)]
@@ -150,7 +151,6 @@ mod tests {
         }
         let transaction = index.database.begin_read().expect("read");
         let cells = transaction.open_table(CELLS).expect("cells");
-        use redb::ReadableTableMetadata as _;
         assert_eq!(cells.len().expect("cell count"), 2);
     }
 }

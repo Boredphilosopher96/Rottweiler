@@ -1,4 +1,4 @@
-//! SQLite owns a live read transaction; search never copies the lifetime database.
+//! `SQLite` owns a live read transaction; search never copies the lifetime database.
 use super::{SessionStoreError, sqlite_snapshot::validate_read_only_index};
 use rusqlite::{Connection, OpenFlags};
 use std::{fs, path::Path};
