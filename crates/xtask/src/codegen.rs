@@ -770,6 +770,7 @@ fn contract_fixture() -> ContractFixture {
             EngineEvent::ProviderCallAccounted {
                 meta: event_meta(),
                 call: ProviderCallIdentity {
+                    budget_session_id: SessionId("session-fixture".to_owned()),
                     session_id: SessionId("session-fixture".to_owned()),
                     turn_id: TurnId("turn-fixture".to_owned()),
                     attribution: AccountingAttribution::Main,

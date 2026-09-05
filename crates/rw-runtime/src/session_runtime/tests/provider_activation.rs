@@ -112,6 +112,7 @@ async fn engine_switches_to_an_exact_model_route_staged_by_provider_activation()
     let workspace = tempdir().expect("workspace");
     let session_id = SessionId("staged-provider-switch".to_owned());
     let actor = SessionActor::spawn(SessionActorConfig {
+        budget_session_id: session_id.clone(),
         session_id: session_id.clone(),
         workspace_root: workspace.path().to_path_buf(),
         additional_workspace_roots: Vec::new(),

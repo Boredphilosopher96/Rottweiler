@@ -235,6 +235,7 @@ pub(in crate::engine::tests) fn config(
     hooks: HookDispatcher,
 ) -> SessionActorConfig {
     SessionActorConfig {
+        budget_session_id: SessionId("fixture-session".to_owned()),
         session_id: SessionId("fixture-session".to_owned()),
         workspace_root: root.to_path_buf(),
         additional_workspace_roots: Vec::new(),

@@ -140,7 +140,7 @@ impl BudgetLedger {
         if global.0[projection::ACTIVE] >= MAX_ACTIVE_PROVIDER_CALLS {
             return Err(Error::Capacity);
         }
-        let session = projection::read(&transaction, &plan.identity.session_id.0, 0)?;
+        let session = projection::read(&transaction, &plan.identity.budget_session_id.0, 0)?;
         admit(&transaction, plan, session, global)?;
         let call = Call {
             identity: plan.identity.clone(),
@@ -335,7 +335,7 @@ fn replace_projections(
     previous: Option<&Call>,
     next: &Call,
 ) -> Result<(), Error> {
-    for scope in [projection::ROOT_SCOPE, &next.identity.session_id.0] {
+    for scope in [projection::ROOT_SCOPE, &next.identity.budget_session_id.0] {
         projection::pending(
             connection,
             scope,
@@ -401,7 +401,7 @@ fn admit(
             return Err(Error::UnresolvedCharge);
         }
         let totals = if scope == BudgetScope::Session {
-            projection::through(connection, &plan.identity.session_id.0, at)?
+            projection::through(connection, &plan.identity.budget_session_id.0, at)?
         } else {
             projection::through(connection, projection::ROOT_SCOPE, at)?.subtract(
                 projection::through(
@@ -483,6 +483,7 @@ fn save(connection: &Connection, call: &Call) -> Result<(), Error> {
 
 fn validate_identity(identity: &ProviderCallIdentity) -> Result<(), Error> {
     validate_session_id(&identity.session_id.0)?;
+    validate_session_id(&identity.budget_session_id.0)?;
     for value in [&identity.call_id, &identity.turn_id.0] {
         if value.is_empty()
             || value.len() > 128

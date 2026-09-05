@@ -217,6 +217,7 @@ async fn session_handle_rewind_restores_ten_agent_edits_to_turn_three() {
         Arc::new(CheckpointStore::open(&coordinator_root, &workspace).expect("checkpoint store")),
     ));
     let actor = SessionActor::spawn(SessionActorConfig {
+        budget_session_id: session.clone(),
         session_id: session,
         workspace_root: workspace.clone(),
         additional_workspace_roots: Vec::new(),

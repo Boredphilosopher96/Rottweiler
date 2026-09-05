@@ -224,7 +224,7 @@ pub(crate) async fn compose_hosted_actor(
         .requested_model
         .clone()
         .unwrap_or_else(|| options.config.models.default.clone());
-    let (mut initial_context, persisted_model_alias) = if options.resume {
+    let (mut initial_context, persisted_model_alias, budget_session_id) = if options.resume {
         let metadata = load_session_metadata(&options.storage_root, &session_id, &workspace)?;
         let mut context = metadata.initial_session_context;
         let recorded_count = metadata.initial_context_workspace_root_count;
@@ -235,7 +235,7 @@ pub(crate) async fn compose_hosted_actor(
                 context.push(instructions.as_system_turn());
             }
         }
-        (context, metadata.model_alias)
+        (context, metadata.model_alias, metadata.budget_session_id)
     } else {
         let context = fresh_initial_session_context(&options.storage_root, &workspace_roots)
             .map_err(|error| miette!("project instructions could not load: {error}"))?;
@@ -247,7 +247,11 @@ pub(crate) async fn compose_hosted_actor(
             &context,
             &workspace_roots,
         )?;
-        (context, configured_model_alias)
+        (
+            context,
+            configured_model_alias,
+            rw_types::SessionId(session_id.clone()),
+        )
     };
 
     let session_checkpoint_root = checkpoint_root(&options.storage_root, &workspace, &session_id);
@@ -698,6 +702,7 @@ pub(crate) async fn compose_hosted_actor(
         .map_err(|error| miette!("agent tools could not resolve: {error}"))?;
     let agents = Arc::new(agents);
     let template = Arc::new(ChildActorTemplate {
+        budget_session_id: budget_session_id.clone(),
         provider_admission: options.provider_admission.clone(),
         storage_root: options.storage_root.clone(),
         model: Arc::clone(&model),
@@ -864,6 +869,7 @@ pub(crate) async fn compose_hosted_actor(
     );
     let initial_thinking = configured_session_thinking(&options.config, &persisted_model_alias);
     let handle = SessionActor::spawn(SessionActorConfig {
+        budget_session_id,
         session_id: options.session_id,
         workspace_root: workspace,
         additional_workspace_roots: workspace_roots.into_iter().skip(1).collect(),

@@ -129,6 +129,7 @@ async fn historical_anthropic_prompt_shape_restores_cache_and_tool_schema_offlin
     let workspace = root.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("workspace");
     let actor = SessionActor::spawn(SessionActorConfig {
+        budget_session_id: SessionId(session_id.to_owned()),
         session_id: SessionId(session_id.to_owned()),
         workspace_root: workspace,
         additional_workspace_roots: Vec::new(),

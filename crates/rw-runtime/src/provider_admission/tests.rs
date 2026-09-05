@@ -10,6 +10,7 @@ use rw_types::{AccountingAttribution, SessionId, TurnId, config::BudgetConfig};
 fn plan() -> BudgetReservationPlan {
     BudgetReservationPlan {
         identity: ProviderCallIdentity {
+            budget_session_id: SessionId("session".into()),
             session_id: SessionId("session".into()),
             turn_id: TurnId("turn".into()),
             attribution: AccountingAttribution::Main,

@@ -203,6 +203,7 @@ impl StubFactory {
             )
             .expect("session marker command");
         let handle = SessionActor::spawn(SessionActorConfig {
+            budget_session_id: session_id.clone(),
             session_id: session_id.clone(),
             workspace_root: workspace,
             additional_workspace_roots: Vec::new(),

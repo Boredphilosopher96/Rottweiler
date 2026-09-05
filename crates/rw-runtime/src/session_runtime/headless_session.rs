@@ -267,7 +267,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
         .model
         .clone()
         .unwrap_or_else(|| loaded_config.config.models.default.clone());
-    let (mut initial_context, persisted_model_alias) = if resuming {
+    let (mut initial_context, persisted_model_alias, budget_session_id) = if resuming {
         let metadata = load_session_metadata(&storage_root, &session_id, &workspace)?;
         let mut context = metadata.initial_session_context;
         let recorded_count = metadata.initial_context_workspace_root_count;
@@ -278,7 +278,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
                 context.push(instructions.as_system_turn());
             }
         }
-        (context, metadata.model_alias)
+        (context, metadata.model_alias, metadata.budget_session_id)
     } else {
         let context = fresh_initial_session_context(&storage_root, &workspace_roots)
             .map_err(|error| miette!("project instructions could not load: {error}"))?;
@@ -290,7 +290,11 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
             &context,
             &workspace_roots,
         )?;
-        (context, configured_model_alias.clone())
+        (
+            context,
+            configured_model_alias.clone(),
+            rw_types::SessionId(session_id.clone()),
+        )
     };
 
     let checkpoint_root = checkpoint_root(&storage_root, &workspace, &session_id);
@@ -907,6 +911,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
             .map_err(|error| miette!("agent tools could not resolve: {error}"))?;
         let agents = Arc::new(agents);
         let template = Arc::new(ChildActorTemplate {
+            budget_session_id: budget_session_id.clone(),
             provider_admission: provider_admission.clone(),
             storage_root: storage_root.clone(),
             model: Arc::clone(&model),
@@ -1079,6 +1084,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
     };
     let initial_thinking = configured_session_thinking(&loaded_config.config, &model_alias);
     let actor = SessionActor::spawn(SessionActorConfig {
+        budget_session_id,
         session_id: SessionId(session_id.clone()),
         workspace_root: workspace,
         additional_workspace_roots: workspace_roots.into_iter().skip(1).collect(),

@@ -7,6 +7,7 @@ use std::sync::{Arc, Barrier};
 fn plan(session: &str, call: &str, amount: u64) -> BudgetReservationPlan {
     BudgetReservationPlan {
         identity: ProviderCallIdentity {
+            budget_session_id: SessionId(session.into()),
             session_id: SessionId(session.into()),
             turn_id: TurnId("turn-1".into()),
             attribution: AccountingAttribution::Main,
@@ -356,4 +357,54 @@ fn pending_recovery_pages_skip_settled_history_and_preserve_attempt_identity() {
         Err(BudgetReservationError::IdentityConflict)
     ));
     assert!(ledger.pending_for_session("session", None, 129).is_err());
+}
+
+#[test]
+fn parent_and_child_connections_share_one_session_cap() {
+    let root = tempfile::tempdir().unwrap();
+    BudgetLedger::open(root.path()).unwrap();
+    let barrier = Arc::new(Barrier::new(2));
+    let workers: Vec<_> = ["parent", "child"]
+        .into_iter()
+        .map(|session| {
+            let root = root.path().to_owned();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let mut ledger = BudgetLedger::open(&root).unwrap();
+                let mut request = plan(session, "call", 60);
+                request.identity.budget_session_id = SessionId("parent".into());
+                request.budget.daily_cost_cap_micros_usd = None;
+                barrier.wait();
+                ledger.reserve(&request)
+            })
+        })
+        .collect();
+    let results: Vec<_> = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect();
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(Error::CapExceeded { .. })))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn admitted_call_cannot_change_its_budget_scope() {
+    let root = tempfile::tempdir().unwrap();
+    let mut ledger = BudgetLedger::open(root.path()).unwrap();
+    let mut request = plan("child", "call", 60);
+    request.identity.budget_session_id = SessionId("parent".into());
+    ledger.reserve(&request).unwrap();
+    let mut substituted = request.identity.clone();
+    substituted.budget_session_id = SessionId("other".into());
+    assert!(ledger.start(&substituted).is_err());
+    ledger.start(&request.identity).unwrap();
+    let mut accounted = receipt(&request, 1, 17);
+    accounted.identity.budget_session_id = SessionId("other".into());
+    assert!(ledger.settle_accounted(&accounted).is_err());
 }

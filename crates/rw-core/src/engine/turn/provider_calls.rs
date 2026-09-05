@@ -31,6 +31,7 @@ pub(super) fn invocation(
             total.saturating_add(LocalTokenEstimator::turn(turn))
         });
     Ok(ProviderInvocation {
+        budget_session_id: config.budget_session_id.clone(),
         session_id: config.session_id.clone(),
         turn_id: wire_turn_id(turn),
         attribution,
@@ -90,6 +91,7 @@ mod tests {
         let (signals, mut receive) = mpsc::unbounded_channel();
         let sink = SessionAccountingSink { signals };
         let identity = ProviderCallIdentity {
+            budget_session_id: SessionId("receipt-session".into()),
             session_id: SessionId("receipt-session".into()),
             turn_id: TurnId("7".into()),
             attribution: AccountingAttribution::Main,

@@ -58,6 +58,8 @@ pub enum ProviderInputBudget {
 pub struct ProviderInvocation {
     /// Durable session which owns this logical call.
     pub session_id: rw_types::SessionId,
+    /// Immutable root session whose cap covers this session and its descendants.
+    pub budget_session_id: rw_types::SessionId,
     /// Durable parent turn, including title and compaction attribution.
     pub turn_id: rw_types::TurnId,
     /// Accounting role of this call.

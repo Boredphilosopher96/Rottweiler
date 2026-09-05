@@ -165,6 +165,7 @@ impl RuntimeWorkspaceRootController {
     pub(super) fn child_config(
         &self,
         storage_root: &Path,
+        budget_session_id: &SessionId,
         session_id: &SessionId,
         workspace_root: &Path,
         fallback_model_alias: &str,
@@ -309,6 +310,7 @@ impl RuntimeWorkspaceRootController {
             root_authorization: WorkspaceRootAuthorization::Hosted(roots.clone()),
         });
         Ok(SessionActorConfig {
+            budget_session_id: budget_session_id.clone(),
             session_id: session_id.clone(),
             workspace_root: workspace_root.to_path_buf(),
             additional_workspace_roots: Vec::new(),

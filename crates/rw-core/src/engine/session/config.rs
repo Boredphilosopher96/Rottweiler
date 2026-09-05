@@ -40,6 +40,8 @@ pub struct StartupNotification {
 
 pub struct SessionActorConfig {
     pub session_id: SessionId,
+    /// Immutable root session whose cap covers this session and its descendants.
+    pub budget_session_id: SessionId,
     pub workspace_root: PathBuf,
     pub additional_workspace_roots: Vec<PathBuf>,
     pub workspace_generation: u64,
@@ -100,6 +102,7 @@ impl SessionActorConfig {
     pub(in crate::engine) fn with_model_alias(&self, model_alias: String) -> Self {
         Self {
             session_id: self.session_id.clone(),
+            budget_session_id: self.budget_session_id.clone(),
             workspace_root: self.workspace_root.clone(),
             additional_workspace_roots: self.additional_workspace_roots.clone(),
             workspace_generation: self.workspace_generation,

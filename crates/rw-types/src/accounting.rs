@@ -12,6 +12,8 @@ use ts_rs::TS;
 pub struct ProviderCallIdentity {
     /// Session which owns the provider request.
     pub session_id: SessionId,
+    /// Immutable root session whose cap covers this session and its descendants.
+    pub budget_session_id: SessionId,
     /// Durable agent turn which owns this request.
     pub turn_id: TurnId,
     /// Separates ordinary generation from compaction, title, and child usage.

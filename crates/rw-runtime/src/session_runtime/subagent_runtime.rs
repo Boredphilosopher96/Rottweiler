@@ -23,6 +23,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
 pub(super) struct ChildActorTemplate {
+    pub(super) budget_session_id: SessionId,
     pub(super) provider_admission: Arc<dyn rw_core::provider_admission::ProviderAdmission>,
     pub(super) storage_root: PathBuf,
     pub(super) model: Arc<dyn ModelDriver>,
@@ -90,6 +91,7 @@ impl ChildActorTemplate {
     ) -> std::result::Result<SessionActorConfig, AgentLoopError> {
         self.lease_runtime.child_config(
             &self.storage_root,
+            &self.budget_session_id,
             &launch.handle.session_id,
             &launch.workspace_root,
             &launch.request.model,
@@ -109,6 +111,7 @@ impl ChildActorTemplate {
     ) -> std::result::Result<SessionActorConfig, AgentLoopError> {
         self.lease_runtime.child_config(
             &self.storage_root,
+            &self.budget_session_id,
             session_id,
             workspace_root,
             &policy.model_alias,

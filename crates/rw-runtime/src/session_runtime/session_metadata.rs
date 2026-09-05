@@ -22,6 +22,7 @@ pub(crate) struct SessionMetadata {
     #[serde(deserialize_with = "deserialize_version")]
     pub(super) version: u16,
     pub(super) session_id: String,
+    pub(crate) budget_session_id: SessionId,
     pub workspace: PathBuf,
     pub model_alias: String,
     pub(super) initial_session_context: Vec<Turn>,
@@ -76,6 +77,7 @@ pub(super) fn persist_session_metadata(
     let metadata = SessionMetadata {
         version: SESSION_METADATA_VERSION,
         session_id: session_id.to_owned(),
+        budget_session_id: SessionId(session_id.to_owned()),
         workspace: workspace.to_path_buf(),
         model_alias: model_alias.to_owned(),
         initial_session_context: initial_session_context.to_vec(),
@@ -168,6 +170,7 @@ pub(crate) fn load_session_metadata_any_bounded(
     #[cfg(not(unix))]
     let (bytes, byte_count) = load_session_metadata_portable(&path, max_bytes)?;
     let metadata: SessionMetadata = serde_json::from_slice(&bytes).into_diagnostic()?;
+    validate_session_id(&metadata.budget_session_id.0)?;
     if metadata.version != SESSION_METADATA_VERSION || metadata.session_id != session_id {
         return Err(miette!(
             "session metadata identity does not match this session and canonical workspace"

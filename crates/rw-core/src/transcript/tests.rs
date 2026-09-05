@@ -1005,6 +1005,7 @@ fn turn_summaries_preserve_exact_actuals_without_receipt_duplication_and_obey_re
             EngineEvent::ProviderCallAccounted {
                 meta: meta(0),
                 call: rw_types::ProviderCallIdentity {
+                    budget_session_id: SessionId("semantic".into()),
                     session_id: SessionId("semantic".into()),
                     turn_id: TurnId("1".into()),
                     attribution: rw_types::AccountingAttribution::Main,

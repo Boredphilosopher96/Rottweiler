@@ -79,6 +79,7 @@ impl ProviderAccountingSink for FixtureAccounting {
 }
 pub(super) fn invocation() -> ProviderInvocation {
     ProviderInvocation {
+        budget_session_id: rw_types::SessionId("fixture".into()),
         session_id: rw_types::SessionId("fixture".into()),
         turn_id: rw_types::TurnId("1".into()),
         attribution: rw_types::AccountingAttribution::Main,

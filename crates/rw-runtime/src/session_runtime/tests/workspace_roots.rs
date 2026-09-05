@@ -336,6 +336,7 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
     let resumed_parent = controller
         .child_config(
             &private,
+            &SessionId("family-fixture".into()),
             &parent_session,
             &primary,
             "fast",
@@ -359,6 +360,7 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
     let child = controller
         .child_config(
             &private,
+            &SessionId("family-fixture".into()),
             &SessionId("lease-child".to_owned()),
             &added,
             "fast",
@@ -423,6 +425,7 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
     let trusted_child = controller
         .child_config(
             &private,
+            &SessionId("family-fixture".into()),
             &SessionId("trusted-lease-child".to_owned()),
             &added,
             "fast",

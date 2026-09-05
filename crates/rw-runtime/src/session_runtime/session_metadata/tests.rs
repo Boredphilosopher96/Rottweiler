@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 fn fixture() -> SessionMetadata {
     SessionMetadata {
+        budget_session_id: rw_types::SessionId("fixture".into()),
         version: SESSION_METADATA_VERSION,
         session_id: "metadata-contract".into(),
         workspace: PathBuf::from("/workspace"),
@@ -76,6 +77,7 @@ fn metadata_reader_rejects_invalid_workspace_mappings_and_identity() {
         ("initial_context_workspace_root_count", json!(0)),
         ("initial_context_workspace_root_count", json!(2)),
         ("session_id", json!("other-session")),
+        ("budget_session_id", json!("../outside")),
     ] {
         let mut invalid = valid.clone();
         invalid[field] = replacement;

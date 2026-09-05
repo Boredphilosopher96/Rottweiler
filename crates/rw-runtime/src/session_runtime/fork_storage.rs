@@ -257,6 +257,7 @@ pub(super) fn persist_forked_session_metadata(
     let metadata = SessionMetadata {
         version: SESSION_METADATA_VERSION,
         session_id: child_session_id.to_owned(),
+        budget_session_id: parent.budget_session_id.clone(),
         workspace: parent.workspace.clone(),
         model_alias: parent.model_alias.clone(),
         initial_session_context: parent.initial_session_context.clone(),

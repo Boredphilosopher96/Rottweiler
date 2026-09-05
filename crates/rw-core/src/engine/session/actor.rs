@@ -46,9 +46,11 @@ impl SessionActor {
     ///
     /// Rejects zero guardrails, empty aliases, or an unusable workspace root.
     pub fn spawn(config: SessionActorConfig) -> Result<SessionHandle, AgentLoopError> {
-        if SessionId::validate(&config.session_id.0).is_err() {
+        if SessionId::validate(&config.session_id.0).is_err()
+            || SessionId::validate(&config.budget_session_id.0).is_err()
+        {
             return Err(AgentLoopError::InvalidConfiguration(
-                "session id must satisfy the canonical session identifier grammar".to_owned(),
+                "session and budget scope ids must satisfy the canonical session identifier grammar".to_owned(),
             ));
         }
         if config.model_alias.trim().is_empty() {

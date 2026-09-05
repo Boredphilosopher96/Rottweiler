@@ -38,6 +38,7 @@ impl ProviderAttemptGate for InvocationGate {
     ) -> Result<Box<dyn ProviderAttempt>, ProviderError> {
         let invocation = &self.invocation;
         let identity = ProviderCallIdentity {
+            budget_session_id: invocation.budget_session_id.clone(),
             session_id: invocation.session_id.clone(),
             turn_id: invocation.turn_id.clone(),
             attribution: invocation.attribution.clone(),
