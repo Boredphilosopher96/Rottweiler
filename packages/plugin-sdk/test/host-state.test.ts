@@ -53,3 +53,20 @@ test("state and session replies reject missing nullable fields and additive data
   expect(calls).toEqual([[RPC_METHODS.sessionQuery, {}]])
   await expect(hostStateContext(async () => ({ ...session, provider_config: {} })).session.query()).rejects.toThrow("invalid host")
 })
+
+test("typed controls preserve pending outcomes and reject implicit authority", async () => {
+  const calls: [string, JsonValue][] = []
+  const session = hostStateContext(async (method, params) => {
+    calls.push([method, params])
+    return { outcome: "context_choice_required", question_id: "model-switch-1" }
+  }).session
+  const operation = { action: "select_model", model: "fast", provider: null } as const
+  expect(await session.control(operation)).toEqual({ outcome: "context_choice_required", question_id: "model-switch-1" })
+  expect(calls).toEqual([[RPC_METHODS.sessionControl, operation]])
+  await expect(session.control({ ...operation, session_id: "other" } as typeof operation)).rejects.toThrow("invalid session control")
+  expect(calls.length).toBe(1)
+  const read = { expected_sequence: null, after_item_id: null }
+  const badPage = { outcome: "ready", sequence: null, items: [], next_after_item_id: null, prompt: "secret" }
+  await expect(hostStateContext(async () => badPage).session.readContext(read)).rejects.toThrow("invalid context page")
+  expect(await hostStateContext(async () => ({ outcome: "restart" })).session.readContext(read)).toEqual({ outcome: "restart" })
+})

@@ -39,7 +39,6 @@ use rw_types::ModelContextTransfer;
 use rw_types::PlanArtifact;
 use rw_types::PlanDecision;
 use rw_types::RewindTarget;
-use rw_types::Role;
 use rw_types::ShellId;
 use std::sync::atomic::Ordering;
 use tokio::sync::oneshot;
