@@ -9,7 +9,7 @@ mod completed_turns;
 mod context_surgery;
 mod controls;
 mod initialization;
-mod live_state;
+pub(in crate::engine) mod live_state;
 mod message_input;
 mod messages;
 pub(super) mod model_job;

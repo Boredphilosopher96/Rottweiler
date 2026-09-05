@@ -280,7 +280,7 @@ pub(super) async fn execute_prepared_tool(
         let delegated = Arc::new(rw_tools::DelegatedTools::new(
             invocation_context.clone(),
             runtime.tools.clone(),
-            rw_tools::CapabilityManifest::new(authorization.capabilities.iter().copied()),
+            rw_tools::CapabilityManifest::new(authorization.capabilities.iter().cloned()),
             mutation_scope.clone(),
         ));
         invocation_context.with_effect_host(delegated)
