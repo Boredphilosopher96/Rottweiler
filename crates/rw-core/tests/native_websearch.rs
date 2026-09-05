@@ -9,7 +9,7 @@ use rw_providers::{
     NativeWebSearchCapability, Provider, ProviderError, ProviderEvent, ProviderRequest, Recorder,
     ReplayProvider, WireMode, deny_outbound_network_for_process,
 };
-use rw_tools::{CancellationToken, WebSearchRequest, WebSearchSource, WebSearcher};
+use rw_tools::{CancellationToken, WebSearchRequest, WebSearchSource};
 
 struct NativeFixtureProvider {
     request: Mutex<Option<ProviderRequest>>,

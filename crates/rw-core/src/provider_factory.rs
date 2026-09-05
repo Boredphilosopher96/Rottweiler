@@ -31,23 +31,18 @@ use rw_providers::{
     AnthropicConfig, AnthropicProvider, AnthropicThinkingStrategy, AuthMaterial, AuthProvider,
     BoxEventStream, CacheBreakpointSupport, Capabilities, FixtureRedactor,
     GITHUB_COPILOT_CLIENT_ID, GitHubCopilotProvider, GitHubCopilotProviderConfig,
-    GitHubCopilotRuntime, ModelCandidate, ModelPricing, NativeWebSearchCapability,
-    NativeWebSearchRequest, NetworkPolicy, OAuthRefreshConfig, OPENAI_SUBSCRIPTION_CLIENT_ID,
-    OPENAI_SUBSCRIPTION_RESPONSES_ENDPOINT, OPENAI_SUBSCRIPTION_TOKEN_ENDPOINT,
-    OpenAiChatRequestProfile, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
-    OpenAiSubscriptionAuth, OpenAiSubscriptionAuthConfig, OpenAiSubscriptionTokenSink,
-    OpenAiWireMode, PricingTable, Provider, ProviderError, ProviderErrorKind,
-    ProviderModelMetadata, ProviderRequest, ProviderRouter, ProxyAuthentication, ProxyEnvironment,
-    ProxySettings, ProxySource, RefreshTokenSink, RefreshingOAuth, RetryPolicy, RouterError,
-    Secret as ProviderSecret, StaticAuth, ToolChoice, UsageAccounting, WireFrameSink, WireMode,
+    GitHubCopilotRuntime, ModelCandidate, ModelPricing, NativeWebSearchCapability, NetworkPolicy,
+    OAuthRefreshConfig, OPENAI_SUBSCRIPTION_CLIENT_ID, OPENAI_SUBSCRIPTION_RESPONSES_ENDPOINT,
+    OPENAI_SUBSCRIPTION_TOKEN_ENDPOINT, OpenAiChatRequestProfile, OpenAiCompatibleConfig,
+    OpenAiCompatibleProvider, OpenAiSubscriptionAuth, OpenAiSubscriptionAuthConfig,
+    OpenAiSubscriptionTokenSink, OpenAiWireMode, PricingTable, Provider, ProviderError,
+    ProviderErrorKind, ProviderModelMetadata, ProviderRequest, ProviderRouter, ProxyAuthentication,
+    ProxyEnvironment, ProxySettings, ProxySource, RefreshTokenSink, RefreshingOAuth, RetryPolicy,
+    RouterError, Secret as ProviderSecret, StaticAuth, UsageAccounting, WireFrameSink, WireMode,
 };
 use rw_store::credentials::{
     CredentialEnvironment, CredentialError, CredentialManager, CredentialReference,
     CredentialStore, NoExternalCredentialStore, Secret as StoredSecret, SystemEnvironment,
-};
-use rw_tools::{
-    CancellationToken, ToolError, WebSearchRequest, WebSearchResponse, WebSearchResult,
-    WebSearchSource, WebSearcher,
 };
 use rw_types::config::ThinkingLevel;
 use rw_types::{

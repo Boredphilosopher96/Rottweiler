@@ -3,6 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use super::*;
+use rw_tools::{CancellationToken, WebSearchRequest};
 
 #[derive(Clone, Default)]
 struct EmptyEnvironment;
