@@ -12,7 +12,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use rw_tools::ToolRegistry;
-use rw_types::{ClientCommand, config::PermissionDecision};
+use rw_types::{ClientCommand, ClientRole, config::PermissionDecision};
 use std::{
     path::Path,
     sync::{
@@ -80,7 +80,7 @@ impl SessionExtensionController for CallbackGeneration {
         Ok(())
     }
 }
-fn fixture(controller: &Arc<CallbackGeneration>, root: &Path) -> SessionHandle {
+async fn fixture(controller: &Arc<CallbackGeneration>, root: &Path) -> SessionHandle {
     let mut configuration = config(
         root,
         Arc::new(ScriptedModel::default()),
@@ -98,6 +98,15 @@ fn fixture(controller: &Arc<CallbackGeneration>, root: &Path) -> SessionHandle {
                 .expect("capability"),
         )
         .expect("bind");
+    handle
+        .dispatch(ClientCommand::AttachSession {
+            meta: protocol_meta("driver", "driver-attach"),
+            session_id: handle.session_id().clone(),
+            last_seen_sequence: None,
+            role: ClientRole::Driver,
+        })
+        .await
+        .expect("explicit driver before development admission");
     handle
 }
 fn attach(handle: &SessionHandle) -> ClientCommand {
@@ -117,7 +126,7 @@ async fn entered(controller: &CallbackGeneration) {
 async fn generation_preparation_services_callbacks_and_publishes_after_settlement() {
     let root = tempfile::TempDir::new().expect("root");
     let controller = Arc::new(CallbackGeneration::default());
-    let handle = fixture(&controller, root.path());
+    let handle = fixture(&controller, root.path()).await;
     let caller = tokio::spawn({
         let handle = handle.clone();
         async move { handle.dispatch_durably(attach(&handle)).await }
@@ -144,7 +153,7 @@ async fn generation_preparation_services_callbacks_and_publishes_after_settlemen
 async fn dropped_generation_waiter_does_not_revoke_owned_preparation() {
     let root = tempfile::TempDir::new().expect("root");
     let controller = Arc::new(CallbackGeneration::default());
-    let handle = fixture(&controller, root.path());
+    let handle = fixture(&controller, root.path()).await;
     let caller = tokio::spawn({
         let handle = handle.clone();
         async move { handle.dispatch_durably(attach(&handle)).await }
@@ -167,7 +176,7 @@ async fn dropped_generation_waiter_does_not_revoke_owned_preparation() {
 async fn takeover_rejects_prepared_generation_and_keeps_publication_closed() {
     let root = tempfile::TempDir::new().expect("root");
     let controller = Arc::new(CallbackGeneration::default());
-    let handle = fixture(&controller, root.path());
+    let handle = fixture(&controller, root.path()).await;
     let caller = tokio::spawn({
         let handle = handle.clone();
         async move { handle.dispatch_durably(attach(&handle)).await }

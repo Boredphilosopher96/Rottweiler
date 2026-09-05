@@ -208,7 +208,7 @@ async fn apply_workspace(
     mut context: DispatchContext<'_>,
 ) -> Result<(), AgentLoopError> {
     let replacement = ToolContext::from_workspace_roots(&generation.roots)
-        .map_err(|error| AgentLoopError::ToolContext(error.to_string()))?
+        .map_err(|_error| AgentLoopError::ToolContext("workspace tool context could not prepare".into()))?
         .with_session_id(context.config.session_id.clone())
         .with_mcp_tool_policy(context.config.tools.mcp_tool_policy().clone());
     let result = commit_workspace(generation, &mut context).await;
@@ -247,7 +247,10 @@ async fn commit_workspace(
         .config
         .workspace_roots
         .prepare_commit_generation(generation.generation)
-        .await?;
+        .await
+        .map_err(|_error| {
+            AgentLoopError::Persistence("workspace root generation could not commit".into())
+        })?;
     let roots = generation
         .roots
         .iter()
@@ -270,4 +273,7 @@ async fn commit_workspace(
     )
     .await
     .map(|_| ())
+    .map_err(|_error| {
+        AgentLoopError::Persistence("workspace root change event could not persist".into())
+    })
 }
