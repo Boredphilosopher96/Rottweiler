@@ -86,19 +86,14 @@ fn production() { guarded_http_fetch(request); }
         production = self.production_source(source)
         self.assertIn("TcpStream::connect", production)
 
-    def test_real_session_runtime_is_not_truncated_at_its_test_only_import(self) -> None:
-        candidates = [
-            ROOT / "crates/rw-runtime/src/session_runtime.rs",
-            ROOT / "crates/rw-cli/src/session_runtime.rs",
-            ROOT / "crates/rw-cli/src/runtime.rs",
-        ]
-        existing = [path for path in candidates if path.exists()]
-        self.assertEqual(len(existing), 1, "session runtime implementation must have one owner")
-        path = existing[0]
+    def test_runtime_exports_after_test_imports_remain_visible(self) -> None:
+        path = ROOT / "crates/rw-runtime/src/session_runtime.rs"
         production = MODULE.production_source(path)
         self.assertIn("compose_hosted_actor", production)
         self.assertIn("discover_runtime_extensions", production)
-        self.assertGreater(len(production), 100_000)
+        composition = MODULE.production_source(path.with_suffix("") / "hosted_composition.rs")
+        self.assertIn("fn compose_hosted_actor", composition)
+        self.assertIn("SessionActor::spawn", composition)
 
 
 class ManifestDependencyTests(unittest.TestCase):

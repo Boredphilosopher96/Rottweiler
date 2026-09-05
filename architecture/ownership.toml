@@ -131,7 +131,7 @@ symbols = [
 
 [[owner]]
 id = "built-in-tool-composition"
-path = "crates/rw-runtime/src/session_runtime.rs"
+path = "crates/rw-runtime/src/session_runtime/tool_composition.rs"
 symbols = ["fn build_tools"]
 
 [[owner]]

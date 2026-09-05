@@ -1,0 +1,342 @@
+use super::workspace_roots::RuntimeWorkspaceRootController;
+use async_trait::async_trait;
+use miette::Result;
+use rw_core::AgentLoopError;
+use rw_core::HostError;
+use rw_core::HostSubagentService;
+use rw_core::ModelDriver;
+use rw_core::PermissionGate;
+use rw_core::SessionActorConfig;
+use rw_core::SubagentObserver;
+use rw_core::SubagentOrchestrator;
+use rw_core::SubagentSessionFactory;
+use rw_tools::CancellationToken;
+use rw_tools::SubagentProgressEvent;
+use rw_tools::ToolRegistry;
+use rw_tools::WorktreeLeaseRecord;
+use rw_types::SessionId;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
+
+pub(super) struct ChildActorTemplate {
+    pub(super) provider_admission: Arc<dyn rw_core::provider_admission::ProviderAdmission>,
+    pub(super) storage_root: PathBuf,
+    pub(super) model: Arc<dyn ModelDriver>,
+    pub(super) permissions: Arc<PermissionGate>,
+    pub(super) secret_redactor: Arc<dyn rw_core::SecretRedactor>,
+    pub(super) lease_runtime: Arc<RuntimeWorkspaceRootController>,
+    pub(super) max_turns: usize,
+}
+
+pub(super) struct RuntimeSubagentSessionFactory {
+    pub(super) shared: Arc<dyn SubagentSessionFactory>,
+    pub(super) isolated: Option<Arc<dyn SubagentSessionFactory>>,
+    pub(super) isolation_error: String,
+}
+
+#[async_trait]
+impl SubagentSessionFactory for RuntimeSubagentSessionFactory {
+    async fn create(
+        &self,
+        launch: rw_core::SubagentLaunch,
+    ) -> std::result::Result<Arc<dyn rw_core::SubagentSession>, rw_core::OrchestrationError> {
+        if launch.request.isolation == rw_types::SubagentIsolation::Shared {
+            return self.shared.create(launch).await;
+        }
+        let isolated = self.isolated.as_ref().ok_or_else(|| {
+            rw_core::OrchestrationError::InvalidRequest(format!(
+                "worktree isolation is unavailable for this workspace: {}",
+                self.isolation_error
+            ))
+        })?;
+        isolated.create(launch).await
+    }
+
+    async fn rebind(
+        &self,
+        session_id: &SessionId,
+        workspace_root: Option<&Path>,
+        worktree: Option<&WorktreeLeaseRecord>,
+        allowed_tools: Option<&ToolRegistry>,
+        policy: &rw_core::SubagentRecoveryPolicy,
+    ) -> std::result::Result<Option<Arc<dyn rw_core::SubagentSession>>, rw_core::OrchestrationError>
+    {
+        if worktree.is_none() {
+            return self
+                .shared
+                .rebind(session_id, workspace_root, worktree, allowed_tools, policy)
+                .await;
+        }
+        let isolated = self.isolated.as_ref().ok_or_else(|| {
+            rw_core::OrchestrationError::InvalidRequest(format!(
+                "persisted worktree cannot rebind: {}",
+                self.isolation_error
+            ))
+        })?;
+        isolated
+            .rebind(session_id, workspace_root, worktree, allowed_tools, policy)
+            .await
+    }
+}
+
+impl ChildActorTemplate {
+    pub(super) fn config(
+        &self,
+        launch: &rw_core::SubagentLaunch,
+    ) -> std::result::Result<SessionActorConfig, AgentLoopError> {
+        self.lease_runtime.child_config(
+            &self.storage_root,
+            &launch.handle.session_id,
+            &launch.workspace_root,
+            &launch.request.model,
+            Arc::clone(&self.model),
+            Arc::clone(&self.secret_redactor),
+            self.permissions.as_ref(),
+            self.max_turns,
+            Arc::clone(&self.provider_admission),
+        )
+    }
+
+    pub(super) fn rebind_config(
+        &self,
+        session_id: &SessionId,
+        workspace_root: &Path,
+        policy: &rw_core::SubagentRecoveryPolicy,
+    ) -> std::result::Result<SessionActorConfig, AgentLoopError> {
+        self.lease_runtime.child_config(
+            &self.storage_root,
+            session_id,
+            workspace_root,
+            &policy.model_alias,
+            Arc::clone(&self.model),
+            Arc::clone(&self.secret_redactor),
+            self.permissions.as_ref(),
+            self.max_turns,
+            Arc::clone(&self.provider_admission),
+        )
+    }
+}
+
+pub(super) const SUBAGENT_PROGRESS_QUEUE_CAPACITY: usize = 512;
+
+pub(super) const SUBAGENT_PROGRESS_BATCH_EVENTS: usize = 64;
+
+pub(super) const SUBAGENT_PROGRESS_BATCH_INTERVAL: Duration = Duration::from_millis(8);
+
+pub(super) struct HostedSubagentController {
+    pub(super) parent: rw_core::SessionHandle,
+    pub(super) orchestrator: SubagentOrchestrator,
+}
+
+impl HostedSubagentController {
+    pub(super) fn ensure_parent(&self, parent_session_id: &SessionId) -> Result<(), HostError> {
+        if self.parent.session_id() == parent_session_id {
+            Ok(())
+        } else {
+            Err(HostError::Protocol(
+                "child-agent parent session does not match this controller".to_owned(),
+            ))
+        }
+    }
+}
+
+pub(super) struct HostedSubagentObserver {
+    pub(super) parent: rw_core::SessionHandle,
+    pub(super) progress: mpsc::Sender<HostedSubagentProgressMessage>,
+}
+
+pub(super) enum HostedSubagentProgressMessage {
+    Event(SubagentProgressEvent),
+    Flush(oneshot::Sender<Result<(), String>>),
+}
+
+impl HostedSubagentObserver {
+    pub(super) fn new(parent: rw_core::SessionHandle) -> Self {
+        let (progress, receiver) = mpsc::channel(SUBAGENT_PROGRESS_QUEUE_CAPACITY);
+        tokio::spawn(forward_subagent_progress(parent.clone(), receiver));
+        Self { parent, progress }
+    }
+
+    pub(super) async fn flush_progress(&self) -> Result<(), rw_core::OrchestrationError> {
+        let (send, receive) = oneshot::channel();
+        self.progress
+            .send(HostedSubagentProgressMessage::Flush(send))
+            .await
+            .map_err(|_| {
+                rw_core::OrchestrationError::Observer(
+                    "child progress forwarder is unavailable".to_owned(),
+                )
+            })?;
+        receive
+            .await
+            .map_err(|_| {
+                rw_core::OrchestrationError::Observer(
+                    "child progress forwarder stopped before flushing".to_owned(),
+                )
+            })?
+            .map_err(rw_core::OrchestrationError::Observer)
+    }
+}
+
+pub(super) async fn forward_subagent_progress(
+    parent: rw_core::SessionHandle,
+    mut receiver: mpsc::Receiver<HostedSubagentProgressMessage>,
+) {
+    let mut batch = Vec::with_capacity(SUBAGENT_PROGRESS_BATCH_EVENTS);
+    let mut interval = tokio::time::interval(SUBAGENT_PROGRESS_BATCH_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval.tick().await;
+    loop {
+        tokio::select! {
+            message = receiver.recv() => match message {
+                Some(HostedSubagentProgressMessage::Event(event)) => {
+                    batch.push(event);
+                    if batch.len() >= SUBAGENT_PROGRESS_BATCH_EVENTS
+                        && parent.publish_subagent_progress_batch(std::mem::take(&mut batch)).await.is_err()
+                    {
+                        return;
+                    }
+                }
+                Some(HostedSubagentProgressMessage::Flush(respond)) => {
+                    let result = if batch.is_empty() {
+                        Ok(())
+                    } else {
+                        parent
+                            .publish_subagent_progress_batch(std::mem::take(&mut batch))
+                            .await
+                            .map_err(|error| error.to_string())
+                    };
+                    let failed = result.is_err();
+                    let _ = respond.send(result);
+                    if failed {
+                        return;
+                    }
+                }
+                None => {
+                    if !batch.is_empty() {
+                        let _ = parent.publish_subagent_progress_batch(batch).await;
+                    }
+                    return;
+                }
+            },
+            _ = interval.tick(), if !batch.is_empty() => {
+                if parent.publish_subagent_progress_batch(std::mem::take(&mut batch)).await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl SubagentObserver for HostedSubagentObserver {
+    async fn spawned(
+        &self,
+        handle: &rw_core::SubagentHandle,
+        task: &str,
+    ) -> Result<(), rw_core::OrchestrationError> {
+        self.parent
+            .record_subagent_spawned(
+                handle.subagent_id.clone(),
+                handle.session_id.clone(),
+                task.to_owned(),
+            )
+            .await
+            .map_err(|error| rw_core::OrchestrationError::Observer(error.to_string()))
+    }
+
+    async fn finished(
+        &self,
+        result: &rw_core::SubagentResult,
+    ) -> Result<(), rw_core::OrchestrationError> {
+        self.flush_progress().await?;
+        self.parent
+            .record_subagent_finished(result.clone())
+            .await
+            .map_err(|error| rw_core::OrchestrationError::Observer(error.to_string()))
+    }
+
+    async fn progress(
+        &self,
+        handle: &rw_core::SubagentHandle,
+        child_sequence: Option<u64>,
+        event: serde_json::Value,
+    ) -> Result<(), rw_core::OrchestrationError> {
+        self.progress
+            .send(HostedSubagentProgressMessage::Event(
+                SubagentProgressEvent {
+                    subagent_id: handle.subagent_id.clone(),
+                    child_session_id: handle.session_id.clone(),
+                    child_sequence,
+                    event,
+                },
+            ))
+            .await
+            .map_err(|_| {
+                rw_core::OrchestrationError::Observer(
+                    "child progress forwarder is unavailable".to_owned(),
+                )
+            })
+    }
+}
+
+#[async_trait]
+impl HostSubagentService for HostedSubagentController {
+    async fn list(
+        &self,
+        parent_session_id: &SessionId,
+    ) -> Result<Vec<rw_core::SubagentDescriptor>, HostError> {
+        self.ensure_parent(parent_session_id)?;
+        Ok(self.orchestrator.list_for_parent(parent_session_id))
+    }
+
+    async fn continue_child(
+        &self,
+        parent_session_id: &SessionId,
+        subagent_id: &rw_core::SubagentId,
+        content: String,
+    ) -> Result<(), HostError> {
+        self.ensure_parent(parent_session_id)?;
+        let observer: Arc<dyn SubagentObserver> =
+            Arc::new(HostedSubagentObserver::new(self.parent.clone()));
+        self.orchestrator
+            .follow_up(
+                parent_session_id,
+                subagent_id,
+                content,
+                observer,
+                CancellationToken::default(),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| HostError::Protocol(error.to_string()))
+    }
+
+    async fn interrupt(
+        &self,
+        parent_session_id: &SessionId,
+        subagent_id: &rw_core::SubagentId,
+    ) -> Result<(), HostError> {
+        self.ensure_parent(parent_session_id)?;
+        self.orchestrator
+            .cancel(parent_session_id, subagent_id)
+            .await
+            .map_err(|error| HostError::Protocol(error.to_string()))
+    }
+
+    async fn close(
+        &self,
+        parent_session_id: &SessionId,
+        subagent_id: &rw_core::SubagentId,
+    ) -> Result<(), HostError> {
+        self.ensure_parent(parent_session_id)?;
+        self.orchestrator
+            .close(parent_session_id, subagent_id)
+            .await
+            .map_err(|error| HostError::Protocol(error.to_string()))
+    }
+}

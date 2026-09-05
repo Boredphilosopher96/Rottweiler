@@ -64,3 +64,9 @@ Pending means no completion claim. Source complete needs checked-in implementati
 PR [#54](https://github.com/Boredphilosopher96/Rottweiler/pull/54) merged the first integrated batch. Candidate6c3a4ae3853a9793fd0b7c2b04565aa7b66b2d36 passed every hosted gate in run33930648431. Main3ef57e913384bb9f2cd26341c337aa171c786c2f has the identical Git tree; its post-merge CI run33931348188 completed successfully. The required aggregate is now enforced in the main ruleset, bound to GitHub Actions, with unrelated rules preserved.
 
 The next batch is on `feat/mission-architecture-foundations`. A10 ordered execution windows and A11 JSON sizing are locally verified. A02 segmented journal migration,A04 semantic transcript paging and A06/provider lifecycle remain in isolated implementation/review. Dedicated-runner inventory is empty; no eight-hour qualification is claimed. The remaining architecture findings above are still in scope.
+
+## Source size and build cleanup
+
+The hard 1,500-line source/test check runs in CI. Runtime production and behavior tests now fit the limit: its entrypoint is 80 lines, its largest extracted production file is 1,160 lines, and all 538 function bodies from the final parent split are preserved. Runtime264 tests and strict all-target/all-feature Clippy pass. Four core and five TUI files remain over the limit. [Module evidence](2026-09-04-architecture-evidence/runtime-semantic-modules.md).
+
+`AGENTS.md` and the README document preview-first build cleanup, one reused Cargo target per worktree, retained verification evidence, and cleanup after builds stop. The cleanup command protects tracked data and accepts exact external target paths. Twelve hygiene regressions pass. Final active-cache cleanup follows final integration and verification.

@@ -1,0 +1,657 @@
+use super::checkpoint_journal::abort_checkpoint_root_generation;
+use super::checkpoint_journal::append_checkpoint_root_generation;
+use super::checkpoint_journal::commit_checkpoint_root_generation;
+use super::checkpoint_journal::open_checkpoint_stores;
+use super::checkpoints::DurableCheckpointCoordinator;
+use super::command_execution::CommandFixtureMode;
+use super::credential_resolution::DeferredToolProxy;
+use super::credential_resolution::DeferredWebSearchHeaders;
+use super::credential_resolution::ResolvedToolProxy;
+use super::custom_commands::compose_runtime_commands;
+use super::durable_session::DurableEventSink;
+use super::durable_session::load_session_events;
+use super::extension_discovery::discover_runtime_extensions;
+use super::extension_discovery::discover_runtime_extensions_derived;
+use super::extension_discovery::skill_index_turn;
+use super::folder_trust::RuntimeFolderTrustController;
+use super::initial_memory::fresh_initial_session_context;
+use super::native_search::NativeWebSearchResolver;
+use super::nested_instructions::register_nested_instruction_guard;
+use super::runtime_options::DEFAULT_DOOM_LOOP_LIMIT;
+use super::runtime_options::DEFAULT_EVENT_CAPACITY;
+use super::runtime_options::DEFAULT_MAX_OUTPUT_TOKENS;
+use super::runtime_options::MAX_WORKSPACE_ROOTS;
+use super::session_selection::checkpoint_root;
+use super::tool_composition::BuildToolsInput;
+use super::tool_composition::BuiltTools;
+use super::tool_composition::build_tools;
+use super::tool_composition::trusted_lsp_roots;
+use super::toolchain::ToolchainRuntime;
+use super::wasm_hooks::NamedWasmHook;
+use super::wasm_hooks::compose_runtime_hooks_with_extensions;
+use crate::journal_reads::JournalReads;
+use async_trait::async_trait;
+use miette::IntoDiagnostic;
+use miette::Result;
+use miette::miette;
+use rw_core::AgentLoopError;
+use rw_core::ModelDriver;
+use rw_core::PermissionGate;
+use rw_core::SessionActorConfig;
+use rw_core::SessionCommandContext;
+use rw_core::SessionCommandOutput;
+use rw_core::SystemEventClock;
+use rw_core::project_session_events_with_modes;
+use rw_ext::CommandRegistry;
+use rw_ext::HookDispatcher;
+use rw_ext::compose_mode_registry;
+use rw_store::session::SessionEventLog;
+use rw_store::trust::FolderTrustStore;
+use rw_tools::BackgroundProcessManager;
+use rw_tools::CommandFixtureRedactor;
+use rw_tools::CommandSafetyClassifier;
+use rw_tools::ExecutionLease;
+use rw_tools::QuestionAsker;
+use rw_types::SessionId;
+use rw_types::Turn;
+use rw_types::config::ThinkingLevel;
+use rw_types::config::ToolchainConfig;
+use rw_types::config::WebSearchConfig;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::RwLock;
+
+pub(super) fn canonical_workspace_roots(
+    primary: &Path,
+    additional: &[PathBuf],
+) -> Result<Vec<PathBuf>> {
+    let mut roots = vec![std::fs::canonicalize(primary).into_diagnostic()?];
+    for supplied in additional {
+        let canonical = std::fs::canonicalize(supplied).map_err(|error| {
+            miette!(
+                "additional workspace {} is unavailable: {error}",
+                supplied.display()
+            )
+        })?;
+        if !canonical.is_dir() {
+            return Err(miette!(
+                "additional workspace {} is not a directory",
+                supplied.display()
+            ));
+        }
+        if !roots.contains(&canonical) {
+            roots.push(canonical);
+        }
+    }
+    if roots.len() > MAX_WORKSPACE_ROOTS {
+        return Err(miette!(
+            "workspace root count exceeds the supported maximum of {MAX_WORKSPACE_ROOTS}"
+        ));
+    }
+    Ok(roots)
+}
+
+#[allow(clippy::struct_excessive_bools)]
+pub(super) struct RuntimeWorkspaceRootController {
+    pub(super) index_pool: Arc<rw_tools::WorkspaceIndexPool>,
+    pub(super) journal_reads: Arc<JournalReads>,
+    pub(super) checkpoint_root: PathBuf,
+    pub(super) storage_root: PathBuf,
+    pub(super) question_asker: Arc<dyn QuestionAsker>,
+    pub(super) offline: bool,
+    pub(super) global_proxy: Option<ResolvedToolProxy>,
+    pub(super) deferred_global_proxy: Option<DeferredToolProxy>,
+    pub(super) command_fixture_mode: CommandFixtureMode,
+    pub(super) execution_lease: Arc<ExecutionLease>,
+    pub(super) command_safety: Arc<CommandSafetyClassifier>,
+    pub(super) websearch_config: WebSearchConfig,
+    pub(super) websearch_headers: BTreeMap<String, String>,
+    pub(super) deferred_websearch_headers: Option<DeferredWebSearchHeaders>,
+    pub(super) background_redactor: Arc<dyn CommandFixtureRedactor>,
+    pub(super) background_manager: Arc<BackgroundProcessManager>,
+    pub(super) native_websearch_possible: bool,
+    pub(super) native_websearch_resolver: Option<Arc<NativeWebSearchResolver>>,
+    pub(super) trust_store_path: PathBuf,
+    pub(super) toolchain_config: ToolchainConfig,
+    pub(super) toolchain_runtime: Arc<ToolchainRuntime>,
+    pub(super) validated_wasm_hooks: Arc<[NamedWasmHook]>,
+    pub(super) extension_user_home: PathBuf,
+    pub(super) extension_user_rottweiler: PathBuf,
+    pub(super) dangerously_trust: bool,
+    pub(super) instruction_workspace_roots: Arc<RwLock<Vec<PathBuf>>>,
+    pub(super) active_nested_instruction_sources: Arc<RwLock<BTreeSet<PathBuf>>>,
+    pub(super) pending_instruction_roots: Mutex<HashMap<u64, Vec<PathBuf>>>,
+    pub(super) root_authorization: WorkspaceRootAuthorization,
+}
+
+pub(super) enum WorkspaceRootAuthorization {
+    LocalUnrestricted,
+    Hosted(Vec<PathBuf>),
+}
+
+impl WorkspaceRootAuthorization {
+    pub(super) fn allows(&self, root: &Path) -> bool {
+        match self {
+            Self::LocalUnrestricted => true,
+            Self::Hosted(allowed) => allowed
+                .iter()
+                .any(|authorized| root == authorized || root.starts_with(authorized)),
+        }
+    }
+}
+
+pub(super) struct PreparedExtensionGeneration {
+    pub(super) hooks: Arc<HookDispatcher>,
+    pub(super) commands: Arc<CommandRegistry<SessionCommandContext, SessionCommandOutput>>,
+    pub(super) modes: Arc<rw_ext::ModeRegistry>,
+    pub(super) skill_index: Option<Turn>,
+}
+
+pub(super) struct PreparedRootGeneration {
+    pub(super) roots: Vec<PathBuf>,
+    pub(super) supplemental_context: Vec<Turn>,
+    pub(super) built: BuiltTools,
+    pub(super) permissions: Arc<PermissionGate>,
+    pub(super) extensions: PreparedExtensionGeneration,
+}
+
+impl RuntimeWorkspaceRootController {
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(super) fn child_config(
+        &self,
+        storage_root: &Path,
+        session_id: &SessionId,
+        workspace_root: &Path,
+        fallback_model_alias: &str,
+        model: Arc<dyn ModelDriver>,
+        secret_redactor: Arc<dyn rw_core::SecretRedactor>,
+        parent_permissions: &PermissionGate,
+        max_turns: usize,
+        provider_admission: Arc<dyn rw_core::provider_admission::ProviderAdmission>,
+    ) -> std::result::Result<SessionActorConfig, AgentLoopError> {
+        let roots = vec![workspace_root.to_path_buf()];
+        let trusted_roots =
+            trusted_lsp_roots(&roots, &self.trust_store_path, self.dangerously_trust).map_err(
+                |_error| {
+                    AgentLoopError::InvalidConfiguration(
+                        "child workspace trust could not be assessed".to_owned(),
+                    )
+                },
+            )?;
+        let child_project_trusted = trusted_roots.first().copied().unwrap_or(false);
+        let built = build_tools(BuildToolsInput {
+            index_pool: Arc::clone(&self.index_pool),
+            workspace_roots: &roots,
+            trusted_lsp_roots: &trusted_roots,
+            question_asker: Arc::clone(&self.question_asker),
+            offline: self.offline,
+            global_proxy: self.global_proxy.as_ref(),
+            deferred_global_proxy: self.deferred_global_proxy.clone(),
+            command_fixture_mode: self.command_fixture_mode.clone(),
+            execution_lease: Arc::clone(&self.execution_lease),
+            command_safety: &self.command_safety,
+            websearch_config: &self.websearch_config,
+            websearch_headers: &self.websearch_headers,
+            deferred_websearch_headers: self.deferred_websearch_headers.clone(),
+            native_websearch_possible: self.native_websearch_possible,
+            background_redactor: Arc::clone(&self.background_redactor),
+            background_manager: Some(Arc::clone(&self.background_manager)),
+        })
+        .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
+        if let Some(searcher) = &built.websearch {
+            searcher.bind_native_resolver(self.native_websearch_resolver.clone());
+        }
+        let toolchain_runtime = Arc::new(ToolchainRuntime::new_with_read_only(
+            Arc::clone(&built.command_executor),
+            Arc::clone(&built.read_only_hook_executor),
+            built.read_only_hook_scratch.clone(),
+            &roots,
+        ));
+        let catalog = discover_runtime_extensions_derived(
+            workspace_root,
+            &self.extension_user_home,
+            &self.extension_user_rottweiler,
+            child_project_trusted,
+        );
+        let instruction_roots = Arc::new(RwLock::new(roots.clone()));
+        let active_sources = Arc::new(RwLock::new(BTreeSet::new()));
+        let mut hooks = compose_runtime_hooks_with_extensions(
+            &self.toolchain_config,
+            &toolchain_runtime,
+            Arc::clone(&built.registry),
+            &catalog,
+            Arc::clone(&built.code_intelligence),
+            &self.validated_wasm_hooks,
+        )
+        .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
+        register_nested_instruction_guard(
+            &mut hooks,
+            Arc::clone(&built.registry),
+            Arc::clone(&instruction_roots),
+            Arc::clone(&active_sources),
+        )
+        .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
+        let commands = compose_runtime_commands(&catalog, &roots, storage_root, &built.registry)
+            .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
+        let mode_registry = compose_mode_registry(&catalog)
+            .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
+        let child_checkpoint_root = checkpoint_root(storage_root, workspace_root, &session_id.0);
+        let stores = open_checkpoint_stores(&child_checkpoint_root, &roots)
+            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+        let log = SessionEventLog::open(storage_root, &session_id.0)
+            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+        let events = load_session_events(&log)
+            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+        let recovered = project_session_events_with_modes(&events, &mode_registry)
+            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+        let event_sink = DurableEventSink::new(
+            log,
+            storage_root.to_path_buf(),
+            session_id.0.clone(),
+            Arc::clone(&self.journal_reads),
+        )
+        .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+        let mut initial_context = fresh_initial_session_context(storage_root, &roots)
+            .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
+        if let Some(index) = skill_index_turn(&catalog)
+            .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?
+        {
+            initial_context.push(index);
+        }
+        let permissions = parent_permissions
+            .fork_for_workspace_roots(&roots)
+            .map(|gate| {
+                gate.with_trusted_read_roots(
+                    roots
+                        .iter()
+                        .zip(&trusted_roots)
+                        .filter_map(|(root, trusted)| trusted.then_some(root)),
+                )
+            })
+            .map(Arc::new)
+            .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
+        let workspace_controller = Arc::new(RuntimeWorkspaceRootController {
+            index_pool: Arc::clone(&self.index_pool),
+            journal_reads: Arc::clone(&self.journal_reads),
+            checkpoint_root: child_checkpoint_root.clone(),
+            storage_root: storage_root.to_path_buf(),
+            question_asker: Arc::clone(&self.question_asker),
+            offline: self.offline,
+            global_proxy: self.global_proxy.clone(),
+            deferred_global_proxy: self.deferred_global_proxy.clone(),
+            command_fixture_mode: self.command_fixture_mode.clone(),
+            execution_lease: Arc::clone(&self.execution_lease),
+            command_safety: Arc::clone(&self.command_safety),
+            websearch_config: self.websearch_config.clone(),
+            websearch_headers: self.websearch_headers.clone(),
+            deferred_websearch_headers: self.deferred_websearch_headers.clone(),
+            background_redactor: Arc::clone(&self.background_redactor),
+            background_manager: Arc::clone(&self.background_manager),
+            native_websearch_possible: self.native_websearch_possible,
+            native_websearch_resolver: self.native_websearch_resolver.clone(),
+            trust_store_path: self.trust_store_path.clone(),
+            toolchain_config: self.toolchain_config.clone(),
+            toolchain_runtime,
+            validated_wasm_hooks: Arc::clone(&self.validated_wasm_hooks),
+            extension_user_home: self.extension_user_home.clone(),
+            extension_user_rottweiler: self.extension_user_rottweiler.clone(),
+            dangerously_trust: self.dangerously_trust,
+            instruction_workspace_roots: instruction_roots,
+            active_nested_instruction_sources: active_sources,
+            pending_instruction_roots: Mutex::new(HashMap::new()),
+            root_authorization: WorkspaceRootAuthorization::Hosted(roots.clone()),
+        });
+        Ok(SessionActorConfig {
+            session_id: session_id.clone(),
+            workspace_root: workspace_root.to_path_buf(),
+            additional_workspace_roots: Vec::new(),
+            workspace_generation: recovered.workspace_generation,
+            initial_session_context: initial_context,
+            startup_notifications: Vec::new(),
+            model_alias: recovered
+                .model_alias
+                .clone()
+                .unwrap_or_else(|| fallback_model_alias.to_owned()),
+            model,
+            tools: built.registry,
+            permissions,
+            hooks: Arc::new(hooks),
+            commands: Arc::new(commands),
+            modes: Arc::new(mode_registry),
+            event_sink: Arc::new(event_sink),
+            event_clock: Arc::new(SystemEventClock),
+            provider_admission,
+            secret_redactor,
+            checkpoints: Arc::new(DurableCheckpointCoordinator::from_stores(
+                child_checkpoint_root,
+                stores,
+            )),
+            folder_trust: Arc::new(RuntimeFolderTrustController::new(
+                self.trust_store_path.clone(),
+                roots,
+            )),
+            workspace_roots: workspace_controller,
+            extension_development: Arc::new(rw_core::NoopSessionExtensionController),
+            resources: Arc::new(rw_core::NoopSessionResources),
+            recovered,
+            max_turns,
+            identical_tool_failure_limit: DEFAULT_DOOM_LOOP_LIMIT,
+            max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+            thinking: ThinkingLevel::Off,
+            event_capacity: DEFAULT_EVENT_CAPACITY,
+        })
+    }
+
+    pub(super) fn prepare_tools(
+        &self,
+        roots: &[PathBuf],
+    ) -> std::result::Result<BuiltTools, AgentLoopError> {
+        let trusted_lsp_roots =
+            trusted_lsp_roots(roots, &self.trust_store_path, self.dangerously_trust).map_err(
+                |_error| {
+                    AgentLoopError::InvalidConfiguration(
+                        "workspace LSP trust could not be assessed".to_owned(),
+                    )
+                },
+            )?;
+        let built = build_tools(BuildToolsInput {
+            index_pool: Arc::clone(&self.index_pool),
+            workspace_roots: roots,
+            trusted_lsp_roots: &trusted_lsp_roots,
+            question_asker: Arc::clone(&self.question_asker),
+            offline: self.offline,
+            global_proxy: self.global_proxy.as_ref(),
+            deferred_global_proxy: self.deferred_global_proxy.clone(),
+            command_fixture_mode: self.command_fixture_mode.clone(),
+            execution_lease: Arc::clone(&self.execution_lease),
+            command_safety: &self.command_safety,
+            websearch_config: &self.websearch_config,
+            websearch_headers: &self.websearch_headers,
+            deferred_websearch_headers: self.deferred_websearch_headers.clone(),
+            native_websearch_possible: self.native_websearch_possible,
+            background_redactor: Arc::clone(&self.background_redactor),
+            background_manager: Some(Arc::clone(&self.background_manager)),
+        })
+        .map_err(|_error| {
+            AgentLoopError::InvalidConfiguration(
+                "workspace tool generation could not prepare".to_owned(),
+            )
+        })?;
+        if let Some(searcher) = &built.websearch {
+            searcher.bind_native_resolver(self.native_websearch_resolver.clone());
+        }
+        Ok(built)
+    }
+
+    pub(super) fn appended_roots(
+        &self,
+        requested: &Path,
+        current_roots: &[PathBuf],
+    ) -> std::result::Result<Vec<PathBuf>, AgentLoopError> {
+        if current_roots.len() >= MAX_WORKSPACE_ROOTS {
+            return Err(AgentLoopError::InvalidConfiguration(format!(
+                "workspace root count is limited to {MAX_WORKSPACE_ROOTS}"
+            )));
+        }
+        let primary_root = current_roots.first().ok_or_else(|| {
+            AgentLoopError::InvalidConfiguration(
+                "workspace root generation requires an existing root".to_owned(),
+            )
+        })?;
+        let requested = if requested.is_absolute() {
+            requested.to_path_buf()
+        } else {
+            primary_root.join(requested)
+        };
+        let canonical = std::fs::canonicalize(&requested).map_err(|_error| {
+            AgentLoopError::InvalidConfiguration(
+                "requested workspace root is unavailable".to_owned(),
+            )
+        })?;
+        if !canonical.is_dir() || current_roots.contains(&canonical) {
+            return Err(AgentLoopError::InvalidConfiguration(
+                "workspace root must be a new canonical directory".to_owned(),
+            ));
+        }
+        if !self.root_authorization.allows(&canonical) {
+            return Err(AgentLoopError::InvalidConfiguration(
+                "workspace root is outside the host authorization policy".to_owned(),
+            ));
+        }
+        FolderTrustStore::new(self.trust_store_path.clone())
+            .assess(&canonical)
+            .map_err(|_error| {
+                AgentLoopError::InvalidConfiguration(
+                    "workspace root trust assessment failed".to_owned(),
+                )
+            })?;
+        let mut roots = current_roots.to_vec();
+        roots.push(canonical);
+        Ok(roots)
+    }
+
+    pub(super) fn prepare_root_generation(
+        &self,
+        roots: Vec<PathBuf>,
+        permissions: &PermissionGate,
+    ) -> std::result::Result<PreparedRootGeneration, AgentLoopError> {
+        let added_root = roots.last().ok_or_else(|| {
+            AgentLoopError::InvalidConfiguration(
+                "workspace root generation requires an added root".to_owned(),
+            )
+        })?;
+        let mut supplemental_context = rw_core::load_root_project_instructions(added_root)
+            .map_err(|_error| {
+                AgentLoopError::InvalidConfiguration(
+                    "workspace root instructions could not load".to_owned(),
+                )
+            })?
+            .map(|instructions| vec![instructions.as_system_turn()])
+            .unwrap_or_default();
+        let built = self.prepare_tools(&roots)?;
+        let trusted_roots =
+            trusted_lsp_roots(&roots, &self.trust_store_path, self.dangerously_trust).map_err(
+                |_error| {
+                    AgentLoopError::InvalidConfiguration(
+                        "workspace permission trust could not be assessed".to_owned(),
+                    )
+                },
+            )?;
+        let permissions = permissions
+            .fork_for_workspace_roots(&roots)
+            .map_err(|_error| {
+                AgentLoopError::Persistence(
+                    "workspace permission generation could not prepare".to_owned(),
+                )
+            })?
+            .with_trusted_read_roots(
+                roots
+                    .iter()
+                    .zip(&trusted_roots)
+                    .filter_map(|(root, trusted)| trusted.then_some(root)),
+            );
+        let permissions = Arc::new(permissions);
+        let mut extensions = self.prepare_extensions(&roots, &built)?;
+        if let Some(index) = extensions.skill_index.take() {
+            supplemental_context.push(index);
+        }
+        Ok(PreparedRootGeneration {
+            roots,
+            supplemental_context,
+            built,
+            permissions,
+            extensions,
+        })
+    }
+
+    pub(super) fn prepare_extensions(
+        &self,
+        roots: &[PathBuf],
+        built: &BuiltTools,
+    ) -> std::result::Result<PreparedExtensionGeneration, AgentLoopError> {
+        let catalog = discover_runtime_extensions(
+            roots,
+            &self.trust_store_path,
+            &self.extension_user_home,
+            &self.extension_user_rottweiler,
+            self.dangerously_trust,
+        )
+        .map_err(|_error| {
+            AgentLoopError::InvalidConfiguration(
+                "workspace extension generation could not prepare".to_owned(),
+            )
+        })?;
+        let skill_index = skill_index_turn(&catalog).map_err(|_error| {
+            AgentLoopError::InvalidConfiguration(
+                "workspace skill index could not prepare".to_owned(),
+            )
+        })?;
+        let mut hooks = compose_runtime_hooks_with_extensions(
+            &self.toolchain_config,
+            &self.toolchain_runtime,
+            Arc::clone(&built.registry),
+            &catalog,
+            Arc::clone(&built.code_intelligence),
+            &self.validated_wasm_hooks,
+        )
+        .map_err(|_error| {
+            AgentLoopError::InvalidConfiguration(
+                "workspace hook generation could not prepare".to_owned(),
+            )
+        })?;
+        register_nested_instruction_guard(
+            &mut hooks,
+            Arc::clone(&built.registry),
+            Arc::clone(&self.instruction_workspace_roots),
+            Arc::clone(&self.active_nested_instruction_sources),
+        )
+        .map_err(|_error| {
+            AgentLoopError::InvalidConfiguration(
+                "nested instruction guard could not prepare".to_owned(),
+            )
+        })?;
+        let commands =
+            compose_runtime_commands(&catalog, roots, &self.storage_root, &built.registry)
+                .map_err(|_error| {
+                    AgentLoopError::InvalidConfiguration(
+                        "workspace command generation could not prepare".to_owned(),
+                    )
+                })?;
+        let modes = compose_mode_registry(&catalog).map_err(|_error| {
+            AgentLoopError::InvalidConfiguration(
+                "workspace mode generation could not prepare".to_owned(),
+            )
+        })?;
+        Ok(PreparedExtensionGeneration {
+            hooks: Arc::new(hooks),
+            commands: Arc::new(commands),
+            modes: Arc::new(modes),
+            skill_index,
+        })
+    }
+}
+
+#[async_trait]
+impl rw_core::WorkspaceRootController for RuntimeWorkspaceRootController {
+    async fn append_root(
+        &self,
+        requested: &Path,
+        current_roots: &[PathBuf],
+        current_generation: u64,
+        effective_from_turn: u64,
+        permissions: Arc<PermissionGate>,
+    ) -> std::result::Result<rw_core::WorkspaceRuntimeGeneration, AgentLoopError> {
+        let roots = self.appended_roots(requested, current_roots)?;
+        let prepared = self.prepare_root_generation(roots, &permissions)?;
+        let generation = current_generation.saturating_add(1);
+        append_checkpoint_root_generation(
+            &self.checkpoint_root,
+            current_roots,
+            &prepared.roots,
+            generation,
+            effective_from_turn,
+        )
+        .map_err(|_error| {
+            AgentLoopError::Persistence("workspace generation journal could not prepare".to_owned())
+        })?;
+        let stores = match open_checkpoint_stores(&self.checkpoint_root, &prepared.roots) {
+            Ok(stores) => stores,
+            Err(_error) => {
+                let _ = abort_checkpoint_root_generation(&self.checkpoint_root, generation);
+                return Err(AgentLoopError::Persistence(
+                    "workspace checkpoint generation could not prepare".to_owned(),
+                ));
+            }
+        };
+        self.toolchain_runtime.prepare(
+            generation,
+            Arc::clone(&prepared.built.command_executor),
+            Arc::clone(&prepared.built.read_only_hook_executor),
+            prepared.built.read_only_hook_scratch.clone(),
+            &prepared.roots,
+        );
+        self.pending_instruction_roots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(generation, prepared.roots.clone());
+        Ok(rw_core::WorkspaceRuntimeGeneration {
+            generation,
+            effective_from_turn,
+            roots: prepared.roots.clone(),
+            tools: prepared.built.registry,
+            hooks: prepared.extensions.hooks,
+            commands: prepared.extensions.commands,
+            modes: prepared.extensions.modes,
+            permissions: prepared.permissions,
+            checkpoints: Arc::new(DurableCheckpointCoordinator::from_stores(
+                self.checkpoint_root.clone(),
+                stores,
+            )),
+            folder_trust: Arc::new(RuntimeFolderTrustController::new(
+                self.trust_store_path.clone(),
+                prepared.roots,
+            )),
+            supplemental_context: prepared.supplemental_context,
+        })
+    }
+
+    async fn prepare_commit_generation(
+        &self,
+        generation: u64,
+    ) -> std::result::Result<(), AgentLoopError> {
+        commit_checkpoint_root_generation(&self.checkpoint_root, generation).map_err(|_error| {
+            AgentLoopError::Persistence("workspace generation marker could not commit".to_owned())
+        })
+    }
+
+    fn finalize_generation(&self, generation: u64) {
+        self.toolchain_runtime.commit(generation);
+        if let Some(roots) = self
+            .pending_instruction_roots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&generation)
+        {
+            *self
+                .instruction_workspace_roots
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = roots;
+        }
+    }
+
+    async fn abort_generation(&self, generation: u64) -> std::result::Result<(), AgentLoopError> {
+        self.pending_instruction_roots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&generation);
+        self.toolchain_runtime.abort(generation);
+        abort_checkpoint_root_generation(&self.checkpoint_root, generation).map_err(|_error| {
+            AgentLoopError::Persistence("workspace generation could not abort".to_owned())
+        })
+    }
+}
