@@ -49,3 +49,5 @@ Production-renderer tests cover terminal cells, wide and narrow layout, native m
 ## Picker interaction lifetime
 
 The picker controller owns the active route and its interaction lease together. Opening or replacing a route retires the previous lease; refreshing its data preserves it. Selection callbacks and custom setting/permission prompts act only while their captured lease is active. Renderer destruction retires the lease without reopening a parent browser. This keeps delayed callbacks from acting on a different dialog or session.
+
+Each interaction can own one retirement cleanup. The controller publishes the next route before invoking that cleanup. Theme previews use it to restore the original palette when cancelled or replaced. Theme confirmation admits one pending save, freezes preview changes while saving, and applies its result only while that interaction remains active. A late success or failure cannot dismiss another dialog.

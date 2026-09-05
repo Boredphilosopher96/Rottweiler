@@ -30,12 +30,27 @@ interface PickerControllerOptions {
   readonly onClosed: (kind: PickerKind | null, reason: PickerCloseReason) => void
 }
 
-export interface PickerInteraction { readonly active: boolean }
+export interface PickerInteraction {
+  readonly active: boolean
+  onRetire(cleanup: () => void): void
+}
 
 class OwnedPickerInteraction implements PickerInteraction {
   #active = true
+  #cleanup: (() => void) | null = null
   get active(): boolean { return this.#active }
-  retire(): void { this.#active = false }
+  onRetire(cleanup: () => void): void {
+    if (!this.#active) { cleanup(); return }
+    if (this.#cleanup !== null) throw new Error("picker interaction already has a cleanup owner")
+    this.#cleanup = cleanup
+  }
+  retire(): void {
+    if (!this.#active) return
+    this.#active = false
+    const cleanup = this.#cleanup
+    this.#cleanup = null
+    cleanup?.()
+  }
 }
 
 export class PickerController {
@@ -59,8 +74,9 @@ export class PickerController {
   get interaction(): PickerInteraction | null { return this.#active?.interaction ?? null }
 
   #replace(kind: PickerKind | null): void {
-    this.#active?.interaction.retire()
+    const previous = this.#active
     this.#active = kind === null ? null : { kind, interaction: new OwnedPickerInteraction() }
+    previous?.interaction.retire()
   }
 
   dispose(): void { this.#replace(null) }

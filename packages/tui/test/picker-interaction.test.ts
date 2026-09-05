@@ -24,7 +24,10 @@ test("picker transitions retire captured actions while refresh retains the activ
     const item = { id: "choice", label: "Choice", description: "", value: "selected" }
     const show = () => controller.show("Choose", [item], choice => selected.push(choice.value))
     controller.begin("settings")
+    const retiredRoutes: Array<string | null> = []
     const first = controller.interaction!
+    first.onRetire(() => retiredRoutes.push(controller.kind))
+    expect(() => first.onRetire(() => {})).toThrow("cleanup owner")
     show()
     controller.refresh()
     expect(controller.interaction).toBe(first)
@@ -32,6 +35,7 @@ test("picker transitions retire captured actions while refresh retains the activ
     expect(selected).toEqual(["selected"])
     controller.kind = "settingChoices"
     expect(first.active).toBe(false)
+    expect(retiredRoutes).toEqual(["settingChoices"])
     callbacks[0]!(item)
     expect(selected).toHaveLength(1)
     show()
@@ -53,5 +57,6 @@ test("picker transitions retire captured actions while refresh retains the activ
     const last = controller.interaction!
     controller.dispose()
     expect(last.active).toBe(false)
+    expect(retiredRoutes).toEqual(["settingChoices"])
   } finally { setup.renderer.destroy() }
 })
