@@ -260,7 +260,7 @@ impl HostedSession {
         let tail = self.handle.last_sequence().await.map_err(HostError::from)?;
         let mut events = self
             .handle
-            .subscribe_client(ClientId("host-descriptor-projector".to_owned()), tail);
+            .subscribe_client(ClientId("host-descriptor-projector".to_owned()), tail)?;
         tokio::spawn(async move {
             while let Ok(event) = events.recv().await {
                 {
@@ -673,7 +673,10 @@ pub enum HostError {
 
 impl From<AgentLoopError> for HostError {
     fn from(value: AgentLoopError) -> Self {
-        Self::Persistence(value.to_string())
+        match value {
+            AgentLoopError::ReplayCursorAhead => Self::ReplayCursorAhead,
+            other => Self::Persistence(other.to_string()),
+        }
     }
 }
 
@@ -1844,7 +1847,7 @@ impl EngineHost {
                 let tail = session.handle().last_sequence().await?;
                 let mut events = session
                     .handle()
-                    .subscribe_client(meta.client_id.clone(), tail);
+                    .subscribe_client(meta.client_id.clone(), tail)?;
                 let request_id = meta.request_id.clone();
                 let outcome = session
                     .handle()
@@ -3182,16 +3185,11 @@ impl EngineHost {
     ) -> Result<mpsc::Receiver<Result<EngineEvent, HostError>>, HostError> {
         let session = if let Some(session_id) = &session_id {
             let session = self.ready_session(session_id).await?;
-            let captured_tail = session.handle().last_sequence().await?;
-            let cursor_ahead = match (last_seen, captured_tail) {
-                (Some(_), None) => true,
-                (Some(seen), Some(tail)) => seen > tail,
-                (None, _) => false,
-            };
-            if cursor_ahead {
-                return Err(HostError::ReplayCursorAhead);
-            }
-            Some((session, captured_tail))
+            let events = session
+                .handle()
+                .subscribe_client(bound.client_id.clone(), last_seen)?;
+            let captured_tail = events.initial_tail();
+            Some((session, captured_tail, events))
         } else {
             None
         };
@@ -3213,10 +3211,7 @@ impl EngineHost {
                 registry: client_events,
                 pending: provider_auth,
             };
-            if let Some((session, captured_tail)) = session {
-                let mut session_events = session
-                    .handle()
-                    .subscribe_client(bound.client_id.clone(), last_seen);
+            if let Some((session, captured_tail, mut session_events)) = session {
                 let mut replay_complete = last_seen == captured_tail;
                 if replay_complete {
                     let _ = send
@@ -4735,11 +4730,10 @@ mod tests {
             self.inner.append(event).await
         }
 
-        async fn read_after(
+        fn capture_read_view(
             &self,
-            last_seen: Option<SequenceId>,
-        ) -> Result<Vec<EngineEvent>, AgentLoopError> {
-            self.inner.read_after(last_seen).await
+        ) -> Result<Arc<dyn crate::SessionEventReadView>, AgentLoopError> {
+            self.inner.capture_read_view()
         }
     }
 
@@ -5217,7 +5211,8 @@ mod tests {
 
         let mut durable = past_session
             .handle()
-            .subscribe_client(ClientId("durable-reader".to_owned()), None);
+            .subscribe_client(ClientId("durable-reader".to_owned()), None)
+            .expect("subscription");
         let persisted_title = tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 if let EngineEvent::SessionTitleUpdated { title, .. } =
@@ -5471,7 +5466,8 @@ mod tests {
             let tail = session.handle().last_sequence().await.expect("tail");
             let mut events = session
                 .handle()
-                .subscribe_client(driver.client_id.clone(), tail);
+                .subscribe_client(driver.client_id.clone(), tail)
+                .expect("subscription");
             assert_eq!(
                 host.dispatch(
                     driver.clone(),
@@ -7196,7 +7192,8 @@ mod tests {
         let tail = session.handle().last_sequence().await.expect("tail");
         let mut shell_events = session
             .handle()
-            .subscribe_client(ClientId("shell-test".to_owned()), tail);
+            .subscribe_client(ClientId("shell-test".to_owned()), tail)
+            .expect("subscription");
         sink.block(BLOCK_SHELL_ACTIVE);
         let start = tokio::spawn({
             let host = host.clone();
@@ -7279,7 +7276,8 @@ mod tests {
         let tail = session.handle().last_sequence().await.expect("tail");
         let mut broker_events = session
             .handle()
-            .subscribe_client(ClientId("broker-test".to_owned()), tail);
+            .subscribe_client(ClientId("broker-test".to_owned()), tail)
+            .expect("subscription");
         sink.block(0);
         assert_eq!(
             host.dispatch(

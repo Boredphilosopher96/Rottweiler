@@ -70,6 +70,8 @@ use crate::{
 mod commands;
 mod dispatch;
 mod projection;
+mod replay;
+pub use replay::{SessionEventReadView, SessionReplayLimits};
 mod session;
 mod session_extension;
 mod turn;
@@ -91,12 +93,12 @@ use dispatch::{commit_prepared_model_switch, handle_actor_command, prepare_user_
 use projection::recovered_pending_event;
 pub use projection::{
     ContextSurgeryAction, InterruptedToolRepair, RecoveredQuestion, RecoveredUserShell,
-    SessionProjectionError, SessionRecoveredState, project_session_events,
-    project_session_events_with_modes,
+    SessionProjectionError, SessionProjector, SessionRecoveredState, project_session_events,
+    project_session_events_with_modes, project_session_read_view,
 };
 use projection::{
-    approved_plan_context_item, parse_turn_id, plan_review_context_turn, review_hash_is_valid,
-    review_path_is_valid, shell_context_turn,
+    approved_plan_context_item, find_journal_boundary, parse_turn_id, plan_review_context_turn,
+    project_journal_prefix, review_hash_is_valid, review_path_is_valid, shell_context_turn,
 };
 use session::{
     ActorCommand, ActorState, PendingApproval, PendingModelSwitch, PendingQuestion,
@@ -676,6 +678,9 @@ impl ModelDriver for ProviderRuntime {
 /// Stable turn-loop construction or runtime failure.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum AgentLoopError {
+    /// A replay cursor is beyond its captured committed prefix.
+    #[error("replay cursor is ahead of the captured journal")]
+    ReplayCursorAhead,
     /// Configuration would make termination impossible or invalid.
     #[error("invalid agent-loop configuration: {0}")]
     InvalidConfiguration(String),
@@ -1790,23 +1795,16 @@ pub trait SessionEventSink: Send + Sync {
         Ok(events)
     }
 
-    /// Reads every persisted event strictly after `last_seen`, or the whole
-    /// log when `last_seen` is `None`. Implementations must return a contiguous
-    /// sequence and never synthesize connection-scoped acknowledgements.
-    async fn read_after(
-        &self,
-        last_seen: Option<SequenceId>,
-    ) -> Result<Vec<EngineEvent>, AgentLoopError>;
+    /// Captures an immutable acknowledged prefix for bounded replay.
+    ///
+    /// # Errors
+    /// Rejects unavailable storage or exhausted read admission.
+    fn capture_read_view(&self) -> Result<Arc<dyn SessionEventReadView>, AgentLoopError>;
 
     /// Returns the current durable tail without relying on the finite live
     /// broadcast buffer.
     async fn last_sequence(&self) -> Result<Option<SequenceId>, AgentLoopError> {
-        Ok(self
-            .read_after(None)
-            .await?
-            .last()
-            .and_then(EngineEvent::meta)
-            .map(|meta| meta.sequence_id))
+        Ok(self.capture_read_view()?.last_sequence())
     }
 
     /// Returns reconciled session, UTC-day, and trailing-minute spend totals.
@@ -1823,7 +1821,7 @@ pub trait SessionEventSink: Send + Sync {
 #[derive(Debug, Default)]
 pub struct NoopSessionEventSink {
     next_sequence: Mutex<u64>,
-    events: Mutex<Vec<EngineEvent>>,
+    events: Arc<Mutex<Vec<EngineEvent>>>,
 }
 
 impl NoopSessionEventSink {
@@ -1833,7 +1831,7 @@ impl NoopSessionEventSink {
             next_sequence: Mutex::new(
                 last_sequence.map_or(0, |sequence| sequence.0.saturating_add(1)),
             ),
-            events: Mutex::new(Vec::new()),
+            events: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -1905,19 +1903,15 @@ impl SessionEventSink for NoopSessionEventSink {
         Ok(batch)
     }
 
-    async fn read_after(
-        &self,
-        last_seen: Option<SequenceId>,
-    ) -> Result<Vec<EngineEvent>, AgentLoopError> {
-        let first = last_seen.map_or(0, |sequence| sequence.0.saturating_add(1));
-        Ok(self
-            .events
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-            .filter(|event| event.meta().is_some_and(|meta| meta.sequence_id.0 >= first))
-            .cloned()
-            .collect())
+    fn capture_read_view(&self) -> Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
+        Ok(Arc::new(replay::MemoryEventReadView::new(
+            Arc::clone(&self.events),
+            self.next_sequence
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .checked_sub(1)
+                .map(SequenceId),
+        )))
     }
 
     async fn last_sequence(&self) -> Result<Option<SequenceId>, AgentLoopError> {
@@ -2116,6 +2110,34 @@ struct RoutedEvent {
 mod tests {
     #![allow(clippy::expect_used)]
 
+    #[async_trait]
+    trait TestEventSinkExt: SessionEventSink {
+        async fn test_events_after(
+            &self,
+            mut after: Option<SequenceId>,
+        ) -> Result<Vec<EngineEvent>, AgentLoopError> {
+            let view = self.capture_read_view()?;
+            let mut events = Vec::new();
+            while after != view.last_sequence() {
+                let page = view
+                    .read_page(after, SessionReplayLimits::default())
+                    .await?;
+                if page.is_empty() {
+                    return Err(AgentLoopError::Persistence(
+                        "fixture view did not advance".to_owned(),
+                    ));
+                }
+                after = page
+                    .last()
+                    .and_then(EngineEvent::meta)
+                    .map(|meta| meta.sequence_id);
+                events.extend(page);
+            }
+            Ok(events)
+        }
+    }
+    impl<T: SessionEventSink + ?Sized> TestEventSinkExt for T {}
+
     use std::{
         path::Path,
         sync::atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -2193,7 +2215,7 @@ mod tests {
         actor_config.recovered.title = Some("reasoning fixture".to_owned());
         actor_config.event_sink = sink.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
 
         handle.send_message("run").await.expect("message");
         collect_turn(&mut events).await;
@@ -3393,19 +3415,29 @@ mod tests {
             Ok(events)
         }
 
-        async fn read_after(
-            &self,
-            last_seen: Option<SequenceId>,
-        ) -> Result<Vec<EngineEvent>, AgentLoopError> {
-            let first = last_seen.map_or(0, |sequence| sequence.0.saturating_add(1));
-            Ok(self
-                .events
-                .lock()
-                .expect("event sink lock")
-                .iter()
-                .filter(|event| event.sequence.0 >= first)
-                .map(|event| event.wire.clone())
-                .collect())
+        fn capture_read_view(&self) -> Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
+            let events: Vec<EngineEvent> = {
+                Ok(self
+                    .events
+                    .lock()
+                    .expect("event sink lock")
+                    .iter()
+                    .map(|event| event.wire.clone())
+                    .collect())
+            }?;
+            let actual = events
+                .last()
+                .and_then(EngineEvent::meta)
+                .map(|meta| meta.sequence_id);
+            let floor = *self.tail_floor.lock().expect("tail floor");
+            let tail = match (floor, actual) {
+                (Some(floor), Some(actual)) => Some(floor.max(actual)),
+                (floor, actual) => floor.or(actual),
+            };
+            Ok(Arc::new(replay::MemoryEventReadView::new(
+                Arc::new(Mutex::new(events)),
+                tail,
+            )))
         }
 
         async fn last_sequence(&self) -> Result<Option<SequenceId>, AgentLoopError> {
@@ -3441,11 +3473,8 @@ mod tests {
             self.inner.append_batch(events).await
         }
 
-        async fn read_after(
-            &self,
-            last_seen: Option<SequenceId>,
-        ) -> Result<Vec<EngineEvent>, AgentLoopError> {
-            self.inner.read_after(last_seen).await
+        fn capture_read_view(&self) -> Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
+            self.inner.capture_read_view()
         }
 
         async fn last_sequence(&self) -> Result<Option<SequenceId>, AgentLoopError> {
@@ -3533,10 +3562,7 @@ mod tests {
             Err(AgentLoopError::Persistence("fixture failure".to_owned()))
         }
 
-        async fn read_after(
-            &self,
-            _last_seen: Option<SequenceId>,
-        ) -> Result<Vec<EngineEvent>, AgentLoopError> {
+        fn capture_read_view(&self) -> Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
             Err(AgentLoopError::Persistence("fixture failure".to_owned()))
         }
     }
@@ -3559,11 +3585,8 @@ mod tests {
             self.inner.append_batch(events).await
         }
 
-        async fn read_after(
-            &self,
-            last_seen: Option<SequenceId>,
-        ) -> Result<Vec<EngineEvent>, AgentLoopError> {
-            self.inner.read_after(last_seen).await
+        fn capture_read_view(&self) -> Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
+            self.inner.capture_read_view()
         }
 
         async fn last_sequence(&self) -> Result<Option<SequenceId>, AgentLoopError> {
@@ -3622,11 +3645,8 @@ mod tests {
             self.inner.append_batch(events).await
         }
 
-        async fn read_after(
-            &self,
-            last_seen: Option<SequenceId>,
-        ) -> Result<Vec<EngineEvent>, AgentLoopError> {
-            self.inner.read_after(last_seen).await
+        fn capture_read_view(&self) -> Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
+            self.inner.capture_read_view()
         }
 
         async fn last_sequence(&self) -> Result<Option<SequenceId>, AgentLoopError> {
@@ -3666,11 +3686,8 @@ mod tests {
             self.inner.append_batch(events).await
         }
 
-        async fn read_after(
-            &self,
-            last_seen: Option<SequenceId>,
-        ) -> Result<Vec<EngineEvent>, AgentLoopError> {
-            self.inner.read_after(last_seen).await
+        fn capture_read_view(&self) -> Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
+            self.inner.capture_read_view()
         }
 
         async fn last_sequence(&self) -> Result<Option<SequenceId>, AgentLoopError> {
@@ -3709,11 +3726,8 @@ mod tests {
             self.inner.append_batch(events).await
         }
 
-        async fn read_after(
-            &self,
-            last_seen: Option<SequenceId>,
-        ) -> Result<Vec<EngineEvent>, AgentLoopError> {
-            self.inner.read_after(last_seen).await
+        fn capture_read_view(&self) -> Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
+            self.inner.capture_read_view()
         }
 
         async fn last_sequence(&self) -> Result<Option<SequenceId>, AgentLoopError> {
@@ -3729,18 +3743,22 @@ mod tests {
 
     struct MalformedBatchSink {
         mode: MalformedBatchMode,
+        inner: NoopSessionEventSink,
     }
 
     #[async_trait]
     impl SessionEventSink for MalformedBatchSink {
         async fn append(&self, event: EngineEvent) -> Result<EngineEvent, AgentLoopError> {
-            Ok(event)
+            self.inner.append(event).await
         }
 
         async fn append_batch(
             &self,
             mut events: Vec<EngineEvent>,
         ) -> Result<Vec<EngineEvent>, AgentLoopError> {
+            if events.len() == 1 {
+                return self.inner.append_batch(events).await;
+            }
             match self.mode {
                 MalformedBatchMode::Payload => {
                     if let Some(event) = events.get_mut(1) {
@@ -3766,11 +3784,8 @@ mod tests {
             Ok(events)
         }
 
-        async fn read_after(
-            &self,
-            _last_seen: Option<SequenceId>,
-        ) -> Result<Vec<EngineEvent>, AgentLoopError> {
-            Ok(Vec::new())
+        fn capture_read_view(&self) -> Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
+            self.inner.capture_read_view()
         }
     }
 
@@ -3810,19 +3825,25 @@ mod tests {
             Ok(self.persist(events))
         }
 
-        async fn read_after(
-            &self,
-            last_seen: Option<SequenceId>,
-        ) -> Result<Vec<EngineEvent>, AgentLoopError> {
-            let first = last_seen.map_or(0, |sequence| sequence.0.saturating_add(1));
-            Ok(self
-                .persisted
-                .lock()
-                .expect("persisted events")
-                .iter()
-                .filter(|event| event.meta().is_some_and(|meta| meta.sequence_id.0 >= first))
-                .cloned()
-                .collect())
+        fn capture_read_view(&self) -> Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
+            let events: Vec<EngineEvent> = {
+                Ok(self
+                    .persisted
+                    .lock()
+                    .expect("persisted events")
+                    .iter()
+                    .filter(|event| event.meta().is_some())
+                    .cloned()
+                    .collect())
+            }?;
+            let tail = events
+                .last()
+                .and_then(EngineEvent::meta)
+                .map(|meta| meta.sequence_id);
+            Ok(Arc::new(replay::MemoryEventReadView::new(
+                Arc::new(Mutex::new(events)),
+                tail,
+            )))
         }
     }
 
@@ -4103,19 +4124,25 @@ mod tests {
             Ok(events)
         }
 
-        async fn read_after(
-            &self,
-            last_seen: Option<SequenceId>,
-        ) -> Result<Vec<EngineEvent>, AgentLoopError> {
-            let first = last_seen.map_or(0, |sequence| sequence.0.saturating_add(1));
-            Ok(self
-                .events
-                .lock()
-                .expect("events")
-                .iter()
-                .filter(|event| event.meta().is_some_and(|meta| meta.sequence_id.0 >= first))
-                .cloned()
-                .collect())
+        fn capture_read_view(&self) -> Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
+            let events: Vec<EngineEvent> = {
+                Ok(self
+                    .events
+                    .lock()
+                    .expect("events")
+                    .iter()
+                    .filter(|event| event.meta().is_some())
+                    .cloned()
+                    .collect())
+            }?;
+            let tail = events
+                .last()
+                .and_then(EngineEvent::meta)
+                .map(|meta| meta.sequence_id);
+            Ok(Arc::new(replay::MemoryEventReadView::new(
+                Arc::new(Mutex::new(events)),
+                tail,
+            )))
         }
     }
 
@@ -5010,7 +5037,7 @@ mod tests {
         );
         actor_config.commands = Arc::new(commands);
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         assert_eq!(
             handle.send_message("/echo hello").await.expect("command"),
             MessageDisposition::Command
@@ -5078,7 +5105,7 @@ mod tests {
         actor_config.commands = Arc::new(commands);
         actor_config.checkpoints = checkpoints.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         assert_eq!(
             timeout(Duration::from_millis(16), handle.send_message("/deep-init"))
                 .await
@@ -5136,7 +5163,7 @@ mod tests {
         actor_config.commands = Arc::new(commands);
         actor_config.checkpoints = checkpoints.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         assert_eq!(
             handle.send_message("/init").await.expect("init ack"),
             MessageDisposition::Command
@@ -5195,7 +5222,7 @@ mod tests {
         );
         actor_config.commands = Arc::new(commands);
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
 
         assert_eq!(
             handle.send_message("/scoped").await.expect("custom turn"),
@@ -5249,7 +5276,7 @@ mod tests {
         );
         actor_config.folder_trust = trust.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         for (command, expected) in [
             ("/trust", FolderTrustOperation::Status),
             (
@@ -5308,7 +5335,7 @@ mod tests {
         actor_config.permissions = permissions;
         actor_config.workspace_roots = controller.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         let failure = handle
             .send_message(format!("/add-dir {}", added.display()))
             .await
@@ -5556,7 +5583,7 @@ mod tests {
         );
         actor_config.permissions = permissions.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle
             .send_message("/permissions mode yolo")
             .await
@@ -5737,7 +5764,7 @@ mod tests {
             unrestorable_paths: Vec::new(),
         });
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("first").await.expect("first");
         collect_turn(&mut events).await;
         handle.send_message("second").await.expect("second");
@@ -5835,7 +5862,7 @@ mod tests {
             }],
         });
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("first").await.expect("first");
         collect_turn(&mut events).await;
         handle
@@ -5887,7 +5914,7 @@ mod tests {
             ..SessionRecoveredState::default()
         };
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("persist me").await.expect("message");
         let started = next_matching(&mut events, |kind| {
             matches!(kind, PendingEvent::TurnStarted { .. })
@@ -5983,7 +6010,7 @@ mod tests {
         );
         actor_config.event_sink = sink.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.ensure_local_driver().await.expect("local driver");
 
         assert_eq!(
@@ -6037,7 +6064,11 @@ mod tests {
             "the recovered actor should complete a later turn"
         );
 
-        let durable = sink.inner.read_after(None).await.expect("durable log");
+        let durable = sink
+            .inner
+            .test_events_after(None)
+            .await
+            .expect("durable log");
         let recovered = project_session_events(&durable).expect("replay repaired journal");
         assert_eq!(recovered.completed_turns, 2);
         assert!(recovered.conversation.iter().any(|turn| {
@@ -6076,7 +6107,7 @@ mod tests {
         );
         actor_config.event_sink = sink.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle
             .send_message("explain the project structure")
             .await
@@ -6131,7 +6162,7 @@ mod tests {
         );
         actor_config.event_sink = sink.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle
             .send_message("explain the project structure")
             .await
@@ -6239,7 +6270,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle
             .send_message("fix reconnect recovery without blocking input")
             .await
@@ -6286,7 +6317,9 @@ mod tests {
         actor_config.event_sink = sink.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
         handle.ensure_local_driver().await.expect("local driver");
-        let mut events = handle.subscribe_client(ClientId("local".to_owned()), Some(0.into()));
+        let mut events = handle
+            .subscribe_client(ClientId("local".to_owned()), Some(0.into()))
+            .expect("subscription");
         let sender = handle.clone();
         let send = tokio::spawn(async move { sender.send_message("persist together").await });
 
@@ -6347,10 +6380,15 @@ mod tests {
                 PermissionDecision::Allow,
                 builtin_hook_dispatcher().expect("hooks"),
             );
-            actor_config.event_sink = Arc::new(MalformedBatchSink { mode });
+            actor_config.event_sink = Arc::new(MalformedBatchSink {
+                mode,
+                inner: NoopSessionEventSink::default(),
+            });
             let handle = SessionActor::spawn(actor_config).expect("actor");
             handle.ensure_local_driver().await.expect("local driver");
-            let mut events = handle.subscribe_client(ClientId("local".to_owned()), Some(0.into()));
+            let mut events = handle
+                .subscribe_client(ClientId("local".to_owned()), Some(0.into()))
+                .expect("subscription");
 
             assert!(matches!(
                 handle.send_message("reject malformed batch").await,
@@ -6397,7 +6435,7 @@ mod tests {
         actor_config.recovered.title = Some("batch fixture".to_owned());
         actor_config.event_sink = sink.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
 
         handle.send_message("run").await.expect("message");
         let observed = collect_turn(&mut events).await;
@@ -6563,7 +6601,7 @@ mod tests {
         actor_config.recovered.title = Some("batch fixture".to_owned());
         actor_config.event_sink = sink.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
 
         handle.send_message("raw input").await.expect("message");
         collect_turn(&mut events).await;
@@ -6620,7 +6658,7 @@ mod tests {
         actor_config.recovered.title = Some("batch fixture".to_owned());
         actor_config.event_sink = sink.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
 
         handle.send_message("run").await.expect("message");
         let observed = collect_turn(&mut events).await;
@@ -6656,7 +6694,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
 
         handle.send_message("run").await.expect("message");
         let delta = timeout(
@@ -6699,7 +6737,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
 
         handle.send_message("run").await.expect("message");
         let delta = timeout(
@@ -7117,7 +7155,7 @@ mod tests {
         }];
         actor_config.event_sink = sink.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("what word?").await.expect("message");
         collect_turn(&mut events).await;
         assert!(model.observed.load(Ordering::SeqCst));
@@ -7162,7 +7200,7 @@ mod tests {
                 builtin_hook_dispatcher().expect("hooks"),
             ))
             .expect("actor");
-            let mut events = handle.subscribe();
+            let mut events = handle.subscribe().expect("subscription");
             handle.send_message("run").await.expect("message");
             let request = next_matching(&mut events, |kind| {
                 matches!(kind, PendingEvent::PermissionRequested { .. })
@@ -7237,7 +7275,7 @@ mod tests {
                 hooks,
             ))
             .expect("actor");
-            let mut events = handle.subscribe();
+            let mut events = handle.subscribe().expect("subscription");
             handle.send_message("write").await.expect("message");
             let approval = next_matching(&mut events, |kind| {
                 matches!(kind, PendingEvent::PermissionRequested { .. })
@@ -7298,7 +7336,7 @@ mod tests {
             );
             actor_config.commands = Arc::new(commands);
             let handle = SessionActor::spawn(actor_config).expect("actor");
-            let mut events = handle.subscribe();
+            let mut events = handle.subscribe().expect("subscription");
             assert_eq!(
                 handle.send_message("/prelude").await.expect("command"),
                 MessageDisposition::Started
@@ -7379,7 +7417,7 @@ mod tests {
         actor_config.commands = Arc::new(commands);
         actor_config.checkpoints = checkpoints;
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("baseline").await.expect("baseline");
         collect_turn(&mut events).await;
         handle.send_message("/prelude").await.expect("prelude");
@@ -7429,7 +7467,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("delete it").await.expect("message");
 
         let approval = next_matching(&mut events, |kind| {
@@ -7505,7 +7543,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("escape").await.expect("message");
         let approval = next_matching(&mut events, |kind| {
             matches!(kind, PendingEvent::PermissionRequested { .. })
@@ -7574,7 +7612,7 @@ mod tests {
             )),
         );
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("test").await.expect("message");
         let turn = collect_turn(&mut events).await;
         assert!(
@@ -7647,7 +7685,7 @@ mod tests {
                 builtin_hook_dispatcher().expect("hooks"),
             ))
             .expect("actor");
-            let mut events = handle.subscribe();
+            let mut events = handle.subscribe().expect("subscription");
             handle
                 .send_message("summarize the page")
                 .await
@@ -7734,7 +7772,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("run").await.expect("message");
         let event = next_matching(&mut events, |kind| {
             matches!(kind, PendingEvent::PermissionRequested { .. })
@@ -7809,7 +7847,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("run").await.expect("message");
         let event = next_matching(&mut events, |kind| {
             matches!(kind, PendingEvent::PermissionRequested { .. })
@@ -7898,7 +7936,7 @@ mod tests {
         actor_config.event_sink = sink.clone();
         actor_config.secret_redactor = Arc::new(CanarySecretRedactor);
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("run").await.expect("message");
         let event = next_matching(&mut events, |kind| {
             matches!(kind, PendingEvent::PermissionRequested { .. })
@@ -8003,7 +8041,7 @@ mod tests {
         actor_config.event_sink = sink.clone();
         actor_config.secret_redactor = Arc::new(CanarySecretRedactor);
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("run").await.expect("message");
         let event = next_matching(&mut events, |kind| {
             matches!(kind, PendingEvent::PermissionRequested { .. })
@@ -8060,7 +8098,7 @@ mod tests {
         actor_config.event_sink = sink.clone();
         actor_config.secret_redactor = Arc::new(CanarySecretRedactor);
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle
             .send_message("safe KNOWN_CANARY tail")
             .await
@@ -8136,7 +8174,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("write").await.expect("message");
         let event = next_matching(&mut events, |kind| {
             matches!(kind, PendingEvent::PermissionRequested { .. })
@@ -8228,7 +8266,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("write").await.expect("message");
         let turn = collect_turn(&mut events).await;
         assert!(
@@ -8281,7 +8319,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("write").await.expect("message");
         let event = next_matching(&mut events, |kind| {
             matches!(kind, PendingEvent::PermissionRequested { .. })
@@ -8350,7 +8388,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("write").await.expect("message");
         let event = next_matching(&mut events, |kind| {
             matches!(kind, PendingEvent::PermissionRequested { .. })
@@ -8429,7 +8467,7 @@ mod tests {
             hooks,
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("run").await.expect("message");
         let event = next_matching(&mut events, |kind| {
             matches!(kind, PendingEvent::PermissionRequested { .. })
@@ -8523,7 +8561,7 @@ mod tests {
             hooks,
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("run").await.expect("message");
         let events = collect_turn(&mut events).await;
         assert_eq!(
@@ -8702,7 +8740,7 @@ mod tests {
         );
         actor_config.event_sink = sink.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("hang").await.expect("message");
         assert!(handle.interrupt().await.expect("interrupt"));
         let finished = next_matching(&mut events, |kind| {
@@ -8766,7 +8804,7 @@ mod tests {
         );
         actor_config.event_sink = sink.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("run").await.expect("message");
         let events = collect_turn(&mut events).await;
         assert_eq!(
@@ -9031,7 +9069,7 @@ mod tests {
         );
         actor_config.event_sink = sink.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("run").await.expect("message");
         timeout(Duration::from_secs(3), first_started.notified())
             .await
@@ -9065,7 +9103,7 @@ mod tests {
             );
             actor_config.session_id = SessionId(session_id.to_owned());
             let handle = SessionActor::spawn(actor_config).expect("actor");
-            let mut events = handle.subscribe();
+            let mut events = handle.subscribe().expect("subscription");
             handle.send_message("capture").await.expect("message");
             collect_turn(&mut events).await;
         }
@@ -9100,7 +9138,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("run").await.expect("message");
         let chunk = next_matching(&mut events, |kind| {
             matches!(kind, PendingEvent::ToolOutput { .. })
@@ -9149,7 +9187,7 @@ mod tests {
         );
         actor_config.checkpoints = checkpoints.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("write").await.expect("message");
         collect_turn(&mut events).await;
         assert_eq!(
@@ -9201,7 +9239,7 @@ mod tests {
         );
         actor_config.checkpoints = checkpoints.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("read").await.expect("message");
         collect_turn(&mut events).await;
         assert_eq!(
@@ -9258,7 +9296,7 @@ mod tests {
         );
         actor_config.checkpoints = checkpoints;
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("baseline").await.expect("baseline");
         collect_turn(&mut events).await;
         handle.send_message("read").await.expect("read");
@@ -9317,7 +9355,7 @@ mod tests {
         );
         actor_config.checkpoints = checkpoints.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("baseline").await.expect("baseline");
         collect_turn(&mut events).await;
         handle.send_message("read").await.expect("message");
@@ -9373,7 +9411,7 @@ mod tests {
         actor_config.checkpoints = checkpoints.clone();
         actor_config.event_sink = sink.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("run").await.expect("message");
         next_matching(&mut events, |kind| {
             matches!(kind, PendingEvent::ToolOutput { .. })
@@ -9443,7 +9481,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("run").await.expect("message");
         next_matching(&mut events, |kind| {
             matches!(kind, PendingEvent::ToolOutput { .. })
@@ -9578,7 +9616,7 @@ mod tests {
         );
         actor_config.checkpoints = checkpoints.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut receiver = handle.subscribe();
+        let mut receiver = handle.subscribe().expect("subscription");
         handle.send_message("run").await.expect("message");
         next_matching(&mut receiver, |kind| {
             matches!(kind, PendingEvent::ToolCallStarted { .. })
@@ -9691,7 +9729,7 @@ mod tests {
         );
         actor_config.checkpoints = checkpoints.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut receiver = handle.subscribe();
+        let mut receiver = handle.subscribe().expect("subscription");
         handle
             .send_message("panic once")
             .await
@@ -9741,7 +9779,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         assert_eq!(
             handle.send_message("first").await.expect("first"),
             MessageDisposition::Started
@@ -9803,7 +9841,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("run").await.expect("message");
         let events = collect_turn(&mut events).await;
         assert!(events.iter().any(|event| matches!(
@@ -9870,7 +9908,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("run").await.expect("message");
         let finished = next_matching(&mut events, |kind| {
             matches!(kind, PendingEvent::TurnFinished { .. })
@@ -9923,11 +9961,16 @@ mod tests {
             Ok(event)
         }
 
-        async fn read_after(
-            &self,
-            _last_seen: Option<SequenceId>,
-        ) -> Result<Vec<EngineEvent>, AgentLoopError> {
-            Ok(vec![self.event.clone()])
+        fn capture_read_view(&self) -> Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
+            let events = vec![self.event.clone()];
+            let tail = events
+                .last()
+                .and_then(EngineEvent::meta)
+                .map(|meta| meta.sequence_id);
+            Ok(Arc::new(replay::MemoryEventReadView::new(
+                Arc::new(Mutex::new(events)),
+                tail,
+            )))
         }
     }
 
@@ -9952,19 +9995,25 @@ mod tests {
             Ok(event)
         }
 
-        async fn read_after(
-            &self,
-            last_seen: Option<SequenceId>,
-        ) -> Result<Vec<EngineEvent>, AgentLoopError> {
-            let first = last_seen.map_or(0, |sequence| sequence.0.saturating_add(1));
-            Ok(self
-                .events
-                .lock()
-                .expect("events")
-                .iter()
-                .filter(|event| event.meta().is_some_and(|meta| meta.sequence_id.0 >= first))
-                .cloned()
-                .collect())
+        fn capture_read_view(&self) -> Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
+            let events: Vec<EngineEvent> = {
+                Ok(self
+                    .events
+                    .lock()
+                    .expect("events")
+                    .iter()
+                    .filter(|event| event.meta().is_some())
+                    .cloned()
+                    .collect())
+            }?;
+            let tail = events
+                .last()
+                .and_then(EngineEvent::meta)
+                .map(|meta| meta.sequence_id);
+            Ok(Arc::new(replay::MemoryEventReadView::new(
+                Arc::new(Mutex::new(events)),
+                tail,
+            )))
         }
     }
 
@@ -10025,7 +10074,9 @@ mod tests {
         ))
         .expect("actor");
         let session_id = SessionId("fixture-session".to_owned());
-        let mut driver_events = handle.subscribe_client(ClientId("driver".to_owned()), None);
+        let mut driver_events = handle
+            .subscribe_client(ClientId("driver".to_owned()), None)
+            .expect("subscription");
         assert_eq!(
             handle
                 .dispatch(ClientCommand::AttachSession {
@@ -10061,7 +10112,9 @@ mod tests {
             } if emitted_at == "2026-01-02T03:04:05.006Z"
         ));
 
-        let mut observer_events = handle.subscribe_client(ClientId("observer".to_owned()), None);
+        let mut observer_events = handle
+            .subscribe_client(ClientId("observer".to_owned()), None)
+            .expect("subscription");
         assert_eq!(
             handle
                 .dispatch(ClientCommand::AttachSession {
@@ -10141,8 +10194,12 @@ mod tests {
         actor_config.event_sink = sink.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
         let session_id = SessionId("fixture-session".to_owned());
-        let mut driver_events = handle.subscribe_client(ClientId("local".to_owned()), None);
-        let mut observer_events = handle.subscribe_client(ClientId("observer".to_owned()), None);
+        let mut driver_events = handle
+            .subscribe_client(ClientId("local".to_owned()), None)
+            .expect("subscription");
+        let mut observer_events = handle
+            .subscribe_client(ClientId("observer".to_owned()), None)
+            .expect("subscription");
         for (client, role) in [
             ("local", ClientRole::Driver),
             ("observer", ClientRole::Observer),
@@ -10240,7 +10297,10 @@ mod tests {
             MessageDisposition::Queued
         );
 
-        let durable_after_remove = sink.read_after(None).await.expect("durable removal log");
+        let durable_after_remove = sink
+            .test_events_after(None)
+            .await
+            .expect("durable removal log");
         assert!(durable_after_remove.iter().any(|event| matches!(
             event,
             EngineEvent::MessageQueued {
@@ -10290,7 +10350,10 @@ mod tests {
                 .queued_messages
                 .is_empty()
         );
-        let durable_after_clear = sink.read_after(None).await.expect("durable clear log");
+        let durable_after_clear = sink
+            .test_events_after(None)
+            .await
+            .expect("durable clear log");
         assert!(
             project_session_events(&durable_after_clear)
                 .expect("recover cleared queue")
@@ -10364,8 +10427,12 @@ mod tests {
         actor_config.permissions = Arc::clone(&permissions);
         let handle = SessionActor::spawn(actor_config).expect("actor");
         let session_id = SessionId("fixture-session".to_owned());
-        let mut driver_events = handle.subscribe_client(ClientId("driver".to_owned()), None);
-        let mut observer_events = handle.subscribe_client(ClientId("observer".to_owned()), None);
+        let mut driver_events = handle
+            .subscribe_client(ClientId("driver".to_owned()), None)
+            .expect("subscription");
+        let mut observer_events = handle
+            .subscribe_client(ClientId("observer".to_owned()), None)
+            .expect("subscription");
         for (client, role) in [
             ("driver", ClientRole::Driver),
             ("observer", ClientRole::Observer),
@@ -10745,6 +10812,154 @@ mod tests {
             .await;
     }
 
+    #[derive(Debug)]
+    struct CountedReplayView {
+        inner: Arc<dyn SessionEventReadView>,
+        pages: Arc<Mutex<Vec<usize>>>,
+    }
+
+    #[async_trait]
+    impl SessionEventReadView for CountedReplayView {
+        fn last_sequence(&self) -> Option<SequenceId> {
+            self.inner.last_sequence()
+        }
+        async fn read_page(
+            &self,
+            after: Option<SequenceId>,
+            limits: SessionReplayLimits,
+        ) -> Result<Vec<EngineEvent>, AgentLoopError> {
+            let page = self.inner.read_page(after, limits).await?;
+            self.pages.lock().expect("pages").push(page.len());
+            Ok(page)
+        }
+    }
+
+    #[derive(Default)]
+    struct CountedReplaySink {
+        inner: NoopSessionEventSink,
+        pages: Arc<Mutex<Vec<usize>>>,
+    }
+
+    #[async_trait]
+    impl SessionEventSink for CountedReplaySink {
+        async fn append(&self, event: EngineEvent) -> Result<EngineEvent, AgentLoopError> {
+            self.inner.append(event).await
+        }
+        async fn append_batch(
+            &self,
+            events: Vec<EngineEvent>,
+        ) -> Result<Vec<EngineEvent>, AgentLoopError> {
+            self.inner.append_batch(events).await
+        }
+
+        fn capture_read_view(&self) -> Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
+            Ok(Arc::new(CountedReplayView {
+                inner: self.inner.capture_read_view()?,
+                pages: Arc::clone(&self.pages),
+            }))
+        }
+        async fn last_sequence(&self) -> Result<Option<SequenceId>, AgentLoopError> {
+            self.inner.last_sequence().await
+        }
+    }
+
+    #[tokio::test]
+    async fn large_reconnect_pages_pin_cursor_and_preserve_attach_ack_after_lag() {
+        let root = TempDir::new().expect("tempdir");
+        let sink = Arc::new(CountedReplaySink::default());
+        let mut seeded = vec![wire_event(
+            0,
+            PendingEvent::SessionCreated {
+                driver_client_id: ClientId("prior".to_owned()),
+            },
+        )];
+        seeded.extend((1..10_000).map(|sequence| {
+            wire_event(
+                sequence,
+                PendingEvent::TextDelta {
+                    turn: 1,
+                    text: "x".to_owned(),
+                },
+            )
+        }));
+        let recovered = project_session_events(&seeded).expect("projection");
+        sink.append_batch(seeded).await.expect("seed");
+        let mut actor_config = config(
+            root.path(),
+            Arc::new(ScriptedModel::default()),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        actor_config.event_sink = sink.clone();
+        actor_config.recovered = recovered;
+        actor_config.event_capacity = 1;
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let session = SessionId("fixture-session".to_owned());
+        let mut observer = handle
+            .subscribe_client(ClientId("observer".to_owned()), Some(SequenceId(499)))
+            .expect("subscription");
+        observer.prime().await.expect("prime historical prefix");
+        assert_eq!(*sink.pages.lock().expect("pages"), vec![256]);
+        handle
+            .dispatch(ClientCommand::SendMessage {
+                meta: protocol_meta("prior", "new-between-subscribe-attach"),
+                session_id: session.clone(),
+                content: "/status".to_owned(),
+                attachments: Vec::new(),
+            })
+            .await
+            .expect("new durable event");
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::AttachSession {
+                    meta: protocol_meta("observer", "attach"),
+                    session_id: session.clone(),
+                    last_seen_sequence: Some(SequenceId(499)),
+                    role: ClientRole::Observer,
+                })
+                .await
+                .expect("attach"),
+            CommandOutcome::Accepted
+        );
+        let mut sequences = Vec::new();
+        timeout(Duration::from_secs(3), async {
+            loop {
+                let event = observer.recv().await.expect("replay");
+                if let Some(meta) = event.meta() {
+                    sequences.push(meta.sequence_id.0);
+                }
+                if matches!(event, EngineEvent::CommandAcknowledged { .. }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("bounded replay finishes");
+        let tail = sink
+            .last_sequence()
+            .await
+            .expect("tail")
+            .expect("nonempty")
+            .0;
+        assert_eq!(sequences, (500..=tail).collect::<Vec<_>>());
+        let pages = sink.pages.lock().expect("pages").clone();
+        assert!(pages.len() >= 38);
+        assert!(pages.iter().all(|size| *size <= 256));
+        assert!(matches!(
+            handle
+                .dispatch(ClientCommand::AttachSession {
+                    meta: protocol_meta("observer", "future"),
+                    session_id: session,
+                    last_seen_sequence: Some(SequenceId(tail + 1)),
+                    role: ClientRole::Observer,
+                })
+                .await
+                .expect("future rejected"),
+            CommandOutcome::Rejected { .. }
+        ));
+    }
+
     #[tokio::test]
     async fn lagged_subscription_replays_every_durable_sequence_and_continues_live() {
         let root = TempDir::new().expect("tempdir");
@@ -10760,7 +10975,9 @@ mod tests {
         actor_config.event_capacity = 1;
         let handle = SessionActor::spawn(actor_config).expect("actor");
         let session_id = SessionId("fixture-session".to_owned());
-        let mut events = handle.subscribe_client(ClientId("driver".to_owned()), None);
+        let mut events = handle
+            .subscribe_client(ClientId("driver".to_owned()), None)
+            .expect("subscription");
         handle
             .dispatch(ClientCommand::AttachSession {
                 meta: protocol_meta("driver", "attach"),
@@ -10859,7 +11076,9 @@ mod tests {
             );
             actor_config.event_sink = Arc::new(CorruptGapSink { event });
             let handle = SessionActor::spawn(actor_config).expect("actor");
-            let mut subscription = handle.subscribe_client(ClientId("driver".to_owned()), None);
+            let mut subscription = handle
+                .subscribe_client(ClientId("driver".to_owned()), None)
+                .expect("subscription");
             assert!(matches!(
                 handle
                     .dispatch(ClientCommand::AttachSession {
@@ -11032,7 +11251,9 @@ mod tests {
         );
         actor_config.event_sink = sink.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe_client(ClientId("driver".to_owned()), None);
+        let mut events = handle
+            .subscribe_client(ClientId("driver".to_owned()), None)
+            .expect("subscription");
         let session_id = SessionId("fixture-session".to_owned());
         handle
             .dispatch(ClientCommand::AttachSession {
@@ -11166,7 +11387,9 @@ mod tests {
         actor_config.event_sink = sink.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
         let session_id = SessionId("fixture-session".to_owned());
-        let mut events = handle.subscribe_client(ClientId("driver".to_owned()), None);
+        let mut events = handle
+            .subscribe_client(ClientId("driver".to_owned()), None)
+            .expect("subscription");
         handle
             .dispatch(ClientCommand::AttachSession {
                 meta: protocol_meta("driver", "attach"),
@@ -11247,7 +11470,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("flood").await.expect("message");
         let turn = timeout(Duration::from_secs(3), collect_turn(&mut events))
             .await
@@ -11379,7 +11602,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("run").await.expect("message");
         let events = collect_turn(&mut events).await;
         assert_eq!(doom_model.request_count(), 5);
@@ -11420,7 +11643,7 @@ mod tests {
         );
         actor_config.max_turns = 2;
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("run").await.expect("message");
         let events = collect_turn(&mut events).await;
         assert_eq!(max_model.request_count(), 2);
@@ -11472,7 +11695,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("run").await.expect("message");
         let events = collect_turn(&mut events).await;
         assert_eq!(model.request_count(), 9);
@@ -11521,7 +11744,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("run").await.expect("message");
         let events = collect_turn(&mut events).await;
         assert_eq!(model.request_count(), 9);
@@ -11572,7 +11795,7 @@ mod tests {
         );
         actor_config.max_turns = 22;
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("run").await.expect("message");
         let events = collect_turn(&mut events).await;
         assert_eq!(model.request_count(), 22);
@@ -11817,7 +12040,7 @@ mod tests {
             .await
             .expect("recovery abort must be persisted before commands are accepted");
 
-            let mut subscription = handle.subscribe();
+            let mut subscription = handle.subscribe().expect("subscription");
             handle
                 .send_message("later after recovery")
                 .await
@@ -12026,7 +12249,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle
             .send_message("blocked")
             .await
@@ -12071,7 +12294,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
 
         handle.send_message("first").await.expect("first message");
         let first = collect_turn(&mut events).await;
@@ -12148,7 +12371,7 @@ mod tests {
         );
         actor_config.event_sink = Arc::new(AccountingRecordingSink::default());
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
 
         handle.send_message("first").await.expect("first message");
         collect_turn(&mut events).await;
@@ -12183,7 +12406,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
 
         handle.send_message("blocked").await.expect("message");
         let events = collect_turn(&mut events).await;
@@ -12236,7 +12459,7 @@ mod tests {
             );
             actor_config.event_sink = sink;
             let handle = SessionActor::spawn(actor_config).expect("actor");
-            let mut events = handle.subscribe();
+            let mut events = handle.subscribe().expect("subscription");
 
             handle.send_message("first").await.expect("first message");
             collect_turn(&mut events).await;
@@ -12292,7 +12515,7 @@ mod tests {
                 actor_config.event_sink = Arc::new(AccountingRecordingSink::default());
             }
             let handle = SessionActor::spawn(actor_config).expect("actor");
-            let mut events = handle.subscribe();
+            let mut events = handle.subscribe().expect("subscription");
 
             handle.send_message("first").await.expect("first message");
             let first = collect_turn(&mut events).await;
@@ -12351,7 +12574,7 @@ mod tests {
                 builtin_hook_dispatcher().expect("hooks"),
             ))
             .expect("actor");
-            let mut events = handle.subscribe();
+            let mut events = handle.subscribe().expect("subscription");
             handle.send_message("route me").await.expect("message");
             let events = collect_turn(&mut events).await;
             (events, model.requests.load(Ordering::SeqCst))
@@ -12447,7 +12670,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("run").await.expect("message");
         let events = collect_turn(&mut events).await;
         assert!(events.iter().any(|event| matches!(
@@ -12498,7 +12721,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle
             .send_message("complete a turn")
             .await
@@ -12539,7 +12762,7 @@ mod tests {
         );
         actor_config.event_sink = Arc::new(AccountingRecordingSink::default());
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
 
         handle.send_message("first").await.expect("first message");
         let first = collect_turn(&mut events).await;
@@ -12627,8 +12850,8 @@ mod tests {
         let sink = Arc::new(NoopSessionEventSink::default());
         actor_config.event_sink = sink.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
-        let mut wire_events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
+        let mut wire_events = handle.subscribe().expect("subscription");
         handle
             .send_message("What is the src/lib.rs checksum?")
             .await
@@ -12675,7 +12898,7 @@ mod tests {
             PendingEvent::TextDelta { text, .. } if text == "amber-42"
         )));
         assert!(requests[1].cache_hint.is_none());
-        let durable = sink.read_after(None).await.expect("durable events");
+        let durable = sink.test_events_after(None).await.expect("durable events");
         let resumed = project_session_events(&durable).expect("resume projection");
         assert!(
             resumed
@@ -12717,7 +12940,7 @@ mod tests {
         let sink = Arc::new(FailCompactionLedgerSink::default());
         actor_config.event_sink = sink.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("continue").await.expect("message");
         let events = collect_turn(&mut events).await;
 
@@ -12732,7 +12955,7 @@ mod tests {
                 ..
             }
         )));
-        let durable = sink.read_after(None).await.expect("durable events");
+        let durable = sink.test_events_after(None).await.expect("durable events");
         assert!(durable.iter().any(|event| matches!(
             event,
             EngineEvent::CompactionFailed {
@@ -12777,7 +13000,7 @@ mod tests {
                 })
                 .collect();
             let handle = SessionActor::spawn(actor_config).expect("actor");
-            let mut events = handle.subscribe();
+            let mut events = handle.subscribe().expect("subscription");
             handle
                 .send_message("What is the src/lib.rs checksum?")
                 .await
@@ -12869,7 +13092,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle
             .send_message("keep me intact")
             .await
@@ -12920,7 +13143,7 @@ mod tests {
             builtin_hook_dispatcher().expect("hooks"),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("run").await.expect("message");
         let events = collect_turn(&mut events).await;
         assert_eq!(
@@ -13009,7 +13232,7 @@ mod tests {
             text_turn(Role::User, "newer user boundary"),
         ];
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.send_message("run pruning").await.expect("message");
         let events = collect_turn(&mut events).await;
 
@@ -13044,7 +13267,7 @@ mod tests {
         actor_config.initial_session_context = vec![text_turn(Role::System, "stable policy")];
         actor_config.event_sink = sink.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut subscription = handle.subscribe();
+        let mut subscription = handle.subscribe().expect("subscription");
         for index in 0..20 {
             handle
                 .send_message(format!("message {index}"))
@@ -13052,7 +13275,7 @@ mod tests {
                 .expect("message");
             collect_turn(&mut subscription).await;
         }
-        let durable = sink.read_after(None).await.expect("durable events");
+        let durable = sink.test_events_after(None).await.expect("durable events");
         let hashes = durable
             .iter()
             .filter_map(|event| match event {
@@ -13088,7 +13311,7 @@ mod tests {
         actor_config.recovered.conversation = vec![text_turn(Role::User, "stable item")];
         let handle = SessionActor::spawn(actor_config).expect("actor");
         handle.ensure_local_driver().await.expect("driver");
-        let mut subscription = handle.subscribe();
+        let mut subscription = handle.subscribe().expect("subscription");
         handle.send_message("run").await.expect("message");
         next_matching(&mut subscription, |event| {
             matches!(event, PendingEvent::TurnStarted { .. })
@@ -13162,7 +13385,7 @@ mod tests {
         assert_eq!(cancelled[0].usage.input_tokens, 11);
         assert_eq!(cancelled[0].usage.output_tokens, 7);
         let durable = sink
-            .read_after(None)
+            .test_events_after(None)
             .await
             .expect("durable cancellation events");
         let first = project_session_events(&durable).expect("first cancellation resume");
@@ -13191,7 +13414,7 @@ mod tests {
         );
         actor_config.recovered.conversation = vec![text_turn(Role::User, "compact me")];
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         let compact_handle = handle.clone();
         let compact = tokio::spawn(async move { compact_handle.compact(None).await });
         timeout(Duration::from_secs(1), started.notified())
@@ -13298,7 +13521,7 @@ mod tests {
         assert_eq!(snapshot.session_cost_micros_usd, 80);
 
         let durable = sink
-            .read_after(None)
+            .test_events_after(None)
             .await
             .expect("durable fallback events");
         assert_eq!(
@@ -13346,7 +13569,7 @@ mod tests {
                 HookDispatcher::new(),
             ))
             .expect("actor");
-            let mut events = handle.subscribe();
+            let mut events = handle.subscribe().expect("subscription");
             handle
                 .dispatch(ClientCommand::AttachSession {
                     meta: protocol_meta("driver", "attach"),
@@ -13447,7 +13670,7 @@ prompt = "Execute approved work."
         let sink = Arc::new(RecordingSink::default());
         actor_config.event_sink = sink.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle.ensure_local_driver().await.expect("local driver");
         assert_eq!(
             handle
@@ -13757,7 +13980,7 @@ prompt = "The file changed after the mode was selected."
                     PermissionGate::for_headless_mode(rw_types::PermissionModeDescriptor::Yolo)
                 });
                 let handle = SessionActor::spawn(actor_config).expect("actor");
-                let mut events = handle.subscribe();
+                let mut events = handle.subscribe().expect("subscription");
                 handle
                     .dispatch(ClientCommand::AttachSession {
                         meta: protocol_meta("property", "attach"),
@@ -13860,7 +14083,7 @@ prompt = "The file changed after the mode was selected."
             HookDispatcher::new(),
         ))
         .expect("actor");
-        let mut events = handle.subscribe();
+        let mut events = handle.subscribe().expect("subscription");
         handle
             .dispatch(ClientCommand::AttachSession {
                 meta: protocol_meta("driver", "attach"),
@@ -14190,7 +14413,7 @@ prompt = "The file changed after the mode was selected."
         ));
         let durable = handle
             .event_sink
-            .read_after(None)
+            .test_events_after(None)
             .await
             .expect("durable shell start");
         let recovered = project_session_events(&durable).expect("project shell gate");
@@ -14224,7 +14447,7 @@ prompt = "The file changed after the mode was selected."
         ));
         let durable = handle
             .event_sink
-            .read_after(None)
+            .test_events_after(None)
             .await
             .expect("durable redacted shell end");
         assert!(durable.iter().any(|event| matches!(
@@ -14263,7 +14486,7 @@ prompt = "The file changed after the mode was selected."
         );
         let durable = handle
             .event_sink
-            .read_after(None)
+            .test_events_after(None)
             .await
             .expect("durable model switch question");
         let (question_id, question) = durable
@@ -14363,7 +14586,7 @@ prompt = "The file changed after the mode was selected."
         assert_eq!(concrete.thinking, ThinkingLevel::High);
         let durable = handle
             .event_sink
-            .read_after(None)
+            .test_events_after(None)
             .await
             .expect("durable model switch");
         assert_eq!(
@@ -14421,7 +14644,7 @@ prompt = "The file changed after the mode was selected."
             );
             handle
                 .event_sink
-                .read_after(None)
+                .test_events_after(None)
                 .await
                 .expect("switch events")
                 .into_iter()
@@ -14450,7 +14673,7 @@ prompt = "The file changed after the mode was selected."
             strategy: ModelContextTransfer,
             request: &str,
         ) {
-            let mut events = handle.subscribe();
+            let mut events = handle.subscribe().expect("subscription");
             assert_eq!(
                 handle
                     .dispatch(ClientCommand::AnswerQuestion {
@@ -14530,7 +14753,7 @@ prompt = "The file changed after the mode was selected."
             .expect("serialize compacted conversation");
         assert!(!compacted.contains("original user context"));
         assert!(!compacted.contains("original assistant context"));
-        let mut summary_events = summary_handle.subscribe();
+        let mut summary_events = summary_handle.subscribe().expect("subscription");
         assert_eq!(
             summary_handle
                 .dispatch(ClientCommand::SendMessage {
@@ -14586,7 +14809,7 @@ prompt = "The file changed after the mode was selected."
                 .conversation,
             original
         );
-        let mut full_events = full_handle.subscribe();
+        let mut full_events = full_handle.subscribe().expect("subscription");
         assert_eq!(
             full_handle
                 .dispatch(ClientCommand::SendMessage {
@@ -14635,7 +14858,7 @@ prompt = "The file changed after the mode was selected."
                 .conversation,
             vec![original[0].clone()]
         );
-        let mut fresh_events = fresh_handle.subscribe();
+        let mut fresh_events = fresh_handle.subscribe().expect("subscription");
         assert_eq!(
             fresh_handle
                 .dispatch(ClientCommand::SendMessage {
@@ -14720,7 +14943,7 @@ prompt = "The file changed after the mode was selected."
                 .expect("attach recovered"),
             CommandOutcome::Accepted
         );
-        let mut subscription = handle.subscribe();
+        let mut subscription = handle.subscribe().expect("subscription");
         assert_eq!(
             handle
                 .dispatch(ClientCommand::AnswerQuestion {

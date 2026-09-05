@@ -1547,12 +1547,12 @@ pub(super) async fn handle_actor_command(
                 return;
             }
 
-            let attach_gap = if let ClientCommand::AttachSession {
+            if let ClientCommand::AttachSession {
                 last_seen_sequence, ..
             } = &command
             {
-                let tail = match config.event_sink.last_sequence().await {
-                    Ok(tail) => tail,
+                let view = match config.event_sink.capture_read_view() {
+                    Ok(view) => view,
                     Err(error) => {
                         let outcome = protocol_rejection(
                             "gap_replay_failed",
@@ -1563,9 +1563,9 @@ pub(super) async fn handle_actor_command(
                         return;
                     }
                 };
-                if last_seen_sequence
-                    .is_some_and(|last_seen| tail.is_none_or(|tail| last_seen > tail))
-                {
+                if last_seen_sequence.is_some_and(|last_seen| {
+                    view.last_sequence().is_none_or(|tail| last_seen > tail)
+                }) {
                     let outcome = protocol_rejection(
                         "sequence_ahead_of_log",
                         "last-seen sequence is ahead of the durable session tail",
@@ -1574,7 +1574,10 @@ pub(super) async fn handle_actor_command(
                     let _ = respond.send(outcome);
                     return;
                 }
-                match config.event_sink.read_after(*last_seen_sequence).await {
+                match view
+                    .read_page(*last_seen_sequence, SessionReplayLimits::default())
+                    .await
+                {
                     Ok(gap) => {
                         if let Err(error) =
                             validate_gap(*last_seen_sequence, &gap, &config.session_id)
@@ -1587,7 +1590,6 @@ pub(super) async fn handle_actor_command(
                             let _ = respond.send(outcome);
                             return;
                         }
-                        Some(gap)
                     }
                     Err(error) => {
                         let outcome = protocol_rejection(
@@ -1599,9 +1601,7 @@ pub(super) async fn handle_actor_command(
                         return;
                     }
                 }
-            } else {
-                None
-            };
+            }
 
             state.transient_cause = Some(meta.request_id.clone());
             let lease_persist = match &command {
@@ -1646,14 +1646,6 @@ pub(super) async fn handle_actor_command(
                     let _ = complete.send(Err(error));
                 }
                 return;
-            }
-            if let Some(gap) = &attach_gap {
-                for event in gap {
-                    let _ = events.send(RoutedEvent {
-                        target: Some(meta.client_id.clone()),
-                        event: event.clone(),
-                    });
-                }
             }
             let mut precommitted_answer = None;
             if let ClientCommand::AnswerQuestion {
@@ -2366,24 +2358,13 @@ pub(super) async fn handle_actor_command(
                 }
                 ClientCommand::DumpPrompt { turn_id, .. } => {
                     let historical = if let Some(requested) = &turn_id {
-                        let events = config.event_sink.read_after(None).await;
-                        events.and_then(|events| {
-                            let boundary = events.iter().position(|event| {
-                                matches!(
-                                    event,
-                                    EngineEvent::ContextUsageUpdated { turn_id, .. }
-                                        if turn_id == requested
-                                )
-                            });
-                            let boundary = boundary.ok_or_else(|| {
-                                AgentLoopError::InvalidConfiguration(format!(
-                                    "no assembled prompt was recorded for turn {}",
-                                    requested.0
-                                ))
-                            })?;
-                            project_session_events_with_modes(&events[..=boundary], &config.modes)
-                                .map_err(|error| AgentLoopError::Persistence(error.to_string()))
-                        })
+                        async {
+                            let view = config.event_sink.capture_read_view()?;
+                            let boundary = find_journal_boundary(&view, &config.session_id,
+                                |event| matches!(event, EngineEvent::ContextUsageUpdated { turn_id, .. } if turn_id == requested), false,
+                            ).await?.ok_or_else(|| AgentLoopError::InvalidConfiguration(format!("no assembled prompt was recorded for turn {}", requested.0)))?;
+                            project_journal_prefix(view, &config.session_id, &config.modes, Some(boundary)).await
+                        }.await
                     } else {
                         Ok(SessionRecoveredState {
                             conversation: state.conversation.clone(),
@@ -3368,22 +3349,15 @@ async fn rewind_state(
             "turn {to_turn} is not a completed rewind target"
         )));
     };
-    let historical = config
-        .event_sink
-        .read_after(None)
-        .await?
-        .into_iter()
-        .collect::<Vec<_>>();
-    let historical = historical
-        .iter()
-        .rposition(|event| {
-            matches!(event, EngineEvent::TurnFinished { turn_id, .. } if parse_turn_id(turn_id) == Ok(to_turn))
-        })
-        .map(|boundary| {
-            project_session_events_with_modes(&historical[..=boundary], &config.modes)
-        })
-        .transpose()
-        .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+    let view = config.event_sink.capture_read_view()?;
+    let boundary = find_journal_boundary(&view, &config.session_id,
+        |event| matches!(event, EngineEvent::TurnFinished { turn_id, .. } if parse_turn_id(turn_id) == Ok(to_turn)), true,
+    ).await?;
+    let historical = if let Some(boundary) = boundary {
+        Some(project_journal_prefix(view, &config.session_id, &config.modes, Some(boundary)).await?)
+    } else {
+        None
+    };
     let operation_id = format!(
         "rewind-{}-{to_turn}",
         state

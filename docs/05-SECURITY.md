@@ -127,7 +127,7 @@ Foreground shell calls retain an owned task across caller cancellation and futur
 
 - `bash("rm -rf /tmp/outside-workspace")` under default policy → prompt; under sandbox, write outside workspace → EPERM (test asserts the syscall fails, not just that we prompted).
 - Network attempt from a sandboxed safe-list command → blocked.
-- API key present in env → never appears in `events.jsonl`, exports, or plugin event stream (fuzz with canary strings).
+- API key present in env → never appears in session journal segments, exports, or plugin event stream (fuzz with canary strings).
 - Provider-factory canaries: environment-over-private-file API-key precedence, static OAuth, refresh plus rotation persistence, authenticated provider proxy, mixed-auth rejection, and recorder fixtures all assert that canary values never enter diagnostics or fixture bytes.
 - OpenAI subscription canaries: exact authorization parameters and callback, JWT account-claim precedence, deduplicated refresh, rotated-bundle-before-bearer persistence, required request headers/body, fixed-endpoint/auth conflicts, and recorder redaction are deterministic loopback tests; token values never appear in debug output.
 - GitHub Copilot canaries: injected device-flow transport proves verification-code presentation, polling backoff, denial/expiry/cancellation, and sanitized token storage; the stored token is bound to its issuing OAuth client id and a production/test-identity mismatch fails before token exposure. Factory fixtures prove API-key/base-URL conflicts, redactor registration before lazy discovery, 401/403 and policy-disabled fail-closed behavior, endpoint priority, and offline replay with zero discovery sockets. No test reads any external `gh`/Copilot/VS Code/OpenCode credential cache.

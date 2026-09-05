@@ -23,6 +23,62 @@ use tempfile::{TempDir, tempdir};
 const PROMPT: &str = "create hello.py that prints hi, run it";
 const STEERING: &str = "STEER_TOKEN_M2_CLI";
 
+#[test]
+fn sessions_verify_checks_the_journal_and_rejects_unsupported_layout() {
+    let root = tempdir().expect("root");
+    let home = private_test_directory(&root.path().join("home"));
+    let workspace = private_test_directory(&root.path().join("workspace"));
+    let mut log = rw_store::session::SessionEventLog::open(&home, "verified").expect("journal");
+    log.append(EngineEvent::UiNotification {
+        meta: rw_core::EventMeta {
+            protocol_version: rw_core::PROTOCOL_VERSION,
+            session_id: rw_core::SessionId("verified".to_owned()),
+            sequence_id: rw_core::SequenceId(0),
+            emitted_at: "2026-09-04T00:00:00Z".to_owned(),
+            caused_by: None,
+        },
+        plugin_id: "fixture".to_owned(),
+        title: "verification".to_owned(),
+        message: "complete".to_owned(),
+    })
+    .expect("event");
+    let bytes = log.read_view().total_bytes();
+    drop(log);
+    let output = base_command(&workspace, &home)
+        .args(["sessions", "--output-format", "json", "verify", "verified"])
+        .output()
+        .expect("verify command");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("verification JSON");
+    assert_eq!(
+        report,
+        json!({"session_id": "verified", "events": 1, "bytes": bytes})
+    );
+    let legacy = home.join("sessions/unsupported");
+    fs::create_dir_all(&legacy).expect("legacy directory");
+    fs::write(
+        legacy.join("events.jsonl"),
+        b"nonempty unsupported journal\n",
+    )
+    .expect("legacy fixture");
+    let output = base_command(&workspace, &home)
+        .args(["sessions", "verify", "unsupported"])
+        .output()
+        .expect("reject command");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("events.jsonl is not a segmented journal"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!legacy.join("journal").exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn m9_rw_replay_renders_a_persisted_envelope_log_through_production_tui() {
@@ -39,7 +95,8 @@ fn m9_rw_replay_renders_a_persisted_envelope_log_through_production_tui() {
     fs::create_dir_all(&session).expect("session directory");
     let source = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../packages/tui/test/fixtures/m9-replay-events.jsonl");
-    let mut persisted = fs::File::create(session.join("events.jsonl")).expect("event log");
+    let mut persisted =
+        rw_store::session::SessionEventLog::open(&home, session_id).expect("event log");
     for (sequence, line) in fs::read_to_string(source)
         .expect("replay fixture")
         .lines()
@@ -47,18 +104,9 @@ fn m9_rw_replay_renders_a_persisted_envelope_log_through_production_tui() {
     {
         let mut event: serde_json::Value = serde_json::from_str(line).expect("fixture event");
         event["meta"]["sequence_id"] = json!(sequence.to_string());
-        serde_json::to_writer(
-            &mut persisted,
-            &json!({
-                "schema_version": 1,
-                "sequence": sequence.to_string(),
-                "event": event,
-            }),
-        )
-        .expect("persisted envelope");
-        persisted.write_all(b"\n").expect("event newline");
+        persisted.append(event).expect("durable fixture event");
     }
-    persisted.sync_all().expect("durable event fixture");
+    drop(persisted);
 
     let worker = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../packages/tui/test/goldens/replay-cli-worker.ts")
@@ -1067,7 +1115,8 @@ fn resume_repairs_a_killed_tail_and_reuses_the_original_agents_prefix() {
         .home
         .join("sessions")
         .join(&session_id)
-        .join("events.jsonl");
+        .join("journal")
+        .join("active.jsonl");
     let mut tail = fs::OpenOptions::new()
         .append(true)
         .open(&log_path)
@@ -1690,10 +1739,8 @@ fn continue_filters_by_canonical_workspace_and_resume_rejects_cwd_mismatch() {
         "continue stderr: {}",
         String::from_utf8_lossy(&continued.stderr)
     );
-    let log_a = fs::read_to_string(home.join("sessions").join(&session_a).join("events.jsonl"))
-        .expect("a log");
-    let log_b = fs::read_to_string(home.join("sessions").join(&session_b).join("events.jsonl"))
-        .expect("b log");
+    let log_a = read_session_journal(&home, &session_a);
+    let log_b = read_session_journal(&home, &session_b);
     assert!(log_a.contains("CONTINUE_ONLY_WORKSPACE_A"));
     assert!(!log_b.contains("CONTINUE_ONLY_WORKSPACE_A"));
 
@@ -1917,7 +1964,11 @@ fn git_output(workspace: &Path, args: &[&str]) -> String {
 }
 
 fn rewrite_turn_cost(home: &Path, session_id: &str, amount_micros: u64) {
-    let path = home.join("sessions").join(session_id).join("events.jsonl");
+    let path = home
+        .join("sessions")
+        .join(session_id)
+        .join("journal")
+        .join("active.jsonl");
     let source = fs::read_to_string(&path).expect("event log before cost rewrite");
     let mut rewritten = String::new();
     let mut found = false;
@@ -2048,11 +2099,18 @@ fn fixture_files(root: &Path) -> Vec<PathBuf> {
     files
 }
 
+fn read_session_journal(home: &Path, session: &str) -> String {
+    let envelopes =
+        rw_store::session::SessionEventLog::load_existing::<serde_json::Value>(home, session)
+            .expect("offline journal");
+    serde_json::to_string(&envelopes).expect("journal JSON")
+}
+
 fn event_log(home: &Path) -> Option<PathBuf> {
     let session = fs::read_dir(home.join("sessions"))
         .ok()?
         .find_map(Result::ok)?;
-    Some(session.path().join("events.jsonl"))
+    Some(session.path().join("journal").join("active.jsonl"))
 }
 
 fn wait_until(timeout: Duration, mut predicate: impl FnMut() -> bool) {

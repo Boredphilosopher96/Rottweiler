@@ -1,3 +1,4 @@
+use crate::journal_reads::{JournalReadLease, JournalReads, JournalRegistration};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     io::{self, Read, Write},
@@ -24,12 +25,13 @@ use rw_core::{
     ProviderNativeWebSearcher, QuestionId, ReviewFileDecision, RewindCheckpoint,
     RuntimeServiceDescriptor, RuntimeServiceKind, SESSION_EVENT_VERSION, SequenceId, SessionActor,
     SessionActorConfig, SessionCommandAction, SessionCommandContext, SessionCommandOutput,
-    SessionEventSink, SessionReview, SpawnAgentTool, StartupNotification, SubagentLimits,
-    SubagentMetadataStore, SubagentObserver, SubagentOrchestrator, SubagentReplay,
-    SubagentSessionFactory, SystemEventClock, ToolOutputStream, TurnStatus, UnrestorablePath,
-    Usage, WorktreeSubagentSessionFactory, base_agent_system_turn, builtin_command_registry,
-    builtin_hook_dispatcher, load_instruction_stack, load_nested_instruction_stack,
-    merge_model_catalog_provider, project_session_events, project_session_events_with_modes,
+    SessionEventReadView, SessionEventSink, SessionReplayLimits, SessionReview, SpawnAgentTool,
+    StartupNotification, SubagentLimits, SubagentMetadataStore, SubagentObserver,
+    SubagentOrchestrator, SubagentReplay, SubagentSessionFactory, SystemEventClock,
+    ToolOutputStream, TurnStatus, UnrestorablePath, Usage, WorktreeSubagentSessionFactory,
+    base_agent_system_turn, builtin_command_registry, builtin_hook_dispatcher,
+    load_instruction_stack, load_nested_instruction_stack, merge_model_catalog_provider,
+    project_session_events, project_session_events_with_modes,
 };
 use rw_ext::{
     CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation, CommandRegistry,
@@ -424,6 +426,7 @@ struct SubagentRecoveryNode {
 }
 
 fn open_subagent_recovery_log(
+    journal_reads: Arc<JournalReads>,
     storage_root: &Path,
     session_id: &SessionId,
 ) -> std::result::Result<(DurableEventSink, Vec<EngineEvent>), AgentLoopError> {
@@ -431,15 +434,20 @@ fn open_subagent_recovery_log(
         .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
     let events = load_session_events(&log)
         .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-    let sink = DurableEventSink::new(log, storage_root.to_path_buf(), session_id.0.clone())
-        .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+    let sink = DurableEventSink::new(
+        log,
+        storage_root.to_path_buf(),
+        session_id.0.clone(),
+        journal_reads,
+    )
+    .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
     Ok((sink, events))
 }
 
 /// Repairs and rebinds a complete persisted subagent tree. Discovery is kept
 /// separate from actor creation so every descendant log is repaired before a
 /// recovered actor opens it and caches its next durable sequence.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn recover_subagent_tree(
     storage_root: &Path,
     root_session_id: &SessionId,
@@ -469,7 +477,11 @@ async fn recover_subagent_tree(
         let (sink, events) = if let Some(events) = node.events {
             (None, events)
         } else {
-            let (sink, events) = open_subagent_recovery_log(storage_root, &node.parent_session_id)?;
+            let (sink, events) = open_subagent_recovery_log(
+                Arc::clone(&root_sink.journal_reads),
+                storage_root,
+                &node.parent_session_id,
+            )?;
             (Some(sink), events)
         };
         let repaired = repair_incomplete_subagent_lifecycles(
@@ -873,6 +885,7 @@ pub enum HostedProviderMode {
 }
 
 pub(crate) struct HostedSessionComposition {
+    pub journal_reads: Arc<JournalReads>,
     pub workspace: PathBuf,
     pub additional_workspaces: Vec<PathBuf>,
     pub allowed_workspace_roots: Vec<PathBuf>,
@@ -910,9 +923,9 @@ const SUBAGENT_PROGRESS_BATCH_EVENTS: usize = 64;
 const SUBAGENT_PROGRESS_BATCH_INTERVAL: Duration = Duration::from_millis(8);
 
 struct HostedSubagentController {
+    journal_reads: Arc<JournalReads>,
     parent: rw_core::SessionHandle,
     orchestrator: SubagentOrchestrator,
-    storage_root: PathBuf,
 }
 
 impl HostedSubagentController {
@@ -1016,7 +1029,7 @@ async fn forward_subagent_progress(
 }
 
 fn load_bounded_subagent_replay(
-    storage_root: &Path,
+    journal_reads: &JournalReads,
     child_session_id: &SessionId,
     after_sequence: Option<SequenceId>,
 ) -> Result<SubagentReplay, HostError> {
@@ -1027,19 +1040,13 @@ fn load_bounded_subagent_replay(
         max_scan_bytes: MAX_SUBAGENT_REPLAY_SCAN_BYTES,
         max_scan_events: MAX_SUBAGENT_REPLAY_SCAN_EVENTS,
     };
+    let lease = journal_reads
+        .capture(&child_session_id.0)
+        .map_err(|_| HostError::Persistence("child session replay is unavailable".to_owned()))?;
     let page = if let Some(after_sequence) = after_sequence {
-        SessionEventLog::load_existing_page::<EngineEvent>(
-            storage_root,
-            &child_session_id.0,
-            Some(after_sequence),
-            limits,
-        )
+        lease.view.page::<EngineEvent>(Some(after_sequence), limits)
     } else {
-        SessionEventLog::load_existing_tail_page::<EngineEvent>(
-            storage_root,
-            &child_session_id.0,
-            limits,
-        )
+        lease.view.tail_page::<EngineEvent>(limits)
     }
     .map_err(|_| HostError::Persistence("child session replay is unavailable".to_owned()))?;
     let through_sequence = page.events.last().map(|envelope| envelope.sequence);
@@ -1076,7 +1083,7 @@ fn load_bounded_subagent_replay(
 }
 
 async fn load_bounded_subagent_replay_retry(
-    storage_root: &Path,
+    journal_reads: &Arc<JournalReads>,
     child_session_id: &SessionId,
     after_sequence: Option<SequenceId>,
 ) -> Result<SubagentReplay, HostError> {
@@ -1084,7 +1091,14 @@ async fn load_bounded_subagent_replay_retry(
     let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
     let mut delay = Duration::from_millis(10);
     loop {
-        match load_bounded_subagent_replay(storage_root, child_session_id, after_sequence) {
+        let reads = Arc::clone(journal_reads);
+        let child = child_session_id.clone();
+        let replay = tokio::task::spawn_blocking(move || {
+            load_bounded_subagent_replay(&reads, &child, after_sequence)
+        })
+        .await
+        .map_err(|_| HostError::Persistence("child journal reader failed".to_owned()))?;
+        match replay {
             Ok(replay) => return Ok(replay),
             Err(HostError::Persistence(message))
                 if message == "child session replay is unavailable"
@@ -1172,7 +1186,7 @@ impl HostSubagentService for HostedSubagentController {
             .descriptor_for_parent(parent_session_id, subagent_id)
             .map_err(|error| HostError::Protocol(error.to_string()))?;
         load_bounded_subagent_replay_retry(
-            &self.storage_root,
+            &self.journal_reads,
             &descriptor.child_session_id,
             after_sequence,
         )
@@ -1289,6 +1303,7 @@ pub async fn run(options: RunOptions) -> Result<()> {
         .to_path_buf();
     initialize_private_storage_root(&storage_root).into_diagnostic()?;
     collect_abandoned_empty_sessions(&storage_root)?;
+    let journal_reads = JournalReads::new(&storage_root)?;
     let loaded_config = config_loader.load().into_diagnostic()?;
     for warning in loaded_config.warnings() {
         eprintln!("warning: {}", warning.message());
@@ -1296,11 +1311,7 @@ pub async fn run(options: RunOptions) -> Result<()> {
 
     let session_id = select_session(&storage_root, &workspace, &options)?;
     validate_session_id(&session_id)?;
-    let session_exists = storage_root
-        .join("sessions")
-        .join(&session_id)
-        .join("events.jsonl")
-        .is_file();
+    let session_exists = journal_reads.contains_session(&session_id)?;
     let resuming = (options.resume.is_some() || options.continue_latest) && session_exists;
     if !session_exists
         && (options.resume.is_some()
@@ -1441,6 +1452,7 @@ pub async fn run(options: RunOptions) -> Result<()> {
         log,
         storage_root.clone(),
         session_id.clone(),
+        Arc::clone(&journal_reads),
     )?);
     durable_sink.reconcile_accounting(&recovered_events)?;
     let checkpoint_coordinator = Arc::new(DurableCheckpointCoordinator::from_stores(
@@ -1914,6 +1926,7 @@ pub async fn run(options: RunOptions) -> Result<()> {
         .await?;
     wasm_startup_notifications.extend(extension_startup_notifications(&extension_catalog));
     let workspace_root_controller = Arc::new(RuntimeWorkspaceRootController {
+        journal_reads: Arc::clone(&journal_reads),
         checkpoint_root,
         storage_root: storage_root.clone(),
         question_asker: root_question_asker,
@@ -2420,6 +2433,7 @@ pub(crate) async fn compose_hosted_actor(
         options.storage_root.clone(),
         session_id.clone(),
         &recovered_events,
+        Arc::clone(&options.journal_reads),
     )?);
     durable_sink.reconcile_accounting(&recovered_events)?;
     let checkpoint_coordinator = Arc::new(DurableCheckpointCoordinator::from_stores(
@@ -2742,6 +2756,7 @@ pub(crate) async fn compose_hosted_actor(
         .await?;
     wasm_startup_notifications.extend(extension_startup_notifications(&extension_catalog));
     let workspace_root_controller = Arc::new(RuntimeWorkspaceRootController {
+        journal_reads: Arc::clone(&options.journal_reads),
         checkpoint_root: checkpoint_root(&options.storage_root, &workspace, &session_id),
         storage_root: options.storage_root.clone(),
         question_asker: root_question_asker,
@@ -3015,7 +3030,7 @@ pub(crate) async fn compose_hosted_actor(
         plugins.bind_push(&handle)?;
     }
     if mcp_runtime.is_some() || plugin_runtime.is_some() {
-        let mut lifecycle = handle.subscribe();
+        let mut lifecycle = handle.subscribe().map_err(display_agent_error)?;
         tokio::spawn(async move {
             while lifecycle.recv().await.is_ok() {}
             if let Some(mcp) = mcp_runtime {
@@ -3027,9 +3042,9 @@ pub(crate) async fn compose_hosted_actor(
         });
     }
     let subagents: Arc<dyn HostSubagentService> = Arc::new(HostedSubagentController {
+        journal_reads: Arc::clone(&options.journal_reads),
         parent: handle.clone(),
         orchestrator,
-        storage_root: options.storage_root.clone(),
     });
     Ok(HostedActorRuntime {
         handle,
@@ -3544,6 +3559,7 @@ fn acquire_shared_execution_lease(
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn fork_hosted_session_storage(
+    journal_reads: &JournalReads,
     storage_root: &Path,
     workspace: &Path,
     parent_session_id: &str,
@@ -3558,13 +3574,12 @@ pub(crate) fn fork_hosted_session_storage(
     validate_session_id(parent_session_id)?;
     validate_session_id(child_session_id)?;
     let parent_metadata = load_session_metadata(storage_root, parent_session_id, workspace)?;
-    let parent_events = SessionEventLog::load_existing_bounded::<EngineEvent>(
-        storage_root,
+    let lease = journal_reads.capture(parent_session_id)?;
+    let (parent_events, _) = crate::history::load_events_from_view(
+        &lease.view,
         parent_session_id,
         crate::history::MAX_HISTORY_BYTES,
-        crate::history::MAX_HISTORY_EVENTS,
-    )
-    .map_err(|error| miette!("fork parent event log could not load: {error}"))?;
+    )?;
     let through_sequence = if include_idle_tail {
         through_sequence
     } else if through_turn == 0 {
@@ -3651,11 +3666,11 @@ pub(crate) fn fork_hosted_session_storage(
         let _target_stores = open_checkpoint_stores(&target_checkpoint_root, &fork_roots)?;
         let child_id = SessionId(child_session_id.to_owned());
         let child_id_for_map = child_id.clone();
-        let log = SessionEventLog::fork_mapped_loaded::<EngineEvent, _>(
+        let log = SessionEventLog::fork_mapped_view::<EngineEvent, _>(
             storage_root,
             parent_session_id,
             child_session_id,
-            parent_events,
+            &lease.view,
             through_sequence,
             move |mut event| {
                 let meta = event.meta_mut().ok_or(SessionStoreError::CorruptEvent(
@@ -3973,12 +3988,19 @@ pub(crate) fn load_checkpoint_roots_exact(
 }
 
 pub(crate) fn load_session_workspace_roots(
+    journal_reads: &JournalReads,
     storage_root: &Path,
     workspace: &Path,
     session_id: &str,
 ) -> Result<Vec<PathBuf>> {
     let root = checkpoint_root(storage_root, workspace, session_id);
-    let envelopes = SessionEventLog::load_existing::<EngineEvent>(storage_root, session_id)
+    let lease = journal_reads.capture(session_id)?;
+    let envelopes = lease
+        .view
+        .collect_bounded::<EngineEvent>(
+            crate::history::MAX_HISTORY_BYTES,
+            crate::history::MAX_HISTORY_EVENTS,
+        )
         .map_err(|error| miette!("session event log could not load: {error}"))?;
     let events = validate_session_event_envelopes(envelopes)?;
     let projected = project_session_events(&events)
@@ -4578,7 +4600,60 @@ pub fn new_session_id() -> Result<String> {
     Ok(id)
 }
 
+#[derive(Debug)]
+struct DurableReadView {
+    lease: JournalReadLease,
+    session_id: String,
+}
+
+#[async_trait]
+impl SessionEventReadView for DurableReadView {
+    fn last_sequence(&self) -> Option<SequenceId> {
+        self.lease.view.last_sequence()
+    }
+
+    async fn read_page(
+        &self,
+        after: Option<SequenceId>,
+        limits: SessionReplayLimits,
+    ) -> std::result::Result<Vec<EngineEvent>, AgentLoopError> {
+        let lease = self.lease.clone();
+        let session = self.session_id.clone();
+        tokio::task::spawn_blocking(move || {
+            let page = lease
+                .view
+                .page::<EngineEvent>(
+                    after,
+                    SessionEventPageLimits {
+                        max_page_events: limits.max_events,
+                        max_page_bytes: limits.max_bytes as u64,
+                        ..SessionEventPageLimits::default()
+                    },
+                )
+                .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+            page.events
+                .into_iter()
+                .map(|envelope| {
+                    let meta = envelope.event.meta().ok_or_else(|| {
+                        AgentLoopError::Persistence("transient event in durable journal".to_owned())
+                    })?;
+                    if meta.session_id.0 != session || meta.sequence_id != envelope.sequence {
+                        return Err(AgentLoopError::Persistence(
+                            "durable event identity differs from its envelope".to_owned(),
+                        ));
+                    }
+                    Ok(envelope.event)
+                })
+                .collect()
+        })
+        .await
+        .map_err(|error| AgentLoopError::Persistence(format!("journal reader failed: {error}")))?
+    }
+}
+
 struct DurableEventSink {
+    journal_reads: Arc<JournalReads>,
+    _registration: JournalRegistration,
     log: Arc<Mutex<SessionEventLog>>,
     storage_root: PathBuf,
     session_id: String,
@@ -4650,8 +4725,13 @@ impl HostedSessionProjection {
 }
 
 impl DurableEventSink {
-    fn new(log: SessionEventLog, storage_root: PathBuf, session_id: String) -> Result<Self> {
-        Self::new_with_hosted_projection(log, storage_root, session_id, None)
+    fn new(
+        log: SessionEventLog,
+        storage_root: PathBuf,
+        session_id: String,
+        journal_reads: Arc<JournalReads>,
+    ) -> Result<Self> {
+        Self::new_with_hosted_projection(log, storage_root, session_id, None, journal_reads)
     }
 
     fn new_hosted(
@@ -4659,10 +4739,17 @@ impl DurableEventSink {
         storage_root: PathBuf,
         session_id: String,
         recovered_events: &[EngineEvent],
+        journal_reads: Arc<JournalReads>,
     ) -> Result<Self> {
         let projection =
             HostedSessionProjection::from_events(&session_id, recovered_events, log.path());
-        Self::new_with_hosted_projection(log, storage_root, session_id, Some(projection))
+        Self::new_with_hosted_projection(
+            log,
+            storage_root,
+            session_id,
+            Some(projection),
+            journal_reads,
+        )
     }
 
     fn new_with_hosted_projection(
@@ -4670,10 +4757,19 @@ impl DurableEventSink {
         storage_root: PathBuf,
         session_id: String,
         hosted_projection: Option<HostedSessionProjection>,
+        journal_reads: Arc<JournalReads>,
     ) -> Result<Self> {
         let log = Arc::new(Mutex::new(log));
+        let registration = journal_reads.register(
+            &session_id,
+            log.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .read_view(),
+        )?;
         let prompt_shapes = Arc::new(PromptShapeJournal::open(&storage_root, &session_id)?);
         Ok(Self {
+            journal_reads,
+            _registration: registration,
             log,
             storage_root,
             session_id,
@@ -4690,7 +4786,7 @@ impl DurableEventSink {
                 .storage_root
                 .join("sessions")
                 .join(&self.session_id)
-                .join("events.jsonl");
+                .join("journal");
             let mut hosted = hosted
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -4754,6 +4850,7 @@ impl SessionEventSink for DurableEventSink {
             .iter()
             .any(|event| matches!(event, EngineEvent::ConversationRewound { .. }));
         let log = Arc::clone(&self.log);
+        let publisher = Arc::clone(&self._registration.publisher);
         let append = move || {
             let mut log = log
                 .lock()
@@ -4777,8 +4874,11 @@ impl SessionEventSink for DurableEventSink {
                     )));
                 }
             }
-            log.append_batch(events)
-                .map_err(|error| AgentLoopError::Persistence(error.to_string()))
+            let envelopes = log
+                .append_batch(events)
+                .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+            publisher.publish(log.read_view());
+            Ok(envelopes)
         };
         let envelopes = match tokio::runtime::Handle::current().runtime_flavor() {
             tokio::runtime::RuntimeFlavor::MultiThread => tokio::task::block_in_place(append),
@@ -4835,16 +4935,17 @@ impl SessionEventSink for DurableEventSink {
         Ok(persisted)
     }
 
-    async fn read_after(
+    fn capture_read_view(
         &self,
-        last_seen: Option<SequenceId>,
-    ) -> std::result::Result<Vec<EngineEvent>, AgentLoopError> {
-        self.log
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .load_after(last_seen)
-            .map(|events| events.into_iter().map(|envelope| envelope.event).collect())
-            .map_err(|error| AgentLoopError::Persistence(error.to_string()))
+    ) -> std::result::Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
+        let lease = self
+            .journal_reads
+            .capture(&self.session_id)
+            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+        Ok(Arc::new(DurableReadView {
+            lease,
+            session_id: self.session_id.clone(),
+        }))
     }
 
     async fn last_sequence(&self) -> std::result::Result<Option<SequenceId>, AgentLoopError> {
@@ -5111,12 +5212,12 @@ impl SessionEventSink for PluginFanoutEventSink {
         }
         Ok(events)
     }
-    async fn read_after(
+    fn capture_read_view(
         &self,
-        last_seen: Option<SequenceId>,
-    ) -> std::result::Result<Vec<EngineEvent>, AgentLoopError> {
-        self.inner.read_after(last_seen).await
+    ) -> std::result::Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
+        self.inner.capture_read_view()
     }
+
     async fn last_sequence(&self) -> std::result::Result<Option<SequenceId>, AgentLoopError> {
         self.inner.last_sequence().await
     }
@@ -5219,6 +5320,7 @@ struct RuntimeFolderTrustController {
 
 #[allow(clippy::struct_excessive_bools)]
 struct RuntimeWorkspaceRootController {
+    journal_reads: Arc<JournalReads>,
     checkpoint_root: PathBuf,
     storage_root: PathBuf,
     question_asker: Arc<dyn QuestionAsker>,
@@ -5366,9 +5468,13 @@ impl RuntimeWorkspaceRootController {
             .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
         let recovered = project_session_events_with_modes(&events, &mode_registry)
             .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-        let event_sink =
-            DurableEventSink::new(log, storage_root.to_path_buf(), session_id.0.clone())
-                .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+        let event_sink = DurableEventSink::new(
+            log,
+            storage_root.to_path_buf(),
+            session_id.0.clone(),
+            Arc::clone(&self.journal_reads),
+        )
+        .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
         let mut initial_context = fresh_initial_session_context(storage_root, &roots)
             .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
         if let Some(index) = skill_index_turn(&catalog)
@@ -5389,6 +5495,7 @@ impl RuntimeWorkspaceRootController {
             .map(Arc::new)
             .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
         let workspace_controller = Arc::new(RuntimeWorkspaceRootController {
+            journal_reads: Arc::clone(&self.journal_reads),
             checkpoint_root: child_checkpoint_root.clone(),
             storage_root: storage_root.to_path_buf(),
             question_asker: Arc::clone(&self.question_asker),
@@ -12427,7 +12534,7 @@ async fn run_print(
     format: OutputFormat,
     perf_markers: bool,
 ) -> Result<Option<TurnStatus>> {
-    let mut events = actor.subscribe();
+    let mut events = actor.subscribe().map_err(display_agent_error)?;
     // Complete the initial durable replay before dispatch. Otherwise a fast
     // command result can enter the replay ahead of its connection-scoped ACK.
     events
@@ -12734,7 +12841,7 @@ async fn run_repl(
     storage_root: &Path,
     format: OutputFormat,
 ) -> Result<Option<TurnStatus>> {
-    let mut events = actor.subscribe();
+    let mut events = actor.subscribe().map_err(display_agent_error)?;
     let (mut input, mut printer) = spawn_readline(storage_root.join("history.txt"))?;
     let mut interactions = VecDeque::new();
     let mut last_status = None;
@@ -13037,7 +13144,7 @@ fn update_one_session_index(
     let path = storage_root
         .join("sessions")
         .join(session_id)
-        .join("events.jsonl");
+        .join("journal");
     let projection = project_session(session_id, &events, &path);
     SessionIndex::open(storage_root)
         .map_err(|error| miette!("session index could not open: {error}"))?
@@ -13298,8 +13405,12 @@ mod tests {
         }
         drop(log);
 
-        let replay = load_bounded_subagent_replay(storage.path(), &child, Some(SequenceId(0)))
-            .expect("bounded replay");
+        let replay = load_bounded_subagent_replay(
+            &JournalReads::new(storage.path()).expect("journal reads"),
+            &child,
+            Some(SequenceId(0)),
+        )
+        .expect("bounded replay");
         assert_eq!(replay.child_session_id, child);
         assert_eq!(replay.through_sequence, Some(SequenceId(1)));
         assert_eq!(replay.next_cursor, Some(SequenceId(1)));
@@ -13310,8 +13421,12 @@ mod tests {
         assert_eq!(replay.events.len(), 1);
         assert_eq!(replay.events[0].0, SequenceId(1));
 
-        let at_tail = load_bounded_subagent_replay(storage.path(), &child, Some(SequenceId(1)))
-            .expect("empty tail page");
+        let at_tail = load_bounded_subagent_replay(
+            &JournalReads::new(storage.path()).expect("journal reads"),
+            &child,
+            Some(SequenceId(1)),
+        )
+        .expect("empty tail page");
         assert!(at_tail.events.is_empty());
         assert_eq!(at_tail.through_sequence, None);
         assert_eq!(at_tail.next_cursor, Some(SequenceId(1)));
@@ -13336,7 +13451,14 @@ mod tests {
             })
             .expect("append invalid event");
         drop(invalid);
-        assert!(load_bounded_subagent_replay(invalid_storage.path(), &child, None).is_err());
+        assert!(
+            load_bounded_subagent_replay(
+                &JournalReads::new(invalid_storage.path()).expect("journal reads"),
+                &child,
+                None
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]
@@ -13359,8 +13481,13 @@ mod tests {
             driver_client_id: ClientId("benchmark-driver".to_owned()),
         });
         log.append_batch(events).expect("benchmark event batch");
-        let sink = DurableEventSink::new(log, storage.path().to_owned(), session.0.clone())
-            .expect("durable sink");
+        let sink = DurableEventSink::new(
+            log,
+            storage.path().to_owned(),
+            session.0.clone(),
+            JournalReads::new(storage.path()).expect("journal reads"),
+        )
+        .expect("durable sink");
 
         let tail_started = std::time::Instant::now();
         for _ in 0..TAIL_READS {
@@ -13373,7 +13500,12 @@ mod tests {
 
         let gap_started = std::time::Instant::now();
         let gap = sink
-            .read_after(Some(SequenceId(EVENTS - 101)))
+            .capture_read_view()
+            .expect("view")
+            .read_page(
+                Some(SequenceId(EVENTS - 101)),
+                SessionReplayLimits::default(),
+            )
             .await
             .expect("durable tail gap");
         let gap_elapsed = gap_started.elapsed();
@@ -13409,9 +13541,13 @@ mod tests {
             .expect("append child event");
         });
 
-        let replay = load_bounded_subagent_replay_retry(&root, &child, None)
-            .await
-            .expect("replay waits for log readiness");
+        let replay = load_bounded_subagent_replay_retry(
+            &JournalReads::new(&root).expect("journal reads"),
+            &child,
+            None,
+        )
+        .await
+        .expect("replay waits for log readiness");
         writer.await.expect("writer");
         assert_eq!(replay.events.len(), 1);
         assert_eq!(replay.through_sequence, Some(SequenceId(0)));
@@ -13436,12 +13572,16 @@ mod tests {
             message: payload.clone(),
         }))
         .expect("append large child history");
-        let log_bytes = std::fs::metadata(log.path()).expect("child metadata").len();
+        let log_bytes = log.read_view().total_bytes();
         assert!(log_bytes > 8 * 1024 * 1024);
         drop(log);
 
-        let initial = load_bounded_subagent_replay(storage.path(), &child, None)
-            .expect("recent tail inspection");
+        let initial = load_bounded_subagent_replay(
+            &JournalReads::new(storage.path()).expect("journal reads"),
+            &child,
+            None,
+        )
+        .expect("recent tail inspection");
         assert_eq!(initial.tail_sequence, Some(SequenceId(20_049)));
         assert_eq!(initial.through_sequence, Some(SequenceId(20_049)));
         assert_eq!(initial.next_cursor, Some(SequenceId(20_049)));
@@ -13458,8 +13598,12 @@ mod tests {
         let mut expected = 1_u64;
         let mut pages = 0;
         loop {
-            let page = load_bounded_subagent_replay(storage.path(), &child, cursor)
-                .expect("forward replay page");
+            let page = load_bounded_subagent_replay(
+                &JournalReads::new(storage.path()).expect("journal reads"),
+                &child,
+                cursor,
+            )
+            .expect("forward replay page");
             pages += 1;
             assert_eq!(page.events_before_page, expected);
             assert_eq!(page.tail_sequence, Some(SequenceId(20_049)));
@@ -13961,11 +14105,10 @@ mod tests {
             self.inner.append(event).await
         }
 
-        async fn read_after(
+        fn capture_read_view(
             &self,
-            last_seen: Option<SequenceId>,
-        ) -> std::result::Result<Vec<EngineEvent>, AgentLoopError> {
-            self.inner.read_after(last_seen).await
+        ) -> std::result::Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
+            self.inner.capture_read_view()
         }
     }
 
@@ -14760,6 +14903,7 @@ mod tests {
         }
         let session_id = SessionId("unavailable-concrete-resume".to_owned());
         let options = |resume, requested_model| HostedSessionComposition {
+            journal_reads: JournalReads::new(&storage).expect("journal reads"),
             workspace: workspace.clone(),
             additional_workspaces: Vec::new(),
             allowed_workspace_roots: vec![workspace.clone()],
@@ -15219,8 +15363,13 @@ mod tests {
 
         let parent_session = SessionId("artifact-parent".to_owned());
         let log = SessionEventLog::open(&storage, &parent_session.0).expect("parent event log");
-        let durable = DurableEventSink::new(log, storage.clone(), parent_session.0.clone())
-            .expect("durable sink");
+        let durable = DurableEventSink::new(
+            log,
+            storage.clone(),
+            parent_session.0.clone(),
+            JournalReads::new(&(storage.clone())).expect("journal reads"),
+        )
+        .expect("durable sink");
         let meta = |sequence| EventMeta {
             protocol_version: SESSION_EVENT_VERSION,
             session_id: parent_session.clone(),
@@ -15383,7 +15532,7 @@ mod tests {
             event_capacity: 128,
         })
         .expect("parent actor");
-        let mut events = actor.subscribe();
+        let mut events = actor.subscribe().expect("subscription");
         actor
             .send_message("apply both durable child artifacts".to_owned())
             .await
@@ -15430,8 +15579,13 @@ mod tests {
         let storage = TempDir::new().expect("storage");
         let parent = SessionId("repair-parent".to_owned());
         let log = SessionEventLog::open(storage.path(), &parent.0).expect("event log");
-        let sink = DurableEventSink::new(log, storage.path().to_path_buf(), parent.0.clone())
-            .expect("durable sink");
+        let sink = DurableEventSink::new(
+            log,
+            storage.path().to_path_buf(),
+            parent.0.clone(),
+            JournalReads::new(storage.path()).expect("journal reads"),
+        )
+        .expect("durable sink");
         let meta = |sequence| EventMeta {
             protocol_version: SESSION_EVENT_VERSION,
             session_id: parent.clone(),
@@ -15494,8 +15648,13 @@ mod tests {
             child_session: &SessionId,
         ) -> DurableEventSink {
             let log = SessionEventLog::open(storage, &parent.0).expect("open parent log");
-            let sink = DurableEventSink::new(log, storage.to_path_buf(), parent.0.clone())
-                .expect("parent sink");
+            let sink = DurableEventSink::new(
+                log,
+                storage.to_path_buf(),
+                parent.0.clone(),
+                JournalReads::new(storage).expect("journal reads"),
+            )
+            .expect("parent sink");
             let meta = |sequence| EventMeta {
                 protocol_version: SESSION_EVENT_VERSION,
                 session_id: parent.clone(),
@@ -18389,7 +18548,7 @@ mod tests {
                 cost: None,
             },
         ];
-        let path = fixture.path().join("events.jsonl");
+        let path = fixture.path().join("projection-fixture");
         std::fs::write(&path, b"fixture").expect("event file");
         let projection = project_session(session_id, &events, &path);
         assert_eq!(projection.summary.title, "Repository Architecture Review");
@@ -18580,10 +18739,12 @@ mod tests {
         let parent_path = storage
             .join("sessions")
             .join(&parent.0)
-            .join("events.jsonl");
+            .join("journal")
+            .join("active.jsonl");
         let parent_bytes = std::fs::read(&parent_path).expect("parent bytes");
         let fork_modes = rw_ext::ModeRegistry::builtins().expect("built-in modes");
         fork_hosted_session_storage(
+            &JournalReads::new(&storage).expect("journal reads"),
             &storage,
             &workspace,
             &parent.0,
@@ -18625,8 +18786,13 @@ mod tests {
         assert_eq!(child_metadata.initial_context_workspace_root_count, Some(1));
         assert_eq!(child_metadata.fork_at_turn, Some(2));
         assert_eq!(
-            load_session_workspace_roots(&storage, &workspace, &parent.0)
-                .expect("current parent roots"),
+            load_session_workspace_roots(
+                &JournalReads::new(&storage).expect("journal reads"),
+                &storage,
+                &workspace,
+                &parent.0
+            )
+            .expect("current parent roots"),
             vec![workspace.clone(), added.clone(), added_later]
         );
         let child_stores = open_checkpoint_stores(
@@ -18668,6 +18834,7 @@ mod tests {
             .expect("custom mode event");
         drop(parent_log);
         let error = fork_hosted_session_storage(
+            &JournalReads::new(&storage).expect("journal reads"),
             &storage,
             &workspace,
             &parent.0,
@@ -19949,8 +20116,13 @@ mod tests {
             "fixture must represent the crash after marker persistence and before the event"
         );
 
-        let visible = load_session_workspace_roots(&storage, &primary, session_id)
-            .expect("host workspace query");
+        let visible = load_session_workspace_roots(
+            &JournalReads::new(&storage).expect("journal reads"),
+            &storage,
+            &primary,
+            session_id,
+        )
+        .expect("host workspace query");
         assert_eq!(visible, vec![primary]);
         assert!(!visible.contains(&added));
     }
@@ -19993,6 +20165,7 @@ mod tests {
                 .with_project_approval_file(approvals),
         );
         let controller = RuntimeWorkspaceRootController {
+            journal_reads: JournalReads::new(&private).expect("journal reads"),
             checkpoint_root: checkpoint_root.clone(),
             storage_root: private.clone(),
             question_asker: Arc::new(HeadlessQuestionAsker),
@@ -20331,6 +20504,7 @@ mod tests {
         }
 
         let pending = RuntimeWorkspaceRootController {
+            journal_reads: JournalReads::new(&private).expect("journal reads"),
             checkpoint_root: checkpoint_root.clone(),
             storage_root: private.clone(),
             question_asker: Arc::new(HeadlessQuestionAsker),
@@ -20389,6 +20563,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn rewind_event_reprojects_ephemeral_todo_state() {
         let root = tempdir().expect("root");
         let workspace = root.path().join("workspace");
@@ -20431,8 +20606,13 @@ mod tests {
         assert_eq!(before.data["count"], 1);
 
         let log = SessionEventLog::open(root.path(), &session.0).expect("event log");
-        let sink = DurableEventSink::new(log, root.path().to_owned(), session.0.clone())
-            .expect("durable sink");
+        let sink = DurableEventSink::new(
+            log,
+            root.path().to_owned(),
+            session.0.clone(),
+            JournalReads::new(root.path()).expect("journal reads"),
+        )
+        .expect("durable sink");
         sink.bind_todo(TodoRestoreBinding {
             todo: Arc::clone(&todo),
             workspace: workspace.clone(),
@@ -20536,7 +20716,13 @@ mod tests {
             .expect("write tool");
         let log = SessionEventLog::open(&storage, &session.0).expect("event log");
         let sink = Arc::new(
-            DurableEventSink::new(log, storage.clone(), session.0.clone()).expect("durable sink"),
+            DurableEventSink::new(
+                log,
+                storage.clone(),
+                session.0.clone(),
+                JournalReads::new(&(storage.clone())).expect("journal reads"),
+            )
+            .expect("durable sink"),
         );
         let coordinator_root = checkpoint_root(&storage, &workspace, &session.0);
         let checkpoints = Arc::new(DurableCheckpointCoordinator::new(
@@ -20574,7 +20760,7 @@ mod tests {
             event_capacity: 256,
         })
         .expect("session actor");
-        let mut events = actor.subscribe();
+        let mut events = actor.subscribe().expect("subscription");
         for turn in 1..=10_u64 {
             actor
                 .send_message(format!("edit number {turn}"))
@@ -20694,8 +20880,13 @@ mod tests {
                 .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
             let recovered = project_session_events(&events)
                 .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-            let sink = DurableEventSink::new(log, storage.to_path_buf(), session_id.0.clone())
-                .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+            let sink = DurableEventSink::new(
+                log,
+                storage.to_path_buf(),
+                session_id.0.clone(),
+                JournalReads::new(storage).expect("journal reads"),
+            )
+            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
             Ok(SessionActorConfig {
                 session_id: session_id.clone(),
                 workspace_root: workspace.to_path_buf(),
@@ -20826,8 +21017,13 @@ mod tests {
             .await
             .expect("persist pending metadata");
         let initial_log = SessionEventLog::open(&storage, &parent.0).expect("parent event log");
-        let initial_sink = DurableEventSink::new(initial_log, storage.clone(), parent.0.clone())
-            .expect("initial parent sink");
+        let initial_sink = DurableEventSink::new(
+            initial_log,
+            storage.clone(),
+            parent.0.clone(),
+            JournalReads::new(&(storage.clone())).expect("journal reads"),
+        )
+        .expect("initial parent sink");
         let meta = |sequence| EventMeta {
             protocol_version: SESSION_EVENT_VERSION,
             session_id: parent.clone(),
@@ -20857,8 +21053,13 @@ mod tests {
 
         let parent_log = SessionEventLog::open(&storage, &parent.0).expect("reopen parent log");
         let parent_sink = Arc::new(
-            DurableEventSink::new(parent_log, storage.clone(), parent.0.clone())
-                .expect("recovered parent sink"),
+            DurableEventSink::new(
+                parent_log,
+                storage.clone(),
+                parent.0.clone(),
+                JournalReads::new(&(storage.clone())).expect("journal reads"),
+            )
+            .expect("recovered parent sink"),
         );
         let repaired = repair_incomplete_subagent_lifecycles(
             parent_sink.as_ref(),

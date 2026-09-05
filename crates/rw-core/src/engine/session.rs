@@ -275,25 +275,56 @@ pub struct SessionSubscription {
     pub(super) receiver: broadcast::Receiver<RoutedEvent>,
     sink: Arc<dyn SessionEventSink>,
     last_sequence: Option<SequenceId>,
+    initial_tail: Option<SequenceId>,
     pending: VecDeque<EngineEvent>,
+    replay: Option<Arc<dyn SessionEventReadView>>,
     needs_initial_replay: bool,
 }
 
 impl SessionSubscription {
-    /// Loads and validates the initial durable replay before a caller starts a
-    /// new protocol command. This prevents a freshly persisted command result
-    /// from entering the replay ahead of its connection-scoped acknowledgement.
+    /// Durable tail captured before this subscription was returned to its caller.
+    #[must_use]
+    pub const fn initial_tail(&self) -> Option<SequenceId> {
+        self.initial_tail
+    }
+
+    /// Loads and validates the first page of the prefix captured at subscription
+    /// creation. Callers can validate storage before sending a protocol command.
     ///
     /// # Errors
     ///
     /// Returns a persistence error when the durable replay is invalid.
     pub async fn prime(&mut self) -> Result<(), AgentLoopError> {
         if self.needs_initial_replay {
-            let gap = self.sink.read_after(self.last_sequence).await?;
-            validate_gap(self.last_sequence, &gap, &self.session_id)?;
-            self.pending.extend(gap);
+            self.refill_replay().await?;
             self.needs_initial_replay = false;
         }
+        Ok(())
+    }
+
+    async fn refill_replay(&mut self) -> Result<(), AgentLoopError> {
+        let Some(view) = &self.replay else {
+            return Ok(());
+        };
+        if self.last_sequence == view.last_sequence() {
+            self.replay = None;
+            return Ok(());
+        }
+        let page = view
+            .read_page(self.last_sequence, SessionReplayLimits::default())
+            .await?;
+        validate_gap(self.last_sequence, &page, &self.session_id)?;
+        if page.is_empty()
+            || page.last().and_then(EngineEvent::meta).is_some_and(|meta| {
+                view.last_sequence()
+                    .is_none_or(|tail| meta.sequence_id > tail)
+            })
+        {
+            return Err(AgentLoopError::Persistence(
+                "replay page does not advance inside its captured prefix".to_owned(),
+            ));
+        }
+        self.pending.extend(page);
         Ok(())
     }
 
@@ -306,6 +337,9 @@ impl SessionSubscription {
     pub async fn recv(&mut self) -> Result<EngineEvent, AgentLoopError> {
         loop {
             self.prime().await?;
+            if self.pending.is_empty() {
+                self.refill_replay().await?;
+            }
             if let Some(event) = self.pending.pop_front() {
                 self.observe(&event);
                 return Ok(event);
@@ -330,9 +364,7 @@ impl SessionSubscription {
                     return Ok(routed.event);
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {
-                    let gap = self.sink.read_after(self.last_sequence).await?;
-                    validate_gap(self.last_sequence, &gap, &self.session_id)?;
-                    self.pending.extend(gap);
+                    self.replay = Some(self.sink.capture_read_view()?);
                 }
                 Err(broadcast::error::RecvError::Closed) => {
                     return Err(AgentLoopError::Closed);
@@ -784,29 +816,41 @@ impl SessionHandle {
         }
     }
 
-    /// Subscribes to sequenced actor events.
-    #[must_use]
-    pub fn subscribe(&self) -> SessionSubscription {
+    /// Subscribes to sequenced actor events from a captured durable prefix.
+    ///
+    /// # Errors
+    /// Rejects an unavailable read view or a cursor beyond its committed tail.
+    pub fn subscribe(&self) -> Result<SessionSubscription, AgentLoopError> {
         self.subscribe_client(ClientId("local".to_owned()), self.local_last_seen)
     }
 
     /// Subscribes one protocol client, optionally starting after a previously
-    /// observed durable sequence.
-    #[must_use]
+    /// observed durable sequence. Captures the prefix before returning.
+    ///
+    /// # Errors
+    /// Rejects an unavailable read view or a cursor beyond its committed tail.
     pub fn subscribe_client(
         &self,
         client_id: ClientId,
         last_sequence: Option<SequenceId>,
-    ) -> SessionSubscription {
-        SessionSubscription {
+    ) -> Result<SessionSubscription, AgentLoopError> {
+        let receiver = self.events.subscribe();
+        let replay = self.event_sink.capture_read_view()?;
+        let initial_tail = replay.last_sequence();
+        if last_sequence.is_some_and(|last| initial_tail.is_none_or(|tail| last > tail)) {
+            return Err(AgentLoopError::ReplayCursorAhead);
+        }
+        Ok(SessionSubscription {
             client_id,
             session_id: self.session_id.clone(),
-            receiver: self.events.subscribe(),
+            receiver,
             sink: Arc::clone(&self.event_sink),
             last_sequence,
+            initial_tail,
             pending: VecDeque::new(),
+            replay: Some(replay),
             needs_initial_replay: true,
-        }
+        })
     }
 
     /// Starts a turn, queues a mid-turn message, or dispatches a slash command.
@@ -1154,11 +1198,12 @@ pub(super) async fn recover_actor_from_journal(
         let _ = pending.respond.send(String::new());
     }
 
-    let durable = config.event_sink.read_after(None).await?;
-    let recovered =
-        project_session_events_with_modes(&durable, &config.modes).map_err(|error| {
-            AgentLoopError::Persistence(format!("could not recover session journal: {error}"))
-        })?;
+    let recovered = project_session_read_view(
+        config.event_sink.capture_read_view()?,
+        &config.session_id,
+        &config.modes,
+    )
+    .await?;
     let client_roles = std::mem::take(&mut state.client_roles);
     *state = ActorState::recover(
         config.session_id.clone(),

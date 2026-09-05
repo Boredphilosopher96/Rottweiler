@@ -44,7 +44,7 @@ use rw_core::{
 };
 use rw_store::catalog_cache::{load_model_catalog_cache, store_model_catalog_cache};
 use rw_store::config::ConfigLoader;
-use rw_store::session::{SessionEventLog, SessionIndex, SessionStoreError, UtcTimestamp};
+use rw_store::session::{SessionIndex, SessionStoreError, UtcTimestamp};
 use rw_types::{PermissionModeDescriptor as PermissionMode, config::ThinkingLevel};
 use serde::{Deserialize, Serialize};
 
@@ -233,6 +233,7 @@ impl RuntimeHostOptions {
 
 #[derive(Clone)]
 pub struct RuntimeSessionFactory {
+    journal_reads: Arc<crate::journal_reads::JournalReads>,
     options: Arc<RuntimeHostOptions>,
     allowed_workspaces: Arc<Vec<PathBuf>>,
     model_catalog: Arc<CachedModelCatalog>,
@@ -412,6 +413,8 @@ impl RuntimeSessionFactory {
             cache_path: catalog_cache_path,
         });
         let factory = Self {
+            journal_reads: crate::journal_reads::JournalReads::new(&options.storage_root)
+                .map_err(|error| HostError::Persistence(error.to_string()))?,
             options: Arc::new(options),
             allowed_workspaces: Arc::new(allowed),
             model_catalog: Arc::new(CachedModelCatalog::with_initial(source, initial_catalog)),
@@ -427,8 +430,16 @@ impl RuntimeSessionFactory {
         output_path: &Path,
         force: bool,
     ) -> Result<String, HostError> {
-        let events = crate::history::load_events(&self.options.storage_root, &session.session_id.0)
+        let lease = self
+            .journal_reads
+            .capture(&session.session_id.0)
             .map_err(|error| HostError::Query(error.to_string()))?;
+        let (events, _) = crate::history::load_events_from_view(
+            &lease.view,
+            &session.session_id.0,
+            crate::history::MAX_HISTORY_BYTES,
+        )
+        .map_err(|error| HostError::Query(error.to_string()))?;
         let redactor = rw_providers::FixtureRedactor::default();
         crate::session_runtime::register_credential_environment(&redactor);
         let exported =
@@ -719,13 +730,16 @@ impl RuntimeSessionFactory {
                 "fork parent workspace does not match its operation".to_owned(),
             ));
         }
-        let envelopes = SessionEventLog::load_existing_bounded::<EngineEvent>(
-            &self.options.storage_root,
+        let lease = self
+            .journal_reads
+            .capture(&request.parent.session_id.0)
+            .map_err(|error| HostError::Persistence(error.to_string()))?;
+        let (envelopes, _) = crate::history::load_events_from_view(
+            &lease.view,
             &request.parent.session_id.0,
             crate::history::MAX_HISTORY_BYTES,
-            crate::history::MAX_HISTORY_EVENTS,
         )
-        .map_err(|_| HostError::Persistence("fork parent event log is unavailable".to_owned()))?;
+        .map_err(|error| HostError::Persistence(error.to_string()))?;
         let fork_turn = request
             .at_turn
             .0
@@ -1528,6 +1542,7 @@ impl RuntimeSessionFactory {
     ) -> Result<Vec<PathBuf>, HostError> {
         let primary = self.workspace_for_session(descriptor)?;
         let configured = load_session_workspace_roots(
+            &self.journal_reads,
             &self.options.storage_root,
             &primary,
             &descriptor.session_id.0,
@@ -1571,6 +1586,7 @@ impl RuntimeSessionFactory {
     ) -> Result<HostedSession, HostError> {
         let requested_model = self.requested_model_for_compose(&workspace, model, resume)?;
         let runtime = compose_hosted_actor(HostedSessionComposition {
+            journal_reads: Arc::clone(&self.journal_reads),
             workspace: workspace.clone(),
             additional_workspaces: Vec::new(),
             allowed_workspace_roots: self
@@ -1874,6 +1890,7 @@ impl SessionFactory for RuntimeSessionFactory {
                 let expected = factory.expected_fork_state(&request, &workspace_for_fork)?;
                 let operation_id = journal.operation_id.clone();
                 fork_hosted_session_storage(
+                    &factory.journal_reads,
                     &storage_root,
                     &workspace_for_fork,
                     &parent_session_id,
@@ -3704,6 +3721,7 @@ fn open_relative_regular_file(root: &OwnedFd, relative: &Path) -> Result<OwnedFd
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
+    use rw_store::session::SessionEventLog;
 
     #[cfg(unix)]
     use std::time::Instant;
@@ -3979,7 +3997,7 @@ mod tests {
             })
             .await
             .expect("hosted session");
-        let mut events = hosted.handle().subscribe();
+        let mut events = hosted.handle().subscribe().expect("subscription");
         assert_eq!(
             hosted
                 .handle()
@@ -4773,7 +4791,7 @@ mod tests {
             })
             .await
             .expect("parent composes");
-        let mut events = parent.handle().subscribe();
+        let mut events = parent.handle().subscribe().expect("subscription");
         assert_eq!(
             parent
                 .handle()
@@ -4881,7 +4899,8 @@ mod tests {
         let parent_path = storage_root
             .join("sessions")
             .join(&parent_id.0)
-            .join("events.jsonl");
+            .join("journal")
+            .join("active.jsonl");
         let parent_before = fs::read(&parent_path).expect("parent bytes");
         let child_id = SessionId("production-fork-child".to_owned());
         let fork_turn = TurnId("1".to_owned());
@@ -5111,7 +5130,8 @@ mod tests {
                 storage_root
                     .join("sessions")
                     .join(&child_id.0)
-                    .join("events.jsonl"),
+                    .join("journal")
+                    .join("active.jsonl"),
                 fs::Permissions::from_mode(0o000),
             )
             .expect("install completed-child no-read canary");
@@ -5237,8 +5257,8 @@ mod tests {
             .await
             .expect("prepare");
         let session_tree = factory.options.storage_root.join("sessions").join(&child.0);
-        fs::create_dir_all(&session_tree).expect("partial session tree");
-        fs::write(session_tree.join("events.jsonl"), b"partial").expect("partial log");
+        fs::create_dir_all(session_tree.join("journal")).expect("partial session tree");
+        fs::write(session_tree.join("journal/active.jsonl"), b"partial").expect("partial log");
         fs::write(session_tree.join(".metadata-crash.tmp"), br#"{"version":1"#)
             .expect("unpublished metadata temporary");
         let digest = blake3::hash(workspace.as_os_str().as_encoded_bytes())

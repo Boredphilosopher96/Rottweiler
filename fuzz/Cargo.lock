@@ -1323,6 +1323,7 @@ version = "0.1.4"
 dependencies = [
  "blake3",
  "globset",
+ "memchr",
  "rusqlite",
  "rustix",
  "rw-types",

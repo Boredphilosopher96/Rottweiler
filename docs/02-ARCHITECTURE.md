@@ -303,9 +303,14 @@ resolve(alias) → [candidate models] → adapter → provider
 
 ### Storage (`rw-store`)
 
-- `sessions/<id>/events.jsonl` — append-only, fsync'd per turn.
-- `control/events.jsonl` — connection-scoped command acknowledgements that do
-  not yet have a session log (bounded retention; excluded from session replay).
+- `sessions/<id>/journal/` — bounded sealed JSONL segments, `active.jsonl`, and a
+  stable `writer.lock`. An append batch is synchronized before publication.
+  Captured committed-prefix views support bounded cursor pages (ADR-029).
+- Connection-scoped acknowledgements are excluded from session journals/replay.
+- `rw sessions verify <id>` checks every segment and typed event identity in an
+  offline journal. Normal tail reads verify only referenced segments.
+- The old lifetime-file journal layout is rejected explicitly; it is not opened
+  as an empty segmented session or migrated implicitly.
 - `index.sqlite` — session list, titles, costs, full-text search over transcripts.
 - `checkpoints/` — content-addressed blobs (BLAKE3) + per-turn manifests of touched files. Rewind = restore manifest.
 - Config precedence: built-in defaults ← `~/.rottweiler/config.toml` ← `.rottweiler/config.toml` ← env ← CLI flags. **Exception**: security-sensitive keys (`[permissions]`, safe-list, `[network]`/proxy, telemetry opt-in, update channel) are ignored at project level with a warning (05 Layer 0). Schema in `rw-types`, `rw config check` validates and prints effective config with provenance per key.

@@ -20,6 +20,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from journal_observer import journal_files, session_journals
+
+
 DEFAULT_SECONDS = 8 * 60 * 60
 DEFAULT_RSS_LIMIT_MIB = 600
 DEFAULT_TURN_SECONDS = 2.0
@@ -326,43 +330,48 @@ class EventLogProbe:
 
     def __init__(self, sessions_root: Path) -> None:
         self.sessions_root = sessions_root
-        self.offsets: dict[Path, int] = {}
-        self.tails: dict[Path, bytes] = {}
+        self.paths: dict[tuple[int, int], Path] = {}
+        self.offsets: dict[tuple[int, int], int] = {}
+        self.tails: dict[tuple[int, int], bytes] = {}
         self.seen_markers: set[str] = set()
-        self.marker_locations: dict[str, tuple[Path, int]] = {}
+        self.marker_locations: dict[str, tuple[tuple[int, int], int]] = {}
         self.event_counts: dict[str, int] = {}
         self.bytes_observed = 0
-        self.pending_records: dict[Path, bytes] = {}
-        self.last_events: dict[Path, dict[str, object]] = {}
+        self.pending_records: dict[tuple[int, int], bytes] = {}
+        self.last_events: dict[tuple[int, int], dict[str, object]] = {}
 
     def poll(self, marker: str | None = None) -> bool:
         found = marker in self.seen_markers if marker is not None else False
-        for path in sorted(self.sessions_root.glob("*/events.jsonl")):
+        for path in (path for journal in session_journals(self.sessions_root) for path in journal_files(journal)):
             try:
-                size = path.stat().st_size
-                offset = self.offsets.get(path, 0)
-                if size < offset:
-                    offset = 0
-                    self.pending_records.pop(path, None)
-                    self.last_events.pop(path, None)
-                if size == offset:
-                    continue
                 with path.open("rb") as handle:
+                    metadata = os.fstat(handle.fileno())
+                    identity = (metadata.st_dev, metadata.st_ino)
+                    self.paths[identity] = path
+                    size = metadata.st_size
+                    offset = self.offsets.get(identity, 0)
+                    if size < offset:
+                        offset = 0
+                        self.pending_records.pop(identity, None)
+                        self.last_events.pop(identity, None)
+                        self.tails.pop(identity, None)
+                    if size == offset:
+                        continue
                     handle.seek(offset)
                     raw = handle.read()
-                self.offsets[path] = offset + len(raw)
+                self.offsets[identity] = offset + len(raw)
                 self.bytes_observed += len(raw)
-                self.observe_metadata(path, raw)
-                tail = self.tails.get(path, b"")
+                self.observe_metadata(identity, path, raw)
+                tail = self.tails.get(identity, b"")
                 combined = tail + raw
-                self.tails[path] = combined[-256:]
+                self.tails[identity] = combined[-256:]
                 for match in SOAK_TOKEN.finditer(combined):
                     if match.end() <= len(tail):
                         continue
                     token = match.group().decode("ascii")
                     self.seen_markers.add(token)
                     self.marker_locations[token] = (
-                        path,
+                        identity,
                         max(0, offset - len(tail) + match.start()),
                     )
                 for match in EVENT_TYPE.finditer(combined):
@@ -378,12 +387,12 @@ class EventLogProbe:
                 continue
         return found
 
-    def observe_metadata(self, path: Path, raw: bytes) -> None:
-        records = (self.pending_records.pop(path, b"") + raw).splitlines(keepends=True)
+    def observe_metadata(self, identity: tuple[int, int], path: Path, raw: bytes) -> None:
+        records = (self.pending_records.pop(identity, b"") + raw).splitlines(keepends=True)
         for record in records:
             if not record.endswith(b"\n"):
                 if len(record) <= MAX_DIAGNOSTIC_EVENT_BYTES:
-                    self.pending_records[path] = record
+                    self.pending_records[identity] = record
                 continue
             if len(record) > MAX_DIAGNOSTIC_EVENT_BYTES:
                 continue
@@ -399,13 +408,13 @@ class EventLogProbe:
                 meta = {}
             # Only protocol identities enter diagnostics, never event bodies.
             fields = {
-                "session_id": meta.get("session_id", path.parent.name),
+                "session_id": meta.get("session_id", path.parent.parent.name),
                 "sequence_id": meta.get("sequence_id", envelope.get("sequence")),
                 "turn_id": event.get("turn_id"),
                 "request_id": meta.get("caused_by"),
                 "event_type": event.get("type"),
             }
-            self.last_events[path] = {
+            self.last_events[identity] = {
                 key: value if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", value) else None
                 for key, value in fields.items()
             }
@@ -427,7 +436,9 @@ class EventLogProbe:
         location = self.marker_locations.get(marker)
         if location is None:
             return False
-        path, offset = location
+        identity, offset = location
+        self.poll()
+        path = self.paths[identity]
         encoded = marker.encode()
         try:
             if path.stat().st_size < offset + len(encoded):
@@ -440,7 +451,7 @@ class EventLogProbe:
 
     def durable_bytes(self) -> int:
         total = 0
-        for path in self.sessions_root.glob("*/events.jsonl"):
+        for path in (path for journal in session_journals(self.sessions_root) for path in journal_files(journal)):
             try:
                 total += path.stat().st_size
             except FileNotFoundError:

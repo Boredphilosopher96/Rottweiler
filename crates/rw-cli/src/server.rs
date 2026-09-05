@@ -2025,7 +2025,8 @@ mod tests {
             SessionEventLog::open(root.path(), "remote-canary-session").expect("session event log");
         log.append_expected(SequenceId(0), durable_event.clone())
             .expect("persist durable event");
-        let persisted = fs::read_to_string(log.path()).expect("events.jsonl");
+        let persisted =
+            fs::read_to_string(log.path().join("active.jsonl")).expect("active journal");
         let diagnostics = format!("{initial_diagnostics} {streamed_event:?} {durable_event:?}");
 
         for canary in [bootstrap.trim(), credentials.token.as_str()] {

@@ -477,6 +477,11 @@ impl From<HistoryExportFormat> for rw_core::TranscriptFormat {
 
 #[derive(Debug, Subcommand)]
 enum SessionsCommand {
+    /// Verify all persisted segments and event identities in an offline session.
+    Verify {
+        #[arg(value_name = "SESSION")]
+        session: String,
+    },
     /// List sessions from newest to oldest.
     List {
         #[arg(long, default_value_t = 20)]
@@ -1266,6 +1271,21 @@ async fn main() -> Result<()> {
                 session_history::write_transcript_export(&storage_root, &path, &exported, force)?;
             } else {
                 io::stdout().write_all(&exported).into_diagnostic()?;
+            }
+        }
+        Some(Command::Sessions {
+            output,
+            command: SessionsCommand::Verify { session },
+        }) => {
+            let verified = session_history::verify_session(&configuration_root_path()?, &session)?;
+            match output_format(cli.output_format, output.output_format)? {
+                OutputFormat::Text => println!(
+                    "Verified {}: {} events, {} bytes",
+                    verified.session_id, verified.events, verified.bytes
+                ),
+                OutputFormat::Json | OutputFormat::StreamJson => {
+                    println!("{}", serde_json::to_string(&verified).into_diagnostic()?);
+                }
             }
         }
         Some(Command::Sessions {
@@ -2093,6 +2113,8 @@ mod historical_replay_tests {
                 },
             ])
             .expect("child events");
+        drop(child);
+        drop(grandchild);
         let root = rw_store::session::EventEnvelope {
             schema_version: 1,
             sequence: SequenceId(0),
@@ -2130,6 +2152,7 @@ mod historical_replay_tests {
                 message: "small event".to_owned(),
             })
             .expect("child event");
+        drop(child);
         let root = rw_store::session::EventEnvelope {
             schema_version: 1,
             sequence: SequenceId(0),

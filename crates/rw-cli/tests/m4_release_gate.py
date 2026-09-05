@@ -28,6 +28,10 @@ import termios
 from dataclasses import dataclass
 
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "scripts"))
+from journal_observer import observed_envelopes, session_journals
+
+
 FIRST_PAINT_MARKER = b"Rottweiler"
 TUI_PROCESS_START_MARKER = b"ROTTWEILER_TUI_PROCESS_START"
 TUI_TRANSCRIPT_PAINTED_MARKER = b"ROTTWEILER_TUI_TRANSCRIPT_PAINTED"
@@ -1514,12 +1518,11 @@ def shell_handover_gate(
 
 
 def durable_shell_events(home: pathlib.Path) -> list[dict[str, object]]:
-    event_logs = list((home / "sessions").glob("*/events.jsonl"))
+    event_logs = session_journals(home / "sessions")
     if len(event_logs) != 1:
         raise RuntimeError(f"expected one durable session event log, found {event_logs!r}")
     events: list[dict[str, object]] = []
-    for line in event_logs[0].read_text(encoding="utf-8").splitlines():
-        envelope = json.loads(line)
+    for envelope in observed_envelopes(event_logs[0]):
         event = envelope.get("event")
         if isinstance(event, dict) and event.get("type") == "user_shell_state_changed":
             events.append(event)
@@ -1727,20 +1730,19 @@ def canonical_durable_transcript(
     home: pathlib.Path, session_id: str | None = None
 ) -> bytes:
     if session_id is None:
-        event_logs = list((home / "sessions").glob("*/events.jsonl"))
+        event_logs = session_journals(home / "sessions")
         if len(event_logs) != 1:
             raise RuntimeError(
                 f"expected one local durable transcript, found {event_logs!r}"
             )
         event_log = event_logs[0]
     else:
-        event_log = home / "sessions" / session_id / "events.jsonl"
-        if not event_log.is_file():
+        event_log = home / "sessions" / session_id / "journal"
+        if not event_log.is_dir():
             raise RuntimeError(f"remote durable transcript is missing: {event_log}")
 
     turns: list[dict[str, object]] = []
-    for line in event_log.read_text(encoding="utf-8").splitlines():
-        envelope = json.loads(line)
+    for envelope in observed_envelopes(event_log):
         event = envelope.get("event")
         if not isinstance(event, dict) or event.get("type") != "conversation_turn_committed":
             continue

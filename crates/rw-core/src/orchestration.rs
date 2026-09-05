@@ -2461,7 +2461,10 @@ impl SubagentSession for ActorSubagentSession {
         cancellation: CancellationToken,
         progress: Arc<dyn SubagentProgressObserver>,
     ) -> Result<SubagentTurnResult, OrchestrationError> {
-        let mut subscription = self.handle.subscribe();
+        let mut subscription = self
+            .handle
+            .subscribe()
+            .map_err(|error| OrchestrationError::Session(error.to_string()))?;
         self.handle
             .send_message(prompt)
             .await

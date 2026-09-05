@@ -526,6 +526,40 @@ normal reads must not claim to have verified the entire lifetime journal. Full
 verification streams all segments with bounded memory and reports its verified
 sequence/byte coverage.
 
+Sealed files use `<first:020>-<next:020>-<bytes:020>-<blake3>.jsonl`; `next`
+is exclusive. File names form the sparse sequence catalog, and payload checksums
+are verified when their segments are read. `active.jsonl` is at most 16 MiB;
+ordinary segments seal around 1 MiB, preserving batch atomicity. The store rejects
+an existing `events.jsonl` session layout before creating a new journal directory.
+Captured views share an append-only catalog and retain an immutable entry count.
+Catalog entries occupy fixed-size chunks; rotation never copies prior entries.
+Each boundary caches its cumulative byte count and prefix hash, so a historical
+prefix reads one boundary segment and searches metadata without copying or folding
+the lifetime catalog. Page readers clone only the segment descriptor they are about
+to read, then release the catalog lock before filesystem access. Offline capture
+still enumerates the bounded filename catalog once.
+
+Acceptance harnesses observe the public segmented format and track file identities
+across rotation; observing an active record alone does not prove its fsync.
+
+**Read ownership and subscription ordering.** Each runtime host owns an explicit
+`JournalReads` service rooted in a pinned storage-directory descriptor. Active
+append owners register one committed-prefix publication; duplicate ownership is
+rejected. The publication is separate from the fsync-held append mutex and changes
+only after a successful durable append, before live event fanout. Capture clones
+one consistent prefix under a short publication lock; readers never wait for the
+append mutex. Inactive capture takes and releases the journal ownership lock before
+returning its view, so a starting/stopping unregistered writer cannot expose an
+uncommitted active tail. Reader admission is shared across that host's sessions;
+leases keep admission until blocking read work and its retained views finish.
+
+A subscription installs its broadcast receiver and captures the initial prefix
+before returning, even when its caller has not polled replay yet. Initial replay
+and lag recovery retain one bounded page, suppress duplicate live events, and
+reject future cursors. Attach acknowledges the connection without rebroadcasting
+the entire durable gap. Fork copy also consumes pinned pages and can resume an
+identical partial child; a differing existing prefix is rejected.
+
 **Recovery snapshots.** Snapshots are derived state bound to an exact durable
 journal prefix, with a projection version, session identity, content checksum and
 byte bound. Reject incompatible, corrupt, future or mismatched snapshots and

@@ -8,11 +8,12 @@ use rw_types::SequenceId;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 #[cfg(not(unix))]
 use std::io::Read as _;
+#[cfg(test)]
+use std::io::Write as _;
 use std::{
     fs::{self, File},
-    io::Write as _,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
 
 const SEGMENT_TARGET_BYTES: usize = 1024 * 1024;
@@ -75,6 +76,215 @@ impl Segment {
     }
 }
 
+/// Append-only metadata shared by captured prefixes. Payload I/O never holds its lock.
+#[derive(Debug, Default)]
+struct SegmentCatalog {
+    entries: RwLock<CatalogEntries>,
+}
+
+const CATALOG_CHUNK_ENTRIES: usize = 256;
+
+#[derive(Debug, Default)]
+struct CatalogEntries {
+    chunks: Vec<Vec<CatalogEntry>>,
+    len: usize,
+}
+
+impl CatalogEntries {
+    fn get(&self, index: usize) -> Option<&CatalogEntry> {
+        self.chunks
+            .get(index / CATALOG_CHUNK_ENTRIES)?
+            .get(index % CATALOG_CHUNK_ENTRIES)
+    }
+
+    fn last(&self) -> Option<&CatalogEntry> {
+        self.len.checked_sub(1).and_then(|index| self.get(index))
+    }
+
+    fn push(&mut self, entry: CatalogEntry) {
+        let chunk = self.len / CATALOG_CHUNK_ENTRIES;
+        if chunk == self.chunks.len() {
+            self.chunks.push(Vec::with_capacity(CATALOG_CHUNK_ENTRIES));
+        }
+        self.chunks[chunk].push(entry);
+        self.len += 1;
+    }
+}
+
+impl std::ops::Index<usize> for CatalogEntries {
+    type Output = CatalogEntry;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.chunks[index / CATALOG_CHUNK_ENTRIES][index % CATALOG_CHUNK_ENTRIES]
+    }
+}
+
+#[derive(Debug)]
+struct CatalogEntry {
+    segment: Segment,
+    cumulative_bytes: u64,
+    cumulative_identity: blake3::Hash,
+}
+
+impl SegmentCatalog {
+    fn from_segments(segments: Vec<Segment>) -> Self {
+        let catalog = Self::default();
+        for segment in segments {
+            catalog.push(segment);
+        }
+        catalog
+    }
+
+    fn push(&self, segment: Segment) {
+        let mut entries = self
+            .entries
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (bytes, identity) = entries.last().map_or((0, blake3::hash(b"")), |entry| {
+            (entry.cumulative_bytes, entry.cumulative_identity)
+        });
+        entries.push(CatalogEntry {
+            cumulative_bytes: bytes + segment.bytes,
+            cumulative_identity: segment.extend_identity(identity),
+            segment,
+        });
+    }
+
+    fn len(&self) -> usize {
+        self.entries
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len
+    }
+
+    fn get(&self, index: usize) -> Option<Segment> {
+        self.entries
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(index)
+            .map(|entry| entry.segment.clone())
+    }
+
+    fn prefix(&self, count: usize) -> (u64, blake3::Hash) {
+        if count == 0 {
+            return (0, blake3::hash(b""));
+        }
+        let entries = self
+            .entries
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = &entries[count - 1];
+        (entry.cumulative_bytes, entry.cumulative_identity)
+    }
+
+    fn partition(&self, count: usize, predicate: impl Fn(&Segment) -> bool) -> usize {
+        let entries = self
+            .entries
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut left = 0;
+        let mut right = count;
+        while left < right {
+            let middle = left + (right - left) / 2;
+            if predicate(&entries[middle].segment) {
+                left = middle + 1;
+            } else {
+                right = middle;
+            }
+        }
+        left
+    }
+}
+
+/// Descriptor-bound root for one runtime's journal read service.
+#[derive(Debug)]
+pub struct JournalRoot {
+    file: File,
+    path: PathBuf,
+}
+
+impl JournalRoot {
+    /// Pins an existing storage directory without following its final symlink.
+    ///
+    /// # Errors
+    /// Rejects missing, unsafe or inaccessible storage directories.
+    pub fn open(path: &Path) -> Result<Self, SessionStoreError> {
+        #[cfg(unix)]
+        let file = File::from(
+            rustix::fs::open(
+                path,
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::DIRECTORY
+                    | rustix::fs::OFlags::NOFOLLOW
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            )
+            .map_err(std::io::Error::from)?,
+        );
+        #[cfg(not(unix))]
+        let file = {
+            if !fs::symlink_metadata(path)?.file_type().is_dir() {
+                return Err(SessionStoreError::UnsafeSessionDirectory);
+            }
+            File::open(path)?
+        };
+        Ok(Self {
+            file,
+            path: path.to_path_buf(),
+        })
+    }
+
+    /// Tests for a segmented session without reading payloads or taking its writer lock.
+    ///
+    /// # Errors
+    /// Rejects unsupported legacy layouts and unsafe directory components.
+    pub fn contains_session(&self, session_id: &str) -> Result<bool, SessionStoreError> {
+        match Directory::open_at(self, session_id, false) {
+            Ok(_) => Ok(true),
+            Err(SessionStoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Captures an offline prefix beneath the pinned storage directory.
+    ///
+    /// # Errors
+    /// Rejects live writers, unsafe journal components and corrupt active tails.
+    pub fn read_view(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<JournalReadView>, SessionStoreError> {
+        JournalReadView::from_directory(Directory::open_at(self, session_id, false))
+    }
+
+    /// Checks that an active view belongs to this root's current session directory.
+    ///
+    /// # Errors
+    /// Rejects unsafe or replaced session directories and foreign views.
+    pub fn validate_view(
+        &self,
+        session_id: &str,
+        view: &JournalReadView,
+    ) -> Result<(), SessionStoreError> {
+        let directory = Directory::open_at(self, session_id, false)?;
+        #[cfg(unix)]
+        {
+            let expected = rustix::fs::fstat(&directory.file).map_err(std::io::Error::from)?;
+            let actual = rustix::fs::fstat(&view.directory.file).map_err(std::io::Error::from)?;
+            if expected.st_dev != actual.st_dev || expected.st_ino != actual.st_ino {
+                return Err(SessionStoreError::UnsafeSessionDirectory);
+            }
+        }
+        #[cfg(not(unix))]
+        if directory.path != view.directory.path {
+            return Err(SessionStoreError::UnsafeSessionDirectory);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 struct Directory {
     file: File,
@@ -83,15 +293,34 @@ struct Directory {
 
 impl Directory {
     fn open(root: &Path, session_id: &str, create: bool) -> Result<Self, SessionStoreError> {
+        if create {
+            fs::create_dir_all(root)?;
+        }
+        Self::open_at(&JournalRoot::open(root)?, session_id, create)
+    }
+
+    fn open_at(
+        root: &JournalRoot,
+        session_id: &str,
+        create: bool,
+    ) -> Result<Self, SessionStoreError> {
         super::validate_session_id(session_id)?;
-        let path = root.join("sessions").join(session_id).join("journal");
+        let path = root.path.join("sessions").join(session_id).join("journal");
         #[cfg(unix)]
         {
-            if create {
-                fs::create_dir_all(root)?;
-            }
-            let mut parent = File::open(root)?;
+            let mut parent = root.file.try_clone()?;
             for name in ["sessions", session_id, "journal"] {
+                if name == "journal" {
+                    match rustix::fs::statat(
+                        &parent,
+                        "events.jsonl",
+                        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+                    ) {
+                        Ok(_) => return Err(SessionStoreError::UnsupportedJournalLayout),
+                        Err(rustix::io::Errno::NOENT) => {}
+                        Err(error) => return Err(std::io::Error::from(error).into()),
+                    }
+                }
                 parent = if create {
                     super::open_or_create_directory(&parent, name)?
                 } else {
@@ -114,11 +343,21 @@ impl Directory {
         #[cfg(not(unix))]
         {
             if create {
-                super::create_checked_directory_portable(root)?;
+                super::create_checked_directory_portable(&root.path)?;
+            }
+            match fs::symlink_metadata(
+                root.path
+                    .join("sessions")
+                    .join(session_id)
+                    .join("events.jsonl"),
+            ) {
+                Ok(_) => return Err(SessionStoreError::UnsupportedJournalLayout),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
             }
             for directory in [
-                root.join("sessions"),
-                root.join("sessions").join(session_id),
+                root.path.join("sessions"),
+                root.path.join("sessions").join(session_id),
                 path.clone(),
             ] {
                 if create {
@@ -290,7 +529,8 @@ impl std::io::Write for BoundedBatch {
 pub struct SegmentedJournal {
     directory: Arc<Directory>,
     _writer_lock: File,
-    segments: Arc<Vec<Segment>>,
+    segments: Arc<SegmentCatalog>,
+    segment_count: usize,
     active: Arc<File>,
     active_first: u64,
     active_bytes: u64,
@@ -306,7 +546,8 @@ pub struct SegmentedJournal {
 #[derive(Clone, Debug)]
 pub struct JournalReadView {
     directory: Arc<Directory>,
-    segments: Arc<Vec<Segment>>,
+    segments: Arc<SegmentCatalog>,
+    segment_count: usize,
     active: Arc<File>,
     active_segment: Option<Segment>,
     next_sequence: u64,
@@ -377,8 +618,12 @@ impl SegmentedJournal {
         let directory = Arc::new(Directory::open(root, session_id, true)?);
         let writer_lock = directory.file("writer.lock", true, true)?;
         super::lock_writer(&writer_lock)?;
-        let segments = Arc::new(directory.catalog()?);
-        let active_first = segments.last().map_or(0, |segment| segment.next);
+        let segments = Arc::new(SegmentCatalog::from_segments(directory.catalog()?));
+        let segment_count = segments.len();
+        let active_first = segment_count
+            .checked_sub(1)
+            .and_then(|index| segments.get(index))
+            .map_or(0, |segment| segment.next);
         let active = Arc::new(directory.file("active.jsonl", true, true)?);
         directory.file.sync_all()?;
         let mut bytes = super::read_opened_file_bounded(&active, MAX_SEGMENT_BYTES as u64)?;
@@ -401,12 +646,7 @@ impl SegmentedJournal {
         let mut active_hash = blake3::Hasher::new();
         active_hash.update(&bytes);
         let active_state = super::event_file_snapshot(&active)?;
-        let sealed_bytes = segments.iter().map(|segment| segment.bytes).sum();
-        let sealed_identity = segments
-            .iter()
-            .fold(blake3::hash(b""), |identity, segment| {
-                segment.extend_identity(identity)
-            });
+        let (sealed_bytes, sealed_identity) = segments.prefix(segment_count);
         Ok(Self {
             sealed_identity,
             active_state,
@@ -414,6 +654,7 @@ impl SegmentedJournal {
             directory,
             _writer_lock: writer_lock,
             segments,
+            segment_count,
             active,
             active_first,
             active_bytes: bytes.len() as u64,
@@ -496,8 +737,7 @@ impl SegmentedJournal {
                 "active journal length changed after validation",
             ));
         }
-        let append = (&*self.active)
-            .write_all(&bytes)
+        let append = super::write_event_bytes(&mut &*self.active, &bytes)
             .and_then(|()| super::sync_event_file(&self.active));
         if let Err(error) = append {
             if let Err(rollback) =
@@ -524,7 +764,7 @@ impl SegmentedJournal {
     }
 
     fn seal(&mut self) -> Result<(), SessionStoreError> {
-        if self.segments.len() >= MAX_SEGMENTS {
+        if self.segment_count >= MAX_SEGMENTS {
             return Err(SessionStoreError::CorruptEvent("too many journal segments"));
         }
         let digest = self.active_hash.finalize();
@@ -554,7 +794,8 @@ impl SegmentedJournal {
             name,
         };
         self.sealed_identity = segment.extend_identity(self.sealed_identity);
-        Arc::make_mut(&mut self.segments).push(segment);
+        self.segments.push(segment);
+        self.segment_count += 1;
         self.sealed_bytes += self.active_bytes;
         self.active_state = super::event_file_snapshot(&active)?;
         self.active = active;
@@ -587,6 +828,7 @@ impl SegmentedJournal {
             },
             directory: Arc::clone(&self.directory),
             segments: Arc::clone(&self.segments),
+            segment_count: self.segment_count,
             active: Arc::clone(&self.active),
             active_segment,
             next_sequence: self.next_sequence,
@@ -617,7 +859,13 @@ impl JournalReadView {
     /// Rejects a live writer, unsafe files, corrupt complete records, or an
     /// interrupted tail which must first be recovered by the writer.
     pub fn open_existing(root: &Path, session_id: &str) -> Result<Option<Self>, SessionStoreError> {
-        let directory = match Directory::open(root, session_id, false) {
+        Self::from_directory(Directory::open(root, session_id, false))
+    }
+
+    fn from_directory(
+        directory: Result<Directory, SessionStoreError>,
+    ) -> Result<Option<Self>, SessionStoreError> {
+        let directory = match directory {
             Ok(directory) => Arc::new(directory),
             Err(SessionStoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(None);
@@ -626,7 +874,8 @@ impl JournalReadView {
         };
         let ownership = directory.file("writer.lock", false, false)?;
         super::lock_writer(&ownership)?;
-        let segments = Arc::new(directory.catalog()?);
+        let segments = Arc::new(SegmentCatalog::from_segments(directory.catalog()?));
+        let segment_count = segments.len();
         let active = Arc::new(directory.file("active.jsonl", false, false)?);
         let bytes = super::read_opened_file_bounded(&active, MAX_SEGMENT_BYTES as u64)?;
         if !bytes.is_empty() && bytes.last() != Some(&b'\n') {
@@ -634,7 +883,10 @@ impl JournalReadView {
                 "active journal tail requires writer recovery",
             ));
         }
-        let first = segments.last().map_or(0, |segment| segment.next);
+        let first = segment_count
+            .checked_sub(1)
+            .and_then(|index| segments.get(index))
+            .map_or(0, |segment| segment.next);
         let records = super::parse_events_bounded_from_sequence::<serde_json::Value>(
             &bytes,
             usize::MAX,
@@ -650,17 +902,15 @@ impl JournalReadView {
             digest: blake3::hash(&bytes),
             name: "active.jsonl".to_owned(),
         });
-        let total_bytes =
-            segments.iter().map(|segment| segment.bytes).sum::<u64>() + bytes.len() as u64;
-        let digest = segments
-            .iter()
-            .chain(active_segment.iter())
-            .fold(blake3::hash(b""), |identity, segment| {
-                segment.extend_identity(identity)
-            });
+        let (sealed_bytes, sealed_identity) = segments.prefix(segment_count);
+        let total_bytes = sealed_bytes + bytes.len() as u64;
+        let digest = active_segment.as_ref().map_or(sealed_identity, |segment| {
+            segment.extend_identity(sealed_identity)
+        });
         Ok(Some(Self {
             directory,
             segments,
+            segment_count,
             active,
             active_segment,
             next_sequence,
@@ -716,7 +966,8 @@ impl JournalReadView {
         if next == 0 {
             return Ok(Self {
                 directory: Arc::clone(&self.directory),
-                segments: Arc::new(Vec::new()),
+                segments: Arc::clone(&self.segments),
+                segment_count: 0,
                 active: Arc::clone(&self.active),
                 active_segment: None,
                 next_sequence: 0,
@@ -724,21 +975,26 @@ impl JournalReadView {
                 identity: JournalPrefixIdentity::empty(),
             });
         }
-        let index = self.segments.partition_point(|segment| segment.next < next);
-        let (boundary, active) = if let Some(segment) = self.segments.get(index) {
+        let index = self
+            .segments
+            .partition(self.segment_count, |segment| segment.next < next);
+        let (boundary, active) = if let Some(segment) = (index < self.segment_count)
+            .then(|| self.segments.get(index))
+            .flatten()
+        {
             (segment, false)
         } else {
             (
                 self.active_segment
-                    .as_ref()
+                    .clone()
                     .ok_or(SessionStoreError::CorruptEvent(
                         "missing journal prefix boundary",
                     ))?,
                 true,
             )
         };
-        let boundary_file = self.segment_file(boundary, active)?;
-        let bytes = Self::read_segment_bytes(&boundary_file, boundary, active)?;
+        let boundary_file = self.segment_file(&boundary, active)?;
+        let bytes = Self::read_segment_bytes(&boundary_file, &boundary, active)?;
         let count = next
             .checked_sub(boundary.first)
             .and_then(|count| usize::try_from(count).ok())
@@ -760,20 +1016,16 @@ impl JournalReadView {
             digest: blake3::hash(&bytes[..prefix_bytes]),
             name: boundary.name.clone(),
         };
-        let segments = Arc::new(self.segments[..index].to_vec());
-        let prior = segments
-            .iter()
-            .fold(blake3::hash(b""), |identity, segment| {
-                segment.extend_identity(identity)
-            });
+        let (prior_bytes, prior) = self.segments.prefix(index);
         let identity = JournalPrefixIdentity {
             next_sequence: next,
             digest: *prefix.extend_identity(prior).as_bytes(),
         };
-        let total_bytes = segments.iter().map(|segment| segment.bytes).sum::<u64>() + prefix.bytes;
+        let total_bytes = prior_bytes + prefix.bytes;
         Ok(Self {
             directory: Arc::clone(&self.directory),
-            segments,
+            segments: Arc::clone(&self.segments),
+            segment_count: index,
             active: boundary_file,
             active_segment: Some(prefix),
             next_sequence: next,
@@ -812,6 +1064,17 @@ impl JournalReadView {
         }
     }
 
+    fn segments_from(&self, first: usize) -> impl DoubleEndedIterator<Item = (Segment, bool)> + '_ {
+        (first..self.segment_count)
+            .filter_map(|index| self.segments.get(index).map(|segment| (segment, false)))
+            .chain(
+                self.active_segment
+                    .iter()
+                    .cloned()
+                    .map(|segment| (segment, true)),
+            )
+    }
+
     fn segment_bytes(&self, segment: &Segment, active: bool) -> Result<Vec<u8>, SessionStoreError> {
         let file = self.segment_file(segment, active)?;
         Self::read_segment_bytes(&file, segment, active)
@@ -842,6 +1105,8 @@ impl JournalReadView {
             file.seek(SeekFrom::Start(0))?;
             file.read_exact(&mut bytes)?;
         }
+        #[cfg(test)]
+        super::run_event_read_hook();
         if blake3::hash(&bytes) != segment.digest {
             return Err(SessionStoreError::CorruptEvent(
                 "pinned journal segment checksum changed",
@@ -931,19 +1196,15 @@ impl JournalReadView {
         let mut next = first;
         let first_segment = self
             .segments
-            .partition_point(|segment| segment.next <= first);
-        'segments: for (segment, active) in self.segments[first_segment..]
-            .iter()
-            .map(|segment| (segment, false))
-            .chain(self.active_segment.iter().map(|segment| (segment, true)))
-        {
+            .partition(self.segment_count, |segment| segment.next <= first);
+        'segments: for (segment, active) in self.segments_from(first_segment) {
             if events.len() >= limits.max_page_events || page_bytes >= limits.max_page_bytes {
                 break;
             }
             if segment.next <= first {
                 continue;
             }
-            let bytes = self.page_segment_bytes(segment, active, limits, &mut metrics)?;
+            let bytes = self.page_segment_bytes(&segment, active, limits, &mut metrics)?;
             for (index, line) in bytes.split_inclusive(|byte| *byte == b'\n').enumerate() {
                 let sequence = segment.first + index as u64;
                 if sequence < first {
@@ -1008,6 +1269,125 @@ impl JournalReadView {
         ))
     }
 
+    /// Reads a complete prefix only when it fits explicit aggregate limits.
+    ///
+    /// Intended for bounded exports and small control records. Replay and recovery
+    /// should fold [`Self::page`] results instead of retaining the complete prefix.
+    ///
+    /// # Errors
+    /// Rejects aggregate limits before allocation and propagates page integrity errors.
+    pub fn collect_bounded<T: DeserializeOwned>(
+        &self,
+        max_bytes: u64,
+        max_events: usize,
+    ) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
+        if self.total_bytes > max_bytes {
+            return Err(SessionStoreError::EventLogTooLarge { max_bytes });
+        }
+        if self.next_sequence > max_events as u64 {
+            return Err(SessionStoreError::EventCountTooLarge { max_events });
+        }
+        let limits = SessionEventPageLimits {
+            max_page_bytes: MAX_SEGMENT_BYTES as u64,
+            max_page_events: 2_000,
+            ..SessionEventPageLimits::default()
+        };
+        let mut result = Vec::new();
+        let mut after = None;
+        loop {
+            let page = self.page(after, limits)?;
+            after = page.next_cursor;
+            result.extend(page.events);
+            if !page.has_more {
+                return Ok(result);
+            }
+        }
+    }
+
+    /// Total serialized bytes in this pinned prefix, without reading payloads.
+    #[must_use]
+    pub const fn total_bytes(&self) -> u64 {
+        self.total_bytes
+    }
+
+    /// Reads the latest bounded page ending at this view's durable tail.
+    ///
+    /// # Errors
+    /// Rejects invalid limits, corrupt referenced segments and oversized last records.
+    pub fn tail_page<T: DeserializeOwned>(
+        &self,
+        limits: SessionEventPageLimits,
+    ) -> Result<SessionEventPage<T>, SessionStoreError> {
+        if limits.max_page_events == 0
+            || limits.max_page_bytes == 0
+            || limits.max_line_bytes == 0
+            || limits.max_scan_bytes == 0
+            || limits.max_scan_events == 0
+        {
+            return Err(SessionStoreError::InvalidEventPageLimits);
+        }
+        let mut events = Vec::new();
+        let mut page_bytes = 0;
+        let mut metrics = JournalReadMetrics::default();
+        'segments: for (segment, active) in self.segments_from(0).rev() {
+            if events.len() >= limits.max_page_events || page_bytes >= limits.max_page_bytes {
+                break;
+            }
+            let bytes = self.page_segment_bytes(&segment, active, limits, &mut metrics)?;
+            let mut end = bytes.len();
+            for index in memchr::memchr_iter(b'\n', &bytes[..bytes.len() - 1])
+                .rev()
+                .map(|position| position + 1)
+                .chain(std::iter::once(0))
+            {
+                let line = &bytes[index..end];
+                end = index;
+                if events.len() >= limits.max_page_events {
+                    break 'segments;
+                }
+                if line.len() - 1 > limits.max_line_bytes {
+                    return Err(SessionStoreError::EventRecordTooLarge {
+                        max_line_bytes: limits.max_line_bytes,
+                    });
+                }
+                if page_bytes + line.len() as u64 > limits.max_page_bytes {
+                    if events.is_empty() {
+                        return Err(SessionStoreError::EventPageByteLimitTooSmall {
+                            required_bytes: line.len() as u64,
+                            max_bytes: limits.max_page_bytes,
+                        });
+                    }
+                    break 'segments;
+                }
+                let event: EventEnvelope<T> = serde_json::from_slice(line)?;
+                if event.schema_version != EVENT_SCHEMA_VERSION {
+                    return Err(SessionStoreError::UnsupportedEventVersion(
+                        event.schema_version,
+                    ));
+                }
+                if event.sequence.0 != self.next_sequence - events.len() as u64 - 1 {
+                    return Err(SessionStoreError::CorruptEvent(
+                        "non-contiguous journal tail page",
+                    ));
+                }
+                page_bytes += line.len() as u64;
+                events.push(event);
+            }
+        }
+        events.reverse();
+        Ok(SessionEventPage {
+            events_before_page: self.next_sequence - events.len() as u64,
+            events,
+            page_bytes,
+            next_cursor: self.last_sequence(),
+            has_more: false,
+            events_after_page: 0,
+            total_events: self.next_sequence,
+            total_bytes: self.total_bytes,
+            tail_sequence: self.last_sequence(),
+        })
+    }
+
     /// Checks every historical segment and record with bounded working memory.
     ///
     /// # Errors
@@ -1015,13 +1395,8 @@ impl JournalReadView {
     pub fn verify_all(&self) -> Result<JournalVerification, SessionStoreError> {
         let mut expected = 0;
         let mut verified_bytes = 0;
-        for (segment, active) in self
-            .segments
-            .iter()
-            .map(|segment| (segment, false))
-            .chain(self.active_segment.iter().map(|segment| (segment, true)))
-        {
-            let bytes = self.segment_bytes(segment, active)?;
+        for (segment, active) in self.segments_from(0) {
+            let bytes = self.segment_bytes(&segment, active)?;
             let events = super::parse_events_bounded_from_sequence::<serde_json::Value>(
                 &bytes,
                 usize::MAX,
@@ -1054,6 +1429,34 @@ mod tests {
             max_page_events: events,
             ..SessionEventPageLimits::default()
         }
+    }
+
+    #[test]
+    fn catalog_growth_keeps_existing_entries_and_prefix_queries_stable() {
+        let catalog = SegmentCatalog::default();
+        let segment = |index| Segment {
+            first: index,
+            next: index + 1,
+            bytes: 1,
+            digest: blake3::hash(&index.to_le_bytes()),
+            name: index.to_string(),
+        };
+        catalog.push(segment(0));
+        let pointer = {
+            let entries = catalog.entries.read().expect("catalog");
+            std::ptr::from_ref(&entries[0]) as usize
+        };
+        let first = catalog.prefix(1);
+        for index in 1..16_384 {
+            catalog.push(segment(index));
+        }
+        assert_eq!(catalog.prefix(1), first);
+        assert_eq!(catalog.prefix(16_384).0, 16_384);
+        assert_eq!(catalog.partition(128, |entry| entry.next <= 97), 97);
+        assert_eq!(catalog.partition(128, |entry| entry.next <= 20_000), 128);
+        let entries = catalog.entries.read().expect("catalog");
+        assert_eq!(std::ptr::from_ref(&entries[0]) as usize, pointer);
+        assert_eq!(entries.chunks.len(), 64);
     }
 
     #[test]
@@ -1391,7 +1794,8 @@ mod tests {
             view.at_prefix(changed),
             Err(SessionStoreError::EventPageCursorAhead)
         ));
-        let first_segment = journal_path(root.path(), "historical").join(&view.segments[0].name);
+        let first_segment = journal_path(root.path(), "historical")
+            .join(&view.segments.get(0).expect("segment").name);
         let mut bytes = fs::read(&first_segment).expect("read");
         bytes[0] ^= 1;
         fs::write(first_segment, bytes).expect("corrupt boundary");
@@ -1441,7 +1845,9 @@ mod tests {
             .append_batch([json!({"text":"latest"})])
             .expect("seal old segment");
         let view = journal.read_view();
-        let old = journal.path().join(&view.segments[0].name);
+        let old = journal
+            .path()
+            .join(&view.segments.get(0).expect("segment").name);
         let mut bytes = fs::read(&old).expect("read old segment");
         bytes[0] = b'[';
         fs::write(old, bytes).expect("simulate old bitrot");
@@ -1511,7 +1917,9 @@ mod tests {
             .append_batch([json!({"text":"active"})])
             .expect("rotate");
         let view = journal.read_view();
-        let sealed = journal.path().join(&view.segments[0].name);
+        let sealed = journal
+            .path()
+            .join(&view.segments.get(0).expect("segment").name);
         let backup = root.path().join("backup");
         fs::rename(&sealed, &backup).expect("move segment");
         symlink(&backup, &sealed).expect("symlink");
@@ -1523,6 +1931,27 @@ mod tests {
         assert!(
             view.page::<Value>(Some(SequenceId(0)), page_limits(1))
                 .is_err()
+        );
+    }
+    #[test]
+    fn unsupported_lifetime_layout_is_rejected_without_creating_an_empty_journal() {
+        let root = tempdir().expect("root");
+        let session = root.path().join("sessions/legacy");
+        fs::create_dir_all(&session).expect("session");
+        let original = b"{\"schema_version\":1,\"sequence\":\"0\",\"event\":{}}\n";
+        fs::write(session.join("events.jsonl"), original).expect("old layout");
+        assert!(matches!(
+            SegmentedJournal::open(root.path(), "legacy"),
+            Err(SessionStoreError::UnsupportedJournalLayout)
+        ));
+        assert!(matches!(
+            JournalReadView::open_existing(root.path(), "legacy"),
+            Err(SessionStoreError::UnsupportedJournalLayout)
+        ));
+        assert!(!session.join("journal").exists());
+        assert_eq!(
+            fs::read(session.join("events.jsonl")).expect("unchanged"),
+            original
         );
     }
     #[test]
@@ -1541,6 +1970,8 @@ mod tests {
             .prefix_through(Some(SequenceId(0)))
             .expect("cursor prefix");
         assert_eq!(prefix.prefix_identity(), first.prefix_identity());
+        assert!(Arc::ptr_eq(&prefix.segments, &grown.segments));
+        assert!(Arc::ptr_eq(&first.segments, &grown.segments));
         assert_eq!(prefix.last_sequence(), Some(SequenceId(0)));
         assert_eq!(
             grown.prefix_through(None).expect("empty").prefix_identity(),

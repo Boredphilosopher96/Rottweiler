@@ -89,8 +89,8 @@ class SoakHarnessTests(unittest.TestCase):
     def test_event_probe_reads_only_growth_and_remembers_persisted_marker(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             sessions = Path(temporary)
-            log = sessions / "session-1" / "events.jsonl"
-            log.parent.mkdir()
+            log = sessions / "session-1" / "journal" / "active.jsonl"
+            log.parent.mkdir(parents=True)
             log.write_text('{"event":{"type":"session_created"}}\n', encoding="utf-8")
             probe = SOAK.EventLogProbe(sessions)
 
@@ -110,11 +110,28 @@ class SoakHarnessTests(unittest.TestCase):
             log.write_text("durable marker removed\n", encoding="utf-8")
             self.assertFalse(probe.marker_persisted("SOAK_STEP_000001_DONE"))
 
+    def test_event_probe_preserves_offsets_and_markers_across_rotation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            sessions = Path(temporary)
+            log = sessions / "session-1" / "journal" / "active.jsonl"
+            log.parent.mkdir(parents=True)
+            log.write_text('{"event":{"type":"text_delta","text":"SOAK_STEP_000001_DONE"}}\n')
+            probe = SOAK.EventLogProbe(sessions)
+            self.assertTrue(probe.poll("SOAK_STEP_000001_DONE"))
+            before = probe.bytes_observed
+            sealed = log.with_name(f"{0:020}-{1:020}-{log.stat().st_size:020}-{'a' * 64}.jsonl")
+            log.rename(sealed)
+            log.write_text('{"event":{"type":"text_delta","text":"SOAK_STEP_000002_DONE"}}\n')
+            self.assertTrue(probe.poll("SOAK_STEP_000002_DONE"))
+            self.assertTrue(probe.marker_persisted("SOAK_STEP_000001_DONE"))
+            self.assertEqual(probe.event_count("text_delta"), 2)
+            self.assertEqual(probe.bytes_observed, before + log.stat().st_size)
+
     def test_event_probe_tracks_input_acceptance_and_compaction_boundaries(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             sessions = Path(temporary)
-            log = sessions / "session-1" / "events.jsonl"
-            log.parent.mkdir()
+            log = sessions / "session-1" / "journal" / "active.jsonl"
+            log.parent.mkdir(parents=True)
             probe = SOAK.EventLogProbe(sessions)
             log.write_text(
                 '{"event":{"type":"user_message_accepted",'
@@ -229,8 +246,8 @@ class SoakHarnessTests(unittest.TestCase):
 
     def test_event_diagnostics_keep_identities_not_payloads_across_split_records(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "session-1" / "events.jsonl"
-            path.parent.mkdir()
+            path = Path(temporary) / "session-1" / "journal" / "active.jsonl"
+            path.parent.mkdir(parents=True)
             raw = json.dumps({"sequence": "9", "event": {
                 "type": "text_delta", "turn_id": "2", "text": "payload-private-canary",
                 "meta": {"session_id": "session-1", "sequence_id": "9", "caused_by": "req-1"},

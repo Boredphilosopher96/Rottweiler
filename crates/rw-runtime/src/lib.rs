@@ -10,6 +10,7 @@ use rw_core::{EngineHost, EngineHostConfig, HostError, HostQueryService, Session
 mod extension_config;
 mod extension_runtime;
 mod history;
+mod journal_reads;
 mod mode_recovery;
 mod plugin_process;
 mod project_commands;
@@ -26,8 +27,9 @@ pub use session_host::{RuntimeHostOptions, RuntimeSessionFactory};
 /// Durable session replay, search, and export APIs.
 pub mod session_history {
     pub use crate::history::{
-        MAX_HISTORY_BYTES, MAX_HISTORY_EVENTS, export_transcript, list_sessions, load_events,
-        load_events_with_size, replay_jsonl, search_sessions, write_transcript_export,
+        MAX_HISTORY_BYTES, MAX_HISTORY_EVENTS, SessionVerification, export_transcript,
+        list_sessions, load_events, load_events_with_size, replay_jsonl, search_sessions,
+        verify_session, write_transcript_export,
     };
 }
 

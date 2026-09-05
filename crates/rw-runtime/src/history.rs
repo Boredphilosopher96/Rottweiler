@@ -10,12 +10,60 @@ use std::{
 use miette::{IntoDiagnostic as _, Result, miette};
 use rw_core::{EngineEvent, TranscriptFormat};
 use rw_providers::FixtureRedactor;
-use rw_store::session::{EventEnvelope, SessionEventLog, SessionIndex, SessionSummary};
+use rw_store::session::{EventEnvelope, SessionIndex, SessionSummary};
 use serde_json::Value;
 
 pub const MAX_HISTORY_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_HISTORY_EVENTS: usize = 250_000;
 const MAX_RENDERED_BYTES: usize = 96 * 1024 * 1024;
+
+/// Result of a complete, offline authoritative-journal integrity scan.
+#[derive(Debug, serde::Serialize)]
+pub struct SessionVerification {
+    pub session_id: String,
+    pub events: u64,
+    pub bytes: u64,
+}
+
+/// Verifies every journal segment and every durable event identity.
+///
+/// # Errors
+/// Rejects active sessions, unsafe descriptors, any historical corruption,
+/// unknown event payloads, and mismatched session or sequence identities.
+pub fn verify_session(storage_root: &Path, session: &str) -> Result<SessionVerification> {
+    let view = rw_store::session::journal::JournalReadView::open_existing(storage_root, session)
+        .map_err(|error| miette!("session journal could not open for verification: {error}"))?
+        .ok_or_else(|| miette!("session journal does not exist"))?;
+    let mut cursor = None;
+    loop {
+        let page = view
+            .page::<EngineEvent>(cursor, rw_store::session::SessionEventPageLimits::default())
+            .map_err(|error| miette!("session journal integrity verification failed: {error}"))?;
+        for envelope in &page.events {
+            let meta = envelope
+                .event
+                .meta()
+                .ok_or_else(|| miette!("transient event in session journal"))?;
+            if meta.protocol_version != rw_core::PROTOCOL_VERSION
+                || meta.session_id.0 != session
+                || meta.sequence_id != envelope.sequence
+            {
+                return Err(miette!(
+                    "session journal event identity does not match its envelope"
+                ));
+            }
+        }
+        cursor = page.next_cursor;
+        if !page.has_more {
+            break;
+        }
+    }
+    Ok(SessionVerification {
+        session_id: session.to_owned(),
+        events: view.prefix_identity().next_sequence,
+        bytes: view.total_bytes(),
+    })
+}
 
 /// Loads one bounded, identity-validated durable session history.
 ///
@@ -34,19 +82,30 @@ pub fn load_events_with_size(
     session: &str,
     max_bytes: u64,
 ) -> Result<(Vec<EventEnvelope<EngineEvent>>, u64)> {
-    let (events, bytes) = SessionEventLog::load_existing_bounded_with_size::<EngineEvent>(
-        storage_root,
-        session,
-        max_bytes.min(MAX_HISTORY_BYTES),
-        MAX_HISTORY_EVENTS,
-    )
-    .map_err(|error| miette!("session history could not be read: {error}"))?;
+    let view = rw_store::session::journal::JournalReadView::open_existing(storage_root, session)
+        .map_err(|error| miette!("session history could not be read: {error}"))?
+        .ok_or_else(|| miette!("session journal does not exist"))?;
+    load_events_from_view(&view, session, max_bytes)
+}
+
+pub(crate) fn load_events_from_view(
+    view: &rw_store::session::journal::JournalReadView,
+    session: &str,
+    max_bytes: u64,
+) -> Result<(Vec<EventEnvelope<EngineEvent>>, u64)> {
+    let events = view
+        .collect_bounded::<EngineEvent>(max_bytes.min(MAX_HISTORY_BYTES), MAX_HISTORY_EVENTS)
+        .map_err(|error| miette!("session history could not be read: {error}"))?;
+    let bytes = view.total_bytes();
     for envelope in &events {
         let meta = envelope
             .event
             .meta()
             .ok_or_else(|| miette!("session history contains a non-durable event"))?;
-        if meta.session_id.0 != session || meta.sequence_id != envelope.sequence {
+        if meta.protocol_version != rw_core::PROTOCOL_VERSION
+            || meta.session_id.0 != session
+            || meta.sequence_id != envelope.sequence
+        {
             return Err(miette!(
                 "session history event identity does not match its durable envelope"
             ));
@@ -1088,6 +1147,7 @@ fn enforce_render_limit(output: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
+    use rw_store::session::SessionEventLog;
 
     use super::*;
     use rw_core::{EventMeta, PROTOCOL_VERSION, SequenceId, SessionId};
@@ -1176,6 +1236,61 @@ mod tests {
     }
 
     #[test]
+    fn full_verification_checks_history_outside_a_recent_page() {
+        let storage = tempfile::tempdir().expect("storage");
+        let mut log = SessionEventLog::open(storage.path(), "golden").expect("writer");
+        let mut first = fixture()[0].event.clone();
+        if let EngineEvent::UiNotification { message, .. } = &mut first {
+            *message = "x".repeat(1024 * 1024);
+        }
+        log.append(first).expect("large first segment");
+        let mut second = fixture()[0].event.clone();
+        second.meta_mut().expect("meta").sequence_id = SequenceId(1);
+        log.append(second).expect("second segment");
+        let view = log.read_view();
+        assert!(
+            verify_session(storage.path(), "golden").is_err(),
+            "live writer is excluded"
+        );
+        let segment = fs::read_dir(log.path())
+            .expect("segments")
+            .map(|entry| entry.expect("segment").path())
+            .find(|path| {
+                path.file_name()
+                    .expect("name")
+                    .to_string_lossy()
+                    .starts_with("00000000000000000000-")
+            })
+            .expect("sealed segment");
+        drop(log);
+        assert_eq!(
+            verify_session(storage.path(), "golden")
+                .expect("full scan")
+                .events,
+            2
+        );
+        let mut bytes = fs::read(&segment).expect("bytes");
+        bytes[0] = b'[';
+        fs::write(segment, bytes).expect("corrupt history");
+        assert_eq!(
+            view.page::<EngineEvent>(
+                Some(SequenceId(0)),
+                rw_store::session::SessionEventPageLimits::default()
+            )
+            .expect("unrelated recent page")
+            .events
+            .len(),
+            1
+        );
+        assert!(
+            verify_session(storage.path(), "golden")
+                .expect_err("historical bitrot")
+                .to_string()
+                .contains("checksum")
+        );
+    }
+
+    #[test]
     fn replay_rejects_event_identity_outside_its_durable_envelope() {
         let storage = tempfile::tempdir().expect("storage");
         let mut log = SessionEventLog::open(storage.path(), "history").expect("event log");
@@ -1186,6 +1301,24 @@ mod tests {
 
         let error = load_events(storage.path(), "history").expect_err("identity must fail closed");
         assert!(error.to_string().contains("identity"));
+        assert!(
+            verify_session(storage.path(), "history")
+                .expect_err("verify identity")
+                .to_string()
+                .contains("identity")
+        );
+    }
+
+    #[test]
+    fn verification_rejects_an_unsupported_event_protocol_version() {
+        let storage = tempfile::tempdir().expect("storage");
+        let mut log = SessionEventLog::open(storage.path(), "golden").expect("writer");
+        let mut event = fixture()[0].event.clone();
+        event.meta_mut().expect("meta").protocol_version = PROTOCOL_VERSION + 1;
+        log.append(event).expect("unsupported protocol fixture");
+        drop(log);
+        assert!(verify_session(storage.path(), "golden").is_err());
+        assert!(load_events(storage.path(), "golden").is_err());
     }
 
     #[test]
@@ -1371,8 +1504,8 @@ mod tests {
 
         let storage = tempfile::tempdir().expect("storage");
         let session = storage.path().join("sessions/history");
-        fs::create_dir_all(&session).expect("session directory");
-        let events = session.join("events.jsonl");
+        fs::create_dir_all(session.join("journal")).expect("journal directory");
+        let events = session.join("journal/active.jsonl");
         fs::write(&events, b"canary").expect("events");
         let output = tempfile::tempdir().expect("output");
         let planted = output.path().join("transcript.md");
@@ -1396,8 +1529,8 @@ mod tests {
 
         let storage = tempfile::tempdir().expect("storage");
         let session = storage.path().join("sessions/history");
-        fs::create_dir_all(&session).expect("session directory");
-        let events = session.join("events.jsonl");
+        fs::create_dir_all(session.join("journal")).expect("journal directory");
+        let events = session.join("journal/active.jsonl");
         fs::write(&events, b"event-canary").expect("events");
 
         let output = tempfile::tempdir().expect("output");

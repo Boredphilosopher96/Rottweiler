@@ -49,12 +49,12 @@ pub use engine::{
     NoopSessionEventSink, NoopSessionExtensionController, NoopWorkspaceRootController,
     PluginSessionCapability, RecoveredQuestion, RewindCheckpoint, SESSION_EVENT_VERSION,
     SecretRedactor, SessionActor, SessionActorConfig, SessionCommandAction, SessionCommandContext,
-    SessionCommandOutput, SessionEventSink, SessionExtensionController, SessionExtensionSnapshot,
-    SessionHandle, SessionProjectionError, SessionRecoveredState, SessionSnapshot,
-    SessionSubscription, SessionUsage, StartupNotification, SystemEventClock,
-    TOOL_CANCELLATION_GRACE, WorkspaceRootController, WorkspaceRuntimeGeneration,
-    builtin_command_registry, builtin_hook_dispatcher, project_session_events,
-    project_session_events_with_modes,
+    SessionCommandOutput, SessionEventReadView, SessionEventSink, SessionExtensionController,
+    SessionExtensionSnapshot, SessionHandle, SessionProjectionError, SessionProjector,
+    SessionRecoveredState, SessionReplayLimits, SessionSnapshot, SessionSubscription, SessionUsage,
+    StartupNotification, SystemEventClock, TOOL_CANCELLATION_GRACE, WorkspaceRootController,
+    WorkspaceRuntimeGeneration, builtin_command_registry, builtin_hook_dispatcher,
+    project_session_events, project_session_events_with_modes, project_session_read_view,
 };
 pub use host::{
     BoundClient, CompletedForkOperation, CreateSessionRequest, EngineHost, EngineHostConfig,

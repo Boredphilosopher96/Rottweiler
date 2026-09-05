@@ -4,9 +4,8 @@
 pub mod journal;
 
 use std::{
-    collections::VecDeque,
     fs::{self, File},
-    io::{BufRead, BufReader, Read as _, Write},
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
 };
 
@@ -15,7 +14,7 @@ use std::os::unix::fs::FileExt as _;
 #[cfg(not(unix))]
 use std::{
     fs::OpenOptions,
-    io::{Seek as _, SeekFrom},
+    io::{Read as _, Seek as _, SeekFrom},
 };
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
@@ -98,443 +97,192 @@ pub struct SessionEventPage<T> {
     pub tail_sequence: Option<SequenceId>,
 }
 
-/// Append-only event log for one session actor.
+/// Append owner for a session's authoritative segmented journal.
 #[derive(Debug)]
 pub struct SessionEventLog {
-    path: PathBuf,
-    next_sequence: u64,
-    file: File,
-    validated_bytes: u64,
-    validated_hasher: blake3::Hasher,
-    writer_state: SessionWriterState,
-}
-
-/// Whether an append can safely continue using the open writer descriptor.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SessionWriterState {
-    Healthy,
-    Poisoned,
+    journal: journal::SegmentedJournal,
 }
 
 impl SessionEventLog {
-    /// Opens or creates `sessions/<id>/events.jsonl`, repairing an incomplete
-    /// final record left by a killed writer.
+    /// Opens or recovers the journal under its exclusive writer lock.
     ///
     /// # Errors
-    ///
-    /// Returns an error for an unsafe id, I/O failure, corrupt non-final record,
-    /// schema mismatch, or non-contiguous sequence.
+    /// Rejects unsafe paths, concurrent writers and corrupt active records.
     pub fn open(root: &Path, session_id: &str) -> Result<Self, SessionStoreError> {
-        validate_session_id(session_id)?;
-        let directory = root.join("sessions").join(session_id);
-        let path = directory.join("events.jsonl");
-
-        #[cfg(unix)]
-        let file = open_session_file(root, session_id)?;
-        #[cfg(not(unix))]
-        let file = open_session_file_portable(root, &directory, &path)?;
-
-        ensure_regular_file(&file)?;
-        lock_writer(&file)?;
-        let next_sequence = recover_and_validate(&file)?;
-        let validated = read_opened_file(&file)?;
-        let validated_bytes =
-            u64::try_from(validated.len()).map_err(|_| SessionStoreError::LimitOverflow)?;
-        let mut validated_hasher = blake3::Hasher::new();
-        validated_hasher.update(&validated);
-        Ok(Self {
-            path,
-            next_sequence,
-            file,
-            validated_bytes,
-            validated_hasher,
-            writer_state: SessionWriterState::Healthy,
-        })
+        journal::SegmentedJournal::open(root, session_id).map(|journal| Self { journal })
     }
 
-    /// Durable path of this session's event log.
+    /// Physical journal directory; the layout is owned by the store.
     #[must_use]
     pub fn path(&self) -> &Path {
-        &self.path
+        self.journal.path()
     }
 
-    /// Sequence assigned to the next appended event.
+    /// Next durable envelope sequence.
     #[must_use]
     pub const fn next_sequence(&self) -> u64 {
-        self.next_sequence
+        self.journal.next_sequence()
     }
 
-    /// Last persisted sequence, distinguishing an empty log from event zero.
+    /// Last acknowledged sequence, or none for an empty journal.
     #[must_use]
-    pub const fn last_sequence(&self) -> Option<SequenceId> {
-        if self.next_sequence == 0 {
-            None
-        } else {
-            Some(SequenceId(self.next_sequence - 1))
-        }
+    pub fn last_sequence(&self) -> Option<SequenceId> {
+        self.journal.read_view().last_sequence()
     }
 
-    /// Appends one event and synchronizes it before returning.
+    /// Captures the acknowledged prefix without reading journal payloads.
+    #[must_use]
+    pub fn read_view(&self) -> journal::JournalReadView {
+        self.journal.read_view()
+    }
+
+    /// Appends and synchronizes one durable event.
     ///
     /// # Errors
-    ///
-    /// Returns a serialization, sequence-overflow, or durable-write error.
+    /// Propagates serialization, identity, capacity and durable write failures.
     pub fn append<T: Serialize>(
         &mut self,
         event: T,
     ) -> Result<EventEnvelope<T>, SessionStoreError> {
-        let mut appended = self.append_batch([event])?;
-        appended.pop().ok_or(SessionStoreError::CorruptEvent(
-            "append produced no persisted event",
-        ))
+        self.append_batch([event])?
+            .pop()
+            .ok_or(SessionStoreError::CorruptEvent("empty append"))
     }
 
-    /// Appends only when a caller's expected id is exactly the next id.
-    ///
-    /// This is the fail-closed adapter for engines which allocate the id before
-    /// persistence. Prefer [`Self::append`] and broadcast its returned envelope
-    /// when the log can be the sole authority.
+    /// Appends only at the caller's expected next sequence.
     ///
     /// # Errors
-    ///
-    /// Returns a sequence mismatch before serializing or writing any bytes.
+    /// Rejects a mismatched sequence before serialization or writing.
     pub fn append_expected<T: Serialize>(
         &mut self,
         expected: SequenceId,
         event: T,
     ) -> Result<EventEnvelope<T>, SessionStoreError> {
-        if expected != SequenceId(self.next_sequence) {
+        if expected.0 != self.next_sequence() {
             return Err(SessionStoreError::UnexpectedEventSequence {
-                expected: SequenceId(self.next_sequence),
+                expected: SequenceId(self.next_sequence()),
                 actual: expected,
             });
         }
         self.append(event)
     }
 
-    /// Serializes a batch before writing, then appends it under the existing
-    /// writer lock and performs one durable synchronization. A failed append
-    /// is rolled back to its original length before its error is returned.
+    /// Appends a bounded batch with one event synchronization.
     ///
     /// # Errors
-    ///
-    /// Returns a serialization, sequence-overflow, or durable-write error.
+    /// Propagates serialization, capacity, identity and durable write failures.
     pub fn append_batch<T: Serialize>(
         &mut self,
         events: impl IntoIterator<Item = T>,
     ) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
-        if self.writer_state == SessionWriterState::Poisoned {
-            return Err(SessionStoreError::EventWriterPoisoned);
-        }
-        let events = events.into_iter().collect::<Vec<_>>();
-        let count = u64::try_from(events.len()).map_err(|_| SessionStoreError::SequenceOverflow)?;
-        self.next_sequence
-            .checked_add(count)
-            .ok_or(SessionStoreError::SequenceOverflow)?;
-        let mut bytes = Vec::new();
-        let mut envelopes = Vec::with_capacity(events.len());
-        for (offset, event) in events.into_iter().enumerate() {
-            let offset = u64::try_from(offset).map_err(|_| SessionStoreError::SequenceOverflow)?;
-            let envelope = EventEnvelope {
-                schema_version: EVENT_SCHEMA_VERSION,
-                sequence: SequenceId(
-                    self.next_sequence
-                        .checked_add(offset)
-                        .ok_or(SessionStoreError::SequenceOverflow)?,
-                ),
-                event,
-            };
-            serde_json::to_writer(&mut bytes, &envelope)?;
-            bytes.push(b'\n');
-            envelopes.push(envelope);
-        }
-        if bytes.is_empty() {
-            return Ok(envelopes);
-        }
-        let pre_append_len = self.file.metadata()?.len();
-        if pre_append_len != self.validated_bytes {
-            self.writer_state = SessionWriterState::Poisoned;
-            return Err(SessionStoreError::CorruptEvent(
-                "event log length changed after validation",
-            ));
-        }
-        let appended_bytes =
-            u64::try_from(bytes.len()).map_err(|_| SessionStoreError::LimitOverflow)?;
-        let validated_bytes = self
-            .validated_bytes
-            .checked_add(appended_bytes)
-            .ok_or(SessionStoreError::LimitOverflow)?;
-        if let Err(append_error) = append_event_bytes(&mut self.file, &bytes) {
-            return Err(self.rollback_failed_append(pre_append_len, append_error));
-        }
-        self.next_sequence += count;
-        self.validated_bytes = validated_bytes;
-        self.validated_hasher.update(&bytes);
-        Ok(envelopes)
+        self.journal.append_batch(events)
     }
 
-    fn rollback_failed_append(
-        &mut self,
-        pre_append_len: u64,
-        append_error: std::io::Error,
-    ) -> SessionStoreError {
-        match truncate_and_sync_event_file(&self.file, pre_append_len) {
-            Ok(()) => SessionStoreError::Io(append_error),
-            Err(rollback_error) => {
-                self.writer_state = SessionWriterState::Poisoned;
-                SessionStoreError::AppendRollbackFailed {
-                    append: append_error,
-                    rollback: rollback_error,
-                }
-            }
-        }
-    }
-
-    /// Loads every complete event after validating version and sequence.
+    /// Loads a small bounded journal; streaming consumers use `read_view`.
     ///
     /// # Errors
-    ///
-    /// Returns an error for I/O, JSON, schema, or sequence corruption.
+    /// Rejects journals exceeding 512 MiB or one million events and corruption.
     pub fn load<T: DeserializeOwned>(&self) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
-        load_events(&self.file)
+        self.read_view()
+            .collect_bounded(512 * 1024 * 1024, 1_000_000)
     }
 
-    /// Loads complete events strictly after a durable sequence cursor.
-    ///
-    /// The open writer fingerprints every validated append. This path checks
-    /// the complete stable snapshot against that fingerprint, then decodes only
-    /// the requested suffix.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for I/O, JSON, schema, sequence corruption, or a cursor
-    /// ahead of the durable tail.
-    pub fn load_after<T: DeserializeOwned>(
-        &self,
-        after_sequence: Option<SequenceId>,
-    ) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
-        let bytes = read_opened_file(&self.file)?;
-        if u64::try_from(bytes.len()).map_err(|_| SessionStoreError::LimitOverflow)?
-            != self.validated_bytes
-            || blake3::hash(&bytes) != self.validated_hasher.finalize()
-        {
-            return Err(SessionStoreError::CorruptEvent(
-                "event log changed after validation",
-            ));
-        }
-        let start_sequence = match after_sequence {
-            Some(sequence) => sequence
-                .0
-                .checked_add(1)
-                .ok_or(SessionStoreError::EventPageCursorAhead)?,
-            None => 0,
-        };
-        if start_sequence > self.next_sequence {
-            return Err(SessionStoreError::EventPageCursorAhead);
-        }
-        if start_sequence == self.next_sequence {
-            return Ok(Vec::new());
-        }
-        let records_to_skip =
-            usize::try_from(start_sequence).map_err(|_| SessionStoreError::EventPageCursorAhead)?;
-        let mut skipped = 0_usize;
-        let start = bytes
-            .split_inclusive(|byte| *byte == b'\n')
-            .take(records_to_skip)
-            .try_fold(0_usize, |offset, record| {
-                skipped = skipped
-                    .checked_add(1)
-                    .ok_or(SessionStoreError::LimitOverflow)?;
-                offset
-                    .checked_add(record.len())
-                    .ok_or(SessionStoreError::LimitOverflow)
-            })?;
-        if skipped != records_to_skip {
-            return Err(SessionStoreError::CorruptEvent(
-                "event log is shorter than its durable tail",
-            ));
-        }
-        parse_events_bounded_from_sequence(&bytes[start..], usize::MAX, start_sequence)
+    fn existing_view(
+        root: &Path,
+        session_id: &str,
+    ) -> Result<journal::JournalReadView, SessionStoreError> {
+        journal::JournalReadView::open_existing(root, session_id)?.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "session journal does not exist",
+            )
+            .into()
+        })
     }
 
-    /// Loads an existing session log without acquiring the lifetime writer lock.
-    ///
-    /// This is the read-only boundary for host queries while the owning actor
-    /// may still be active. A concurrent append is detected by the stable-file
-    /// read and returned as an error rather than projecting a torn record.
+    /// Loads an offline journal under the default aggregate bounds.
     ///
     /// # Errors
-    ///
-    /// Returns an error for an unsafe id or path, missing log, concurrent
-    /// mutation, malformed record, schema mismatch, or non-contiguous sequence.
+    /// Rejects live ownership, corruption and excessive aggregate output.
     pub fn load_existing<T: DeserializeOwned>(
         root: &Path,
         session_id: &str,
     ) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
-        validate_session_id(session_id)?;
-        #[cfg(unix)]
-        let file = open_existing_session_file(root, session_id)?;
-        #[cfg(not(unix))]
-        let file = open_existing_session_file_portable(root, session_id)?;
-        ensure_regular_file(&file)?;
-        load_events(&file)
+        Self::load_existing_bounded(root, session_id, 512 * 1024 * 1024, 1_000_000)
     }
 
-    /// Loads a read-only log under explicit byte and event-count limits.
+    /// Loads an offline journal under explicit aggregate output limits.
     ///
     /// # Errors
-    ///
-    /// Returns an error for an unsafe id or path, missing log, concurrent
-    /// mutation, malformed record, schema mismatch, non-contiguous sequence,
-    /// or either configured limit being exceeded.
+    /// Rejects live ownership, corruption and excessive aggregate output.
     pub fn load_existing_bounded<T: DeserializeOwned>(
         root: &Path,
         session_id: &str,
         max_bytes: u64,
         max_events: usize,
     ) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
-        Self::load_existing_bounded_with_size(root, session_id, max_bytes, max_events)
-            .map(|(events, _)| events)
+        Self::existing_view(root, session_id)?.collect_bounded(max_bytes, max_events)
     }
 
-    /// Loads a bounded read-only log and returns the byte length observed from
-    /// the same stable file descriptor used for parsing.
+    /// Loads an offline journal and its exact pinned byte length.
     ///
     /// # Errors
-    ///
-    /// Returns the same errors as [`Self::load_existing_bounded`].
+    /// Rejects live ownership, corruption and excessive aggregate output.
     pub fn load_existing_bounded_with_size<T: DeserializeOwned>(
         root: &Path,
         session_id: &str,
         max_bytes: u64,
         max_events: usize,
     ) -> Result<(Vec<EventEnvelope<T>>, u64), SessionStoreError> {
-        validate_session_id(session_id)?;
-        #[cfg(unix)]
-        let file = open_existing_session_file(root, session_id)?;
-        #[cfg(not(unix))]
-        let file = open_existing_session_file_portable(root, session_id)?;
-        ensure_regular_file(&file)?;
-        load_events_bounded_with_size(&file, max_bytes, max_events)
+        let view = Self::existing_view(root, session_id)?;
+        Ok((
+            view.collect_bounded(max_bytes, max_events)?,
+            view.total_bytes(),
+        ))
     }
 
-    /// Streams and validates an existing log while retaining only one bounded,
-    /// cursor-exclusive page.
-    ///
-    /// Unlike the legacy bounded whole-log reader, the cursor is applied while
-    /// scanning, so logs larger than one page remain readable. Every traversed
-    /// envelope is still decoded and checked for schema and contiguous sequence;
-    /// the complete stable snapshot is scanned to produce truthful total/tail
-    /// metadata. A concurrent append or mutation fails the entire read.
+    /// Reads a bounded cursor-exclusive page from an offline journal.
     ///
     /// # Errors
-    ///
-    /// Returns an error for unsafe identity/path components, malformed or
-    /// oversized records, invalid sequence/schema, an out-of-range cursor,
-    /// exceeded page/scan limits, or concurrent descriptor mutation.
+    /// Rejects live ownership, invalid limits/cursors and referenced corruption.
     pub fn load_existing_page<T: DeserializeOwned>(
         root: &Path,
         session_id: &str,
-        after_sequence: Option<SequenceId>,
+        after: Option<SequenceId>,
         limits: SessionEventPageLimits,
     ) -> Result<SessionEventPage<T>, SessionStoreError> {
-        validate_session_id(session_id)?;
-        #[cfg(unix)]
-        let file = open_existing_session_file(root, session_id)?;
-        #[cfg(not(unix))]
-        let file = open_existing_session_file_portable(root, session_id)?;
-        ensure_regular_file(&file)?;
-        load_event_page_with_hook(&file, after_sequence, limits, || {})
+        Self::existing_view(root, session_id)?.page(after, limits)
     }
 
-    /// Streams and validates an existing log while retaining only its most
-    /// recent bounded page.
-    ///
-    /// This is the initial-inspection companion to [`Self::load_existing_page`]:
-    /// it scans the same stable descriptor snapshot and validates every
-    /// envelope, but keeps a rolling page ending at the durable tail instead of
-    /// retaining the oldest page. Callers can therefore inspect a very large
-    /// log without first transferring its entire history.
+    /// Reads the most recent bounded page from an offline journal.
     ///
     /// # Errors
-    ///
-    /// Returns an error for unsafe identity/path components, malformed or
-    /// oversized records, invalid sequence/schema, exceeded page/scan limits,
-    /// or concurrent descriptor mutation.
+    /// Rejects live ownership, invalid limits and referenced corruption.
     pub fn load_existing_tail_page<T: DeserializeOwned>(
         root: &Path,
         session_id: &str,
         limits: SessionEventPageLimits,
     ) -> Result<SessionEventPage<T>, SessionStoreError> {
-        validate_session_id(session_id)?;
-        #[cfg(unix)]
-        let file = open_existing_session_file(root, session_id)?;
-        #[cfg(not(unix))]
-        let file = open_existing_session_file_portable(root, session_id)?;
-        ensure_regular_file(&file)?;
-        load_event_tail_page_with_hook(&file, limits, || {})
+        Self::existing_view(root, session_id)?.tail_page(limits)
     }
 
-    /// Creates or idempotently completes a child log from an exact parent
-    /// prefix. The parent is opened read-only and never modified.
-    ///
-    /// An existing child is accepted only when it is an exact prefix of the
-    /// requested fork, which makes recovery after a killed append safe while
-    /// rejecting identity reuse or post-fork divergence.
+    /// Copies an exact bounded parent prefix into an idempotent child journal.
     ///
     /// # Errors
-    ///
-    /// Returns an error for identical identities, a missing parent cursor, a
-    /// conflicting child prefix, concurrent parent mutation, or durable I/O.
+    /// Rejects missing cursors, conflicting identities, divergent children and I/O.
     pub fn fork(
         root: &Path,
         parent_session_id: &str,
         child_session_id: &str,
         through_sequence: Option<SequenceId>,
     ) -> Result<Self, SessionStoreError> {
-        validate_session_id(parent_session_id)?;
-        validate_session_id(child_session_id)?;
-        if parent_session_id == child_session_id {
-            return Err(SessionStoreError::ForkIdentityConflict);
-        }
-        #[cfg(unix)]
-        let parent_file = open_existing_session_file(root, parent_session_id)?;
-        #[cfg(not(unix))]
-        let parent_file = open_existing_session_file_portable(root, parent_session_id)?;
-        ensure_regular_file(&parent_file)?;
-        let parent_bytes = read_opened_file(&parent_file)?;
-        let parent_events = parse_events::<serde_json::Value>(&parent_bytes)?;
-        let event_count = through_sequence.map_or(Ok(0), |through| {
-            let index = usize::try_from(through.0).map_err(|_| SessionStoreError::LimitOverflow)?;
-            if parent_events.get(index).map(|event| event.sequence) != Some(through) {
-                return Err(SessionStoreError::ForkSourceCursorMissing);
-            }
-            index.checked_add(1).ok_or(SessionStoreError::LimitOverflow)
-        })?;
-        let target_len = parent_bytes
-            .split_inclusive(|byte| *byte == b'\n')
-            .take(event_count)
-            .try_fold(0_usize, |total, line| {
-                total
-                    .checked_add(line.len())
-                    .ok_or(SessionStoreError::LimitOverflow)
-            })?;
-        let target = &parent_bytes[..target_len];
-        let mut child = Self::open(root, child_session_id)?;
-        let existing = read_opened_file(&child.file)?;
-        if existing.len() > target.len() || !target.starts_with(&existing) {
-            return Err(SessionStoreError::ForkTargetConflict);
-        }
-        child.file.write_all(&target[existing.len()..])?;
-        child.file.flush()?;
-        sync_event_file(&child.file)?;
-        child.next_sequence =
-            u64::try_from(event_count).map_err(|_| SessionStoreError::SequenceOverflow)?;
-        child.validated_bytes =
-            u64::try_from(target.len()).map_err(|_| SessionStoreError::LimitOverflow)?;
-        child.validated_hasher = blake3::Hasher::new();
-        child.validated_hasher.update(target);
-        Ok(child)
+        Self::fork_mapped::<serde_json::Value, _>(
+            root,
+            parent_session_id,
+            child_session_id,
+            through_sequence,
+            Ok,
+        )
     }
 
     /// Typed fork primitive which can rewrite payload-owned session identity
@@ -558,28 +306,28 @@ impl SessionEventLog {
         T: DeserializeOwned + PartialEq + Serialize,
         Map: FnMut(T) -> Result<T, SessionStoreError>,
     {
-        let parent = Self::load_existing::<T>(root, parent_session_id)?;
-        Self::fork_mapped_loaded(
+        let parent = Self::existing_view(root, parent_session_id)?;
+        Self::fork_mapped_view(
             root,
             parent_session_id,
             child_session_id,
-            parent,
+            &parent,
             through_sequence,
             map,
         )
     }
 
-    /// Forks an already validated event vector without rereading the source log.
+    /// Copies a pinned parent prefix in bounded pages, resuming an identical child.
+    /// A failed write or mapping can leave a matching partial child for retry.
     ///
     /// # Errors
-    ///
-    /// Returns an error for invalid identities or cursors, mapper failures, an
-    /// incompatible existing target prefix, or durable write failures.
-    pub fn fork_mapped_loaded<T, Map>(
+    /// Rejects invalid identities/cursors, mapping failures, an incompatible
+    /// existing child prefix, or durable read/write errors.
+    pub fn fork_mapped_view<T, Map>(
         root: &Path,
         parent_session_id: &str,
         child_session_id: &str,
-        mut parent: Vec<EventEnvelope<T>>,
+        parent: &journal::JournalReadView,
         through_sequence: Option<SequenceId>,
         mut map: Map,
     ) -> Result<Self, SessionStoreError>
@@ -592,47 +340,63 @@ impl SessionEventLog {
         if parent_session_id == child_session_id {
             return Err(SessionStoreError::ForkIdentityConflict);
         }
-        if let Some(through_sequence) = through_sequence {
-            let through_index = usize::try_from(through_sequence.0)
-                .map_err(|_| SessionStoreError::LimitOverflow)?;
-            if parent.get(through_index).map(|event| event.sequence) != Some(through_sequence) {
-                return Err(SessionStoreError::ForkSourceCursorMissing);
-            }
-            parent.truncate(
-                through_index
-                    .checked_add(1)
-                    .ok_or(SessionStoreError::LimitOverflow)?,
-            );
-        } else {
-            parent.clear();
+        if through_sequence
+            .is_some_and(|through| parent.last_sequence().is_none_or(|tail| through > tail))
+        {
+            return Err(SessionStoreError::ForkSourceCursorMissing);
         }
-        let parent = parent
-            .into_iter()
-            .map(|envelope| {
-                Ok(EventEnvelope {
-                    schema_version: envelope.schema_version,
-                    sequence: envelope.sequence,
-                    event: map(envelope.event)?,
-                })
-            })
-            .collect::<Result<Vec<_>, SessionStoreError>>()?;
-
+        journal::JournalRoot::open(root)?.validate_view(parent_session_id, parent)?;
         let mut child = Self::open(root, child_session_id)?;
-        let existing = child.load::<T>()?;
-        if existing.len() > parent.len()
-            || existing
-                .iter()
-                .zip(&parent)
-                .any(|(child, parent)| child != parent)
+        let existing = child.read_view();
+        if existing
+            .last_sequence()
+            .is_some_and(|tail| through_sequence.is_none_or(|through| tail > through))
         {
             return Err(SessionStoreError::ForkTargetConflict);
         }
-        child.append_batch(
-            parent
-                .into_iter()
-                .skip(existing.len())
-                .map(|envelope| envelope.event),
-        )?;
+        let limits = SessionEventPageLimits {
+            max_page_events: 256,
+            ..SessionEventPageLimits::default()
+        };
+        let mut cursor = None;
+        let mut child_cursor = None;
+        let mut child_page = std::collections::VecDeque::new();
+        while cursor != through_sequence {
+            let page = parent.page::<T>(cursor, limits)?;
+            if page.events.is_empty() {
+                return Err(SessionStoreError::ForkSourceCursorMissing);
+            }
+            let mut append = Vec::new();
+            for envelope in page.events {
+                if through_sequence.is_none_or(|through| envelope.sequence > through) {
+                    break;
+                }
+                cursor = Some(envelope.sequence);
+                let mapped = EventEnvelope {
+                    schema_version: envelope.schema_version,
+                    sequence: envelope.sequence,
+                    event: map(envelope.event)?,
+                };
+                if existing
+                    .last_sequence()
+                    .is_some_and(|tail| mapped.sequence <= tail)
+                {
+                    if child_page.is_empty() {
+                        child_page.extend(existing.page::<T>(child_cursor, limits)?.events);
+                    }
+                    let found = child_page
+                        .pop_front()
+                        .ok_or(SessionStoreError::ForkTargetConflict)?;
+                    child_cursor = Some(found.sequence);
+                    if found != mapped {
+                        return Err(SessionStoreError::ForkTargetConflict);
+                    }
+                } else {
+                    append.push(mapped.event);
+                }
+            }
+            child.append_batch(append)?;
+        }
         Ok(child)
     }
 }
@@ -685,13 +449,24 @@ pub fn garbage_collect_empty_sessions(root: &Path) -> Result<Vec<String>, Sessio
                 }
                 Err(error) => return Err(error),
             };
-            let events = log.load::<serde_json::Value>()?;
-            let has_user_turn = events.iter().any(|event| {
-                matches!(
-                    event.event.get("type").and_then(serde_json::Value::as_str),
-                    Some("turn_started" | "user_message_accepted")
-                )
-            });
+            let view = log.read_view();
+            let mut cursor = None;
+            let has_user_turn = loop {
+                let page =
+                    view.page::<serde_json::Value>(cursor, SessionEventPageLimits::default())?;
+                if page.events.iter().any(|event| {
+                    matches!(
+                        event.event.get("type").and_then(serde_json::Value::as_str),
+                        Some("turn_started" | "user_message_accepted")
+                    )
+                }) {
+                    break true;
+                }
+                if !page.has_more {
+                    break false;
+                }
+                cursor = page.next_cursor;
+            };
             if has_user_turn || !directory_contains_only_event_log(&directory)? {
                 continue;
             }
@@ -704,7 +479,11 @@ pub fn garbage_collect_empty_sessions(root: &Path) -> Result<Vec<String>, Sessio
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(error) => return Err(error.into()),
             }
-            fs::remove_file(quarantine.join("events.jsonl"))?;
+            let journal = quarantine.join("journal");
+            for entry in fs::read_dir(&journal)? {
+                fs::remove_file(entry?.path())?;
+            }
+            fs::remove_dir(journal)?;
             fs::remove_dir(&quarantine)?;
             drop(log);
             removed.push(session_id);
@@ -716,11 +495,18 @@ pub fn garbage_collect_empty_sessions(root: &Path) -> Result<Vec<String>, Sessio
 #[cfg(unix)]
 fn directory_contains_only_event_log(directory: &Path) -> Result<bool, SessionStoreError> {
     let entries = fs::read_dir(directory)?.collect::<Result<Vec<_>, _>>()?;
-    if entries.len() != 1 || entries[0].file_name() != "events.jsonl" {
+    if entries.len() != 1
+        || entries[0].file_name() != "journal"
+        || !entries[0].file_type()?.is_dir()
+    {
         return Ok(false);
     }
-    let metadata = fs::symlink_metadata(entries[0].path())?;
-    Ok(metadata.file_type().is_file())
+    for entry in fs::read_dir(entries[0].path())? {
+        if !entry?.file_type()?.is_file() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// One denormalized row in the session listing/search index.
@@ -2403,65 +2189,12 @@ fn remove_if_exists(path: &Path) -> Result<(), SessionStoreError> {
     }
 }
 
-fn recover_and_validate(file: &File) -> Result<u64, SessionStoreError> {
-    let bytes = read_opened_file(file)?;
-    let mut next_sequence = 0_u64;
-    let mut record_start = 0_usize;
-
-    for record in bytes.split_inclusive(|byte| *byte == b'\n') {
-        let record_end = record_start
-            .checked_add(record.len())
-            .ok_or(SessionStoreError::LimitOverflow)?;
-        if record_end == bytes.len() && record.last() != Some(&b'\n') {
-            truncate_and_sync_event_file(
-                file,
-                u64::try_from(record_start).map_err(|_| SessionStoreError::LimitOverflow)?,
-            )?;
-            return Ok(next_sequence);
-        }
-
-        validate_recovered_event(&record[..record.len().saturating_sub(1)], next_sequence)?;
-        next_sequence = next_sequence
-            .checked_add(1)
-            .ok_or(SessionStoreError::SequenceOverflow)?;
-        record_start = record_end;
-    }
-    Ok(next_sequence)
-}
-
-fn validate_recovered_event(
-    record: &[u8],
-    expected_sequence: u64,
-) -> Result<(), SessionStoreError> {
-    if record.is_empty() {
-        return Err(SessionStoreError::CorruptEvent("blank JSONL record"));
-    }
-    let envelope: EventEnvelope<serde_json::Value> = serde_json::from_slice(record)?;
-    if envelope.schema_version != EVENT_SCHEMA_VERSION {
-        return Err(SessionStoreError::UnsupportedEventVersion(
-            envelope.schema_version,
-        ));
-    }
-    if envelope.sequence != SequenceId(expected_sequence) {
-        return Err(SessionStoreError::CorruptEvent(
-            "non-contiguous event sequence",
-        ));
-    }
-    Ok(())
-}
-
-fn append_event_bytes(file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
-    write_event_bytes(file, bytes)?;
-    file.flush()?;
-    sync_event_file(file)
-}
-
 fn truncate_and_sync_event_file(file: &File, len: u64) -> std::io::Result<()> {
     set_event_file_len(file, len)?;
     sync_event_file(file)
 }
 
-fn write_event_bytes(file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
+fn write_event_bytes(file: &mut impl Write, bytes: &[u8]) -> std::io::Result<()> {
     #[cfg(test)]
     if let Some(fail_after) = take_partial_append_write_fault() {
         file.write_all(&bytes[..bytes.len().min(fail_after)])?;
@@ -2485,6 +2218,19 @@ fn set_event_file_len(file: &File, len: u64) -> std::io::Result<()> {
 struct AppendFault {
     partial_write_after: Option<usize>,
     fail_truncate: bool,
+}
+
+#[cfg(test)]
+thread_local! {
+    static EVENT_READ_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn run_event_read_hook() {
+    let hook = EVENT_READ_HOOK.with(|hook| hook.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
 }
 
 #[cfg(test)]
@@ -2535,309 +2281,6 @@ fn take_append_truncate_fault() -> bool {
         fault.set(Some(state));
         fail
     })
-}
-
-fn load_events<T: DeserializeOwned>(
-    file: &File,
-) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
-    let bytes = read_opened_file(file)?;
-    parse_events_bounded(&bytes, usize::MAX)
-}
-
-fn load_events_bounded_with_size<T: DeserializeOwned>(
-    file: &File,
-    max_bytes: u64,
-    max_events: usize,
-) -> Result<(Vec<EventEnvelope<T>>, u64), SessionStoreError> {
-    let bytes = read_opened_file_bounded(file, max_bytes)?;
-    let byte_count = u64::try_from(bytes.len()).map_err(|_| SessionStoreError::LimitOverflow)?;
-    parse_events_bounded(&bytes, max_events).map(|events| (events, byte_count))
-}
-
-fn load_event_page_with_hook<T, Hook>(
-    file: &File,
-    after_sequence: Option<SequenceId>,
-    limits: SessionEventPageLimits,
-    after_snapshot: Hook,
-) -> Result<SessionEventPage<T>, SessionStoreError>
-where
-    T: DeserializeOwned,
-    Hook: FnOnce(),
-{
-    validate_page_limits(limits)?;
-    let snapshot = event_file_snapshot(file)?;
-    if snapshot.len() > limits.max_scan_bytes {
-        return Err(SessionStoreError::EventScanBytesExceeded {
-            max_bytes: limits.max_scan_bytes,
-        });
-    }
-    after_snapshot();
-    let result = scan_event_page(file, snapshot.len(), after_sequence, limits);
-    // Stability wins over any parse result. A writer can expose an incomplete
-    // tail while the scan is in progress; callers must never mistake that race
-    // for durable corruption in the captured session.
-    verify_event_file_snapshot(file, &snapshot)?;
-    result
-}
-
-fn load_event_tail_page_with_hook<T, Hook>(
-    file: &File,
-    limits: SessionEventPageLimits,
-    after_snapshot: Hook,
-) -> Result<SessionEventPage<T>, SessionStoreError>
-where
-    T: DeserializeOwned,
-    Hook: FnOnce(),
-{
-    validate_page_limits(limits)?;
-    let snapshot = event_file_snapshot(file)?;
-    if snapshot.len() > limits.max_scan_bytes {
-        return Err(SessionStoreError::EventScanBytesExceeded {
-            max_bytes: limits.max_scan_bytes,
-        });
-    }
-    after_snapshot();
-    let result = scan_event_tail_page(file, snapshot.len(), limits);
-    verify_event_file_snapshot(file, &snapshot)?;
-    result
-}
-
-fn validate_page_limits(limits: SessionEventPageLimits) -> Result<(), SessionStoreError> {
-    if limits.max_page_bytes == 0
-        || limits.max_page_events == 0
-        || limits.max_line_bytes == 0
-        || limits.max_scan_bytes == 0
-        || limits.max_scan_events == 0
-    {
-        return Err(SessionStoreError::InvalidEventPageLimits);
-    }
-    Ok(())
-}
-
-fn scan_event_page<T: DeserializeOwned>(
-    file: &File,
-    snapshot_bytes: u64,
-    after_sequence: Option<SequenceId>,
-    limits: SessionEventPageLimits,
-) -> Result<SessionEventPage<T>, SessionStoreError> {
-    let mut remaining = snapshot_bytes;
-    let mut reader = BufReader::new(file.take(snapshot_bytes));
-    let mut line = Vec::with_capacity(limits.max_line_bytes.min(16 * 1024));
-    let mut events = Vec::with_capacity(limits.max_page_events.min(2_000));
-    let mut page_bytes = 0_u64;
-    let mut total_events = 0_u64;
-
-    while let Some(line_bytes) = read_bounded_snapshot_line(
-        &mut reader,
-        &mut remaining,
-        limits.max_line_bytes,
-        &mut line,
-    )? {
-        if total_events >= limits.max_scan_events {
-            return Err(SessionStoreError::EventScanCountExceeded {
-                max_events: limits.max_scan_events,
-            });
-        }
-        let envelope: EventEnvelope<T> = serde_json::from_slice(&line)?;
-        if envelope.schema_version != EVENT_SCHEMA_VERSION {
-            return Err(SessionStoreError::UnsupportedEventVersion(
-                envelope.schema_version,
-            ));
-        }
-        if envelope.sequence != SequenceId(total_events) {
-            return Err(SessionStoreError::CorruptEvent(
-                "non-contiguous event sequence",
-            ));
-        }
-        total_events = total_events
-            .checked_add(1)
-            .ok_or(SessionStoreError::SequenceOverflow)?;
-
-        if after_sequence.is_none_or(|cursor| envelope.sequence > cursor)
-            && events.len() < limits.max_page_events
-        {
-            let next_page_bytes = page_bytes
-                .checked_add(line_bytes)
-                .ok_or(SessionStoreError::LimitOverflow)?;
-            if next_page_bytes <= limits.max_page_bytes {
-                page_bytes = next_page_bytes;
-                events.push(envelope);
-            } else if events.is_empty() {
-                return Err(SessionStoreError::EventPageByteLimitTooSmall {
-                    required_bytes: line_bytes,
-                    max_bytes: limits.max_page_bytes,
-                });
-            }
-        }
-    }
-
-    let tail_sequence = total_events.checked_sub(1).map(SequenceId);
-    if after_sequence.is_some_and(|cursor| tail_sequence.is_none_or(|tail| cursor > tail)) {
-        return Err(SessionStoreError::EventPageCursorAhead);
-    }
-    let first_page_sequence = events.first().map(|envelope| envelope.sequence);
-    let next_cursor = events
-        .last()
-        .map(|envelope| envelope.sequence)
-        .or(after_sequence);
-    let covered_events = next_cursor.map_or(0, |cursor| cursor.0.saturating_add(1));
-    let events_after_page = total_events
-        .checked_sub(covered_events)
-        .ok_or(SessionStoreError::EventPageCursorAhead)?;
-    let events_before_page = first_page_sequence.map_or(covered_events, |sequence| sequence.0);
-    Ok(SessionEventPage {
-        events,
-        page_bytes,
-        next_cursor,
-        has_more: events_after_page > 0,
-        events_before_page,
-        events_after_page,
-        total_events,
-        total_bytes: snapshot_bytes,
-        tail_sequence,
-    })
-}
-
-fn scan_event_tail_page<T: DeserializeOwned>(
-    file: &File,
-    snapshot_bytes: u64,
-    limits: SessionEventPageLimits,
-) -> Result<SessionEventPage<T>, SessionStoreError> {
-    let mut remaining = snapshot_bytes;
-    let mut reader = BufReader::new(file.take(snapshot_bytes));
-    let mut line = Vec::with_capacity(limits.max_line_bytes.min(16 * 1024));
-    let mut retained = VecDeque::with_capacity(limits.max_page_events.min(2_000));
-    let mut page_bytes = 0_u64;
-    let mut total_events = 0_u64;
-
-    while let Some(line_bytes) = read_bounded_snapshot_line(
-        &mut reader,
-        &mut remaining,
-        limits.max_line_bytes,
-        &mut line,
-    )? {
-        if total_events >= limits.max_scan_events {
-            return Err(SessionStoreError::EventScanCountExceeded {
-                max_events: limits.max_scan_events,
-            });
-        }
-        let envelope: EventEnvelope<T> = serde_json::from_slice(&line)?;
-        if envelope.schema_version != EVENT_SCHEMA_VERSION {
-            return Err(SessionStoreError::UnsupportedEventVersion(
-                envelope.schema_version,
-            ));
-        }
-        if envelope.sequence != SequenceId(total_events) {
-            return Err(SessionStoreError::CorruptEvent(
-                "non-contiguous event sequence",
-            ));
-        }
-        total_events = total_events
-            .checked_add(1)
-            .ok_or(SessionStoreError::SequenceOverflow)?;
-        if line_bytes > limits.max_page_bytes {
-            return Err(SessionStoreError::EventPageByteLimitTooSmall {
-                required_bytes: line_bytes,
-                max_bytes: limits.max_page_bytes,
-            });
-        }
-        while retained.len() >= limits.max_page_events
-            || page_bytes.saturating_add(line_bytes) > limits.max_page_bytes
-        {
-            let (_, removed_bytes) = retained
-                .pop_front()
-                .ok_or(SessionStoreError::LimitOverflow)?;
-            page_bytes = page_bytes
-                .checked_sub(removed_bytes)
-                .ok_or(SessionStoreError::LimitOverflow)?;
-        }
-        page_bytes = page_bytes
-            .checked_add(line_bytes)
-            .ok_or(SessionStoreError::LimitOverflow)?;
-        retained.push_back((envelope, line_bytes));
-    }
-
-    let events_before_page = retained
-        .front()
-        .map_or(total_events, |(envelope, _)| envelope.sequence.0);
-    let events = retained
-        .into_iter()
-        .map(|(envelope, _)| envelope)
-        .collect::<Vec<_>>();
-    let tail_sequence = total_events.checked_sub(1).map(SequenceId);
-    let next_cursor = events.last().map(|envelope| envelope.sequence);
-    Ok(SessionEventPage {
-        events,
-        page_bytes,
-        next_cursor,
-        has_more: false,
-        events_before_page,
-        events_after_page: 0,
-        total_events,
-        total_bytes: snapshot_bytes,
-        tail_sequence,
-    })
-}
-
-fn read_bounded_snapshot_line<R: BufRead>(
-    reader: &mut R,
-    remaining: &mut u64,
-    max_line_bytes: usize,
-    line: &mut Vec<u8>,
-) -> Result<Option<u64>, SessionStoreError> {
-    line.clear();
-    if *remaining == 0 {
-        return Ok(None);
-    }
-    loop {
-        let available = reader.fill_buf()?;
-        if available.is_empty() {
-            return Err(SessionStoreError::CorruptEvent(
-                "event log ended before its descriptor snapshot",
-            ));
-        }
-        let remaining_usize = usize::try_from(*remaining).unwrap_or(usize::MAX);
-        let available_len = available.len().min(remaining_usize);
-        let chunk = &available[..available_len];
-        if let Some(newline) = chunk.iter().position(|byte| *byte == b'\n') {
-            if line.len().saturating_add(newline) > max_line_bytes {
-                return Err(SessionStoreError::EventRecordTooLarge { max_line_bytes });
-            }
-            line.extend_from_slice(&chunk[..newline]);
-            let consumed = newline
-                .checked_add(1)
-                .ok_or(SessionStoreError::LimitOverflow)?;
-            reader.consume(consumed);
-            let consumed = u64::try_from(consumed).map_err(|_| SessionStoreError::LimitOverflow)?;
-            *remaining = remaining
-                .checked_sub(consumed)
-                .ok_or(SessionStoreError::LimitOverflow)?;
-            if line.is_empty() {
-                return Err(SessionStoreError::CorruptEvent("blank JSONL record"));
-            }
-            return Ok(Some(
-                u64::try_from(line.len())
-                    .map_err(|_| SessionStoreError::LimitOverflow)?
-                    .checked_add(1)
-                    .ok_or(SessionStoreError::LimitOverflow)?,
-            ));
-        }
-        if line.len().saturating_add(chunk.len()) > max_line_bytes {
-            return Err(SessionStoreError::EventRecordTooLarge { max_line_bytes });
-        }
-        line.extend_from_slice(chunk);
-        reader.consume(available_len);
-        let consumed =
-            u64::try_from(available_len).map_err(|_| SessionStoreError::LimitOverflow)?;
-        *remaining = remaining
-            .checked_sub(consumed)
-            .ok_or(SessionStoreError::LimitOverflow)?;
-        if *remaining == 0 {
-            return Err(SessionStoreError::CorruptEvent(
-                "incomplete final JSONL record",
-            ));
-        }
-    }
 }
 
 #[cfg(unix)]
@@ -2925,19 +2368,6 @@ fn verify_event_file_snapshot(
     Ok(())
 }
 
-fn parse_events<T: DeserializeOwned>(
-    bytes: &[u8],
-) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
-    parse_events_bounded(bytes, usize::MAX)
-}
-
-fn parse_events_bounded<T: DeserializeOwned>(
-    bytes: &[u8],
-    max_events: usize,
-) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
-    parse_events_bounded_from_sequence(bytes, max_events, 0)
-}
-
 fn parse_events_bounded_from_sequence<T: DeserializeOwned>(
     bytes: &[u8],
     max_events: usize,
@@ -2971,11 +2401,6 @@ fn parse_events_bounded_from_sequence<T: DeserializeOwned>(
         events.push(envelope);
     }
     Ok(events)
-}
-
-#[cfg(unix)]
-fn read_opened_file(file: &File) -> Result<Vec<u8>, SessionStoreError> {
-    read_opened_file_bounded(file, u64::MAX)
 }
 
 #[cfg(unix)]
@@ -3019,11 +2444,6 @@ fn read_opened_file_bounded(file: &File, max_bytes: u64) -> Result<Vec<u8>, Sess
 }
 
 #[cfg(not(unix))]
-fn read_opened_file(file: &File) -> Result<Vec<u8>, SessionStoreError> {
-    read_opened_file_bounded(file, u64::MAX)
-}
-
-#[cfg(not(unix))]
 fn read_opened_file_bounded(file: &File, max_bytes: u64) -> Result<Vec<u8>, SessionStoreError> {
     let mut file = file.try_clone()?;
     if file.metadata()?.len() > max_bytes {
@@ -3037,59 +2457,6 @@ fn read_opened_file_bounded(file: &File, max_bytes: u64) -> Result<Vec<u8>, Sess
         return Err(SessionStoreError::EventLogTooLarge { max_bytes });
     }
     Ok(bytes)
-}
-
-fn ensure_regular_file(file: &File) -> Result<(), SessionStoreError> {
-    if file.metadata()?.file_type().is_file() {
-        Ok(())
-    } else {
-        Err(SessionStoreError::UnsafeEventFileType)
-    }
-}
-
-#[cfg(unix)]
-fn open_session_file(root: &Path, session_id: &str) -> Result<File, SessionStoreError> {
-    fs::create_dir_all(root)?;
-    let root = File::open(root)?;
-    if !root.metadata()?.is_dir() {
-        return Err(SessionStoreError::UnsafeSessionDirectory);
-    }
-    let sessions = open_or_create_directory(&root, "sessions")?;
-    let session = open_or_create_directory(&sessions, session_id)?;
-    open_or_create_event_file(&session)
-}
-
-#[cfg(unix)]
-fn open_existing_session_file(root: &Path, session_id: &str) -> Result<File, SessionStoreError> {
-    let root = File::open(root)?;
-    if !root.metadata()?.is_dir() {
-        return Err(SessionStoreError::UnsafeSessionDirectory);
-    }
-    let flags = rustix::fs::OFlags::RDONLY
-        | rustix::fs::OFlags::DIRECTORY
-        | rustix::fs::OFlags::NONBLOCK
-        | rustix::fs::OFlags::CLOEXEC
-        | rustix::fs::OFlags::NOFOLLOW;
-    let sessions = File::from(
-        rustix::fs::openat(&root, "sessions", flags, rustix::fs::Mode::empty())
-            .map_err(std::io::Error::from)?,
-    );
-    let session = File::from(
-        rustix::fs::openat(&sessions, session_id, flags, rustix::fs::Mode::empty())
-            .map_err(std::io::Error::from)?,
-    );
-    let event_flags = rustix::fs::OFlags::RDONLY
-        | rustix::fs::OFlags::NONBLOCK
-        | rustix::fs::OFlags::CLOEXEC
-        | rustix::fs::OFlags::NOFOLLOW;
-    rustix::fs::openat(
-        &session,
-        "events.jsonl",
-        event_flags,
-        rustix::fs::Mode::empty(),
-    )
-    .map(File::from)
-    .map_err(|error| std::io::Error::from(error).into())
 }
 
 #[cfg(unix)]
@@ -3113,92 +2480,6 @@ fn open_or_create_directory(parent: &File, name: &str) -> Result<File, SessionSt
         }
         Err(source) => Err(std::io::Error::from(source).into()),
     }
-}
-
-#[cfg(unix)]
-fn open_or_create_event_file(parent: &File) -> Result<File, SessionStoreError> {
-    let flags = rustix::fs::OFlags::RDWR
-        | rustix::fs::OFlags::APPEND
-        | rustix::fs::OFlags::NONBLOCK
-        | rustix::fs::OFlags::CLOEXEC
-        | rustix::fs::OFlags::NOFOLLOW;
-    match rustix::fs::openat(parent, "events.jsonl", flags, rustix::fs::Mode::empty()) {
-        Ok(descriptor) => Ok(File::from(descriptor)),
-        Err(rustix::io::Errno::NOENT) => {
-            let created = rustix::fs::openat(
-                parent,
-                "events.jsonl",
-                flags | rustix::fs::OFlags::CREATE | rustix::fs::OFlags::EXCL,
-                rustix::fs::Mode::from_bits_truncate(0o600),
-            );
-            match created {
-                Ok(descriptor) => {
-                    let file = File::from(descriptor);
-                    sync_event_file(&file)?;
-                    sync_event_file(parent)?;
-                    Ok(file)
-                }
-                Err(rustix::io::Errno::EXIST) => {
-                    let descriptor = rustix::fs::openat(
-                        parent,
-                        "events.jsonl",
-                        flags,
-                        rustix::fs::Mode::empty(),
-                    )
-                    .map_err(std::io::Error::from)?;
-                    Ok(File::from(descriptor))
-                }
-                Err(source) => Err(std::io::Error::from(source).into()),
-            }
-        }
-        Err(source) => Err(std::io::Error::from(source).into()),
-    }
-}
-
-#[cfg(not(unix))]
-fn open_session_file_portable(
-    root: &Path,
-    directory: &Path,
-    path: &Path,
-) -> Result<File, SessionStoreError> {
-    create_checked_directory_portable(root)?;
-    create_checked_directory_portable(&root.join("sessions"))?;
-    create_checked_directory_portable(directory)?;
-    let file = match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_file() => {
-            OpenOptions::new().read(true).append(true).open(path)?
-        }
-        Ok(_) => return Err(SessionStoreError::UnsafeEventFileType),
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => OpenOptions::new()
-            .create_new(true)
-            .read(true)
-            .append(true)
-            .open(path)?,
-        Err(source) => return Err(source.into()),
-    };
-    sync_event_file(&file)?;
-    Ok(file)
-}
-
-#[cfg(not(unix))]
-fn open_existing_session_file_portable(
-    root: &Path,
-    session_id: &str,
-) -> Result<File, SessionStoreError> {
-    let sessions = root.join("sessions");
-    let directory = sessions.join(session_id);
-    let path = directory.join("events.jsonl");
-    for candidate in [root, sessions.as_path(), directory.as_path()] {
-        let metadata = fs::symlink_metadata(candidate)?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(SessionStoreError::UnsafeSessionDirectory);
-        }
-    }
-    let metadata = fs::symlink_metadata(&path)?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(SessionStoreError::UnsafeEventFileType);
-    }
-    File::open(path).map_err(Into::into)
 }
 
 #[cfg(not(unix))]
@@ -3256,6 +2537,9 @@ fn validate_session_id(value: &str) -> Result<(), SessionStoreError> {
 /// Session log/index failure without transcript contents in diagnostics.
 #[derive(Debug, Error)]
 pub enum SessionStoreError {
+    /// A session uses the unsupported lifetime-file journal layout.
+    #[error("unsupported legacy session journal layout; events.jsonl is not a segmented journal")]
+    UnsupportedJournalLayout,
     /// Session ids are path components and must use the restricted alphabet.
     #[error("session id is empty, too long, or contains unsafe characters")]
     InvalidSessionId,
@@ -3426,7 +2710,7 @@ mod tests {
         assert!(!root.path().join("sessions/session-removable").exists());
         assert!(
             root.path()
-                .join("sessions/session-active/events.jsonl")
+                .join("sessions/session-active/journal/active.jsonl")
                 .is_file()
         );
         assert!(
@@ -3436,7 +2720,7 @@ mod tests {
         );
         assert!(
             root.path()
-                .join("sessions/session-meaningful/events.jsonl")
+                .join("sessions/session-meaningful/journal/active.jsonl")
                 .is_file()
         );
         drop(active);
@@ -3469,9 +2753,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             events[..2]
         );
-        let parent_bytes = std::fs::read(root.path().join("sessions/parent/events.jsonl"))
+        let parent_bytes = std::fs::read(root.path().join("sessions/parent/journal/active.jsonl"))
             .unwrap_or_else(|error| panic!("parent bytes must read: {error}"));
-        let child_bytes = std::fs::read(child.path())
+        let child_bytes = std::fs::read(child.path().join("active.jsonl"))
             .unwrap_or_else(|error| panic!("child bytes must read: {error}"));
         let expected_prefix_len = parent_bytes
             .split_inclusive(|byte| *byte == b'\n')
@@ -3623,7 +2907,7 @@ mod tests {
         .unwrap_or_else(|error| panic!("event must append: {error}"));
         let mut file = OpenOptions::new()
             .append(true)
-            .open(log.path())
+            .open(log.path().join("active.jsonl"))
             .unwrap_or_else(|error| panic!("tail file must open: {error}"));
         file.write_all(br#"{"schema_version":1,"sequence":1,"event":{"kind":"assistant""#)
             .unwrap_or_else(|error| panic!("partial tail must write: {error}"));
@@ -3677,7 +2961,7 @@ mod tests {
             text: "durable prefix".to_owned(),
         })
         .unwrap_or_else(|error| panic!("prefix must append: {error}"));
-        let before = std::fs::read(log.path())
+        let before = std::fs::read(log.path().join("active.jsonl"))
             .unwrap_or_else(|error| panic!("prefix bytes must read: {error}"));
 
         let fault = install_append_fault(7, false);
@@ -3689,7 +2973,8 @@ mod tests {
             Err(SessionStoreError::Io(_))
         ));
         assert_eq!(
-            std::fs::read(log.path()).unwrap_or_else(|error| panic!("rolled-back bytes: {error}")),
+            std::fs::read(log.path().join("active.jsonl"))
+                .unwrap_or_else(|error| panic!("rolled-back bytes: {error}")),
             before
         );
         drop(fault);
@@ -3725,10 +3010,10 @@ mod tests {
             text: "complete".to_owned(),
         })
         .unwrap_or_else(|error| panic!("event must append: {error}"));
-        let path = log.path().to_path_buf();
+        let path = log.path().join("active.jsonl");
         let mut file = OpenOptions::new()
             .append(true)
-            .open(log.path())
+            .open(log.path().join("active.jsonl"))
             .unwrap_or_else(|error| panic!("tail file must open: {error}"));
         file.write_all(b"{\"schema_version\":1,\"sequence\":1,\"event\":\n")
             .unwrap_or_else(|error| panic!("malformed tail must write: {error}"));
@@ -3755,7 +3040,7 @@ mod tests {
         let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
         let log = SessionEventLog::open(root.path(), "unsupported-tail")
             .unwrap_or_else(|error| panic!("log must open: {error}"));
-        let path = log.path().to_path_buf();
+        let path = log.path().join("active.jsonl");
         let mut file = OpenOptions::new()
             .append(true)
             .open(&path)
@@ -3785,7 +3070,7 @@ mod tests {
         let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
         let log = SessionEventLog::open(root.path(), "non-contiguous-tail")
             .unwrap_or_else(|error| panic!("log must open: {error}"));
-        let path = log.path().to_path_buf();
+        let path = log.path().join("active.jsonl");
         let mut file = OpenOptions::new()
             .append(true)
             .open(&path)
@@ -3824,7 +3109,7 @@ mod tests {
         .unwrap_or_else(|error| panic!("event must append: {error}"));
         let mut file = OpenOptions::new()
             .append(true)
-            .open(log.path())
+            .open(log.path().join("active.jsonl"))
             .unwrap_or_else(|error| panic!("tail file must open: {error}"));
         file.write_all(b"{\"schema_version\":1,\"sequence\":1,\"event\":\n")
             .unwrap_or_else(|error| panic!("malformed middle must write: {error}"));
@@ -3898,7 +3183,7 @@ mod tests {
             appended
         );
 
-        let before = std::fs::read(log.path())
+        let before = std::fs::read(log.path().join("active.jsonl"))
             .unwrap_or_else(|error| panic!("batch log must read: {error}"));
         assert!(
             log.append_batch([
@@ -3915,14 +3200,14 @@ mod tests {
         );
         assert_eq!(log.next_sequence(), 2);
         assert_eq!(
-            std::fs::read(log.path())
+            std::fs::read(log.path().join("active.jsonl"))
                 .unwrap_or_else(|error| panic!("batch log must reread: {error}")),
             before
         );
     }
 
     #[test]
-    fn load_after_uses_an_exclusive_cursor_and_rejects_ahead() {
+    fn read_view_pages_use_an_exclusive_cursor_and_reject_ahead() {
         let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
         let mut log = SessionEventLog::open(root.path(), "suffix")
             .unwrap_or_else(|error| panic!("log must open: {error}"));
@@ -3934,49 +3219,67 @@ mod tests {
             .unwrap_or_else(|error| panic!("events must append: {error}"));
 
         assert_eq!(
-            log.load_after::<FixtureEvent>(None)
-                .unwrap_or_else(|error| panic!("full suffix must load: {error}")),
+            log.read_view()
+                .page::<FixtureEvent>(None, SessionEventPageLimits::default())
+                .map_or_else(
+                    |error| panic!("full suffix must load: {error}"),
+                    |page| page.events
+                ),
             appended
         );
         assert_eq!(
-            log.load_after::<FixtureEvent>(Some(SequenceId(1)))
-                .unwrap_or_else(|error| panic!("tail suffix must load: {error}")),
+            log.read_view()
+                .page::<FixtureEvent>(Some(SequenceId(1)), SessionEventPageLimits::default())
+                .map_or_else(
+                    |error| panic!("tail suffix must load: {error}"),
+                    |page| page.events
+                ),
             appended[2..]
         );
         assert!(
-            log.load_after::<FixtureEvent>(Some(SequenceId(3)))
-                .unwrap_or_else(|error| panic!("empty suffix must load: {error}"))
+            log.read_view()
+                .page::<FixtureEvent>(Some(SequenceId(3)), SessionEventPageLimits::default())
+                .map_or_else(
+                    |error| panic!("empty suffix must load: {error}"),
+                    |page| page.events
+                )
                 .is_empty()
         );
         assert!(matches!(
-            log.load_after::<FixtureEvent>(Some(SequenceId(4))),
+            log.read_view()
+                .page::<FixtureEvent>(Some(SequenceId(4)), SessionEventPageLimits::default())
+                .map(|page| page.events),
             Err(SessionStoreError::EventPageCursorAhead)
         ));
 
-        let original =
-            std::fs::read(log.path()).unwrap_or_else(|error| panic!("test log must read: {error}"));
+        let original = std::fs::read(log.path().join("active.jsonl"))
+            .unwrap_or_else(|error| panic!("test log must read: {error}"));
         let mut mutated = original.clone();
         mutated[0] = b'[';
-        std::fs::write(log.path(), &mutated)
+        std::fs::write(log.path().join("active.jsonl"), &mutated)
             .unwrap_or_else(|error| panic!("same-length mutation must succeed: {error}"));
         assert!(matches!(
-            log.load_after::<FixtureEvent>(Some(SequenceId(1))),
+            log.read_view()
+                .page::<FixtureEvent>(Some(SequenceId(1)), SessionEventPageLimits::default())
+                .map(|page| page.events),
             Err(SessionStoreError::CorruptEvent(
-                "event log changed after validation"
+                "pinned journal segment checksum changed"
             ))
         ));
-        std::fs::write(log.path(), original)
+        std::fs::write(log.path().join("active.jsonl"), original)
             .unwrap_or_else(|error| panic!("test log restore must succeed: {error}"));
 
         OpenOptions::new()
             .write(true)
-            .open(log.path())
+            .open(log.path().join("active.jsonl"))
             .and_then(|file| file.set_len(0))
             .unwrap_or_else(|error| panic!("test truncation must succeed: {error}"));
         assert!(matches!(
-            log.load_after::<FixtureEvent>(Some(SequenceId(1))),
+            log.read_view()
+                .page::<FixtureEvent>(Some(SequenceId(1)), SessionEventPageLimits::default())
+                .map(|page| page.events),
             Err(SessionStoreError::CorruptEvent(
-                "event log changed after validation"
+                "pinned journal segment length changed"
             ))
         ));
     }
@@ -4691,12 +3994,15 @@ mod tests {
         let log = SessionEventLog::open(root.path(), "future-fields")
             .unwrap_or_else(|error| panic!("log must open: {error}"));
         std::fs::write(
-            log.path(),
+            log.path().join("active.jsonl"),
             br#"{"schema_version":1,"sequence":"0","event":{"kind":"user","text":"hello","future_event_field":true},"future_envelope_field":{"nested":1}}
 "#,
         )
         .unwrap_or_else(|error| panic!("future fixture must write: {error}"));
-        let events = log
+        drop(log);
+        let reopened = SessionEventLog::open(root.path(), "future-fields")
+            .unwrap_or_else(|error| panic!("fixture reopen: {error}"));
+        let events = reopened
             .load::<FixtureEvent>()
             .unwrap_or_else(|error| panic!("additive fields must load: {error}"));
         assert_eq!(events[0].event.text, "hello");
@@ -4715,7 +4021,7 @@ mod tests {
             })
             .unwrap_or_else(|error| panic!("event must persist: {error}"));
         assert_eq!(persisted.sequence, SequenceId(0));
-        let raw = std::fs::read_to_string(log.path())
+        let raw = std::fs::read_to_string(log.path().join("active.jsonl"))
             .unwrap_or_else(|error| panic!("log must read: {error}"));
         assert!(raw.contains("\"sequence\":\"0\""));
         assert!(!raw.contains("\"sequence\":0"));
@@ -4732,7 +4038,7 @@ mod tests {
             .is_err()
         );
         assert_eq!(
-            std::fs::read_to_string(log.path())
+            std::fs::read_to_string(log.path().join("active.jsonl"))
                 .unwrap_or_else(|error| panic!("unchanged log must read: {error}")),
             before
         );
@@ -4757,14 +4063,14 @@ mod tests {
 
         let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
         let outside = tempdir().unwrap_or_else(|error| panic!("outside must create: {error}"));
-        std::fs::create_dir_all(root.path().join("sessions/file-link"))
+        std::fs::create_dir_all(root.path().join("sessions/file-link/journal"))
             .unwrap_or_else(|error| panic!("session directory must create: {error}"));
         let outside_log = outside.path().join("outside.jsonl");
         std::fs::write(&outside_log, b"outside")
             .unwrap_or_else(|error| panic!("outside log must write: {error}"));
         symlink(
             &outside_log,
-            root.path().join("sessions/file-link/events.jsonl"),
+            root.path().join("sessions/file-link/journal/active.jsonl"),
         )
         .unwrap_or_else(|error| panic!("event symlink must create: {error}"));
         assert!(SessionEventLog::open(root.path(), "file-link").is_err());
@@ -4777,7 +4083,7 @@ mod tests {
         symlink(outside.path(), root.path().join("sessions/directory-link"))
             .unwrap_or_else(|error| panic!("directory symlink must create: {error}"));
         assert!(SessionEventLog::open(root.path(), "directory-link").is_err());
-        assert!(!outside.path().join("events.jsonl").exists());
+        assert!(!outside.path().join("journal").exists());
     }
 
     #[cfg(unix)]
@@ -4799,12 +4105,12 @@ mod tests {
         use std::{process::Command, thread, time::Duration};
 
         let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
-        let directory = root.path().join("sessions/fifo");
+        let directory = root.path().join("sessions/fifo/journal");
         std::fs::create_dir_all(&directory)
             .unwrap_or_else(|error| panic!("session directory must create: {error}"));
         assert!(
             Command::new("mkfifo")
-                .arg(directory.join("events.jsonl"))
+                .arg(directory.join("active.jsonl"))
                 .status()
                 .unwrap_or_else(|error| panic!("mkfifo must run: {error}"))
                 .success()
@@ -5066,9 +4372,10 @@ mod tests {
             ),
             Err(SessionStoreError::EventCountTooLarge { max_events: 0 })
         ));
-        let expected_bytes = std::fs::metadata(root.path().join("sessions/bounded/events.jsonl"))
-            .unwrap_or_else(|error| panic!("event metadata: {error}"))
-            .len();
+        let expected_bytes =
+            std::fs::metadata(root.path().join("sessions/bounded/journal/active.jsonl"))
+                .unwrap_or_else(|error| panic!("event metadata: {error}"))
+                .len();
         let (events, descriptor_bytes) = SessionEventLog::load_existing_bounded_with_size::<
             FixtureEvent,
         >(root.path(), "bounded", 1024 * 1024, 10)
@@ -5222,7 +4529,7 @@ mod tests {
             text: format!("event-{index}"),
         }))
         .unwrap_or_else(|error| panic!("append events: {error}"));
-        let path = log.path().to_path_buf();
+        let path = log.path().join("active.jsonl");
         drop(log);
         let mut lines = std::fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("read fixture: {error}"))
@@ -5254,47 +4561,42 @@ mod tests {
     fn paged_history_rejects_concurrent_descriptor_mutation_before_returning_data() {
         let root = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
         let mut log = SessionEventLog::open(root.path(), "paged-mutated")
-            .unwrap_or_else(|error| panic!("open log: {error}"));
+            .unwrap_or_else(|error| panic!("open: {error}"));
         log.append(FixtureEvent {
             kind: "fixture".to_owned(),
             text: "first".to_owned(),
         })
-        .unwrap_or_else(|error| panic!("append event: {error}"));
-        let path = log.path().to_path_buf();
-        drop(log);
-        #[cfg(unix)]
-        let file = super::open_existing_session_file(root.path(), "paged-mutated")
-            .unwrap_or_else(|error| panic!("open descriptor: {error}"));
-        #[cfg(not(unix))]
-        let file = super::open_existing_session_file_portable(root.path(), "paged-mutated")
-            .unwrap_or_else(|error| panic!("open descriptor: {error}"));
-        let result = super::load_event_page_with_hook::<FixtureEvent, _>(
-            &file,
-            None,
-            SessionEventPageLimits::default(),
-            || {
-                let envelope = EventEnvelope {
-                    schema_version: super::EVENT_SCHEMA_VERSION,
-                    sequence: SequenceId(1),
-                    event: FixtureEvent {
-                        kind: "fixture".to_owned(),
-                        text: "concurrent".to_owned(),
-                    },
-                };
-                let mut append = std::fs::OpenOptions::new()
+        .unwrap_or_else(|error| panic!("append: {error}"));
+        log.append(FixtureEvent {
+            kind: "fixture".to_owned(),
+            text: "x".repeat(1024 * 1024),
+        })
+        .unwrap_or_else(|error| panic!("rotate: {error}"));
+        let sealed = std::fs::read_dir(log.path())
+            .unwrap_or_else(|error| panic!("directory: {error}"))
+            .map(|entry| {
+                entry
+                    .unwrap_or_else(|error| panic!("entry: {error}"))
+                    .path()
+            })
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "jsonl")
+                    && path.file_name().is_none_or(|name| name != "active.jsonl")
+            })
+            .unwrap_or_else(|| panic!("sealed segment"));
+        super::EVENT_READ_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                OpenOptions::new()
                     .append(true)
-                    .open(&path)
-                    .unwrap_or_else(|error| panic!("open append: {error}"));
-                serde_json::to_writer(&mut append, &envelope)
-                    .unwrap_or_else(|error| panic!("append JSON: {error}"));
-                append
-                    .write_all(b"\n")
-                    .unwrap_or_else(|error| panic!("append newline: {error}"));
-                append
-                    .sync_all()
-                    .unwrap_or_else(|error| panic!("sync append: {error}"));
-            },
-        );
+                    .open(sealed)
+                    .and_then(|mut file| file.write_all(b"changed"))
+                    .unwrap_or_else(|error| panic!("mutate opened segment: {error}"));
+            }));
+        });
+        let result = log
+            .read_view()
+            .page::<FixtureEvent>(None, SessionEventPageLimits::default());
         assert!(matches!(
             result,
             Err(SessionStoreError::EventFileChangedDuringRead)
@@ -5308,7 +4610,7 @@ mod tests {
         let log = SessionEventLog::open(root.path(), "linked")
             .unwrap_or_else(|error| panic!("open log: {error}"));
         let link = root.path().join("linked-copy.jsonl");
-        std::fs::hard_link(log.path(), &link)
+        std::fs::hard_link(log.path().join("active.jsonl"), &link)
             .unwrap_or_else(|error| panic!("hard link fixture: {error}"));
         drop(log);
         assert!(matches!(
@@ -5344,4 +4646,58 @@ mod tests {
     }
 
     use std::{fs::OpenOptions, io::Write};
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn paged_fork_resumes_partial_copy_without_a_whole_parent_batch() {
+        let root = tempfile::tempdir().expect("root");
+        let mut parent = SessionEventLog::open(root.path(), "paged-parent").expect("parent");
+        for start in (0..5000_u64).step_by(250) {
+            parent
+                .append_batch((start..start + 250).map(|sequence| {
+                    serde_json::json!({
+                        "sequence": sequence, "payload": "x".repeat(4096)
+                    })
+                }))
+                .expect("bounded source batch");
+        }
+        let view = parent.read_view();
+        assert!(view.total_bytes() > 16 * 1024 * 1024);
+        let interrupted = SessionEventLog::fork_mapped_view::<serde_json::Value, _>(
+            root.path(),
+            "paged-parent",
+            "paged-child",
+            &view,
+            Some(SequenceId(4999)),
+            |event| {
+                if event["sequence"] == 700 {
+                    Err(SessionStoreError::CorruptEvent("mapping interrupted"))
+                } else {
+                    Ok(event)
+                }
+            },
+        );
+        assert!(interrupted.is_err());
+        let partial = super::journal::JournalReadView::open_existing(root.path(), "paged-child")
+            .expect("partial view")
+            .expect("partial child");
+        assert_eq!(partial.last_sequence(), Some(SequenceId(511)));
+        let child = SessionEventLog::fork_mapped_view::<serde_json::Value, _>(
+            root.path(),
+            "paged-parent",
+            "paged-child",
+            &view,
+            Some(SequenceId(4999)),
+            Ok,
+        )
+        .expect("resume matching prefix");
+        assert_eq!(child.last_sequence(), Some(SequenceId(4999)));
+        assert_eq!(
+            child
+                .read_view()
+                .verify_all()
+                .expect("child integrity")
+                .events,
+            5000
+        );
+    }
 }
