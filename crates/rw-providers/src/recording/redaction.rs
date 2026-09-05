@@ -104,6 +104,43 @@ impl FixtureRedactor {
         self.redact(value)
     }
 
+    /// Redacts strings while bounding each owned replacement allocation.
+    /// The original string remains with its caller. At most two `max_bytes`
+    /// intermediate strings coexist; replacement markers follow the same ordered
+    /// exact-secret and strict-format rules as `redact_text`.
+    ///
+    /// # Errors
+    /// Rejects input or any replacement stage exceeding the caller's byte budget.
+    pub fn redact_text_bounded(&self, value: &str, max_bytes: usize) -> std::io::Result<String> {
+        if value.len() > max_bytes {
+            return Err(redaction_limit());
+        }
+        let secrets = self
+            .secrets
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut rendered = value.to_owned();
+        for secret in secrets.iter() {
+            if let Some(replaced) = limited_replacement(&rendered, max_bytes, || {
+                rendered
+                    .match_indices(secret.as_str())
+                    .map(|(start, value)| (start, start + value.len()))
+            })? {
+                rendered = replaced;
+            }
+        }
+        for pattern in strict_patterns() {
+            if let Some(replaced) = limited_replacement(&rendered, max_bytes, || {
+                pattern
+                    .find_iter(&rendered)
+                    .map(|found| (found.start(), found.end()))
+            })? {
+                rendered = replaced;
+            }
+        }
+        Ok(rendered)
+    }
+
     /// Redacts exact registered credential bytes before a transport chunk is
     /// encoded for an untrusted boundary. Callers retain cross-chunk overlap.
     #[must_use]
@@ -210,12 +247,20 @@ pub(super) fn replace_bytes(input: &[u8], needle: &[u8], replacement: &[u8]) -> 
 /// heuristics are deliberately excluded so ordinary hashes, base64 payloads,
 /// and minified source remain intact at the model-context boundary.
 pub(super) fn redact_strict_key_formats(value: &str) -> String {
+    strict_patterns()
+        .iter()
+        .fold(value.to_owned(), |redacted, pattern| {
+            pattern.replace_all(&redacted, "[REDACTED]").into_owned()
+        })
+}
+
+fn strict_patterns() -> &'static [regex::Regex] {
     use std::sync::OnceLock;
 
     use regex::Regex;
 
     static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
-    let patterns = PATTERNS.get_or_init(|| {
+    PATTERNS.get_or_init(|| {
         [
             // PEM private keys, including PKCS#1, PKCS#8, EC, and OpenSSH.
             r"(?s)-----BEGIN [^-\r\n]*PRIVATE KEY-----.*?-----END [^-\r\n]*PRIVATE KEY-----",
@@ -233,14 +278,82 @@ pub(super) fn redact_strict_key_formats(value: &str) -> String {
         .into_iter()
         .map(|pattern| Regex::new(pattern).unwrap_or_else(|_| unreachable!("static regex")))
         .collect()
-    });
-    patterns.iter().fold(value.to_owned(), |redacted, pattern| {
-        pattern.replace_all(&redacted, "[REDACTED]").into_owned()
     })
+}
+
+fn redaction_limit() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "redacted string exceeds byte budget",
+    )
+}
+
+fn limited_replacement<F, I>(
+    value: &str,
+    limit: usize,
+    ranges: F,
+) -> std::io::Result<Option<String>>
+where
+    F: Fn() -> I,
+    I: Iterator<Item = (usize, usize)>,
+{
+    let mut any = false;
+    let length = ranges()
+        .try_fold(value.len(), |length, (start, end)| {
+            any = true;
+            length
+                .checked_sub(end.checked_sub(start)?)?
+                .checked_add("[REDACTED]".len())
+        })
+        .filter(|length| *length <= limit)
+        .ok_or_else(redaction_limit)?;
+    if !any {
+        return Ok(None);
+    }
+    let mut output = String::with_capacity(length);
+    let mut offset = 0;
+    for (start, end) in ranges() {
+        output.push_str(&value[offset..start]);
+        output.push_str("[REDACTED]");
+        offset = end;
+    }
+    output.push_str(&value[offset..]);
+    Ok(Some(output))
 }
 
 impl crate::KnownSecretRegistrar for FixtureRedactor {
     fn register(&self, secret: &crate::Secret) {
         self.register_secret(secret);
+    }
+}
+
+#[cfg(test)]
+mod bounded_tests {
+    use super::FixtureRedactor;
+    #[test]
+    fn bounded_text_matches_ordered_semantics_and_rejects_expansion_before_allocating() {
+        let redactor = FixtureRedactor::new(["x".to_owned(), "E".to_owned()]);
+        assert!(
+            redactor
+                .redact_text_bounded(&"x".repeat(1024), 1024)
+                .is_err()
+        );
+        let short = "hello x and E";
+        assert_eq!(
+            redactor.redact_text_bounded(short, 4096).ok(),
+            Some(redactor.redact_text(short))
+        );
+        let key = "sk-012345678901234567890123456789";
+        assert_eq!(
+            FixtureRedactor::default()
+                .redact_text_bounded(key, 1024)
+                .ok(),
+            Some("[REDACTED]".into())
+        );
+        assert!(
+            FixtureRedactor::default()
+                .redact_text_bounded("four", 3)
+                .is_err()
+        );
     }
 }
