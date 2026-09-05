@@ -44,6 +44,14 @@ fn main() {
         let args = [OsString::from("--probe-child")];
         let plan =
             shell_launch_plan(&policy, &executable, &executable, &args).expect("launch plan");
+        #[cfg(target_os = "linux")]
+        assert!(
+            !plan
+                .args
+                .iter()
+                .any(|arg| arg == "--rw-macos-worker" || arg == "-D"),
+            "Linux worker arguments must remain Linux-native"
+        );
         let output = Command::new(&plan.program)
             .args(&plan.args)
             .output()

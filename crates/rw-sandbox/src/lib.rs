@@ -690,17 +690,6 @@ pub fn shell_launch_plan(
         let (helper_executable, helper_pin) = pin_linux_helper(helper_executable)?;
         let encoded = serde_json::to_os_string(policy)?;
         let mut args = vec![OsString::from(HELPER_ARG), encoded];
-        if !policy.allow_process_creation {
-            let helper = std::fs::canonicalize(helper_executable).map_err(|error| {
-                SandboxError::Unavailable(format!("invalid macOS worker helper: {error}"))
-            })?;
-            args.push(OsString::from("-D"));
-            let mut definition = OsString::from("RW_WORKER_HELPER=");
-            definition.push(helper.as_os_str());
-            args.push(definition);
-            args.push(helper.into_os_string());
-            args.push(OsString::from("--rw-macos-worker"));
-        }
         args.push(shell.as_os_str().to_owned());
         args.extend_from_slice(shell_args);
         if let NetworkPolicy::PolicyProxy {
