@@ -14,6 +14,8 @@ pub struct ConversationPage {
     pub range: Range<u64>,
     pub turns: Vec<Turn>,
     pub sources: Vec<ConversationSource>,
+    /// Latest mutations only for returned rows; aligned with `turns` and `sources`.
+    pub context_actions: Vec<Option<crate::engine::projection::ContextSurgeryAction>>,
     pub serialized_bytes: u64,
     pub decoded_bytes: u64,
     pub has_more: bool,
@@ -93,6 +95,12 @@ impl CanonicalHistory {
             .clone()
             .map(|ordinal| self.turn_source(ordinal))
             .collect::<Result<Vec<_>, _>>()?;
+        let context_actions = selected
+            .clone()
+            .map(|ordinal| {
+                self.context_action(&rw_types::ContextItemId(format!("conversation:{ordinal}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(ConversationPage {
             serialized_bytes: self.window_bytes(selected.clone())?,
             decoded_bytes: self.window_decoded_bytes(selected.clone())?,
@@ -100,6 +108,7 @@ impl CanonicalHistory {
             range: selected,
             turns,
             sources,
+            context_actions,
         })
     }
 }

@@ -50,6 +50,11 @@ impl CanonicalRecovery {
                 };
                 let page = read.page(namespace, scope, Some(after), 64, 1024 * 1024)?;
                 for row in page.rows {
+                    if namespace == CONTEXT_ACTIONS {
+                        mutations.push(RecoveryMutation::Delete(
+                            super::context_state::revision_key(&row)?,
+                        ));
+                    }
                     mutations.push(RecoveryMutation::Delete(row.key));
                 }
                 if page.has_more {

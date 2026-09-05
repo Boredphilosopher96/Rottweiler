@@ -8,6 +8,7 @@ pub use accounting::{
 };
 mod capability;
 pub use capability::{SessionHistory, SessionHistoryView};
+mod context_state;
 mod control;
 pub use control::{
     MAX_CONTROL_SOURCE_BYTES, RecoveredMessage, RecoveredModelSelection, RecoveryBootstrap,
@@ -86,3 +87,6 @@ mod page_tests;
 
 #[cfg(test)]
 mod model_tests;
+
+#[cfg(test)]
+mod context_state_tests;

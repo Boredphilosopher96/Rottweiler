@@ -4,10 +4,10 @@ use super::{
     projector::{BatchRows, key},
     state::{
         ACCOUNTING, ACTIVE_ASSISTANT, ACTIVE_TOOL_LIFECYCLE, ACTIVE_TOOL_RESULTS, AcceptedSource,
-        ActiveSource, ActiveTurn, BOUNDARIES, Boundary, CONTEXT_ACTIONS, CONVERSATION,
-        ConversationCut, ConversationSource, MAX_QUESTIONS, MAX_QUEUED, Maintenance,
-        PRUNED_OUTPUTS, QuestionSource, QueuedSource, RecoveryHead, RewindPhase, SOURCE_ORDINAL,
-        SourceTotals, ToolLifecycleSource, ToolStartIdentity, TurnSourceKind,
+        ActiveSource, ActiveTurn, BOUNDARIES, Boundary, CONVERSATION, ConversationCut,
+        ConversationSource, MAX_QUESTIONS, MAX_QUEUED, Maintenance, PRUNED_OUTPUTS, QuestionSource,
+        QueuedSource, RecoveryHead, RewindPhase, SOURCE_ORDINAL, SourceTotals, ToolLifecycleSource,
+        ToolStartIdentity, TurnSourceKind,
     },
 };
 use crate::engine::{
@@ -542,10 +542,7 @@ fn context_change(
         .as_ref()
         .unwrap_or(&head.conversation)
         .generation;
-    rows.put(
-        key(CONTEXT_ACTIONS, generation, sequence.0),
-        &(item, pinned, effective),
-    )?;
+    super::context_state::apply(rows, generation, sequence, item, pinned, effective)?;
     head.context_cut = sequence.0;
     Ok(())
 }
