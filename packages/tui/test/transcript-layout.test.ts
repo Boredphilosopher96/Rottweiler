@@ -181,7 +181,7 @@ describe("retained transcript layout", () => {
           text,
           thinking: "",
           citations: [],
-          toolCallIds: [],
+          toolInvocationIds: [],
           finished: null,
         }),
       },
@@ -218,7 +218,7 @@ describe("retained transcript layout", () => {
         text: "",
         thinking: "",
         citations: [],
-        toolCallIds: [],
+        toolInvocationIds: [],
         finished: null,
       }),
     }
@@ -373,7 +373,7 @@ conversationItem(2, "user", "FOLLOW_UP_QUESTION_START\nCan you continue?")
         text: lines.join("\n"),
         thinking: "",
         citations: [],
-        toolCallIds: [],
+        toolInvocationIds: [],
         finished: null,
       }),
     }

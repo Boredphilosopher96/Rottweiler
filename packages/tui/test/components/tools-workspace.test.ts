@@ -124,14 +124,14 @@ describe("tools-workspace components", () => {
     await setup.renderOnce()
     const bottomBeforeGrowth = workspace.activityScroller.scrollTop
     workspace.update(toolsWorkspaceModel(initial.map((row, index) =>
-      index === 5 ? toolsActivity(row.toolCallId, 8, "running", 1) : row)))
+      index === 5 ? toolsActivity(row.invocationId, 8, "running", 1) : row)))
     await setup.renderOnce()
     expect(workspace.activityScroller.scrollTop).toBeGreaterThanOrEqual(bottomBeforeGrowth)
 
     workspace.activityScroller.scrollTo(0)
     await setup.renderOnce()
     workspace.update(toolsWorkspaceModel(initial.map((row, index) =>
-      index === 4 ? toolsActivity(row.toolCallId, 8, "running", 1) : row)))
+      index === 4 ? toolsActivity(row.invocationId, 8, "running", 1) : row)))
     await setup.renderOnce()
     expect(workspace.activityScroller.scrollTop).toBe(0)
   })

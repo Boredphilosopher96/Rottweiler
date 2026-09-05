@@ -50,7 +50,7 @@ describe("live-tools components", () => {
           text: "",
           thinking: "Inspecting the workspace",
           citations: [],
-          toolCallIds: [],
+          toolInvocationIds: [],
           finished: null,
         }),
       } satisfies RottweilerState
@@ -270,7 +270,7 @@ describe("live-tools components", () => {
     const setup = await createTestRenderer({ width: 90, height: 24, useThread: false })
     renderer = setup.renderer
     const tool = {
-      toolCallId: "full-output",
+      toolCallId: "shared-provider-call",
       invocationId: "full-output",
       turnId: "1",
       name: "read",
@@ -288,15 +288,19 @@ describe("live-tools components", () => {
       callIndex: 0,
       timing: { kind: "unknown" as const },
     }
+    const sibling = {
+      ...tool, invocationId: "other-output", callIndex: 1,
+      args: { path: "logs/other.log" }, chunks: toolOutputBuffer([{ stream: "stdout", chunk: "other invocation" }]),
+    }
     const initial: RottweilerState = {
       ...createInitialState(),
-      tools: { [tool.toolCallId]: tool },
+      tools: { [tool.invocationId]: tool, [sibling.invocationId]: sibling },
       streamingTail: createStreamingTail({
         turnId: tool.turnId,
         text: "",
         thinking: "",
         citations: [],
-        toolCallIds: [tool.toolCallId],
+        toolInvocationIds: [tool.invocationId, sibling.invocationId],
         finished: null,
       }),
     }
@@ -321,6 +325,8 @@ describe("live-tools components", () => {
     await setup.renderOnce()
 
     expect(app.outputViewer.visible).toBeTrue()
+    expect(app.outputViewer.invocationId).toBe("full-output")
+    expect(app.outputViewer.body.plainText).not.toContain("other invocation")
     expect(app.outputViewer.header.plainText).toBe("Read file · logs/full-output.log")
     expect(app.outputViewer.body.plainText).toBe(toolOutputContent(tool))
     expect(app.outputViewer.body.plainText).toContain("line-1")
@@ -334,7 +340,7 @@ describe("live-tools components", () => {
     }
     const streaming: RottweilerState = {
       ...initial,
-      tools: { [streamingTool.toolCallId]: streamingTool },
+      tools: { ...initial.tools, [streamingTool.invocationId]: streamingTool },
     }
     app.setState(streaming)
     await setup.renderOnce()
@@ -357,7 +363,7 @@ describe("live-tools components", () => {
     app.setState({
       ...streaming,
       tools: {},
-      streamingTail: createStreamingTail({ ...streaming.streamingTail!, toolCallIds: [] }),
+      streamingTail: createStreamingTail({ ...streaming.streamingTail!, toolInvocationIds: [] }),
     })
     await setup.renderOnce()
     expect(app.outputViewer.visible).toBeFalse()

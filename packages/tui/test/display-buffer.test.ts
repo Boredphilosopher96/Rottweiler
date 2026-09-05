@@ -193,16 +193,16 @@ describe("bounded immutable display streams", () => {
     const running = reduce(createInitialState(), {
       type: "tool_output_delta", meta: meta(1), turn_id: "1", tool_call_id: "stream", invocation_id: "stream-1", stream: "stdout", chunk: "live prefix",
     })
-    const before = running.tools.stream
+    const before = running.tools["stream-1"]
     if (before === undefined) throw new Error("expected running projection")
     before.chunks.read()
     const finished = reduce(running, {
       type: "tool_call_finished", presentation: null, meta: meta(2), turn_id: "1", tool_call_id: "stream", invocation_id: "stream-1",
       output: { type: "text", text: "authoritative final output" }, is_error: false, call_index: 0,
     })
-    expect(finished.tools.stream?.chunks).toBe(EMPTY_TOOL_OUTPUT)
+    expect(finished.tools["stream-1"]?.chunks).toBe(EMPTY_TOOL_OUTPUT)
     expect(before.chunks.read().plain).toBe("live prefix")
-    expect(finished.tools.stream?.output).toEqual({ type: "text", text: "authoritative final output" })
+    expect(finished.tools["stream-1"]?.output).toEqual({ type: "text", text: "authoritative final output" })
   })
 
   test("text and reasoning obey independent display budgets with exact omitted-byte metadata", () => {

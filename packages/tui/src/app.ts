@@ -147,7 +147,7 @@ export class RottweilerApp extends BoxRenderable {
   #activeSubagentReadOnly = false
   #commandCatalogTruncationNotified = false
   #projectionErrors: Partial<Record<ProjectionKind, string>> = {}
-  #outputViewerToolCallId: string | null = null
+  #outputViewerInvocationId: string | null = null
   #primaryView: PrimaryView = "conversation"
   #toolsElapsedTimer: ReturnType<typeof setInterval> | null = null
   #reviewOpen = false
@@ -549,8 +549,8 @@ export class RottweilerApp extends BoxRenderable {
       submission: this.#submission, pickerController: this.#pickerController,
       sessions: this.#sessions, pickerContent: this.#pickerContent,
       get width() { return app.width || app.ctx.width }, get height() { return app.height || app.ctx.height },
-      get outputViewerToolCallId() { return app.#outputViewerToolCallId },
-      set outputViewerToolCallId(value) { app.#outputViewerToolCallId = value },
+      get outputViewerInvocationId() { return app.#outputViewerInvocationId },
+      set outputViewerInvocationId(value) { app.#outputViewerInvocationId = value },
       openToolOutput: id => this.#openToolOutput(id), openChangedFileDiff: path => this.#openChangedFileDiff(path),
       closeReview: () => this.#closeReview(), resizeReviewPanel: (width, height) => this.#resizeReviewPanel(width, height),
       projectError: (code, message, retryable) => this.#projectClientError(code, message, retryable),
@@ -656,7 +656,7 @@ export class RottweilerApp extends BoxRenderable {
       this.#providers.catalogSettled()
       this.#projectionErrors = {}
       this.#pendingReviewSelection = null
-      this.#outputViewerToolCallId = null
+      this.#outputViewerInvocationId = null
       this.#reviewOpen = false
       this.#sessions.reset()
       this.#submission.reset()
@@ -957,14 +957,14 @@ export class RottweilerApp extends BoxRenderable {
       this.transcript.setHistory(this.#history.controller.snapshot)
     }
     this.#updateToolsWorkspace(presented)
-    const viewedTool = this.#outputViewerToolCallId === null
+    const viewedTool = this.#outputViewerInvocationId === null
       ? undefined
-      : presented.tools[this.#outputViewerToolCallId]
-    if (this.#outputViewerToolCallId !== null && viewedTool === undefined) {
-      this.#outputViewerToolCallId = null
+      : presented.tools[this.#outputViewerInvocationId]
+    if (this.#outputViewerInvocationId !== null && viewedTool === undefined) {
+      this.#outputViewerInvocationId = null
       this.outputViewer.closePresentation()
     } else if (viewedTool !== undefined) {
-      if (this.outputViewer.toolCallId === viewedTool.toolCallId) {
+      if (this.outputViewer.invocationId === viewedTool.invocationId) {
         this.outputViewer.update(viewedTool)
       } else {
         this.outputViewer.open(viewedTool)
@@ -1179,11 +1179,11 @@ export class RottweilerApp extends BoxRenderable {
     this.#toolsElapsedTimer = null
   }
 
-  #openToolOutput(toolCallId: string): void {
-    const tool = this.#children.presentedState().tools[toolCallId]
+  #openToolOutput(invocationId: string): void {
+    const tool = this.#children.presentedState().tools[invocationId]
     if (tool === undefined) return
     this.#document?.close()
-    this.#outputViewerToolCallId = toolCallId
+    this.#outputViewerInvocationId = invocationId
     this.outputViewer.open(tool)
     this.setState(this.#state)
     this.outputViewer.focusPresentation()
@@ -1370,7 +1370,7 @@ export class RottweilerApp extends BoxRenderable {
   #closeOutputViewer(): void {
     if (!this.outputViewer.visible) return
     this.#document?.close()
-    this.#outputViewerToolCallId = null
+    this.#outputViewerInvocationId = null
     this.outputViewer.closePresentation()
     this.setState(this.#state)
     this.#input.focusForInputMode()

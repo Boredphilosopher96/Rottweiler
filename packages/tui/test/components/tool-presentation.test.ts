@@ -66,13 +66,13 @@ describe("tool-presentation components", () => {
     const initial: RottweilerState = {
       ...createInitialState(),
       workspaceRoots: { generation: "1", effectiveFromTurn: "0", roots: ["/workspace"] },
-      tools: { [bash.toolCallId]: bash, [edit.toolCallId]: edit },
+      tools: { [bash.invocationId]: bash, [edit.invocationId]: edit },
       streamingTail: createStreamingTail({
         turnId: "1",
         text: "",
         thinking: "",
         citations: [],
-        toolCallIds: [bash.toolCallId, edit.toolCallId],
+        toolInvocationIds: [bash.invocationId, edit.invocationId],
         finished: null,
       }),
     }
@@ -119,7 +119,7 @@ describe("tool-presentation components", () => {
       ...initial,
       tools: {
         ...initial.tools,
-        [bash.toolCallId]: {
+        [bash.invocationId]: {
           ...bash,
           chunks: toolOutputBuffer([{ stream: "stdout" as const, chunk: "checking\n" }]),
         },
@@ -279,13 +279,13 @@ describe("tool-presentation components", () => {
       historyReader: emptyHistoryReader,
       initialState: {
         ...createInitialState(),
-        tools: { [diagnostics.toolCallId]: diagnostics },
+        tools: { [diagnostics.invocationId]: diagnostics },
         streamingTail: createStreamingTail({
           turnId: "1",
           text: "",
           thinking: "",
           citations: [],
-          toolCallIds: [diagnostics.toolCallId],
+          toolInvocationIds: [diagnostics.invocationId],
           finished: null,
         }),
       },

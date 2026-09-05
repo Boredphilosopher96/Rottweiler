@@ -62,7 +62,7 @@ export function updateTail(
         text: "",
         thinking: "",
         citations: [],
-        toolCallIds: [],
+        toolInvocationIds: [],
         finished: null,
       })
   return update(tail)
@@ -71,12 +71,12 @@ export function updateTail(
 export function attachToolToTail(
   current: StreamingTail | null,
   turnId: string,
-  toolCallId: string,
+  invocationId: string,
 ): StreamingTail {
   return updateTail(current, turnId, (tail) => ({
     ...tail,
-    toolCallIds: tail.toolCallIds.includes(toolCallId)
-      ? tail.toolCallIds
-      : [...tail.toolCallIds, toolCallId],
+    toolInvocationIds: tail.toolInvocationIds.includes(invocationId)
+      ? tail.toolInvocationIds
+      : [...tail.toolInvocationIds, invocationId],
   }))
 }

@@ -130,7 +130,7 @@ describe("approvals components", () => {
     }
     const app = createRottweilerApp(renderer, {
       historyReader: emptyHistoryReader,
-      initialState: { ...createInitialState(), tools: { [tool.toolCallId]: tool } },
+      initialState: { ...createInitialState(), tools: { [tool.invocationId]: tool } },
       onCommand(command) {
         commands.push(command)
       },
@@ -221,7 +221,7 @@ describe("approvals components", () => {
       initialState: {
         ...createInitialState(),
         permissions: permissionState("strict"),
-        tools: { [tool.toolCallId]: tool },
+        tools: { [tool.invocationId]: tool },
       },
       onCommand(command) {
         commands.push(command)

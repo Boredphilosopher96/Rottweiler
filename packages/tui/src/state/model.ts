@@ -83,7 +83,7 @@ export interface StreamingTail {
     readonly thinking: { readonly bytes: number; readonly omittedBytes: number }
   }
   readonly citations: readonly StreamingCitation[]
-  readonly toolCallIds: readonly string[]
+  readonly toolInvocationIds: readonly string[]
   readonly finished: {
     readonly status: TurnStatus
     readonly usage: Usage

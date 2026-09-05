@@ -19,7 +19,7 @@ import {
 import type { RottweilerTheme } from "../theme"
 
 export interface ToolsWorkspaceOptions {
-  readonly onOpenToolOutput: (toolCallId: string) => void
+  readonly onOpenToolOutput: (invocationId: string) => void
 }
 
 export class ToolActivityRowRenderable extends BoxRenderable {
@@ -33,13 +33,13 @@ export class ToolActivityRowRenderable extends BoxRenderable {
   #theme: RottweilerTheme
   #availableWidth = 20
   #headerSignature = ""
-  #onOpenToolOutput: (toolCallId: string) => void
+  #onOpenToolOutput: (invocationId: string) => void
 
   constructor(
     ctx: RenderContext,
     theme: RottweilerTheme,
     model: ActivityPresentation,
-    onOpenToolOutput: (toolCallId: string) => void,
+    onOpenToolOutput: (invocationId: string) => void,
   ) {
     super(ctx, {
       id: model.key,
@@ -145,7 +145,7 @@ export class ToolActivityRowRenderable extends BoxRenderable {
 
   openOutput(): boolean {
     if (this.#model.kind !== "tool" || !this.#model.canOpenRetainedOutput) return false
-    this.#onOpenToolOutput(this.#model.toolCallId)
+    this.#onOpenToolOutput(this.#model.invocationId)
     return true
   }
 

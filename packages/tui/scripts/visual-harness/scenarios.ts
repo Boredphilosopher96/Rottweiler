@@ -31,7 +31,7 @@ export function scenarioState(scenario: VisualScenario): RottweilerState {
       text: "I need permission before running the focused regression suite.",
       thinking: "The command executes workspace code, so it must cross the approval boundary.",
       citations: [],
-      toolCallIds: [approval.toolCallId],
+      toolInvocationIds: [approval.toolCallId],
       finished: null,
     }),
     tools: { [approval.toolCallId]: approval },
@@ -264,7 +264,7 @@ function toolsState(): RottweilerState {
       text: "",
       thinking: "",
       citations: [],
-      toolCallIds: tools.map((tool) => tool.toolCallId),
+      toolInvocationIds: tools.map((tool) => tool.toolCallId),
       finished: null,
     }),
     turns: {
@@ -330,7 +330,7 @@ function conversationState(): RottweilerState {
       text: "## What changed\n\nThe stream resumes from the last **durable** sequence, not the last delivered frame.\n\n1. `cursor.rs` tracks `durable_seq` independently\n2. `sse.ts` replays from that sequence on reattach\n3. `app.ts` drops the transport-ack fast path",
       thinking: "Two acknowledgements exist here: the transport ack and\nthe durable sequence ack. The client advances its cursor\non the transport ack, so a reconnect replays from a\nsequence the UI already consumed. Keep them separate.",
       citations: [{ uri: "protocol/session-log.md", title: "Reconnect contract" }],
-      toolCallIds: [edit.toolCallId, tests.toolCallId, read.toolCallId],
+      toolInvocationIds: [edit.toolCallId, tests.toolCallId, read.toolCallId],
       finished: null,
     }),
     tools: {

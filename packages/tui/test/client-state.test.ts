@@ -69,7 +69,7 @@ describe("client-owned renderer handoff", () => {
       output: null, isError: null, callIndex: 0, timing: { kind: "unknown" },
     }
     const initial = { ...createInitialState(), tools: { one: tool }, streamingTail: createStreamingTail({
-      turnId: "turn", text: "", thinking: "reasoning", citations: [], toolCallIds: ["one"], finished: null,
+      turnId: "turn", text: "", thinking: "reasoning", citations: [], toolInvocationIds: ["one"], finished: null,
     }) }
     const original = createRottweilerApp(renderer, { historyReader: emptyHistoryReader, initialState: initial })
     renderer.root.add(original)

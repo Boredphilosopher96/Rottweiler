@@ -42,7 +42,7 @@ export type ActivityOutputPresentation =
 export interface ToolActivityPresentation {
   readonly kind: "tool"
   readonly key: `tool:${string}`
-  readonly toolCallId: string
+  readonly invocationId: string
   readonly name: string
   readonly subject: string
   readonly outcome: ToolOutcomePresentation
@@ -108,7 +108,7 @@ export function projectToolsWorkspace(
     ? []
     : Object.values(state.tools)
       .filter((tool) => tool.turnId === turnId)
-      .sort((left, right) => left.callIndex - right.callIndex || left.toolCallId.localeCompare(right.toolCallId))
+      .sort((left, right) => left.callIndex - right.callIndex || left.invocationId.localeCompare(right.invocationId))
       .map((tool) => projectToolActivity(tool, nowMs, state.replay.active))
   const selectedShell = state.latestShell !== null
     && (state.shell.shellId === null || state.latestShell.shellId === state.shell.shellId) ? state.latestShell : null
@@ -150,8 +150,8 @@ export function projectToolActivity(
 
   return {
     kind: "tool",
-    key: `tool:${tool.toolCallId}`,
-    toolCallId: tool.toolCallId,
+    key: `tool:${tool.invocationId}`,
+    invocationId: tool.invocationId,
     name: tool.name,
     subject: truncateToCells((presentation.subject || fallbackSubject).replace(/\s+/g, " ").trim(), 80),
     outcome,

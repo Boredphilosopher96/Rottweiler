@@ -21,7 +21,7 @@ A `TranscriptView` identifies the session, projection version, structural genera
 
 Positions support first, latest, before, after, around and ordinal lookup. An ordinal lookup includes its expected generation. A changed ordering returns `OrderingChanged`; an incomplete projection returns `CatchingUp`. Neither result exposes an incomplete row set as a complete transcript. `Around` reports a replacement when the requested item no longer exists.
 
-Each row has stable identity and a revision sequence. Tool lifecycle events bind to a host-owned invocation identity. Late completion and diff events update that row rather than creating duplicate tool output from provider IR. `TurnSummary` is sourced from `TurnFinished`; provider accounting receipts do not add a second displayed total.
+Each row has stable identity and a revision sequence. Tool lifecycle events bind to a host-owned invocation identity. Live tool maps, streaming membership, selection, output viewers and approval notifications use that identity; provider call IDs remain correlation data for engine commands. Late completion and diff events update that row rather than creating duplicate tool output from provider IR. `TurnSummary` is sourced from `TurnFinished`; provider accounting receipts do not add a second displayed total.
 
 The index serves the effective transcript at its applied prefix. Rewinds change structural generation. Item revisions and invalidations also cover changes that preserve ordering. The client rejects superseded requests and regressing views. Immutable journal history remains independently available for audit and export.
 

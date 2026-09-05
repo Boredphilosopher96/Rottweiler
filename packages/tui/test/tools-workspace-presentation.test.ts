@@ -107,7 +107,7 @@ function runningState(tools: readonly ToolProjection[]): RottweilerState {
       text: "",
       thinking: "",
       citations: [],
-      toolCallIds: tools.map((item) => item.toolCallId),
+      toolInvocationIds: tools.map((item) => item.toolCallId),
       finished: null,
     }),
     turns: {

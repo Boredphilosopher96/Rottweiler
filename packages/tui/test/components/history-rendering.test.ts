@@ -28,7 +28,7 @@ describe("semantic history rendering", () => {
     const { app, setup } = await fixture(Array.from({ length: 120 }, (_, index) => conversationItem(index + 1, "assistant", `Answer ${index}`)))
     const rows = [...app.transcript.mountedCards.values()]
     const markdown = app.transcript.streamingMarkdown
-    app.setState({ ...app.state, streamingTail: createStreamingTail({ turnId: "121", text: "A live answer", thinking: "", citations: [], toolCallIds: [], finished: null }) })
+    app.setState({ ...app.state, streamingTail: createStreamingTail({ turnId: "121", text: "A live answer", thinking: "", citations: [], toolInvocationIds: [], finished: null }) })
     await setup.flush()
     expect(app.transcript.streamingMarkdown).toBe(markdown)
     expect([...app.transcript.mountedCards.values()]).toEqual(rows)
@@ -136,7 +136,7 @@ describe("semantic history rendering", () => {
     const initial = {
       ...createInitialState(), streamingTail: createStreamingTail({
         turnId: "1", text: "", thinking: "Reading manifests now.",
-        citations: [], toolCallIds: [], finished: null
+        citations: [], toolInvocationIds: [], finished: null
       })
     } satisfies RottweilerState
     const { app, setup } = await fixture(items, initial)

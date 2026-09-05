@@ -137,7 +137,7 @@ export function toolsAppState(): RottweilerState {
       text: "",
       thinking: "",
       citations: [],
-      toolCallIds: Object.keys(tools),
+      toolInvocationIds: Object.keys(tools),
       finished: null,
     }),
     turns: {

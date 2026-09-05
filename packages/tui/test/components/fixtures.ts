@@ -73,24 +73,24 @@ export const listDetailRows: readonly ListDetailRow<string>[] = [
 ]
 
 export function toolsActivity(
-  toolCallId: string,
+  invocationId: string,
   visibleLines: number,
   outcome: "running" | "succeeded",
   hiddenRetainedLineCount: number,
 ): Extract<ActivityPresentation, { readonly kind: "tool" }> {
   return {
     kind: "tool",
-    key: `tool:${toolCallId}`,
-    toolCallId,
+    key: `tool:${invocationId}`,
+    invocationId,
     name: "bash",
-    subject: `bun test ${toolCallId}`,
+    subject: `bun test ${invocationId}`,
     outcome: outcome === "running"
       ? { kind: "running", label: "live" }
       : { kind: "succeeded", label: "Completed" },
     elapsed: { kind: "known", milliseconds: 12_000, label: "00:12" },
     output: {
       kind: "text",
-      text: Array.from({ length: visibleLines }, (_, index) => `${toolCallId}-${index + 1}`).join("\n"),
+      text: Array.from({ length: visibleLines }, (_, index) => `${invocationId}-${index + 1}`).join("\n"),
       retainedLineCount: visibleLines + hiddenRetainedLineCount,
       visibleLineCount: visibleLines,
       hiddenRetainedLineCount,

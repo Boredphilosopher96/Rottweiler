@@ -167,7 +167,7 @@ describe("state tools", () => {
       capabilities: ["read_filesystem"],
       rationale: "Inspect workspace files",
     })
-    expect(state.streamingTail?.toolCallIds).toEqual(["late-glob"])
+    expect(state.streamingTail?.toolInvocationIds).toEqual(["late-glob"])
     expect(state.tools["late-glob"]?.status).toBe("awaiting_approval")
 
     state = reduce(state, {
@@ -189,7 +189,7 @@ describe("state tools", () => {
       is_error: false,
       call_index: 0,
     })
-    expect(state.streamingTail?.toolCallIds).toEqual(["late-glob"])
+    expect(state.streamingTail?.toolInvocationIds).toEqual(["late-glob"])
     expect(state.tools["late-glob"]?.chunks.count).toBe(0)
     expect(state.tools["late-glob"]?.output).toEqual({ type: "text", text: "src/lib.rs" })
     expect(state.tools["late-glob"]?.status).toBe("finished")
@@ -260,20 +260,27 @@ describe("state tools", () => {
     expect(state.tools["tool-2"]).toBeUndefined()
   })
 
-  test("reused provider IDs reject late observations from an earlier invocation", () => {
+  test("provider correlation reuse retains independent invocation state and routes late events exactly", () => {
     let state = createInitialState()
     for (const [sequence, invocation] of [["1", "first"], ["2", "second"]] as const) {
       state = reduce(state, { type: "tool_call_started", meta: meta(sequence), turn_id: "1", tool_call_id: "reused", invocation_id: invocation, name: "read", args: {}, call_index: 0 })
     }
-    state = reduce(state, { type: "tool_output_delta", meta: meta("3"), turn_id: "1", tool_call_id: "reused", invocation_id: "first", stream: "stdout", chunk: "stale output" })
-    state = reduce(state, { type: "tool_call_finished", presentation: null, meta: meta("4"), turn_id: "1", tool_call_id: "reused", invocation_id: "first", output: { type: "text", text: "stale result" }, is_error: false, call_index: 0 })
-    expect(state.tools.reused?.invocationId).toBe("second")
-    expect(state.tools.reused?.status).toBe("running")
-    expect(state.tools.reused?.chunks.count).toBe(0)
+    const second = state.tools.second
+    state = reduce(state, { type: "tool_output_delta", meta: meta("3"), turn_id: "1", tool_call_id: "reused", invocation_id: "first", stream: "stdout", chunk: "first output" })
+    expect(state.tools.first?.chunks.read().plain).toBe("first output")
+    state = reduce(state, { type: "tool_call_finished", presentation: null, meta: meta("4"), turn_id: "1", tool_call_id: "reused", invocation_id: "first", output: { type: "text", text: "first result" }, is_error: false, call_index: 0 })
+    expect(Object.keys(state.tools)).toEqual(["first", "second"])
+    expect(state.tools.reused).toBeUndefined()
+    expect(state.tools.first?.output).toEqual({ type: "text", text: "first result" })
+    expect(state.tools.second).toBe(second)
+    expect(state.streamingTail?.toolInvocationIds).toEqual(["first", "second"])
+    const before = state.tools
+    state = reduce(state, { type: "tool_output_delta", meta: meta("5"), turn_id: "1", tool_call_id: "foreign-correlation", invocation_id: "second", stream: "stdout", chunk: "incorrect identity" })
+    expect(state.tools).toBe(before)
     const cursor = state.lastSequence
     state = reduce(state, { type: "tool_progress", session_id: "session-state", turn_id: "1", tool_call_id: "reused", invocation_id: "first", progress: { message: "late" } })
     expect(state.lastSequence).toBe(cursor)
-    expect(state.tools.reused?.invocationId).toBe("second")
+    expect(state.tools.second).toBe(second)
   })
 
   test("progress wire validation enforces plain Unicode text and count relationships", () => {
@@ -325,6 +332,6 @@ describe("state tools", () => {
     expect(state.tools["yolo-write"]?.status).toBe("finished")
     expect(state.tools["yolo-write"]?.diff?.path).toBe("src/main.rs")
     expect(state.tools["yolo-write"]?.diff?.unified_diff).toContain("+new")
-    expect(state.streamingTail?.toolCallIds).toEqual(["yolo-write"])
+    expect(state.streamingTail?.toolInvocationIds).toEqual(["yolo-write"])
   })
 })

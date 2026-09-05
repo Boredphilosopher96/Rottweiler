@@ -20,7 +20,7 @@ export class OutputViewerRenderable extends BoxRenderable {
   readonly body: TextRenderable
   readonly surface: UiPresentationRenderable
   readonly hint: TextRenderable
-  #toolCallId: string | null = null
+  #invocationId: string | null = null
   #documentPage: DocumentSnapshot["page"] = null
 
   constructor(ctx: RenderContext, theme: RottweilerTheme) {
@@ -85,15 +85,15 @@ export class OutputViewerRenderable extends BoxRenderable {
     this.resizeForTerminal(ctx.height)
   }
 
-  get toolCallId(): string | null {
-    return this.#toolCallId
+  get invocationId(): string | null {
+    return this.#invocationId
   }
 
   showDocument(snapshot: DocumentSnapshot): void {
     if (!snapshot.open) return
     const changed = this.#documentPage !== snapshot.page
     this.#documentPage = snapshot.page
-    this.#toolCallId = null
+    this.#invocationId = null
     this.visible = true
     const page = snapshot.page
     this.surface.setSurface(snapshot.surface)
@@ -111,7 +111,7 @@ export class OutputViewerRenderable extends BoxRenderable {
     this.#documentPage = null
     this.surface.setSurface(null)
     this.body.visible = true
-    this.#toolCallId = tool.toolCallId
+    this.#invocationId = tool.invocationId
     this.update(tool)
     this.visible = true
     this.scroller.scrollTo(0)
@@ -120,14 +120,14 @@ export class OutputViewerRenderable extends BoxRenderable {
 
   /** Refresh content without disturbing the reader's current scroll position. */
   update(tool: ToolProjection): void {
-    if (this.#toolCallId !== tool.toolCallId) return
+    if (this.#invocationId !== tool.invocationId) return
     const subject = presentTool(tool).subject.replace(/\s+/g, " ").trim()
     this.header.content = `${toolDisplayName(tool.name)} · ${subject}`
     this.body.content = toolOutputContent(tool)
   }
 
   closePresentation(): void {
-    this.#toolCallId = null
+    this.#invocationId = null
     this.#documentPage = null
     this.scroller.blur()
     this.visible = false

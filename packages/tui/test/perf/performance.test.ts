@@ -102,7 +102,7 @@ describe("M4 executable TUI performance budgets", () => {
         text: "",
         thinking: "",
         citations: [],
-        toolCallIds: [],
+        toolInvocationIds: [],
         finished: null,
       }),
     }

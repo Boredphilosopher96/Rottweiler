@@ -5,13 +5,13 @@ export const UNKNOWN_ACTIVITY_TIMING: ActivityTimingProjection = { kind: "unknow
 export const MAX_RETAINED_TOOL_PROJECTIONS = 16
 
 export function retainRecentTools(
-  current: RottweilerState["tools"], toolCallId: string, tool: ToolProjection,
+  current: RottweilerState["tools"], invocationId: string, tool: ToolProjection,
 ): RottweilerState["tools"] {
-  const next = { ...current, [toolCallId]: tool }
+  const next = { ...current, [invocationId]: tool }
   let count = Object.keys(next).length
   for (const [id, projection] of Object.entries(next)) {
     if (count <= MAX_RETAINED_TOOL_PROJECTIONS) break
-    if (id !== toolCallId && projection.status === "finished") {
+    if (id !== invocationId && projection.status === "finished") {
       delete next[id]
       count -= 1
     }
@@ -21,10 +21,10 @@ export function retainRecentTools(
 
 export function updateTool(
   current: RottweilerState["tools"],
-  toolCallId: string,
+  invocationId: string,
   tool: ToolProjection,
 ): RottweilerState["tools"] {
-  return { ...current, [toolCallId]: tool }
+  return { ...current, [invocationId]: tool }
 }
 
 function activityTimestamp(value: string): number | null {

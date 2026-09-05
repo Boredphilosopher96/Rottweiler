@@ -89,7 +89,7 @@ describe("subagents components", () => {
         text: "Coordinating the implementation.",
         thinking: "",
         citations: [],
-        toolCallIds: [],
+        toolInvocationIds: [],
         finished: null,
       }),
       subagentOrder: ["explore", "tests"],

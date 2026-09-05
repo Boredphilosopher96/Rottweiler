@@ -37,7 +37,7 @@ export interface TranscriptRenderableOptions {
   readonly treeSitterClient?: TreeSitterClient
   readonly onInteraction?: () => void
   readonly onOpenSubagent?: (subagentId: string) => void
-  readonly onOpenToolOutput?: (toolCallId: string) => void
+  readonly onOpenToolOutput?: (invocationId: string) => void
   readonly onOpenContent?: (source: import("../../protocol").TranscriptContentSource) => void
   readonly onOpenChild?: (child: Extract<TranscriptContent, { type: "subagent" }>) => void
   readonly onHistoryAnchor?: (anchor: HistoryAnchor) => void
@@ -291,7 +291,7 @@ export class ToolBlockRenderable extends BoxRenderable {
   ) {
     const blockId = `tool:${tool.invocationId}`
     super(ctx, {
-      id: `tool-${tool.toolCallId}`,
+      id: `tool-${tool.invocationId}`,
       width: "100%",
       minHeight: 1,
       flexDirection: "column",
@@ -342,7 +342,7 @@ export class ToolBlockRenderable extends BoxRenderable {
       selectable: true,
     })
     this.#bodyContainer = new BoxRenderable(ctx, {
-      id: `tool-body-${tool.toolCallId}`,
+      id: `tool-body-${tool.invocationId}`,
       width: "100%",
       height: 0,
       flexDirection: "column",
@@ -360,7 +360,7 @@ export class ToolBlockRenderable extends BoxRenderable {
     }
     bindSelectableClick(ctx, this.header, () => this.toggle())
     bindSelectableClick(ctx, this.truncationMarker, () => {
-      this.#rendering?.onOpenToolOutput?.(this.#tool.toolCallId)
+      this.#rendering?.onOpenToolOutput?.(this.#tool.invocationId)
     })
     this.add(this.header)
     this.#bodyContainer.add(this.body)
@@ -376,9 +376,9 @@ export class ToolBlockRenderable extends BoxRenderable {
   ): void {
     const blockId = `tool:${tool.invocationId}`
     this.blockId = blockId
-    this.id = `tool-${tool.toolCallId}`
+    this.id = `tool-${tool.invocationId}`
     this.header.id = `${blockId}:header`
-    this.#bodyContainer.id = `tool-body-${tool.toolCallId}`
+    this.#bodyContainer.id = `tool-body-${tool.invocationId}`
     const successfulFileEdit =
       tool.status === "finished" && tool.isError !== true && tool.diff !== null
     this.#collapsed = expanded === undefined
@@ -518,7 +518,7 @@ export class ToolBlockRenderable extends BoxRenderable {
     const content = visibleBashCommand(command)
     const rows = Math.max(1, content.split("\n").length)
     const container = new BoxRenderable(this.ctx, {
-      id: `tool-command-row-${tool.toolCallId}`,
+      id: `tool-command-row-${tool.invocationId}`,
       width: "100%",
       height: rows,
       flexDirection: "row",
@@ -541,7 +541,7 @@ export class ToolBlockRenderable extends BoxRenderable {
         selectable: true,
       })
       : new CodeRenderable(this.ctx, {
-        id: `tool-command-${tool.toolCallId}`,
+        id: `tool-command-${tool.invocationId}`,
         flexGrow: 1,
         height: rows,
         content,
@@ -593,7 +593,7 @@ export class ToolBlockRenderable extends BoxRenderable {
       ? unifiedDiffVisualRows(visibleDiff)
       : splitDiffVisualRows(visibleDiff)
     const container = new BoxRenderable(this.ctx, {
-      id: `tool-diff-row-${tool.toolCallId}`,
+      id: `tool-diff-row-${tool.invocationId}`,
       width: "100%",
       height: rows + 1 + (truncated === null ? 0 : 1),
       flexDirection: "column",
@@ -616,7 +616,7 @@ export class ToolBlockRenderable extends BoxRenderable {
         selectable: true,
       })
       : new DiffRenderable(this.ctx, {
-        id: `tool-diff-${tool.toolCallId}`,
+        id: `tool-diff-${tool.invocationId}`,
         width: "100%",
         height: rows,
         diff: visibleDiff,

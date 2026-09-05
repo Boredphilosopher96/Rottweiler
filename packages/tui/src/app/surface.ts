@@ -70,7 +70,7 @@ interface SurfaceHost {
   readonly pickerController: PickerController
   readonly sessions: SessionUiController
   readonly pickerContent: PickerContentController
-  outputViewerToolCallId: string | null
+  outputViewerInvocationId: string | null
   openToolOutput(id: string): void
   openChangedFileDiff(path: string): void
   closeReview(): void
@@ -109,7 +109,7 @@ export function buildSurface(host: SurfaceHost, theme: RottweilerTheme): void {
       onOpenContent: source => {
         const view = host.history?.controller.snapshot.page?.view
         if (view === undefined || host.document === null) return
-        host.outputViewerToolCallId = null
+        host.outputViewerInvocationId = null
         void host.document.open(view, source)
         host.ui.setState(host.ui.state)
         host.ui.outputViewer.focusPresentation()
@@ -119,10 +119,10 @@ export function buildSurface(host: SurfaceHost, theme: RottweilerTheme): void {
       onHistoryAround: item => { void host.history?.controller.around(item) },
       onHistoryBoundary: boundary => { void host.history?.controller.load({ type: boundary }) },
       onHistoryFollowing: following => host.history?.controller.setFollowing(following),
-      onOpenToolOutput: (toolCallId) => host.openToolOutput(toolCallId),
+      onOpenToolOutput: (invocationId) => host.openToolOutput(invocationId),
     })
     host.ui.toolsWorkspace = new ToolsWorkspaceRenderable(host.context, theme, {
-      onOpenToolOutput: (toolCallId) => host.openToolOutput(toolCallId),
+      onOpenToolOutput: (invocationId) => host.openToolOutput(invocationId),
     })
     host.ui.toolsWorkspace.visible = host.ui.primaryView === "tools"
     host.ui.contextPanel = new ContextPanelRenderable(host.context, theme, {

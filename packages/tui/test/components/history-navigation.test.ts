@@ -39,8 +39,8 @@ describe("semantic history navigation", () => {
     const app = createRottweilerApp(renderer, {
       sessionId: "session-components", historyReader: historyReaderFor(items),
       treeSitterClient: new MockTreeSitterClient(), initialState: {
-        ...createInitialState(), tools: { [tool.toolCallId]: tool },
-        streamingTail: createStreamingTail({ turnId: "1", text: "", thinking: "", citations: [], toolCallIds: [tool.toolCallId], finished: null })
+        ...createInitialState(), tools: { [tool.invocationId]: tool },
+        streamingTail: createStreamingTail({ turnId: "1", text: "", thinking: "", citations: [], toolInvocationIds: [tool.invocationId], finished: null })
       }
     })
     renderer.root.add(app)
@@ -92,8 +92,8 @@ describe("semantic history navigation", () => {
     const app = createRottweilerApp(renderer, {
       historyReader: historyReaderFor(blockItems()), treeSitterClient: new MockTreeSitterClient(),
       initialState: {
-        ...createInitialState(), tools: { [tool.toolCallId]: tool }, streamingTail: createStreamingTail({
-          turnId: "2", text: "", thinking: "Next inspection", citations: [], toolCallIds: [tool.toolCallId], finished: null
+        ...createInitialState(), tools: { [tool.invocationId]: tool }, streamingTail: createStreamingTail({
+          turnId: "2", text: "", thinking: "Next inspection", citations: [], toolInvocationIds: [tool.invocationId], finished: null
         })
       }
     })

@@ -8,7 +8,7 @@ export function notifyTransition(notifications: NotificationAdapter, previous: R
     const approval = Object.values(next.tools).find(
       (tool) =>
         tool.status === "awaiting_approval" &&
-        previous.tools[tool.toolCallId]?.status !== "awaiting_approval",
+        previous.tools[tool.invocationId]?.status !== "awaiting_approval",
     )
     const question = Object.values(next.questions).find(
       (candidate) => !candidate.answered && previous.questions[candidate.questionId] === undefined,

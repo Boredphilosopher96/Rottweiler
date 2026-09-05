@@ -85,7 +85,7 @@ export class TranscriptRenderable extends BoxRenderable {
   readonly #syntaxStyle: SyntaxStyle
   readonly #treeSitterClient: TreeSitterClient | undefined
   readonly #onInteraction: (() => void) | undefined
-  readonly #onOpenToolOutput: ((toolCallId: string) => void) | undefined
+  readonly #onOpenToolOutput: ((invocationId: string) => void) | undefined
   readonly #toolExpansion = new Map<string, boolean>()
   readonly #tailToolCards = new Map<string, ToolBlockRenderable>()
   readonly #tailToolPool: ToolBlockRenderable[] = []
@@ -610,8 +610,8 @@ export class TranscriptRenderable extends BoxRenderable {
 
   #updateTail(state: RottweilerState): void {
     const tail = state.streamingTail
-    const tools = (tail?.toolCallIds ?? [])
-      .map(toolCallId => state.tools[toolCallId])
+    const tools = (tail?.toolInvocationIds ?? [])
+      .map(invocationId => state.tools[invocationId])
       .filter((tool): tool is ToolProjection => tool !== undefined
         && !this.#finalHistoryInvocations.has(tool.invocationId))
     const liveInvocations = new Set(tools.map(tool => tool.invocationId))
@@ -712,10 +712,10 @@ export class TranscriptRenderable extends BoxRenderable {
 
   #replaceTailTools(tools: readonly ToolProjection[]): void {
     const retained = new Set(tools.map((tool) => tool.invocationId))
-    for (const [toolCallId, card] of this.#tailToolCards) {
-      if (retained.has(toolCallId)) continue
+    for (const [invocationId, card] of this.#tailToolCards) {
+      if (retained.has(invocationId)) continue
       this.#tailTools.remove(card)
-      this.#tailToolCards.delete(toolCallId)
+      this.#tailToolCards.delete(invocationId)
       this.#tailToolPool.push(card)
     }
     for (const tool of tools) {
@@ -762,9 +762,9 @@ export class TranscriptRenderable extends BoxRenderable {
     super.destroy()
   }
 
-  #rememberToolExpansion(toolCallId: string, expanded: boolean): void {
-    if (this.#toolExpansion.get(toolCallId) === expanded) return
-    rememberExpansion(this.#toolExpansion, toolCallId, expanded)
+  #rememberToolExpansion(invocationId: string, expanded: boolean): void {
+    if (this.#toolExpansion.get(invocationId) === expanded) return
+    rememberExpansion(this.#toolExpansion, invocationId, expanded)
     const state = this.#state
     if (state === null) return
     this.#updateTail(state)

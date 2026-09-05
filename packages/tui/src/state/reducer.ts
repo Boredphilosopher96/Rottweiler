@@ -787,18 +787,18 @@ function applyKnownEvent(
       return {
         ...state,
         errors: [],
-        tools: retainRecentTools(state.tools, event.tool_call_id, tool),
+        tools: retainRecentTools(state.tools, event.invocation_id, tool),
         streamingTail: updateTail(state.streamingTail, event.turn_id, (tail) => ({
           ...tail,
-          toolCallIds: tail.toolCallIds.includes(event.tool_call_id)
-            ? tail.toolCallIds
-            : [...tail.toolCallIds, event.tool_call_id],
+          toolInvocationIds: tail.toolInvocationIds.includes(event.invocation_id)
+            ? tail.toolInvocationIds
+            : [...tail.toolInvocationIds, event.invocation_id],
         })),
       }
     }
     case "tool_approval_needed": {
-      const existing = state.tools[event.tool_call_id]
-      if (existing !== undefined && (existing.invocationId !== event.invocation_id || existing.turnId !== event.turn_id)) return state
+      const existing = state.tools[event.invocation_id]
+      if (existing !== undefined && (existing.toolCallId !== event.tool_call_id || existing.turnId !== event.turn_id)) return state
       const tool: ToolProjection = {
         toolCallId: event.tool_call_id,
         invocationId: event.invocation_id,
@@ -817,14 +817,14 @@ function applyKnownEvent(
       }
       return {
         ...state,
-        tools: updateTool(state.tools, event.tool_call_id, tool),
-        streamingTail: attachToolToTail(state.streamingTail, event.turn_id, event.tool_call_id),
+        tools: updateTool(state.tools, event.invocation_id, tool),
+        streamingTail: attachToolToTail(state.streamingTail, event.turn_id, event.invocation_id),
       }
     }
     case "tool_diff_ready": {
-      const observed = state.tools[event.tool_call_id]
-      if (observed !== undefined && (observed.invocationId !== event.invocation_id || observed.turnId !== event.turn_id)) return state
-      const existing: ToolProjection = state.tools[event.tool_call_id] ?? {
+      const observed = state.tools[event.invocation_id]
+      if (observed !== undefined && (observed.toolCallId !== event.tool_call_id || observed.turnId !== event.turn_id)) return state
+      const existing: ToolProjection = state.tools[event.invocation_id] ?? {
         toolCallId: event.tool_call_id,
         invocationId: event.invocation_id,
         turnId: event.turn_id,
@@ -844,20 +844,20 @@ function applyKnownEvent(
         ...state,
         tools: updateTool(
           state.tools,
-          event.tool_call_id,
+          event.invocation_id,
           {
             ...existing,
             diff: event.diff,
             timing: observeActivityTiming(existing.timing, event.meta.emitted_at),
           },
         ),
-        streamingTail: attachToolToTail(state.streamingTail, event.turn_id, event.tool_call_id),
+        streamingTail: attachToolToTail(state.streamingTail, event.turn_id, event.invocation_id),
       }
     }
     case "tool_output_delta": {
-      const observed = state.tools[event.tool_call_id]
-      if (observed !== undefined && (observed.invocationId !== event.invocation_id || observed.turnId !== event.turn_id)) return state
-      const existing: ToolProjection = state.tools[event.tool_call_id] ?? {
+      const observed = state.tools[event.invocation_id]
+      if (observed !== undefined && (observed.toolCallId !== event.tool_call_id || observed.turnId !== event.turn_id)) return state
+      const existing: ToolProjection = state.tools[event.invocation_id] ?? {
         toolCallId: event.tool_call_id,
         invocationId: event.invocation_id,
         turnId: event.turn_id,
@@ -875,17 +875,17 @@ function applyKnownEvent(
       }
       return {
         ...state,
-        tools: updateTool(state.tools, event.tool_call_id, {
+        tools: updateTool(state.tools, event.invocation_id, {
           ...existing,
           chunks: existing.chunks.append({ stream: event.stream, chunk: event.chunk }),
           timing: observeActivityTiming(existing.timing, event.meta.emitted_at),
         }),
-        streamingTail: attachToolToTail(state.streamingTail, event.turn_id, event.tool_call_id),
+        streamingTail: attachToolToTail(state.streamingTail, event.turn_id, event.invocation_id),
       }
     }
     case "tool_call_finished": {
-      const existing = state.tools[event.tool_call_id]
-      if (existing !== undefined && (existing.invocationId !== event.invocation_id || existing.turnId !== event.turn_id)) return state
+      const existing = state.tools[event.invocation_id]
+      if (existing !== undefined && (existing.toolCallId !== event.tool_call_id || existing.turnId !== event.turn_id)) return state
       const tool: ToolProjection = {
         toolCallId: event.tool_call_id,
         invocationId: event.invocation_id,
@@ -904,8 +904,8 @@ function applyKnownEvent(
       }
       return {
         ...state,
-        tools: retainRecentTools(state.tools, event.tool_call_id, tool),
-        streamingTail: attachToolToTail(state.streamingTail, event.turn_id, event.tool_call_id),
+        tools: retainRecentTools(state.tools, event.invocation_id, tool),
+        streamingTail: attachToolToTail(state.streamingTail, event.turn_id, event.invocation_id),
       }
     }
     case "question_asked":
