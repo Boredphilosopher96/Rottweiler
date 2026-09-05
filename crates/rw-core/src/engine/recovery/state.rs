@@ -12,7 +12,7 @@ pub(super) const ACTIVE_TOOL_LIFECYCLE: u8 = 7;
 pub(super) const ACTIVE_TOOL_RESULTS: u8 = 8;
 pub(super) const SOURCE_ORDINAL: u8 = 12;
 pub(super) const MAX_QUEUED: usize = 128;
-pub(super) const MAX_QUESTIONS: usize = 64;
+pub(super) const MAX_QUESTIONS: usize = rw_types::question_admission::MAX_PENDING_QUESTION_REQUESTS;
 
 /// Exact visible canonical conversation. Bodies remain in the authoritative journal.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

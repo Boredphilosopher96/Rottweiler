@@ -92,6 +92,8 @@ struct ActiveToolStart {
 /// A persisted event log cannot be projected safely.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum SessionProjectionError {
+    #[error("invalid durable question payload: {0}")]
+    InvalidQuestion(&'static str),
     #[error("unsupported session event version {0}")]
     UnsupportedVersion(u16),
     #[error("session event sequence is not contiguous at {found}; expected {expected}")]
@@ -716,6 +718,16 @@ impl SessionProjector {
                     question_id,
                     questions,
                 } => {
+                    rw_types::question_admission::validate_questions(questions)
+                        .map_err(SessionProjectionError::InvalidQuestion)?;
+                    if !pending_questions.contains_key(&question_id.0)
+                        && pending_questions.len()
+                            >= rw_types::question_admission::MAX_PENDING_QUESTION_REQUESTS
+                    {
+                        return Err(SessionProjectionError::InvalidQuestion(
+                            "pending request count exceeds admission",
+                        ));
+                    }
                     pending_questions.insert(
                         question_id.0.clone(),
                         RecoveredQuestion {

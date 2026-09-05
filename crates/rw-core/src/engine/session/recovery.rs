@@ -92,7 +92,7 @@ pub(in crate::engine) async fn recover_actor_from_journal(
         let _ = pending.respond.send(ApprovalDecision::Deny);
     }
     for (_, pending) in std::mem::take(&mut state.pending_questions) {
-        let _ = pending.respond.send(String::new());
+        let _ = pending.respond.send(Err(rw_tools::ToolError::Cancelled));
     }
 
     let recovered = project_session_read_view(

@@ -186,19 +186,17 @@ pub(in crate::engine) async fn handle_turn_signal(
             )
             .await?;
         }
-        TurnSignal::Question { request, respond } => {
+        TurnSignal::Question {
+            request,
+            respond,
+            admission,
+        } => {
             let Some(turn) = state.running.as_ref().map(|running| running.id) else {
-                let _ = respond.send(String::new());
+                let _ = respond.send(Err(rw_tools::ToolError::Cancelled));
                 return Ok(());
             };
             let question_id = QuestionId(format!("question-{turn}-{}", state.next_question));
             state.next_question = state.next_question.saturating_add(1);
-            if let Some(previous) = state
-                .pending_questions
-                .insert(question_id.0.clone(), PendingQuestion { turn, respond })
-            {
-                let _ = previous.respond.send(String::new());
-            }
             let response_kind = if request.options.is_empty() {
                 QuestionResponseKind::Text
             } else {
@@ -220,6 +218,28 @@ pub(in crate::engine) async fn handle_turn_signal(
                     .collect(),
                 model_switch: None,
             };
+            let questions = vec![question];
+            let validation = rw_types::question_admission::validate_questions(&questions);
+            if let Err(error) = validation {
+                let _ = respond.send(Err(rw_tools::ToolError::InvalidInput(error.into())));
+                return Ok(());
+            }
+            if state.pending_questions.len() + state.pending_model_switches.len()
+                >= rw_types::question_admission::MAX_PENDING_QUESTION_REQUESTS
+            {
+                let _ = respond.send(Err(rw_tools::ToolError::InvalidInput(
+                    "pending question admission is full".into(),
+                )));
+                return Ok(());
+            }
+            state.pending_questions.insert(
+                question_id.0.clone(),
+                PendingQuestion {
+                    turn,
+                    respond,
+                    _admission: admission,
+                },
+            );
             emit(
                 state,
                 events,
@@ -227,7 +247,7 @@ pub(in crate::engine) async fn handle_turn_signal(
                 PendingEvent::QuestionAsked {
                     turn,
                     question_id,
-                    questions: vec![question],
+                    questions,
                 },
             )
             .await?;
@@ -320,7 +340,7 @@ pub(in crate::engine) async fn handle_turn_signal(
             }
             state.pending_approvals.clear();
             for (_, pending) in std::mem::take(&mut state.pending_questions) {
-                let _ = pending.respond.send(String::new());
+                let _ = pending.respond.send(Err(rw_tools::ToolError::Cancelled));
             }
             state.replace_conversation(outcome.conversation);
             state.context_surgery = outcome.context_surgery;
@@ -434,7 +454,8 @@ pub(in crate::engine) enum TurnSignal {
     },
     Question {
         request: AskUserInput,
-        respond: oneshot::Sender<String>,
+        respond: oneshot::Sender<Result<String, rw_tools::ToolError>>,
+        admission: OwnedSemaphorePermit,
     },
     Complete(TurnOutcome),
     ManualCompactionComplete {

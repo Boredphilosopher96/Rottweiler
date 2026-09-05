@@ -205,8 +205,12 @@ pub(super) fn reduce(
             });
         }
         PendingEvent::QuestionAsked {
-            turn, question_id, ..
+            turn,
+            question_id,
+            questions,
         } => {
+            rw_types::question_admission::validate_questions(&questions)
+                .map_err(RecoveryError::Limit)?;
             head.control
                 .questions
                 .retain(|question| question.id != question_id.0);

@@ -248,6 +248,26 @@ fn generate_typescript() -> Result<String, XtaskError> {
             "MAX_TOOL_NAME_BYTES",
             rw_types::tool_admission::MAX_TOOL_NAME_BYTES,
         ),
+        (
+            "MAX_PENDING_QUESTION_REQUESTS",
+            rw_types::question_admission::MAX_PENDING_QUESTION_REQUESTS,
+        ),
+        (
+            "MAX_QUESTION_SET_BYTES",
+            rw_types::question_admission::MAX_QUESTION_SET_BYTES,
+        ),
+        (
+            "MAX_QUESTION_SET_PREPARED_BYTES",
+            rw_types::question_admission::MAX_QUESTION_SET_PREPARED_BYTES,
+        ),
+        (
+            "MAX_PENDING_QUESTION_BYTES",
+            rw_types::question_admission::MAX_PENDING_QUESTION_BYTES,
+        ),
+        (
+            "MAX_PENDING_QUESTION_PREPARED_BYTES",
+            rw_types::question_admission::MAX_PENDING_QUESTION_PREPARED_BYTES,
+        ),
         ("MAX_TODO_ITEMS", rw_types::todo::MAX_TODO_ITEMS),
         ("MAX_TODO_ID_BYTES", rw_types::todo::MAX_TODO_ID_BYTES),
         (

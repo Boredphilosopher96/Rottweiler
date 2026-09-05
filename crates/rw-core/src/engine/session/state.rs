@@ -193,8 +193,9 @@ pub(in crate::engine) struct ActorState {
 }
 
 pub(in crate::engine) struct PendingQuestion {
+    pub(in crate::engine) _admission: tokio::sync::OwnedSemaphorePermit,
     pub(in crate::engine) turn: u64,
-    pub(in crate::engine) respond: oneshot::Sender<String>,
+    pub(in crate::engine) respond: oneshot::Sender<Result<String, rw_tools::ToolError>>,
 }
 
 pub(in crate::engine) enum PrecommittedAnswer {

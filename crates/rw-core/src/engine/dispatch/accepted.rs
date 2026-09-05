@@ -397,7 +397,7 @@ pub(super) async fn apply_accepted(
             if let Some(answer) = precommitted_answer.take() {
                 match answer {
                     PrecommittedAnswer::Turn(pending, answer) => {
-                        let _ = pending.respond.send(answer);
+                        let _ = pending.respond.send(Ok(answer));
                         if let Some(complete) = completion.take() {
                             let _ = complete.send(Ok(ProtocolCompletion::Unit));
                         }

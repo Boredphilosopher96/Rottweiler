@@ -186,6 +186,8 @@ impl CanonicalHistory {
             if turn != question.agent_turn || question_id.0 != question.id {
                 return Err(RecoveryError::Invalid("question source identity"));
             }
+            rw_types::question_admission::validate_questions(&questions)
+                .map_err(RecoveryError::Limit)?;
             result.pending_questions.push(RecoveredQuestion {
                 agent_turn: turn,
                 question_id,

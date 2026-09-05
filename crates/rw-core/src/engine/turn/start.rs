@@ -242,10 +242,10 @@ pub(in crate::engine) async fn start_turn_with_overrides(
     } else {
         messages
     };
-    let protocol_asker: Arc<dyn QuestionAsker> = Arc::new(ActorQuestionAsker {
-        signals: runtime.signals.clone(),
-        cancellation: cancellation.clone(),
-    });
+    let protocol_asker: Arc<dyn QuestionAsker> = Arc::new(ActorQuestionAsker::new(
+        runtime.signals.clone(),
+        cancellation.clone(),
+    ));
     let tool_context = runtime
         .tool_context
         .clone()

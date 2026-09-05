@@ -61,8 +61,23 @@ impl PermissionApprover for RedactingApprover<'_> {
 }
 
 pub(super) struct ActorQuestionAsker {
-    pub(super) signals: mpsc::UnboundedSender<TurnSignal>,
-    pub(super) cancellation: CancellationToken,
+    signals: mpsc::UnboundedSender<TurnSignal>,
+    cancellation: CancellationToken,
+    admission: Arc<tokio::sync::Semaphore>,
+}
+impl ActorQuestionAsker {
+    pub(super) fn new(
+        signals: mpsc::UnboundedSender<TurnSignal>,
+        cancellation: CancellationToken,
+    ) -> Self {
+        Self {
+            signals,
+            cancellation,
+            admission: Arc::new(tokio::sync::Semaphore::new(
+                rw_types::question_admission::MAX_PENDING_QUESTION_REQUESTS,
+            )),
+        }
+    }
 }
 
 #[async_trait]
@@ -72,13 +87,21 @@ impl QuestionAsker for ActorQuestionAsker {
         request: AskUserInput,
         _cancellation: CancellationToken,
     ) -> Result<String, ToolError> {
+        validate_question_input(&request)?;
+        let admission = Arc::clone(&self.admission)
+            .try_acquire_owned()
+            .map_err(|_| ToolError::InvalidInput("question admission is full".into()))?;
         let (respond, receive) = oneshot::channel();
         self.signals
-            .send(TurnSignal::Question { request, respond })
+            .send(TurnSignal::Question {
+                request,
+                respond,
+                admission,
+            })
             .map_err(|_| ToolError::Cancelled)?;
         tokio::select! {
             () = self.cancellation.cancelled() => Err(ToolError::Cancelled),
-            response = receive => response.map_err(|_| ToolError::Cancelled),
+            response = receive => response.map_err(|_| ToolError::Cancelled)?,
         }
     }
 }
@@ -520,5 +543,93 @@ pub(super) async fn prepare_tool_call(
         semantics: Box::new(security.semantics),
         authorization,
         deferred_mutating_pre_hook,
+    }
+}
+
+fn validate_question_input(request: &AskUserInput) -> Result<(), ToolError> {
+    use rw_types::question_admission::{MAX_QUESTION_SET_BYTES, MAX_QUESTION_SET_PREPARED_BYTES};
+    if request.options.len() > rw_types::question_admission::MAX_PENDING_QUESTION_REQUESTS {
+        return Err(ToolError::InvalidInput(
+            "question option count exceeds admission".into(),
+        ));
+    }
+    let retained = request.options.iter().fold(
+        request.question.capacity().checked_add(
+            request
+                .options
+                .capacity()
+                .checked_mul(std::mem::size_of::<String>())
+                .unwrap_or(usize::MAX),
+        ),
+        |total, option| {
+            total.and_then(|bytes| bytes.checked_add(option.capacity().saturating_mul(2)))
+        },
+    );
+    if request.question.len() > MAX_QUESTION_SET_BYTES
+        || retained.is_none_or(|bytes| bytes > MAX_QUESTION_SET_PREPARED_BYTES / 2)
+    {
+        return Err(ToolError::InvalidInput(
+            "question payload exceeds admission".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod question_admission_tests {
+    use super::{ActorQuestionAsker, QuestionAsker};
+    use rw_tools::{AskUserInput, CancellationToken, ToolError};
+    #[tokio::test]
+    async fn dropped_question_waiters_do_not_release_queued_request_admission() {
+        use std::future::Future;
+        let (signals, mut receive) = tokio::sync::mpsc::unbounded_channel();
+        let asker = ActorQuestionAsker::new(signals, CancellationToken::default());
+        let request = || AskUserInput {
+            question: "choice".into(),
+            options: Vec::new(),
+            allow_free_text: true,
+        };
+        let mut pending = (0..rw_types::question_admission::MAX_PENDING_QUESTION_REQUESTS)
+            .map(|_| Box::pin(asker.ask(request(), CancellationToken::default())))
+            .collect::<Vec<_>>();
+        for question in &mut pending {
+            assert!(
+                std::future::poll_fn(|cx| std::task::Poll::Ready(question.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
+        }
+        drop(pending);
+        assert!(matches!(
+            asker.ask(request(), CancellationToken::default()).await,
+            Err(ToolError::InvalidInput(_))
+        ));
+        drop(receive.try_recv().expect("owned queued request"));
+        let mut admitted = Box::pin(asker.ask(request(), CancellationToken::default()));
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(admitted.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert_eq!(asker.admission.available_permits(), 0);
+    }
+
+    #[tokio::test]
+    async fn oversized_questions_fail_before_entering_the_actor_signal_queue() {
+        let (signals, mut receive) = tokio::sync::mpsc::unbounded_channel();
+        let asker = ActorQuestionAsker::new(signals, CancellationToken::default());
+        let error = asker
+            .ask(
+                AskUserInput {
+                    question: "x".repeat(rw_types::question_admission::MAX_QUESTION_SET_BYTES + 1),
+                    options: vec![],
+                    allow_free_text: true,
+                },
+                CancellationToken::default(),
+            )
+            .await
+            .expect_err("typed admission error");
+        assert!(matches!(error, ToolError::InvalidInput(_)));
+        assert!(receive.try_recv().is_err());
     }
 }

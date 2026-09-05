@@ -71,6 +71,16 @@ pub(super) async fn request_model_selection(
         let question_id = QuestionId(format!("model-switch-{}", state.next_question));
         state.next_question = state.next_question.saturating_add(1);
         let question = model_switch_question(question_id.clone(), model.clone(), provider.clone());
+        let questions = vec![question];
+        rw_types::question_admission::validate_questions(&questions)
+            .map_err(|error| AgentLoopError::InvalidConfiguration(error.into()))?;
+        if state.pending_questions.len() + state.pending_model_switches.len()
+            >= rw_types::question_admission::MAX_PENDING_QUESTION_REQUESTS
+        {
+            return Err(AgentLoopError::InvalidConfiguration(
+                "pending question admission is full".into(),
+            ));
+        }
         let result = emit(
             state,
             events,
@@ -78,7 +88,7 @@ pub(super) async fn request_model_selection(
             PendingEvent::QuestionAsked {
                 turn: state.completed_turns,
                 question_id: question_id.clone(),
-                questions: vec![question],
+                questions,
             },
         )
         .await
