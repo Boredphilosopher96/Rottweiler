@@ -15,13 +15,17 @@ use std::{
     time::Duration,
 };
 
-async fn bundle_fixture(root: &Path) -> (PathBuf, rw_plugin_protocol::PluginManifest) {
+async fn bundle_fixture(
+    root: &Path,
+    fixture: &str,
+) -> (PathBuf, rw_plugin_protocol::PluginManifest) {
     let bun = std::env::split_paths(&std::env::var_os("PATH").expect("PATH"))
         .map(|path| path.join("bun"))
         .find(|path| path.is_file())
         .expect("pinned Bun on PATH");
-    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../packages/plugin-sdk/fixtures/conformance/command-session.ts");
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../../packages/plugin-sdk/fixtures/conformance/{fixture}.ts"
+    ));
     let output = root.join("plugin.js");
     let build = tokio::process::Command::new(&bun)
         .args(["build", "--target=bun"])
@@ -55,10 +59,10 @@ async fn bundle_fixture(root: &Path) -> (PathBuf, rw_plugin_protocol::PluginMani
     )
 }
 
-async fn configure_plugin(root: &Path, storage: &Path, workspace: &Path) {
+pub(super) async fn configure_plugin(root: &Path, storage: &Path, workspace: &Path, fixture: &str) {
     let package = workspace.join("fixture");
     std::fs::create_dir(&package).expect("package");
-    let (bun, manifest) = bundle_fixture(&package).await;
+    let (bun, manifest) = bundle_fixture(&package, fixture).await;
     let manifest_path = package.join("manifest.json");
     std::fs::write(
         &manifest_path,
@@ -69,7 +73,7 @@ async fn configure_plugin(root: &Path, storage: &Path, workspace: &Path) {
     std::fs::create_dir(&project).expect("project settings");
     let config_path = project.join("plugins.toml");
     let settings = serde_json::json!({"plugins":[{
-        "name":"command-session", "argv":[bun, package.join("plugin.js")], "cwd":package, "manifest":manifest_path
+        "name":manifest.name, "argv":[bun, package.join("plugin.js")], "cwd":package, "manifest":manifest_path
     }]});
     std::fs::write(
         &config_path,
@@ -103,50 +107,9 @@ async fn sdk_command_controls_state_and_panel_reenter_the_live_actor() {
     )
     .expect("private storage");
     let workspace = workspace.canonicalize().expect("workspace identity");
-    configure_plugin(root.path(), &storage, &workspace).await;
-    let mut config = Config::default();
-    config.models.default = "fast".into();
-    config
-        .models
-        .aliases
-        .insert("fast".into(), vec!["fixture/base".into()]);
-    config.providers.insert(
-        "fixture".into(),
-        ProviderConfig {
-            kind: "openai_compatible".into(),
-            base_url: Some("http://127.0.0.1:1/v1/chat/completions".into()),
-            ..ProviderConfig::default()
-        },
-    );
-    let journal_service = JournalService::new(&storage).expect("journal owner");
-    let runtime = compose_hosted_actor(HostedSessionComposition {
-        transcripts: crate::transcript_service::TranscriptReader::new(Arc::clone(&journal_service)),
-        provider_admission: Arc::new(
-            crate::provider_admission::DurableProviderAdmission::open(storage.clone())
-                .await
-                .expect("model admission"),
-        ),
-        plugin_runtime_budget: Arc::new(crate::extension_runtime::PluginRuntimeBudget::default()),
-        wasm_workers: rw_ext::WasmWorkerPool::new(),
-        index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
-        journal_service,
-        workspace: workspace.clone(),
-        additional_workspaces: Vec::new(),
-        allowed_workspace_roots: vec![workspace.clone()],
-        storage_root: storage.clone(),
-        credentials_path: storage.join("credentials.json"),
-        config,
-        session_id: SessionId("command-session-actor".into()),
-        requested_model: None,
-        resume: false,
-        permission_mode: Some(PermissionModeDescriptor::Strict),
-        max_turns: 2,
-        provider_mode: HostedProviderMode::Live,
-        dangerously_trust: true,
-        wait_for_execution_lease: false,
-    })
-    .await
-    .expect("production actor composition");
+    configure_plugin(root.path(), &storage, &workspace, "command-session").await;
+    let runtime =
+        compose_fixture_session(&storage, &workspace, "command-session-actor", false).await;
     let outcome = tokio::time::timeout(
         Duration::from_secs(10),
         runtime.handle.send_message("/context-panel"),
@@ -274,4 +237,57 @@ async fn verify_root_recomposition(
             .len(),
         1
     );
+}
+
+pub(super) async fn compose_fixture_session(
+    storage: &Path,
+    workspace: &Path,
+    session_id: &str,
+    resume: bool,
+) -> super::super::runtime_options::HostedActorRuntime {
+    let storage = storage.to_path_buf();
+    let workspace = workspace.to_path_buf();
+    let mut config = Config::default();
+    config.models.default = "fast".into();
+    config
+        .models
+        .aliases
+        .insert("fast".into(), vec!["fixture/base".into()]);
+    config.providers.insert(
+        "fixture".into(),
+        ProviderConfig {
+            kind: "openai_compatible".into(),
+            base_url: Some("http://127.0.0.1:1/v1/chat/completions".into()),
+            ..ProviderConfig::default()
+        },
+    );
+    let journal_service = JournalService::new(&storage).expect("journal owner");
+    compose_hosted_actor(HostedSessionComposition {
+        transcripts: crate::transcript_service::TranscriptReader::new(Arc::clone(&journal_service)),
+        provider_admission: Arc::new(
+            crate::provider_admission::DurableProviderAdmission::open(storage.clone())
+                .await
+                .expect("model admission"),
+        ),
+        plugin_runtime_budget: Arc::new(crate::extension_runtime::PluginRuntimeBudget::default()),
+        wasm_workers: rw_ext::WasmWorkerPool::new(),
+        index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
+        journal_service,
+        workspace: workspace.clone(),
+        additional_workspaces: Vec::new(),
+        allowed_workspace_roots: vec![workspace.clone()],
+        storage_root: storage.clone(),
+        credentials_path: storage.join("credentials.json"),
+        config,
+        session_id: SessionId(session_id.to_owned()),
+        requested_model: None,
+        resume,
+        permission_mode: Some(PermissionModeDescriptor::Strict),
+        max_turns: 2,
+        provider_mode: HostedProviderMode::Live,
+        dangerously_trust: true,
+        wait_for_execution_lease: false,
+    })
+    .await
+    .expect("production actor composition")
 }
