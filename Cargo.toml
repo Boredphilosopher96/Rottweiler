@@ -7,6 +7,7 @@ members = [
     "crates/rw-intel",
     "crates/rw-mcp",
     "crates/rw-memory-derive",
+    "crates/rw-macos-bootstrap",
     "crates/rw-operation-contract",
     "crates/rw-plugin-protocol",
     "crates/rw-providers",

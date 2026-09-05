@@ -67,13 +67,20 @@ mod tty;
 mod tui_config;
 mod upgrade;
 
-#[tokio::main]
-#[allow(clippy::too_many_lines)]
-async fn main() -> Result<()> {
-    parent_death::arm_from_environment().into_diagnostic()?;
+fn main() -> Result<()> {
     if maybe_run_sandbox_helper(std::env::args_os()).map_err(|error| miette!(error.to_string()))? {
         return Ok(());
     }
+    parent_death::arm_from_environment().into_diagnostic()?;
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .into_diagnostic()?
+        .block_on(run())
+}
+
+#[allow(clippy::too_many_lines)]
+async fn run() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)

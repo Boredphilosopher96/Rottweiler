@@ -921,6 +921,16 @@ Failed cleanup returns an explicit unsettled error while retaining its resource 
 
 Host session creation, fresh preparation, resume and fork transfer their identity reservation to an owned composition task before yielding. Host shutdown first closes session admission, then settles every ready actor and accepted opener, and only then shuts down shared factory services. Final accounting and SessionEnd hooks remain able to use those services during cleanup. A failed dependent proof retains the factory. The bounded shutdown result is sticky and does not acknowledge HostShutdown on failure. See [host closure evidence](reviews/2026-09-04-architecture-evidence/host-session-closure.md).
 
+## ADR-040: macOS worker authority
+
+Single-process macOS workers enter a trusted Rottweiler bootstrap after Seatbelt is installed and before untrusted code executes. The bootstrap requires one thread and clears registered Mach ports, task and thread exception ports, bootstrap service access, and debug/resource notification ports. It then immediately executes the target. Exec creates a fresh task and IPC namespace, terminating ordinary receive queues and their pending transferred rights. Failure exits before target execution.
+
+`rw-macos-bootstrap` owns the Mach FFI and every returned pointer and send right. It is the audited exception to the workspace unsafe-code prohibition. `rw-sandbox` selects it for the single-process policy; the host application is unaffected.
+
+The kernel-owned `TASK_ACCESS_PORT` remains because macOS refuses its replacement. This taskgated service performs task-access and code-signature checks. Seatbelt denies external task acquisition. Application-provided delegation roots are cleared; fixed OS runtime authority follows the macOS contract. See Apple's [special ports](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/ipc_tt.c) and [task-access protocol](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/mach/task_access.defs).
+
+Tests observe parent-owned message receipts and capability-bearing queue destruction across the actual sandbox/bootstrap/target exec chain. Thread rejection, compilation, proxy routing, and external-task denial are separate behavioral checks. Arbitrary shell descendants require their own effect owner.
+
 ## ADR-041: Native build candidates
 
 Build and size enforcement belong to the native candidate builder. A candidate binds the source commit and working-tree content, native target, pinned compiler and Bun identities, release profile, build configuration, component paths, byte counts, and checksums. The artifact-bundle contract verifies its files. Acceptance gates consume verified candidates.

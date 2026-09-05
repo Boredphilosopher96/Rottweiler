@@ -4,6 +4,9 @@
 //! policy into an argv-only launch plan consumed by `rw-tools`, and exposes the
 //! Linux helper entry point used immediately before `exec(2)`.
 
+#[cfg(target_os = "macos")]
+mod macos;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -648,7 +651,7 @@ fn unavailable(message: &str) -> SandboxCapability {
 ///
 /// `helper_executable` is the trusted Rottweiler executable that recognizes
 /// [`HELPER_ARG`] before parsing user-facing CLI options.  It is used only on
-/// Linux; macOS directly launches Seatbelt.
+/// Linux and for the macOS single-process worker bootstrap.
 ///
 /// # Errors
 ///
@@ -662,44 +665,7 @@ pub fn shell_launch_plan(
 ) -> Result<LaunchPlan, SandboxError> {
     #[cfg(target_os = "macos")]
     {
-        let _ = helper_executable;
-        if let NetworkPolicy::PolicyProxy { port, .. } = &policy.network
-            && !proxy::supervised_proxy_owns_port(*port)
-        {
-            return Err(SandboxError::PolicyProxyUnavailable);
-        }
-        let mut args = vec![
-            OsString::from("-p"),
-            OsString::from(seatbelt_profile(policy)),
-        ];
-        for (index, root) in policy.write_roots.iter().enumerate() {
-            args.push(OsString::from("-D"));
-            let mut definition = OsString::from(format!("RW_WRITE_{index}="));
-            definition.push(root.as_os_str());
-            args.push(definition);
-        }
-        if let Some(read_roots) = &policy.read_roots {
-            for (index, root) in read_roots.iter().enumerate() {
-                args.push(OsString::from("-D"));
-                let mut definition = OsString::from(format!("RW_READ_{index}="));
-                definition.push(root.as_os_str());
-                args.push(definition);
-            }
-        }
-        directory_reads::append_parameters(policy, &mut args);
-        for (index, root) in sensitive_read_roots().iter().enumerate() {
-            args.push(OsString::from("-D"));
-            let mut definition = OsString::from(format!("RW_SECRET_{index}="));
-            definition.push(root.as_os_str());
-            args.push(definition);
-        }
-        args.push(shell.as_os_str().to_owned());
-        args.extend_from_slice(shell_args);
-        Ok(LaunchPlan {
-            program: PathBuf::from("/usr/bin/sandbox-exec"),
-            args,
-            warnings: Vec::new(),
-        })
+        macos::launch_plan(policy, helper_executable, shell, shell_args)
     }
     #[cfg(target_os = "linux")]
     {
@@ -715,6 +681,17 @@ pub fn shell_launch_plan(
         let (helper_executable, helper_pin) = pin_linux_helper(helper_executable)?;
         let encoded = serde_json::to_os_string(policy)?;
         let mut args = vec![OsString::from(HELPER_ARG), encoded];
+        if !policy.allow_process_creation {
+            let helper = std::fs::canonicalize(helper_executable).map_err(|error| {
+                SandboxError::Unavailable(format!("invalid macOS worker helper: {error}"))
+            })?;
+            args.push(OsString::from("-D"));
+            let mut definition = OsString::from("RW_WORKER_HELPER=");
+            definition.push(helper.as_os_str());
+            args.push(definition);
+            args.push(helper.into_os_string());
+            args.push(OsString::from("--rw-macos-worker"));
+        }
         args.push(shell.as_os_str().to_owned());
         args.extend_from_slice(shell_args);
         if let NetworkPolicy::PolicyProxy {
@@ -833,67 +810,6 @@ fn audited_linux_tool(candidates: &[&str]) -> Option<PathBuf> {
     })
 }
 
-#[cfg(target_os = "macos")]
-fn seatbelt_profile(policy: &SandboxPolicy) -> String {
-    let authority = if policy.allow_process_creation {
-        "(allow default)"
-    } else {
-        "(deny default) (allow file-read* file-write* file-map-executable sysctl-read process-exec) (allow process-info* signal (target self))"
-    };
-    let writable = (0..policy.write_roots.len())
-        .map(|index| format!("(subpath (param \"RW_WRITE_{index}\"))"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let readable = policy.read_roots.as_ref().map(|roots| {
-        (0..roots.len())
-            .map(|index| format!("(subpath (param \"RW_READ_{index}\"))"))
-            .collect::<Vec<_>>()
-            .join(" ")
-    });
-    let network = match &policy.network {
-        NetworkPolicy::Deny => "(deny network*)".to_owned(),
-        NetworkPolicy::PolicyProxy { port, .. } => format!(
-            "(allow network-outbound (remote ip \"localhost:{port}\")) (deny network-outbound (require-not (remote ip \"localhost:{port}\"))) (deny network-bind) (deny network-inbound)"
-        ),
-    };
-    let directory_entries = (0..policy.read_directory_ancestors.len())
-        .map(|index| {
-            format!(
-                "(require-all (literal (param \"RW_DIRECTORY_{index}\")) (vnode-type DIRECTORY))"
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    let read_rule = readable.map_or_else(String::new, |readable| {
-        format!(
-            "(deny file-read* (require-not (require-any (literal \"/\") (literal \"/dev/null\") {writable} {readable} {directory_entries})))"
-        )
-    });
-    let secret_roots = (0..sensitive_read_roots().len())
-        .map(|index| format!("(subpath (param \"RW_SECRET_{index}\"))"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let secret_rule = if secret_roots.is_empty() {
-        String::new()
-    } else {
-        format!("(deny file-read* (require-any {secret_roots}))")
-    };
-    format!(
-        "(version 1) {authority} {read_rule} {secret_rule} (deny file-write* (require-not (require-any (literal \"/dev/null\") {writable}))) {network}"
-    )
-}
-
-#[cfg(target_os = "macos")]
-fn sensitive_read_roots() -> Vec<PathBuf> {
-    let Some(home) = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-    else {
-        return Vec::new();
-    };
-    sensitive_home_roots(&home)
-}
-
 /// Handles a Linux sandbox-helper invocation and replaces the current process
 /// with the requested command after Landlock and seccomp are active.
 ///
@@ -912,6 +828,16 @@ where
 {
     let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
     let entry = args.get(1).and_then(|value| value.to_str());
+    #[cfg(target_os = "macos")]
+    if entry == Some(macos::WORKER_ARG) {
+        let program = args
+            .get(2)
+            .filter(|program| !program.is_empty())
+            .ok_or_else(|| SandboxError::Unavailable("missing macOS worker target".to_owned()))?;
+        return Err(SandboxError::Unavailable(
+            rw_macos_bootstrap::exec_worker(program, &args[3..]).to_string(),
+        ));
+    }
     #[cfg(target_os = "linux")]
     if entry == Some(linux::process_creation::WORKER_ARG) {
         return linux::process_creation::run_worker(&args).map(|never| match never {});
@@ -1188,7 +1114,7 @@ mod tests {
             .get(1)
             .and_then(|value| value.to_str())
             .expect("profile");
-        let sensitive = sensitive_read_roots();
+        let sensitive = macos::sensitive_read_roots();
         assert!(!sensitive.is_empty());
         for (index, root) in sensitive.iter().enumerate() {
             assert!(profile.contains(&format!("(subpath (param \"RW_SECRET_{index}\"))")));

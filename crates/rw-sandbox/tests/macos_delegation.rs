@@ -17,7 +17,8 @@ if sys.argv[1] == 'baseline':
     socket.socket(socket.AF_UNIX).connect(sys.argv[2])
     print('baseline bootstrap lookup and Unix connection succeed')
     sys.exit(0)
-assert status == 1100, ('inherited bootstrap lookup must return BOOTSTRAP_NOT_PRIVILEGED', status)
+assert bootstrap == 0, ('bootstrap discovery root remains', bootstrap)
+assert status == 0x10000003, ('cleared bootstrap must report MACH_SEND_INVALID_DEST', status)
 if sys.argv[3] != '0':
     socket.create_connection(('127.0.0.1', int(sys.argv[3])), timeout=2).close()
 try:
@@ -86,15 +87,22 @@ fn single_process_policy_denies_service_delegation_in_both_network_modes() {
             socket.as_os_str().to_owned(),
             OsString::from(allowed_port.to_string()),
         ];
-        let plan =
-            shell_launch_plan(&policy, Path::new("rw"), interpreter, &args).expect("launch plan");
+        let plan = shell_launch_plan(
+            &policy,
+            Path::new(env!("CARGO_BIN_EXE_rw-sandbox-helper")),
+            interpreter,
+            &args,
+        )
+        .expect("launch plan");
         let output = Command::new(plan.program)
             .args(plan.args)
             .output()
             .expect("sandbox probe");
         assert!(
             output.status.success(),
-            "{}",
+            "{}: {} {}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(

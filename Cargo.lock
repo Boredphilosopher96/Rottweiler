@@ -2864,6 +2864,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rw-macos-bootstrap"
+version = "0.1.4"
+dependencies = [
+ "mach2",
+]
+
+[[package]]
 name = "rw-mcp"
 version = "0.1.4"
 dependencies = [
@@ -2989,6 +2996,7 @@ dependencies = [
  "nix 0.31.3",
  "rustix",
  "rustls",
+ "rw-macos-bootstrap",
  "rw-types",
  "seccompiler",
  "serde",
