@@ -616,6 +616,7 @@ export const contractFixture = {
     },
     {
       "type": "tool_call_finished",
+      "presentation": null,
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
