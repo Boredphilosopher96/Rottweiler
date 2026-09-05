@@ -153,6 +153,7 @@ pub(crate) struct PreparedExtensionGeneration {
 }
 
 pub(crate) struct PreparedRootGeneration {
+    pub(crate) catalog: Arc<rw_ext::ExtensionCatalog>,
     pub(crate) roots: Vec<PathBuf>,
     pub(crate) supplemental_context: Vec<Turn>,
     pub(crate) built: BuiltTools,
@@ -502,11 +503,13 @@ impl RuntimeWorkspaceRootController {
                     .filter_map(|(root, trusted)| trusted.then_some(root)),
             );
         let permissions = Arc::new(permissions);
-        let mut extensions = self.prepare_extensions(&roots, &built)?;
+        let catalog = self.extension_catalog(&roots)?;
+        let mut extensions = self.prepare_extensions(&catalog, &roots, &built)?;
         if let Some(index) = extensions.skill_index.take() {
             supplemental_context.push(index);
         }
         Ok(PreparedRootGeneration {
+            catalog,
             roots,
             supplemental_context,
             built,
@@ -567,22 +570,11 @@ impl RuntimeWorkspaceRootController {
 
     pub(crate) fn prepare_extensions(
         &self,
+        catalog: &rw_ext::ExtensionCatalog,
         roots: &[PathBuf],
         built: &BuiltTools,
     ) -> std::result::Result<PreparedExtensionGeneration, AgentLoopError> {
-        let catalog = discover_runtime_extensions(
-            roots,
-            &self.trust_store_path,
-            &self.extension_user_home,
-            &self.extension_user_rottweiler,
-            self.dangerously_trust,
-        )
-        .map_err(|_error| {
-            AgentLoopError::InvalidConfiguration(
-                "workspace extension generation could not prepare".to_owned(),
-            )
-        })?;
-        let skill_index = skill_index_turn(&catalog).map_err(|_error| {
+        let skill_index = skill_index_turn(catalog).map_err(|_error| {
             AgentLoopError::InvalidConfiguration(
                 "workspace skill index could not prepare".to_owned(),
             )
@@ -591,7 +583,7 @@ impl RuntimeWorkspaceRootController {
             &self.toolchain_config,
             &self.toolchain_runtime,
             Arc::clone(&built.registry),
-            &catalog,
+            catalog,
             Arc::clone(&built.code_intelligence),
             &self.validated_wasm_hooks,
         )
@@ -612,13 +604,14 @@ impl RuntimeWorkspaceRootController {
             )
         })?;
         let commands =
-            compose_runtime_commands(&catalog, roots, &self.storage_root, &built.registry)
-                .map_err(|_error| {
+            compose_runtime_commands(catalog, roots, &self.storage_root, &built.registry).map_err(
+                |_error| {
                     AgentLoopError::InvalidConfiguration(
                         "workspace command generation could not prepare".to_owned(),
                     )
-                })?;
-        let modes = compose_mode_registry(&catalog).map_err(|_error| {
+                },
+            )?;
+        let modes = compose_mode_registry(catalog).map_err(|_error| {
             AgentLoopError::InvalidConfiguration(
                 "workspace mode generation could not prepare".to_owned(),
             )
@@ -701,7 +694,13 @@ impl rw_core::WorkspaceRootController for RuntimeWorkspaceRootController {
                 {
                     Ok(snapshot) => snapshot,
                     Err(error) => {
-                        self.abort_generation(generation).await?;
+                        // Cleanup diagnostics cannot turn failed native retirement
+                        // into a recoverable configuration error.
+                        if let Err(cleanup) = self.abort_generation(generation).await {
+                            return Err(AgentLoopError::EffectsUnsettled(format!(
+                                "{error}; workspace generation rollback failed: {cleanup}"
+                            )));
+                        }
                         return Err(error);
                     }
                 },

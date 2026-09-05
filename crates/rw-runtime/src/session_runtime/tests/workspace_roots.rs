@@ -489,6 +489,7 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
         !escaped.exists(),
         "lease-root bash must never retain the parent executor boundary"
     );
+    verify_captured_catalog(&controller, &[primary.clone(), added.clone()]);
     let generation = rw_core::WorkspaceRootController::append_root(
         &controller,
         rw_core::WorkspaceRootRequest {
@@ -706,4 +707,43 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
             .expect("generation");
     assert_eq!(recovered.roots, generation.roots);
     assert!(!recovered.roots.contains(&third));
+}
+
+fn verify_captured_catalog(controller: &RuntimeWorkspaceRootController, roots: &[PathBuf]) {
+    let command = roots[1].join(".agents/commands/captured-catalog.md");
+    std::fs::write(
+        &command,
+        "---\ndescription: Captured declaration\n---\nUse the captured recipe",
+    )
+    .expect("captured command");
+    let captured = controller
+        .extension_catalog(roots)
+        .expect("capture catalog");
+    std::fs::write(
+        &command,
+        "---\ndescription: Replaced declaration\n---\nUse the changed recipe",
+    )
+    .expect("replace command source");
+    let built = controller.prepare_tools(roots).expect("prepare registry");
+    let prepared = controller
+        .prepare_extensions(&captured, roots, &built)
+        .expect("compose captured catalog");
+    let description = |commands: &rw_ext::CommandRegistry<
+        rw_core::SessionCommandContext,
+        rw_core::SessionCommandOutput,
+    >| {
+        commands
+            .descriptors()
+            .find(|command| command.name() == "captured-catalog")
+            .expect("captured command descriptor")
+            .description()
+            .to_owned()
+    };
+    assert_eq!(description(&prepared.commands), "Captured declaration");
+    let replaced = controller.extension_catalog(roots).expect("new catalog");
+    let fresh = controller
+        .prepare_extensions(&replaced, roots, &built)
+        .expect("compose new catalog");
+    assert_eq!(description(&fresh.commands), "Replaced declaration");
+    std::fs::remove_file(command).expect("remove catalog fixture");
 }

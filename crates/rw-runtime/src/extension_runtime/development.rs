@@ -45,6 +45,14 @@ struct DevelopmentExtensionState {
     ceiling: Option<rw_plugin_protocol::PluginCapabilities>,
     revision: u64,
 }
+struct NativePreparation<'a> {
+    built: &'a mut crate::session_runtime::tool_composition::BuiltTools,
+    catalog: &'a Arc<rw_ext::ExtensionCatalog>,
+    roots: &'a [PathBuf],
+    alias: &'a str,
+    revision: u64,
+    development: Option<&'a crate::extension_config::DiscoveredPlugin>,
+}
 impl RuntimeSessionExtensionController {
     pub(crate) fn new(
         owner: Arc<super::generations::PluginGenerationOwner>,
@@ -123,14 +131,17 @@ impl RuntimeSessionExtensionController {
     async fn prepare(
         &self,
         state: &DevelopmentExtensionState,
-        built: &mut crate::session_runtime::tool_composition::BuiltTools,
-        roots: &[PathBuf],
-        alias: &str,
-        revision: u64,
-        development: Option<&crate::extension_config::DiscoveredPlugin>,
+        input: NativePreparation<'_>,
     ) -> std::result::Result<rw_core::SessionExtensionSnapshot, rw_core::AgentLoopError> {
+        let NativePreparation {
+            built,
+            catalog,
+            roots,
+            alias,
+            revision,
+            development,
+        } = input;
         let root_owner = self.recipe.root_owner()?;
-        let catalog = root_owner.extension_catalog(roots)?;
         let configured = root_owner.native_configs(roots)?;
         let prepared = self.owner.prepare(&configured, development, roots).await?;
         let candidate = prepared.runtime.clone();
@@ -139,11 +150,11 @@ impl RuntimeSessionExtensionController {
             tools.register(tool.clone()).map_err(closed_generation)?;
         }
         self.recipe
-            .add_tools(&mut tools, &catalog)
+            .add_tools(&mut tools, catalog)
             .map_err(closed_generation)?;
         built.registry = Arc::new(tools);
         let extensions = root_owner
-            .prepare_extensions(roots, built)
+            .prepare_extensions(catalog, roots, built)
             .map_err(closed_generation)?;
         let mut hooks = extensions.hooks.as_ref().clone();
         for (registration, handler) in &candidate.hooks {
@@ -181,7 +192,7 @@ impl RuntimeSessionExtensionController {
             .checked_add(1)
             .ok_or_else(|| closed_generation("extension revision exhausted"))?;
         let model = publication.model();
-        for agent in rw_ext::compose_agent_registry(&catalog)
+        for agent in rw_ext::compose_agent_registry(catalog)
             .map_err(closed_generation)?
             .definitions()
         {
@@ -216,11 +227,14 @@ impl RuntimeSessionExtensionController {
         let snapshot = self
             .prepare(
                 &state,
-                &mut root.built,
-                &root.roots,
-                alias,
-                revision,
-                state.development.as_ref(),
+                NativePreparation {
+                    built: &mut root.built,
+                    catalog: &root.catalog,
+                    roots: &root.roots,
+                    alias,
+                    revision,
+                    development: state.development.as_ref(),
+                },
             )
             .await?;
         state.revision = snapshot.revision;
@@ -255,10 +269,9 @@ impl rw_core::SessionExtensionController for RuntimeSessionExtensionController {
                 "development capability change requires detach and a fresh explicit grant",
             ));
         }
-        let mut built = self
-            .recipe
-            .root_owner()?
-            .prepare_tools(&current.workspace_roots)?;
+        let root_owner = self.recipe.root_owner()?;
+        let catalog = root_owner.extension_catalog(&current.workspace_roots)?;
+        let mut built = root_owner.prepare_tools(&current.workspace_roots)?;
         built.registry = Arc::new(
             built
                 .registry
@@ -269,11 +282,14 @@ impl rw_core::SessionExtensionController for RuntimeSessionExtensionController {
         let snapshot = self
             .prepare(
                 &state,
-                &mut built,
-                &current.workspace_roots,
-                &current.model_alias,
-                current.revision,
-                Some(&plugin),
+                NativePreparation {
+                    built: &mut built,
+                    catalog: &catalog,
+                    roots: &current.workspace_roots,
+                    alias: &current.model_alias,
+                    revision: current.revision,
+                    development: Some(&plugin),
+                },
             )
             .await?;
         state.ceiling = Some(manifest.capabilities);
@@ -289,10 +305,9 @@ impl rw_core::SessionExtensionController for RuntimeSessionExtensionController {
         if state.development.is_none() {
             return Err(development_error("no development plugin is attached"));
         }
-        let mut built = self
-            .recipe
-            .root_owner()?
-            .prepare_tools(&current.workspace_roots)?;
+        let root_owner = self.recipe.root_owner()?;
+        let catalog = root_owner.extension_catalog(&current.workspace_roots)?;
+        let mut built = root_owner.prepare_tools(&current.workspace_roots)?;
         built.registry = Arc::new(
             built
                 .registry
@@ -303,11 +318,14 @@ impl rw_core::SessionExtensionController for RuntimeSessionExtensionController {
         let snapshot = self
             .prepare(
                 &state,
-                &mut built,
-                &current.workspace_roots,
-                &current.model_alias,
-                current.revision,
-                None,
+                NativePreparation {
+                    built: &mut built,
+                    catalog: &catalog,
+                    roots: &current.workspace_roots,
+                    alias: &current.model_alias,
+                    revision: current.revision,
+                    development: None,
+                },
             )
             .await?;
         state.development = None;
