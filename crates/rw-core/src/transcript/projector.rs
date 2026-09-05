@@ -365,7 +365,9 @@ impl BatchRows<'_> {
             TranscriptIndexMutation::Bind { binding, key } => {
                 self.bindings.insert(binding.clone(), key.clone());
             }
-            TranscriptIndexMutation::Delete(_) | TranscriptIndexMutation::Move { .. } => {}
+            TranscriptIndexMutation::Delete(_)
+            | TranscriptIndexMutation::Move { .. }
+            | TranscriptIndexMutation::PutAuxiliary { .. } => {}
         }
     }
 }

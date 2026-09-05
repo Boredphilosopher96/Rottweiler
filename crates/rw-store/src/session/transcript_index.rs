@@ -31,6 +31,9 @@ pub const MAX_PAGE_ROWS: usize = 64;
 const MAX_KEY_BYTES: usize = 256;
 const CACHE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_DATABASE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+mod auxiliary;
+pub use auxiliary::{MAX_AUXILIARY_CELL_BYTES, MAX_AUXILIARY_CELLS};
+
 type StoredRow<'a> = (&'a str, u64, u64, Option<u64>, &'a [u8]);
 type StoredHead<'a> = (u32, u64, u64, &'a [u8], &'a [u8], bool);
 const ROWS: TableDefinition<u64, StoredRow<'_>> = TableDefinition::new("transcript_rows_v1");
@@ -122,6 +125,8 @@ pub struct TranscriptIndexRow {
 /// A bounded atomic change to the derived row catalog.
 #[derive(Clone, Debug)]
 pub enum TranscriptIndexMutation {
+    /// Replace one bounded opaque cell under the same exact canonical prefix.
+    PutAuxiliary { key: u16, payload: Vec<u8> },
     /// Insert the next ordinal or replace the content of an existing identity.
     Put(TranscriptIndexRow),
     /// Delete an identity during a rebuild.
@@ -137,6 +142,7 @@ impl TranscriptIndexMutation {
     #[must_use]
     pub fn charged_bytes(&self) -> usize {
         match self {
+            Self::PutAuxiliary { payload, .. } => payload.len() + 16,
             Self::Put(row) => row.payload.len() + row.key.len() + 48,
             Self::Delete(key) => key.len() + 48,
             Self::Bind { binding, key } => binding.len() + key.len() + 48,
@@ -231,6 +237,7 @@ impl TranscriptIndex {
             transaction.open_table(BINDINGS).map_err(storage)?;
             transaction.open_table(CHANGES).map_err(storage)?;
             transaction.open_table(SOURCES).map_err(storage)?;
+            transaction.open_table(auxiliary::CELLS).map_err(storage)?;
             let prefix = JournalPrefixIdentity::empty();
             transaction
                 .open_table(HEAD)
@@ -312,6 +319,13 @@ impl TranscriptIndex {
             let mut catalog = RowCatalog::open(&transaction)?;
             for mutation in mutations {
                 match mutation {
+                    TranscriptIndexMutation::PutAuxiliary { key, payload } => {
+                        transaction
+                            .open_table(auxiliary::CELLS)
+                            .map_err(storage)?
+                            .insert(*key, payload.as_slice())
+                            .map_err(storage)?;
+                    }
                     TranscriptIndexMutation::Put(row) => {
                         catalog.put(row, rebuilding || head.rebuilding)?;
                     }
@@ -865,6 +879,9 @@ fn validate_mutation(
     next: u64,
 ) -> Result<(), TranscriptIndexError> {
     let key = match mutation {
+        TranscriptIndexMutation::PutAuxiliary { key, payload } => {
+            return auxiliary::validate(*key, payload);
+        }
         TranscriptIndexMutation::Put(row) => {
             if row.payload.len() > MAX_ROW_BYTES || row.ordinal > i64::MAX as u64 {
                 return Err(TranscriptIndexError::Limit("row"));
