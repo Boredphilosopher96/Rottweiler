@@ -12,13 +12,47 @@ use std::sync::{Arc, Mutex};
 pub(in crate::session_runtime) struct ChildLifecycleReader {
     sink: Arc<DurableEventSink>,
     order: Arc<Mutex<()>>,
+    metadata_pages: Arc<tokio::sync::Semaphore>,
+}
+pub(in crate::session_runtime) struct MetadataRead<T> {
+    pub(in crate::session_runtime) value: T,
+    _permit: tokio::sync::OwnedSemaphorePermit,
 }
 impl ChildLifecycleReader {
     pub(in crate::session_runtime) fn new(sink: Arc<DurableEventSink>) -> Arc<Self> {
         Arc::new(Self {
             sink,
             order: Arc::new(Mutex::new(())),
+            metadata_pages: Arc::new(tokio::sync::Semaphore::new(4)),
         })
+    }
+    pub(in crate::session_runtime) async fn metadata_read<T: Send + 'static>(
+        &self,
+        metadata: &crate::subagent_metadata::PrivateSubagentMetadataStore,
+        query: impl FnOnce(
+            &crate::subagent_metadata::PrivateSubagentMetadataStore,
+        ) -> Result<T, OrchestrationError>
+        + Send
+        + 'static,
+    ) -> Result<MetadataRead<T>, AgentLoopError> {
+        let permit = self
+            .metadata_pages
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| persistence("child metadata read allocation exhausted"))?;
+        let metadata = metadata.clone_for_read().map_err(persistence)?;
+        self.sink
+            .reads
+            .run((metadata, Some(permit)), move |(metadata, permit)| {
+                let value = query(metadata).map_err(persistence)?;
+                Ok(MetadataRead {
+                    value,
+                    _permit: permit
+                        .take()
+                        .ok_or_else(|| persistence("child metadata read already delivered"))?,
+                })
+            })
+            .await
     }
     pub(in crate::session_runtime) async fn open_sink(
         &self,
@@ -165,4 +199,77 @@ fn persistence(error: impl std::fmt::Display) -> AgentLoopError {
 }
 fn orchestration(error: AgentLoopError) -> OrchestrationError {
     OrchestrationError::Session(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{journal_service::JournalService, subagent_metadata::PrivateSubagentMetadataStore};
+    use rw_store::session::SessionEventLog;
+
+    fn reader(root: &std::path::Path) -> Arc<ChildLifecycleReader> {
+        ChildLifecycleReader::new(
+            DurableEventSink::new(
+                SessionEventLog::open(root, "parent").expect("log"),
+                root.to_owned(),
+                "parent".into(),
+                JournalService::new(root).expect("journal"),
+            )
+            .expect("sink"),
+        )
+    }
+    #[tokio::test]
+    async fn returned_metadata_pages_keep_their_shared_admission() {
+        let root = tempfile::tempdir().expect("root");
+        let reader = reader(root.path());
+        let metadata = PrivateSubagentMetadataStore::open(root.path()).expect("metadata");
+        let mut pages = Vec::new();
+        for _ in 0..4 {
+            pages.push(
+                reader
+                    .metadata_read(&metadata, |metadata| {
+                        metadata.load_parent_page(&SessionId("parent".into()), None)
+                    })
+                    .await
+                    .expect("page"),
+            );
+        }
+        assert!(reader.metadata_read(&metadata, |_| Ok(())).await.is_err());
+        pages.pop();
+        assert!(reader.metadata_read(&metadata, |_| Ok(())).await.is_ok());
+        drop(pages);
+        reader.sink.reads.settle().await.expect("settled");
+    }
+    #[tokio::test]
+    async fn dropped_metadata_caller_keeps_the_blocking_owner_until_settlement() {
+        let root = tempfile::tempdir().expect("root");
+        let reader = reader(root.path());
+        let metadata = PrivateSubagentMetadataStore::open(root.path()).expect("metadata");
+        let (started, entered) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let caller_reader = reader.clone();
+        let caller = tokio::spawn(async move {
+            caller_reader
+                .metadata_read(&metadata, move |metadata| {
+                    started.send(()).expect("started");
+                    wait.recv().expect("release");
+                    metadata.load_parent_page(&SessionId("parent".into()), None)
+                })
+                .await
+        });
+        entered.await.expect("entered");
+        caller.abort();
+        let _ = caller.await;
+        assert_eq!(reader.metadata_pages.available_permits(), 3);
+        assert_eq!(reader.sink.reads.active(), 1);
+        release.send(()).expect("release");
+        reader.sink.reads.settle().await.expect("settled");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while reader.metadata_pages.available_permits() != 4 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("completion released permit");
+    }
 }

@@ -174,6 +174,29 @@ impl PrivateSubagentMetadataStore {
         }
     }
 
+    pub(crate) fn clone_for_read(&self) -> Result<Self, OrchestrationError> {
+        #[cfg(unix)]
+        {
+            Ok(Self {
+                storage_root: self
+                    .storage_root
+                    .try_clone()
+                    .map_err(|error| io_error("retain metadata storage descriptor", error))?,
+                root: self
+                    .root
+                    .try_clone()
+                    .map_err(|error| io_error("retain metadata descriptor", error))?,
+                root_identity: self.root_identity,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(Self {
+                root: self.root.clone(),
+            })
+        }
+    }
+
     pub(crate) fn load_parent_page(
         &self,
         parent: &SessionId,

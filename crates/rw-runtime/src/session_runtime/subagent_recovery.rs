@@ -197,11 +197,14 @@ pub(super) async fn recover_subagent_tree(
         })?;
         let mut after = None;
         loop {
-            let page = metadata
-                .load_parent_page(&node.parent_session_id, after.as_ref())
-                .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-            after = page.next;
-            for (mut record, _) in page.records {
+            let parent = node.parent_session_id.clone();
+            let page = history
+                .metadata_read(metadata, move |metadata| {
+                    metadata.load_parent_page(&parent, after.as_ref())
+                })
+                .await?;
+            after = page.value.next;
+            for (mut record, _) in page.value.records {
                 if record.depth != expected_depth || record.depth > max_depth {
                     return Err(AgentLoopError::Persistence(format!(
                         "persisted child depth {} does not match expected depth {expected_depth} or configured maximum {max_depth}",
@@ -283,10 +286,12 @@ pub(super) async fn recover_subagent_tree(
     // Every actor opens a fully repaired log. Descendant-first rebinding also
     // makes the recovered depth map complete before any parent follow-up runs.
     for (parent, child, expected) in records.into_iter().rev() {
-        let record = metadata
-            .load_record(&parent, &child)
-            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-        if crate::subagent_metadata::record_fingerprint(&record)
+        let record = history
+            .metadata_read(metadata, move |metadata| {
+                metadata.load_record(&parent, &child)
+            })
+            .await?;
+        if crate::subagent_metadata::record_fingerprint(&record.value)
             .map_err(|error| AgentLoopError::Persistence(error.to_string()))?
             != expected
         {
@@ -295,7 +300,7 @@ pub(super) async fn recover_subagent_tree(
             ));
         }
         orchestrator
-            .recover_record(record)
+            .recover_record(record.value)
             .await
             .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
     }
