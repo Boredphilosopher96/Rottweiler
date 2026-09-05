@@ -2599,6 +2599,7 @@ pub(super) fn prompt_turn(
     prompt
 }
 
+#[tracing::instrument(target = "rw_performance", level = "trace", name = "context.assemble", skip_all, fields(session_id = config.session_id.0.as_str(), turns = conversation.len()))]
 pub(super) fn assemble_session_context(
     config: &SessionActorConfig,
     conversation: &[Turn],
@@ -3206,6 +3207,7 @@ pub(super) async fn current_approval_diff(
 
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(target = "rw_performance", level = "trace", name = "tool.prepare", skip_all, fields(session_id = config.session_id.0.as_str(), turn, tool_call_id = call.id.as_str()))]
 async fn prepare_tool_call(
     turn: u64,
     mut call: PendingToolCall,
@@ -3602,6 +3604,7 @@ async fn run_deferred_mutating_pre_hook(
 }
 
 #[allow(clippy::too_many_lines)]
+#[tracing::instrument(target = "rw_performance", level = "trace", name = "tool.execute", skip_all, fields(session_id = context.session_id().map_or("", |id| id.0.as_str()))) ]
 async fn execute_prepared_tool(
     prepared: PreparedToolCall,
     context: ToolContext,
@@ -3894,6 +3897,7 @@ async fn apply_post_tool_hook(
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[tracing::instrument(target = "rw_performance", level = "trace", name = "tool.batch", skip_all, fields(session_id = config.session_id.0.as_str(), turn, calls = calls.len()))]
 async fn execute_tool_calls(
     turn: u64,
     calls: Vec<PendingToolCall>,
@@ -4646,6 +4650,12 @@ async fn execute_compaction(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(
+    target = "rw_performance",
+    level = "trace",
+    name = "context.compact",
+    skip_all
+)]
 pub(super) async fn compact_during_turn(
     turn: u64,
     conversation: &mut Vec<Turn>,
@@ -4859,6 +4869,7 @@ pub(super) fn frame_command_tool_output(
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[tracing::instrument(target = "rw_performance", level = "trace", name = "turn.run", skip_all, fields(session_id = config.session_id.0.as_str(), turn))]
 async fn run_turn(
     turn: u64,
     mut messages: Vec<PreparedUserMessage>,
@@ -5192,6 +5203,9 @@ async fn run_turn(
             status = AgentTurnStatus::Failed;
             break;
         }
+        let provider_started = tracing::enabled!(target: "rw_performance", tracing::Level::TRACE)
+            .then(std::time::Instant::now);
+        let mut first_provider_event = true;
         let mut stream = match config.model.stream_for_provider(
             &config.model_alias,
             config.recovered.provider.as_deref(),
@@ -5265,6 +5279,13 @@ async fn run_turn(
                 );
                 break;
             };
+            if first_provider_event {
+                if let Some(started) = provider_started {
+                    tracing::trace!(target: "rw_performance", stage = "provider.first_event",
+                        elapsed_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
+                }
+                first_provider_event = false;
+            }
             let event = match event {
                 Ok(event) => event,
                 Err(error) => {
@@ -5453,6 +5474,10 @@ async fn run_turn(
                     break;
                 }
             }
+        }
+        if let Some(started) = provider_started {
+            tracing::trace!(target: "rw_performance", stage = "provider.stream",
+                elapsed_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
         }
         drop(stream);
         config.model.settle_effects().await;
