@@ -495,6 +495,7 @@ fn subagent_status(status: &TurnStatus) -> SubagentStatus {
 }
 
 mod artifact_source;
+mod deferred_actor;
 mod lifecycle;
 pub use artifact_source::SubagentArtifactSource;
 mod startup;

@@ -262,24 +262,15 @@ impl SubagentSessionFactory for ActorSubagentSessionFactory {
         let (Some(rebuilder), Some(workspace_root)) = (&self.rebuilder, workspace_root) else {
             return Ok(None);
         };
-        let mut config = rebuilder(session_id, workspace_root, policy)
-            .map_err(|error| OrchestrationError::Session(error.to_string()))?;
-        config.session_id = session_id.clone();
-        config.workspace_root = workspace_root.to_path_buf();
-        config.additional_workspace_roots.clear();
-        if let Some(allowed_tools) = allowed_tools {
-            config.tools = Arc::new(bind_child_tools(&config.tools, allowed_tools)?);
-        }
-        apply_child_policy(
-            &mut config,
-            &policy.model_alias,
-            policy.system_prompt.as_deref(),
-            policy.permission_mode,
-            policy.max_turns,
-        );
-        let handle = SessionActor::spawn(config)
-            .map_err(|error| OrchestrationError::Session(error.to_string()))?;
-        Ok(Some(Arc::new(ActorSubagentSession { handle })))
+        Ok(Some(Arc::new(
+            super::deferred_actor::DeferredActorSession::new(
+                Arc::clone(rebuilder),
+                session_id.clone(),
+                workspace_root.to_path_buf(),
+                allowed_tools.map(|tools| Arc::new(tools.clone())),
+                policy.clone(),
+            ),
+        )))
     }
 }
 
@@ -376,7 +367,7 @@ pub(super) fn bind_child_tools(
 }
 
 pub(super) struct ActorSubagentSession {
-    handle: SessionHandle,
+    pub(super) handle: SessionHandle,
 }
 
 #[async_trait]
@@ -393,7 +384,7 @@ impl SubagentSession for ActorSubagentSession {
     ) -> Result<SubagentTurnResult, OrchestrationError> {
         let mut subscription = self
             .handle
-            .subscribe()
+            .subscribe_live()
             .map_err(|error| OrchestrationError::Session(error.to_string()))?;
         self.handle
             .send_message(prompt)
@@ -411,7 +402,13 @@ impl SubagentSession for ActorSubagentSession {
             };
             let sequence = event.meta().map(|meta| meta.sequence_id.0);
             if let EngineEvent::TextDelta { text, .. } = &event {
-                final_text.push_str(text);
+                let remaining =
+                    super::MAX_SUBAGENT_FINAL_TEXT_BYTES.saturating_sub(final_text.len());
+                let mut end = text.len().min(remaining);
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                final_text.push_str(&text[..end]);
             }
             let encoded = serde_json::to_value(&event)
                 .map_err(|error| OrchestrationError::Session(error.to_string()))?;

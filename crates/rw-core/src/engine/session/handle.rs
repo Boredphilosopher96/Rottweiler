@@ -388,6 +388,26 @@ impl SessionHandle {
         })
     }
 
+    /// Subscribe after the source tail captured for this operation, excluding prior turns.
+    /// # Errors
+    /// Returns an invalid canonical source or unavailable event channel error.
+    pub fn subscribe_live(&self) -> Result<SessionSubscription, AgentLoopError> {
+        let receiver = self.events.subscribe();
+        let source = self.event_sink.capture_read_view()?;
+        let tail = source.last_sequence();
+        Ok(SessionSubscription {
+            client_id: ClientId("local".to_owned()),
+            session_id: self.session_id.clone(),
+            receiver,
+            sink: Arc::clone(&self.event_sink),
+            last_sequence: tail,
+            initial_tail: tail,
+            pending: VecDeque::new(),
+            replay: None,
+            needs_initial_replay: false,
+        })
+    }
+
     /// Starts a turn, queues a mid-turn message, or dispatches a slash command.
     ///
     /// # Errors
