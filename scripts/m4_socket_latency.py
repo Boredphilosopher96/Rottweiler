@@ -47,6 +47,8 @@ def measure_socket_channels(
     commands: UnixHttpConnection, events: UnixSseStream, headers: dict[str, str],
     session_id: str, client_id: str, samples: int, evidence: GateEvidence | None,
 ) -> dict[str, int]:
+    headers = {**headers, "x-rottweiler-command-lane": "normal"}
+
     def payload(kind: str, request_id: str) -> bytes:
         value: dict[str, object] = {
             "type": kind,

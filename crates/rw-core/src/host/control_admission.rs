@@ -36,7 +36,7 @@ pub(super) struct ControlLease {
 impl Default for ControlAdmission {
     fn default() -> Self {
         Self {
-            normal: Lane::new(64, 32 * 1024 * 1024, 8, 8, 8 * 1024 * 1024),
+            normal: Lane::new(64, 32 * 1024 * 1024, 8, 8, 16 * 1024 * 1024),
             urgent: Lane::new(8, 1024 * 1024, 2, 2, 64 * 1024),
         }
     }
@@ -48,25 +48,13 @@ impl ControlAdmission {
         command: &ClientCommand,
         bytes: usize,
     ) -> Result<ControlLease, &'static str> {
-        let lane = if is_urgent(command) {
+        let lane = if command.is_urgent() {
             &self.urgent
         } else {
             &self.normal
         };
         lane.acquire(command, bytes)
     }
-}
-
-pub(super) fn is_urgent(command: &ClientCommand) -> bool {
-    matches!(
-        command,
-        ClientCommand::Interrupt { .. }
-            | ClientCommand::InterruptSubagent { .. }
-            | ClientCommand::CancelProviderAuth { .. }
-            | ClientCommand::ApproveTool { .. }
-            | ClientCommand::ApprovePlan { .. }
-            | ClientCommand::ShutdownHost { .. }
-    )
 }
 
 impl Lane {

@@ -615,6 +615,32 @@ read_commands!(
     ListSubagents,
 );
 
+// One variant list owns admission priority and its generated transport projection.
+macro_rules! urgent_commands {
+    ($($variant:ident),+ $(,)?) => {
+        impl ClientCommand {
+            #[must_use]
+            pub const fn is_urgent(&self) -> bool {
+                matches!(self, $(Self::$variant { .. })|+)
+            }
+            pub fn urgent_type_tags() -> impl Serialize {
+                #[derive(Serialize)]
+                #[serde(rename_all = "snake_case")]
+                enum Tag { $($variant),+ }
+                [$(Tag::$variant),+]
+            }
+        }
+    };
+}
+urgent_commands!(
+    Interrupt,
+    InterruptSubagent,
+    CancelProviderAuth,
+    ApproveTool,
+    ApprovePlan,
+    ShutdownHost
+);
+
 /// Direct response on the authenticated command channel. Read data never enters SSE or mutation dedupe.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]

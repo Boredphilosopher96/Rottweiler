@@ -36,7 +36,7 @@ impl CompletionBudget {
         ledger: &mut DedupeRegistry,
         key: &(ClientId, RequestId),
     ) -> Option<CompletionReservation> {
-        let (pool, units) = if super::control_admission::is_urgent(command) {
+        let (pool, units) = if command.is_urgent() {
             (&self.urgent, URGENT_REPLY_UNITS)
         } else {
             (&self.normal, NORMAL_REPLY_UNITS)

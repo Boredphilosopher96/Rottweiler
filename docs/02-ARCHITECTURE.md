@@ -167,7 +167,7 @@ The signed updater follows the same boundary: `rw-core` owns exact-byte threshol
 Host control admission counts prepared typed allocation capacity before hashing or
 spawning work: ordinary controls have 64 global slots, eight per client, eight
 per session, and 32 MiB of retained command bytes. A single command may retain
-at most 8 MiB. Interruptions, cancellation, approvals, and shutdown use an
+at most 16 MiB. Interruptions, cancellation, approvals, and shutdown use an
 independent eight-slot, 1 MiB lane with two slots per client/session and 64 KiB
 per command. Exhaustion returns an explicit busy response without accepting work.
 Accepted controls remain owned after transport cancellation. Shutdown joins their

@@ -139,10 +139,15 @@ async fn unix_request(socket: &Path, request: Request<Full<Bytes>>) -> Response<
 }
 
 fn request_builder(method: Method, path: &str) -> hyper::http::request::Builder {
-    Request::builder()
+    let builder = Request::builder()
         .method(method)
         .uri(path.parse::<Uri>().expect("fixture URI"))
-        .header(hyper::header::HOST, "localhost")
+        .header(hyper::header::HOST, "localhost");
+    if path == "/v1/command" {
+        builder.header(COMMAND_LANE_HEADER, "normal")
+    } else {
+        builder
+    }
 }
 
 #[test]
@@ -445,7 +450,7 @@ async fn command_transport_accepts_the_maximum_legal_image_attachment_envelope()
     );
     assert!(
         body.len() > 2 * 1024 * 1024,
-        "fixture must cover the old failure"
+        "fixture must exercise a large legal envelope"
     );
     let response = unix_request(
         &runtime.paths.socket,
@@ -520,6 +525,23 @@ async fn uds_auth_mints_bound_identity_and_overwrites_spoofed_meta() {
     )
     .await;
     assert_eq!(wrong_token.status(), StatusCode::UNAUTHORIZED);
+
+    for declared_lane in [None, Some("urgent")] {
+        let mut request = request_builder(Method::POST, "/v1/command")
+            .header(AUTHORIZATION, format!("Bearer {}", credentials.token))
+            .header(CLIENT_HEADER, &credentials.client_id.0)
+            .body(Full::new(Bytes::from(command_bytes.clone())))
+            .expect("invalid command lane");
+        request.headers_mut().remove(COMMAND_LANE_HEADER);
+        if let Some(lane) = declared_lane {
+            request
+                .headers_mut()
+                .insert(COMMAND_LANE_HEADER, HeaderValue::from_static(lane));
+        }
+        let rejected = unix_request(&runtime.paths.socket, request).await;
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(engine.dispatches.load(Ordering::Relaxed), 0);
+    }
 
     let accepted = unix_request(
         &runtime.paths.socket,

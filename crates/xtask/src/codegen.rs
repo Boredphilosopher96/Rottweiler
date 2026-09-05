@@ -361,6 +361,14 @@ fn generate_command_execution() -> Result<String, XtaskError> {
         .iter()
         .filter_map(serde_json::Value::as_str)
         .collect();
+    let urgent_tags = serde_json::to_value(ClientCommand::urgent_type_tags())?;
+    let mut urgent: BTreeSet<&str> = urgent_tags
+        .as_array()
+        .ok_or_else(|| XtaskError::GeneratedContract("urgent tags must be an array".into()))?
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    let mut lanes = BTreeMap::new();
     let mut classes = BTreeMap::new();
     for variant in variants {
         let tag = variant
@@ -368,8 +376,16 @@ fn generate_command_execution() -> Result<String, XtaskError> {
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| XtaskError::GeneratedContract("command tag missing".into()))?;
         classes.insert(tag, if reads.remove(tag) { "read" } else { "control" });
+        lanes.insert(
+            tag,
+            if urgent.remove(tag) {
+                "urgent"
+            } else {
+                "normal"
+            },
+        );
     }
-    if !reads.is_empty() {
+    if !reads.is_empty() || !urgent.is_empty() {
         return Err(XtaskError::GeneratedContract(
             "read classification has unknown command tags".into(),
         ));
@@ -381,6 +397,14 @@ fn generate_command_execution() -> Result<String, XtaskError> {
     }
     output.push_str(
         "} as const satisfies Record<ClientCommand[\"type\"], \"read\" | \"control\">;\n",
+    );
+    output.push_str("\nexport const CLIENT_COMMAND_LANE = {\n");
+    for (tag, lane) in lanes {
+        use std::fmt::Write as _;
+        let _ = writeln!(output, "  {tag}: \"{lane}\",");
+    }
+    output.push_str(
+        "} as const satisfies Record<ClientCommand[\"type\"], \"normal\" | \"urgent\">;\n",
     );
     Ok(output)
 }

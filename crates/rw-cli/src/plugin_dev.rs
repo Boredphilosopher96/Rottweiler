@@ -108,6 +108,14 @@ impl DevelopmentClient {
         let request = Request::builder()
             .method(Method::POST)
             .uri("/v1/command")
+            .header(
+                crate::server::COMMAND_LANE_HEADER,
+                if command.is_urgent() {
+                    "urgent"
+                } else {
+                    "normal"
+                },
+            )
             .header(HOST, "localhost")
             .header(AUTHORIZATION, format!("Bearer {}", self.credentials.token))
             .header(CLIENT_HEADER, &self.credentials.client_id.0)

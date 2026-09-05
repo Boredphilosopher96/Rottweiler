@@ -1,3 +1,5 @@
+mod command_input;
+pub(crate) use command_input::LANE_HEADER as COMMAND_LANE_HEADER;
 use std::{
     collections::{HashMap, HashSet},
     convert::Infallible,
@@ -636,6 +638,8 @@ pub struct ServerState {
     bootstrap: SecretToken,
     clients: Arc<ClientRegistry>,
     shutdown_notifier: Arc<Notify>,
+    command_ingress: Arc<command_input::CommandIngress>,
+    connections: Arc<tokio::sync::Semaphore>,
     provider_api_key_attempts: Arc<Mutex<HashSet<String>>>,
 }
 
@@ -656,6 +660,8 @@ impl ServerState {
             bootstrap: runtime.bootstrap().clone(),
             clients: Arc::new(ClientRegistry::new()),
             shutdown_notifier: Arc::new(Notify::new()),
+            command_ingress: Arc::default(),
+            connections: Arc::new(tokio::sync::Semaphore::new(128)),
             provider_api_key_attempts: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -679,8 +685,10 @@ pub async fn serve(
             }
             accepted = listener.accept() => {
                 let (stream, _) = accepted.into_diagnostic()?;
+                let Ok(connection_permit) = state.connections.clone().try_acquire_owned() else { continue; };
                 let connection_state = state.clone();
                 tokio::spawn(async move {
+                    let _connection_permit = connection_permit;
                     let shutdown_state = connection_state.clone();
                     let connection_shutdown = Arc::new(AtomicBool::new(false));
                     let request_shutdown = Arc::clone(&connection_shutdown);
@@ -693,6 +701,9 @@ pub async fn serve(
                     });
                     if let Err(error) = http1::Builder::new()
                         .keep_alive(true)
+                        .max_buf_size(16 * 1024)
+                        .timer(hyper_util::rt::TokioTimer::new())
+                        .header_read_timeout(std::time::Duration::from_secs(3))
                         .serve_connection(TokioIo::new(stream), service)
                         .await
                     {
@@ -752,23 +763,58 @@ async fn handle_request(
             let Some(client) = authenticate_client(&request, &state.clients) else {
                 return Ok(unauthorized());
             };
-            if request
+            let Some(lane) = request
+                .headers()
+                .get(command_input::LANE_HEADER)
+                .and_then(|value| value.to_str().ok())
+            else {
+                return Ok(error_response(
+                    StatusCode::BAD_REQUEST,
+                    "command lane is required",
+                ));
+            };
+            let length = request
                 .headers()
                 .get(hyper::header::CONTENT_LENGTH)
                 .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.parse::<usize>().ok())
-                .is_some_and(|length| length > COMMAND_BODY_LIMIT)
+                .and_then(|value| value.parse::<usize>().ok());
+            let input = match state
+                .command_ingress
+                .acquire(&client.client_id, lane, length)
             {
-                return Ok(error_response(
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "command body exceeds the transport limit",
-                ));
-            }
+                Ok(input) => input,
+                Err(command_input::AdmissionError::InvalidLane) => {
+                    return Ok(error_response(
+                        StatusCode::BAD_REQUEST,
+                        "command lane must be normal or urgent",
+                    ));
+                }
+                Err(command_input::AdmissionError::BodyLimit) => {
+                    return Ok(error_response(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "command body exceeds its lane limit",
+                    ));
+                }
+                Err(command_input::AdmissionError::Busy) => {
+                    return Ok(error_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "command input admission exhausted",
+                    ));
+                }
+            };
             let body = request.into_body();
-            match Limited::new(body, COMMAND_BODY_LIMIT).collect().await {
-                Ok(collected) => {
-                    match serde_json::from_slice::<ClientCommand>(&collected.to_bytes()) {
-                        Ok(mut command) => {
+            match tokio::time::timeout(
+                command_input::BODY_TIMEOUT,
+                Limited::new(body, input.limit).collect(),
+            )
+            .await
+            {
+                Ok(Ok(collected)) => {
+                    match command_input::decode(collected.to_bytes(), input).await {
+                        Ok(command_input::ParsedCommand {
+                            mut command,
+                            lease: _input,
+                        }) => {
                             command.meta_mut().client_id = client.client_id.clone();
                             let shutdown_requested =
                                 matches!(&command, ClientCommand::ShutdownHost { .. });
@@ -807,10 +853,13 @@ async fn handle_request(
                         ),
                     }
                 }
-                Err(_) => error_response(
+                Ok(Err(_)) => error_response(
                     StatusCode::PAYLOAD_TOO_LARGE,
                     "command body exceeds the transport limit",
                 ),
+                Err(_) => {
+                    error_response(StatusCode::REQUEST_TIMEOUT, "command body deadline expired")
+                }
             }
         }
         (&Method::POST, "/v1/provider-api-key") => {

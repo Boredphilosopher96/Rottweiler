@@ -1,7 +1,7 @@
 import { EngineProtocolError, EngineTransportError } from "./errors"
 import type { ClientDiagnostics } from "../client-diagnostics"
 import validateCommandReply from "../../../../protocol/command-reply-validator.js"
-import { CLIENT_COMMAND_EXECUTION, ENGINE_EVENT_DELIVERY, MAX_COMMAND_REPLY_BYTES, PROTOCOL_VERSION } from "../protocol"
+import { CLIENT_COMMAND_LANE, CLIENT_COMMAND_EXECUTION, ENGINE_EVENT_DELIVERY, MAX_COMMAND_REPLY_BYTES, PROTOCOL_VERSION } from "../protocol"
 import { boundedJson } from "./json"
 import { ClientReadAdmission } from "./read-admission"
 import type { ClientCommand, CommandReply, EngineEvent } from "../protocol"
@@ -116,7 +116,7 @@ export class EngineHttpSseClient {
     const response = await this.#fetch(this.#url(this.#commandPath), {
       unix: this.#socketPath,
       method: "POST",
-      headers: this.#clientHeaders(auth, { "Content-Type": "application/json" }),
+      headers: this.#clientHeaders(auth, { "Content-Type": "application/json", "x-rottweiler-command-lane": CLIENT_COMMAND_LANE[command.type] }),
       body: JSON.stringify(authenticatedCommand),
       ...(signal === undefined ? {} : { signal }),
     })
