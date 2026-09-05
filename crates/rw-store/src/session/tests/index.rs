@@ -214,7 +214,7 @@ fn derived_index_rebuild_replaces_stale_rows() {
     );
     assert_eq!(
         AccountingLedger::open(root.path())
-            .and_then(|ledger| ledger.entries_bounded(Some("current")), 4096)
+            .and_then(|ledger| ledger.entries_bounded(Some("current"), 4096))
             .unwrap_or_else(|error| panic!("rebuilt accounting must query: {error}")),
         vec![accounting]
     );
