@@ -1,7 +1,5 @@
 #![allow(clippy::expect_used)]
-use crate::extension_runtime::{
-    PluginRuntimeBudget, PluginSessionRuntime, SharedPluginRedactor, tests::rollback_plugin,
-};
+use crate::extension_runtime::{PluginRuntimeBudget, SharedPluginRedactor, tests::rollback_plugin};
 use rw_ext::{HookClass, HookDispatcher, HookEffect, HookEvent, HookFailurePolicy};
 use rw_plugin_protocol::{PluginHookCapability, PluginToolCapability, PluginToolEffect};
 use std::sync::Arc;
@@ -49,16 +47,19 @@ async fn native_hook_registration_uses_sibling_tools_process_write_authority() {
             serde_json::to_vec(&manifest).expect("manifest JSON"),
         )
         .expect("manifest");
-        let runtime = PluginSessionRuntime::compose(
+        let owner = crate::extension_runtime::generations::PluginGenerationOwner::compose(
+            crate::extension_runtime::generations::PluginGenerationConfig {
+                private_root: root.path().to_path_buf(),
+                helper: root.path().join("unavailable-helper"),
+                redactor: redactor.clone(),
+                budget: budget.clone(),
+                session_ui: Arc::new(crate::extension_runtime::ui::UiSessionBudget::default()),
+            },
             &[config],
-            root.path(),
             &[root.path().to_path_buf()],
-            &root.path().join("unavailable-helper"),
-            &redactor,
-            &budget,
-            Arc::new(crate::extension_runtime::ui::UiSessionBudget::default()),
         )
         .expect("inert registration");
+        let runtime = owner.current();
         let mut dispatcher = HookDispatcher::new();
         let (registration, handler) = runtime.hooks[0].clone();
         assert_eq!(
@@ -82,7 +83,7 @@ async fn native_hook_registration_uses_sibling_tools_process_write_authority() {
         if allowed && writes {
             assert!(dispatcher.has_workspace_mutating_tool_hook(event, "unrelated_tool"));
         }
-        runtime.shutdown().await.expect("inert shutdown");
+        owner.shutdown().await.expect("inert shutdown");
     }
     budget
         .close()

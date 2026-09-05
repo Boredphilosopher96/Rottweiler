@@ -357,49 +357,6 @@ impl PluginSessionRuntime {
         }
     }
 
-    pub(crate) fn compose(
-        configs: &[crate::extension_config::DiscoveredPlugin],
-        private_root: &Path,
-        workspace_roots: &[PathBuf],
-        helper: &Path,
-        redactor: &Arc<SharedPluginRedactor>,
-        budget: &Arc<PluginRuntimeBudget>,
-        session_ui: Arc<ui::UiSessionBudget>,
-    ) -> Result<Self> {
-        let mut runtime = Self::new(budget, redactor, session_ui);
-        for config in configs.iter().filter(|config| config.enabled) {
-            let manifest = match config.load_manifest() {
-                Ok(manifest) => manifest,
-                Err(error) => {
-                    runtime
-                        .pending
-                        .push(format!("{}: unavailable: {error}", config.name));
-                    continue;
-                }
-            };
-            let metadata = rw_ext::PluginEndpointMetadata::new(manifest.clone())
-                .map_err(|error| miette!(error.to_string()))?;
-            let push_handler = Arc::new(SessionPluginPushHandler::default());
-            let endpoint: Arc<dyn rw_ext::PluginEndpoint> = Arc::new(
-                activation::DormantPluginEndpoint::new(activation::ActivationRecipe {
-                    metadata,
-                    approval: activation::ActivationApproval::Configured,
-                    config: config.clone(),
-                    private_root: private_root.to_path_buf(),
-                    workspace_roots: workspace_roots.to_vec(),
-                    helper: helper.to_path_buf(),
-                    redactor: Arc::clone(redactor),
-                    push_handler: Arc::clone(&push_handler),
-                    budget: Arc::clone(budget),
-                    #[cfg(test)]
-                    launcher: None,
-                }),
-            );
-            runtime.register_endpoint(config, &manifest, endpoint, push_handler)?;
-        }
-        Ok(runtime)
-    }
-
     fn register_endpoint(
         &mut self,
         config: &crate::extension_config::DiscoveredPlugin,
@@ -524,16 +481,6 @@ impl PluginSessionRuntime {
                 .bind(plugin_id)
                 .map_err(|error| miette!(error.to_string()))?;
             handler.bind(binding.session_id().0.clone(), capability);
-        }
-        Ok(())
-    }
-
-    pub(crate) fn bind_push(&self, handle: &rw_core::SessionHandle) -> Result<()> {
-        for (plugin_id, handler) in &self.push_handlers {
-            let capability = handle
-                .plugin_session_capability(plugin_id.clone())
-                .map_err(|error| miette!(error.to_string()))?;
-            handler.bind(handle.session_id().0.clone(), capability);
         }
         Ok(())
     }

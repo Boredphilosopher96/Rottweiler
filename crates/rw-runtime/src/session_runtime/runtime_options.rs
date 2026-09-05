@@ -111,7 +111,6 @@ pub(crate) struct HostedSessionComposition {
 }
 
 pub(crate) struct HostedActorRuntime {
-    pub model_generations: Arc<super::native_model_generations::NativeModelGenerations>,
     pub handle: rw_core::SessionHandle,
     pub model_catalog: Option<Arc<CachedModelCatalog>>,
     pub mcp: Option<Arc<dyn rw_core::HostMcpService>>,

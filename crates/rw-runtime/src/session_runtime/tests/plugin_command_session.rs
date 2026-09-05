@@ -164,8 +164,6 @@ async fn verify_root_recomposition(
         .ui_catalog()
         .await
         .expect("initial UI catalog");
-    let old_generation =
-        rw_core::ModelCatalogSource::generation(runtime.model_generations.as_ref());
     let added = workspace.join("additional");
     std::fs::create_dir(&added).expect("new workspace root");
     runtime
@@ -182,10 +180,6 @@ async fn verify_root_recomposition(
             .workspace_roots
             .len(),
         2
-    );
-    assert!(
-        rw_core::ModelCatalogSource::generation(runtime.model_generations.as_ref())
-            > old_generation
     );
     let catalog = runtime
         .handle

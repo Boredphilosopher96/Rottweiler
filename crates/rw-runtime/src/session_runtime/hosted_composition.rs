@@ -954,7 +954,6 @@ pub(crate) async fn compose_hosted_actor(
         orchestrator,
     });
     Ok(HostedActorRuntime {
-        model_generations,
         handle,
         model_catalog,
         mcp: mcp_admin,

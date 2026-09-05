@@ -277,20 +277,23 @@ async fn source_and_provider_metadata_registration_performs_no_activation() {
         package_root: fixture.root.path().join("unprepared-source"),
         entry: fixture.root.path().join("unprepared-source/index.ts"),
     };
-    let runtime = crate::extension_runtime::PluginSessionRuntime::compose(
+    let owner = crate::extension_runtime::generations::PluginGenerationOwner::compose(
+        crate::extension_runtime::generations::PluginGenerationConfig {
+            private_root: fixture.root.path().to_path_buf(),
+            helper: fixture.root.path().join("missing-release/rw"),
+            redactor: fixture.endpoint.generation.recipe.redactor.clone(),
+            budget: fixture.budget.clone(),
+            session_ui: Arc::new(crate::extension_runtime::ui::UiSessionBudget::default()),
+        },
         &[config],
-        fixture.root.path(),
         &[fixture.root.path().to_path_buf()],
-        &fixture.root.path().join("missing-release/rw"),
-        &fixture.endpoint.generation.recipe.redactor,
-        &fixture.budget,
-        Arc::new(crate::extension_runtime::ui::UiSessionBudget::default()),
     )
     .expect("inert composition");
+    let runtime = owner.current();
     assert_eq!(runtime.providers.len(), 1);
     assert_eq!(runtime.endpoints.len(), 1);
     assert!(runtime.pending.is_empty());
-    runtime.shutdown().await.expect("never activated");
+    owner.shutdown().await.expect("never activated");
     fixture.budget.close().expect("no retained capacity");
 }
 
@@ -363,19 +366,22 @@ async fn zero_ten_and_fifty_installed_plugins_remain_inert() {
             })
             .collect::<Vec<_>>();
         let budget = Arc::new(PluginRuntimeBudget::default());
-        let runtime = crate::extension_runtime::PluginSessionRuntime::compose(
+        let owner = crate::extension_runtime::generations::PluginGenerationOwner::compose(
+            crate::extension_runtime::generations::PluginGenerationConfig {
+                private_root: fixture.root.path().to_path_buf(),
+                helper: fixture.root.path().join("unavailable-helper"),
+                redactor: fixture.endpoint.generation.recipe.redactor.clone(),
+                budget: budget.clone(),
+                session_ui: Arc::new(crate::extension_runtime::ui::UiSessionBudget::default()),
+            },
             &configs,
-            fixture.root.path(),
             &[fixture.root.path().to_path_buf()],
-            &fixture.root.path().join("unavailable-helper"),
-            &fixture.endpoint.generation.recipe.redactor,
-            &budget,
-            Arc::new(crate::extension_runtime::ui::UiSessionBudget::default()),
         )
         .expect("metadata composition");
+        let runtime = owner.current();
         assert_eq!(runtime.endpoints.len(), count);
         assert!(runtime.pending.is_empty());
-        runtime.shutdown().await.expect("inert closure");
+        owner.shutdown().await.expect("inert closure");
         budget.close().expect("no activation slots consumed");
     }
 }
