@@ -153,3 +153,17 @@ fn derived_rebuild_is_paged_resumable_and_never_exposes_partial_totals() {
         300
     );
 }
+
+#[test]
+fn decoded_utc_boundaries_enforce_their_calendar_invariant() {
+    for value in [
+        "",
+        "2026-02-29",
+        "2026-09-05T00:00:00Z",
+        "2026-09-05T25:00:00.000Z",
+    ] {
+        assert!(serde_json::from_value::<UtcTimestamp>(serde_json::json!(value)).is_err());
+    }
+    assert!(serde_json::from_str::<UtcDayKey>("\"2026-02-29\"").is_err());
+    assert!(serde_json::from_str::<UtcTimestamp>("\"2024-02-29T00:00:00.000Z\"").is_ok());
+}

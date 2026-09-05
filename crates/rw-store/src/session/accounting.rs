@@ -16,7 +16,7 @@ use std::{
 };
 
 /// Validated UTC calendar-day key used by accounting queries and projections.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct UtcDayKey(String);
 
@@ -40,6 +40,12 @@ impl UtcDayKey {
     }
 }
 
+impl<'de> Deserialize<'de> for UtcDayKey {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::parse(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
 impl std::fmt::Display for UtcDayKey {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(formatter)
@@ -48,7 +54,7 @@ impl std::fmt::Display for UtcDayKey {
 
 /// Validated millisecond-precision UTC timestamp used as an injected budget
 /// and spend-rate clock boundary.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct UtcTimestamp(String);
 
@@ -100,6 +106,12 @@ impl UtcTimestamp {
     #[must_use]
     pub fn utc_day(&self) -> UtcDayKey {
         UtcDayKey(self.0[..10].to_owned())
+    }
+}
+
+impl<'de> Deserialize<'de> for UtcTimestamp {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::parse(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
     }
 }
 
