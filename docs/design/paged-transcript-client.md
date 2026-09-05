@@ -72,3 +72,9 @@ Edit and retry read the complete first message-text block through its typed cont
 A source rewind includes the expected committed prefix, committed user source sequence, turn identity and a before/through boundary position. The actor checks these inputs inside serialized mutation admission. Reused turn numbers and stale client pages cannot select another effective source. The client applies edit/retry follow-up only after the corresponding durable rewind event carries the exact request identity. A before action without an earlier completed workspace boundary is unavailable.
 
 Timeline handoff restores the selected source through an around read. Unresolved reads and navigation controls without a selected source defer renderer replacement. Independent history readers have distinct cache key namespaces; disposing one releases only its pages and leases.
+
+## Task state
+
+Task state has one authoritative typed snapshot, committed independently from transformed tool presentation. The client retains no historical task-output checkpoints. A rewind immediately invalidates the displayed snapshot and records its physical sequence as the minimum acceptable read prefix. A late query cannot replace a newer live state commit.
+
+`GetTodos` uses the authenticated read channel in live and historical views. Each query advances the mode-independent index by a bounded number of transactions and returns either an exact snapshot or explicit catch-up progress. The client owns one pending task request and one catch-up timer; session changes and renderer destruction retire that timer. Task identities, item count, per-field UTF-8 bytes and aggregate text bytes are validated from the same source schema in Rust and generated client validators.

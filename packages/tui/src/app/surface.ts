@@ -54,6 +54,7 @@ interface SurfaceHost {
     | "toolsWorkspace"
     | "transcript"
   >
+  retryTodos(): void
   readonly context: RenderContext
   readonly width: number
   readonly height: number
@@ -124,6 +125,7 @@ export function buildSurface(host: SurfaceHost, theme: RottweilerTheme): void {
     })
     host.ui.toolsWorkspace.visible = host.ui.primaryView === "tools"
     host.ui.contextPanel = new ContextPanelRenderable(host.context, theme, {
+      onRetryTodos: () => host.retryTodos(),
       onOpenDiff: (path) => host.openChangedFileDiff(path),
       onOpenSubagent: (subagentId) => {
         void host.children.enterSubagent(subagentId)

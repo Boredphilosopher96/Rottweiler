@@ -1,3 +1,4 @@
+import { emptyTodos, type TodoState } from "./todos"
 import { MAX_TAIL_TEXT_BYTES, utf8Prefix, type ToolOutputBuffer } from "./display-buffer"
 import type {
   Answer,
@@ -139,15 +140,6 @@ export interface ToolProjection {
   readonly isError: boolean | null
   readonly callIndex: number
   readonly timing: ActivityTimingProjection
-}
-
-export type TodoStatusProjection = "pending" | "in_progress" | "completed" | "blocked"
-
-/** Bounded, display-safe projection of the session todo tool's latest successful snapshot. */
-export interface TodoProjection {
-  readonly id: string
-  readonly content: string
-  readonly status: TodoStatusProjection
 }
 
 export type SubagentStatus = "running" | SubagentTerminalStatus
@@ -372,7 +364,7 @@ export interface RottweilerState {
   readonly streamingTail: StreamingTail | null
   readonly turns: Readonly<Record<string, TurnProjection>>
   readonly tools: Readonly<Record<string, ToolProjection>>
-  readonly todos: readonly TodoProjection[]
+  readonly todos: TodoState
   /** Current parent-turn children, kept separate from durable transcript history. */
   readonly subagents: Readonly<Record<string, SubagentProjection>>
   readonly subagentOrder: readonly string[]
@@ -437,7 +429,7 @@ export function createInitialState(): RottweilerState {
     streamingTail: null,
     turns: {},
     tools: {},
-    todos: [],
+    todos: emptyTodos(),
     subagents: {},
     subagentOrder: [],
     questions: {},

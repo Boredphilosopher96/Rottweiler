@@ -55,7 +55,8 @@ describe("Rottweiler tools-history", () => {
     expect(app.banner.plainText).toContain("history available")
     expect(app.transcript.mountedEntryCount).toBe(2)
     expect(setup.captureCharFrame()).toContain("Historical answer rendered")
-    expect(commands).toEqual([])
+    expect(commands.map(command => command.type)).toEqual(["get_todos"])
+    expect(commands[0]).toMatchObject({ session_id: "session-historical" })
   })
 
   test("defers hidden Tools binding and preserves its selection and current output on return", async () => {

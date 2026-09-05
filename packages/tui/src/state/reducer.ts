@@ -1,3 +1,4 @@
+import { commitTodos, invalidateTodos, readTodos } from "./todos"
 import {
   ENGINE_EVENT_DELIVERY,
   type EngineEvent,
@@ -14,7 +15,7 @@ import {
 import { projectSession, projectSessionReview, providerQualifiedRoute } from "./session-projections"
 import { projectShellEvent } from "./shell-state"
 import { MAX_SUBAGENT_TASK_BYTES, boundedSubagentHistory, nextSubagentArchiveKey, subagentActivity, subagentTerminalSummary } from "./subagents"
-import { UNKNOWN_ACTIVITY_TIMING, closeActivityTiming, deriveTodosFromTools, observeActivityTiming, openActivityTiming, projectTodoOutput, retainRecentTools, updateTool } from "./tool-state"
+import { UNKNOWN_ACTIVITY_TIMING, closeActivityTiming, observeActivityTiming, openActivityTiming, retainRecentTools, updateTool } from "./tool-state"
 import { MAX_COMPACTION_STREAM_BYTES, appendTailText, attachToolToTail, currentTurnId, retainRecentTurns, updateTail } from "./turn-state"
 
 export function reduceRottweilerState(
@@ -561,6 +562,11 @@ function applyKnownEvent(
           { pluginId: event.plugin_id, title: event.title, message: event.message },
         ],
       }
+    case "todo_state_committed":
+      return { ...state, todos: commitTodos(state.todos, event.snapshot, event.meta.sequence_id) }
+    case "todos_read":
+      if (activeSessionId !== null && event.session_id !== activeSessionId) return state
+      return { ...state, todos: readTodos(state.todos, event.result) }
     case "conversation_turn_committed": {
       const clearsTail =
         (event.turn.role === "assistant" || event.turn.role === "tool") &&
@@ -578,7 +584,6 @@ function applyKnownEvent(
     }
     case "conversation_rewound": {
       const target = parseU64(event.to_agent_turn)
-      const todos = target === null ? [] : deriveTodosFromTools(state.tools, target)
       const turns = target === null
         ? state.turns
         : Object.fromEntries(Object.entries(state.turns).filter(([turnId]) => {
@@ -607,7 +612,7 @@ function applyKnownEvent(
         queuedMessages: [],
         turns,
         tools,
-        todos,
+        todos: invalidateTodos(state.todos, event.meta.sequence_id),
         subagents,
         subagentOrder: retainedSubagentIds,
       }
@@ -897,13 +902,10 @@ function applyKnownEvent(
         callIndex: event.call_index,
         timing: closeActivityTiming(existing?.timing, event.meta.emitted_at),
       }
-      const todos =
-        tool.name === "todo" && !event.is_error ? projectTodoOutput(event.output) : null
       return {
         ...state,
         tools: retainRecentTools(state.tools, event.tool_call_id, tool),
         streamingTail: attachToolToTail(state.streamingTail, event.turn_id, event.tool_call_id),
-        ...(todos === null ? {} : { todos }),
       }
     }
     case "question_asked":

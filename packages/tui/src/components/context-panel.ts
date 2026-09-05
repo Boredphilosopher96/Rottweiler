@@ -16,6 +16,7 @@ import type { RottweilerState } from "../state"
 import type { RottweilerTheme } from "../theme"
 
 export interface ContextPanelCallbacks {
+  readonly onRetryTodos?: () => void
   readonly onOpenDiff?: (path: string) => void
   readonly onOpenSubagent?: (subagentId: string) => void
 }
@@ -47,6 +48,7 @@ export class ContextPanelRenderable extends BoxRenderable {
   #activeAgentCount = 0
   #activeMcpCount = 0
   #activeServiceCount = 0
+  #retryTodos = false
   #showSession = false
   #previousInputs: ReturnType<typeof contextPanelInputs> | null = null
 
@@ -114,6 +116,9 @@ export class ContextPanelRenderable extends BoxRenderable {
       showScrollIndicator: true,
       showSelectionIndicator: false,
       showDescription: false,
+    })
+    this.todos.on(SelectRenderableEvents.ITEM_SELECTED, () => {
+      if (this.#retryTodos) this.#callbacks.onRetryTodos?.()
     })
     this.mcpTitle = new TextRenderable(ctx, {
       content: "MCP",
@@ -253,16 +258,17 @@ export class ContextPanelRenderable extends BoxRenderable {
       value: subagent.subagentId,
     }))
 
-    const completedTodos = state.todos.filter((todo) => todo.status === "completed").length
+    this.#retryTodos = state.todos.phase === "failed"
+    const completedTodos = state.todos.snapshot.items.filter((todo) => todo.status === "completed").length
     this.todoTitle.content = panelHeading(
       this.#theme,
       "TASKS",
-      state.todos.length === 0 ? "" : `${completedTodos}/${state.todos.length}`,
+      state.todos.snapshot.items.length === 0 ? "" : `${completedTodos}/${state.todos.snapshot.items.length}`,
     )
     this.todos.options =
-      state.todos.length === 0
-        ? [{ name: "○ No tasks", description: "", value: "" }]
-        : state.todos.map((todo) => ({
+      state.todos.snapshot.items.length === 0
+        ? [{ name: state.todos.phase === "loading" ? "○ Loading tasks…" : state.todos.phase === "failed" ? "↻ Retry loading tasks" : "○ No tasks", description: "", value: "" }]
+        : state.todos.snapshot.items.map((todo) => ({
           name: `${todoGlyph(todo.status)} ${todo.content}`,
           description: todo.id,
           value: todo.id,
@@ -451,7 +457,7 @@ function runtimeServiceLabel(kind: "lsp" | "linter" | "formatter" | "test"): str
   return "Lint"
 }
 
-function todoGlyph(status: RottweilerState["todos"][number]["status"]): string {
+function todoGlyph(status: RottweilerState["todos"]["snapshot"]["items"][number]["status"]): string {
   switch (status) {
     case "pending":
       return "○"

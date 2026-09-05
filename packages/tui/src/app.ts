@@ -1,3 +1,4 @@
+import { TodoController } from "./todo-controller"
 import { notifyTransition } from "./app/notifications"
 import { ClientRestoreController } from "./app/client-restore"
 import { buildSurface } from "./app/surface"
@@ -140,6 +141,7 @@ export class RottweilerApp extends BoxRenderable {
   #terminalFocused = true
   #systemThemeMode: ThemeMode | null
   #systemTheme: RottweilerTheme
+  #todos: TodoController
   #projectionRequests: ProjectionRequestBroker
   #pickerController: PickerController
   #activeSubagentReadOnly = false
@@ -213,7 +215,7 @@ export class RottweilerApp extends BoxRenderable {
     })
     this.#options = {
       ...options,
-      sessionId: options.sessionId ?? "session-local",
+      sessionId: options.replaySessionId ?? options.sessionId ?? "session-local",
       clientId: options.clientId ?? "tui-client",
       requestId: options.requestId ?? (() => crypto.randomUUID()),
       nowMs: options.nowMs ?? (() => Date.now()),
@@ -253,6 +255,10 @@ export class RottweilerApp extends BoxRenderable {
           true,
         )
       },
+    })
+    this.#todos = new TodoController({
+      requests: this.#projectionRequests, state: () => this.#state.todos,
+      update: (todos) => this.setState({ ...this.#state, todos }),
     })
     const inputApp = this
     this.#input = new InputUiController({
@@ -526,6 +532,7 @@ export class RottweilerApp extends BoxRenderable {
     const app = this
     buildSurface({
       ui: this, context: this.ctx, options: this.#options, syntaxStyle: this.#syntaxStyle,
+      retryTodos: () => this.#todos.retry(),
       treeSitterClient: this.#treeSitterClient, input: this.#input, children: this.#children,
       history: this.#history, document: this.#document, requests: this.#projectionRequests,
       submission: this.#submission, pickerController: this.#pickerController,
@@ -639,6 +646,7 @@ export class RottweilerApp extends BoxRenderable {
     if (sessionId !== this.#sessionId) {
       this.closePicker("scope_change")
       this.#projectionRequests.clearForSessionChange()
+      this.#todos.reset()
       this.#children.reset()
       this.#pickerContent.resetCommands()
       this.#commandCatalogTruncationNotified = false
@@ -661,6 +669,7 @@ export class RottweilerApp extends BoxRenderable {
 
   resetConnectionProjections(): void {
     this.#projectionRequests.clearForReconnect()
+    this.#todos.reset()
     this.#pickerContent.resetCommands()
     this.#providers.catalogSettled()
     this.#projectionErrors = {}
@@ -742,6 +751,7 @@ export class RottweilerApp extends BoxRenderable {
       { event, eventRecord, commandRequestId, previous, next },
       deferPresentationForEvent(event),
     )
+    this.#todos.event(event)
   }
 
   beginInitialReplayBatch(): void {
@@ -1262,6 +1272,7 @@ export class RottweilerApp extends BoxRenderable {
   override destroy(): void {
     if (this.#destroyed) return
     this.#destroyed = true
+    this.#todos.dispose()
     this.#sessions.reset()
     this.#children.reset()
     this.#themes.dispose()
@@ -1363,6 +1374,7 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #recordProjectionFailure(kind: ProjectionKind, message: string): void {
+    if (kind === "todos") this.#todos.failed()
     if (kind === "commands") {
       this.#pickerContent.resetCommands()
     } else if (kind === "models") {

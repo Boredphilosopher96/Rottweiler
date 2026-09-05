@@ -1,7 +1,7 @@
 import { toolOutputBuffer } from "../../src/state/display-buffer"
 import { createStreamingTail } from "../../src/state/model"
 import type { RottweilerState, ToolProjection } from "../../src/state"
-import { createInitialState } from "../../src/state"
+import { createInitialState, emptyTodos } from "../../src/state"
 
 export type VisualScenario = "conversation" | "command-palette" | "approval" | "tools" | "theme-browser" | "settings-browser" | "mcp-browser" | "session-review"
 export const TOOLS_FIXTURE_NOW_MS = Date.parse("2026-01-01T12:00:41.000Z")
@@ -338,11 +338,11 @@ function conversationState(): RottweilerState {
       [tests.toolCallId]: tests,
       [read.toolCallId]: read,
     },
-    todos: [
+    todos: { ...emptyTodos(), phase: "ready", snapshot: { items: [
       { id: "map", content: "Map the event stream", status: "completed" },
       { id: "cursor", content: "Add durable cursor", status: "in_progress" },
       { id: "tests", content: "Test reconnect replay", status: "pending" },
-    ],
+    ] } },
     subagentOrder: ["explore", "tests"],
     subagents: {
       explore: {

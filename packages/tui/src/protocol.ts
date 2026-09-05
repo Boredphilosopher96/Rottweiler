@@ -1,6 +1,7 @@
 export {
   ENGINE_EVENT_DELIVERY,
   CLIENT_COMMAND_EXECUTION,
+  CLIENT_COMMAND_LANE,
   TRANSCRIPT_PROJECTION_VERSION,
   MAX_COMMAND_REPLY_BYTES,
   MAX_CLIENT_READS,
@@ -13,6 +14,11 @@ export {
   PROTOCOL_VERSION,
 } from "../../../protocol/types"
 export type {
+  TodoItem,
+  TodoStatus,
+  TodoSnapshot,
+  TodoReadSnapshot,
+  TodoReadResult,
   ClientCommand,
   EngineEvent,
   Answer,

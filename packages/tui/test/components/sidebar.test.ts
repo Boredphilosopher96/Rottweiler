@@ -1,3 +1,4 @@
+import { todoState } from "../fixtures/todos"
 import {
   createTestRenderer,
   setRendererCapabilities,
@@ -28,10 +29,10 @@ describe("sidebar components", () => {
     renderer.root.add(panel)
     panel.update({
       ...createInitialState(),
-      todos: [
+      todos: todoState([
         { id: "audit", content: "Audit interactions", status: "in_progress" },
         { id: "tests", content: "Add regression tests", status: "pending" },
-      ],
+      ]),
       mcpServers: [
         { name: "docs", enabled: true, approved: true, state: { type: "ready" }, tool_count: 4, resource_count: 0, prompt_count: 0 },
         { name: "search", enabled: true, approved: true, state: { type: "connecting" }, tool_count: 0, resource_count: 0, prompt_count: 0 },
@@ -113,7 +114,7 @@ describe("sidebar components", () => {
     renderer.root.add(panel)
     panel.update({
       ...createInitialState(),
-      todos: [{ id: "todo", content: "Keep the viewport bounded", status: "pending" }],
+      todos: todoState([{ id: "todo", content: "Keep the viewport bounded", status: "pending" }]),
       mcpServers: Array.from({ length: 4 }, (_, index) => ({
         name: `mcp-${index}`,
         enabled: true,

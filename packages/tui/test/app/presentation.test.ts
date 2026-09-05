@@ -1,3 +1,4 @@
+import { todoState } from "../fixtures/todos"
 import { deferPresentationForEvent } from "../../src/presentation"
 import { createTestRenderer, type TestRenderer } from "@opentui/core/testing"
 import { afterEach, describe, expect, test } from "bun:test"
@@ -174,7 +175,7 @@ describe("Rottweiler presentation", () => {
 
     app.setState({
       ...app.state,
-      todos: [{ id: "first-task", content: "Inspect the workspace", status: "pending" }],
+      todos: todoState([{ id: "first-task", content: "Inspect the workspace", status: "pending" }]),
     })
     await setup.flush()
     expect(app.contextPanel.visible).toBeTrue()
