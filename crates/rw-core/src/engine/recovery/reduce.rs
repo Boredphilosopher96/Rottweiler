@@ -49,6 +49,12 @@ pub(super) fn reduce(
         return Ok(());
     };
     match kind {
+        PendingEvent::TodoStateCommitted { snapshot } => {
+            snapshot
+                .validate()
+                .map_err(|_| RecoveryError::Invalid("task snapshot"))?;
+            head.control.todos = Some(sequence);
+        }
         PendingEvent::ConversationTurnCommitted { agent_turn, turn } => {
             append_turn(
                 head,
@@ -89,6 +95,7 @@ pub(super) fn reduce(
                 .ok_or(RecoveryError::Invalid("unknown rewind boundary"))?;
             head.conversation = boundary.conversation;
             head.control.completed_turns = boundary.control.completed_turns;
+            head.control.todos = boundary.control.todos;
             head.control.mode = boundary.control.mode;
             head.control.mode_id = boundary.control.mode_id;
             head.control.pending_plan = boundary.control.pending_plan;

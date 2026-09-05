@@ -30,6 +30,7 @@ pub struct RecoveredMessage {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RecoveryControlPayloads {
     pub title: Option<String>,
+    pub todos: rw_types::todo::TodoSnapshot,
     pub model: Option<RecoveredModelSelection>,
     pub permission_mode: Option<PermissionModeDescriptor>,
     pub pending_plan: Option<PlanArtifact>,
@@ -88,6 +89,15 @@ impl CanonicalHistory {
         };
         let control = &self.head.control;
         let mut result = RecoveryControlPayloads::default();
+        if let Some(sequence) = control.todos {
+            let PendingEvent::TodoStateCommitted { snapshot } = reader.event(sequence)? else {
+                return Err(RecoveryError::Invalid("task state source selector"));
+            };
+            snapshot
+                .validate()
+                .map_err(|_| RecoveryError::Invalid("task snapshot"))?;
+            result.todos = snapshot;
+        }
         reader.selection(control, &mut result)?;
         reader.workspace_and_plans(control, &mut result)?;
         for queued in &control.queued {

@@ -45,6 +45,15 @@ pub const TRANSIENT_ENGINE_EVENT_TYPES: &[&str] = &[
 #[derive(Allocation)]
 #[serde(deny_unknown_fields)]
 pub enum EngineEvent {
+    TodoStateCommitted {
+        meta: EventMeta,
+        snapshot: crate::todo::TodoSnapshot,
+    },
+    TodosReady {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        todos: crate::todo::TodoReadSnapshot,
+    },
     TranscriptPageReady {
         meta: CommandAckMeta,
         session_id: SessionId,
@@ -807,6 +816,7 @@ impl EngineEvent {
             | Self::PluginMessageInjected { meta, .. }
             | Self::PluginStatusChanged { meta, .. }
             | Self::ExtensionStateCommitted { meta, .. }
+            | Self::TodoStateCommitted { meta, .. }
             | Self::UiNotification { meta, .. }
             | Self::ConversationTurnCommitted { meta, .. }
             | Self::ConversationRewound { meta, .. }
@@ -901,6 +911,7 @@ impl EngineEvent {
             | Self::PluginMessageInjected { meta, .. }
             | Self::PluginStatusChanged { meta, .. }
             | Self::ExtensionStateCommitted { meta, .. }
+            | Self::TodoStateCommitted { meta, .. }
             | Self::UiNotification { meta, .. }
             | Self::ConversationTurnCommitted { meta, .. }
             | Self::ConversationRewound { meta, .. }

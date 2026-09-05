@@ -436,6 +436,7 @@ impl SessionProjector {
                 PendingEvent::PluginMessageInjected { .. }
                 | PendingEvent::PluginStatusChanged { .. }
                 | PendingEvent::ExtensionStateCommitted { .. }
+                | PendingEvent::TodoStateCommitted { .. }
                 | PendingEvent::UiNotification { .. } => {}
                 PendingEvent::ConversationTurnCommitted { agent_turn, turn } => {
                     if let Some(compacted) = &mut compacted_conversation {

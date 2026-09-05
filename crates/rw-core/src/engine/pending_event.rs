@@ -42,6 +42,9 @@ use serde_json::Value;
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(super) enum PendingEvent {
+    TodoStateCommitted {
+        snapshot: rw_types::todo::TodoSnapshot,
+    },
     ProviderCallAccounted {
         call: rw_types::ProviderCallIdentity,
         actuals: rw_types::ProviderCallActuals,
@@ -393,6 +396,9 @@ impl PendingEvent {
                 plugin_id,
                 status,
             },
+            Self::TodoStateCommitted { snapshot } => {
+                EngineEvent::TodoStateCommitted { meta, snapshot }
+            }
             Self::ExtensionStateCommitted {
                 plugin_id,
                 transaction,
