@@ -349,7 +349,11 @@ machine_local_path: string | null, estimated_tokens: string, state: ContextItemS
 
 export type CacheBreakpoint = { after_item_id: ContextItemId | null, };
 
-export type ContextSnapshot = { turn_id: TurnId | null, stable_prefix_hash: string, used_tokens: string, usable_tokens: string, reserved_tokens: string,
+export type ContextSnapshot = {
+/**
+ * Exact canonical source prefix used to assemble this read.
+ */
+through: SequenceId | null, turn_id: TurnId | null, stable_prefix_hash: string, used_tokens: string, usable_tokens: string, reserved_tokens: string,
 /**
  * False when zero capacity means unknown rather than exhausted.
  */
@@ -405,7 +409,11 @@ export type SubscriptionQuotaSummary = { used: string, unit: string, };
 
 export type PromptTool = { name: string, description: string, input_schema: JsonValue, };
 
-export type PromptDump = { turn_id: TurnId | null, model_alias: ModelAlias, turns: Array<Turn>, tools: Array<PromptTool>, stable_prefix_hash: string, cache_breakpoints: Array<CacheBreakpoint>, estimated_tokens: string, };
+export type PromptDump = {
+/**
+ * Exact canonical source prefix used to assemble this read.
+ */
+through: SequenceId | null, turn_id: TurnId | null, model_alias: ModelAlias, turns: Array<Turn>, tools: Array<PromptTool>, stable_prefix_hash: string, cache_breakpoints: Array<CacheBreakpoint>, estimated_tokens: string, };
 
 export type PermissionDecision = "ask" | "allow" | "deny";
 

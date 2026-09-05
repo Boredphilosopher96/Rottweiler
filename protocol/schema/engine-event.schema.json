@@ -5941,6 +5941,17 @@
       "description": "Exact engine-side context breakdown for one assembled request.",
       "type": "object",
       "properties": {
+        "through": {
+          "description": "Exact canonical source prefix used to assemble this read.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "turn_id": {
           "anyOf": [
             {
@@ -6370,6 +6381,17 @@
       "description": "Exact assembled model request exposed for prompt transparency.",
       "type": "object",
       "properties": {
+        "through": {
+          "description": "Exact canonical source prefix used to assemble this read.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "turn_id": {
           "anyOf": [
             {
