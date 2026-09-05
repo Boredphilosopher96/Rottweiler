@@ -1,3 +1,5 @@
+use futures_util::FutureExt;
+
 use super::{
     Arc, BoundClient, CachedDispatch, ClientCommand, ClientId, ClientRole, CommandMeta,
     CommandOutcome, CompletedForkOperation, DedupeState, EngineHost, ForkOperationKey,
@@ -5,130 +7,182 @@ use super::{
     TurnId, command_ack, completed_fork_dispatch, host_error_code, rejected, trim_dedupe, watch,
 };
 
+enum ControlRequest {
+    Complete(Arc<CachedDispatch>),
+    Running(watch::Receiver<Option<Arc<CachedDispatch>>>),
+    Launch {
+        completion: watch::Receiver<Option<Arc<CachedDispatch>>>,
+        admission: tokio::sync::OwnedSemaphorePermit,
+    },
+}
+
 impl EngineHost {
-    /// Dispatches a command under a transport-authenticated identity. Duplicate
-    /// request ids replay their original outcome and connection-scoped events.
-    #[allow(clippy::too_many_lines)]
+    /// Accepted execution and its completion have owners independent of callers
+    /// and cache retention. A duplicate never reruns by losing an evicted entry.
     pub(super) async fn dispatch_control(
         &self,
         bound: BoundClient,
         mut command: ClientCommand,
     ) -> CommandOutcome {
         command.meta_mut().client_id = bound.client_id.clone();
-        let meta = command.meta().clone();
         let Ok(payload_hash) = super::read::command_hash(&command) else {
             return rejected("command_serialization", "command could not serialize");
         };
-        let key = (bound.client_id.clone(), meta.request_id.clone());
-        let session_id_hint = command.session_id().cloned();
-        let mut pending_command = Some(command);
-        let mut owns_execution = false;
-
+        let key = (bound.client_id.clone(), command.meta().request_id.clone());
+        let request = match self.reserve_control(&key, &payload_hash) {
+            Ok(request) => request,
+            Err(outcome) => return outcome,
+        };
+        let (mut completion, owns_execution) = match request {
+            ControlRequest::Complete(dispatch) => {
+                self.emit_many(&bound.client_id, &dispatch.events).await;
+                return dispatch.outcome.clone();
+            }
+            ControlRequest::Running(completion) => (completion, false),
+            ControlRequest::Launch {
+                completion,
+                admission,
+            } => {
+                self.launch_control(command, key, payload_hash, admission)
+                    .await;
+                (completion, true)
+            }
+        };
         loop {
-            let (wait, launch, completed) = {
-                let mut dedupe = self
-                    .dedupe
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                match dedupe.entries.get(&key) {
-                    Some(DedupeState::Read { .. }) => {
-                        return rejected("request_id_conflict", "request id was used for a read");
-                    }
-                    Some(DedupeState::Complete {
-                        payload_hash: existing,
-                        dispatch,
-                        retry_same_request,
-                    }) => {
-                        if existing == &payload_hash {
-                            let cached = dispatch.clone();
-                            let retry_same_request = *retry_same_request;
-                            if retry_same_request {
-                                dedupe.entries.remove(&key);
-                                dedupe.order.retain(|queued| queued != &key);
-                            }
-                            (None, None, Some((cached.outcome, cached.events)))
-                        } else {
-                            let outcome = rejected(
-                                "request_id_conflict",
-                                "request id was reused with a different command",
-                            );
-                            let event = command_ack(
-                                &meta,
-                                session_id_hint.clone(),
-                                outcome.clone(),
-                                &*self.clock,
-                            );
-                            (None, None, Some((outcome, vec![event])))
-                        }
-                    }
-                    Some(DedupeState::Running {
-                        payload_hash: existing,
-                        completion,
-                    }) => {
-                        if existing == &payload_hash {
-                            (Some(completion.subscribe()), None, None)
-                        } else {
-                            let outcome = rejected(
-                                "request_id_conflict",
-                                "request id was reused with a different command",
-                            );
-                            let event = command_ack(
-                                &meta,
-                                session_id_hint.clone(),
-                                outcome.clone(),
-                                &*self.clock,
-                            );
-                            (None, None, Some((outcome, vec![event])))
-                        }
-                    }
-                    None => {
-                        let Ok(admission) = Arc::clone(&self.control_admission).try_acquire_owned()
-                        else {
-                            return rejected("control_busy", "host control admission exhausted");
-                        };
-                        let (completion, wait) = watch::channel(false);
-                        dedupe.entries.insert(
-                            key.clone(),
-                            DedupeState::Running {
-                                payload_hash: payload_hash.clone(),
-                                completion,
-                            },
-                        );
-                        dedupe.order.push_back(key.clone());
-                        let Some(operation) = pending_command.take() else {
-                            return rejected(
-                                "request_state_invalid",
-                                "request execution state was unavailable",
-                            );
-                        };
-                        (Some(wait), Some((operation, admission)), None)
-                    }
-                }
-            };
-            if let Some((outcome, events)) = completed {
+            let completed = completion.borrow_and_update().clone();
+            if let Some(dispatch) = completed {
                 if !owns_execution {
-                    self.emit_many(&bound.client_id, &events).await;
+                    self.emit_many(&bound.client_id, &dispatch.events).await;
                 }
-                return outcome;
+                return dispatch.outcome.clone();
             }
-            if let Some((operation, admission)) = launch {
-                owns_execution = true;
-                let host = self.clone();
-                let bound_client = bound.client_id.clone();
-                let operation_key = key.clone();
-                let operation_hash = payload_hash.clone();
-                tokio::spawn(async move {
-                    let _admission = admission;
-                    let dispatch = host.execute(operation, operation_hash.clone()).await;
-                    host.complete_request(operation_key, operation_hash, &dispatch, &bound_client)
+            if completion.changed().await.is_err() {
+                return rejected(
+                    "request_completion_lost",
+                    "request completion owner disappeared",
+                );
+            }
+        }
+    }
+
+    fn reserve_control(
+        &self,
+        key: &(ClientId, RequestId),
+        payload_hash: &str,
+    ) -> Result<ControlRequest, CommandOutcome> {
+        let mut dedupe = self
+            .dedupe
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match dedupe.entries.get(key) {
+            Some(DedupeState::Read { .. }) => Err(rejected(
+                "request_id_conflict",
+                "request id was used for a read",
+            )),
+            Some(DedupeState::Complete {
+                payload_hash: existing,
+                dispatch,
+                retry_same_request,
+            }) => {
+                if existing != payload_hash {
+                    return Err(rejected(
+                        "request_id_conflict",
+                        "request id was reused with a different command",
+                    ));
+                }
+                let dispatch = Arc::clone(dispatch);
+                if *retry_same_request {
+                    dedupe.entries.remove(key);
+                    dedupe.order.retain(|queued| queued != key);
+                }
+                Ok(ControlRequest::Complete(dispatch))
+            }
+            Some(DedupeState::Running {
+                payload_hash: existing,
+                completion,
+            }) => {
+                if existing != payload_hash {
+                    return Err(rejected(
+                        "request_id_conflict",
+                        "request id was reused with a different command",
+                    ));
+                }
+                Ok(ControlRequest::Running(completion.subscribe()))
+            }
+            None => {
+                let admission = Arc::clone(&self.control_admission)
+                    .try_acquire_owned()
+                    .map_err(|_| rejected("control_busy", "host control admission exhausted"))?;
+                let (completion, wait) = watch::channel(None);
+                dedupe.entries.insert(
+                    key.clone(),
+                    DedupeState::Running {
+                        payload_hash: payload_hash.to_owned(),
+                        completion,
+                    },
+                );
+                dedupe.order.push_back(key.clone());
+                Ok(ControlRequest::Launch {
+                    completion: wait,
+                    admission,
+                })
+            }
+        }
+    }
+
+    async fn launch_control(
+        &self,
+        command: ClientCommand,
+        key: (ClientId, RequestId),
+        payload_hash: String,
+        admission: tokio::sync::OwnedSemaphorePermit,
+    ) {
+        let shutdown = matches!(command, ClientCommand::ShutdownHost { .. });
+        let meta = command.meta().clone();
+        let host = self.clone();
+        let operation_key = key.clone();
+        let operation_hash = payload_hash.clone();
+        let work = async move {
+            let _admission = admission;
+            let dispatch =
+                match std::panic::AssertUnwindSafe(host.execute(command, operation_hash.clone()))
+                    .catch_unwind()
+                    .await
+                {
+                    Ok(dispatch) => dispatch,
+                    Err(_) => {
+                        host.retain_failed_owners(
+                            "host control panicked before effect proof".into(),
+                            (),
+                        )
                         .await;
-                });
-            }
-            if let Some(mut wait) = wait
-                && !*wait.borrow_and_update()
-            {
-                let _ = wait.changed().await;
-            }
+                        let outcome = rejected(
+                            "control_panicked",
+                            "host control failed; effects require host recovery",
+                        );
+                        CachedDispatch {
+                            events: vec![command_ack(&meta, None, outcome.clone(), &*host.clock)],
+                            outcome,
+                            cacheable: true,
+                        }
+                    }
+                };
+            host.complete_request(
+                operation_key,
+                operation_hash,
+                Arc::new(dispatch),
+                &meta.client_id,
+            )
+            .await;
+        };
+        if self.control_owner.spawn(work, shutdown).is_err() {
+            let dispatch = Arc::new(CachedDispatch {
+                outcome: rejected("host_shutting_down", "host control admission is closed"),
+                events: Vec::new(),
+                cacheable: true,
+            });
+            self.complete_request(key.clone(), payload_hash, dispatch, &key.0)
+                .await;
         }
     }
 
@@ -136,7 +190,7 @@ impl EngineHost {
         &self,
         key: (ClientId, RequestId),
         payload_hash: String,
-        dispatch: &CachedDispatch,
+        dispatch: Arc<CachedDispatch>,
         client_id: &ClientId,
     ) {
         let completion = {
@@ -152,7 +206,7 @@ impl EngineHost {
                 key,
                 DedupeState::Complete {
                     payload_hash,
-                    dispatch: dispatch.clone(),
+                    dispatch: Arc::clone(&dispatch),
                     retry_same_request: !dispatch.cacheable,
                 },
             );
@@ -161,7 +215,7 @@ impl EngineHost {
         };
         self.emit_many(client_id, &dispatch.events).await;
         if let Some(completion) = completion {
-            completion.send_replace(true);
+            completion.send_replace(Some(dispatch));
         }
     }
 

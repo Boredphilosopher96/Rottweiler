@@ -2,6 +2,7 @@ mod contracts;
 pub use contracts::*;
 mod commands;
 mod control;
+mod control_owner;
 mod events;
 mod lifecycle;
 mod provider_completion;
@@ -81,11 +82,11 @@ enum DedupeState {
     },
     Running {
         payload_hash: String,
-        completion: watch::Sender<bool>,
+        completion: watch::Sender<Option<Arc<CachedDispatch>>>,
     },
     Complete {
         payload_hash: String,
-        dispatch: CachedDispatch,
+        dispatch: Arc<CachedDispatch>,
         retry_same_request: bool,
     },
 }
@@ -363,6 +364,7 @@ pub struct EngineHost {
     dedupe: Arc<Mutex<DedupeRegistry>>,
     read_channel: HostReadChannel,
     control_admission: Arc<tokio::sync::Semaphore>,
+    control_owner: Arc<control_owner::ControlOwner>,
     client_events: Arc<Mutex<ClientEventRegistry>>,
     provider_auth: Arc<PendingProviderAuths>,
     provider_mutation: Arc<tokio::sync::Mutex<()>>,
@@ -409,6 +411,7 @@ impl EngineHost {
             dedupe,
             read_channel,
             control_admission: Arc::new(tokio::sync::Semaphore::new(64)),
+            control_owner: Arc::default(),
             client_events: Arc::new(Mutex::new(ClientEventRegistry::default())),
             provider_auth: Arc::new(PendingProviderAuths::default()),
             provider_mutation: Arc::new(tokio::sync::Mutex::new(())),

@@ -57,6 +57,7 @@ impl EngineHost {
     }
 
     async fn close_all_sessions(&self) -> Result<(), HostError> {
+        self.control_owner.close_admission();
         let (ready, openings) = {
             let registry = self.registry.lock().await;
             self.shutting_down.store(true, Ordering::Release);
@@ -88,7 +89,9 @@ impl EngineHost {
             }
             Ok::<(), HostError>(())
         }));
-        let (sessions, openings) = tokio::join!(close_sessions, wait_openings);
+        let (sessions, openings, controls) =
+            tokio::join!(close_sessions, wait_openings, self.control_owner.settle());
+        controls?;
         for result in sessions.into_iter().chain(openings) {
             result?;
         }

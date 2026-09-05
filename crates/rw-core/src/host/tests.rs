@@ -135,6 +135,7 @@ struct StubFactory {
     fail_resume_once: AtomicBool,
     corrupt_identity: bool,
     panic_resume: bool,
+    panic_allocate: bool,
     block_create: AtomicBool,
     block_resume: AtomicBool,
     block_fork: AtomicBool,
@@ -159,6 +160,7 @@ impl StubFactory {
             fail_resume_once: AtomicBool::new(false),
             corrupt_identity: false,
             panic_resume: false,
+            panic_allocate: false,
             block_create: AtomicBool::new(false),
             block_resume: AtomicBool::new(false),
             block_fork: AtomicBool::new(false),
@@ -258,6 +260,7 @@ impl StubFactory {
 #[async_trait]
 impl SessionFactory for StubFactory {
     fn allocate_session_id(&self) -> Result<SessionId, HostError> {
+        assert!(!self.panic_allocate, "injected allocation panic");
         Ok(SessionId(format!(
             "created-{}",
             self.next.fetch_add(1, Ordering::Relaxed)
@@ -382,6 +385,7 @@ struct StubQueries {
     exports: std::sync::Mutex<Vec<(SessionId, TranscriptFormat, String, bool)>>,
     fail_model_catalog: bool,
     fail_model_persistence: bool,
+    export_gate: Option<Arc<control_ownership::ExportGate>>,
 }
 
 struct AuthFixture {
@@ -598,6 +602,10 @@ impl HostQueryService for StubQueries {
         output_path: &str,
         force: bool,
     ) -> Result<String, HostError> {
+        if let Some(gate) = &self.export_gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
         self.exports
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -635,6 +643,7 @@ fn host(max_sessions: usize) -> (EngineHost, Arc<StubFactory>) {
 
 mod catalog;
 mod closure;
+mod control_ownership;
 mod delivery;
 mod models;
 mod provider_auth;
