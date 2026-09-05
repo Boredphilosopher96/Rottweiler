@@ -1,3 +1,4 @@
+import { SessionUiController } from "./app/sessions"
 import {
 BoxRenderable,
 CliRenderEvents,
@@ -161,49 +162,12 @@ interface PendingPresentationEvent {
 export type { AppClientState } from "./recycle-state"
 const MAX_VISIBLE_SUBAGENTS = 256
 
-interface TimelineTurnChoice {
-  readonly sequenceId: string
-  readonly agentTurn: string
-  readonly rewindTarget: string
-  readonly content: string
-  readonly hadAttachments: boolean
-}
-
-type TimelineAction = "edit" | "retry" | "rewind"
-
-interface PendingRewindIntent {
-  readonly action: TimelineAction
-  readonly target: string
-  readonly content: string
-  readonly hadAttachments: boolean
-  requestId: string | null
-}
-
 type SubagentAction =
   | { readonly kind: "inspect"; readonly subagent: SubagentDescriptor }
   | { readonly kind: "continue"; readonly subagent: SubagentDescriptor }
   | { readonly kind: "running"; readonly subagent: SubagentDescriptor }
   | { readonly kind: "interrupt"; readonly subagent: SubagentDescriptor }
   | { readonly kind: "close"; readonly subagent: SubagentDescriptor }
-type QueuedMessagePickerAction =
-  | { readonly kind: "remove"; readonly position: string }
-  | { readonly kind: "clear" }
-type SessionProjection = RottweilerState["sessions"][number]
-type SessionListAction =
-  | { readonly kind: "new" }
-  | { readonly kind: "session"; readonly session: SessionProjection }
-  | { readonly kind: "retry" }
-type SessionPickerAction =
-  | { readonly kind: "resume"; readonly session: SessionProjection }
-  | { readonly kind: "rename"; readonly session: SessionProjection }
-type ExportFormat = "markdown" | "html" | "json"
-interface PendingExport {
-  readonly format: ExportFormat
-  readonly outputPath: string
-  readonly force: boolean
-  readonly requestId: string | null
-}
-
 interface PaletteAction {
   readonly id: string
   readonly title: string
@@ -251,17 +215,6 @@ const KEYBOARD_HELP_CONTEXTS: Record<KeybindingPreset, readonly KeybindingContex
   vim: ["global", "vim_normal", "vim_insert", "picker_normal", "picker_insert", "review"],
 }
 
-const EXPORT_FORMAT_CHOICES: readonly {
-  readonly format: ExportFormat
-  readonly label: string
-  readonly description: string
-  readonly extension: string
-}[] = [
-  { format: "markdown", label: "Markdown", description: "Readable text", extension: "md" },
-  { format: "html", label: "HTML", description: "Formatted for a browser", extension: "html" },
-  { format: "json", label: "JSON", description: "Structured data", extension: "json" },
-]
-
 export class RottweilerApp extends BoxRenderable {
   transcript!: TranscriptRenderable
   toolsWorkspace!: ToolsWorkspaceRenderable
@@ -280,6 +233,7 @@ export class RottweilerApp extends BoxRenderable {
   banner!: StateBannerRenderable
   main!: BoxRenderable
 
+  readonly #sessions: SessionUiController
   readonly #themes: ThemeUiController
   readonly #settings: SettingsUiController
   readonly #permissions: PermissionUiController
@@ -311,7 +265,6 @@ export class RottweilerApp extends BoxRenderable {
   #composerSubmissionsInFlight = 0
   #deferredTheme: RottweilerTheme | null = null
   #sessionId: string
-  #pendingSessionCreateRequestId: string | null = null
   #terminalFocused = true
   #systemThemeMode: ThemeMode | null
   #systemTheme: RottweilerTheme
@@ -340,18 +293,12 @@ export class RottweilerApp extends BoxRenderable {
   #terminalSuspended = false
   #pendingShellTimer: ReturnType<typeof setTimeout> | null = null
   #pluginNotificationTimer: ReturnType<typeof setTimeout> | null = null
-  #sessionSearchTimer: ReturnType<typeof setTimeout> | null = null
   #runtimeServicesTimer: ReturnType<typeof setTimeout> | null = null
   #interruptEscapeTimer: ReturnType<typeof setTimeout> | null = null
   #clipboardNoticeTimer: ReturnType<typeof setTimeout> | null = null
-  #exportNoticeTimer: ReturnType<typeof setTimeout> | null = null
   #interruptEscapeArmed = false
   #pendingReviewPaths = new Set<string>()
-  #sessionActionId: string | null = null
-  #timelineTurn: TimelineTurnChoice | null = null
-  #pendingRewindIntent: PendingRewindIntent | null = null
   #composerNotice: string | null = null
-  #pendingExport: PendingExport | null = null
   #lastComposerValue = ""
   #pendingClientState: AppClientState | null = null
   #keybindings: CompiledKeybindings
@@ -654,6 +601,19 @@ export class RottweilerApp extends BoxRenderable {
     })
 
     const app = this
+    this.#sessions = new SessionUiController({
+      get state() { return app.#state }, get sessionId() { return app.#sessionId },
+      get picker() { return app.picker }, get composer() { return app.composer },
+      get banner() { return app.banner }, get theme() { return app.#theme },
+      get projectionErrors() { return app.#projectionErrors }, get destroyed() { return app.#destroyed },
+      get composerNotice() { return app.#composerNotice }, set composerNotice(value) { app.#composerNotice = value },
+      pickerController: this.#pickerController, requests: this.#projectionRequests,
+      refresh: () => this.setState(this.#state), closePicker: () => this.closePicker(),
+      selectSession: id => this.#options.onSessionSelect?.(id),
+      sendMessage: (content, attachments, preserve) => this.#sendMessage(content, attachments, preserve),
+      projectError: (code, message, retryable) => this.#projectClientError(code, message, retryable),
+      projectRejection: outcome => this.#projectRejection(outcome),
+    })
     this.#providers = new ProviderUiController({
       get state() { return app.#state },
       get activeSubagentId() { return app.#activeSubagentId },
@@ -900,7 +860,7 @@ export class RottweilerApp extends BoxRenderable {
     )
     const picker = new FuzzyPickerRenderable(this.ctx, theme, (query) => {
       if (this.picker !== picker) return
-      if (this.#pickerController.kind === "sessions") this.#scheduleSessionSearch(query)
+      if (this.#pickerController.kind === "sessions") this.#sessions.scheduleSessionSearch(query)
     })
     this.picker = picker
     this.picker.position = "absolute"
@@ -1118,11 +1078,8 @@ export class RottweilerApp extends BoxRenderable {
       this.#pendingReviewSelection = null
       this.#outputViewerToolCallId = null
       this.#reviewOpen = false
-      this.#timelineTurn = null
-      this.#pendingRewindIntent = null
+      this.#sessions.reset()
       this.#composerNotice = null
-      this.#pendingExport = null
-      this.#clearExportNotice()
       this.#providers.resetSession()
       this.outputViewer.closePresentation()
       this.reviewPanel.closePresentation()
@@ -1262,69 +1219,7 @@ export class RottweilerApp extends BoxRenderable {
         "the live command catalog exceeded the safe display limit; narrow the configured extension set",
       )
     }
-    const pendingRewind = this.#pendingRewindIntent
-    const causedBy = isRecord(eventRecord.meta) && typeof eventRecord.meta.caused_by === "string"
-      ? eventRecord.meta.caused_by
-      : null
-    const rewindAckOutcome = commandRequestId === null
-      ? null
-      : next.commandAcks[commandRequestId]?.outcome ?? null
-    if (
-      event.type === "command_acknowledged" &&
-      commandRequestId !== null &&
-      commandRequestId === this.#pendingSessionCreateRequestId
-    ) {
-      const acknowledgement = event as Extract<EngineEvent, { type: "command_acknowledged" }>
-      this.#pendingSessionCreateRequestId = null
-      if (acknowledgement.outcome.type === "rejected") {
-        this.#projectRejection(acknowledgement.outcome)
-      } else if (
-        acknowledgement.session_id === null ||
-        acknowledgement.session_id === undefined
-      ) {
-        this.#projectClientError(
-          "session_create_missing_identity",
-          "the engine accepted the new session without returning its identity",
-          true,
-        )
-      } else {
-        this.closePicker()
-        void this.#options.onSessionSelect?.(acknowledgement.session_id)
-      }
-    }
-    if (
-      pendingRewind !== null &&
-      event.type === "command_acknowledged" &&
-      commandRequestId === pendingRewind.requestId &&
-      rewindAckOutcome?.type === "rejected"
-    ) {
-      this.#pendingRewindIntent = null
-      this.#projectRejection(rewindAckOutcome)
-    } else if (
-      pendingRewind !== null &&
-      event.type === "error" &&
-      (causedBy === null || causedBy === pendingRewind.requestId)
-    ) {
-      this.#pendingRewindIntent = null
-    } else if (
-      pendingRewind !== null &&
-      event.type === "conversation_rewound" &&
-      event.to_agent_turn === pendingRewind.target &&
-      (causedBy === null || causedBy === pendingRewind.requestId)
-    ) {
-      // Clear before applying the follow-up so a duplicate durable event cannot fire it twice.
-      this.#pendingRewindIntent = null
-      if (pendingRewind.action === "edit") {
-        this.composer.value = pendingRewind.content
-        this.#composerNotice = pendingRewind.hadAttachments
-          ? "attachments from the original message are not restored"
-          : null
-        this.composer.focus()
-        this.setState(this.#state)
-      } else if (pendingRewind.action === "retry") {
-        void this.#sendMessage(pendingRewind.content, [])
-      }
-    }
+    this.#sessions.afterEvent(event, eventRecord, commandRequestId, next)
     const modelSwitchOutcome =
       event.type === "command_acknowledged" &&
       commandRequestId !== null &&
@@ -1333,30 +1228,6 @@ export class RottweilerApp extends BoxRenderable {
         : null
     if (modelSwitchOutcome?.type === "rejected") {
       this.#projectRejection(modelSwitchOutcome)
-    }
-    const pendingExport = this.#pendingExport
-    if (
-      event.type === "command_acknowledged" &&
-      pendingExport !== null &&
-      pendingExport.requestId !== null &&
-      commandRequestId === pendingExport.requestId &&
-      (event as Extract<EngineEvent, { type: "command_acknowledged" }>).outcome.type === "rejected"
-    ) {
-      this.#handleExportRejection(
-        (event as Extract<EngineEvent, { type: "command_acknowledged" }>).outcome as Extract<CommandOutcome, { type: "rejected" }>,
-        pendingExport,
-      )
-    } else if (
-      event.type === "session_exported" &&
-      (event as Extract<EngineEvent, { type: "session_exported" }>).session_id === this.#sessionId &&
-      pendingExport !== null &&
-      pendingExport.requestId !== null &&
-      commandRequestId === pendingExport.requestId
-    ) {
-      this.#pendingExport = null
-      this.#showExportNotice(
-        (event as Extract<EngineEvent, { type: "session_exported" }>).output_path,
-      )
     }
     this.#notify(previous, next)
     if (
@@ -1506,7 +1377,7 @@ export class RottweilerApp extends BoxRenderable {
       || this.#terminalSuspended || this.#state.shell.active || this.#state.replay.active
       || this.#providers.hasPendingAction
       || this.#state.providerAuth.pending !== null || this.#mcp.hasDraft
-      || this.#pendingRewindIntent !== null || this.#pendingExport !== null
+      || this.#sessions.pending
       || this.#reviewOpen || this.outputViewer.visible || this.interactionPanel.visible
       || (kind !== null && !isRestorablePicker(kind))) return null
     const surface = this.#clientPickerSurface()
@@ -1788,90 +1659,11 @@ export class RottweilerApp extends BoxRenderable {
 
   openTrustPicker(): void { this.#permissions.openTrustPicker() }
 
+  openTimelinePicker(): void { this.#sessions.openTimelinePicker() }
 
-  openTimelinePicker(): void {
-    this.#timelineTurn = null
-    this.#pickerController.begin("timeline")
-    this.#pickerController.refresh()
-  }
+  openQueuedMessagesPicker(): void { this.#sessions.openQueuedMessagesPicker() }
 
-  openQueuedMessagesPicker(): void {
-    if (this.#state.replay.active) return
-    this.#pickerController.begin("queuedMessages")
-    this.#pickerController.refresh()
-  }
-
-  openExportSessionPicker(): void {
-    if (this.#state.replay.active) return
-    this.#pickerController.begin("exportFormat")
-    this.#pickerController.refresh()
-  }
-
-  #openExportPathPrompt(format: ExportFormat): void {
-    const choice = EXPORT_FORMAT_CHOICES.find((item) => item.format === format)
-    if (choice === undefined) return
-    this.#pickerController.kind = "exportPath"
-    this.picker.openTextPrompt({ title: "Save to path, e.g. ~/transcript.md", placeholder: `~/rottweiler-export.${choice.extension}`, onSubmit: (value) => {
-        this.closePicker()
-        const outputPath = expandLeadingHome(value.trim())
-        void this.#submitSessionExport(format, outputPath, false)
-      }, maxBytes: 4_096, empty: "reject" })
-  }
-
-  async #submitSessionExport(
-    format: ExportFormat,
-    outputPath: string,
-    force: boolean,
-  ): Promise<void> {
-    if (this.#state.replay.active) return
-    const meta = this.#projectionRequests.meta()
-    const pending: PendingExport = {
-      format,
-      outputPath,
-      force,
-      requestId: meta.request_id,
-    }
-    this.#pendingExport = pending
-    try {
-      const outcome = await this.#projectionRequests.emit({
-        type: "export_session",
-        meta,
-        session_id: this.#sessionId,
-        format,
-        output_path: outputPath,
-        force,
-      })
-      if (outcome?.type === "rejected" && this.#pendingExport?.requestId === meta.request_id) {
-        this.#handleExportRejection(outcome, pending)
-      } else if (outcome === null && this.#pendingExport?.requestId === meta.request_id) {
-        this.#pendingExport = null
-        this.#projectClientError(
-          "session_export_unavailable",
-          "the session export was not acknowledged by the engine",
-          true,
-        )
-      }
-    } catch (error) {
-      if (this.#pendingExport?.requestId !== meta.request_id) return
-      this.#pendingExport = null
-      this.#projectClientError(
-        "session_export_failed",
-        `session export failed: ${safeErrorMessage(error)}`,
-        true,
-      )
-    }
-  }
-
-  #handleExportRejection(outcome: Extract<CommandOutcome, { type: "rejected" }>, pending: PendingExport): void {
-    this.#projectRejection(outcome)
-    if (!pending.force && outcome.error.message.includes("export output already exists")) {
-      this.#pendingExport = { ...pending, requestId: null }
-      this.#pickerController.begin("exportOverwrite")
-      this.#pickerController.refresh()
-      return
-    }
-    this.#pendingExport = null
-  }
+  openExportSessionPicker(): void { this.#sessions.openExportSessionPicker() }
 
   openWorkspaceRootsPicker(): void {
     this.#pickerController.begin("workspaceRoots")
@@ -1879,7 +1671,6 @@ export class RottweilerApp extends BoxRenderable {
   }
   openMcpPicker(): void { this.#mcp.openMcpPicker() }
   openThemePicker(): void { this.#themes.openThemePicker() }
-
 
   #resizeReviewPanel(width: number, height: number): void {
     const primaryHeight = Math.max(
@@ -1895,85 +1686,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#pickerController.refresh()
   }
 
-  openSessionPicker(): void {
-    this.#sessionActionId = null
-    this.#pickerController.begin("sessions")
-    this.#projectionRequests.command({ type: "list_sessions" })
-    this.#pickerController.refresh()
-  }
-
-  async #createSession(): Promise<void> {
-    if (this.#state.replay.active) {
-      this.#projectClientError(
-        "new_session_unavailable_in_replay",
-        "return to the live session before starting a new conversation",
-      )
-      return
-    }
-    if (this.#pendingSessionCreateRequestId !== null) return
-    const cwd = this.#state.workspaceRoots?.roots[0]
-    if (cwd === undefined) {
-      this.#projectClientError(
-        "new_session_workspace_unavailable",
-        "the engine has not published the current workspace yet; try again after it connects",
-        true,
-      )
-      return
-    }
-    const meta = this.#projectionRequests.meta()
-    this.#pendingSessionCreateRequestId = meta.request_id
-    try {
-      const outcome = await this.#projectionRequests.emit({
-        type: "create_session",
-        meta,
-        cwd,
-        model: null,
-      })
-      if (outcome?.type === "rejected") {
-        this.#pendingSessionCreateRequestId = null
-        this.#projectRejection(outcome)
-      } else if (outcome === null) {
-        this.#pendingSessionCreateRequestId = null
-        this.#projectClientError(
-          "new_session_unavailable",
-          "the engine connection is unavailable",
-          true,
-        )
-      }
-    } catch (error) {
-      this.#pendingSessionCreateRequestId = null
-      this.#projectClientError(
-        "new_session_failed",
-        presentError({
-          category: "protocol",
-          code: "new_session_failed",
-          message: safeErrorMessage(error),
-          requestId: meta.request_id,
-        }).text,
-        true,
-      )
-    }
-  }
-
-  #openSessionActionPicker(session: SessionProjection): void {
-    this.#sessionActionId = session.sessionId
-    this.#pickerController.kind = "sessionActions"
-    this.#pickerController.refresh()
-  }
-
-  #openSessionRenamePrompt(session: SessionProjection): void {
-    this.#sessionActionId = session.sessionId
-    this.#pickerController.kind = "sessionRename"
-    this.picker.openTextPrompt({ title: "Rename session, e.g. Auth refactor", placeholder: session.title ?? session.workspaceName, onSubmit: (title) => {
-        const sessionId = this.#sessionActionId
-        this.#pickerController.kind = "sessions"
-        this.#pickerController.query = ""
-        if (sessionId !== null) {
-          this.#projectionRequests.command({ type: "rename_session", sessionId, title })
-        }
-        this.#pickerController.refresh()
-      }, maxBytes: 288, empty: "reject" })
-  }
+  openSessionPicker(): void { this.#sessions.openSessionPicker() }
 
   openSubagentPicker(): void {
     if (this.#state.replay.active) {
@@ -2141,7 +1854,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#mcp.pickerClosed()
     this.#settings.pickerClosed()
     this.#subagentActionId = null
-    this.#sessionActionId = null
+    this.#sessions.pickerClosed()
     if (restoreMcpBrowser) {
       this.#pickerController.kind = "mcp"
       this.mcpBrowser.visible = true
@@ -2185,6 +1898,7 @@ export class RottweilerApp extends BoxRenderable {
   override destroy(): void {
     if (this.#destroyed) return
     this.#destroyed = true
+    this.#sessions.reset()
     this.#themes.dispose()
     this.#pickerController.dispose()
     this.#providers.dispose()
@@ -2195,12 +1909,10 @@ export class RottweilerApp extends BoxRenderable {
     this.#presentation.destroy()
     this.#clearPendingShellTimer()
     this.#clearPluginNotificationTimer()
-    this.#clearSessionSearchTimer()
     this.#clearRuntimeServicesTimer()
     this.#clearToolsElapsedTimer()
     this.#clearInterruptEscape(false)
     this.#clearClipboardNotice()
-    this.#clearExportNotice()
     this.ctx.off(CliRenderEvents.FOCUS, this.#onTerminalFocus)
     this.ctx.off(CliRenderEvents.BLUR, this.#onTerminalBlur)
     this.ctx.off(CliRenderEvents.THEME_MODE, this.#onTerminalThemeMode)
@@ -2225,23 +1937,6 @@ export class RottweilerApp extends BoxRenderable {
     if (this.#clipboardNoticeTimer === null) return
     clearTimeout(this.#clipboardNoticeTimer)
     this.#clipboardNoticeTimer = null
-  }
-
-  #showExportNotice(path: string): void {
-    this.#clearExportNotice()
-    this.banner.visible = true
-    this.banner.fg = this.#theme.success
-    this.banner.content = `Exported to ${path}`
-    this.#exportNoticeTimer = setTimeout(() => {
-      this.#exportNoticeTimer = null
-      if (!this.#destroyed) this.setState(this.#state)
-    }, 3_000)
-  }
-
-  #clearExportNotice(): void {
-    if (this.#exportNoticeTimer === null) return
-    clearTimeout(this.#exportNoticeTimer)
-    this.#exportNoticeTimer = null
   }
 
   #keybindingContext(): KeybindingContext {
@@ -2276,7 +1971,7 @@ export class RottweilerApp extends BoxRenderable {
       return true
     }
     if (action === "new_session") {
-      void this.#createSession()
+      void this.#sessions.createSession()
       return true
     }
     if (action === "open_subagent_picker") {
@@ -2812,169 +2507,12 @@ export class RottweilerApp extends BoxRenderable {
           },
         )
         break
-      case "timeline": {
-        const turns = this.#timelineTurns()
-        if (turns.length === 0) {
-          this.#pickerController.showStatus(
-            "Conversation timeline",
-            "No completed user turns",
-            this.#state.replay.active ? "read-only session" : "Send a message to create a checkpoint.",
-          )
-          break
-        }
-        const readOnly = this.#state.replay.active
-        const items: PickerItem<TimelineTurnChoice | null>[] = [
-          ...(readOnly
-            ? [{
-                id: "timeline.read-only",
-                label: "read-only session",
-                description: "Timeline actions are unavailable in replay",
-                value: null,
-                selectable: false,
-              }]
-            : []),
-          ...turns.map((turn) => ({
-            id: `timeline.turn.${turn.sequenceId}`,
-            label: timelineTurnLabel(turn.content),
-            description: this.#timelineTurnDescription(turn.agentTurn, readOnly),
-            value: turn,
-            selectable: !readOnly,
-          })),
-        ]
-        this.#pickerController.show("Conversation timeline", items, (item) => {
-          if (item.value === null || readOnly) return
-          this.#timelineTurn = item.value
-          this.#pickerController.kind = "timelineActions"
-          this.#pickerController.refresh()
-        })
-        break
-      }
-      case "timelineActions": {
-        const turn = this.#timelineTurn
-        if (turn === null) {
-          this.openTimelinePicker()
-          break
-        }
-        const items: PickerItem<TimelineAction>[] = [
-          {
-            id: "timeline.action.edit",
-            label: "Edit and resend",
-            description: "Rewind, restore the message in the composer, and focus it",
-            value: "edit",
-          },
-          {
-            id: "timeline.action.retry",
-            label: "Retry",
-            description: "Rewind and resend the same text without attachments",
-            value: "retry",
-          },
-          {
-            id: "timeline.action.rewind",
-            label: "Rewind only",
-            description: "Rewind without restoring the message",
-            value: "rewind",
-          },
-        ]
-        this.#pickerController.show(`Turn ${turn.agentTurn} actions`, items, (item) => {
-          this.closePicker()
-          void this.#startRewindIntent(turn, item.value)
-        })
-        break
-      }
-      case "queuedMessages": {
-        if (this.#state.replay.active) {
-          this.closePicker()
-          break
-        }
-        const queuedMessages = this.#state.queuedMessages
-        if (queuedMessages.length === 0) {
-          this.#pickerController.showStatus(
-            "Queued messages",
-            "No queued messages",
-            "Messages sent during an active turn will appear here.",
-          )
-          break
-        }
-        const items: PickerItem<QueuedMessagePickerAction>[] = [
-          ...queuedMessages.map((message) => ({
-            id: `queued.message.${message.position}`,
-            label: queuedMessageLabel(message.content),
-            description: "queued",
-            value: { kind: "remove", position: message.position } as const,
-          })),
-          ...(queuedMessages.length < 2
-            ? []
-            : [{
-                id: "queued.messages.clear",
-                label: "Clear all queued messages",
-                description: "Remove every queued message",
-                value: { kind: "clear" } as const,
-              }]),
-        ]
-        this.#pickerController.show("Queued messages · select to remove", items, (item) => {
-          if (item.value.kind === "clear") {
-            this.closePicker()
-            this.#projectionRequests.command({ type: "clear_queued_messages" })
-            return
-          }
-          this.#projectionRequests.command({
-            type: "remove_queued_message",
-            position: item.value.position,
-          })
-        })
-        break
-      }
-      case "exportFormat": {
-        if (this.#state.replay.active) {
-          this.closePicker()
-          break
-        }
-        this.#pickerController.show(
-          "Export session",
-          EXPORT_FORMAT_CHOICES.map((choice) => ({
-            id: `export.format.${choice.format}`,
-            label: choice.label,
-            description: choice.description,
-            value: choice.format,
-          })),
-          (item) => this.#openExportPathPrompt(item.value),
-        )
-        break
-      }
-      case "exportOverwrite": {
-        const pending = this.#pendingExport
-        if (this.#state.replay.active || pending === null) {
-          this.closePicker()
-          break
-        }
-        this.#pickerController.show(
-          "Overwrite existing file?",
-          [
-            {
-              id: "export.overwrite.confirm",
-              label: "Overwrite",
-              description: "Replace the existing file atomically",
-              value: true,
-            },
-            {
-              id: "export.overwrite.cancel",
-              label: "Cancel",
-              description: "Keep the existing file",
-              value: false,
-            },
-          ],
-          (item) => {
-            this.closePicker()
-            this.#pendingExport = null
-            if (item.value) {
-              void this.#submitSessionExport(pending.format, pending.outputPath, true)
-            }
-          },
-        )
-        break
-      }
-      case "exportPath":
-        break
+      case "timeline": this.#sessions.render("timeline"); break
+      case "timelineActions": this.#sessions.render("timelineActions"); break
+      case "queuedMessages": this.#sessions.render("queuedMessages"); break
+      case "exportFormat": this.#sessions.render("exportFormat"); break
+      case "exportOverwrite": this.#sessions.render("exportOverwrite"); break
+      case "exportPath": this.#sessions.render("exportPath"); break
       case "workspaceRoots": {
         const workspaceRoots = this.#state.workspaceRoots
         if (workspaceRoots === null) {
@@ -3245,100 +2783,9 @@ export class RottweilerApp extends BoxRenderable {
         })
         break
       }
-      case "sessions":
-        const sessionError = this.#projectionErrors.sessions
-        if (
-          sessionError === undefined &&
-          this.#projectionRequests.current("sessions") !== null &&
-          this.#state.sessions.length === 0
-        ) {
-          this.#pickerController.showLoading("Sessions", "Loading sessions")
-          break
-        }
-        const sessionItems: PickerItem<SessionListAction>[] = [
-          {
-            id: "sessions.new",
-            label: "New session",
-            description: "Start a clean conversation in this workspace",
-            value: { kind: "new" },
-          },
-          ...(sessionError === undefined
-            ? []
-            : [{
-                id: "sessions.error",
-                label: "Couldn't load sessions",
-                description: `${sessionError} · select to retry`,
-                value: { kind: "retry" } as const,
-              }]),
-          ...this.#state.sessions.map((session) => ({
-            id: session.sessionId,
-            label: session.title || session.workspaceName,
-            description: `${session.workspaceName} · ${session.model}${session.shellActive ? " · shell active" : ""}`,
-            searchText: `${session.sessionId} ${session.title ?? ""} ${session.workspaceName} ${session.model}`,
-            value: { kind: "session", session } as const,
-          })),
-        ]
-        this.#pickerController.show(
-          this.#state.sessionSearch?.truncated === true
-            ? "Sessions · results truncated"
-            : "Sessions",
-          sessionItems,
-          (item) => {
-            if (item.value.kind === "new") {
-              void this.#createSession()
-              return
-            }
-            if (item.value.kind === "retry") {
-              const query = this.picker.input.value.trim()
-              if (query.length === 0) {
-                this.#projectionRequests.command({ type: "list_sessions" })
-              } else {
-                this.#projectionRequests.command({ type: "search_sessions", query, limit: 100 })
-              }
-              return
-            }
-            this.#openSessionActionPicker(item.value.session)
-          },
-        )
-        break
-      case "sessionActions": {
-        const session = this.#state.sessions.find(
-          (candidate) => candidate.sessionId === this.#sessionActionId,
-        )
-        if (session === undefined) {
-          this.closePicker()
-          break
-        }
-        const items: PickerItem<SessionPickerAction>[] = [
-          {
-            id: "resume",
-            label: "Resume session",
-            description: "Switch to this session",
-            value: { kind: "resume", session },
-          },
-          {
-            id: "rename",
-            label: "Rename session",
-            description: "Change its picker title without switching",
-            value: { kind: "rename", session },
-          },
-        ]
-        this.#pickerController.show(
-          `Session actions · ${boundedUiText(session.title ?? session.workspaceName, 64)}`,
-          items,
-          (item) => {
-            if (item.value.kind === "resume") {
-              this.closePicker()
-              void this.#options.onSessionSelect?.(item.value.session.sessionId)
-            } else {
-              this.#openSessionRenamePrompt(item.value.session)
-            }
-          },
-        )
-        break
-      }
-      case "sessionRename":
-        break
+      case "sessions": this.#sessions.render("sessions"); break
+      case "sessionActions": this.#sessions.render("sessionActions"); break
+      case "sessionRename": this.#sessions.render("sessionRename"); break
       case null:
         break
     }
@@ -3347,64 +2794,6 @@ export class RottweilerApp extends BoxRenderable {
   #resolvedTheme(theme: RottweilerTheme): RottweilerTheme {
     if (theme.name === "system") return this.#systemTheme
     return themeByName(theme.name, this.#systemThemeMode ?? theme.mode) ?? theme
-  }
-
-  #timelineTurns(): readonly TimelineTurnChoice[] {
-    return this.#state.transcript
-      .filter(
-        (entry) =>
-          entry.turn.role === "user" &&
-          this.#state.turns[entry.agentTurn]?.status !== "running" &&
-          isU64(entry.agentTurn),
-      )
-      .map((entry) => {
-        const message = timelineUserMessage(entry.turn)
-        return {
-          sequenceId: entry.sequenceId,
-          agentTurn: entry.agentTurn,
-          rewindTarget: (BigInt(entry.agentTurn) - 1n).toString(),
-          content: message.content,
-          hadAttachments: message.hadAttachments,
-        }
-      })
-      .reverse()
-  }
-
-  #timelineTurnDescription(agentTurn: string, readOnly: boolean): string {
-    const tools = Object.values(this.#state.tools).filter((tool) => tool.turnId === agentTurn)
-    const edits = tools.filter((tool) => tool.diff !== null).length
-    const detail = [`turn ${agentTurn}`]
-    if (tools.length > 0) detail.push(`${tools.length} ${tools.length === 1 ? "tool" : "tools"}`)
-    if (edits > 0) detail.push(`${edits} ${edits === 1 ? "edit" : "edits"}`)
-    if (readOnly) detail.push("read-only")
-    return detail.join(" · ")
-  }
-
-  async #startRewindIntent(turn: TimelineTurnChoice, action: TimelineAction): Promise<void> {
-    const target = action === "rewind" ? turn.agentTurn : turn.rewindTarget
-    const intent: PendingRewindIntent = {
-      action,
-      target,
-      content: turn.content,
-      hadAttachments: turn.hadAttachments,
-      requestId: null,
-    }
-    this.#pendingRewindIntent = intent
-    try {
-      const accepted = await this.#sendMessage(`/rewind ${target}`, [], true)
-      if (!accepted && this.#pendingRewindIntent === intent) this.#pendingRewindIntent = null
-    } catch (error) {
-      if (this.#pendingRewindIntent === intent) this.#pendingRewindIntent = null
-      this.#projectClientError(
-        "rewind_failed",
-        presentError({
-          category: "protocol",
-          code: "rewind_failed",
-          message: safeErrorMessage(error),
-        }).text,
-        true,
-      )
-    }
   }
 
   #submitPaletteCommand(content: string): void {
@@ -3461,7 +2850,7 @@ export class RottweilerApp extends BoxRenderable {
       { id: "compact.run", title: "Compact context", section: "Conversation", description: "Compact the conversation context", run: submit("/compact") },
       { id: "rewind.run", title: "Rewind to a turn", section: "Conversation", description: "Choose from completed user turns", run: open(() => this.openTimelinePicker()) },
       { id: "fork.run", title: "Fork session", section: "Conversation", description: "Fork at the latest completed turn", run: open(() => void this.#requestFork(null)) },
-      { id: "session.new", title: "New session", section: "Conversation", description: this.#paletteDescription("Start a clean conversation", "new_session"), run: open(() => void this.#createSession()) },
+      { id: "session.new", title: "New session", section: "Conversation", description: this.#paletteDescription("Start a clean conversation", "new_session"), run: open(() => void this.#sessions.createSession()) },
       { id: "session.list", title: "Switch session", section: "Conversation", description: this.#paletteDescription("Resume another durable session", "open_session_picker"), run: open(() => this.openSessionPicker()) },
       { id: "review.open", title: "Review changes", section: "Conversation", description: this.#paletteDescription("Open the cumulative session diff", "open_review"), run: open(() => this.openReview()) },
       { id: "session.export", title: "Export session", section: "Conversation", description: "Save this session's transcript to a file", run: open(() => this.openExportSessionPicker()) },
@@ -3529,8 +2918,7 @@ export class RottweilerApp extends BoxRenderable {
     }
     this.#options.onComposerInput?.(value)
     this.transcript.clearBlockSelection()
-    const hadPendingIntent = this.#pendingRewindIntent !== null
-    this.#pendingRewindIntent = null
+    const hadPendingIntent = this.#sessions.clearRewind()
     const hadNotice = this.#composerNotice !== null
     this.#composerNotice = null
     if ((hadPendingIntent || hadNotice) && !this.#destroyed) this.setState(this.#state)
@@ -3889,27 +3277,6 @@ export class RottweilerApp extends BoxRenderable {
     })
   }
 
-  #scheduleSessionSearch(query: string): void {
-    this.#clearSessionSearchTimer()
-    this.#sessionSearchTimer = setTimeout(() => {
-      this.#sessionSearchTimer = null
-      if (this.#pickerController.kind === "sessions" && this.picker.input.value === query) {
-        if (query.trim().length === 0) {
-          this.#projectionRequests.command({ type: "list_sessions" })
-        } else {
-          this.#projectionRequests.command({ type: "search_sessions", query, limit: 100 })
-        }
-      }
-    }, 80)
-  }
-
-  #clearSessionSearchTimer(): void {
-    if (this.#sessionSearchTimer !== null) {
-      clearTimeout(this.#sessionSearchTimer)
-      this.#sessionSearchTimer = null
-    }
-  }
-
   #refreshRuntimeServicesWhileToolsRun(): void {
     this.#projectionRequests.command({ type: "list_runtime_services" })
     this.#clearRuntimeServicesTimer()
@@ -3934,7 +3301,7 @@ export class RottweilerApp extends BoxRenderable {
     preserveRewindIntent = false,
   ): Promise<boolean> {
     if (!preserveRewindIntent) {
-      this.#pendingRewindIntent = null
+      this.#sessions.clearRewind()
       this.#clearComposerNotice()
     }
     if (this.#state.replay.active) {
@@ -4048,7 +3415,7 @@ export class RottweilerApp extends BoxRenderable {
     }
     if (sessionAction?.type === "new") {
       this.closePicker()
-      void this.#createSession()
+      void this.#sessions.createSession()
       return true
     }
     if (sessionAction?.type === "rewindTimeline") {
@@ -4120,9 +3487,7 @@ export class RottweilerApp extends BoxRenderable {
       return await this.#requestFork(sessionAction.atTurn)
     }
     const meta = this.#projectionRequests.meta()
-    if (preserveRewindIntent && this.#pendingRewindIntent !== null) {
-      this.#pendingRewindIntent.requestId = meta.request_id
-    }
+    if (preserveRewindIntent) this.#sessions.bindRewindRequest(meta.request_id)
     const outcome = await this.#projectionRequests.emit({
       type: "send_message",
       meta,
@@ -4520,30 +3885,10 @@ export class RottweilerApp extends BoxRenderable {
   }
 }
 
-function timelineUserMessage(turn: RottweilerState["transcript"][number]["turn"]): {
-  readonly content: string
-  readonly hadAttachments: boolean
-} {
-  const first = turn.blocks[0]
-  if (first?.type !== "text") {
-    return { content: "", hadAttachments: turn.blocks.length > 0 }
-  }
-  const firstIsTextAttachment = /^Attached file .+ \([^\n]+\):\n/.test(first.text)
-  return {
-    content: firstIsTextAttachment ? "" : first.text,
-    hadAttachments: firstIsTextAttachment || turn.blocks.length > 1,
-  }
-}
-
 function safeErrorMessage(error: unknown): string {
   return error instanceof Error && error.message.length > 0
     ? error.message
     : "the request could not be delivered to the engine"
-}
-
-function expandLeadingHome(path: string): string {
-  if (path === "~") return homedir()
-  return path.startsWith("~/") ? `${homedir()}${path.slice(1)}` : path
 }
 
 function approvalBinding(diff: unknown): ApprovalBinding | null {

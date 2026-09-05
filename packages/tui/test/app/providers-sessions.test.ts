@@ -4,7 +4,7 @@ import { PROTOCOL_VERSION } from "../../../../protocol/types"
 import {
   createRottweilerApp
 } from "../../src/app"
-import type { ClientCommand, EngineEvent } from "../../src/protocol"
+import type { ClientCommand, CommandOutcome, EngineEvent } from "../../src/protocol"
 import { createInitialState } from "../../src/state"
 import { emptyHistoryReader } from "../fixtures/history"
 
@@ -666,4 +666,44 @@ describe("Rottweiler providers-sessions", () => {
     )
     expect(persisted).toHaveLength(0)
   })
+  test("session changes retire pending creation before an abandoned reply settles", async () => {
+    const setup = await createTestRenderer({ width: 100, height: 24, useThread: false })
+    renderer = setup.renderer
+    const pending: ReturnType<typeof Promise.withResolvers<CommandOutcome>>[] = []
+    const requests: string[] = []
+    const selected: string[] = []
+    let sequence = 0
+    const app = createRottweilerApp(renderer, {
+      historyReader: emptyHistoryReader, sessionId: "first",
+      requestId: () => `creation-${++sequence}`,
+      initialState: { ...createInitialState(), workspaceRoots: {
+        generation: "1", effectiveFromTurn: "0", roots: ["/workspace/project"],
+      } },
+      onCommand(command) {
+        if (command.type !== "create_session") return { type: "accepted" }
+        const reply = Promise.withResolvers<CommandOutcome>()
+        pending.push(reply)
+        requests.push(command.meta.request_id)
+        return reply.promise
+      },
+      onSessionSelect: id => { selected.push(id) },
+    })
+    renderer.root.add(app)
+    setup.mockInput.pressKey("n", { ctrl: true })
+    expect(pending).toHaveLength(1)
+    app.setSessionId("second")
+    setup.mockInput.pressKey("n", { ctrl: true })
+    expect(pending).toHaveLength(2)
+    pending[0]!.reject(new Error("abandoned connection"))
+    await Bun.sleep(0)
+    expect(app.state.errors).toHaveLength(0)
+    app.handleEvent({ type: "command_acknowledged", meta: {
+      protocol_version: PROTOCOL_VERSION, client_id: "tui-client",
+      request_id: requests[1]!, emitted_at: "2026-01-01T00:00:00Z",
+    }, session_id: "created", outcome: { type: "accepted" } })
+    pending[1]!.resolve({ type: "accepted" })
+    await Bun.sleep(0)
+    expect(selected).toEqual(["created"])
+  })
+
 })
