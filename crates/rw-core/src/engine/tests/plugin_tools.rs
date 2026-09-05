@@ -114,18 +114,19 @@ async fn command_host_tool_uses_canonical_turn_without_provider_ir_and_retires_o
     let outcome = command.outcome.get().expect("outcome");
     assert!(!outcome.is_error);
     assert_eq!(tool.calls.load(Ordering::SeqCst), 1);
-    let events = sink.events.lock().expect("events");
-    let started = events.iter().position(|event|matches!(&event.wire,EngineEvent::ToolCallStarted {invocation_id,..} if invocation_id==&outcome.invocation_id)).expect("canonical start");
-    let finished = events.iter().position(|event|matches!(&event.wire,EngineEvent::ToolCallFinished {invocation_id,..} if invocation_id==&outcome.invocation_id)).expect("canonical finish");
-    let terminal = events.iter().position(|event|matches!(&event.wire,EngineEvent::TurnFinished {turn_id,..} if turn_id==&outcome.turn_id)).expect("terminal");
-    assert!(started < finished && finished < terminal);
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(&event.wire, EngineEvent::ConversationTurnCommitted { .. })),
-        "host calls do not invent model messages"
-    );
-    drop(events);
+    {
+        let events = sink.events.lock().expect("events");
+        let started = events.iter().position(|event|matches!(&event.wire,EngineEvent::ToolCallStarted {invocation_id,..} if invocation_id==&outcome.invocation_id)).expect("canonical start");
+        let finished = events.iter().position(|event|matches!(&event.wire,EngineEvent::ToolCallFinished {invocation_id,..} if invocation_id==&outcome.invocation_id)).expect("canonical finish");
+        let terminal = events.iter().position(|event|matches!(&event.wire,EngineEvent::TurnFinished {turn_id,..} if turn_id==&outcome.turn_id)).expect("terminal");
+        assert!(started < finished && finished < terminal);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(&event.wire, EngineEvent::ConversationTurnCommitted { .. })),
+            "host calls do not invent model messages"
+        );
+    }
     assert!(
         command
             .session

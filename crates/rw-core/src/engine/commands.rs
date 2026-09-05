@@ -1091,6 +1091,13 @@ pub fn builtin_command_registry()
             CompactCommand,
         )
         .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
+    register_workspace_commands(&mut registry)?;
+    Ok(registry)
+}
+
+fn register_workspace_commands(
+    registry: &mut CommandRegistry<SessionCommandContext, SessionCommandOutput>,
+) -> Result<(), AgentLoopError> {
     registry
         .register(
             CommandDescriptor::new("trust", "Inspect or change folder trust")
@@ -1105,5 +1112,5 @@ pub fn builtin_command_registry()
             AddDirCommand,
         )
         .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
-    Ok(registry)
+    Ok(())
 }

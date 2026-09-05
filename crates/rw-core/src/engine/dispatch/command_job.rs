@@ -71,7 +71,7 @@ pub(super) async fn start(
                 meta,
                 String::new(),
                 observed_turn,
-                Err(command_error(error)),
+                Err(command_error(&error)),
                 reply,
                 context,
             )
@@ -94,7 +94,10 @@ pub(super) async fn start(
     let next_turn = context.state.next_turn;
     let (prepare_started, preparation) = oneshot::channel();
     let operation = async move {
-        let result = bound.execute(&mut snapshot).await.map_err(command_error);
+        let result = bound
+            .execute(&mut snapshot)
+            .await
+            .map_err(|error| command_error(&error));
         let result = match result {
             Ok(output) => {
                 let _ = prepare_started.send(());
@@ -113,7 +116,8 @@ pub(super) async fn start(
         host_tools,
         preparation,
         operation,
-        context,
+        context.state,
+        context.config,
     );
 }
 
@@ -157,7 +161,8 @@ pub(super) fn start_development(
         Arc::from([]),
         preparation,
         operation,
-        context,
+        context.state,
+        context.config,
     );
 }
 
@@ -171,18 +176,19 @@ fn admit(
     host_tools: Arc<[String]>,
     preparation: oneshot::Receiver<()>,
     operation: impl std::future::Future<Output = (Execution, Option<BoundUiCommand>)> + Send + 'static,
-    context: DispatchContext<'_>,
+    state: &mut crate::engine::session::ActorState,
+    config: &Arc<SessionActorConfig>,
 ) {
-    if context.state.pending_command.is_some() {
+    if state.pending_command.is_some() {
         let _ = reply.send(Err(AgentLoopError::InvalidConfiguration(
             "another command is still executing".into(),
         )));
         return;
     }
     let (send, receive) = oneshot::channel();
-    let owner = Arc::clone(context.config);
-    let task = context.state.tasks.spawn(
-        Arc::clone(context.config),
+    let owner = Arc::clone(config);
+    let task = state.tasks.spawn(
+        Arc::clone(config),
         CancellationToken::default(),
         async move {
             tokio::pin!(operation);
@@ -217,13 +223,13 @@ fn admit(
         Ok(task) => {
             // ActorTasks owns completion independently of this join handle.
             drop(task);
-            context.state.pending_command = Some(PendingCommand {
+            state.pending_command = Some(PendingCommand {
                 origin,
                 host_tools,
                 receive,
-                owner: Arc::clone(context.config),
-                mode: context.state.mode_id.clone(),
-                driver: context.state.control.driver(),
+                owner: Arc::clone(config),
+                mode: state.mode_id.clone(),
+                driver: state.control.driver(),
                 meta,
                 name,
                 navigation: None,
@@ -338,8 +344,8 @@ fn unproven(result: &Execution) -> bool {
     matches!(result, Err(AgentLoopError::EffectsUnsettled(_)))
 }
 
-fn command_error(error: CommandRegistryError) -> AgentLoopError {
-    if matches!(&error, CommandRegistryError::Execution {source,..} if matches!(source.code(), "panic" | "effects_unsettled"))
+fn command_error(error: &CommandRegistryError) -> AgentLoopError {
+    if matches!(error, CommandRegistryError::Execution {source,..} if matches!(source.code(), "panic" | "effects_unsettled"))
     {
         AgentLoopError::EffectsUnsettled(error.to_string())
     } else {
