@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "base": "5860cd2",
+  "platform": "macOS arm64; Rust 1.97.1; private /tmp/rw-storage-target",
+  "problem": "Executor panic bypassed removal/completion inside the foreground invocation task; caller then marked that entry abandoned and settlement waited forever on a closed false completion channel.",
+  "fix": "An owned supervisor joins the invocation and awaits the required executor settlement contract before publishing completion. Native process, watchdog, pipe drains, proxy and execution lease live in an owner that schedules retained asynchronous cleanup on drop. Watchdog ownership transfers before readiness awaits. Every executor implementation explicitly forwards or defines effect settlement.",
+  "checks": [
+    {
+      "command": "CARGO_TARGET_DIR=/tmp/rw-storage-target cargo test -p rw-tools panicked_foreground_task_does_not_leave_an_immortal_registration --lib",
+      "before": "FAIL: panic settlement must terminate: Elapsed(())",
+      "after": "PASS; next invocation terminates and registry is empty"
+    },
+    {
+      "test": "foreground_panic_waits_for_native_settlement_before_next_mutation",
+      "result": "PASS; real parent and descendant write loops run, executor panics, settlement is deliberately delayed, caller is aborted, barrier remains pending, then native cleanup completes and later writes stay unchanged"
+    },
+    {
+      "command": "env -u CARGO_TARGET_DIR /private/tmp/rw-storage-target/debug/deps/rw_tools-e96817238b256435 --test-threads=4",
+      "result": "112 passed; includes existing cancellation, recording, watchdog, parent-death and process-group tests"
+    },
+    {
+      "command": "CARGO_TARGET_DIR=/tmp/rw-storage-target cargo clippy -p rw-tools -p rw-runtime --all-targets -- -D warnings",
+      "result": "PASS"
+    },
+    {
+      "command": "cargo fmt --all --check; git diff --check",
+      "result": "PASS"
+    }
+  ],
+  "environment_note": "Running the test executable via /tmp instead of its canonical /private/tmp path initially failed three unrelated protocol launcher tests because they intentionally reject symlink provenance. Canonical executable invocation passed the full suite; no protocol security check was changed.",
+  "limits": "No native Linux run. A cleanup worker or OS wait that cannot prove native exit remains fail-closed; task exit is never substituted for that proof."
+}

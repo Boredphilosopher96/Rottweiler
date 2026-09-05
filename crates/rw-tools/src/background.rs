@@ -909,6 +909,7 @@ mod tests {
 
     #[async_trait]
     impl CommandExecutor for BlockingFixture {
+        async fn settle_effects(&self) {}
         fn supports_background(&self) -> bool {
             true
         }
@@ -949,6 +950,7 @@ mod tests {
 
     #[async_trait]
     impl CommandExecutor for SplitSecretFixture {
+        async fn settle_effects(&self) {}
         fn supports_background(&self) -> bool {
             true
         }
@@ -1208,6 +1210,7 @@ mod tests {
 
     #[async_trait]
     impl CommandExecutor for CompletingFixture {
+        async fn settle_effects(&self) {}
         fn supports_background(&self) -> bool {
             true
         }

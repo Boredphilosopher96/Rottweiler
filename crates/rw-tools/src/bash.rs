@@ -382,6 +382,11 @@ fn resolve_audited_system_git() -> Option<PathBuf> {
 /// Injected process boundary. Core must approve the bash manifest before this is called.
 #[async_trait]
 pub trait CommandExecutor: Send + Sync {
+    /// Waits for native cleanup transferred out of a dropped or panicked invocation.
+    /// Implementations that own native effects must retain cleanup independently
+    /// of `run`; pure replay implementations explicitly have no effects to settle.
+    async fn settle_effects(&self);
+
     /// Whether this executor can safely supervise a command after the
     /// initiating tool call returns.
     fn supports_background(&self) -> bool {
@@ -770,6 +775,9 @@ impl RecordingCommandExecutor {
 
 #[async_trait]
 impl CommandExecutor for RecordingCommandExecutor {
+    async fn settle_effects(&self) {
+        self.inner.settle_effects().await;
+    }
     fn supports_background(&self) -> bool {
         false
     }
@@ -868,6 +876,7 @@ impl ReplayCommandExecutor {
 
 #[async_trait]
 impl CommandExecutor for ReplayCommandExecutor {
+    async fn settle_effects(&self) {}
     fn supports_background(&self) -> bool {
         false
     }
@@ -1337,6 +1346,7 @@ fn reject_non_regular_portable(path: &Path) -> Result<(), ToolError> {
 /// Un-sandboxed M2 executor. Its tool manifest explicitly declares every ambient capability.
 #[derive(Clone, Debug, Default)]
 pub struct TokioCommandExecutor {
+    native_cleanup: Arc<NativeCleanup>,
     execution_lease: Option<Arc<ExecutionLease>>,
     sandbox: Option<Arc<SandboxPolicy>>,
     policy_egress_available: bool,
@@ -1378,6 +1388,7 @@ impl TokioCommandExecutor {
     #[must_use]
     pub fn with_execution_lease(execution_lease: Arc<ExecutionLease>) -> Self {
         Self {
+            native_cleanup: Arc::default(),
             execution_lease: Some(execution_lease),
             sandbox: None,
             policy_egress_available: false,
@@ -1438,6 +1449,9 @@ impl TokioCommandExecutor {
 
 #[async_trait]
 impl CommandExecutor for TokioCommandExecutor {
+    async fn settle_effects(&self) {
+        self.native_cleanup.settle().await;
+    }
     fn supports_background(&self) -> bool {
         self.sandbox.is_some()
     }
@@ -1485,27 +1499,57 @@ impl CommandExecutor for TokioCommandExecutor {
             None
         };
         let mut guarded = guarded_process(&request, sandbox, egress_proxy.as_ref())?;
-        let mut child = guarded
+        let child = guarded
             .command
             .spawn()
             .map_err(|error| ToolError::Command(error.to_string()))?;
         #[cfg(target_os = "linux")]
         drop(guarded.helper_pin.take());
-        let child_id = child.id();
-        let Some(mut launch_gate) = child.stdin.take() else {
-            settle_command_child(&mut child, child_id).await;
+        let mut owner = NativeCommandOwner {
+            state: Some(NativeCommandState {
+                child_id: child.id(),
+                child,
+                watchdog: None,
+                output: None,
+                _proxy: egress_proxy,
+                _lease: self.execution_lease.clone(),
+            }),
+            cleanup: Arc::clone(&self.native_cleanup),
+        };
+        let result = self
+            .run_owned_child(
+                owner.state.as_mut().ok_or_else(|| {
+                    ToolError::Command("native command owner is missing".to_owned())
+                })?,
+                cancellation,
+                output,
+            )
+            .await;
+        let cleanup = owner.settle().await;
+        cleanup?;
+        result
+    }
+}
+
+impl TokioCommandExecutor {
+    async fn run_owned_child(
+        &self,
+        native: &mut NativeCommandState,
+        cancellation: CancellationToken,
+        output: Arc<dyn ToolOutputSink>,
+    ) -> Result<CommandOutcome, ToolError> {
+        let child_id = native.child_id;
+        let Some(mut launch_gate) = native.child.stdin.take() else {
             return Err(ToolError::Command(
                 "command launch gate was not created".to_owned(),
             ));
         };
-        let mut watchdog =
-            match spawn_parent_death_watchdog(child_id, self.execution_lease.as_deref()).await {
-                Ok(watchdog) => watchdog,
-                Err(error) => {
-                    settle_command_child(&mut child, child_id).await;
-                    return Err(error);
-                }
-            };
+        arm_parent_death_watchdog(
+            &mut native.watchdog,
+            child_id,
+            self.execution_lease.as_deref(),
+        )
+        .await?;
         #[cfg(all(test, unix))]
         if let Some(hook) = &self.launch_gate_hook {
             hook.child_id.store(
@@ -1517,65 +1561,153 @@ impl CommandExecutor for TokioCommandExecutor {
         }
         let launch_result = tokio::select! {
             biased;
-            () = cancellation.cancelled() => {
-                settle_command_child(&mut child, child_id).await;
-                watchdog.disarm().await?;
-                return Err(ToolError::Cancelled);
-            }
+            () = cancellation.cancelled() => return Err(ToolError::Cancelled),
             result = launch_gate.write_all(b"armed\n") => result,
         };
-        if let Err(error) = launch_result {
-            settle_command_child(&mut child, child_id).await;
-            let _ = watchdog.disarm().await;
-            return Err(ToolError::Command(format!(
-                "could not release guarded command: {error}"
-            )));
-        }
+        launch_result.map_err(|error| {
+            ToolError::Command(format!("could not release guarded command: {error}"))
+        })?;
         let _ = launch_gate.shutdown().await;
         drop(launch_gate);
-        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
-            settle_command_child(&mut child, child_id).await;
-            watchdog.disarm().await?;
+        let (Some(stdout), Some(stderr)) = (native.child.stdout.take(), native.child.stderr.take())
+        else {
             return Err(ToolError::Command(
                 "command output pipes were not created".to_owned(),
             ));
         };
-        let stdout_task = tokio::spawn(copy_stream(
-            stdout,
-            ToolOutputStream::Stdout,
-            Arc::clone(&output),
+        native.output = Some((
+            tokio::spawn(copy_stream(
+                stdout,
+                ToolOutputStream::Stdout,
+                Arc::clone(&output),
+            )),
+            tokio::spawn(copy_stream(stderr, ToolOutputStream::Stderr, output)),
         ));
-        let stderr_task = tokio::spawn(copy_stream(stderr, ToolOutputStream::Stderr, output));
-
+        let watchdog = native
+            .watchdog
+            .as_mut()
+            .ok_or_else(|| ToolError::Command("native watchdog is missing".to_owned()))?;
         let status = tokio::select! {
             biased;
             watchdog_status = watchdog.wait_unexpected() => {
-                settle_command_child(&mut child, child_id).await;
-                let _ = watchdog.disarm().await;
-                finish_command_output(stdout_task, stderr_task).await?;
-                return Err(ToolError::Command(format!(
-                    "command watchdog exited before command completion: {watchdog_status}"
-                )));
+                return Err(ToolError::Command(format!("command watchdog exited before command completion: {watchdog_status}")));
             }
-            () = cancellation.cancelled() => {
-                settle_command_child(&mut child, child_id).await;
-                let watchdog_result = watchdog.disarm().await;
-                let output_result = finish_command_output(stdout_task, stderr_task).await;
-                watchdog_result?;
-                output_result?;
-                return Err(ToolError::Cancelled);
-            }
-            status = child.wait() => status,
+            () = cancellation.cancelled() => return Err(ToolError::Cancelled),
+            status = native.child.wait() => status,
         };
-        settle_command_child(&mut child, child_id).await;
-        let watchdog_result = watchdog.disarm().await;
-        let output_result = finish_command_output(stdout_task, stderr_task).await;
-        watchdog_result?;
-        output_result?;
         let status = status.map_err(|error| ToolError::Command(error.to_string()))?;
         Ok(CommandOutcome {
             exit_code: status.code().unwrap_or(-1),
         })
+    }
+}
+
+#[derive(Debug, Default)]
+struct NativeCleanup {
+    pending: Mutex<Vec<tokio::sync::watch::Receiver<bool>>>,
+}
+
+impl NativeCleanup {
+    fn schedule(
+        &self,
+        mut state: NativeCommandState,
+    ) -> tokio::sync::oneshot::Receiver<Result<(), ToolError>> {
+        let (completed, completion) = tokio::sync::watch::channel(false);
+        let (respond, result) = tokio::sync::oneshot::channel();
+        {
+            let mut pending = self
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            pending.retain(|completion| !*completion.borrow());
+            pending.push(completion);
+        }
+        tokio::spawn(async move {
+            let result = state.settle().await;
+            drop(state);
+            completed.send_replace(true);
+            let _ = respond.send(result);
+        });
+        result
+    }
+
+    async fn settle(&self) {
+        loop {
+            let pending = {
+                let mut pending = self
+                    .pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                pending.retain(|completion| !*completion.borrow());
+                pending.clone()
+            };
+            if pending.is_empty() {
+                return;
+            }
+            for mut completion in pending {
+                while !*completion.borrow_and_update() {
+                    if completion.changed().await.is_err() {
+                        tracing::error!("native cleanup worker exited without proving settlement");
+                        std::future::pending::<()>().await;
+                    }
+                }
+            }
+        }
+    }
+}
+
+type CommandOutputTasks = (
+    tokio::task::JoinHandle<Result<(), ToolError>>,
+    tokio::task::JoinHandle<Result<(), ToolError>>,
+);
+
+struct NativeCommandState {
+    child: Child,
+    child_id: Option<u32>,
+    watchdog: Option<ParentDeathWatchdog>,
+    output: Option<CommandOutputTasks>,
+    _proxy: Option<SupervisedEgressProxy>,
+    _lease: Option<Arc<ExecutionLease>>,
+}
+
+impl NativeCommandState {
+    async fn settle(&mut self) -> Result<(), ToolError> {
+        settle_command_child(&mut self.child, self.child_id).await;
+        self.child_id = None;
+        let watchdog_result = match self.watchdog.as_mut() {
+            Some(watchdog) => watchdog.disarm().await,
+            None => Ok(()),
+        };
+        let output_result = match self.output.take() {
+            Some((stdout, stderr)) => finish_command_output(stdout, stderr).await,
+            None => Ok(()),
+        };
+        watchdog_result.and(output_result)
+    }
+}
+
+struct NativeCommandOwner {
+    state: Option<NativeCommandState>,
+    cleanup: Arc<NativeCleanup>,
+}
+
+impl NativeCommandOwner {
+    async fn settle(mut self) -> Result<(), ToolError> {
+        let state = self
+            .state
+            .take()
+            .ok_or_else(|| ToolError::Command("native command owner is missing".to_owned()))?;
+        self.cleanup.schedule(state).await.map_err(|error| {
+            ToolError::Command(format!("native command cleanup worker failed: {error}"))
+        })?
+    }
+}
+
+impl Drop for NativeCommandOwner {
+    fn drop(&mut self) {
+        if let Some(state) = self.state.take() {
+            drop(self.cleanup.schedule(state));
+        }
     }
 }
 
@@ -1879,14 +2011,15 @@ fn configure_proxy_environment(command: &mut Command, proxy: Option<&SupervisedE
 struct ParentDeathWatchdog {
     child: Child,
     control: Option<ChildStdin>,
-    stderr_task: tokio::task::JoinHandle<std::io::Result<u64>>,
+    stderr_task: Option<tokio::task::JoinHandle<std::io::Result<u64>>>,
 }
 
 #[cfg(unix)]
-async fn spawn_parent_death_watchdog(
+async fn arm_parent_death_watchdog(
+    owner: &mut Option<ParentDeathWatchdog>,
     command_group_id: Option<u32>,
     execution_lease: Option<&ExecutionLease>,
-) -> Result<ParentDeathWatchdog, ToolError> {
+) -> Result<(), ToolError> {
     let group_id = command_group_id
         .ok_or_else(|| ToolError::Command("command process id was unavailable".to_owned()))?;
     let script = r#"
@@ -1913,14 +2046,23 @@ while kill -0 "-$1" 2>/dev/null; do sleep 0.01; done
         })
         .stderr(Stdio::piped());
     command.process_group(0);
-    let mut child = command.spawn().map_err(|error| {
+    let child = command.spawn().map_err(|error| {
         ToolError::Command(format!("could not start command watchdog: {error}"))
     })?;
-    let control = child
-        .stdin
-        .take()
-        .ok_or_else(|| ToolError::Command("watchdog control pipe was not created".to_owned()))?;
-    let stderr = child
+    *owner = Some(ParentDeathWatchdog {
+        child,
+        control: None,
+        stderr_task: None,
+    });
+    let watchdog = owner
+        .as_mut()
+        .ok_or_else(|| ToolError::Command("watchdog owner is missing".to_owned()))?;
+    watchdog.control =
+        Some(watchdog.child.stdin.take().ok_or_else(|| {
+            ToolError::Command("watchdog control pipe was not created".to_owned())
+        })?);
+    let stderr = watchdog
+        .child
         .stderr
         .take()
         .ok_or_else(|| ToolError::Command("watchdog ready pipe was not created".to_owned()))?;
@@ -1929,21 +2071,15 @@ while kill -0 "-$1" 2>/dev/null; do sleep 0.01; done
     let ready =
         tokio::time::timeout(Duration::from_secs(2), stderr.read_line(&mut readiness)).await;
     if !matches!(ready, Ok(Ok(_))) || readiness != "ready\n" {
-        let _ = child.start_kill();
-        let _ = child.wait().await;
         return Err(ToolError::Command(
             "command watchdog did not confirm its execution lease".to_owned(),
         ));
     }
-    let stderr_task = tokio::spawn(async move {
+    watchdog.stderr_task = Some(tokio::spawn(async move {
         let mut sink = tokio::io::sink();
         tokio::io::copy(&mut stderr, &mut sink).await
-    });
-    Ok(ParentDeathWatchdog {
-        child,
-        control: Some(control),
-        stderr_task,
-    })
+    }));
+    Ok(())
 }
 
 #[cfg(all(unix, test))]
@@ -1991,18 +2127,24 @@ impl ParentDeathWatchdog {
             Ok(Ok(status)) => Err(ToolError::Command(format!(
                 "command watchdog failed while disarming: {status}"
             ))),
-            Ok(Err(error)) => Err(ToolError::Command(format!(
-                "could not reap command watchdog: {error}"
-            ))),
+            Ok(Err(error)) => {
+                tracing::error!(%error, "watchdog exit is unproven; retaining effect ownership");
+                std::future::pending().await
+            }
             Err(_) => {
                 let _ = self.child.start_kill();
-                let _ = self.child.wait().await;
+                if let Err(error) = self.child.wait().await {
+                    tracing::error!(%error, "killed watchdog could not be reaped; retaining effect ownership");
+                    std::future::pending::<()>().await;
+                }
                 Err(ToolError::Command(
-                    "command watchdog did not terminate after disarm".to_owned(),
+                    "command watchdog required forced termination after disarm".to_owned(),
                 ))
             }
         };
-        let _ = (&mut self.stderr_task).await;
+        if let Some(stderr_task) = &mut self.stderr_task {
+            let _ = stderr_task.await;
+        }
         control_result.and(result)
     }
 }
@@ -2011,11 +2153,13 @@ impl ParentDeathWatchdog {
 struct ParentDeathWatchdog;
 
 #[cfg(not(unix))]
-async fn spawn_parent_death_watchdog(
+async fn arm_parent_death_watchdog(
+    owner: &mut Option<ParentDeathWatchdog>,
     _command_group_id: Option<u32>,
     _execution_lease: Option<&ExecutionLease>,
-) -> Result<ParentDeathWatchdog, ToolError> {
-    Ok(ParentDeathWatchdog)
+) -> Result<(), ToolError> {
+    *owner = Some(ParentDeathWatchdog);
+    Ok(())
 }
 
 #[cfg(not(unix))]
@@ -2465,8 +2609,19 @@ impl BashTool {
         let executor = Arc::clone(&self.executor);
         let foreground = Arc::clone(&self.foreground);
         let finished_command = Arc::clone(&caller.command);
+        let invocation_executor = Arc::clone(&executor);
+        let invocation =
+            tokio::spawn(
+                async move { invocation_executor.run(request, cancellation, output).await },
+            );
         let task = tokio::spawn(async move {
-            let result = executor.run(request, cancellation, output).await;
+            let result = invocation
+                .await
+                .map_err(|error| {
+                    ToolError::Command(format!("foreground command task failed: {error}"))
+                })
+                .and_then(std::convert::identity);
+            executor.settle_effects().await;
             foreground
                 .calls
                 .lock()
@@ -3411,6 +3566,7 @@ sys.exit(92)
 
     #[async_trait]
     impl CommandExecutor for StreamingExecutor {
+        async fn settle_effects(&self) {}
         async fn run(
             &self,
             _request: CommandRequest,
@@ -3694,8 +3850,134 @@ sys.exit(92)
         ));
     }
 
+    struct PanickingExecutor;
+
+    #[async_trait]
+    impl CommandExecutor for PanickingExecutor {
+        async fn settle_effects(&self) {}
+        async fn run(
+            &self,
+            _request: CommandRequest,
+            _cancellation: CancellationToken,
+            _output: Arc<dyn ToolOutputSink>,
+        ) -> Result<CommandOutcome, ToolError> {
+            panic!("injected executor panic");
+        }
+    }
+
+    #[tokio::test]
+    async fn panicked_foreground_task_does_not_leave_an_immortal_registration() {
+        let root = tempdir().expect("workspace");
+        let context = ToolContext::new(root.path()).expect("context");
+        let tool = BashTool::new(Arc::new(PanickingExecutor), ToolLimits::default());
+        let result = tool
+            .execute(&context, json!({"command":"printf test"}))
+            .await;
+        assert!(matches!(result, Err(ToolError::Command(_))));
+        tokio::time::timeout(Duration::from_millis(100), tool.settle_effects())
+            .await
+            .expect("panic settlement must terminate");
+        assert!(tool.foreground.calls.lock().expect("calls").is_empty());
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            tool.execute(&context, json!({"command":"printf next"})),
+        )
+        .await
+        .expect("next invocation must not hang")
+        .expect_err("executor still panics");
+    }
+
+    #[derive(Default)]
+    struct PanicDuringNative {
+        executor: TokioCommandExecutor,
+        panic_now: tokio::sync::Notify,
+        settling: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl CommandExecutor for PanicDuringNative {
+        async fn settle_effects(&self) {
+            self.settling.notify_one();
+            self.release.notified().await;
+            self.executor.settle_effects().await;
+        }
+
+        async fn run(
+            &self,
+            request: CommandRequest,
+            cancellation: CancellationToken,
+            output: Arc<dyn ToolOutputSink>,
+        ) -> Result<CommandOutcome, ToolError> {
+            tokio::select! {
+                result = self.executor.run(request, cancellation, output) => result,
+                () = self.panic_now.notified() => panic!("panic with a live native child"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn foreground_panic_waits_for_native_settlement_before_next_mutation() {
+        let _lifecycle = crate::acquire_process_lifecycle_test_gate().await;
+        let root = tempdir().expect("workspace");
+        let context = ToolContext::new(root.path()).expect("context");
+        let executor = Arc::new(PanicDuringNative::default());
+        let tool = Arc::new(BashTool::new(executor.clone(), ToolLimits::default()));
+        let mut invocation = {
+            let tool = Arc::clone(&tool);
+            tokio::spawn(async move {
+                tool.execute(&context, json!({"command":"(while :; do printf child >> child-writes; /bin/sleep 0.01; done) & while :; do printf parent >> parent-writes; /bin/sleep 0.01; done"})).await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !root.path().join("parent-writes").exists()
+                || !root.path().join("child-writes").exists()
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("native children started");
+        executor.panic_now.notify_one();
+        tokio::time::timeout(Duration::from_secs(3), executor.settling.notified())
+            .await
+            .expect("physical settlement entered");
+        let premature = tokio::time::timeout(Duration::from_millis(50), &mut invocation)
+            .await
+            .is_ok();
+        invocation.abort();
+        let _ = invocation.await;
+        let premature_barrier =
+            tokio::time::timeout(Duration::from_millis(50), tool.settle_effects())
+                .await
+                .is_ok();
+        executor.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(3), tool.settle_effects())
+            .await
+            .expect("native cleanup settles after caller drop");
+        assert!(!premature, "task panic was treated as physical completion");
+        assert!(
+            !premature_barrier,
+            "caller drop bypassed executor settlement"
+        );
+        assert!(tool.foreground.calls.lock().expect("calls").is_empty());
+        for file in ["parent-writes", "child-writes"] {
+            std::fs::write(root.path().join(file), b"next mutation")
+                .expect("write after settlement");
+        }
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        for file in ["parent-writes", "child-writes"] {
+            assert_eq!(
+                std::fs::read(root.path().join(file)).expect("read after settlement"),
+                b"next mutation"
+            );
+        }
+    }
+
     #[derive(Default)]
     struct DelayedNativeCleanup {
+        executor: TokioCommandExecutor,
         started: tokio::sync::Notify,
         release: tokio::sync::Notify,
         finished: std::sync::atomic::AtomicBool,
@@ -3703,6 +3985,9 @@ sys.exit(92)
 
     #[async_trait]
     impl CommandExecutor for DelayedNativeCleanup {
+        async fn settle_effects(&self) {
+            self.executor.settle_effects().await;
+        }
         async fn run(
             &self,
             request: CommandRequest,
@@ -3710,8 +3995,9 @@ sys.exit(92)
             output: Arc<dyn ToolOutputSink>,
         ) -> Result<CommandOutcome, ToolError> {
             let native_cancellation = CancellationToken::default();
-            let executor = TokioCommandExecutor::default();
-            let command = executor.run(request, native_cancellation.clone(), output);
+            let command = self
+                .executor
+                .run(request, native_cancellation.clone(), output);
             tokio::pin!(command);
             tokio::select! {
                 result = &mut command => result,
@@ -3844,6 +4130,7 @@ sys.exit(92)
 
     #[async_trait]
     impl CommandExecutor for BlockingExecutor {
+        async fn settle_effects(&self) {}
         async fn run(
             &self,
             _request: CommandRequest,

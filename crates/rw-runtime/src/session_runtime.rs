@@ -10768,6 +10768,9 @@ struct ScratchGuardedCommandExecutor {
 
 #[async_trait]
 impl CommandExecutor for ScratchGuardedCommandExecutor {
+    async fn settle_effects(&self) {
+        self.inner.settle_effects().await;
+    }
     fn supports_background(&self) -> bool {
         self.inner.supports_background()
     }
@@ -10847,6 +10850,11 @@ impl DeferredCommandExecutor {
 
 #[async_trait]
 impl CommandExecutor for DeferredCommandExecutor {
+    async fn settle_effects(&self) {
+        if let Some(inner) = self.inner.get() {
+            inner.settle_effects().await;
+        }
+    }
     fn supports_background(&self) -> bool {
         matches!(
             self.command_fixture_mode,
@@ -16656,6 +16664,7 @@ mod tests {
 
     #[async_trait]
     impl CommandExecutor for FixtureToolchainExecutor {
+        async fn settle_effects(&self) {}
         async fn run(
             &self,
             request: CommandRequest,
