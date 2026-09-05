@@ -2177,6 +2177,12 @@
       "description": "Connection-scoped boundary for one compaction provider attempt.\nThis never enters the durable session sequence.",
       "type": "object",
       "properties": {
+        "started": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "revision": {
+          "type": "string"
+        },
         "session_id": {
           "$ref": "#/$defs/SessionId"
         },
@@ -2196,6 +2202,8 @@
       "additionalProperties": false,
       "required": [
         "type",
+        "started",
+        "revision",
         "session_id",
         "summary_turn_id",
         "attempt"
@@ -2205,6 +2213,12 @@
       "description": "Connection-scoped provider text produced while a compaction summary is\ngenerated. This never enters the durable session sequence.",
       "type": "object",
       "properties": {
+        "started": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "revision": {
+          "type": "string"
+        },
         "session_id": {
           "$ref": "#/$defs/SessionId"
         },
@@ -2227,6 +2241,8 @@
       "additionalProperties": false,
       "required": [
         "type",
+        "started",
+        "revision",
         "session_id",
         "summary_turn_id",
         "attempt",
@@ -2237,6 +2253,12 @@
       "description": "Connection-scoped provider reasoning produced during compaction.",
       "type": "object",
       "properties": {
+        "started": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "revision": {
+          "type": "string"
+        },
         "session_id": {
           "$ref": "#/$defs/SessionId"
         },
@@ -2259,6 +2281,8 @@
       "additionalProperties": false,
       "required": [
         "type",
+        "started",
+        "revision",
         "session_id",
         "summary_turn_id",
         "attempt",
@@ -3140,6 +3164,15 @@
     "SessionCompactionState": {
       "type": "object",
       "properties": {
+        "revision": {
+          "type": "string"
+        },
+        "text": {
+          "$ref": "#/$defs/TranscriptTailText"
+        },
+        "thinking": {
+          "$ref": "#/$defs/TranscriptTailText"
+        },
         "summary_turn_id": {
           "$ref": "#/$defs/TurnId"
         },
@@ -3157,9 +3190,30 @@
       },
       "additionalProperties": false,
       "required": [
+        "revision",
+        "text",
+        "thinking",
         "summary_turn_id",
         "started",
         "attempt"
+      ]
+    },
+    "TranscriptTailText": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "maxLength": 65536,
+          "x-rw-max-utf8-bytes": 65536
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "text",
+        "truncated"
       ]
     },
     "SessionQueuedPreview": {
@@ -4637,24 +4691,6 @@
             "next_offset"
           ]
         }
-      ]
-    },
-    "TranscriptTailText": {
-      "type": "object",
-      "properties": {
-        "text": {
-          "type": "string",
-          "maxLength": 65536,
-          "x-rw-max-utf8-bytes": 65536
-        },
-        "truncated": {
-          "type": "boolean"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "text",
-        "truncated"
       ]
     },
     "TranscriptTailCitation": {

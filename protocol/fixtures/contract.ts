@@ -757,12 +757,16 @@ export const contractFixture = {
     },
     {
       "type": "compaction_attempt_started",
+      "started": "0",
+      "revision": "1",
       "session_id": "session-fixture",
       "summary_turn_id": "summary-turn",
       "attempt": 0
     },
     {
       "type": "compaction_thinking_delta",
+      "started": "0",
+      "revision": "2",
       "session_id": "session-fixture",
       "summary_turn_id": "summary-turn",
       "attempt": 0,
@@ -770,6 +774,8 @@ export const contractFixture = {
     },
     {
       "type": "compaction_text_delta",
+      "started": "0",
+      "revision": "3",
       "session_id": "session-fixture",
       "summary_turn_id": "summary-turn",
       "attempt": 0,
