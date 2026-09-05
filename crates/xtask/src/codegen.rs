@@ -268,6 +268,22 @@ fn generate_typescript() -> Result<String, XtaskError> {
             "MAX_PENDING_QUESTION_PREPARED_BYTES",
             rw_types::question_admission::MAX_PENDING_QUESTION_PREPARED_BYTES,
         ),
+        (
+            "MAX_TURN_CITATIONS",
+            rw_types::citation_admission::MAX_TURN_CITATIONS,
+        ),
+        (
+            "MAX_CITATION_TEXT_BYTES",
+            rw_types::citation_admission::MAX_CITATION_TEXT_BYTES,
+        ),
+        (
+            "MAX_TURN_CITATION_TEXT_BYTES",
+            rw_types::citation_admission::MAX_TURN_CITATION_TEXT_BYTES,
+        ),
+        (
+            "MAX_TURN_CITATION_PREPARED_BYTES",
+            rw_types::citation_admission::MAX_TURN_CITATION_PREPARED_BYTES,
+        ),
         ("MAX_TODO_ITEMS", rw_types::todo::MAX_TODO_ITEMS),
         ("MAX_TODO_ID_BYTES", rw_types::todo::MAX_TODO_ID_BYTES),
         (

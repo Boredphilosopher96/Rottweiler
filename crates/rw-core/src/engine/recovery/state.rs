@@ -67,6 +67,8 @@ pub struct AcceptedSource {
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ActiveTurn {
+    pub announced_citations: rw_types::citation_admission::CitationAdmission,
+    pub committed_citations: rw_types::citation_admission::CitationAdmission,
     pub turn: u64,
     pub started: SequenceId,
     pub first_conversation_ordinal: u64,

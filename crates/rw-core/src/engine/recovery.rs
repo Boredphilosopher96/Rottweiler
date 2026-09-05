@@ -90,3 +90,6 @@ mod model_tests;
 
 #[cfg(test)]
 mod context_state_tests;
+
+#[cfg(test)]
+mod citation_tests;

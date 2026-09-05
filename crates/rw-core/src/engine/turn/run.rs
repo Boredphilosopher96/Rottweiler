@@ -204,6 +204,7 @@ pub(super) async fn run_turn(
     let mut current_turn_tokens = 0_u64;
     let budget_config = config.model.budget_config();
     let mut turn_cost = None;
+    let mut citation_admission = rw_types::citation_admission::CitationAdmission::default();
 
     'iterations: for iteration in 0..config.max_turns {
         if cancellation.is_cancelled() {
@@ -714,8 +715,32 @@ pub(super) async fn run_turn(
                     }
                 }
                 ProviderEvent::Citation { uri, title, .. } => {
+                    // Reject provider-owned oversized input before redaction copies it.
+                    let mut candidate = citation_admission;
+                    if let Err(message) = candidate.admit(&uri, title.as_ref(), None) {
+                        send_event(
+                            &signals,
+                            PendingEvent::Error {
+                                message: message.to_owned(),
+                            },
+                        );
+                        status = AgentTurnStatus::Failed;
+                        stream_failed = true;
+                        break;
+                    }
                     let uri = config.secret_redactor.redact(&uri);
                     let title = title.map(|title| config.secret_redactor.redact(&title));
+                    if let Err(message) = citation_admission.admit(&uri, title.as_ref(), None) {
+                        send_event(
+                            &signals,
+                            PendingEvent::Error {
+                                message: message.to_owned(),
+                            },
+                        );
+                        status = AgentTurnStatus::Failed;
+                        stream_failed = true;
+                        break;
+                    }
                     assistant.blocks.push(Block::Citation {
                         uri: uri.clone(),
                         title: title.clone(),

@@ -56,6 +56,30 @@ pub(super) fn reduce(
             head.control.todos = Some(sequence);
         }
         PendingEvent::ConversationTurnCommitted { agent_turn, turn } => {
+            let mut citation_admission = head
+                .control
+                .active
+                .as_ref()
+                .filter(|active| active.turn == agent_turn && head.compacting.is_none())
+                .map_or_else(Default::default, |active| active.committed_citations);
+            for block in &turn.blocks {
+                if let rw_types::Block::Citation {
+                    uri,
+                    title,
+                    excerpt,
+                } = block
+                {
+                    citation_admission
+                        .admit(uri, title.as_ref(), excerpt.as_ref())
+                        .map_err(RecoveryError::Limit)?;
+                }
+            }
+            if head.compacting.is_none()
+                && let Some(active) = &mut head.control.active
+                && active.turn == agent_turn
+            {
+                active.committed_citations = citation_admission;
+            }
             append_turn(
                 head,
                 rows,
@@ -122,6 +146,8 @@ pub(super) fn reduce(
         }
         PendingEvent::TurnStarted { turn } => {
             head.control.active = Some(ActiveTurn {
+                announced_citations: Default::default(),
+                committed_citations: Default::default(),
                 turn,
                 started: sequence,
                 first_conversation_ordinal: head.conversation.turns,
@@ -409,9 +435,20 @@ pub(super) fn reduce(
             );
             head.budget = budget.snapshot();
         }
-        PendingEvent::TextDelta { turn, .. }
-        | PendingEvent::ThinkingDelta { turn, .. }
-        | PendingEvent::CitationDelta { turn, .. } => {
+        PendingEvent::CitationDelta { turn, uri, title } => {
+            let active = head
+                .control
+                .active
+                .as_mut()
+                .filter(|active| active.turn == turn)
+                .ok_or(RecoveryError::Invalid("citation has no active turn"))?;
+            active
+                .announced_citations
+                .admit(&uri, title.as_ref(), None)
+                .map_err(RecoveryError::Limit)?;
+            active_source(head, rows, event, turn, ACTIVE_ASSISTANT)?;
+        }
+        PendingEvent::TextDelta { turn, .. } | PendingEvent::ThinkingDelta { turn, .. } => {
             active_source(head, rows, event, turn, ACTIVE_ASSISTANT)?;
         }
         PendingEvent::ToolCallStarted {
