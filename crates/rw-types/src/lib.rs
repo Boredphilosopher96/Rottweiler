@@ -11,6 +11,7 @@ mod ir;
 pub mod mcp;
 mod permission_mode;
 mod protocol;
+pub mod transcript;
 pub mod release_contract {
     include!("generated/release_contract.rs");
 }

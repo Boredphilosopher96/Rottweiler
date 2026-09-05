@@ -12,6 +12,8 @@ mod orchestration;
 mod permission;
 mod provider_factory;
 mod subscription_credentials;
+#[cfg(unix)]
+pub mod transcript;
 mod update;
 
 pub use rw_types::config::{
