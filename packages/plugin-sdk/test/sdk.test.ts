@@ -38,6 +38,7 @@ const providerRequest: JsonValue = {
   tools: [],
   tool_choice: { mode: "auto" },
   max_output_tokens: 64,
+  cache_hint: null,
   temperature: null,
   thinking: "off",
 }
@@ -124,6 +125,16 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<voi
 }
 
 describe("wire protocol", () => {
+  test("rejects incomplete provider requests before invoking a handler", async () => {
+    const { server, messages } = harness()
+    await request(server, 1, "initialize", initializeParams)
+    await request(server, 2, "provider/complete", { alias: "fixture/model", request: {} })
+    await waitFor(() => messages.some(message => typeof message === "object" && message !== null && !Array.isArray(message) && message.id === 2))
+    expect(messages).toContainEqual({ jsonrpc: "2.0", id: 2, error: { code: -32602, message: "invalid provider request" } })
+    expect(messages.some(message => typeof message === "object" && message !== null && !Array.isArray(message) && message.method === "provider/event")).toBe(false)
+    await request(server, 3, "shutdown", {})
+  })
+
   test("exports the frozen canonical method table", () => {
     expect(Object.isFrozen(RPC_METHODS)).toBe(true)
     expect(RPC_METHODS).toEqual({

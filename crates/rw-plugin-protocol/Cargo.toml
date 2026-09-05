@@ -7,8 +7,6 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-schemars.workspace = true
-ts-rs.workspace = true
 rw-operation-contract.workspace = true
 rw-types.workspace = true
 blake3.workspace = true

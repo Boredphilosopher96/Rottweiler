@@ -26,7 +26,9 @@
     "./protocol.json": "./fixtures/wire/protocol-3.json",
     "./protocol.schema.json": "./fixtures/wire/protocol-3.schema.json",
     "./hook-input.schema.json": "./fixtures/wire/hook-input.schema.json",
-    "./hook-directive.schema.json": "./fixtures/wire/hook-directive.schema.json"
+    "./hook-directive.schema.json": "./fixtures/wire/hook-directive.schema.json",
+    "./provider-request.schema.json": "./fixtures/wire/provider-request.schema.json",
+    "./provider-event.schema.json": "./fixtures/wire/provider-event.schema.json"
   },
   "bin": {
     "rottweiler-plugin-scaffold": "./dist/bin/scaffold.js"
@@ -39,7 +41,9 @@
     "PROTOCOL.md",
     "README.md",
     "fixtures/wire/hook-input.schema.json",
-    "fixtures/wire/hook-directive.schema.json"
+    "fixtures/wire/hook-directive.schema.json",
+    "fixtures/wire/provider-request.schema.json",
+    "fixtures/wire/provider-event.schema.json"
   ],
   "scripts": {
     "build": "bun run build.ts",

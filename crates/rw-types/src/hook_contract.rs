@@ -136,6 +136,7 @@ pub struct HookCompactionInput {
     pub conversation_turns: u32,
     pub injected_context: Vec<String>,
     #[serde(deserialize_with = "Option::deserialize")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<String>")]
     pub replacement_prompt: Option<String>,
     pub suppress_auto_continue: bool,
 }
@@ -178,6 +179,7 @@ pub enum HookTransform {
     PreCompact {
         injected_context: Vec<String>,
         #[serde(deserialize_with = "Option::deserialize")]
+        #[schemars(schema_with = "crate::schema::required_nullable::<String>")]
         replacement_prompt: Option<String>,
         suppress_auto_continue: bool,
     },

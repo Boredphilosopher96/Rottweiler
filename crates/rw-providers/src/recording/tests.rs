@@ -477,7 +477,7 @@ fn request() -> ProviderRequest {
         max_output_tokens: 10,
         temperature: None,
         thinking: ThinkingLevel::Off,
-        tool_choice: ToolChoice::Auto,
+        tool_choice: ToolChoice::Auto {},
         cache_hint: None,
     }
 }

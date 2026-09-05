@@ -195,7 +195,7 @@ fn chat_request_shape_is_selected_by_connection_profile() {
         model: "fixture".to_owned(),
         turns: Vec::new(),
         tools: Vec::new(),
-        tool_choice: ToolChoice::Auto,
+        tool_choice: ToolChoice::Auto {},
         max_output_tokens: 128,
         temperature: None,
         thinking: ThinkingLevel::Off,
@@ -340,7 +340,7 @@ fn responses_native_search_uses_official_tool_and_sources_shape() {
             .tool_definition()
             .unwrap_or_else(|error| panic!("native search marker must encode: {error}")),
         ],
-        tool_choice: ToolChoice::Auto,
+        tool_choice: ToolChoice::Auto {},
         max_output_tokens: 256,
         temperature: None,
         thinking: ThinkingLevel::Off,
@@ -381,7 +381,7 @@ fn responses_request_continues_only_valid_same_adapter_reasoning() {
         model: "gpt-fixture".to_owned(),
         turns: turns.clone(),
         tools: Vec::new(),
-        tool_choice: ToolChoice::Auto,
+        tool_choice: ToolChoice::Auto {},
         max_output_tokens: 128,
         temperature: None,
         thinking: ThinkingLevel::Medium,
@@ -440,9 +440,9 @@ fn tool_choice_uses_each_openai_wire_shape() {
         json!({"type":"function","name":"live_smoke_ping"})
     );
     for (choice, expected) in [
-        (ToolChoice::Auto, "auto"),
-        (ToolChoice::Required, "required"),
-        (ToolChoice::None, "none"),
+        (ToolChoice::Auto {}, "auto"),
+        (ToolChoice::Required {}, "required"),
+        (ToolChoice::None {}, "none"),
     ] {
         request.tool_choice = choice;
         assert_eq!(
@@ -488,7 +488,7 @@ fn subscription_shape_moves_system_text_and_sets_codex_fields() {
             description: "read".to_owned(),
             input_schema: json!({"type":"object"}),
         }],
-        tool_choice: ToolChoice::Auto,
+        tool_choice: ToolChoice::Auto {},
         max_output_tokens: 321,
         temperature: None,
         thinking: ThinkingLevel::Medium,
@@ -631,7 +631,7 @@ fn copilot_gpt_omits_wire_max_but_other_auth_keeps_it() {
         model: "gpt-fixture".to_owned(),
         turns: Vec::new(),
         tools: Vec::new(),
-        tool_choice: ToolChoice::Auto,
+        tool_choice: ToolChoice::Auto {},
         max_output_tokens: 512,
         temperature: None,
         thinking: ThinkingLevel::Off,
@@ -738,7 +738,7 @@ fn vision_rejection_detects_images_nested_in_tool_results() {
             meta: TurnMeta::default(),
         }],
         tools: Vec::new(),
-        tool_choice: ToolChoice::Auto,
+        tool_choice: ToolChoice::Auto {},
         max_output_tokens: 32,
         temperature: None,
         thinking: ThinkingLevel::Off,

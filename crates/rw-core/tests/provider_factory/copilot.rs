@@ -102,7 +102,7 @@ async fn copilot_invalid_tool_choices_fail_before_model_discovery_socket() {
         .provider("github-copilot/fixture-model")
         .unwrap_or_else(|| panic!("Copilot provider must exist"));
     let mut required = request("fixture-model");
-    required.tool_choice = ToolChoice::Required;
+    required.tool_choice = ToolChoice::Required {};
     let mut named_without_tools = request("fixture-model");
     named_without_tools.tool_choice = ToolChoice::Named {
         name: "missing".to_owned(),

@@ -10,12 +10,14 @@ import sys
 
 ALLOWED = {
     "rw-operation-contract": set(),
-    "rw-plugin-protocol": {"rw-operation-contract"},
-    "rw-types": {"rw-operation-contract"},
+    "rw-memory-derive": set(),
+    "rw-macos-bootstrap": set(),
+    "rw-plugin-protocol": {"rw-operation-contract", "rw-types"},
+    "rw-types": {"rw-operation-contract", "rw-memory-derive"},
     "rw-store": {"rw-types"},
     "rw-providers": {"rw-types"},
     "rw-context": {"rw-providers", "rw-types"},
-    "rw-sandbox": {"rw-types"},
+    "rw-sandbox": {"rw-types", "rw-macos-bootstrap"},
     "rw-intel": {"rw-types"},
     "rw-tools": {"rw-operation-contract", "rw-intel", "rw-sandbox", "rw-types"},
     "rw-mcp": {"rw-tools", "rw-types"},
@@ -45,7 +47,7 @@ ALLOWED = {
     # Private process boundary for the heavyweight WASM runtime. The public
     # `rw` binary talks to it through rw-ext's bounded wire protocol and does
     # not link Wasmtime itself.
-    "rw-wasm-host": {"rw-ext", "rw-plugin-protocol"},
+    "rw-wasm-host": {"rw-ext", "rw-plugin-protocol", "rw-types"},
     "rw-cli": {
         "rw-core",
         "rw-ext",
@@ -57,7 +59,7 @@ ALLOWED = {
         "rw-tools",
         "rw-types",
     },
-    "xtask": {"rw-types"},
+    "xtask": {"rw-types", "rw-operation-contract", "rw-plugin-protocol", "rw-providers", "rw-store"},
 }
 
 RUNTIME_COMPOSITION_FILES = {

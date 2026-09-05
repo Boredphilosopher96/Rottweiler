@@ -550,11 +550,11 @@ fn build_chat_request(
     if !tools.is_empty() {
         object.insert("tools".to_owned(), Value::Array(tools));
     }
-    if !request.tools.is_empty() || request.tool_choice == ToolChoice::None {
+    if !request.tools.is_empty() || request.tool_choice == (ToolChoice::None {}) {
         let tool_choice = match &request.tool_choice {
-            ToolChoice::Auto => json!("auto"),
-            ToolChoice::Required => json!("required"),
-            ToolChoice::None => json!("none"),
+            ToolChoice::Auto {} => json!("auto"),
+            ToolChoice::Required {} => json!("required"),
+            ToolChoice::None {} => json!("none"),
             ToolChoice::Named { name } => {
                 json!({ "type": "function", "function": { "name": name } })
             }
@@ -618,11 +618,11 @@ fn build_responses_request(request: &ProviderRequest, reasoning_endpoint: bool) 
             json!(["web_search_call.action.sources"]),
         );
     }
-    if !request.tools.is_empty() || request.tool_choice == ToolChoice::None {
+    if !request.tools.is_empty() || request.tool_choice == (ToolChoice::None {}) {
         let tool_choice = match &request.tool_choice {
-            ToolChoice::Auto => json!("auto"),
-            ToolChoice::Required => json!("required"),
-            ToolChoice::None => json!("none"),
+            ToolChoice::Auto {} => json!("auto"),
+            ToolChoice::Required {} => json!("required"),
+            ToolChoice::None {} => json!("none"),
             ToolChoice::Named { name } => json!({ "type": "function", "name": name }),
         };
         object.insert("tool_choice".to_owned(), tool_choice);

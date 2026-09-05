@@ -26,7 +26,7 @@ fn request() -> ProviderRequest {
             meta: TurnMeta::default(),
         }],
         tools: Vec::new(),
-        tool_choice: ToolChoice::Auto,
+        tool_choice: ToolChoice::Auto {},
         max_output_tokens: 32,
         temperature: None,
         thinking: ThinkingLevel::Off,

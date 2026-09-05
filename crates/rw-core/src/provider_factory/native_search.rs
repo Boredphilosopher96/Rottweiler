@@ -77,7 +77,7 @@ impl WebSearcher for ProviderNativeWebSearcher {
                         .tool_definition()
                         .map_err(|error| ToolError::Network(error.to_string()))?,
                 ],
-                tool_choice: ToolChoice::Auto,
+                tool_choice: ToolChoice::Auto {},
                 max_output_tokens: 2_048,
                 temperature: None,
                 thinking: ThinkingLevel::Off,

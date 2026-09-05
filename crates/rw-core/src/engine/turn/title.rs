@@ -260,7 +260,7 @@ fn title_request(alias: &str, prompt: String) -> ProviderRequest {
             },
         ],
         tools: Vec::new(),
-        tool_choice: ToolChoice::None,
+        tool_choice: ToolChoice::None {},
         max_output_tokens: 32,
         temperature: Some(0.0),
         thinking: ThinkingLevel::Off,

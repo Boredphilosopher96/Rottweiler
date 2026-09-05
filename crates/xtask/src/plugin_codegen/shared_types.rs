@@ -36,19 +36,22 @@ pub(super) fn generate(root: &Path, check: bool) -> Result<(), String> {
     types.visit::<HookClass>();
     types.visit::<HookEvent>();
     types.visit::<HookFailurePolicy>();
-    let declarations = format!(
-        "{}\n{}",
-        super::GENERATED_MARKER,
-        types.declarations.into_values().collect::<String>()
-    );
-    super::ensure_output(
-        &root.join("packages/plugin-sdk/src/generated/hook-contract.ts"),
-        &declarations,
-        check,
-    )?;
+    write_types(root, "hook-contract", types, check)?;
+    let mut ir = Types {
+        seen: HashSet::new(),
+        declarations: BTreeMap::new(),
+    };
+    ir.visit::<rw_providers::ProviderRequest>();
+    ir.visit::<rw_providers::ProviderEvent>();
+    write_types(root, "provider-contract", ir, check)?;
     for (name, schema) in [
         ("hook-input", schema::<HookInput>()),
         ("hook-directive", schema::<HookDirective>()),
+        (
+            "provider-request",
+            schema::<rw_providers::ProviderRequest>(),
+        ),
+        ("provider-event", schema::<rw_providers::ProviderEvent>()),
     ] {
         let mut schema = schema;
         schema.insert(
@@ -67,21 +70,34 @@ pub(super) fn generate(root: &Path, check: bool) -> Result<(), String> {
     let mut validator = std::process::Command::new("bun");
     validator
         .current_dir(root)
-        .arg("packages/plugin-sdk/generate-hook-validators.ts");
+        .arg("packages/plugin-sdk/generate-contract-validators.ts");
     if check {
         validator.arg("--check");
     }
     let status = validator
         .status()
-        .map_err(|error| format!("hook validator generator failed: {error}"))?;
+        .map_err(|error| format!("plugin validator generator failed: {error}"))?;
     if !status.success() {
-        return Err("hook validator generation failed".to_owned());
+        return Err("plugin validator generation failed".to_owned());
     }
     Ok(())
 }
 
 fn schema<T: schemars::JsonSchema>() -> schemars::Schema {
-    let mut settings = schemars::generate::SchemaSettings::draft2020_12();
-    settings.contract = schemars::generate::Contract::Serialize;
-    settings.into_generator().into_root_schema_for::<T>()
+    schemars::generate::SchemaSettings::draft2020_12()
+        .into_generator()
+        .into_root_schema_for::<T>()
+}
+
+fn write_types(root: &Path, name: &str, types: Types, check: bool) -> Result<(), String> {
+    let declarations = format!(
+        "{}\n{}",
+        super::GENERATED_MARKER,
+        types.declarations.into_values().collect::<String>()
+    );
+    super::ensure_output(
+        &root.join(format!("packages/plugin-sdk/src/generated/{name}.ts")),
+        &declarations,
+        check,
+    )
 }

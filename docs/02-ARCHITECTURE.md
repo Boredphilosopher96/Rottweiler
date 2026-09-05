@@ -53,8 +53,10 @@ rottweiler/
 │   └── release-contract.json  # release platforms, archive shape, and product budgets
 ├── crates/
 │   ├── rw-operation-contract/ # leaf lifetime/progress values shared across tool and wire boundaries
+│   ├── rw-memory-derive/      # compile-time retained-allocation accounting
+│   ├── rw-macos-bootstrap/    # Mach authority clearing at worker entry
 │   ├── rw-types/              # shared types: message IR, events, config schema, errors
-│   ├── rw-plugin-protocol/    # runtime-independent plugin wire contract + current codegen
+│   ├── rw-plugin-protocol/    # plugin envelopes, manifest capabilities, and shared hook contract
 │   ├── rw-store/              # session persistence, checkpoints, config loading
 │   ├── rw-providers/          # router, adapters, pricing, auth
 │   ├── rw-context/            # token budget, compaction, TOON, cache strategy
@@ -66,7 +68,8 @@ rottweiler/
 │   ├── rw-core/               # the engine: session loop, modes, orchestration, permissions
 │   ├── rw-runtime/            # reusable session/host composition for headless frontends
 │   ├── rw-wasm-host/          # private capability-bounded WASM runtime helper
-│   └── rw-cli/                # `rw` binary: args, presentation, transports, supervision
+│   ├── rw-cli/                # `rw` binary: args, presentation, transports, supervision
+│   └── xtask/                 # code generation and release signing tools
 ├── packages/
 │   └── tui/                   # OpenTUI frontend (TypeScript, Bun; compiled with `bun build --compile`)
 ├── protocol/                  # GENERATED (ADR-013): JSON Schema + TS types emitted from rw-types
@@ -75,7 +78,7 @@ rottweiler/
 └── tests/                     # cross-crate integration + replay fixtures + protocol contract tests
 ```
 
-Dependency rule: arrows point downward only. No Rust crate depends on anything in `packages/`. `rw-operation-contract` is a dependency leaf. `rw-types` and `rw-plugin-protocol` depend only on that shared runtime-independent contract within the workspace. `rw-core` is independent of `rw-runtime` and all executable frontends. `rw-runtime` owns concrete storage/provider/tool/MCP/extension assembly and injects it into the core engine. `rw-cli` consumes that owned composition API; its direct lower-level dependencies are explicit, narrow administrative and transport commands, not a re-export facade. The metadata and source-layout rules are enforced in CI by `scripts/check-dependency-direction.py`.
+Dependency rule: arrows point downward only. No Rust crate depends on anything in `packages/`. `rw-operation-contract` is a dependency leaf. `rw-types` consumes the operation contract and the allocation derive macro. `rw-plugin-protocol` consumes the operation and shared-type contracts. `rw-sandbox` owns policy and calls the dependency-free macOS bootstrap crate for Mach authority clearing. `xtask` consumes the type, provider, plugin, operation, and storage owners to generate schemas and SDK projections; product crates never depend on it. `rw-core` is independent of `rw-runtime` and all executable frontends. `rw-runtime` owns concrete storage/provider/tool/MCP/extension assembly and injects it into the core engine. `rw-cli` consumes that owned composition API; its direct lower-level dependencies are explicit, narrow administrative and transport commands, not a re-export facade. The metadata and source-layout rules are enforced in CI by `scripts/check-dependency-direction.py`.
 
 Each piece of contract data and each feature catalog has one hand-maintained
 owner. Other crates, clients, scripts, tests, and docs either consume that owner

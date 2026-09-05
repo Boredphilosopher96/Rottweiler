@@ -2,6 +2,7 @@ use std::{env, path::PathBuf};
 use thiserror::Error;
 
 mod codegen;
+mod plugin_codegen;
 mod signing;
 
 #[derive(Debug, Error)]

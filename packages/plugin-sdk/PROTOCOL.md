@@ -170,3 +170,10 @@ retains its invocation until that handler and its awaited cleanup settle. The SD
 does not send an early cancellation response or release admission while the
 handler can still perform effects. The host terminates and reaps an uncooperative
 plugin at its operation deadline before continuing conflicting work.
+
+Provider requests and events use the Rust provider contract. The SDK exports its
+`ProviderRequest`, `ProviderEvent`, and conversation `Block` types and validates
+requests before invoking a handler. Unknown content variants, foreign object
+fields, and missing required fields are rejected. Provider request and event
+JSON schemas are included in the package. `cargo xtask codegen` generates the
+plugin and client projections from their Rust owners.

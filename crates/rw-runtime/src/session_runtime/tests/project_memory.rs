@@ -128,7 +128,7 @@ fn initial_memory_is_redacted_and_reframed_before_the_provider_boundary() {
         model: "fixture".to_owned(),
         turns: vec![raw_turn],
         tools: Vec::new(),
-        tool_choice: ToolChoice::Auto,
+        tool_choice: ToolChoice::Auto {},
         max_output_tokens: 128,
         temperature: None,
         thinking: ThinkingLevel::Off,

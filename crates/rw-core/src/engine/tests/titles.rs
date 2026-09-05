@@ -77,7 +77,7 @@ async fn first_successful_turn_generates_and_replays_a_bounded_fast_model_title(
     let requests = model.requests.lock().expect("requests");
     let title_request = requests.last().expect("title request");
     assert_eq!(title_request.max_output_tokens, 32);
-    assert_eq!(title_request.tool_choice, ToolChoice::None);
+    assert_eq!(title_request.tool_choice, ToolChoice::None {});
     assert!(title_request.tools.is_empty());
     drop(requests);
 

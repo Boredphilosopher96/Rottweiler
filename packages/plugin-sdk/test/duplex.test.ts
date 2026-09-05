@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test"
+import type { ProviderRequest } from "../src/generated/provider-contract"
+
 import {
   BoundedJsonWriter,
   OutboundQueueFullError,
@@ -9,6 +11,11 @@ import {
   type PluginDefinition,
   type ServerTransport,
 } from "../src/index"
+const providerRequest: ProviderRequest = {
+  model: "model", turns: [], tools: [], tool_choice: { mode: "auto" },
+  max_output_tokens: 64, temperature: null, thinking: "off", cache_hint: null,
+}
+
 
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
@@ -178,7 +185,7 @@ describe("production SDK duplex serve", () => {
       } },
     } }, 1000)
     void serving.then(() => { stopped = true })
-    send({ jsonrpc: "2.0", id: 2, method: "provider/complete", params: { alias: "probe/model", request: {} } })
+    send({ jsonrpc: "2.0", id: 2, method: "provider/complete", params: { alias: "probe/model", request: providerRequest } })
     try {
       await until(() => started)
       send(stop)
@@ -392,7 +399,7 @@ describe("provider delivery credit", () => {
         yield { type: "finished", reason: "stop" }
       } },
     } })
-    send({ jsonrpc: "2.0", id: 2, method: "provider/complete", params: { alias: "probe/model", request: {} } })
+    send({ jsonrpc: "2.0", id: 2, method: "provider/complete", params: { alias: "probe/model", request: providerRequest } })
     send({ jsonrpc: "2.0", method: "provider/credit", params: {
       request_id: 2, events: PROTOCOL_LIMITS.providerWindowEvents, bytes: PROTOCOL_LIMITS.providerWindowBytes,
     } })
@@ -429,7 +436,7 @@ test("shutdown progresses while a provider exhausts its delivery credits", async
       } finally { cleaned = true }
     } },
   } })
-  send({ jsonrpc: "2.0", id: 2, method: "provider/complete", params: { alias: "probe/model", request: {} } })
+  send({ jsonrpc: "2.0", id: 2, method: "provider/complete", params: { alias: "probe/model", request: providerRequest } })
   send({ jsonrpc: "2.0", method: "provider/credit", params: {
     request_id: 2, events: 64, bytes: PROTOCOL_LIMITS.providerWindowBytes,
   } })
@@ -470,7 +477,7 @@ test("production writer prioritizes control while preserving each provider termi
   const serving = server.serve(transport.input).finally(() => input.close())
   send(initialize)
   for (const id of [2, 3]) {
-    send({ jsonrpc: "2.0", id, method: "provider/complete", params: { alias: "probe/model", request: {} } })
+    send({ jsonrpc: "2.0", id, method: "provider/complete", params: { alias: "probe/model", request: providerRequest } })
     send({ jsonrpc: "2.0", method: "provider/credit", params: {
       request_id: id, events: 64, bytes: PROTOCOL_LIMITS.providerWindowBytes,
     } })

@@ -579,7 +579,7 @@ mod tests {
             model: "ignored".to_owned(),
             turns: Vec::new(),
             tools: Vec::new(),
-            tool_choice: crate::ToolChoice::Auto,
+            tool_choice: crate::ToolChoice::Auto {},
             max_output_tokens: 100,
             temperature: None,
             thinking: ThinkingLevel::Off,

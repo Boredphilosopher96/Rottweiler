@@ -366,7 +366,7 @@ fn build_request(
     if request.thinking != ThinkingLevel::Off
         && matches!(
             &request.tool_choice,
-            ToolChoice::Required | ToolChoice::Named { .. }
+            ToolChoice::Required {} | ToolChoice::Named { .. }
         )
     {
         return Err(ProviderError::new(
@@ -434,11 +434,11 @@ fn build_request(
     if !tools.is_empty() {
         object.insert("tools".to_owned(), Value::Array(tools));
     }
-    if !request.tools.is_empty() || request.tool_choice == ToolChoice::None {
+    if !request.tools.is_empty() || request.tool_choice == (ToolChoice::None {}) {
         let tool_choice = match &request.tool_choice {
-            ToolChoice::Auto => json!({ "type": "auto" }),
-            ToolChoice::Required => json!({ "type": "any" }),
-            ToolChoice::None => json!({ "type": "none" }),
+            ToolChoice::Auto {} => json!({ "type": "auto" }),
+            ToolChoice::Required {} => json!({ "type": "any" }),
+            ToolChoice::None {} => json!({ "type": "none" }),
             ToolChoice::Named { name } => json!({ "type": "tool", "name": name }),
         };
         object.insert("tool_choice".to_owned(), tool_choice);
@@ -995,7 +995,7 @@ mod tests {
 
     #[test]
     fn explicit_cache_hint_marks_stable_system_and_conversation_prefix() {
-        let mut request = tool_request(ToolChoice::Auto);
+        let mut request = tool_request(ToolChoice::Auto {});
         request.turns[0].blocks.push(Block::Text {
             text: "current user message".to_owned(),
         });
@@ -1041,7 +1041,7 @@ mod tests {
 
     #[test]
     fn explicit_cache_hint_marks_tool_when_no_stable_system_exists() {
-        let mut request = tool_request(ToolChoice::Auto);
+        let mut request = tool_request(ToolChoice::Auto {});
         request.cache_hint = Some(CacheHint {
             stable_prefix_turns: 0,
             tools_in_prefix: true,
@@ -1057,9 +1057,9 @@ mod tests {
     #[test]
     fn tool_choice_uses_anthropic_messages_shape() {
         let fixtures = [
-            (ToolChoice::Auto, json!({"type":"auto"})),
-            (ToolChoice::Required, json!({"type":"any"})),
-            (ToolChoice::None, json!({"type":"none"})),
+            (ToolChoice::Auto {}, json!({"type":"auto"})),
+            (ToolChoice::Required {}, json!({"type":"any"})),
+            (ToolChoice::None {}, json!({"type":"none"})),
             (
                 ToolChoice::Named {
                     name: "live_smoke_ping".to_owned(),
@@ -1076,7 +1076,7 @@ mod tests {
 
     #[test]
     fn thinking_rejects_anthropic_forced_tool_choice() {
-        let mut request = tool_request(ToolChoice::Required);
+        let mut request = tool_request(ToolChoice::Required {});
         request.thinking = ThinkingLevel::Low;
         let Err(error) = build_request(&request, Some(AnthropicThinkingStrategy::Adaptive)) else {
             panic!("Anthropic thinking cannot force a tool");

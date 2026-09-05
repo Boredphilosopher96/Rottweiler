@@ -3,9 +3,11 @@ use std::{fmt, pin::Pin};
 use async_trait::async_trait;
 use futures_core::Stream;
 use rw_types::{Turn, config::ThinkingLevel};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+use ts_rs::TS;
 
 use crate::ModelPricing;
 
@@ -152,7 +154,7 @@ fn valid_search_domain(domain: &str) -> bool {
 }
 
 /// A provider-neutral request assembled by the engine.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderRequest {
     /// Provider-local model name. The router replaces aliases before dispatch.
@@ -167,16 +169,19 @@ pub struct ProviderRequest {
     pub max_output_tokens: u32,
     /// Optional sampling temperature.
     #[serde(deserialize_with = "Option::deserialize")]
+    #[schemars(schema_with = "rw_types::schema::required_nullable::<f32>")]
     pub temperature: Option<f32>,
     /// Provider-independent reasoning control.
     pub thinking: ThinkingLevel,
     /// Stable-prefix boundary assembled by the provider-neutral context engine.
     #[serde(deserialize_with = "Option::deserialize")]
+    #[schemars(schema_with = "rw_types::schema::required_nullable::<CacheHint>")]
     pub cache_hint: Option<CacheHint>,
 }
 
 /// Provider-neutral stable prompt prefix eligible for adapter cache mapping.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
 pub struct CacheHint {
     /// Count of leading turns in the stable prefix.
     pub stable_prefix_turns: u32,
@@ -188,21 +193,26 @@ pub struct CacheHint {
 ///
 /// Adapters translate this into each provider's wire shape. A named choice is
 /// validated against [`ProviderRequest::tools`] before a request is sent.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "mode")]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "snake_case", tag = "mode", deny_unknown_fields)]
 pub enum ToolChoice {
     /// The model may answer normally or call any exposed tool.
-    #[default]
-    Auto,
+    Auto {},
     /// The model must call at least one exposed tool.
-    Required,
+    Required {},
     /// The model must not call a tool, even when tools are exposed.
-    None,
+    None {},
     /// The model must call this exact function tool.
     Named {
         /// Name of a function present in [`ProviderRequest::tools`].
         name: String,
     },
+}
+
+impl Default for ToolChoice {
+    fn default() -> Self {
+        Self::Auto {}
+    }
 }
 
 impl ProviderRequest {
@@ -214,7 +224,7 @@ impl ProviderRequest {
     /// choice cannot be satisfied by this request's tool definitions.
     pub fn validate_tool_choice(&self) -> Result<(), ProviderError> {
         match &self.tool_choice {
-            ToolChoice::Required if self.tools.is_empty() => Err(ProviderError::new(
+            ToolChoice::Required {} if self.tools.is_empty() => Err(ProviderError::new(
                 ProviderErrorKind::InvalidRequest,
                 "required tool choice needs at least one tool definition",
             )),
@@ -226,16 +236,17 @@ impl ProviderRequest {
                     "named tool choice must match an exposed tool definition",
                 ))
             }
-            ToolChoice::Auto
-            | ToolChoice::Required
-            | ToolChoice::None
+            ToolChoice::Auto {}
+            | ToolChoice::Required {}
+            | ToolChoice::None {}
             | ToolChoice::Named { .. } => Ok(()),
         }
     }
 }
 
 /// A function tool definition.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
 pub struct ToolDefinition {
     /// Tool name presented to the model.
     pub name: String,
@@ -352,22 +363,28 @@ pub enum WireMode {
 }
 
 /// Provider usage normalized across API families.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
 pub struct TokenUsage {
     /// Non-cached input tokens.
+    #[ts(type = "number")]
     pub input_tokens: u64,
     /// Generated tokens.
+    #[ts(type = "number")]
     pub output_tokens: u64,
     /// Input tokens served from a prompt cache.
+    #[ts(type = "number")]
     pub cache_read_tokens: u64,
     /// Input tokens written into a prompt cache.
+    #[ts(type = "number")]
     pub cache_write_tokens: u64,
     /// Reasoning tokens when separately reported.
+    #[ts(type = "number")]
     pub reasoning_tokens: u64,
 }
 
 /// Why a model stream ended.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum FinishReason {
     /// Normal end of generation.
@@ -383,8 +400,8 @@ pub enum FinishReason {
 }
 
 /// The normalized event stream consumed by the engine and replay harness.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProviderEvent {
     /// Opaque router-owned identity for the candidate that served this stream.
     /// It is consumed by accounting and never exposed as a provider name.
@@ -396,6 +413,8 @@ pub enum ProviderEvent {
     /// Hidden or summarized model reasoning.
     ThinkingDelta {
         content: String,
+        #[serde(deserialize_with = "Option::deserialize")]
+        #[schemars(schema_with = "rw_types::schema::required_nullable::<String>")]
         signature: Option<String>,
     },
     /// Beginning of a function call.
@@ -407,8 +426,16 @@ pub enum ProviderEvent {
     /// A source citation emitted by a provider-native response.
     Citation {
         uri: String,
+        #[serde(deserialize_with = "Option::deserialize")]
+        #[schemars(schema_with = "rw_types::schema::required_nullable::<String>")]
         title: Option<String>,
+        #[ts(type = "number | null")]
+        #[serde(deserialize_with = "Option::deserialize")]
+        #[schemars(schema_with = "rw_types::schema::required_nullable::<u64>")]
         start_index: Option<u64>,
+        #[ts(type = "number | null")]
+        #[serde(deserialize_with = "Option::deserialize")]
+        #[schemars(schema_with = "rw_types::schema::required_nullable::<u64>")]
         end_index: Option<u64>,
     },
     /// Latest usage totals for the response.

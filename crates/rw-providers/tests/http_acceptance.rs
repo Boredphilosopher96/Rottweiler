@@ -115,7 +115,7 @@ fn request() -> ProviderRequest {
                 "required": ["path"],
             }),
         }],
-        tool_choice: ToolChoice::Auto,
+        tool_choice: ToolChoice::Auto {},
         max_output_tokens: 128,
         temperature: None,
         thinking: ThinkingLevel::Off,

@@ -51,6 +51,7 @@ pub(super) fn run(mut arguments: impl Iterator<Item = String>) -> Result<(), Xta
         return Err(XtaskError::Usage);
     }
 
+    super::plugin_codegen::run(check).map_err(XtaskError::GeneratedContract)?;
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let protocol = root.join("protocol");
     let artifacts = generated_artifacts()?;

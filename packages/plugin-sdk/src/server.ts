@@ -1,4 +1,6 @@
 import { invokeHook, type HookHandlers } from "./hooks"
+import validateProviderRequest from "./generated/provider-request-validator.js"
+import validateProviderEvent from "./generated/provider-event-validator.js"
 import validateHookInput from "./generated/hook-input-validator.js"
 import validateHookDirective from "./generated/hook-directive-validator.js"
 import { ToolProgressReporter } from "./tool-progress"
@@ -926,6 +928,7 @@ export class PluginServer {
   }
 
   #validateProviderEvent(event: ProviderEvent, sawFinished: boolean): void {
+    if (!validateProviderEvent(event)) throw new SafeRpcError(-32603, "invalid provider event")
     if (event === null || typeof event !== "object" || Array.isArray(event) || typeof event.type !== "string") {
       throw new SafeRpcError(-32603, "provider emitted an invalid event")
     }
@@ -983,10 +986,8 @@ export class PluginServer {
   #providerParams(raw: unknown): ProviderCompleteParams {
     const value = object(raw)
     requireRpcKeys(value, "provider/complete params", ["alias", "request"])
-    return {
-      alias: string(value.alias, "provider alias"),
-      request: object(value.request, "provider request") as unknown as ProviderCompleteParams["request"],
-    }
+    if (!validateProviderRequest(value.request)) throw new SafeRpcError(-32602, "invalid provider request")
+    return { alias: string(value.alias, "provider alias"), request: value.request }
   }
 
   #debug(label: string): void {

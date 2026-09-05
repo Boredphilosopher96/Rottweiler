@@ -119,7 +119,7 @@ fn request() -> ProviderRequest {
         model: "model".into(),
         turns: Vec::new(),
         tools: Vec::new(),
-        tool_choice: crate::ToolChoice::None,
+        tool_choice: crate::ToolChoice::None {},
         max_output_tokens: 10,
         temperature: None,
         thinking: rw_types::config::ThinkingLevel::Off,

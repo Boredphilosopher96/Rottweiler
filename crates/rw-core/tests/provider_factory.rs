@@ -554,7 +554,7 @@ fn request(model: &str) -> ProviderRequest {
             meta: TurnMeta::default(),
         }],
         tools: Vec::new(),
-        tool_choice: rw_providers::ToolChoice::Auto,
+        tool_choice: rw_providers::ToolChoice::Auto {},
         max_output_tokens: 32,
         temperature: None,
         thinking: ThinkingLevel::Off,
