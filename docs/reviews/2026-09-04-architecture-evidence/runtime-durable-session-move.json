@@ -1,0 +1,7 @@
+{
+  "before": "4608a77",
+  "functions_preserved": 556,
+  "module_lines": 497,
+  "validation": "7 durable-filter tests passed, one existing manual diagnostic ignored; runtime all-target all-feature strict Clippy passed",
+  "remaining_giant": "session_runtime.rs split continues"
+}

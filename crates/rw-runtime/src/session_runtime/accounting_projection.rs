@@ -1,5 +1,5 @@
+use super::durable_session::{DurableEventSink, HostedSessionProjection, load_session_events};
 use super::session_metadata::SessionMetadata;
-use super::{DurableEventSink, HostedSessionProjection, load_session_events};
 use miette::{IntoDiagnostic, Result, miette};
 use rw_core::{AccountingAttribution, EngineEvent, SequenceId};
 use rw_store::session::{
