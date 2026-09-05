@@ -765,3 +765,7 @@ mod provider_auth;
 mod session_queries;
 mod sessions;
 mod startup;
+
+fn decode_host_event(event: HostEvent) -> EngineEvent {
+    serde_json::from_slice(&event.json).expect("valid encoded host event")
+}

@@ -213,7 +213,7 @@ async fn read_admission_is_global_and_independent_of_the_request_ledger() {
 #[allow(clippy::too_many_lines)]
 async fn client_event_fanout_cleans_up_each_subscription() {
     async fn expect_results(
-        events: &mut mpsc::Receiver<Result<EngineEvent, HostError>>,
+        events: &mut mpsc::Receiver<Result<HostEvent, HostError>>,
         request_id: &str,
     ) {
         let acknowledgement = tokio::time::timeout(Duration::from_secs(1), events.recv())
@@ -222,7 +222,7 @@ async fn client_event_fanout_cleans_up_each_subscription() {
             .expect("open subscription")
             .expect("host result");
         assert!(matches!(
-            acknowledgement,
+            decode_host_event(acknowledgement),
             EngineEvent::CommandAcknowledged { meta, .. }
                 if meta.request_id.0 == request_id
         ));
@@ -232,7 +232,7 @@ async fn client_event_fanout_cleans_up_each_subscription() {
             .expect("open subscription")
             .expect("host result");
         assert!(matches!(
-            result,
+            decode_host_event(result),
             EngineEvent::SessionsListed { meta, .. }
                 if meta.request_id.0 == request_id
         ));
@@ -388,7 +388,7 @@ async fn connection_results_survive_slow_subscriber_backpressure() {
         else {
             break;
         };
-        match event {
+        match decode_host_event(event) {
             EngineEvent::CommandAcknowledged { meta, .. }
                 if meta.request_id.0.starts_with("slow-") =>
             {
@@ -485,7 +485,7 @@ async fn stalled_subscription_does_not_block_active_sibling() {
                 .await
                 .expect("active subscription remains open")
                 .expect("host result");
-            match event {
+            match decode_host_event(event) {
                 EngineEvent::CommandAcknowledged { meta, .. }
                     if meta.request_id.0.starts_with("sibling-") =>
                 {

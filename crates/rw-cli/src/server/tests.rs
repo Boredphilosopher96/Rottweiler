@@ -55,7 +55,7 @@ impl ServerEngine for StubEngine {
         _session_id: Option<SessionId>,
         _last_seen: Option<SequenceId>,
     ) -> std::result::Result<
-        mpsc::Receiver<std::result::Result<EngineEvent, String>>,
+        mpsc::Receiver<std::result::Result<rw_core::HostEvent, String>>,
         EventSubscriptionError,
     > {
         if let Some(error) = self
@@ -67,17 +67,21 @@ impl ServerEngine for StubEngine {
             return Err(error);
         }
         let (send, receive) = mpsc::channel(1);
-        send.send(Ok(EngineEvent::SessionsListed {
-            meta: CommandAckMeta {
-                protocol_version: PROTOCOL_VERSION,
-                client_id: ClientId("fixture".to_owned()),
-                request_id: RequestId("fixture".to_owned()),
-                emitted_at: "2026-01-01T00:00:00.000Z".to_owned(),
-            },
-            sessions: Vec::<SessionDescriptor>::new(),
-        }))
-        .await
-        .map_err(|_| "fixture receiver closed".to_owned())?;
+        let event = rw_core::HostEventBudget::default()
+            .encode(&EngineEvent::SessionsListed {
+                meta: CommandAckMeta {
+                    protocol_version: PROTOCOL_VERSION,
+                    client_id: ClientId("fixture".to_owned()),
+                    request_id: RequestId("fixture".to_owned()),
+                    emitted_at: "2026-01-01T00:00:00.000Z".to_owned(),
+                },
+                sessions: Vec::<SessionDescriptor>::new(),
+            })
+            .await
+            .expect("encoded event");
+        send.send(Ok(event))
+            .await
+            .map_err(|_| "fixture receiver closed".to_owned())?;
         Ok(receive)
     }
 

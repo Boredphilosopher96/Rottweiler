@@ -1,7 +1,7 @@
 use super::{
     Arc, BoundClient, ClientId, EngineEvent, EngineHost, HOST_EVENT_CAPACITY,
-    HOST_EVENT_STALL_TIMEOUT, HostError, ProviderAuthSubscriptionGuard, SequenceId, SessionId,
-    join_all, mpsc, replay_completed,
+    HOST_EVENT_STALL_TIMEOUT, HostError, HostEvent, HostEventBudget, ProviderAuthSubscriptionGuard,
+    SequenceId, SessionId, join_all, mpsc, replay_completed,
 };
 
 impl EngineHost {
@@ -21,7 +21,7 @@ impl EngineHost {
         bound: BoundClient,
         session_id: Option<SessionId>,
         last_seen: Option<SequenceId>,
-    ) -> Result<mpsc::Receiver<Result<EngineEvent, HostError>>, HostError> {
+    ) -> Result<mpsc::Receiver<Result<HostEvent, HostError>>, HostError> {
         let session = if let Some(session_id) = &session_id {
             let session = self.ready_session(session_id).await?;
             let events = session
@@ -36,9 +36,10 @@ impl EngineHost {
             .client_events
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .subscribe(&bound.client_id);
+            .subscribe(&bound.client_id)?;
         let (send, receive) = mpsc::channel(HOST_EVENT_CAPACITY);
         let clock = Arc::clone(&self.clock);
+        let event_budget = self.event_budget.clone();
         let provider_auth = Arc::clone(&self.provider_auth);
         let client_events = Arc::clone(&self.client_events);
         tokio::spawn(async move {
@@ -52,15 +53,20 @@ impl EngineHost {
             };
             if let Some((session, captured_tail, mut session_events)) = session {
                 let mut replay_complete = last_seen == captured_tail;
-                if replay_complete {
-                    let _ = send
-                        .send(Ok(replay_completed(
+                if replay_complete
+                    && !send_encoded(
+                        &send,
+                        &event_budget,
+                        &replay_completed(
                             &bound.client_id,
                             &session.descriptor().session_id,
                             captured_tail,
                             &*clock,
-                        )))
-                        .await;
+                        ),
+                    )
+                    .await
+                {
+                    return;
                 }
                 loop {
                     tokio::select! {
@@ -72,7 +78,7 @@ impl EngineHost {
                         event = session_events.recv() => match event {
                             Ok(event) => {
                                 if !matches!(event, EngineEvent::CommandAcknowledged { .. })
-                                    && send.send(Ok(event.clone())).await.is_err()
+                                    && !send_encoded(&send, &event_budget, &event).await
                                 {
                                     return;
                                 }
@@ -80,12 +86,12 @@ impl EngineHost {
                                     && event.meta().map(|meta| meta.sequence_id) == captured_tail
                                 {
                                     replay_complete = true;
-                                    if send.send(Ok(replay_completed(
+                                    if !send_encoded(&send, &event_budget, &replay_completed(
                                         &bound.client_id,
                                         &session.descriptor().session_id,
                                         captured_tail,
                                         &*clock,
-                                    ))).await.is_err() {
+                                    )).await {
                                         return;
                                     }
                                 }
@@ -126,6 +132,12 @@ impl EngineHost {
         let _delivery = channel.delivery.lock().await;
         let mut senders = channel.senders();
         for event in events {
+            let Ok(event) = self.event_budget.encode(event).await else {
+                for (id, _) in &senders {
+                    channel.unsubscribe(*id);
+                }
+                return;
+            };
             let outcomes = join_all(senders.iter().map(|(id, sender)| {
                 let event = event.clone();
                 async move {
@@ -152,4 +164,14 @@ impl EngineHost {
             }
         }
     }
+}
+
+async fn send_encoded(
+    send: &mpsc::Sender<Result<HostEvent, HostError>>,
+    budget: &HostEventBudget,
+    event: &EngineEvent,
+) -> bool {
+    let encoded = budget.encode(event).await;
+    let valid = encoded.is_ok();
+    send.send(encoded).await.is_ok() && valid
 }

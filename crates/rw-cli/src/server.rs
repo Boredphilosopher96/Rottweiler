@@ -341,7 +341,7 @@ pub trait ServerEngine: Send + Sync + 'static {
         session_id: Option<SessionId>,
         last_seen: Option<SequenceId>,
     ) -> std::result::Result<
-        mpsc::Receiver<std::result::Result<EngineEvent, String>>,
+        mpsc::Receiver<std::result::Result<rw_core::HostEvent, String>>,
         EventSubscriptionError,
     >;
 
@@ -420,7 +420,7 @@ impl ServerEngine for HostedEngine {
         session_id: Option<SessionId>,
         last_seen: Option<SequenceId>,
     ) -> std::result::Result<
-        mpsc::Receiver<std::result::Result<EngineEvent, String>>,
+        mpsc::Receiver<std::result::Result<rw_core::HostEvent, String>>,
         EventSubscriptionError,
     > {
         let mut source = self
@@ -1119,27 +1119,21 @@ async fn dispatch_shell_broker(
 }
 
 fn sse_response(
-    mut receiver: mpsc::Receiver<std::result::Result<EngineEvent, String>>,
+    mut receiver: mpsc::Receiver<std::result::Result<rw_core::HostEvent, String>>,
 ) -> Response<HttpBody> {
     let stream = async_stream::stream! {
         while let Some(item) = receiver.recv().await {
             match item {
                 Ok(event) => {
-                    let mut frame = String::new();
-                    if let Some(meta) = event.meta() {
+                    let mut prefix = String::with_capacity(64);
+                    if let Some(sequence) = event.sequence {
                         use std::fmt::Write as _;
-                        let _ = writeln!(&mut frame, "id: {}", meta.sequence_id.0);
+                        let _ = writeln!(&mut prefix, "id: {}", sequence.0);
                     }
-                    frame.push_str("event: engine\n");
-                    match serde_json::to_string(&event) {
-                        Ok(data) => {
-                            frame.push_str("data: ");
-                            frame.push_str(&data);
-                            frame.push_str("\n\n");
-                            yield Ok::<Frame<Bytes>, Infallible>(Frame::data(Bytes::from(frame)));
-                        }
-                        Err(_) => break,
-                    }
+                    prefix.push_str("event: engine\ndata: ");
+                    yield Ok::<Frame<Bytes>, Infallible>(Frame::data(Bytes::from(prefix)));
+                    yield Ok::<Frame<Bytes>, Infallible>(Frame::data(event.json));
+                    yield Ok::<Frame<Bytes>, Infallible>(Frame::data(Bytes::from_static(b"\n\n")));
                 }
                 Err(_) => break,
             }

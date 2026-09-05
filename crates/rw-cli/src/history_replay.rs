@@ -17,6 +17,7 @@ pub(super) struct HistoricalReplayEngine {
     session_id: SessionId,
     reader: Arc<TranscriptReader>,
     reads: HostReadChannel,
+    event_budget: rw_core::HostEventBudget,
 }
 
 impl HistoricalReplayEngine {
@@ -27,6 +28,7 @@ impl HistoricalReplayEngine {
             session_id,
             reader: TranscriptReader::open(storage_root)?,
             reads: HostReadChannel::new(256)?,
+            event_budget: rw_core::HostEventBudget::default(),
         })
     }
 
@@ -103,7 +105,7 @@ impl server::ServerEngine for HistoricalReplayEngine {
         session_id: Option<SessionId>,
         last_seen: Option<SequenceId>,
     ) -> std::result::Result<
-        tokio::sync::mpsc::Receiver<std::result::Result<EngineEvent, String>>,
+        tokio::sync::mpsc::Receiver<std::result::Result<rw_core::HostEvent, String>>,
         server::EventSubscriptionError,
     > {
         if session_id.as_ref() != Some(&self.session_id) {
@@ -121,10 +123,19 @@ impl server::ServerEngine for HistoricalReplayEngine {
         }
         let session_id = self.session_id.clone();
         let (sender, receiver) = tokio::sync::mpsc::channel(2);
+        let event_budget = self.event_budget.clone();
         tokio::spawn(async move {
             if let Some(created) = bootstrap.created
                 && last_seen.is_none()
-                && sender.send(Ok(created)).await.is_err()
+                && sender
+                    .send(
+                        event_budget
+                            .encode(&created)
+                            .await
+                            .map_err(|error| error.to_string()),
+                    )
+                    .await
+                    .is_err()
             {
                 return;
             }
@@ -138,7 +149,16 @@ impl server::ServerEngine for HistoricalReplayEngine {
                 session_id,
                 through_sequence: bootstrap.through_sequence,
             };
-            if sender.send(Ok(ready)).await.is_ok() {
+            if sender
+                .send(
+                    event_budget
+                        .encode(&ready)
+                        .await
+                        .map_err(|error| error.to_string()),
+                )
+                .await
+                .is_ok()
+            {
                 sender.closed().await;
             }
         });

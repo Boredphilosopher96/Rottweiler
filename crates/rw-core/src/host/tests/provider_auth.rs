@@ -62,12 +62,13 @@ async fn provider_auth_completion_is_async_and_stale_cancel_keeps_real_attempt()
     );
     let attempt_id = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if let EngineEvent::ProviderAuthStarted { attempt_id, .. } = events
-                .recv()
-                .await
-                .expect("auth event")
-                .expect("auth result")
-            {
+            if let EngineEvent::ProviderAuthStarted { attempt_id, .. } = decode_host_event(
+                events
+                    .recv()
+                    .await
+                    .expect("auth event")
+                    .expect("auth result"),
+            ) {
                 break attempt_id;
             }
         }
@@ -511,12 +512,13 @@ async fn oauth_and_api_key_mutations_share_one_global_store_boundary() {
                 message,
                 warnings,
                 ..
-            } = auth_events
-                .recv()
-                .await
-                .expect("auth event")
-                .expect("auth result")
-            {
+            } = decode_host_event(
+                auth_events
+                    .recv()
+                    .await
+                    .expect("auth event")
+                    .expect("auth result"),
+            ) {
                 break (success, message, warnings);
             }
         }
@@ -590,12 +592,13 @@ async fn provider_catalog_refresh_failure_does_not_delay_or_relabel_login() {
     );
     let attempt_id = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if let EngineEvent::ProviderAuthStarted { attempt_id, .. } = events
-                .recv()
-                .await
-                .expect("auth event")
-                .expect("auth result")
-            {
+            if let EngineEvent::ProviderAuthStarted { attempt_id, .. } = decode_host_event(
+                events
+                    .recv()
+                    .await
+                    .expect("auth event")
+                    .expect("auth result"),
+            ) {
                 break attempt_id;
             }
         }
@@ -625,12 +628,13 @@ async fn provider_catalog_refresh_failure_does_not_delay_or_relabel_login() {
                 message,
                 warnings,
                 ..
-            } = events
-                .recv()
-                .await
-                .expect("auth event")
-                .expect("auth result")
-            {
+            } = decode_host_event(
+                events
+                    .recv()
+                    .await
+                    .expect("auth event")
+                    .expect("auth result"),
+            ) {
                 break (success, message, warnings);
             }
         }
@@ -644,12 +648,13 @@ async fn provider_catalog_refresh_failure_does_not_delay_or_relabel_login() {
         loop {
             if let EngineEvent::ProviderActivationFinished {
                 success, message, ..
-            } = events
-                .recv()
-                .await
-                .expect("readiness event")
-                .expect("readiness result")
-            {
+            } = decode_host_event(
+                events
+                    .recv()
+                    .await
+                    .expect("readiness event")
+                    .expect("readiness result"),
+            ) {
                 break (success, message);
             }
         }

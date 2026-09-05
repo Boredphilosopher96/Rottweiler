@@ -68,10 +68,10 @@ pub use engine::{
 };
 pub use host::{
     BoundClient, CompletedForkOperation, CreateSessionRequest, EngineHost, EngineHostConfig,
-    ForkOperationKey, ForkOperationState, ForkSessionRequest, HostError, HostMcpService,
-    HostQueryService, HostReadChannel, HostReply, HostRuntimeService, HostSubagentService,
-    HostedSession, PreparedForkOperation, ProviderApiKeySubmission, ProviderAuthAttempt,
-    ProviderAuthCompletion, SessionFactory,
+    ForkOperationKey, ForkOperationState, ForkSessionRequest, HostError, HostEvent,
+    HostEventBudget, HostMcpService, HostQueryService, HostReadChannel, HostReply,
+    HostRuntimeService, HostSubagentService, HostedSession, PreparedForkOperation,
+    ProviderApiKeySubmission, ProviderAuthAttempt, ProviderAuthCompletion, SessionFactory,
 };
 pub use init::{
     DEFAULT_INIT_FILE_BUDGET_BYTES, InitDepth, InitError, InitPlan, MAX_INIT_SCAN_ENTRIES,

@@ -97,12 +97,13 @@ async fn fork_requires_idle_driver_and_returns_typed_child_descriptor() {
                 child,
                 at_turn,
                 ..
-            } = events
-                .recv()
-                .await
-                .expect("fork event")
-                .expect("fork result")
-            {
+            } = decode_host_event(
+                events
+                    .recv()
+                    .await
+                    .expect("fork event")
+                    .expect("fork result"),
+            ) {
                 break (parent_session_id, child, at_turn);
             }
         }
@@ -269,7 +270,7 @@ async fn empty_log_rejects_sequence_zero_cursor_and_null_cursor_completes_prompt
         .expect("replay completion item")
         .expect("valid replay completion");
     assert!(matches!(
-        &completed,
+        &decode_host_event(completed),
         EngineEvent::SessionReplayCompleted {
             session_id,
             through_sequence: None,

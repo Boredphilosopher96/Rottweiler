@@ -5,7 +5,9 @@ mod control;
 mod control_admission;
 mod control_completion;
 mod control_owner;
+mod event_frame;
 mod events;
+pub use event_frame::{HostEvent, HostEventBudget};
 mod lifecycle;
 mod operation_receipts;
 mod provider_completion;
@@ -151,7 +153,7 @@ struct ClientEventSubscriptionId(u64);
 #[derive(Default)]
 struct ClientEventSubscribers {
     next_id: u64,
-    senders: HashMap<ClientEventSubscriptionId, mpsc::Sender<EngineEvent>>,
+    senders: HashMap<ClientEventSubscriptionId, mpsc::Sender<HostEvent>>,
 }
 
 #[derive(Default)]
@@ -166,7 +168,7 @@ struct ClientEventRegistry {
 }
 
 impl ClientEventChannel {
-    fn subscribe(&self) -> (ClientEventSubscriptionId, mpsc::Receiver<EngineEvent>) {
+    fn subscribe(&self) -> (ClientEventSubscriptionId, mpsc::Receiver<HostEvent>) {
         let (sender, receiver) = mpsc::channel(HOST_EVENT_CAPACITY);
         let mut subscribers = self
             .subscribers
@@ -192,7 +194,7 @@ impl ClientEventChannel {
         subscribers.senders.is_empty()
     }
 
-    fn senders(&self) -> Vec<(ClientEventSubscriptionId, mpsc::Sender<EngineEvent>)> {
+    fn senders(&self) -> Vec<(ClientEventSubscriptionId, mpsc::Sender<HostEvent>)> {
         self.subscribers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -207,18 +209,35 @@ impl ClientEventRegistry {
     fn subscribe(
         &mut self,
         client_id: &ClientId,
-    ) -> (
-        Arc<ClientEventChannel>,
-        ClientEventSubscriptionId,
-        mpsc::Receiver<EngineEvent>,
-    ) {
+    ) -> Result<
+        (
+            Arc<ClientEventChannel>,
+            ClientEventSubscriptionId,
+            mpsc::Receiver<HostEvent>,
+        ),
+        HostError,
+    > {
+        let total: usize = self
+            .clients
+            .values()
+            .map(|channel| channel.senders().len())
+            .sum();
+        let own = self
+            .clients
+            .get(client_id)
+            .map_or(0, |channel| channel.senders().len());
+        if total >= 64 || own >= 4 {
+            return Err(HostError::Protocol(
+                "host subscription admission exhausted".into(),
+            ));
+        }
         let channel = Arc::clone(
             self.clients
                 .entry(client_id.clone())
                 .or_insert_with(|| Arc::new(ClientEventChannel::default())),
         );
         let (id, receiver) = channel.subscribe();
-        (channel, id, receiver)
+        Ok((channel, id, receiver))
     }
 
     fn unsubscribe(
@@ -261,7 +280,7 @@ impl Drop for ProviderAuthOpeningGuard {
 struct ProviderAuthSubscriptionGuard {
     client_id: ClientId,
     subscription_id: ClientEventSubscriptionId,
-    receiver: mpsc::Receiver<EngineEvent>,
+    receiver: mpsc::Receiver<HostEvent>,
     channel: Arc<ClientEventChannel>,
     registry: Arc<Mutex<ClientEventRegistry>>,
     pending: Arc<PendingProviderAuths>,
@@ -372,6 +391,7 @@ pub struct EngineHost {
     control_owner: Arc<control_owner::ControlOwner>,
     completion_budget: Arc<retained_control::CompletionBudget>,
     client_events: Arc<Mutex<ClientEventRegistry>>,
+    event_budget: HostEventBudget,
     provider_auth: Arc<PendingProviderAuths>,
     provider_mutation: Arc<tokio::sync::Mutex<()>>,
     provider_api_key_store: Arc<ProviderApiKeyStore>,
@@ -420,6 +440,7 @@ impl EngineHost {
             control_owner: Arc::default(),
             completion_budget: Arc::default(),
             client_events: Arc::new(Mutex::new(ClientEventRegistry::default())),
+            event_budget: HostEventBudget::default(),
             provider_auth: Arc::new(PendingProviderAuths::default()),
             provider_mutation: Arc::new(tokio::sync::Mutex::new(())),
             provider_api_key_store: Arc::new(|provider, api_key| {

@@ -10,8 +10,8 @@ use std::{
 use async_trait::async_trait;
 use miette::{IntoDiagnostic, Result, miette};
 use rw_core::{
-    ClientCommand, ClientId, CreateSessionRequest, EngineEvent, EngineHostConfig, ProviderApiKey,
-    SequenceId, SessionId,
+    ClientCommand, ClientId, CreateSessionRequest, EngineHostConfig, ProviderApiKey, SequenceId,
+    SessionId,
 };
 use rw_runtime::session;
 use rw_types::PermissionModeDescriptor as PermissionMode;
@@ -179,7 +179,7 @@ impl server::ServerEngine for DeferredHostedEngine {
         session_id: Option<SessionId>,
         last_seen: Option<SequenceId>,
     ) -> std::result::Result<
-        tokio::sync::mpsc::Receiver<std::result::Result<EngineEvent, String>>,
+        tokio::sync::mpsc::Receiver<std::result::Result<rw_core::HostEvent, String>>,
         server::EventSubscriptionError,
     > {
         self.loaded()

@@ -58,12 +58,13 @@ async fn export_session_requires_an_absolute_path_and_current_driver() {
     );
     let exported_path = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if let EngineEvent::SessionExported { output_path, .. } = events
-                .recv()
-                .await
-                .expect("export event")
-                .expect("export result")
-            {
+            if let EngineEvent::SessionExported { output_path, .. } = decode_host_event(
+                events
+                    .recv()
+                    .await
+                    .expect("export event")
+                    .expect("export result"),
+            ) {
                 break output_path;
             }
         }
@@ -196,11 +197,13 @@ async fn rename_persists_and_lists_a_session_without_its_driver_lease() {
     );
     let title_event = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            let event = host_events
-                .recv()
-                .await
-                .expect("host event")
-                .expect("host result");
+            let event = decode_host_event(
+                host_events
+                    .recv()
+                    .await
+                    .expect("host event")
+                    .expect("host result"),
+            );
             if matches!(
                 &event,
                 EngineEvent::SessionTitleUpdated { meta, title, .. }

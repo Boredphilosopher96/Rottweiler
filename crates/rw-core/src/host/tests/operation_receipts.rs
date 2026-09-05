@@ -76,11 +76,12 @@ async fn durable_mutation_receipt_survives_cache_eviction_and_host_rebinding() {
             .outcome,
         CommandOutcome::Accepted {}
     );
-    let mut ack = tokio::time::timeout(Duration::from_secs(2), events.recv())
+    let ack = tokio::time::timeout(Duration::from_secs(2), events.recv())
         .await
         .expect("delivered")
         .expect("event")
         .expect("ack");
+    let mut ack = decode_host_event(ack);
     assert_eq!(
         ack.command_meta_mut()
             .expect("connection receipt")

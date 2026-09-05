@@ -717,19 +717,28 @@ mod tests {
             _session_id: Option<SessionId>,
             _last_seen: Option<SequenceId>,
         ) -> Result<
-            mpsc::Receiver<Result<EngineEvent, String>>,
+            mpsc::Receiver<Result<rw_core::HostEvent, String>>,
             crate::server::EventSubscriptionError,
         > {
             let (send, receive) = mpsc::channel(4);
             self.subscribed.notify_one();
             if !self.first_generation {
-                send.send(Ok(shell_event(1, true)))
+                send.send(Ok(rw_core::HostEventBudget::default()
+                    .encode(&shell_event(1, true))
+                    .await
+                    .expect("encoded fixture event")))
                     .await
                     .map_err(|_| "fixture replay receiver closed".to_owned())?;
-                send.send(Ok(shell_event(2, false)))
+                send.send(Ok(rw_core::HostEventBudget::default()
+                    .encode(&shell_event(2, false))
+                    .await
+                    .expect("encoded fixture event")))
                     .await
                     .map_err(|_| "fixture replay receiver closed".to_owned())?;
-                send.send(Ok(replay_complete()))
+                send.send(Ok(rw_core::HostEventBudget::default()
+                    .encode(&replay_complete())
+                    .await
+                    .expect("encoded fixture event")))
                     .await
                     .map_err(|_| "fixture replay receiver closed".to_owned())?;
             }
