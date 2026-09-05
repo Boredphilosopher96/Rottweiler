@@ -243,7 +243,9 @@ impl SessionActor {
             config.commands.descriptors().cloned().collect::<Vec<_>>(),
         )));
         let mode_registry = Arc::new(RwLock::new(Arc::clone(&config.modes)));
+        let shutdown = super::shutdown::ActorShutdown::default();
         let handle = SessionHandle {
+            shutdown: shutdown.clone(),
             commands: command_tx,
             events: event_tx.clone(),
             active_turn: active_turn.clone(),
@@ -256,15 +258,31 @@ impl SessionActor {
             mode_registry: Arc::clone(&mode_registry),
             model: Arc::clone(&config.model),
         };
-        tokio::spawn(run_actor(
-            config,
-            tool_context,
-            command_rx,
-            event_tx,
-            active_turn,
-            Arc::clone(&command_descriptors),
-            mode_registry,
-        ));
+        let config = Arc::new(config);
+        let retained = Arc::clone(&config);
+        let task_shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            if AssertUnwindSafe(run_actor(
+                config,
+                tool_context,
+                command_rx,
+                event_tx,
+                super::shutdown::ActorControl {
+                    active_turn,
+                    command_descriptors: Arc::clone(&command_descriptors),
+                    mode_registry,
+                    shutdown: task_shutdown.clone(),
+                },
+            ))
+            .catch_unwind()
+            .await
+            .is_err()
+            {
+                task_shutdown
+                    .complete(Err("session actor exited without cleanup proof".to_owned()));
+                super::shutdown::retain_unproven(retained).await;
+            }
+        });
         Ok(handle)
     }
 }
@@ -421,6 +439,7 @@ pub(super) fn validate_gap(
 /// Cloneable command/event boundary for one session actor.
 #[derive(Clone)]
 pub struct SessionHandle {
+    shutdown: super::shutdown::ActorShutdown,
     pub(super) commands: mpsc::Sender<ActorCommand>,
     events: broadcast::Sender<RoutedEvent>,
     pub(super) active_turn: Arc<AtomicU64>,
@@ -432,6 +451,16 @@ pub struct SessionHandle {
     command_descriptors: Arc<RwLock<Arc<[CommandDescriptor]>>>,
     mode_registry: Arc<RwLock<Arc<ModeRegistry>>>,
     model: Arc<dyn ModelDriver>,
+}
+
+impl SessionHandle {
+    /// Closes admission and waits for the actor's owned effect settlement.
+    ///
+    /// # Errors
+    /// Returns a sticky error while unproven resource owners remain quarantined.
+    pub async fn close(&self) -> Result<(), AgentLoopError> {
+        self.shutdown.close().await
+    }
 }
 
 /// Opaque, plugin-scoped machine capability for one session actor.
@@ -1230,6 +1259,7 @@ pub(super) async fn recover_actor_from_journal(
     )
     .await?;
     let client_roles = std::mem::take(&mut state.client_roles);
+    let tasks = state.tasks.clone();
     *state = ActorState::recover(
         config.session_id.clone(),
         Arc::clone(&config.event_clock),
@@ -1238,6 +1268,7 @@ pub(super) async fn recover_actor_from_journal(
         &config.modes,
         &recovered,
     );
+    state.tasks = tasks;
     state.client_roles = client_roles;
 
     if recovered.interrupted_compaction {
@@ -1308,37 +1339,20 @@ async fn dispatch_lifecycle_hook(
     result.completed()
 }
 
-async fn end_actor_session(
-    state: &mut ActorState,
-    config: &SessionActorConfig,
-    events: &broadcast::Sender<RoutedEvent>,
-) {
-    let _ = dispatch_lifecycle_hook(HookEvent::SessionEnd, state, config, events).await;
-    if let Err(error) = config.tools.end_session(&config.session_id).await {
-        let _ = emit(
-            state,
-            events,
-            &config.event_sink,
-            PendingEvent::Error {
-                message: config
-                    .secret_redactor
-                    .redact(&format!("session resource cleanup failed: {error}")),
-            },
-        )
-        .await;
-    }
-}
-
 #[allow(clippy::too_many_lines)]
 async fn run_actor(
-    config: SessionActorConfig,
+    config: Arc<SessionActorConfig>,
     mut tool_context: ToolContext,
     mut commands: mpsc::Receiver<ActorCommand>,
     events: broadcast::Sender<RoutedEvent>,
-    active_turn: Arc<AtomicU64>,
-    command_descriptors: Arc<RwLock<Arc<[CommandDescriptor]>>>,
-    mode_registry: Arc<RwLock<Arc<ModeRegistry>>>,
+    control: super::shutdown::ActorControl,
 ) {
+    let super::shutdown::ActorControl {
+        active_turn,
+        command_descriptors,
+        mode_registry,
+        shutdown,
+    } = control;
     let mut state = ActorState::recover(
         config.session_id.clone(),
         Arc::clone(&config.event_clock),
@@ -1348,159 +1362,186 @@ async fn run_actor(
         &config.recovered,
     );
     let interrupted_turn = config.recovered.interrupted_turn;
-    let mut config = Arc::new(config);
+    let mut config = config;
     let (turn_signals, mut signals) = mpsc::unbounded_channel();
-    if !config.startup_notifications.is_empty() {
-        let startup_events = config.startup_notifications.iter().flat_map(|notice| {
-            [
-                PendingEvent::PluginStatusChanged {
-                    plugin_id: notice.plugin_id.clone(),
-                    status: notice.status.clone(),
-                },
-                PendingEvent::UiNotification {
-                    plugin_id: notice.plugin_id.clone(),
-                    title: notice.title.clone(),
-                    message: notice.message.clone(),
-                },
-            ]
-        });
-        if emit_batch(
-            &mut state,
-            &events,
-            &config.event_sink,
-            startup_events.collect(),
-        )
-        .await
-        .is_err()
-        {
-            end_actor_session(&mut state, &config, &events).await;
-            return;
-        }
-    }
-    if !dispatch_lifecycle_hook(HookEvent::SessionStart, &mut state, &config, &events).await {
-        end_actor_session(&mut state, &config, &events).await;
-        return;
-    }
-    if config.recovered.interrupted_compaction
-        && emit(
-            &mut state,
-            &events,
-            &config.event_sink,
-            PendingEvent::Error {
-                message: "interrupted compaction was aborted during recovery".to_owned(),
-            },
-        )
-        .await
-        .is_err()
-    {
-        end_actor_session(&mut state, &config, &events).await;
-        return;
-    }
-    if let Some(turn) = interrupted_turn {
-        let mut recovery_events = config
-            .recovered
-            .interrupted_tool_repairs
-            .iter()
-            .flat_map(interrupted_tool_recovery_events)
-            .collect::<Vec<_>>();
-        if let Some(tool_turn) = &config.recovered.interrupted_tool_turn {
-            recovery_events.push(PendingEvent::ConversationTurnCommitted {
-                agent_turn: turn,
-                turn: tool_turn.clone(),
+    'startup: {
+        if !config.startup_notifications.is_empty() {
+            let startup_events = config.startup_notifications.iter().flat_map(|notice| {
+                [
+                    PendingEvent::PluginStatusChanged {
+                        plugin_id: notice.plugin_id.clone(),
+                        status: notice.status.clone(),
+                    },
+                    PendingEvent::UiNotification {
+                        plugin_id: notice.plugin_id.clone(),
+                        title: notice.title.clone(),
+                        message: notice.message.clone(),
+                    },
+                ]
             });
+            if emit_batch(
+                &mut state,
+                &events,
+                &config.event_sink,
+                startup_events.collect(),
+            )
+            .await
+            .is_err()
+            {
+                state.unsettled = Some("session startup failed before completion".to_owned());
+                break 'startup;
+            }
         }
-        recovery_events.push(PendingEvent::TurnFinished {
-            turn,
-            status: AgentTurnStatus::Interrupted,
-            usage: SessionUsage::default(),
-            cost: unavailable_cost(),
-        });
-        if emit_batch(&mut state, &events, &config.event_sink, recovery_events)
+        if !dispatch_lifecycle_hook(HookEvent::SessionStart, &mut state, &config, &events).await {
+            state.unsettled = Some("session startup failed before completion".to_owned());
+            break 'startup;
+        }
+        if config.recovered.interrupted_compaction
+            && emit(
+                &mut state,
+                &events,
+                &config.event_sink,
+                PendingEvent::Error {
+                    message: "interrupted compaction was aborted during recovery".to_owned(),
+                },
+            )
             .await
             .is_err()
         {
-            end_actor_session(&mut state, &config, &events).await;
-            return;
+            state.unsettled = Some("session startup failed before completion".to_owned());
+            break 'startup;
         }
-        state.accounting.push(TurnAccounting {
-            turn_id: wire_turn_id(turn),
-            attribution: AccountingAttribution::Main,
-            usage: SessionUsage::default().into(),
-            cost: unavailable_cost(),
-        });
-        state.completed_turns = state.completed_turns.saturating_add(1);
-        state.turn_ends.insert(turn, state.conversation.len());
-    }
-    if !state.queued.is_empty() {
-        state.queued_positions.clear();
-        let messages = state
-            .queued
-            .drain(..)
-            .map(|content| (content, Vec::new()))
-            .collect();
-        if start_turn(
-            &mut state,
-            &config,
-            &tool_context,
-            &turn_signals,
-            &events,
-            messages,
-            &active_turn,
-        )
-        .await
-        .is_err()
-        {
-            end_actor_session(&mut state, &config, &events).await;
-            return;
+        if let Some(turn) = interrupted_turn {
+            let mut recovery_events = config
+                .recovered
+                .interrupted_tool_repairs
+                .iter()
+                .flat_map(interrupted_tool_recovery_events)
+                .collect::<Vec<_>>();
+            if let Some(tool_turn) = &config.recovered.interrupted_tool_turn {
+                recovery_events.push(PendingEvent::ConversationTurnCommitted {
+                    agent_turn: turn,
+                    turn: tool_turn.clone(),
+                });
+            }
+            recovery_events.push(PendingEvent::TurnFinished {
+                turn,
+                status: AgentTurnStatus::Interrupted,
+                usage: SessionUsage::default(),
+                cost: unavailable_cost(),
+            });
+            if emit_batch(&mut state, &events, &config.event_sink, recovery_events)
+                .await
+                .is_err()
+            {
+                state.unsettled = Some("session startup failed before completion".to_owned());
+                break 'startup;
+            }
+            state.accounting.push(TurnAccounting {
+                turn_id: wire_turn_id(turn),
+                attribution: AccountingAttribution::Main,
+                usage: SessionUsage::default().into(),
+                cost: unavailable_cost(),
+            });
+            state.completed_turns = state.completed_turns.saturating_add(1);
+            state.turn_ends.insert(turn, state.conversation.len());
+        }
+        if !state.queued.is_empty() {
+            state.queued_positions.clear();
+            let messages = state
+                .queued
+                .drain(..)
+                .map(|content| (content, Vec::new()))
+                .collect();
+            if start_turn(
+                &mut state,
+                &config,
+                &tool_context,
+                &turn_signals,
+                &events,
+                messages,
+                &active_turn,
+            )
+            .await
+            .is_err()
+            {
+                state.unsettled = Some("session startup failed before completion".to_owned());
+                break 'startup;
+            }
         }
     }
+    let mut commands_open = true;
+    let mut closing_started = None;
+    let mut cleanup = None;
     loop {
+        if shutdown.requested() || !commands_open || state.unsettled.is_some() {
+            state.closing = true;
+            state.tasks.cancel();
+            if let Some(running) = &state.running {
+                running.cancellation.cancel();
+            }
+            closing_started.get_or_insert_with(tokio::time::Instant::now);
+        }
+        if let Some(error) = state.tasks.failure() {
+            state.unsettled.get_or_insert_with(|| error.to_string());
+        }
+        if state.closing && state.tasks.idle() && signals.is_empty() && cleanup.is_none() {
+            cleanup = Some(super::shutdown::start_cleanup(
+                Arc::clone(&config),
+                turn_signals.clone(),
+                state.unsettled.clone(),
+            ));
+        }
+        let tasks = state.tasks.clone();
         tokio::select! {
-            command = commands.recv() => {
-                let Some(command) = command else {
-                    if let Some(running) = &state.running {
-                        running.cancellation.cancel();
-                    }
-                    break;
-                };
+            () = shutdown.cancelled(), if !state.closing => {},
+            () = tasks.changed() => {},
+            () = super::shutdown::deadline(closing_started), if closing_started.is_some() => {
+                state.unsettled.get_or_insert_with(|| "session shutdown deadline expired before effect settlement".to_owned());
+                break;
+            }
+            result = super::shutdown::cleanup_result(&mut cleanup), if cleanup.is_some() => {
+                if let Err(error) = result { state.unsettled.get_or_insert(error); }
+                break;
+            }
+            command = commands.recv(), if commands_open => {
+                let Some(command) = command else { commands_open = false; continue; };
+                let command = if state.closing {
+                    let Some(command) = super::shutdown::admit_internal(command) else { continue; };
+                    command
+                } else { command };
                 handle_actor_command(
-                    command,
-                    &mut state,
-                    &mut config,
-                    &mut tool_context,
-                    &turn_signals,
-                    &events,
-                    &active_turn,
-                    &command_descriptors,
-                    &mode_registry,
+                    command, &mut state, &mut config, &mut tool_context, &turn_signals,
+                    &events, &active_turn, &command_descriptors, &mode_registry,
                 ).await;
             }
             signal = signals.recv() => {
-                let Some(signal) = signal else { break; };
-                if handle_turn_signal(
-                    signal,
-                    &mut state,
-                    &config,
-                    &tool_context,
-                    &turn_signals,
-                    &events,
-                    &active_turn,
-                ).await.is_err() {
-                    // Signals already queued by the cancelled provider task
-                    // describe the pre-recovery turn and must not be appended
-                    // to the rebuilt journal state.
-                    while signals.try_recv().is_ok() {}
-                    if recover_actor_from_journal(&mut state, &config, &events, &active_turn)
-                        .await
-                        .is_err()
-                    {
-                        break;
+                let Some(signal) = signal else {
+                    state.unsettled.get_or_insert_with(|| "session effect signal channel closed".to_owned());
+                    break;
+                };
+                if let Err(error) = handle_turn_signal(
+                    signal, &mut state, &config, &tool_context, &turn_signals, &events, &active_turn,
+                ).await {
+                    if state.closing {
+                        state.unsettled.get_or_insert_with(|| error.to_string());
+                    } else {
+                        while signals.try_recv().is_ok() {}
+                        if let Err(error) = recover_actor_from_journal(&mut state, &config, &events, &active_turn).await {
+                            state.unsettled.get_or_insert_with(|| error.to_string());
+                        }
                     }
                 }
             }
         }
     }
-    end_actor_session(&mut state, &config, &events).await;
+    active_turn.store(0, Ordering::Release);
+    if let Some(message) = state.unsettled.clone() {
+        shutdown.complete(Err(message));
+        super::shutdown::retain_unproven((state, config, cleanup, commands, signals)).await;
+    } else {
+        shutdown.complete(Ok(()));
+    }
 }
 pub(super) enum ActorCommand {
     Protocol {
@@ -1588,6 +1629,9 @@ pub(super) struct ActorState {
     pub(super) pending_rewind: Option<(u64, RewindCheckpoint)>,
     pub(super) transient_cause: Option<RequestId>,
     pub(super) poisoned: bool,
+    pub(super) closing: bool,
+    pub(super) unsettled: Option<String>,
+    pub(super) tasks: super::task_ownership::ActorTasks,
     pub(super) driver_client_id: Option<ClientId>,
     pub(super) client_roles: BTreeMap<String, ClientRole>,
     pub(super) pending_questions: BTreeMap<String, PendingQuestion>,
@@ -1708,6 +1752,9 @@ impl ActorState {
             pending_rewind: None,
             transient_cause: None,
             poisoned: false,
+            closing: false,
+            unsettled: None,
+            tasks: super::task_ownership::ActorTasks::default(),
             driver_client_id: recovered.driver_client_id.clone(),
             client_roles: BTreeMap::new(),
             pending_questions: BTreeMap::new(),

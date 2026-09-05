@@ -595,8 +595,8 @@ fn block_contains_image(block: &rw_types::Block) -> bool {
 
 #[async_trait]
 impl Provider for ModelBoundProvider {
-    async fn settle_effects(&self) {
-        self.inner.settle_effects().await;
+    async fn settle_effects(&self) -> std::result::Result<(), rw_providers::ProviderError> {
+        self.inner.settle_effects().await
     }
 
     fn name(&self) -> &str {

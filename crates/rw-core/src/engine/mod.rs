@@ -76,6 +76,8 @@ mod replay;
 pub use replay::{SessionEventReadView, SessionReplayLimits};
 mod session;
 mod session_extension;
+mod shutdown;
+mod task_ownership;
 mod turn;
 
 pub use commands::{
@@ -543,8 +545,10 @@ pub struct ModelContextMetadata {
 
 #[async_trait]
 impl ModelDriver for ProviderRuntime {
-    async fn settle_effects(&self) {
-        self.settle_provider_effects().await;
+    async fn settle_effects(&self) -> std::result::Result<(), crate::AgentLoopError> {
+        self.settle_provider_effects()
+            .await
+            .map_err(|error| AgentLoopError::EffectsUnsettled(error.to_string()))
     }
 
     fn stream(
@@ -2106,6 +2110,10 @@ struct ValidateToolHook;
 
 #[async_trait]
 impl HookHandler for ValidateToolHook {
+    async fn settle_effects(&self) -> std::result::Result<(), rw_ext::HookError> {
+        Ok(())
+    }
+
     async fn invoke(
         &self,
         invocation: HookInvocation<'_>,
@@ -2152,6 +2160,7 @@ struct RoutedEvent {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
+    mod close;
 
     #[async_trait]
     trait TestEventSinkExt: SessionEventSink {
@@ -2418,6 +2427,10 @@ mod tests {
 
     #[async_trait]
     impl ModelDriver for DeferredVisionModel {
+        async fn settle_effects(&self) -> std::result::Result<(), crate::AgentLoopError> {
+            Ok(())
+        }
+
         fn stream(
             &self,
             _alias: &str,
@@ -2447,7 +2460,12 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
     impl ModelDriver for AliasVisionModel {
+        async fn settle_effects(&self) -> std::result::Result<(), crate::AgentLoopError> {
+            Ok(())
+        }
+
         fn stream(
             &self,
             _alias: &str,
@@ -2504,7 +2522,12 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
     impl ModelDriver for ScriptedModel {
+        async fn settle_effects(&self) -> std::result::Result<(), crate::AgentLoopError> {
+            Ok(())
+        }
+
         fn stream(
             &self,
             alias: &str,
@@ -2566,6 +2589,10 @@ mod tests {
 
     #[async_trait]
     impl ModelDriver for M3Model {
+        async fn settle_effects(&self) -> std::result::Result<(), crate::AgentLoopError> {
+            Ok(())
+        }
+
         fn stream(
             &self,
             alias: &str,
@@ -2673,7 +2700,15 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
     impl ModelDriver for ReplayHarnessModel {
+        async fn settle_effects(&self) -> std::result::Result<(), crate::AgentLoopError> {
+            self.router
+                .settle_effects()
+                .await
+                .map_err(|error| crate::AgentLoopError::EffectsUnsettled(error.to_string()))
+        }
+
         fn stream(
             &self,
             alias: &str,
@@ -2734,7 +2769,12 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
     impl ModelDriver for RoutedCostModel {
+        async fn settle_effects(&self) -> std::result::Result<(), crate::AgentLoopError> {
+            Ok(())
+        }
+
         fn stream(
             &self,
             _alias: &str,
@@ -2806,7 +2846,12 @@ mod tests {
 
     struct DelayedSummaryModel;
 
+    #[async_trait::async_trait]
     impl ModelDriver for DelayedSummaryModel {
+        async fn settle_effects(&self) -> std::result::Result<(), crate::AgentLoopError> {
+            Ok(())
+        }
+
         fn stream(
             &self,
             _alias: &str,
@@ -2838,7 +2883,12 @@ mod tests {
 
     struct PendingModel;
 
+    #[async_trait::async_trait]
     impl ModelDriver for PendingModel {
+        async fn settle_effects(&self) -> std::result::Result<(), crate::AgentLoopError> {
+            Ok(())
+        }
+
         fn stream(
             &self,
             _alias: &str,
@@ -2860,7 +2910,12 @@ mod tests {
         release: Arc<Notify>,
     }
 
+    #[async_trait::async_trait]
     impl ModelDriver for GatedCompactionModel {
+        async fn settle_effects(&self) -> std::result::Result<(), crate::AgentLoopError> {
+            Ok(())
+        }
+
         fn stream(
             &self,
             _alias: &str,
@@ -2891,7 +2946,12 @@ mod tests {
         delay: Duration,
     }
 
+    #[async_trait::async_trait]
     impl ModelDriver for DelayedFinishModel {
+        async fn settle_effects(&self) -> std::result::Result<(), crate::AgentLoopError> {
+            Ok(())
+        }
+
         fn stream(
             &self,
             _alias: &str,
@@ -2923,7 +2983,12 @@ mod tests {
         delay: Duration,
     }
 
+    #[async_trait::async_trait]
     impl ModelDriver for ContinuousDeltaModel {
+        async fn settle_effects(&self) -> std::result::Result<(), crate::AgentLoopError> {
+            Ok(())
+        }
+
         fn stream(
             &self,
             _alias: &str,
@@ -2962,7 +3027,12 @@ mod tests {
         observed: AtomicBool,
     }
 
+    #[async_trait::async_trait]
     impl ModelDriver for InstructionModel {
+        async fn settle_effects(&self) -> std::result::Result<(), crate::AgentLoopError> {
+            Ok(())
+        }
+
         fn stream(
             &self,
             _alias: &str,
@@ -3023,6 +3093,10 @@ mod tests {
 
     #[async_trait]
     impl Tool for StubTool {
+        async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
+            Ok(())
+        }
+
         fn descriptor(&self) -> ToolDescriptor {
             self.descriptor.clone()
         }
@@ -3064,6 +3138,10 @@ mod tests {
 
     #[async_trait]
     impl Tool for PlanMutationTripwire {
+        async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
+            Ok(())
+        }
+
         fn descriptor(&self) -> ToolDescriptor {
             self.descriptor.clone()
         }
@@ -3142,6 +3220,10 @@ mod tests {
 
     #[async_trait]
     impl Tool for ReverseCompletionTool {
+        async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
+            Ok(())
+        }
+
         fn descriptor(&self) -> ToolDescriptor {
             self.descriptor.clone()
         }
@@ -3176,6 +3258,10 @@ mod tests {
 
     #[async_trait]
     impl Tool for OrderedWindowProbe {
+        async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
+            Ok(())
+        }
+
         fn descriptor(&self) -> ToolDescriptor {
             descriptor("window_probe")
         }
@@ -3215,6 +3301,10 @@ mod tests {
 
     #[async_trait]
     impl Tool for SaturatingOrderedTool {
+        async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
+            Ok(())
+        }
+
         fn descriptor(&self) -> ToolDescriptor {
             descriptor(if self.first {
                 "delayed_first"
@@ -3269,6 +3359,10 @@ mod tests {
 
     #[async_trait]
     impl Tool for SessionCaptureTool {
+        async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
+            Ok(())
+        }
+
         fn descriptor(&self) -> ToolDescriptor {
             ToolDescriptor {
                 name: "session_capture".to_owned(),
@@ -3296,6 +3390,10 @@ mod tests {
 
     #[async_trait]
     impl Tool for EmptySequentialTool {
+        async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
+            Ok(())
+        }
+
         fn descriptor(&self) -> ToolDescriptor {
             self.descriptor.clone()
         }
@@ -3317,6 +3415,10 @@ mod tests {
 
     #[async_trait]
     impl Tool for StreamingTool {
+        async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
+            Ok(())
+        }
+
         fn descriptor(&self) -> ToolDescriptor {
             self.descriptor.clone()
         }
@@ -3349,6 +3451,10 @@ mod tests {
 
     #[async_trait]
     impl Tool for CleanupTool {
+        async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
+            Ok(())
+        }
+
         fn descriptor(&self) -> ToolDescriptor {
             ToolDescriptor {
                 name: "cleanup_tool".to_owned(),
@@ -3415,16 +3521,21 @@ mod tests {
             std::future::pending().await
         }
 
-        async fn settle_effects(&self) {
+        async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
             assert!(self.execution_dropped.load(Ordering::SeqCst));
             self.cleanup_started.notify_one();
             self.release_cleanup.notified().await;
             self.cleanup_finished.store(true, Ordering::SeqCst);
+            Ok(())
         }
     }
 
     #[async_trait]
     impl Tool for PanickingTool {
+        async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
+            Ok(())
+        }
+
         fn descriptor(&self) -> ToolDescriptor {
             ToolDescriptor {
                 name: "panic_tool".to_owned(),
@@ -4112,6 +4223,10 @@ mod tests {
 
     #[async_trait]
     impl Tool for FileMutatingBash {
+        async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
+            Ok(())
+        }
+
         fn descriptor(&self) -> ToolDescriptor {
             ToolDescriptor {
                 name: "bash".to_owned(),
@@ -4141,6 +4256,10 @@ mod tests {
 
     #[async_trait]
     impl HookHandler for MutatingPreHook {
+        async fn settle_effects(&self) -> std::result::Result<(), rw_ext::HookError> {
+            Ok(())
+        }
+
         async fn invoke(
             &self,
             _invocation: HookInvocation<'_>,
@@ -4299,6 +4418,10 @@ mod tests {
 
     #[async_trait]
     impl HookHandler for MarkPostToolFailed {
+        async fn settle_effects(&self) -> std::result::Result<(), rw_ext::HookError> {
+            Ok(())
+        }
+
         async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError> {
             let mut payload = invocation.payload().clone();
             payload["is_error"] = Value::Bool(true);
@@ -4308,6 +4431,10 @@ mod tests {
 
     #[async_trait]
     impl HookHandler for SiblingFormatterPostHook {
+        async fn settle_effects(&self) -> std::result::Result<(), rw_ext::HookError> {
+            Ok(())
+        }
+
         async fn invoke(
             &self,
             _invocation: HookInvocation<'_>,
@@ -4325,6 +4452,10 @@ mod tests {
 
     #[async_trait]
     impl HookHandler for FixedHook {
+        async fn settle_effects(&self) -> std::result::Result<(), rw_ext::HookError> {
+            Ok(())
+        }
+
         async fn invoke(
             &self,
             _invocation: HookInvocation<'_>,
@@ -4339,6 +4470,10 @@ mod tests {
 
     #[async_trait]
     impl HookHandler for PayloadCaptureHook {
+        async fn settle_effects(&self) -> std::result::Result<(), rw_ext::HookError> {
+            Ok(())
+        }
+
         async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError> {
             self.payloads
                 .lock()
@@ -4367,6 +4502,10 @@ mod tests {
 
     #[async_trait]
     impl HookHandler for PermissionAllowHook {
+        async fn settle_effects(&self) -> std::result::Result<(), rw_ext::HookError> {
+            Ok(())
+        }
+
         async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError> {
             let mut payload = invocation.payload().clone();
             payload["decision"] = Value::String("allow".to_owned());
@@ -4376,6 +4515,10 @@ mod tests {
 
     #[async_trait]
     impl HookHandler for NeverHook {
+        async fn settle_effects(&self) -> std::result::Result<(), rw_ext::HookError> {
+            Ok(())
+        }
+
         async fn invoke(
             &self,
             _invocation: HookInvocation<'_>,
@@ -4386,6 +4529,10 @@ mod tests {
 
     #[async_trait]
     impl HookHandler for RewriteArgumentsHook {
+        async fn settle_effects(&self) -> std::result::Result<(), rw_ext::HookError> {
+            Ok(())
+        }
+
         async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError> {
             let mut payload = invocation.payload().clone();
             payload["arguments"] = self.0.clone();
@@ -4395,6 +4542,10 @@ mod tests {
 
     #[async_trait]
     impl HookHandler for RewriteUserPromptHook {
+        async fn settle_effects(&self) -> std::result::Result<(), rw_ext::HookError> {
+            Ok(())
+        }
+
         async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError> {
             let mut payload = invocation.payload().clone();
             payload["content"] = Value::String(self.0.to_owned());
@@ -8801,6 +8952,10 @@ mod tests {
 
     #[async_trait]
     impl Tool for SessionResourceFixture {
+        async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
+            Ok(())
+        }
+
         fn descriptor(&self) -> ToolDescriptor {
             descriptor("session_resource_fixture")
         }
@@ -9691,10 +9846,11 @@ mod tests {
             self.invoked.notify_one();
             std::future::pending().await
         }
-        async fn settle_effects(&self) {
+        async fn settle_effects(&self) -> Result<(), rw_providers::ProviderError> {
             self.cleanup.notify_one();
             self.release.notified().await;
             self.settled.store(true, Ordering::SeqCst);
+            Ok(())
         }
     }
 
@@ -9719,8 +9875,11 @@ mod tests {
                 )
                 .map_err(|error| AgentLoopError::Provider(error.to_string()))
         }
-        async fn settle_effects(&self) {
-            self.0.settle_effects().await;
+        async fn settle_effects(&self) -> std::result::Result<(), crate::AgentLoopError> {
+            self.0
+                .settle_effects()
+                .await
+                .map_err(|error| AgentLoopError::EffectsUnsettled(error.to_string()))
         }
     }
 
@@ -10204,6 +10363,10 @@ mod tests {
 
     #[async_trait]
     impl Tool for FloodOutputTool {
+        async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
+            Ok(())
+        }
+
         fn descriptor(&self) -> ToolDescriptor {
             ToolDescriptor {
                 name: "flood".to_owned(),
@@ -15536,6 +15699,10 @@ prompt = "The file changed after the mode was selected."
 
     #[async_trait]
     impl Tool for ThirdPartyLifecycleTool {
+        async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
+            Ok(())
+        }
+
         fn descriptor(&self) -> ToolDescriptor {
             ToolDescriptor {
                 name: "third_party_children".to_owned(),

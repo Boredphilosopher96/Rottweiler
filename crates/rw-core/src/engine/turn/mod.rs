@@ -1021,6 +1021,22 @@ pub(super) async fn handle_turn_signal(
                 }
             }
         }
+        TurnSignal::EffectsUnsettled { message } => {
+            state.tasks.cancel();
+            state.poisoned = true;
+            state.unsettled = Some(message.clone());
+            emit(
+                state,
+                events,
+                &config.event_sink,
+                PendingEvent::Error {
+                    message: config
+                        .secret_redactor
+                        .redact(&format!("effect settlement is unproven: {message}")),
+                },
+            )
+            .await?;
+        }
         TurnSignal::Complete(outcome) => {
             if state.running.as_ref().map(|running| running.id) != Some(outcome.turn) {
                 return Ok(());
@@ -1028,6 +1044,9 @@ pub(super) async fn handle_turn_signal(
             let completed_successfully = outcome.status == AgentTurnStatus::Completed;
             state.running = None;
             active_turn.store(0, Ordering::Release);
+            if state.unsettled.is_some() {
+                return Ok(());
+            }
             state.pending_approvals.clear();
             for (_, pending) in std::mem::take(&mut state.pending_questions) {
                 let _ = pending.respond.send(String::new());
@@ -1066,10 +1085,10 @@ pub(super) async fn handle_turn_signal(
                 cost: outcome.cost,
             });
             emit_batch(state, events, &config.event_sink, terminal_events).await?;
-            if completed_successfully {
+            if completed_successfully && !state.closing {
                 start_session_title_generation(state, config, turn_signals);
             }
-            if !state.queued.is_empty() {
+            if !state.closing && !state.queued.is_empty() {
                 state.queued_positions.clear();
                 let messages = state
                     .queued
@@ -1096,6 +1115,9 @@ pub(super) async fn handle_turn_signal(
             model_switch,
             completion,
         } => {
+            if let Some(message) = &state.unsettled {
+                result = Err(AgentLoopError::EffectsUnsettled(message.clone()));
+            }
             if state.running.as_ref().map(|running| running.id) == Some(turn) {
                 state.running = None;
                 active_turn.store(0, Ordering::Release);
@@ -1122,7 +1144,7 @@ pub(super) async fn handle_turn_signal(
             if let Some(completion) = completion {
                 let _ = completion.send(result.map(|()| ProtocolCompletion::Unit));
             }
-            if state.running.is_none() && !state.queued.is_empty() {
+            if !state.closing && state.running.is_none() && !state.queued.is_empty() {
                 state.queued_positions.clear();
                 let messages = state
                     .queued
@@ -1363,9 +1385,12 @@ pub(super) async fn start_turn_with_overrides(
     let local_session_accounting = session_accounting_fallback(&state.accounting);
     let state_mode = state.mode;
     let provider_owner = Arc::clone(&config.model);
-    tokio::spawn(async move {
+    let tasks = state.tasks.clone();
+    let turn_tasks = tasks.clone();
+    tasks.spawn(Arc::clone(&config), cancellation.clone(), async move {
         let outcome = AssertUnwindSafe(run_turn(
             turn,
+            turn_tasks,
             run_messages,
             tool_calls,
             conversation,
@@ -1381,21 +1406,30 @@ pub(super) async fn start_turn_with_overrides(
         ))
         .catch_unwind()
         .await
-        .unwrap_or(TurnOutcome {
-            turn,
-            conversation: panic_conversation,
-            status: AgentTurnStatus::Failed,
-            usage: SessionUsage::default(),
-            cost: unavailable_cost(),
-            deferred_terminal_delta: None,
-            deferred_terminal_turn: None,
-            context_surgery: panic_context_surgery,
-            pruned_tool_outputs: panic_pruned_tool_outputs,
-            budgeter: state_budgeter,
+        .unwrap_or_else(|_| {
+            let _ = signals.send(TurnSignal::EffectsUnsettled {
+                message: "turn owner panicked before effect settlement".to_owned(),
+            });
+            TurnOutcome {
+                turn,
+                conversation: panic_conversation,
+                status: AgentTurnStatus::Failed,
+                usage: SessionUsage::default(),
+                cost: unavailable_cost(),
+                deferred_terminal_delta: None,
+                deferred_terminal_turn: None,
+                context_surgery: panic_context_surgery,
+                pruned_tool_outputs: panic_pruned_tool_outputs,
+                budgeter: state_budgeter,
+            }
         });
-        provider_owner.settle_effects().await;
+        if let Err(error) = provider_owner.settle_effects().await {
+            let _ = signals.send(TurnSignal::EffectsUnsettled {
+                message: error.to_string(),
+            });
+        }
         let _ = signals.send(TurnSignal::Complete(outcome));
-    });
+    })?;
     Ok(())
 }
 
@@ -1575,6 +1609,7 @@ struct PendingToolCall {
 }
 
 struct ToolExecution {
+    unsettled: bool,
     call: PendingToolCall,
     output: ToolOutput,
     is_error: bool,
@@ -2754,11 +2789,21 @@ fn report_hook_failures(
     }
 }
 
+fn mark_unsettled(
+    signals: &mpsc::UnboundedSender<TurnSignal>,
+    cancellation: &CancellationToken,
+    message: String,
+) {
+    cancellation.cancel();
+    let _ = signals.send(TurnSignal::EffectsUnsettled { message });
+}
+
 async fn dispatch_hook(
     dispatcher: &HookDispatcher,
     event: HookEvent,
     payload: Value,
     cancellation: &CancellationToken,
+    signals: &mpsc::UnboundedSender<TurnSignal>,
 ) -> Result<HookDispatchResult, AgentLoopError> {
     let result = tokio::select! {
         () = cancellation.cancelled() => Err(AgentLoopError::Extension(
@@ -2766,7 +2811,10 @@ async fn dispatch_hook(
         )),
         result = dispatcher.dispatch(event, payload) => Ok(result),
     };
-    dispatcher.settle_effects(event).await;
+    if let Err(error) = dispatcher.settle_effects(event).await {
+        mark_unsettled(signals, cancellation, error.to_string());
+        return Err(AgentLoopError::EffectsUnsettled(error.to_string()));
+    }
     result
 }
 
@@ -2777,6 +2825,7 @@ async fn dispatch_tool_hook_effect(
     tool_name: &str,
     effect: HookEffect,
     cancellation: &CancellationToken,
+    signals: &mpsc::UnboundedSender<TurnSignal>,
 ) -> Result<HookDispatchResult, AgentLoopError> {
     let result = tokio::select! {
         () = cancellation.cancelled() => Err(AgentLoopError::Extension(
@@ -2784,7 +2833,10 @@ async fn dispatch_tool_hook_effect(
         )),
         result = dispatcher.dispatch_tool_effect(event, payload, tool_name, effect) => Ok(result),
     };
-    dispatcher.settle_effects(event).await;
+    if let Err(error) = dispatcher.settle_effects(event).await {
+        mark_unsettled(signals, cancellation, error.to_string());
+        return Err(AgentLoopError::EffectsUnsettled(error.to_string()));
+    }
     result
 }
 
@@ -2816,6 +2868,7 @@ fn permission_hook_override(
 
 fn failed_execution(call: PendingToolCall, message: impl Into<String>) -> ToolExecution {
     ToolExecution {
+        unsettled: false,
         call,
         output: ToolOutput::Text {
             text: message.into(),
@@ -2950,6 +3003,7 @@ async fn authorize_tool_call(
             "capabilities": displayed.capabilities,
         }),
         cancellation,
+        signals,
     )
     .await
     .map_err(|error| error.to_string())?;
@@ -3088,6 +3142,7 @@ async fn prepare_tool_call(
         &call.name,
         HookEffect::ReadOnly,
         cancellation,
+        signals,
     )
     .await
     {
@@ -3372,6 +3427,7 @@ async fn run_deferred_mutating_pre_hook(
         &call.name,
         HookEffect::WorkspaceMutating,
         cancellation,
+        &runtime.signals,
     )
     .await
     .map_err(|error| ToolError::Command(error.to_string()))?;
@@ -3575,7 +3631,19 @@ async fn execute_prepared_tool(
             None => Err(ToolError::Cancelled),
         }
     };
-    tool.settle_effects().await;
+    let settlement = tool.settle_effects().await;
+    if let Some(message) = settlement.err().map(|error| error.to_string()).or_else(|| {
+        if let Err(ToolError::EffectsUnsettled(message)) = &result {
+            Some(message.clone())
+        } else {
+            None
+        }
+    }) {
+        mark_unsettled(&runtime.signals, &cancellation, message.clone());
+        let mut execution = failed_execution(call, message);
+        execution.unsettled = true;
+        return (execution, true);
+    }
     output_open.store(false, Ordering::Release);
     drop(progress);
     let tool_cancelled = matches!(&result, Err(ToolError::Cancelled));
@@ -3589,6 +3657,7 @@ async fn execute_prepared_tool(
         ),
     };
     let mut execution = ToolExecution {
+        unsettled: false,
         call,
         output,
         is_error,
@@ -3620,7 +3689,14 @@ async fn execute_prepared_tool(
                 text: format!("checkpoint finalization failed: {error}"),
             };
             execution.is_error = true;
+            execution.unsettled = true;
+            mark_unsettled(&runtime.signals, &cancellation, error.to_string());
         }
+    }
+    if let Err(error) = runtime.checkpoints.settle_effects().await {
+        execution.unsettled = true;
+        execution.is_error = true;
+        mark_unsettled(&runtime.signals, &cancellation, error.to_string());
     }
     (execution, true)
 }
@@ -3648,6 +3724,7 @@ async fn apply_post_tool_hook(
             "is_error": execution.is_error,
         }),
         cancellation,
+        signals,
     )
     .await
     {
@@ -3692,8 +3769,9 @@ async fn apply_post_tool_hook(
 #[tracing::instrument(target = "rw_performance", level = "trace", name = "tool.batch", skip_all, fields(session_id = config.session_id.0.as_str(), turn, calls = calls.len()))]
 async fn execute_tool_calls(
     turn: u64,
+    tasks: &super::task_ownership::ActorTasks,
     calls: Vec<PendingToolCall>,
-    config: &SessionActorConfig,
+    config: &Arc<SessionActorConfig>,
     context: &ToolContext,
     cancellation: &CancellationToken,
     approver: &dyn PermissionApprover,
@@ -3795,16 +3873,21 @@ async fn execute_tool_calls(
                     let context = context.clone();
                     let cancellation = cancellation.clone();
                     let runtime = execution_runtime.clone();
-                    let task = tokio::spawn(async move {
+                    let task = tasks.spawn(Arc::clone(config), cancellation.clone(), async move {
                         execute_prepared_tool(call, context, cancellation, runtime).await
                     });
                     running.push(async move {
-                        let execution = match task.await {
-                            Ok((execution, _ran)) => execution,
-                            Err(_) => {
-                                failed_execution(fallback, "tool task ended without a result")
-                            }
-                        };
+                        let execution = async {
+                            let task = task.ok()?;
+                            task.await.ok().map(|(execution, _ran)| execution)
+                        }
+                        .await
+                        .unwrap_or_else(|| {
+                            let mut execution =
+                                failed_execution(fallback, "tool task ended without a result");
+                            execution.unsettled = true;
+                            execution
+                        });
                         (index, execution, mutation)
                     });
                     mutation_running = mutation;
@@ -3819,6 +3902,19 @@ async fn execute_tool_calls(
         };
         if was_mutation {
             mutation_running = false;
+        }
+        if execution.unsettled {
+            mark_unsettled(
+                signals,
+                cancellation,
+                "tool invocation effects remain unproven".to_owned(),
+            );
+            let execution_index = execution.call.index;
+            ordered.push(execution);
+            next = next.saturating_add(1);
+            coordinator.advance(next);
+            subagents.advance_after_tool(execution_index);
+            continue;
         }
         redact_tool_output(&mut execution.output, config.secret_redactor.as_ref());
         emit_plan_submission(
@@ -4051,6 +4147,7 @@ async fn execute_compaction(
             "conversation_turns": conversation.len(),
         }),
         cancellation,
+        signals,
     )
     .await?;
     report_hook_failures(
@@ -4275,7 +4372,10 @@ async fn execute_compaction(
             }
         }
         drop(stream);
-        config.model.settle_effects().await;
+        if let Err(error) = config.model.settle_effects().await {
+            mark_unsettled(signals, cancellation, error.to_string());
+            return Err(error);
+        }
         if let Some(error) = failed {
             if let Some((cost, false)) = persist_failed_compaction_attempt(
                 config,
@@ -4571,7 +4671,8 @@ pub(super) async fn compact_during_turn(
 }
 
 struct CommandToolRuntime<'a> {
-    config: &'a SessionActorConfig,
+    tasks: &'a super::task_ownership::ActorTasks,
+    config: &'a Arc<SessionActorConfig>,
     context: &'a ToolContext,
     cancellation: &'a CancellationToken,
     approver: &'a dyn PermissionApprover,
@@ -4614,6 +4715,7 @@ async fn apply_command_tool_calls(
         .collect();
     let executions = execute_tool_calls(
         turn,
+        runtime.tasks,
         pending,
         runtime.config,
         runtime.context,
@@ -4674,6 +4776,7 @@ pub(super) fn frame_command_tool_output(
 #[tracing::instrument(target = "rw_performance", level = "trace", name = "turn.run", skip_all, fields(session_id = config.session_id.0.as_str(), turn))]
 async fn run_turn(
     turn: u64,
+    tasks: super::task_ownership::ActorTasks,
     mut messages: Vec<PreparedUserMessage>,
     command_tool_calls: Vec<CommandToolCall>,
     mut conversation: Vec<Turn>,
@@ -4696,6 +4799,7 @@ async fn run_turn(
         &mut messages,
         command_tool_calls,
         CommandToolRuntime {
+            tasks: &tasks,
             config: &config,
             context: &tool_context,
             cancellation: &cancellation,
@@ -4726,6 +4830,7 @@ async fn run_turn(
             HookEvent::UserPromptSubmit,
             json!({ "content": message.content }),
             &cancellation,
+            &signals,
         )
         .await
         else {
@@ -5302,7 +5407,11 @@ async fn run_turn(
                 elapsed_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
         }
         drop(stream);
-        config.model.settle_effects().await;
+        if let Err(error) = config.model.settle_effects().await {
+            mark_unsettled(&signals, &cancellation, error.to_string());
+            status = AgentTurnStatus::Failed;
+            break;
+        }
         let normalized_iteration_usage: TokenUsage = iteration_usage.into();
         let reconciliation =
             budgeter.reconcile(input_estimate.local_tokens, normalized_iteration_usage);
@@ -5504,6 +5613,7 @@ async fn run_turn(
         }
         let executions = execute_tool_calls(
             turn,
+            &tasks,
             calls,
             &config,
             &tool_context,
@@ -5513,6 +5623,10 @@ async fn run_turn(
             mode,
         )
         .await;
+        if executions.iter().any(|execution| execution.unsettled) {
+            status = AgentTurnStatus::Failed;
+            break;
+        }
         let interrupted = cancellation.is_cancelled();
         let mut tool_blocks = Vec::new();
         let mut doom_triggered = false;
@@ -5581,6 +5695,7 @@ async fn run_turn(
         HookEvent::TurnEnd,
         json!({ "turn": turn, "status": format!("{status:?}") }),
         &cancellation,
+        &signals,
     )
     .await;
     match hook {
@@ -5666,6 +5781,9 @@ pub(super) struct CompactionProgress {
 }
 
 pub(super) enum TurnSignal {
+    EffectsUnsettled {
+        message: String,
+    },
     Event(PendingEvent),
     ToolOutput {
         event: PendingEvent,

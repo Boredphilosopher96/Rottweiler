@@ -1044,6 +1044,10 @@ struct ToolSearchTool {
 
 #[async_trait]
 impl Tool for ToolSearchTool {
+    async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "tool_search".to_owned(),
@@ -1112,6 +1116,10 @@ struct McpCallTool {
 
 #[async_trait]
 impl Tool for McpCallTool {
+    async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "mcp_call".to_owned(),
@@ -1163,6 +1171,10 @@ struct McpResourceTool {
 
 #[async_trait]
 impl Tool for McpResourceTool {
+    async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         restrictive_descriptor(
             "mcp_read_resource",
@@ -1198,6 +1210,10 @@ struct McpPromptTool {
 
 #[async_trait]
 impl Tool for McpPromptTool {
+    async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         restrictive_descriptor(
             "mcp_get_prompt",
@@ -1229,6 +1245,10 @@ struct McpOverflowReadTool {
 
 #[async_trait]
 impl Tool for McpOverflowReadTool {
+    async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "mcp_overflow_read".to_owned(),

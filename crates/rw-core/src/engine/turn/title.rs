@@ -86,6 +86,7 @@ async fn generate_session_title(
     config: Arc<SessionActorConfig>,
     signals: mpsc::UnboundedSender<TurnSignal>,
     turn: u64,
+    cancellation: CancellationToken,
 ) -> (Option<String>, SessionUsage, Cost) {
     if model.prepare_model(&alias).await.is_err() {
         return unavailable_session_title();
@@ -141,9 +142,18 @@ async fn generate_session_title(
         );
         Some((title, usage, cost))
     };
-    let result = tokio::time::timeout(SESSION_TITLE_TIMEOUT, collect).await;
+    let result = tokio::select! {
+        result = tokio::time::timeout(SESSION_TITLE_TIMEOUT, collect) => Some(result),
+        () = cancellation.cancelled() => None,
+    };
     drop(stream);
-    model.settle_effects().await;
+    if let Err(error) = model.settle_effects().await {
+        mark_unsettled(&signals, &cancellation, error.to_string());
+        return unavailable_session_title();
+    }
+    let Some(result) = result else {
+        return unavailable_session_title();
+    };
     match result {
         Ok(Some((title, usage, cost))) => (Some(title), usage, cost),
         Ok(None) => (
@@ -196,18 +206,34 @@ pub(super) fn start_session_title_generation(
     let signals = signals.clone();
     let config = Arc::clone(config);
     let turn = state.next_turn.saturating_sub(1);
-    tokio::spawn(async move {
-        let (title, usage, cost) = match alias {
-            Some(alias) => {
-                let (title, usage, cost) =
-                    generate_session_title(model, alias, prompt, config, signals.clone(), turn)
-                        .await;
-                (title.unwrap_or(fallback), Some(usage), Some(cost))
-            }
-            None => (fallback, None, None),
-        };
-        let _ = signals.send(TurnSignal::SessionTitleGenerated { title, usage, cost });
-    });
+    let cancellation = CancellationToken::default();
+    let errors = signals.clone();
+    if let Err(error) = state
+        .tasks
+        .spawn(Arc::clone(&config), cancellation.clone(), async move {
+            let (title, usage, cost) = match alias {
+                Some(alias) => {
+                    let (title, usage, cost) = generate_session_title(
+                        model,
+                        alias,
+                        prompt,
+                        config,
+                        signals.clone(),
+                        turn,
+                        cancellation,
+                    )
+                    .await;
+                    (title.unwrap_or(fallback), Some(usage), Some(cost))
+                }
+                None => (fallback, None, None),
+            };
+            let _ = signals.send(TurnSignal::SessionTitleGenerated { title, usage, cost });
+        })
+    {
+        let _ = errors.send(TurnSignal::EffectsUnsettled {
+            message: error.to_string(),
+        });
+    }
 }
 
 fn title_request(alias: &str, prompt: String) -> ProviderRequest {

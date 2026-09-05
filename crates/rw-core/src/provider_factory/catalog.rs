@@ -381,6 +381,7 @@ pub(super) fn protocol_capabilities(capabilities: &Capabilities) -> ModelCapabil
 
 pub(super) const fn provider_discovery_status(error: &ProviderError) -> &'static str {
     match error.kind {
+        ProviderErrorKind::EffectsUnsettled => "provider effects remain unsettled",
         ProviderErrorKind::Authentication => "provider authentication failed",
         ProviderErrorKind::RateLimited => "provider model discovery was rate limited",
         ProviderErrorKind::Timeout => "provider model discovery timed out",

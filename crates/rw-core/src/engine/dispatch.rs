@@ -527,7 +527,8 @@ fn start_manual_compaction(
         &state.mode_id,
     ));
     let signals = turn_signals.clone();
-    tokio::spawn(async move {
+    let tasks = state.tasks.clone();
+    if let Err(error) = tasks.spawn(Arc::clone(&config), cancellation.clone(), async move {
         let result = async {
             let pre_budget = evaluate_budget(
                 summary_turn,
@@ -581,23 +582,29 @@ fn start_manual_compaction(
             model_switch,
             completion,
         });
-    });
+    }) {
+        state.unsettled = Some(error.to_string());
+        state.tasks.cancel();
+    }
 }
 
 fn start_workspace_initialization(
-    workspace: PathBuf,
+    config: Arc<SessionActorConfig>,
+    tasks: &super::task_ownership::ActorTasks,
     depth: InitDepth,
-    session_id: SessionId,
     mutation_turn: u64,
     call_id: String,
-    checkpoints: Arc<dyn MutationCheckpointCoordinator>,
     signals: mpsc::UnboundedSender<TurnSignal>,
 ) {
     let name = match depth {
         InitDepth::Root => "init",
         InitDepth::Deep => "deep-init",
     };
-    tokio::spawn(async move {
+    let errors = signals.clone();
+    let workspace = config.workspace_root.clone();
+    let session_id = config.session_id.clone();
+    let checkpoints = Arc::clone(&config.checkpoints);
+    if let Err(error) = tasks.spawn(config, CancellationToken::default(), async move {
         let result = async {
             let plan = tokio::task::spawn_blocking(move || {
                 plan_init(&workspace, depth, crate::DEFAULT_INIT_FILE_BUDGET_BYTES)
@@ -635,8 +642,17 @@ fn start_workspace_initialization(
             ))
         }
         .await;
+        if let Err(AgentLoopError::EffectsUnsettled(message)) = &result {
+            let _ = signals.send(TurnSignal::EffectsUnsettled {
+                message: message.clone(),
+            });
+        }
         let _ = signals.send(TurnSignal::InitializationComplete { name, result });
-    });
+    }) {
+        let _ = errors.send(TurnSignal::EffectsUnsettled {
+            message: error.to_string(),
+        });
+    }
 }
 
 async fn handle_plugin_message(
@@ -769,6 +785,8 @@ pub(super) async fn handle_actor_command(
                     "session_mismatch",
                     "command session id does not match this actor",
                 ))
+            } else if state.closing {
+                Some(protocol_rejection("session_closing", "session is closing"))
             } else if unsupported_in_m2(&command) {
                 Some(protocol_rejection(
                     "command_not_available",
@@ -3059,12 +3077,11 @@ pub(super) async fn handle_actor_command(
                                 );
                                 state.initialization_running = true;
                                 start_workspace_initialization(
-                                    config.workspace_root.clone(),
+                                    Arc::clone(config),
+                                    &state.tasks,
                                     depth,
-                                    config.session_id.clone(),
                                     state.next_turn,
                                     call_id,
-                                    Arc::clone(&config.checkpoints),
                                     turn_signals.clone(),
                                 );
                                 deferred_command_completion = true;

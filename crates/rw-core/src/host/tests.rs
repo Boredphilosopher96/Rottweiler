@@ -52,7 +52,12 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for MarkerComma
     }
 }
 
+#[async_trait::async_trait]
 impl ModelDriver for IdleModel {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::AgentLoopError> {
+        Ok(())
+    }
+
     fn stream(
         &self,
         _alias: &str,
@@ -67,7 +72,12 @@ impl ModelDriver for IdleModel {
     }
 }
 
+#[async_trait::async_trait]
 impl ModelDriver for SummaryModel {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::AgentLoopError> {
+        Ok(())
+    }
+
     fn stream(
         &self,
         _alias: &str,
@@ -91,6 +101,10 @@ impl ModelDriver for SummaryModel {
 
 #[async_trait]
 impl ModelDriver for ActivatableModel {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::AgentLoopError> {
+        Ok(())
+    }
+
     fn stream(
         &self,
         _alias: &str,

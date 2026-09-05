@@ -46,8 +46,11 @@ impl fmt::Debug for ProviderRuntime {
 
 impl ProviderRuntime {
     /// Drains abandoned local provider ownership retained by the router.
-    pub async fn settle_provider_effects(&self) {
-        self.router.settle_effects().await;
+    ///
+    /// # Errors
+    /// Returns failed provider or accounting settlement proof.
+    pub async fn settle_provider_effects(&self) -> Result<(), ProviderError> {
+        self.router.settle_effects().await
     }
 
     /// Default provider-blind model alias.
