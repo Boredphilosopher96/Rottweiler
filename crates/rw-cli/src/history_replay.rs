@@ -52,6 +52,11 @@ impl HistoricalReplayEngine {
             scope,
             ..
         }
+        | ClientCommand::ReadSessionChildren {
+            session_id: session,
+            scope,
+            ..
+        }
         | ClientCommand::GetTodos {
             session_id: session,
             scope,
@@ -75,6 +80,18 @@ impl HistoricalReplayEngine {
             emitted_at: SystemEventClock.emitted_at(),
         };
         let event = match command {
+            ClientCommand::ReadSessionChildren {
+                session_id, scope, ..
+            } => {
+                let result = self.reader.children(session_id.clone(), scope).await?;
+                return Ok(
+                    result.into_query(|result| EngineEvent::SessionChildrenReady {
+                        meta,
+                        session_id,
+                        result,
+                    }),
+                );
+            }
             ClientCommand::GetTodos {
                 session_id, scope, ..
             } => EngineEvent::TodosRead {

@@ -1,7 +1,9 @@
 //! Live display reads share transcript projection and ancestry admission.
-use super::{ProjectionBudget, ProjectionRead, TranscriptReader, page::storage};
+use super::{
+    OwnedTranscriptRead, ProjectionBudget, ProjectionRead, TranscriptReader, page::storage,
+};
 use rw_core::{
-    HostError, HostReadResult,
+    HostError,
     transcript::{read_transcript_tail, validate_tail_read},
 };
 use rw_types::{
@@ -10,31 +12,6 @@ use rw_types::{
     transcript_tail::{TranscriptTailRead, TranscriptTailResult},
 };
 use std::sync::Arc;
-use tokio::sync::OwnedSemaphorePermit;
-
-/// A decoded tail keeps its admitted worker slot until consumption or reply encoding.
-pub struct OwnedTranscriptTail {
-    result: TranscriptTailResult,
-    permit: OwnedSemaphorePermit,
-}
-impl OwnedTranscriptTail {
-    #[must_use]
-    pub fn value(&self) -> &TranscriptTailResult {
-        &self.result
-    }
-    #[must_use]
-    pub fn into_query(
-        self,
-        event: impl FnOnce(TranscriptTailResult) -> rw_types::EngineEvent,
-    ) -> HostReadResult {
-        HostReadResult::new(
-            rw_types::CommandOutcome::Accepted {},
-            vec![event(self.result)],
-            self.permit,
-        )
-    }
-}
-
 impl TranscriptReader {
     /// Read one bounded in-progress display component without starting a session.
     ///
@@ -45,18 +22,10 @@ impl TranscriptReader {
         session: SessionId,
         scope: SessionReadScope,
         request: TranscriptTailRead,
-    ) -> Result<OwnedTranscriptTail, HostError> {
+    ) -> Result<OwnedTranscriptRead<TranscriptTailResult>, HostError> {
         validate_tail_read(&request).map_err(storage)?;
-        let permit = Arc::clone(&self.workers)
-            .try_acquire_owned()
-            .map_err(|_| HostError::Query("transcript worker admission is exhausted".into()))?;
-        let reader = Arc::clone(self);
-        tokio::task::spawn_blocking(move || {
-            let result = reader.read_tail(&session, &scope, &request)?;
-            Ok(OwnedTranscriptTail { result, permit })
-        })
-        .await
-        .map_err(|_| HostError::Query("transcript worker failed".into()))?
+        self.blocking_owned(move |reader| reader.read_tail(&session, &scope, &request))
+            .await
     }
     pub(crate) fn read_tail(
         &self,

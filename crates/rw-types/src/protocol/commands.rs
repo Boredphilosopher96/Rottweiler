@@ -37,6 +37,11 @@ pub enum ClientCommand {
         session_id: SessionId,
         request: crate::extension_ui::UiActionRequest,
     },
+    ReadSessionChildren {
+        meta: CommandMeta,
+        session_id: SessionId,
+        scope: crate::session_read::SessionReadScope,
+    },
     GetTodos {
         meta: CommandMeta,
         session_id: SessionId,
@@ -402,6 +407,7 @@ impl ClientCommand {
             | Self::GetUiCatalog { meta, .. }
             | Self::GetUiPanels { meta, .. }
             | Self::InvokeUiAction { meta, .. }
+            | Self::ReadSessionChildren { meta, .. }
             | Self::GetTodos { meta, .. }
             | Self::CreateSession { meta, .. }
             | Self::ResumeSession { meta, .. }
@@ -484,6 +490,7 @@ impl ClientCommand {
             | Self::GetUiCatalog { session_id, .. }
             | Self::GetUiPanels { session_id, .. }
             | Self::InvokeUiAction { session_id, .. }
+            | Self::ReadSessionChildren { session_id, .. }
             | Self::GetTodos { session_id, .. }
             | Self::ResumeSession { session_id, .. }
             | Self::AttachSession { session_id, .. }
@@ -557,6 +564,7 @@ impl ClientCommand {
             | Self::GetUiCatalog { meta, .. }
             | Self::GetUiPanels { meta, .. }
             | Self::InvokeUiAction { meta, .. }
+            | Self::ReadSessionChildren { meta, .. }
             | Self::GetTodos { meta, .. }
             | Self::CreateSession { meta, .. }
             | Self::ResumeSession { meta, .. }
@@ -657,6 +665,7 @@ read_commands!(
     GetSessionControls,
     GetUiCatalog,
     GetUiPanels,
+    ReadSessionChildren,
     GetTodos,
     ReadTranscriptTail,
     ReadTranscript,

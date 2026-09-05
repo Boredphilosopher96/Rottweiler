@@ -86,6 +86,22 @@ impl EngineHost {
                     }],
                 ))
             }
+            ClientCommand::ReadSessionChildren {
+                meta,
+                session_id,
+                scope,
+            } => {
+                let result = self.queries.session_children(&session_id, scope).await?;
+                Ok((
+                    CommandOutcome::Accepted {},
+                    Some(session_id.clone()),
+                    vec![EngineEvent::SessionChildrenReady {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        result,
+                    }],
+                ))
+            }
             ClientCommand::GetTodos {
                 meta,
                 session_id,

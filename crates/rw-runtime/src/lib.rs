@@ -32,7 +32,7 @@ mod workflow_runtime;
 
 pub use extension_runtime::PrivatePluginApprovalStore;
 pub use session_host::{RuntimeHostOptions, RuntimeSessionFactory};
-pub use transcript_service::{TranscriptReader, reader::TranscriptBootstrap};
+pub use transcript_service::{OwnedTranscriptRead, TranscriptReader, reader::TranscriptBootstrap};
 
 /// Durable session replay, search, and export APIs.
 pub mod session_history {
@@ -216,6 +216,16 @@ mod tests {
         ) -> Result<rw_types::transcript_tail::TranscriptTailResult, HostError> {
             Err(HostError::Query(
                 "transcript tail is not provided by this fixture".into(),
+            ))
+        }
+
+        async fn session_children(
+            &self,
+            _session: &rw_types::SessionId,
+            _scope: rw_types::session_read::SessionReadScope,
+        ) -> Result<rw_types::session_children::SessionChildrenResult, HostError> {
+            Err(HostError::Query(
+                "fixture has no child lifecycle source".into(),
             ))
         }
 

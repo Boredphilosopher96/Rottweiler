@@ -102,10 +102,12 @@ impl SubagentLifecycleView {
             if page.is_empty() {
                 return Ok(children);
             }
-            if children.len() + page.len() > 256 {
+            if children.len() + page.len() > rw_types::session_children::MAX_ACTIVE_CHILDREN {
                 return Err(RecoveryError::Limit("active child snapshot"));
             }
-            if page.iter().any(|child| child.task_preview.len() > 1024) {
+            if page.iter().any(|child| {
+                child.task_preview.len() > rw_types::session_children::MAX_CHILD_TASK_PREVIEW_BYTES
+            }) {
                 return Err(RecoveryError::Invalid("child task preview"));
             }
             after = page.last().map(|child| child.spawned);

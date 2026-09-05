@@ -28,6 +28,7 @@ mod permission_mode;
 mod protocol;
 pub mod question_admission;
 pub mod schema;
+pub mod session_children;
 pub mod session_controls;
 pub mod session_read;
 pub mod session_state;

@@ -17,10 +17,12 @@ use std::{
 mod authority;
 mod content;
 use crate::projection_budget::ProjectionBudget;
+mod owned_read;
 mod page;
 pub(crate) mod reader;
 mod tail;
-pub use tail::OwnedTranscriptTail;
+pub use owned_read::OwnedTranscriptRead;
+mod children;
 mod tool_presentation;
 
 const MAX_OPEN_PROJECTORS: usize = 8;

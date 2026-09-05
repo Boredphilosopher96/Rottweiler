@@ -204,6 +204,22 @@ impl SubagentLifecycleIndex {
         )?;
         Ok(head.rewind.is_some() || head.next < source.prefix_identity().next_sequence)
     }
+    /// Exact applied physical source prefix, including a pending bounded rewind.
+    /// # Errors
+    /// Rejects corrupt projection metadata.
+    pub fn through(&self) -> Result<Option<SequenceId>, RecoveryError> {
+        let read = self.index.read()?;
+        Ok(decode_head(&read)?.next.checked_sub(1).map(SequenceId))
+    }
+
+    /// # Errors
+    /// Rejects corrupt projection metadata before reporting its readiness.
+    pub fn is_current(&self, source: &JournalReadView) -> Result<bool, RecoveryError> {
+        let read = self.index.read()?;
+        let head = decode_head(&read)?;
+        Ok(head.rewind.is_none() && read.head().prefix == source.prefix_identity())
+    }
+
     /// Capture source-qualified reads. Maintenance must complete before publication.
     /// # Errors
     /// Rejects a mismatched source or incomplete rewind.

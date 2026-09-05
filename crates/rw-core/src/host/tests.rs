@@ -585,6 +585,16 @@ impl HostQueryService for StubQueries {
         ))
     }
 
+    async fn session_children(
+        &self,
+        _session: &rw_types::SessionId,
+        _scope: rw_types::session_read::SessionReadScope,
+    ) -> Result<rw_types::session_children::SessionChildrenResult, HostError> {
+        Err(HostError::Query(
+            "fixture has no child lifecycle source".into(),
+        ))
+    }
+
     async fn todos(
         &self,
         _session: &rw_types::SessionId,

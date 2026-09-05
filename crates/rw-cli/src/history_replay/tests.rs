@@ -458,3 +458,51 @@ async fn tail_reads_are_direct_and_reject_a_foreign_root() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn historical_child_snapshot_uses_only_its_root_and_effective_descendants() {
+    let (_root, engine, scope) = descendant_fixture();
+    let result = engine
+        .query(ClientCommand::ReadSessionChildren {
+            meta: meta("active-children"),
+            session_id: SessionId("history".into()),
+            scope: SessionReadScope::Session {},
+        })
+        .await
+        .expect("root children");
+    let [
+        EngineEvent::SessionChildrenReady {
+            result: rw_types::session_children::SessionChildrenResult::Ready { snapshot },
+            ..
+        },
+    ] = result.events()
+    else {
+        panic!("snapshot")
+    };
+    assert_eq!(snapshot.through, Some(SequenceId(2)));
+    assert_eq!(snapshot.children.len(), 1);
+    assert_eq!(snapshot.children[0].spawned, SequenceId(2));
+    assert_eq!(snapshot.children[0].child_session_id.0, "child");
+    assert_eq!(snapshot.children[0].task_preview, "Inspect");
+    let child = engine
+        .query(ClientCommand::ReadSessionChildren {
+            meta: meta("nested-children"),
+            session_id: SessionId("child".into()),
+            scope,
+        })
+        .await
+        .expect("authorized child");
+    assert!(
+        matches!(child.events(), [EngineEvent::SessionChildrenReady { result: rw_types::session_children::SessionChildrenResult::Ready { snapshot }, .. }] if snapshot.children.is_empty())
+    );
+    assert!(
+        engine
+            .query(ClientCommand::ReadSessionChildren {
+                meta: meta("foreign-children"),
+                session_id: SessionId("child".into()),
+                scope: SessionReadScope::Session {},
+            })
+            .await
+            .is_err()
+    );
+}

@@ -666,3 +666,68 @@ async fn retained_tail_results_keep_admission_until_query_consumption() {
         MAX_OPEN_PROJECTORS
     );
 }
+
+#[tokio::test]
+async fn active_children_query_is_mode_free_bounded_and_source_qualified() {
+    let mut fixture = Fixture::new(80, "prior body");
+    fixture
+        .journal
+        .append(EngineEvent::SubagentSpawned {
+            meta: meta(80),
+            subagent_id: rw_types::SubagentId("agent".into()),
+            child_session_id: SessionId("child".into()),
+            task: "€".repeat(1024),
+        })
+        .expect("spawn");
+    fixture
+        .registration
+        .publisher
+        .publish(fixture.journal.read_view());
+    let scope = rw_types::session_read::SessionReadScope::Session {};
+    let first = fixture
+        .service
+        .children(SessionId("semantic".into()), scope.clone())
+        .await
+        .expect("bounded batch");
+    assert!(matches!(
+        first.value(),
+        rw_types::session_children::SessionChildrenResult::CatchingUp {
+            through: Some(SequenceId(63)),
+            target: Some(SequenceId(80))
+        }
+    ));
+    drop(first);
+    let ready = fixture
+        .service
+        .children(SessionId("semantic".into()), scope.clone())
+        .await
+        .expect("ready");
+    let rw_types::session_children::SessionChildrenResult::Ready { snapshot } = ready.value()
+    else {
+        panic!("snapshot")
+    };
+    assert_eq!(snapshot.through, Some(SequenceId(80)));
+    assert_eq!(snapshot.children.len(), 1);
+    assert_eq!(snapshot.children[0].spawned, SequenceId(80));
+    assert_eq!(snapshot.children[0].child_session_id.0, "child");
+    assert!(snapshot.children[0].task_truncated);
+    assert!(
+        snapshot.children[0].task_preview.len()
+            <= rw_types::session_children::MAX_CHILD_TASK_PREVIEW_BYTES
+    );
+    let wrong = rw_types::session_read::SessionReadScope::Descendant {
+        root_session_id: SessionId("semantic".into()),
+        ancestry: vec![rw_types::session_read::SessionReadAncestor {
+            session_id: SessionId("child".into()),
+            subagent_id: rw_types::SubagentId("agent".into()),
+            source_sequence: SequenceId(79),
+        }],
+    };
+    assert!(
+        fixture
+            .service
+            .children(SessionId("child".into()), wrong)
+            .await
+            .is_err()
+    );
+}

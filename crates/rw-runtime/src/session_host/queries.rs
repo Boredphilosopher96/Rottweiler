@@ -11,6 +11,30 @@ use super::{
 
 #[async_trait]
 impl HostQueryService for RuntimeSessionFactory {
+    async fn session_children(
+        &self,
+        session: &rw_types::SessionId,
+        scope: rw_types::session_read::SessionReadScope,
+    ) -> Result<rw_types::session_children::SessionChildrenResult, HostError> {
+        let factory = self.clone();
+        let session = session.clone();
+        let root = scope
+            .root(&session)
+            .map_err(|message| HostError::Protocol(message.into()))?
+            .clone();
+        self.transcripts
+            .blocking(move |reader| {
+                let metadata =
+                    super::load_session_metadata_any(&factory.options.storage_root, &root.0)
+                        .map_err(|_| {
+                            HostError::Persistence("session metadata is unavailable".into())
+                        })?;
+                factory.authorize_workspace_path(&metadata.workspace)?;
+                reader.read_children(&session, &scope)
+            })
+            .await
+    }
+
     async fn todos(
         &self,
         session: &rw_types::SessionId,

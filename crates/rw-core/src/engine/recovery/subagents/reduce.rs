@@ -79,8 +79,12 @@ pub(super) fn apply(
                 session_id: child_session_id.clone(),
                 spawned: sequence,
                 spawned_turn: turn,
-                task_preview: task[..task.floor_char_boundary(1024.min(task.len()))].to_owned(),
-                task_truncated: task.len() > 1024,
+                task_preview: task[..task.floor_char_boundary(
+                    rw_types::session_children::MAX_CHILD_TASK_PREVIEW_BYTES.min(task.len()),
+                )]
+                    .to_owned(),
+                task_truncated: task.len()
+                    > rw_types::session_children::MAX_CHILD_TASK_PREVIEW_BYTES,
                 terminal: None,
                 latest_artifact: current
                     .as_ref()

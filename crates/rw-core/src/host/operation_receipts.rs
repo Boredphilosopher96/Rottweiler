@@ -89,6 +89,7 @@ fn durable_mutation(command: &ClientCommand) -> bool {
         | ClientCommand::GetSessionControls { .. }
         | ClientCommand::GetUiCatalog { .. }
         | ClientCommand::GetUiPanels { .. }
+        | ClientCommand::ReadSessionChildren { .. }
         | ClientCommand::GetTodos { .. }
         | ClientCommand::ReadTranscriptTail { .. }
         | ClientCommand::ReadTranscript { .. }

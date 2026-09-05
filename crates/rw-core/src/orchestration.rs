@@ -26,7 +26,7 @@ pub const DEFAULT_SUBAGENT_MAX_TURNS: usize = 32;
 pub const DEFAULT_SUBAGENT_MAX_DURATION: Duration = Duration::from_mins(30);
 /// Live and continuable children admitted by one session orchestration owner.
 /// Closing a child releases its slot; durable history remains independently queryable.
-pub const MAX_RETAINED_SUBAGENTS: usize = 256;
+pub const MAX_RETAINED_SUBAGENTS: usize = rw_types::session_children::MAX_ACTIVE_CHILDREN;
 const MAX_SUBAGENT_FINAL_TEXT_BYTES: usize = 256 * 1024;
 const MAX_SUBAGENT_DIFF_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SUBAGENT_TOUCHED_FILES: usize = 4096;

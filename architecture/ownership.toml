@@ -1045,3 +1045,8 @@ symbols = ["ExtensionToolCall", "ExtensionToolOutcome", "ExtensionEffectCall", "
 id = "plugin-validator-projections"
 generator = "plugin-validators"
 patterns = ["packages/plugin-sdk/src/generated/*-validator.*"]
+
+[[owner]]
+id = "session-children-contract"
+path = "crates/rw-types/src/session_children.rs"
+symbols = ["MAX_ACTIVE_CHILDREN", "MAX_CHILD_TASK_PREVIEW_BYTES", "SessionChildrenSnapshot::validate"]

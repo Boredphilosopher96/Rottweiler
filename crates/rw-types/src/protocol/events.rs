@@ -74,6 +74,11 @@ pub enum EngineEvent {
         meta: EventMeta,
         snapshot: crate::todo::TodoSnapshot,
     },
+    SessionChildrenReady {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        result: crate::session_children::SessionChildrenResult,
+    },
     TodosRead {
         meta: CommandAckMeta,
         session_id: SessionId,
@@ -726,6 +731,7 @@ impl EngineEvent {
             | Self::SessionControlsReady { meta, .. }
             | Self::UiCatalogReady { meta, .. }
             | Self::UiPanelsReady { meta, .. }
+            | Self::SessionChildrenReady { meta, .. }
             | Self::TodosRead { meta, .. }
             | Self::TranscriptTailReady { meta, .. }
             | Self::TranscriptPageReady { meta, .. }
@@ -845,6 +851,7 @@ impl EngineEvent {
             | Self::SessionControlsReady { .. }
             | Self::UiCatalogReady { .. }
             | Self::UiPanelsReady { .. }
+            | Self::SessionChildrenReady { .. }
             | Self::TodosRead { .. }
             | Self::ToolProgress { .. }
             | Self::CommandAcknowledged { .. }
@@ -948,6 +955,7 @@ impl EngineEvent {
             | Self::SessionControlsReady { .. }
             | Self::UiCatalogReady { .. }
             | Self::UiPanelsReady { .. }
+            | Self::SessionChildrenReady { .. }
             | Self::TodosRead { .. }
             | Self::ToolProgress { .. }
             | Self::CommandAcknowledged { .. }

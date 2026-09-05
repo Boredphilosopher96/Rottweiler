@@ -1,3 +1,6 @@
+use rw_types::session_children::{
+    SessionChildState, SessionChildrenResult, SessionChildrenSnapshot,
+};
 use rw_types::session_state::{
     SessionActiveTurn, SessionBudgetState, SessionCompactionState, SessionQueuedPreview,
     SessionShellState, SessionStateSnapshot,
@@ -296,6 +299,22 @@ fn generate_typescript() -> Result<String, XtaskError> {
             rw_types::question_admission::MAX_PENDING_QUESTION_PREPARED_BYTES,
         ),
         (
+            "MAX_ACTIVE_CHILDREN",
+            rw_types::session_children::MAX_ACTIVE_CHILDREN,
+        ),
+        (
+            "MAX_CHILD_TASK_PREVIEW_BYTES",
+            rw_types::session_children::MAX_CHILD_TASK_PREVIEW_BYTES,
+        ),
+        (
+            "MAX_SESSION_CHILDREN_BYTES",
+            rw_types::session_children::MAX_SESSION_CHILDREN_BYTES,
+        ),
+        (
+            "MAX_SESSION_CHILDREN_PREPARED_BYTES",
+            rw_types::session_children::MAX_SESSION_CHILDREN_PREPARED_BYTES,
+        ),
+        (
             "MAX_SESSION_STATE_BYTES",
             rw_types::session_state::MAX_SESSION_STATE_BYTES,
         ),
@@ -402,6 +421,9 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(SessionControls);
     declaration!(SessionControlsSnapshot);
     declaration!(SessionStateSnapshot);
+    declaration!(SessionChildState);
+    declaration!(SessionChildrenResult);
+    declaration!(SessionChildrenSnapshot);
     declaration!(SessionActiveTurn);
     declaration!(SessionBudgetState);
     declaration!(SessionCompactionState);
