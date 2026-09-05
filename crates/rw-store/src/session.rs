@@ -1,5 +1,7 @@
 //! Crash-safe append-only session logs and the derived `SQLite` session index.
 
+#[cfg(unix)]
+mod derived_database;
 /// Segmented journal storage and bounded read views.
 pub mod journal;
 /// Rebuildable, bounded semantic transcript index persistence.
