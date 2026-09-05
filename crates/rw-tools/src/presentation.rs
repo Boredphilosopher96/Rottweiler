@@ -117,7 +117,7 @@ mod tests {
     fn plugin_wire_cannot_forge_host_presentation_metadata() {
         assert!(
             serde_json::from_value::<ToolResult>(
-                json!({"content":"text","data":null,"presentation":{}})
+                json!({"content":"text","data":null,"truncated":false,"presentation":{}})
             )
             .is_err()
         );
