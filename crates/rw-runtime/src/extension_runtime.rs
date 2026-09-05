@@ -46,7 +46,8 @@ use rw_mcp::{
     McpManager, McpServerConfig, McpTransportConfig, OverflowSpool, ServerState,
 };
 use rw_plugin_protocol::{
-    METHOD_SESSION_INJECT_MESSAGE, METHOD_SESSION_SET_STATUS, METHOD_UI_NOTIFY, PluginManifest,
+    METHOD_EXTENSION_STATE_COMMIT, METHOD_EXTENSION_STATE_READ, METHOD_SESSION_INJECT_MESSAGE,
+    METHOD_SESSION_QUERY, METHOD_SESSION_SET_STATUS, METHOD_UI_NOTIFY, PluginManifest,
 };
 use rw_store::config::ConfigLoader;
 use rw_store::credentials::{CredentialManager, CredentialReference};
@@ -548,6 +549,21 @@ impl PushHandler for SessionPluginPushHandler {
     ) -> std::result::Result<serde_json::Value, PluginRpcError> {
         let capability = self.bound(&params)?;
         match method {
+            METHOD_SESSION_QUERY => plugin_push_result(capability.query().await),
+            METHOD_EXTENSION_STATE_READ => plugin_push_result(capability.read_state().await),
+            METHOD_EXTENSION_STATE_COMMIT => {
+                let transaction: rw_types::extension_contract::ExtensionStateTransaction =
+                    serde_json::from_value(params).map_err(|_| {
+                        plugin_push_error("invalid_push", "invalid state transaction")
+                    })?;
+                if transaction.acknowledged.is_some() {
+                    return Err(plugin_push_error(
+                        "invalid_push",
+                        "delivery acknowledgement is host-owned",
+                    ));
+                }
+                plugin_push_result(capability.commit_state(transaction).await)
+            }
             METHOD_SESSION_INJECT_MESSAGE => {
                 let content = plugin_push_string(&params, "content")?;
                 let disposition = capability
@@ -593,6 +609,14 @@ impl PushHandler for SessionPluginPushHandler {
             )),
         }
     }
+}
+
+fn plugin_push_result<T: serde::Serialize>(
+    result: std::result::Result<T, rw_core::AgentLoopError>,
+) -> std::result::Result<serde_json::Value, PluginRpcError> {
+    let value = result.map_err(|error| plugin_push_error("push_failed", &error.to_string()))?;
+    serde_json::to_value(value)
+        .map_err(|_| plugin_push_error("push_failed", "cannot encode host command outcome"))
 }
 
 fn plugin_push_string(

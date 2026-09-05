@@ -2,7 +2,16 @@ import { readFile, writeFile } from "node:fs/promises"
 import { standaloneValidator } from "../tui/scripts/standalone-validator"
 
 const check = process.argv.includes("--check")
-const schemas: readonly (readonly [string, string, string])[] = [["hook-input", "HookInput", "hook-contract"], ["hook-directive", "HookDirective", "hook-contract"], ["provider-request", "ProviderRequest", "provider-contract"], ["provider-event", "ProviderEvent", "provider-contract"]]
+const schemas: readonly (readonly [string, string, string])[] = [
+  ["hook-input", "HookInput", "hook-contract"],
+  ["hook-directive", "HookDirective", "hook-contract"],
+  ["provider-request", "ProviderRequest", "provider-contract"],
+  ["provider-event", "ProviderEvent", "provider-contract"],
+  ["extension-state-transaction", "ExtensionStateTransaction", "extension-contract"],
+  ["extension-state-snapshot", "ExtensionStateSnapshot", "extension-contract"],
+  ["extension-state-outcome", "ExtensionStateCommitOutcome", "extension-contract"],
+  ["extension-session-snapshot", "ExtensionSessionSnapshot", "extension-contract"],
+]
 for (const [name, typeName, contract] of schemas) {
   const schema: unknown = JSON.parse(await readFile(new URL(`fixtures/wire/${name}.schema.json`, import.meta.url), "utf8"))
   if (typeof schema !== "object" || schema === null) throw new Error("plugin schema must be an object")

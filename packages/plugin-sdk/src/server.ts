@@ -1,3 +1,4 @@
+import { hostStateContext, type HostSessionApi, type HostStateApi } from "./host-state"
 import { invokeHook, type HookHandlers } from "./hooks"
 import validateProviderRequest from "./generated/provider-request-validator.js"
 import validateProviderEvent from "./generated/provider-event-validator.js"
@@ -57,6 +58,8 @@ export interface PushApi {
 
 export interface HandlerContext {
   readonly push: PushApi
+  readonly session: HostSessionApi
+  readonly state: HostStateApi
   /** Host-owned authenticated HTTP. Credential values never enter this process. */
   readonly providerHttp: {
     request(credentialReference: string, request: ProviderHttpRequest): Promise<ProviderHttpResponse>
@@ -285,6 +288,7 @@ function validateManifest(manifest: PluginManifest): void {
   requireUnique(push, "push")
   const validPush = new Set<PluginPushMethod>([
     RPC_METHODS.injectMessage, RPC_METHODS.setStatus, RPC_METHODS.notify,
+    RPC_METHODS.sessionQuery, RPC_METHODS.stateRead, RPC_METHODS.stateCommit,
   ])
   if (push.some((method) => !validPush.has(method))) throw new Error("unknown push capability")
 
@@ -1220,6 +1224,7 @@ export class PluginServer {
   #context(signal: AbortSignal, providerAlias?: string): HandlerContext {
     return {
       signal,
+      ...hostStateContext((method, params) => this.#push(method, params, signal)),
       providerHttp: {
         request: (credentialReference, request) => this.#providerHttpRequest(
           providerAlias, credentialReference, request, signal,

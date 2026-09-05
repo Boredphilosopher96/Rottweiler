@@ -28,7 +28,11 @@
     "./hook-input.schema.json": "./fixtures/wire/hook-input.schema.json",
     "./hook-directive.schema.json": "./fixtures/wire/hook-directive.schema.json",
     "./provider-request.schema.json": "./fixtures/wire/provider-request.schema.json",
-    "./provider-event.schema.json": "./fixtures/wire/provider-event.schema.json"
+    "./provider-event.schema.json": "./fixtures/wire/provider-event.schema.json",
+    "./extension-state-transaction.schema.json": "./fixtures/wire/extension-state-transaction.schema.json",
+    "./extension-state-snapshot.schema.json": "./fixtures/wire/extension-state-snapshot.schema.json",
+    "./extension-state-outcome.schema.json": "./fixtures/wire/extension-state-outcome.schema.json",
+    "./extension-session-snapshot.schema.json": "./fixtures/wire/extension-session-snapshot.schema.json"
   },
   "bin": {
     "rottweiler-plugin-scaffold": "./dist/bin/scaffold.js"
@@ -43,7 +47,11 @@
     "fixtures/wire/hook-input.schema.json",
     "fixtures/wire/hook-directive.schema.json",
     "fixtures/wire/provider-request.schema.json",
-    "fixtures/wire/provider-event.schema.json"
+    "fixtures/wire/provider-event.schema.json",
+    "fixtures/wire/extension-state-transaction.schema.json",
+    "fixtures/wire/extension-state-snapshot.schema.json",
+    "fixtures/wire/extension-state-outcome.schema.json",
+    "fixtures/wire/extension-session-snapshot.schema.json"
   ],
   "scripts": {
     "build": "bun run build.ts",

@@ -4,6 +4,10 @@ use std::{
     path::Path,
 };
 
+use rw_types::extension_contract::{
+    ExtensionSessionSnapshot, ExtensionStateCommitOutcome, ExtensionStateSnapshot,
+    ExtensionStateTransaction,
+};
 use rw_types::hook_contract::{HookClass, HookDirective, HookEvent, HookFailurePolicy, HookInput};
 use ts_rs::{TS, TypeVisitor};
 
@@ -44,7 +48,32 @@ pub(super) fn generate(root: &Path, check: bool) -> Result<(), String> {
     ir.visit::<rw_providers::ProviderRequest>();
     ir.visit::<rw_providers::ProviderEvent>();
     write_types(root, "provider-contract", ir, check)?;
+    let mut extension = Types {
+        seen: HashSet::new(),
+        declarations: BTreeMap::new(),
+    };
+    extension.visit::<ExtensionStateTransaction>();
+    extension.visit::<ExtensionStateSnapshot>();
+    extension.visit::<ExtensionStateCommitOutcome>();
+    extension.visit::<ExtensionSessionSnapshot>();
+    write_types(root, "extension-contract", extension, check)?;
     for (name, schema) in [
+        (
+            "extension-state-transaction",
+            schema::<ExtensionStateTransaction>(),
+        ),
+        (
+            "extension-state-snapshot",
+            schema::<ExtensionStateSnapshot>(),
+        ),
+        (
+            "extension-state-outcome",
+            schema::<ExtensionStateCommitOutcome>(),
+        ),
+        (
+            "extension-session-snapshot",
+            schema::<ExtensionSessionSnapshot>(),
+        ),
         ("hook-input", schema::<HookInput>()),
         ("hook-directive", schema::<HookDirective>()),
         (

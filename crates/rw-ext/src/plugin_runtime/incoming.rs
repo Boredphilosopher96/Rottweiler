@@ -565,11 +565,25 @@ async fn handle_push_request(
     handler.handle_push(method, params).await
 }
 
-fn validate_push_params(method: &str, params: &Value) -> Result<(), PluginRpcError> {
+pub(super) fn validate_push_params(method: &str, params: &Value) -> Result<(), PluginRpcError> {
     let object = params
         .as_object()
         .ok_or_else(|| rpc_error("invalid_push", "plugin push parameters must be an object"))?;
+    if method == METHOD_EXTENSION_STATE_COMMIT {
+        let transaction: rw_types::extension_contract::ExtensionStateTransaction =
+            serde_json::from_value(params.clone())
+                .map_err(|_| rpc_error("invalid_push", "invalid extension state transaction"))?;
+        if transaction.acknowledged.is_some() {
+            return Err(rpc_error(
+                "invalid_push",
+                "delivery acknowledgements belong to event delivery",
+            ));
+        }
+        return rw_types::extension_contract::validate_state_transaction(&transaction)
+            .map_err(|error| rpc_error("invalid_push", &error.to_string()));
+    }
     let (allowed, fields): (&[&str], &[(&str, usize)]) = match method {
+        METHOD_SESSION_QUERY | METHOD_EXTENSION_STATE_READ => (&[], &[]),
         METHOD_SESSION_INJECT_MESSAGE => (
             &["session_id", "content"],
             &[

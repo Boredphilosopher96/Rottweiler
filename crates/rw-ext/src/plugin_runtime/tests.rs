@@ -4,6 +4,7 @@ mod authority;
 mod catalog;
 mod sdk;
 mod settlement;
+mod state;
 mod transport;
 
 use std::collections::BTreeMap;

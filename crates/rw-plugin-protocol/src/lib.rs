@@ -76,6 +76,9 @@ pub const METHOD_PROVIDER_HTTP: &str = "provider/http";
 pub const METHOD_PROVIDER_HTTP_EVENT: &str = "provider/http_event";
 pub const METHOD_PROVIDER_HTTP_CANCEL: &str = "provider/http_cancel";
 pub const METHOD_EVENT_PUBLISH: &str = "event/publish";
+pub const METHOD_SESSION_QUERY: &str = "session/query";
+pub const METHOD_EXTENSION_STATE_READ: &str = "extension/state_read";
+pub const METHOD_EXTENSION_STATE_COMMIT: &str = "extension/state_commit";
 pub const METHOD_SESSION_INJECT_MESSAGE: &str = "session/inject_message";
 pub const METHOD_SESSION_SET_STATUS: &str = "session/set_status";
 pub const METHOD_UI_NOTIFY: &str = "ui/notify";
@@ -381,6 +384,12 @@ pub struct PluginProviderCapability {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum PluginPush {
+    #[serde(rename = "session/query")]
+    SessionQuery,
+    #[serde(rename = "extension/state_read")]
+    ExtensionStateRead,
+    #[serde(rename = "extension/state_commit")]
+    ExtensionStateCommit,
     #[serde(rename = "session/inject_message")]
     SessionInjectMessage,
     #[serde(rename = "session/set_status")]
@@ -393,6 +402,9 @@ impl PluginPush {
     #[must_use]
     pub const fn method(self) -> &'static str {
         match self {
+            Self::SessionQuery => METHOD_SESSION_QUERY,
+            Self::ExtensionStateRead => METHOD_EXTENSION_STATE_READ,
+            Self::ExtensionStateCommit => METHOD_EXTENSION_STATE_COMMIT,
             Self::SessionInjectMessage => METHOD_SESSION_INJECT_MESSAGE,
             Self::SessionSetStatus => METHOD_SESSION_SET_STATUS,
             Self::UiNotify => METHOD_UI_NOTIFY,
