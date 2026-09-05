@@ -1,7 +1,7 @@
 //! Rebuildable session listing and full-text search; accounting authority is preserved.
 use super::{
     SessionStoreError,
-    accounting::{TurnAccountingEntry, insert_accounting_entry, validate_accounting_entry},
+    journal::JournalPrefixIdentity,
     journal_io::validate_session_id,
     sqlite_schema::{self, configure_connection, ensure_accounting_schema},
     sqlite_snapshot::{read_only_index_snapshot, same_file_identity, validate_read_only_index},
@@ -28,15 +28,17 @@ pub struct SessionSummary {
     pub turn_count: i64,
 }
 
-/// One complete, rebuildable projection of a session event log.
+/// Bounded listing state for one exact journal prefix. Search documents live in SQLite.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionProjection {
     /// Listing fields derived from the log.
     pub summary: SessionSummary,
-    /// Searchable transcript derived from the same log prefix.
-    pub transcript: String,
-    /// Last event incorporated into this projection, or `None` for an empty log.
-    pub projected_through: Option<SequenceId>,
+    /// Whether a title event selected the displayed title.
+    pub explicit_title: bool,
+    /// All documents through the source captured by the projector are present.
+    pub complete: bool,
+    /// Exact journal prefix incorporated into this projection.
+    pub source: JournalPrefixIdentity,
 }
 
 /// Whether a derived index row agrees with the authoritative event log.
@@ -74,72 +76,38 @@ impl SessionIndex {
         Ok(index)
     }
 
-    /// Inserts or replaces one derived session projection.
-    ///
+    /// Atomically writes bounded listing metadata and its title document.
     /// # Errors
-    ///
-    /// Returns an invalid-id or `SQLite` error.
+    /// Rejects malformed identities and failed SQLite writes.
     pub fn upsert(&self, projection: &SessionProjection) -> Result<(), SessionStoreError> {
-        validate_session_id(&projection.summary.id)?;
-        let connection = self.connection()?;
-        upsert_projection(&connection, projection)?;
-        Ok(())
-    }
-
-    /// Removes one disposable projection after its zero-event log was garbage-collected.
-    ///
-    /// # Errors
-    ///
-    /// Returns an invalid-id or `SQLite` error.
-    pub fn remove(&self, session_id: &str) -> Result<(), SessionStoreError> {
-        validate_session_id(session_id)?;
-        self.connection()?
-            .execute("DELETE FROM sessions WHERE id=?1", [session_id])?;
-        Ok(())
-    }
-
-    /// Atomically replaces every derived row from caller-projected event logs.
-    ///
-    /// The JSONL logs remain authoritative; callers use this after any missing
-    /// or stale watermark is detected.
-    ///
-    /// # Errors
-    ///
-    /// Returns an invalid-id or `SQLite` transaction error.
-    pub fn replace_all(&self, projections: &[SessionProjection]) -> Result<(), SessionStoreError> {
-        for projection in projections {
-            validate_session_id(&projection.summary.id)?;
-        }
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
-        transaction.execute("DELETE FROM sessions", [])?;
-        for projection in projections {
-            upsert_projection(&transaction, projection)?;
-        }
+        upsert_projection(&transaction, projection)?;
         transaction.commit()?;
         Ok(())
     }
 
-    /// Rebuilds only derived search tables in one transaction.
-    ///
-    /// Existing accounting and other authoritative tables remain intact. Supplied
-    /// journal accounting is reconciled by identity, never used to erase charges.
-    /// A corrupt database or unsupported accounting schema requires explicit recovery.
-    ///
+    /// Removes one disposable projection and its searchable documents.
     /// # Errors
-    /// Returns an invalid projection, accounting conflict, schema or `SQLite` error.
-    pub fn rebuild(
-        root: &Path,
-        projections: &[SessionProjection],
-        accounting_entries: &[TurnAccountingEntry],
-    ) -> Result<Self, SessionStoreError> {
+    /// Rejects malformed identities and failed SQLite writes.
+    pub fn remove(&self, session_id: &str) -> Result<(), SessionStoreError> {
+        validate_session_id(session_id)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM search_documents WHERE session_id=?1",
+            [session_id],
+        )?;
+        transaction.execute("DELETE FROM sessions WHERE id=?1", [session_id])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Clears rebuildable search state without touching accounting or reservations.
+    /// # Errors
+    /// Rejects unsupported authoritative schemas and failed SQLite writes.
+    pub fn reset_derived(root: &Path) -> Result<Self, SessionStoreError> {
         fs::create_dir_all(root)?;
-        for projection in projections {
-            validate_session_id(&projection.summary.id)?;
-        }
-        for entry in accounting_entries {
-            validate_accounting_entry(entry)?;
-        }
         let index = Self {
             path: root.join("index.sqlite"),
         };
@@ -147,62 +115,69 @@ impl SessionIndex {
         sqlite_schema::validate_accounting(&connection)?;
         configure_connection(&connection)?;
         ensure_accounting_schema(&connection)?;
-        super::accounting::totals::catch_up(&mut connection)?;
         let transaction = connection.transaction()?;
-        transaction.execute_batch("DROP TRIGGER IF EXISTS sessions_ai; DROP TRIGGER IF EXISTS sessions_ad; DROP TRIGGER IF EXISTS sessions_au; DROP TABLE IF EXISTS sessions_fts; DROP TABLE IF EXISTS sessions;")?;
+        transaction.execute_batch("DROP TRIGGER IF EXISTS search_documents_ai; DROP TRIGGER IF EXISTS search_documents_ad; DROP TRIGGER IF EXISTS search_documents_au; DROP TABLE IF EXISTS sessions_fts; DROP TABLE IF EXISTS search_documents; DROP TABLE IF EXISTS sessions;")?;
         sqlite_schema::ensure_sessions_schema(&transaction)?;
-        for projection in projections {
-            upsert_projection(&transaction, projection)?;
-        }
-        for entry in accounting_entries {
-            insert_accounting_entry(&transaction, entry)?;
-        }
         transaction.commit()?;
         Ok(index)
     }
 
-    /// Compares one row's projection watermark with the event log's last id.
-    ///
+    /// Reads bounded metadata and its exact source identity.
     /// # Errors
-    ///
-    /// Returns an invalid-id, corrupt-watermark, or `SQLite` query error.
+    /// Rejects corrupt identities and failed SQLite reads.
+    pub fn projection(&self, id: &str) -> Result<Option<SessionProjection>, SessionStoreError> {
+        validate_session_id(id)?;
+        read_projection(&self.connection()?, id)
+    }
+
+    /// Compares one row's source watermark with the authoritative log.
+    /// # Errors
+    /// Rejects malformed identities, watermarks and failed SQLite reads.
     pub fn projection_status(
         &self,
         id: &str,
-        log_last_sequence: Option<SequenceId>,
+        last: Option<SequenceId>,
     ) -> Result<ProjectionStatus, SessionStoreError> {
-        validate_session_id(id)?;
-        let connection = self.connection()?;
-        let stored = connection
-            .query_row(
-                "SELECT projected_sequence FROM sessions WHERE id=?1",
-                [id],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .optional()?;
-        let Some(stored) = stored else {
+        let Some(projection) = self.projection(id)? else {
             return Ok(ProjectionStatus::Missing);
         };
-        let Some(stored) = stored else {
-            return Ok(ProjectionStatus::Stale {
-                projected_through: None,
-            });
-        };
-        let projected_through = if stored == "-" {
-            None
+        let projected_through = projection
+            .source
+            .next_sequence
+            .checked_sub(1)
+            .map(SequenceId);
+        Ok(if projected_through == last {
+            ProjectionStatus::Current
         } else {
-            Some(
-                stored
-                    .parse::<u64>()
-                    .map(SequenceId)
-                    .map_err(|_| SessionStoreError::CorruptProjectionWatermark)?,
-            )
-        };
-        if projected_through == log_last_sequence {
-            Ok(ProjectionStatus::Current)
-        } else {
-            Ok(ProjectionStatus::Stale { projected_through })
+            ProjectionStatus::Stale { projected_through }
+        })
+    }
+
+    /// Publishes one bounded source page and its documents under a source CAS.
+    /// # Errors
+    /// Rejects a changed source cursor, malformed documents and failed writes.
+    pub fn apply_page(
+        &self,
+        expected: Option<JournalPrefixIdentity>,
+        projection: &SessionProjection,
+        apply: impl FnOnce(&SearchDocumentWriter<'_>) -> Result<(), SessionStoreError>,
+    ) -> Result<(), SessionStoreError> {
+        let mut connection = self.connection()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let actual =
+            read_projection(&transaction, &projection.summary.id)?.map(|value| value.source);
+        if actual != expected {
+            return Err(SessionStoreError::CorruptProjectionWatermark);
         }
+        let writer = SearchDocumentWriter {
+            connection: &transaction,
+            session: &projection.summary.id,
+        };
+        apply(&writer)?;
+        upsert_projection(&transaction, projection)?;
+        transaction.commit()?;
+        Ok(())
     }
 
     fn connection(&self) -> Result<Connection, SessionStoreError> {
@@ -225,7 +200,7 @@ impl SessionIndex {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
             "SELECT id,title,updated_unix_ms,cost_micros,turn_count FROM sessions \
-             ORDER BY updated_unix_ms DESC,id ASC LIMIT ?1",
+             WHERE search_complete=1 ORDER BY updated_unix_ms DESC,id ASC LIMIT ?1",
         )?;
         let rows = statement.query_map([limit], summary_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -241,20 +216,7 @@ impl SessionIndex {
         query: &str,
         limit: usize,
     ) -> Result<Vec<SessionSummary>, SessionStoreError> {
-        if query.trim().is_empty() {
-            return Ok(Vec::new());
-        }
-        let limit = i64::try_from(limit).map_err(|_| SessionStoreError::LimitOverflow)?;
-        let connection = self.connection()?;
-        sqlite_schema::validate_sessions(&connection)?;
-        let mut statement = connection.prepare(
-            "SELECT s.id,s.title,s.updated_unix_ms,s.cost_micros,s.turn_count \
-             FROM sessions_fts f JOIN sessions s ON s.rowid=f.rowid \
-             WHERE sessions_fts MATCH ?1 \
-             ORDER BY bm25(sessions_fts),s.updated_unix_ms DESC,s.id ASC LIMIT ?2",
-        )?;
-        let rows = statement.query_map(params![query, limit], summary_from_row)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        query_search(&self.connection()?, query, limit)
     }
 
     /// Searches an existing index through a `SQLite` read-only connection.
@@ -278,8 +240,6 @@ impl SessionIndex {
         if limit > 1_001 {
             return Err(SessionStoreError::SearchLimitTooLarge);
         }
-        let query = plain_fts_query(query);
-        let limit = i64::try_from(limit).map_err(|_| SessionStoreError::LimitOverflow)?;
         let path = root.join("index.sqlite");
         let before = validate_read_only_index(&path)?;
         let canonical_root = fs::canonicalize(root)?;
@@ -300,14 +260,7 @@ impl SessionIndex {
             return Err(SessionStoreError::UnsafeSessionIndex);
         }
         sqlite_schema::validate_sessions(&connection)?;
-        let mut statement = connection.prepare(
-            "SELECT s.id,s.title,s.updated_unix_ms,s.cost_micros,s.turn_count \
-             FROM sessions_fts f JOIN sessions s ON s.rowid=f.rowid \
-             WHERE sessions_fts MATCH ?1 \
-             ORDER BY bm25(sessions_fts),s.updated_unix_ms DESC,s.id ASC LIMIT ?2",
-        )?;
-        let rows = statement.query_map(params![query, limit], summary_from_row)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        query_search(&connection, query, limit)
     }
 
     /// Lists newest sessions from a private read-only snapshot of an existing
@@ -347,7 +300,7 @@ impl SessionIndex {
         sqlite_schema::validate_sessions(&connection)?;
         let mut statement = connection.prepare(
             "SELECT id,title,updated_unix_ms,cost_micros,turn_count FROM sessions \
-             ORDER BY updated_unix_ms DESC,id ASC LIMIT ?1",
+             WHERE search_complete=1 ORDER BY updated_unix_ms DESC,id ASC LIMIT ?1",
         )?;
         let rows = statement.query_map([limit], summary_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -372,12 +325,40 @@ impl SessionIndex {
     }
 }
 
-fn plain_fts_query(query: &str) -> String {
-    query
+fn query_search(
+    connection: &Connection,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<SessionSummary>, SessionStoreError> {
+    if query.len() > 512 {
+        return Err(SessionStoreError::SearchQueryTooLarge);
+    }
+    if limit > 1001 {
+        return Err(SessionStoreError::SearchLimitTooLarge);
+    }
+    let terms = query
         .split_whitespace()
-        .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(" AND ")
+        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+        .collect::<Vec<_>>();
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlite_schema::validate_sessions(connection)?;
+    let sets = (1..=terms.len()).map(|number| format!("SELECT d.session_id FROM sessions_fts JOIN search_documents d ON d.rowid=sessions_fts.rowid WHERE sessions_fts MATCH ?{number}")).collect::<Vec<_>>().join(" INTERSECT ");
+    let sql = format!(
+        "SELECT s.id,s.title,s.updated_unix_ms,s.cost_micros,s.turn_count FROM sessions s JOIN ({sets}) matching ON matching.session_id=s.id WHERE s.search_complete=1 ORDER BY s.updated_unix_ms DESC,s.id ASC LIMIT ?{}",
+        terms.len() + 1
+    );
+    let mut arguments = terms
+        .into_iter()
+        .map(rusqlite::types::Value::Text)
+        .collect::<Vec<_>>();
+    arguments.push(rusqlite::types::Value::Integer(
+        i64::try_from(limit).map_err(|_| SessionStoreError::LimitOverflow)?,
+    ));
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map(rusqlite::params_from_iter(arguments), summary_from_row)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
 fn summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionSummary> {
@@ -394,26 +375,73 @@ pub(super) fn upsert_projection(
     connection: &Connection,
     projection: &SessionProjection,
 ) -> Result<(), SessionStoreError> {
-    connection.execute(
-        "INSERT INTO sessions(\
-           id,title,updated_unix_ms,cost_micros,turn_count,transcript,projected_sequence\
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7) \
-         ON CONFLICT(id) DO UPDATE SET title=excluded.title, \
-         updated_unix_ms=excluded.updated_unix_ms, \
-         cost_micros=excluded.cost_micros, turn_count=excluded.turn_count, \
-         transcript=excluded.transcript, \
-         projected_sequence=excluded.projected_sequence",
-        params![
-            projection.summary.id,
-            projection.summary.title,
-            projection.summary.updated_unix_ms,
-            projection.summary.cost_micros,
-            projection.summary.turn_count,
-            projection.transcript,
-            projection
-                .projected_through
-                .map_or_else(|| "-".to_owned(), |sequence| sequence.0.to_string())
-        ],
-    )?;
+    validate_session_id(&projection.summary.id)?;
+    if projection.summary.title.len() > 4096 {
+        return Err(SessionStoreError::SearchQueryTooLarge);
+    }
+    connection.execute("INSERT INTO sessions(id,title,updated_unix_ms,cost_micros,turn_count,explicit_title,search_complete,next_sequence,source_digest) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(id) DO UPDATE SET title=excluded.title,updated_unix_ms=excluded.updated_unix_ms,cost_micros=excluded.cost_micros,turn_count=excluded.turn_count,explicit_title=excluded.explicit_title,search_complete=excluded.search_complete,next_sequence=excluded.next_sequence,source_digest=excluded.source_digest", params![projection.summary.id,projection.summary.title,projection.summary.updated_unix_ms,projection.summary.cost_micros,projection.summary.turn_count,projection.explicit_title,projection.complete,projection.source.next_sequence.to_string(),projection.source.digest.as_slice()])?;
+    connection.execute("INSERT INTO search_documents(session_id,kind,agent_turn,sequence_id,part,body) VALUES(?1,0,'0','0',0,?2) ON CONFLICT(session_id,kind,sequence_id,part) DO UPDATE SET body=excluded.body WHERE body<>excluded.body", params![projection.summary.id,projection.summary.title])?;
     Ok(())
+}
+
+fn read_projection(
+    connection: &Connection,
+    id: &str,
+) -> Result<Option<SessionProjection>, SessionStoreError> {
+    let row = connection.query_row("SELECT id,title,updated_unix_ms,cost_micros,turn_count,explicit_title,search_complete,next_sequence,source_digest FROM sessions WHERE id=?1", [id], |row| {
+        Ok((summary_from_row(row)?, row.get::<_,bool>(5)?, row.get::<_,bool>(6)?, row.get::<_,String>(7)?, row.get::<_,Vec<u8>>(8)?))
+    }).optional()?;
+    row.map(|(summary, explicit_title, complete, next, digest)| {
+        let next_sequence = next
+            .parse::<u64>()
+            .map_err(|_| SessionStoreError::CorruptProjectionWatermark)?;
+        if next_sequence.to_string() != next {
+            return Err(SessionStoreError::CorruptProjectionWatermark);
+        }
+        let digest = digest
+            .try_into()
+            .map_err(|_| SessionStoreError::CorruptProjectionWatermark)?;
+        Ok(SessionProjection {
+            summary,
+            explicit_title,
+            complete,
+            source: JournalPrefixIdentity {
+                next_sequence,
+                digest,
+            },
+        })
+    })
+    .transpose()
+}
+
+/// Transaction-scoped document writer. Each body borrows already-admitted source data.
+pub struct SearchDocumentWriter<'a> {
+    connection: &'a Connection,
+    session: &'a str,
+}
+impl SearchDocumentWriter<'_> {
+    /// Adds one source field, with exact turn/sequence identity for replay and rewind.
+    /// # Errors
+    /// Rejects an oversized body and failed SQLite writes.
+    pub fn text(
+        &self,
+        agent_turn: u64,
+        sequence: SequenceId,
+        part: u32,
+        text: &str,
+    ) -> Result<(), SessionStoreError> {
+        if text.len() > 16 * 1024 * 1024 {
+            return Err(SessionStoreError::SearchQueryTooLarge);
+        }
+        self.connection.execute("INSERT INTO search_documents(session_id,kind,agent_turn,sequence_id,part,body) VALUES(?1,1,?2,?3,?4,?5)", params![self.session,agent_turn.to_string(),sequence.0.to_string(),part,text])?;
+        Ok(())
+    }
+    /// Removes documents belonging to discarded agent turns in the same transaction.
+    /// # Errors
+    /// Returns a SQLite write failure.
+    pub fn rewind(&self, through: u64) -> Result<(), SessionStoreError> {
+        let turn = through.to_string();
+        self.connection.execute("DELETE FROM search_documents WHERE session_id=?1 AND kind=1 AND (length(agent_turn)>length(?2) OR (length(agent_turn)=length(?2) AND agent_turn>?2))", params![self.session,turn])?;
+        Ok(())
+    }
 }

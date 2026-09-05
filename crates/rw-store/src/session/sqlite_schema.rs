@@ -16,7 +16,8 @@ pub(super) const ACCOUNTING_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS turn_acco
          );";
 const ACCOUNTING_PROGRESS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS accounting_progress(
     session_id TEXT NOT NULL PRIMARY KEY,
-    next_sequence TEXT NOT NULL,
+    search_complete INTEGER NOT NULL CHECK(search_complete IN (0,1)),
+    next_sequence TEXT NOT NULL CHECK(length(next_sequence)<=20),
     digest BLOB NOT NULL CHECK(length(digest)=32)
 );";
 const ACCOUNTING_TOTALS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS accounting_totals(
@@ -31,31 +32,38 @@ const ACCOUNTING_TOTALS_PROGRESS_SCHEMA: &str =
     projected_rowid INTEGER NOT NULL CHECK(projected_rowid>=0)
 );";
 pub(super) const SESSIONS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS sessions(
-               id TEXT NOT NULL UNIQUE,
-               title TEXT NOT NULL,
-               updated_unix_ms INTEGER NOT NULL,
-               cost_micros INTEGER NOT NULL,
-               turn_count INTEGER NOT NULL DEFAULT 0,
-               transcript TEXT NOT NULL,
-               projected_sequence TEXT
-             );";
+    id TEXT NOT NULL UNIQUE CHECK(length(CAST(id AS BLOB))<=128),
+    title TEXT NOT NULL CHECK(length(CAST(title AS BLOB))<=4096),
+    updated_unix_ms INTEGER NOT NULL,
+    cost_micros INTEGER NOT NULL,
+    turn_count INTEGER NOT NULL,
+    explicit_title INTEGER NOT NULL CHECK(explicit_title IN (0,1)),
+    next_sequence TEXT NOT NULL,
+    source_digest BLOB NOT NULL CHECK(length(source_digest)=32)
+);";
+pub(super) const DOCUMENTS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS search_documents(
+    session_id TEXT NOT NULL,
+    kind INTEGER NOT NULL CHECK(kind IN (0,1)),
+    agent_turn TEXT NOT NULL,
+    sequence_id TEXT NOT NULL,
+    part INTEGER NOT NULL CHECK(part>=0),
+    body TEXT NOT NULL,
+    UNIQUE(session_id,kind,sequence_id,part)
+);";
 pub(super) const SEARCH_SCHEMA: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
-               title,transcript,content='sessions',content_rowid='rowid'
-             );
-             CREATE TRIGGER IF NOT EXISTS sessions_ai AFTER INSERT ON sessions BEGIN
-               INSERT INTO sessions_fts(rowid,title,transcript)
-               VALUES (new.rowid,new.title,new.transcript);
-             END;
-             CREATE TRIGGER IF NOT EXISTS sessions_ad AFTER DELETE ON sessions BEGIN
-               INSERT INTO sessions_fts(sessions_fts,rowid,title,transcript)
-               VALUES ('delete',old.rowid,old.title,old.transcript);
-             END;
-             CREATE TRIGGER IF NOT EXISTS sessions_au AFTER UPDATE ON sessions BEGIN
-               INSERT INTO sessions_fts(sessions_fts,rowid,title,transcript)
-               VALUES ('delete',old.rowid,old.title,old.transcript);
-               INSERT INTO sessions_fts(rowid,title,transcript)
-               VALUES (new.rowid,new.title,new.transcript);
-             END;";
+    body,content='search_documents',content_rowid='rowid'
+);
+CREATE INDEX IF NOT EXISTS search_documents_turn ON search_documents(session_id,length(agent_turn),agent_turn);
+CREATE TRIGGER IF NOT EXISTS search_documents_ai AFTER INSERT ON search_documents BEGIN
+    INSERT INTO sessions_fts(rowid,body) VALUES (new.rowid,new.body);
+END;
+CREATE TRIGGER IF NOT EXISTS search_documents_ad AFTER DELETE ON search_documents BEGIN
+    INSERT INTO sessions_fts(sessions_fts,rowid,body) VALUES ('delete',old.rowid,old.body);
+END;
+CREATE TRIGGER IF NOT EXISTS search_documents_au AFTER UPDATE ON search_documents BEGIN
+    INSERT INTO sessions_fts(sessions_fts,rowid,body) VALUES ('delete',old.rowid,old.body);
+    INSERT INTO sessions_fts(rowid,body) VALUES (new.rowid,new.body);
+END;";
 
 pub(super) fn validate_accounting(connection: &Connection) -> Result<(), SessionStoreError> {
     validate_table(connection, "turn_accounting", ACCOUNTING_SCHEMA)?;
@@ -79,7 +87,15 @@ pub(super) fn validate_accounting(connection: &Connection) -> Result<(), Session
     Ok(())
 }
 pub(super) fn validate_sessions(connection: &Connection) -> Result<(), SessionStoreError> {
-    validate_table(connection, "sessions", SESSIONS_SCHEMA)
+    validate_table(connection, "sessions", SESSIONS_SCHEMA)?;
+    validate_table(connection, "search_documents", DOCUMENTS_SCHEMA)?;
+    let count: u32 = connection.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('sessions','search_documents','sessions_fts')", [], |row| row.get(0))?;
+    if count != 0 && count != 3 {
+        return Err(SessionStoreError::UnsupportedSqliteSchema {
+            table: "search_documents",
+        });
+    }
+    Ok(())
 }
 pub(super) fn validate_table(
     connection: &Connection,
@@ -148,9 +164,22 @@ fn create_accounting_schema(connection: &Connection) -> Result<(), SessionStoreE
 }
 pub(super) fn ensure_sessions_schema(connection: &Connection) -> Result<(), SessionStoreError> {
     validate_sessions(connection)?;
-    connection.execute_batch(SESSIONS_SCHEMA)?;
-    connection.execute_batch(SEARCH_SCHEMA)?;
-    Ok(())
+    connection.execute_batch("SAVEPOINT rw_search_schema")?;
+    let result = (|| {
+        connection.execute_batch(SESSIONS_SCHEMA)?;
+        connection.execute_batch(DOCUMENTS_SCHEMA)?;
+        connection.execute_batch(SEARCH_SCHEMA)?;
+        Ok::<(), SessionStoreError>(())
+    })();
+    match result {
+        Ok(()) => connection
+            .execute_batch("RELEASE rw_search_schema")
+            .map_err(Into::into),
+        Err(error) => {
+            connection.execute_batch("ROLLBACK TO rw_search_schema; RELEASE rw_search_schema")?;
+            Err(error)
+        }
+    }
 }
 
 pub(super) fn open_accounting_connection(path: &Path) -> Result<Connection, SessionStoreError> {

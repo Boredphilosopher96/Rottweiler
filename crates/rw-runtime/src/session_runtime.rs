@@ -79,3 +79,5 @@ pub use session_selection::select_interactive_session;
 pub use wasm_hooks::locate_wasm_host_executable;
 #[cfg(test)]
 mod tests;
+
+mod search_projection;

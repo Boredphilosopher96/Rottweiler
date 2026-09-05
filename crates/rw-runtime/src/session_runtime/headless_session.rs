@@ -1,5 +1,4 @@
 use super::accounting_projection::collect_abandoned_empty_sessions;
-use super::accounting_projection::update_one_session_index;
 use super::checkpoint_journal::open_checkpoint_stores;
 use super::checkpoint_journal::preview_persisted_workspace_roots;
 use super::checkpoint_journal::restore_persisted_workspace_roots;
@@ -1146,8 +1145,6 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
     })
     .map_err(display_agent_error)?;
     let final_sink = Arc::clone(&durable_sink);
-    let final_root = storage_root.clone();
-    let final_session = session_id.clone();
     let lifetime = super::headless_lifetime::own(
         actor.clone(),
         Arc::clone(&plugin_runtime_budget),
@@ -1156,7 +1153,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
         Arc::clone(&journal_service),
         async move {
             let indexed = if interactive {
-                update_one_session_index(&final_root, &final_session, &final_sink)
+                final_sink.synchronize_search()
             } else {
                 Ok(())
             };

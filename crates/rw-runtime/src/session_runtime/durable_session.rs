@@ -2,10 +2,7 @@ mod accounting;
 mod canonical;
 mod provider_recovery;
 mod reads;
-use super::accounting_projection::compact_title;
 use super::accounting_projection::is_session_projection_boundary;
-use super::accounting_projection::session_projection_updated_at;
-use super::accounting_projection::upsert_session_projection;
 use super::prompt_shapes::PromptShapeJournal;
 use crate::journal_service::JournalReadLease;
 use crate::journal_service::JournalRegistration;
@@ -25,9 +22,8 @@ use rw_core::{AdmittedEventBatch, EventBatchPlan, EventBatchReservation};
 use rw_store::session::AccountingLedger;
 use rw_store::session::SessionEventLog;
 use rw_store::session::SessionEventPageLimits;
-use rw_store::session::SessionProjection;
-use rw_store::session::SessionSummary;
 use rw_store::session::UtcTimestamp;
+#[cfg(test)]
 use rw_types::ToolOutput;
 use std::path::Path;
 use std::path::PathBuf;
@@ -100,72 +96,11 @@ pub(super) struct DurableEventSink {
     canonical: std::sync::OnceLock<Arc<canonical::CanonicalSession>>,
     pub(super) storage_root: PathBuf,
     pub(super) session_id: String,
-    pub(super) hosted_projection: Option<Mutex<HostedSessionProjection>>,
+    search_update: Mutex<()>,
     pub(super) prompt_shapes: Arc<PromptShapeJournal>,
     pub(super) accounting_dirty: Arc<AtomicBool>,
     accounting_progress:
         Arc<tokio::sync::Mutex<Option<rw_store::session::journal::JournalPrefixIdentity>>>,
-}
-
-pub(super) struct HostedSessionProjection {
-    pub(super) projection: SessionProjection,
-    pub(super) explicit_title: bool,
-    pub(super) saw_user_message: bool,
-}
-
-impl HostedSessionProjection {
-    pub(super) fn from_events(session_id: &str, events: &[EngineEvent], path: &Path) -> Self {
-        let mut hosted = Self {
-            projection: SessionProjection {
-                summary: SessionSummary {
-                    id: session_id.to_owned(),
-                    title: "New session".to_owned(),
-                    updated_unix_ms: session_projection_updated_at(path),
-                    cost_micros: 0,
-                    turn_count: 0,
-                },
-                transcript: String::new(),
-                projected_through: None,
-            },
-            explicit_title: false,
-            saw_user_message: false,
-        };
-        hosted.apply(events, path);
-        hosted
-    }
-
-    pub(super) fn apply(&mut self, events: &[EngineEvent], path: &Path) {
-        for event in events {
-            match event {
-                EngineEvent::SessionTitleUpdated { title, .. } => {
-                    self.projection.summary.title.clone_from(title);
-                    self.explicit_title = true;
-                }
-                EngineEvent::UserMessageAccepted { content, .. } => {
-                    if !self.saw_user_message && !self.explicit_title {
-                        self.projection.summary.title = compact_title(content);
-                    }
-                    self.saw_user_message = true;
-                    self.projection.summary.turn_count =
-                        self.projection.summary.turn_count.saturating_add(1);
-                    self.projection.transcript.push_str("user: ");
-                    self.projection.transcript.push_str(content);
-                    self.projection.transcript.push('\n');
-                }
-                EngineEvent::TextDelta { text, .. } => {
-                    self.projection.transcript.push_str(text);
-                }
-                EngineEvent::ToolCallFinished { output, .. } => {
-                    self.projection.transcript.push_str("\ntool: ");
-                    append_tool_output(&mut self.projection.transcript, output);
-                    self.projection.transcript.push('\n');
-                }
-                _ => {}
-            }
-            self.projection.projected_through = event.meta().map(|meta| meta.sequence_id);
-        }
-        self.projection.summary.updated_unix_ms = session_projection_updated_at(path);
-    }
 }
 
 impl DurableEventSink {
@@ -173,34 +108,6 @@ impl DurableEventSink {
         log: SessionEventLog,
         storage_root: PathBuf,
         session_id: String,
-        journal_service: Arc<JournalService>,
-    ) -> Result<Arc<Self>> {
-        Self::new_with_hosted_projection(log, storage_root, session_id, None, journal_service)
-    }
-
-    pub(super) fn new_hosted(
-        log: SessionEventLog,
-        storage_root: PathBuf,
-        session_id: String,
-        recovered_events: &[EngineEvent],
-        journal_service: Arc<JournalService>,
-    ) -> Result<Arc<Self>> {
-        let projection =
-            HostedSessionProjection::from_events(&session_id, recovered_events, log.path());
-        Self::new_with_hosted_projection(
-            log,
-            storage_root,
-            session_id,
-            Some(projection),
-            journal_service,
-        )
-    }
-
-    pub(super) fn new_with_hosted_projection(
-        log: SessionEventLog,
-        storage_root: PathBuf,
-        session_id: String,
-        hosted_projection: Option<HostedSessionProjection>,
         journal_service: Arc<JournalService>,
     ) -> Result<Arc<Self>> {
         let log = Arc::new(Mutex::new(log));
@@ -211,7 +118,7 @@ impl DurableEventSink {
                 .read_view(),
         )?;
         let prompt_shapes = Arc::new(PromptShapeJournal::open(&storage_root, &session_id)?);
-        Ok(Arc::new(Self {
+        let sink = Arc::new(Self {
             journal_service,
             registration,
             log,
@@ -220,39 +127,34 @@ impl DurableEventSink {
             reads: reads::ReadOperations::new(),
             storage_root,
             session_id,
-            hosted_projection: hosted_projection.map(Mutex::new),
+            search_update: Mutex::new(()),
             prompt_shapes,
             accounting_dirty: Arc::new(AtomicBool::new(false)),
             accounting_progress: Arc::new(tokio::sync::Mutex::new(None)),
-        }))
+        });
+        sink.synchronize_search()?;
+        Ok(sink)
     }
 
-    fn update_hosted_projection(&self, persisted: &[EngineEvent]) {
-        let projection = self.hosted_projection.as_ref().and_then(|hosted| {
-            let path = self
-                .storage_root
-                .join("sessions")
-                .join(&self.session_id)
-                .join("journal");
-            let mut hosted = hosted
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            hosted.apply(persisted, &path);
-            persisted
-                .iter()
-                .any(is_session_projection_boundary)
-                .then(|| hosted.projection.clone())
-        });
-        let Some(projection) = projection else {
+    pub(super) fn synchronize_search(&self) -> Result<()> {
+        let _update = self
+            .search_update
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let lease = self
+            .journal_service
+            .admit_read()?
+            .capture(&self.session_id)?;
+        super::search_projection::synchronize(&self.storage_root, &self.session_id, &lease.view)
+    }
+
+    fn update_search(&self, persisted: &[EngineEvent]) {
+        if !persisted.iter().any(is_session_projection_boundary) {
             return;
-        };
-        let update_result = upsert_session_projection(&self.storage_root, &projection);
-        if let Err(error) = update_result {
-            tracing::warn!(
-                session_id = %self.session_id,
-                reason = %error,
-                "hosted session search projection will retry at the next durable boundary"
-            );
+        }
+        if let Err(error) = self.synchronize_search() {
+            tracing::warn!(session_id = %self.session_id, reason = %error,
+                "session search projection will retry from its persisted source cursor");
         }
     }
 
@@ -511,7 +413,7 @@ impl DurableEventSink {
                     _ => {}
                 }
             }
-            self.update_hosted_projection(persisted);
+            self.update_search(persisted);
             if let Err(error) = self.reconcile_committed_accounting(persisted) {
                 self.accounting_dirty.store(true, Ordering::Release);
                 tracing::warn!(
@@ -532,6 +434,7 @@ impl DurableEventSink {
 #[cfg(test)]
 mod commit_tests;
 
+#[cfg(test)]
 pub(super) fn append_tool_output(target: &mut String, output: &ToolOutput) {
     match output {
         ToolOutput::Text { text } => target.push_str(text),

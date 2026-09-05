@@ -27,26 +27,15 @@ fn charge() -> TurnAccountingEntry {
 }
 
 #[test]
-fn derived_rebuild_preserves_authority_and_rolls_back_on_accounting_conflict() {
+fn derived_rebuild_preserves_accounting_and_reservations() {
     let root = tempdir().expect("root");
     let ledger = AccountingLedger::open(root.path()).expect("ledger");
     ledger.record(&charge()).expect("charge");
     let connection = Connection::open(root.path().join("index.sqlite")).expect("db");
     connection.execute_batch("CREATE TABLE reservations(id TEXT PRIMARY KEY, micros INTEGER NOT NULL); INSERT INTO reservations VALUES ('uncertain',17);").expect("independent authority");
     drop(connection);
-    let row = SessionProjection {
-        summary: SessionSummary {
-            id: "visible".into(),
-            title: "new".into(),
-            updated_unix_ms: 1,
-            cost_micros: 0,
-            turn_count: 1,
-        },
-        transcript: "searchable".into(),
-        projected_through: Some(SequenceId(1)),
-    };
-    let index =
-        SessionIndex::rebuild(root.path(), std::slice::from_ref(&row), &[]).expect("rebuild");
+    let index = SessionIndex::reset_derived(root.path()).expect("reset derived search");
+    assert!(index.list(10).expect("empty derived index").is_empty());
     assert_eq!(
         ledger.entries_bounded(None, 4096).expect("ledger survives"),
         vec![charge()]
@@ -60,34 +49,6 @@ fn derived_rebuild_preserves_authority_and_rolls_back_on_accounting_conflict() {
         )
         .expect("reservation survives");
     assert_eq!(reserved, 17);
-    let mut conflict = charge();
-    conflict.cost = Cost::Monetary {
-        amount_micros: 6,
-        currency: "USD".into(),
-    };
-    assert!(matches!(
-        SessionIndex::rebuild(root.path(), &[], &[conflict]),
-        Err(SessionStoreError::AccountingConflict)
-    ));
-    assert_eq!(
-        index
-            .get("visible")
-            .expect("derived transaction rolled back"),
-        Some(row.summary)
-    );
-    assert_eq!(
-        index
-            .search("searchable", 10)
-            .expect("search rolled back")
-            .len(),
-        1
-    );
-    assert_eq!(
-        ledger
-            .entries_bounded(None, 4096)
-            .expect("ledger unchanged"),
-        vec![charge()]
-    );
 }
 
 #[test]
@@ -95,7 +56,7 @@ fn corrupt_database_is_not_deleted_as_a_search_repair() {
     let root = tempdir().expect("root");
     let path = root.path().join("index.sqlite");
     std::fs::write(&path, b"unknown authoritative bytes").expect("fixture");
-    assert!(SessionIndex::rebuild(root.path(), &[], &[]).is_err());
+    assert!(SessionIndex::reset_derived(root.path()).is_err());
     assert_eq!(
         std::fs::read(path).expect("preserved"),
         b"unknown authoritative bytes"
@@ -114,7 +75,7 @@ fn explicit_search_rebuild_can_replace_an_unsupported_derived_schema() {
         SessionIndex::open(root.path()),
         Err(SessionStoreError::UnsupportedSqliteSchema { table: "sessions" })
     ));
-    let index = SessionIndex::rebuild(root.path(), &[], &[]).expect("explicit derived repair");
+    let index = SessionIndex::reset_derived(root.path()).expect("explicit derived repair");
     assert!(index.list(10).expect("empty current index").is_empty());
     assert_eq!(
         ledger

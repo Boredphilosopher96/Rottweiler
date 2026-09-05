@@ -1,87 +1,95 @@
 use super::*;
 
+fn summary(id: &str, title: &str, updated: i64) -> SessionSummary {
+    SessionSummary {
+        id: id.into(),
+        title: title.into(),
+        updated_unix_ms: updated,
+        cost_micros: 0,
+        turn_count: 1,
+    }
+}
+fn projection(summary: SessionSummary, next_sequence: u64) -> SessionProjection {
+    SessionProjection {
+        summary,
+        explicit_title: true,
+        complete: true,
+        source: crate::session::journal::JournalPrefixIdentity {
+            next_sequence,
+            digest: [0; 32],
+        },
+    }
+}
+
 #[test]
-fn sqlite_index_lists_updates_and_searches_transcripts() {
-    let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
-    let index =
-        SessionIndex::open(root.path()).unwrap_or_else(|error| panic!("index must open: {error}"));
-    let first = SessionSummary {
-        id: "first".to_owned(),
-        title: "Rust parser".to_owned(),
-        updated_unix_ms: 10,
-        cost_micros: 7,
-        turn_count: 2,
-    };
-    let second = SessionSummary {
-        id: "second".to_owned(),
-        title: "TypeScript UI".to_owned(),
-        updated_unix_ms: 20,
-        cost_micros: 9,
-        turn_count: 4,
-    };
+fn sqlite_search_matches_terms_across_documents_and_atomically_rewinds() {
+    let root = tempdir().expect("root");
+    let index = SessionIndex::open(root.path()).expect("index");
+    let first = projection(summary("first", "Rust parser", 10), 4);
     index
-        .upsert(&SessionProjection {
-            summary: first.clone(),
-            transcript: "implemented a resilient parser".to_owned(),
-            projected_through: Some(SequenceId(3)),
+        .apply_page(None, &first, |writer| {
+            writer.text(1, SequenceId(0), 0, "implemented a resilient parser")?;
+            writer.text(2, SequenceId(3), 0, "rendered terminal cells")
         })
-        .unwrap_or_else(|error| panic!("first index row must write: {error}"));
-    index
-        .upsert(&SessionProjection {
-            summary: second.clone(),
-            transcript: "rendered terminal cells".to_owned(),
-            projected_through: Some(SequenceId(8)),
-        })
-        .unwrap_or_else(|error| panic!("second index row must write: {error}"));
+        .expect("bounded page");
     assert_eq!(
         index
-            .list(10)
-            .unwrap_or_else(|error| panic!("sessions must list: {error}")),
-        vec![second.clone(), first.clone()]
+            .search("resilient terminal", 10)
+            .expect("session-wide conjunction"),
+        vec![first.summary.clone()]
     );
-    assert_eq!(
-        index
-            .search("resilient", 10)
-            .unwrap_or_else(|error| panic!("sessions must search: {error}")),
-        vec![first.clone()]
-    );
-    let updated = SessionSummary {
-        title: "Rust event parser".to_owned(),
-        updated_unix_ms: 30,
-        cost_micros: 11,
-        ..first
-    };
+    let second = projection(summary("second", "TypeScript UI", 20), 2);
     index
-        .upsert(&SessionProjection {
-            summary: updated.clone(),
-            transcript: "recovered a truncated transcript".to_owned(),
-            projected_through: Some(SequenceId(11)),
+        .apply_page(None, &second, |writer| {
+            writer.text(1, SequenceId(1), 0, "other document")
         })
-        .unwrap_or_else(|error| panic!("updated row must write: {error}"));
+        .expect("second");
+    assert_eq!(
+        index.list(10).expect("list"),
+        vec![second.summary, first.summary.clone()]
+    );
+    let updated = projection(summary("first", "Rust event parser", 30), 12);
+    index
+        .apply_page(Some(first.source), &updated, |writer| {
+            writer.rewind(1)?;
+            writer.text(2, SequenceId(11), 0, "recovered a truncated transcript")
+        })
+        .expect("rewind and append");
     assert!(
         index
-            .search("resilient", 10)
-            .unwrap_or_else(|error| panic!("old search must work: {error}"))
+            .search("terminal", 10)
+            .expect("discarded document")
             .is_empty()
     );
     assert_eq!(
         index
-            .search("truncated", 10)
-            .unwrap_or_else(|error| panic!("updated search must work: {error}")),
-        vec![updated]
+            .search("resilient truncated", 10)
+            .expect("retained and new"),
+        vec![updated.summary.clone()]
     );
     assert_eq!(
         index
             .projection_status("first", Some(SequenceId(11)))
-            .unwrap_or_else(|error| panic!("watermark must query: {error}")),
+            .expect("cursor"),
         ProjectionStatus::Current
     );
     assert!(matches!(
         index
             .projection_status("first", Some(SequenceId(12)))
-            .unwrap_or_else(|error| panic!("stale watermark must query: {error}")),
+            .expect("cursor"),
         ProjectionStatus::Stale { .. }
     ));
+    assert!(
+        index
+            .apply_page(Some(first.source), &updated, |writer| writer.rewind(0))
+            .is_err()
+    );
+    assert_eq!(
+        index
+            .search("resilient truncated", 10)
+            .expect("CAS rejected before effects"),
+        vec![updated.summary]
+    );
 }
 
 #[test]
@@ -168,8 +176,12 @@ fn derived_index_rebuild_replaces_stale_rows() {
             cost_micros: 0,
             turn_count: 1,
         },
-        transcript: "obsolete".to_owned(),
-        projected_through: Some(SequenceId(0)),
+        explicit_title: false,
+        complete: true,
+        source: crate::session::journal::JournalPrefixIdentity {
+            next_sequence: 1,
+            digest: [0; 32],
+        },
     };
     SessionIndex::open(root.path())
         .and_then(|index| index.upsert(&stale))
@@ -182,8 +194,12 @@ fn derived_index_rebuild_replaces_stale_rows() {
             cost_micros: 1,
             turn_count: 2,
         },
-        transcript: "authoritative".to_owned(),
-        projected_through: Some(SequenceId(u64::MAX)),
+        explicit_title: false,
+        complete: true,
+        source: crate::session::journal::JournalPrefixIdentity {
+            next_sequence: u64::MAX,
+            digest: [0; 32],
+        },
     };
     let accounting = accounting_entry(
         "current",
@@ -195,12 +211,12 @@ fn derived_index_rebuild_replaces_stale_rows() {
             currency: "USD".to_owned(),
         },
     );
-    let rebuilt = SessionIndex::rebuild(
-        root.path(),
-        std::slice::from_ref(&current),
-        std::slice::from_ref(&accounting),
-    )
-    .unwrap_or_else(|error| panic!("index must rebuild: {error}"));
+    let ledger = AccountingLedger::open(root.path()).expect("ledger");
+    ledger.record(&accounting).expect("durable accounting");
+    let rebuilt = SessionIndex::reset_derived(root.path()).expect("reset only derived rows");
+    rebuilt
+        .upsert(&current)
+        .expect("bounded metadata projection");
     assert!(rebuilt.get("stale").unwrap_or(None).is_none());
     assert_eq!(
         rebuilt.get("current").unwrap_or(None),
@@ -208,7 +224,7 @@ fn derived_index_rebuild_replaces_stale_rows() {
     );
     assert_eq!(
         rebuilt
-            .projection_status("current", Some(SequenceId(u64::MAX)))
+            .projection_status("current", Some(SequenceId(u64::MAX - 1)))
             .unwrap_or_else(|error| panic!("watermark must survive: {error}")),
         ProjectionStatus::Current
     );
@@ -240,8 +256,12 @@ fn read_only_search_never_creates_or_mutates_index_artifacts() {
             cost_micros: 0,
             turn_count: 1,
         },
-        transcript: "deterministic needle transcript".to_owned(),
-        projected_through: Some(SequenceId(0)),
+        explicit_title: false,
+        complete: true,
+        source: crate::session::journal::JournalPrefixIdentity {
+            next_sequence: 1,
+            digest: [0; 32],
+        },
     };
     SessionIndex::open(root.path())
         .and_then(|index| index.upsert(&projection))
@@ -285,8 +305,12 @@ fn read_only_search_sees_committed_wal_rows_without_mutating_artifacts() {
             cost_micros: 0,
             turn_count: 1,
         },
-        transcript: "committed only in the held writer WAL".to_owned(),
-        projected_through: Some(SequenceId(4)),
+        explicit_title: false,
+        complete: true,
+        source: crate::session::journal::JournalPrefixIdentity {
+            next_sequence: 5,
+            digest: [0; 32],
+        },
     };
     upsert_projection(&writer, &projection)
         .unwrap_or_else(|error| panic!("WAL projection: {error}"));

@@ -284,11 +284,10 @@ pub(crate) async fn compose_hosted_actor(
         .unwrap_or_else(|| persisted_model_alias.clone());
     let driver_client_id = recovered.driver_client_id.clone();
     let shell_active = recovered.active_shell.is_some();
-    let durable_sink = DurableEventSink::new_hosted(
+    let durable_sink = DurableEventSink::new(
         log,
         options.storage_root.clone(),
         session_id.clone(),
-        &recovered_events,
         Arc::clone(&options.journal_service),
     )?;
     durable_sink

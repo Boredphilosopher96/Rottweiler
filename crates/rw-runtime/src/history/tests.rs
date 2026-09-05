@@ -69,8 +69,9 @@ fn read_only_session_listing_is_newest_first_and_bounded() {
                     cost_micros: 0,
                     turn_count: 0,
                 },
-                transcript: String::new(),
-                projected_through: None,
+                explicit_title: false,
+                complete: true,
+                source: rw_store::session::journal::JournalPrefixIdentity::empty(),
             })
             .expect("projection");
     }

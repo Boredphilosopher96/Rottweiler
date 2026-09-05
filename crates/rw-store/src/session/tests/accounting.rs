@@ -35,7 +35,7 @@ fn unsupported_accounting_schema_rejects_without_changing_rows_or_bytes() {
         })
     ));
     assert!(matches!(
-        SessionIndex::rebuild(root.path(), &[], &[]),
+        SessionIndex::reset_derived(root.path()),
         Err(SessionStoreError::UnsupportedSqliteSchema {
             table: "turn_accounting"
         })

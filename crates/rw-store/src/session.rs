@@ -30,7 +30,9 @@ pub use error::SessionStoreError;
 pub use event_log::{SessionEventLog, garbage_collect_empty_sessions};
 #[cfg(test)]
 use index::upsert_projection;
-pub use index::{ProjectionStatus, SessionIndex, SessionProjection, SessionSummary};
+pub use index::{
+    ProjectionStatus, SearchDocumentWriter, SessionIndex, SessionProjection, SessionSummary,
+};
 #[cfg(not(unix))]
 use journal_io::create_checked_directory_portable;
 #[cfg(unix)]

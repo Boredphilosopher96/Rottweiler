@@ -216,8 +216,9 @@ fn durable_session_queries_tolerate_blocking_pool_scheduling_delay() {
                     cost_micros: 0,
                     turn_count: 1,
                 },
-                transcript: "durable query scheduling".to_owned(),
-                projected_through: None,
+                explicit_title: false,
+                complete: true,
+                source: rw_store::session::journal::JournalPrefixIdentity::empty(),
             })
         })
         .expect("searchable session index");
