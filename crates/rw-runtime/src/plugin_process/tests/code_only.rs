@@ -77,7 +77,7 @@ async fn native_workers_deny_ambient_effects_and_execute_only_scoped_host_tools(
         (
             "scoped_write",
             json!({"path":"output","content":"owned mutation"}),
-            "output",
+            "wrote 14 bytes",
         ),
     ] {
         let declaration = manifest
