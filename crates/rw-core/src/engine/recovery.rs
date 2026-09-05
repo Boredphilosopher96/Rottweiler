@@ -2,6 +2,10 @@
 
 mod active;
 pub use active::InterruptedTurnInputs;
+mod accounting;
+pub use accounting::{MAX_ACCOUNTING_PAGE_BYTES, RecoveryAccountingPage};
+mod control;
+pub use control::{MAX_CONTROL_SOURCE_BYTES, RecoveredMessage, RecoveredModelSelection, RecoveryControlPayloads};
 mod encoding;
 mod maintenance;
 mod projector;
@@ -12,6 +16,8 @@ pub use read::{
     MAX_MATERIALIZED_HISTORY_TURNS, RecoverySnapshot,
 };
 mod state;
+mod window;
+pub use window::RecoveryBoundary;
 pub use projector::{CanonicalRecovery, RecoveryProgress};
 use rw_store::session::recovery_index::RecoveryIndexError;
 pub use state::{
@@ -46,3 +52,9 @@ mod tests;
 
 #[cfg(test)]
 mod active_tests;
+
+#[cfg(test)]
+mod control_tests;
+
+#[cfg(test)]
+mod indexed_read_tests;
