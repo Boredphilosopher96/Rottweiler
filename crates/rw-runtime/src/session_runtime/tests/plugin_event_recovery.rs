@@ -117,12 +117,40 @@ async fn sdk_event_process_crash_replays_only_the_unacknowledged_delivery() {
     drop(second);
 
     let third = compose_fixture_session(&storage, &workspace, "event-recovery-session", true).await;
+    let current = third
+        .handle
+        .snapshot()
+        .await
+        .expect("recovered mode")
+        .mode_id;
+    let next = if current.0 == "plan" {
+        "execute"
+    } else {
+        "plan"
+    };
+    let mut events = third.handle.subscribe().expect("durable mode events");
     third
         .handle
-        .send_message("/plan")
+        .send_message(format!("/mode {next}"))
         .await
         .expect("produce later subscribed event");
+    let barrier_sequence = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let rw_types::EngineEvent::ModeChanged { meta, mode, .. } =
+                events.recv().await.expect("mode event stream")
+            {
+                assert_eq!(mode.0, next);
+                break meta.sequence_id;
+            }
+        }
+    })
+    .await
+    .expect("canonical mode transition");
     let after = state_with(&third.handle, "barrier").await;
+    assert_eq!(
+        value(&after, "barrier"),
+        &serde_json::json!(barrier_sequence)
+    );
     assert_eq!(value(&after, "deliveries"), &serde_json::json!(1));
     assert!(
         after
