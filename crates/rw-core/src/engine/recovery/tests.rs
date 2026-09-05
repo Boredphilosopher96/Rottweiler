@@ -21,7 +21,7 @@ fn event(sequence: u64, pending: PendingEvent) -> EngineEvent {
         protocol_version: PROTOCOL_VERSION,
         session_id: SessionId("canonical".into()),
         sequence_id: SequenceId(sequence),
-        emitted_at: "2026-09-04T00:00:00Z".into(),
+        emitted_at: "2026-09-04T00:00:00.000Z".into(),
         caused_by: None,
     })
 }

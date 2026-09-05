@@ -82,6 +82,9 @@ async fn session_handle_rewind_restores_ten_agent_edits_to_turn_three() {
         JournalService::new(&(storage.clone())).expect("journal reads"),
     )
     .expect("durable sink");
+    let modes = Arc::new(rw_ext::ModeRegistry::builtins().expect("built-in modes"));
+    sink.configure_canonical(Arc::clone(&modes), None)
+        .expect("canonical owner");
     let coordinator_root = checkpoint_root(&storage, &workspace, &session.0);
     let checkpoints = Arc::new(DurableCheckpointCoordinator::new(
         coordinator_root.clone(),
@@ -101,7 +104,7 @@ async fn session_handle_rewind_restores_ten_agent_edits_to_turn_three() {
         permissions: Arc::new(PermissionGate::new(PermissionDecision::Allow)),
         hooks: Arc::new(builtin_hook_dispatcher().expect("hooks")),
         commands: Arc::new(builtin_command_registry().expect("commands")),
-        modes: Arc::new(rw_ext::ModeRegistry::builtins().expect("built-in modes")),
+        modes,
         event_sink: sink,
         event_clock: Arc::new(SystemEventClock),
         provider_admission: test_provider_admission(),
