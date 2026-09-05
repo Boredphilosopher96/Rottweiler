@@ -14,6 +14,11 @@ export interface HistoryAnchor {
   readonly offset: number
 }
 
+export interface HistoryViewport {
+  readonly following: boolean
+  readonly anchor: HistoryAnchor | null
+}
+
 interface SessionView {
   view: TranscriptView | null
   total: bigint
@@ -92,6 +97,24 @@ export class HistoryController {
     const session = this.#session(sessionId)
     await this.load(session.following || session.anchor === null
       ? { type: "latest" } : { type: "around", item: session.anchor.id })
+  }
+
+  /** Restore source identity before fetching: physical window offsets are not history positions. */
+  async restoreViewport(sessionId: string, viewport: HistoryViewport): Promise<void> {
+    if (this.#disposed) return
+    this.#request?.abort()
+    this.#request = null
+    const previous = this.#active
+    this.#active = null
+    this.#sessionId = sessionId
+    this.#selection = null
+    const session = this.#session(sessionId)
+    session.following = viewport.following
+    session.anchor = viewport.anchor
+    this.#following = viewport.following
+    try { this.#changed() } finally { previous?.release() }
+    await this.load(viewport.following || viewport.anchor === null
+      ? { type: "latest" } : { type: "around", item: viewport.anchor.id })
   }
 
   async load(position: TranscriptPosition): Promise<void> {

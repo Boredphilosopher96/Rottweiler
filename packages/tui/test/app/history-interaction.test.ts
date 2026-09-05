@@ -125,21 +125,40 @@ describe("Rottweiler history-interaction", () => {
     expect(app.composer.editor.focused).toBeTrue()
   })
 
-  test("restores the composer draft and transcript scroll after a process recycle", async () => {
+  test("restores a source anchor after destroying the renderer and loading a differently wrapped history window", async () => {
     const setup = await createTestRenderer({ width: 80, height: 16, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, { historyReader: historyReaderFor(Array.from({ length: 40 }, (_, index) => conversationItem(index + 1, "assistant", `Retained line ${index}`))) })
+    const items = Array.from({ length: 1000 }, (_, index) => conversationItem(index + 1, "assistant", `Retained line ${index} with wrapping text. `.repeat(5)))
+    const reader = historyReaderFor(items)
+    const app = createRottweilerApp(renderer, { historyReader: reader })
     renderer.root.add(app)
+    await setup.flush()
+    app.transcript.scrollTo(0)
+    await setup.flush()
+    app.transcript.setScrollOffset(5)
+    await setup.flush()
     app.composer.value = "unfinished prompt"
     const saved = app.recycleState()
     if (saved === null) throw new Error("expected a restorable draft")
-    app.restoreRecycleState({ ...saved, scrollTop: 5 })
-    await setup.flush()
-    app.applyPendingRecycleScroll()
+    expect(saved.history.following).toBe(false)
+    expect(saved.history.anchor).not.toBeNull()
+    expect(Number(saved.history.anchor?.id)).toBeLessThan(32)
+    renderer.root.remove(app)
+    app.destroyRecursively()
+    renderer.destroy()
 
-    expect(app.composer.value).toBe("unfinished prompt")
-    expect(app.transcript.scroller.scrollTop).toBe(5)
-    expect(app.recycleState()).toMatchObject({ composer: { content: "unfinished prompt" }, scrollTop: 5 })
+    const recreated = await createTestRenderer({ width: 45, height: 16, useThread: false })
+    renderer = recreated.renderer
+    const replacement = createRottweilerApp(renderer, { historyReader: reader })
+    renderer.root.add(replacement)
+    replacement.restoreRecycleState(saved)
+    await recreated.flush()
+    replacement.applyPendingRecycleScroll()
+    await recreated.flush()
+
+    expect(replacement.composer.value).toBe("unfinished prompt")
+    expect(replacement.transcript.captureHistoryViewport()).toEqual(saved.history)
+    expect(replacement.transcript.mountedEntryCount).toBeLessThanOrEqual(16)
   })
 
   test("does not clear a newer selection when an older clipboard write finishes", async () => {

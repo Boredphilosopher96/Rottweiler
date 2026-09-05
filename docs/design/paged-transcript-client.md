@@ -45,7 +45,7 @@ Before replacing the visible window, the renderer captures the first visible ite
 
 Cards keep bounded previews and use OpenTUI for text selection, terminal cells, input and damage tracking. Unmounted historical cards are destroyed. Live reasoning and tool activity have a separate tail; durable row arrival transfers matching selection and expansion identity. A live delta does not rebuild the historical projection.
 
-Renderer handoff is governed by `AppClientState` and its private size limit. Interactions that cannot be safely captured defer replacement. History page availability and in-process anchor restoration do not themselves establish a cross-process anchor contract.
+Renderer handoff is governed by `AppClientState` and its private size limit. Interactions that cannot be safely captured defer replacement. The handoff stores follow-tail intent or the visible stable source item and its signed viewport offset. A replacement resolves that item through an `around` read before restoring layout, including the index-provided replacement when rewind removed the source item. Unresolved navigation defers replacement; physical window scroll offsets are not durable history positions.
 
 ## Local diagnostics
 

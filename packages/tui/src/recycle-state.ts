@@ -14,6 +14,8 @@ import { dirname } from "node:path"
 import type { Attachment } from "./protocol"
 import { MAX_ATTACHMENTS_PER_MESSAGE } from "./protocol"
 import type { ComposerDraft } from "./subagent-state"
+import type { HistoryViewport } from "./history/controller"
+import { parseU64 } from "./transport/types"
 import type { InputMode, VimFocus } from "./keybindings"
 
 export const MAX_RECYCLE_STATE_BYTES = 8 * 1024 * 1024
@@ -42,12 +44,12 @@ export interface TranscriptClientState {
 
 /** Only editable client state belongs here; engine projections and credentials do not. */
 export interface AppClientState {
-  readonly schemaVersion: 2
+  readonly schemaVersion: 3
   readonly sessionId: string
   readonly composer: ClientComposerState
   readonly subagentDrafts: readonly { readonly id: string; readonly draft: ComposerDraft }[]
   readonly primaryView: "conversation" | "tools"
-  readonly scrollTop: number
+  readonly history: HistoryViewport
   readonly toolsScrollTop: number
   readonly transcript: TranscriptClientState
   readonly tools: ClientBlockState
@@ -181,15 +183,25 @@ function parseBlocks(value: unknown): ClientBlockState | null {
 }
 
 export function parseTuiRecycleState(value: unknown): AppClientState | null {
-  if (!record(value) || value.schemaVersion !== 2 || !label(value.sessionId)
+  if (!record(value) || value.schemaVersion !== 3 || !label(value.sessionId)
     || !record(value.composer) || !offset(value.composer.cursorOffset)
-    || !offset(value.scrollTop) || !offset(value.toolsScrollTop)
+    || !offset(value.toolsScrollTop)
     || (value.primaryView !== "conversation" && value.primaryView !== "tools")
     || (value.inputMode !== "standard" && value.inputMode !== "normal" && value.inputMode !== "insert")
     || (value.focus !== "composer" && value.focus !== "transcript")
     || !label(value.theme) || !Array.isArray(value.subagentDrafts) || value.subagentDrafts.length > 256
   ) return null
   if (Buffer.byteLength(JSON.stringify(value)) > MAX_RECYCLE_STATE_BYTES) return null
+  if (!record(value.history) || typeof value.history.following !== "boolean") return null
+  let anchor: HistoryViewport["anchor"] = null
+  if (value.history.anchor !== null) {
+    const item = value.history.anchor
+    if (!record(item) || typeof item.id !== "string" || parseU64(item.id) === null
+      || typeof item.offset !== "number" || !Number.isSafeInteger(item.offset)) return null
+    anchor = { id: item.id, offset: item.offset }
+  }
+  if (value.history.following && anchor !== null) return null
+  const history: HistoryViewport = { following: value.history.following, anchor }
   const tools = parseBlocks(value.tools)
   if (!record(value.transcript) || tools === null) return null
   const blocks = parseBlocks(value.transcript.blocks)
@@ -227,11 +239,11 @@ export function parseTuiRecycleState(value: unknown): AppClientState | null {
       onboarding: item.onboarding, themeBeforePreview: item.themeBeforePreview }
   }
   return {
-    schemaVersion: 2, sessionId: value.sessionId,
+    schemaVersion: 3, sessionId: value.sessionId,
     composer: { ...draft, cursorOffset: value.composer.cursorOffset,
       selection },
     subagentDrafts, primaryView: value.primaryView === "tools" ? "tools" : "conversation",
-    scrollTop: value.scrollTop, toolsScrollTop: value.toolsScrollTop, transcript, tools,
+    history, toolsScrollTop: value.toolsScrollTop, transcript, tools,
     inputMode: value.inputMode, focus: value.focus, theme: value.theme, picker,
   }
 }

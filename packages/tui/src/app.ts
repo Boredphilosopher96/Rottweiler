@@ -435,7 +435,7 @@ export class RottweilerApp extends BoxRenderable {
       projectRejection: outcome => this.#projectRejection(outcome), invalidSlash: message => this.#projectInvalidSlashCommand(message),
     })
     this.#clientRestore = new ClientRestoreController({
-      ui: this, pickerController: this.#pickerController, children: this.#children, sessions: this.#sessions,
+      ui: this, history: this.#history.controller, pickerController: this.#pickerController, children: this.#children, sessions: this.#sessions,
       input: this.#input, providers: this.#providers, mcp: this.#mcp, themes: this.#themes,
       submission: this.#submission, pickerContent: this.#pickerContent,
       get submissionsInFlight() { return app.#composerSubmissionsInFlight }, get sessionId() { return app.#sessionId },

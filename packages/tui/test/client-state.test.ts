@@ -1,4 +1,4 @@
-import { emptyHistoryReader } from "./fixtures/history"
+import { emptyHistoryReader, fixturePage } from "./fixtures/history"
 import { createStreamingTail } from "../src/state/model"
 import { toolOutputBuffer } from "../src/state/display-buffer"
 import { afterEach, describe, expect, test } from "bun:test"
@@ -128,6 +128,33 @@ describe("client-owned renderer handoff", () => {
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
+  })
+
+  test("the process recycle caller defers an unresolved history navigation", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 25, useThread: false })
+    renderer = setup.renderer
+    let finish!: () => void
+    const pending = new Promise<void>(resolve => { finish = resolve })
+    const app = createRottweilerApp(renderer, { historyReader: {
+      page: async (session, read) => {
+        if (read.position.type === "first") await pending
+        return { type: "ready", page: fixturePage(session, read) }
+      }, content: emptyHistoryReader.content,
+    } })
+    renderer.root.add(app)
+    await setup.flush()
+    app.transcript.scrollTo(0)
+    const root = mkdtempSync(join(tmpdir(), "rw-history-recycle-"))
+    let exits = 0
+    try {
+      expect(recycleTuiIfNeeded({ observedBytes: 500, thresholdBytes: 384,
+        path: join(root, "handoff.json"), capture: () => app.recycleState(), recycle: () => { exits++ },
+      })).toBe(false)
+      expect(exits).toBe(0)
+      finish()
+      await setup.flush()
+      expect(app.recycleState()?.history.following).toBe(false)
+    } finally { finish(); rmSync(root, { recursive: true, force: true }) }
   })
 
   test("restores a detached child draft only in its owning session", async () => {

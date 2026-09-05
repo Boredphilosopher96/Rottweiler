@@ -1,4 +1,4 @@
-import type { HistorySnapshot } from "../history/controller"
+import type { HistorySnapshot, HistoryViewport } from "../history/controller"
 import { TranscriptRowRenderable } from "./transcript/row"
 import { TranscriptScrollWindow } from "./transcript/scroll-window"
 import {
@@ -334,6 +334,14 @@ export class TranscriptRenderable extends BoxRenderable {
 
   get selectedBlockId(): string | null {
     return this.#selectedBlockId
+  }
+
+  captureHistoryViewport(): HistoryViewport | null {
+    if (this.#history === null || this.#history.following) return { following: true, anchor: null }
+    // An in-flight navigation has not selected a physical source row yet.
+    if (this.#history.loading || this.#requestedAnchor !== null || this.#pendingAnchor !== null) return null
+    const anchor = this.#captureAnchor() ?? this.#history.anchor
+    return anchor === null && this.#history.total > 0n ? null : { following: false, anchor }
   }
 
   captureClientState(): TranscriptClientState {

@@ -14,9 +14,9 @@ import {
 
 const roots: string[] = []
 const clientState: AppClientState = {
-  schemaVersion: 2, sessionId: "session-local",
+  schemaVersion: 3, sessionId: "session-local",
   composer: { content: "unfinished prompt", attachments: [], cursorOffset: 3, selection: { start: 1, end: 3 } },
-  subagentDrafts: [], primaryView: "conversation", scrollTop: 37, toolsScrollTop: 0,
+  subagentDrafts: [], primaryView: "conversation", history: { following: false, anchor: { id: "37", offset: -2 } }, toolsScrollTop: 0,
   inputMode: "standard", focus: "composer", theme: "kennel", picker: null,
   tools: { selectedId: null, expanded: [] },
   transcript: { blocks: { selectedId: null, expanded: [] }, tools: [], reasoning: [] },
@@ -27,7 +27,7 @@ afterEach(async () => {
 })
 
 describe("TUI recycle state", () => {
-  test("atomically hands a private draft and scroll offset to one replacement", async () => {
+  test("atomically hands a private draft and source anchor to one replacement", async () => {
     const root = await mkdtemp(join(tmpdir(), "rw-tui-recycle-"))
     roots.push(root)
     await chmod(root, 0o700)
@@ -41,7 +41,7 @@ describe("TUI recycle state", () => {
   })
 
   test("rejects malformed and permission-broad handoffs", async () => {
-    expect(parseTuiRecycleState({ ...clientState, scrollTop: -1 })).toBeNull()
+    expect(parseTuiRecycleState({ ...clientState, history: { following: false, anchor: { id: "-1", offset: 0 } } })).toBeNull()
     const root = await mkdtemp(join(tmpdir(), "rw-tui-recycle-"))
     roots.push(root)
     await chmod(root, 0o700)

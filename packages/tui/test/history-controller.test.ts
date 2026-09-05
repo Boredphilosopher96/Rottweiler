@@ -160,3 +160,26 @@ test("session revisits and refreshes resolve the visible stable anchor after evi
   expect(requested.at(-1)).toEqual({ session: "parent", position: { type: "around", item: "400" } })
   controller.dispose()
 })
+
+test("restored source viewport supersedes an in-flight tail read and resolves a removed anchor", async () => {
+  const stale = deferred<TranscriptReadResult>()
+  const positions: unknown[] = []
+  const controller = new HistoryController(reader(async (session, request) => {
+    positions.push(request.position)
+    if (positions.length === 1) return stale.promise
+    const result = page(session, 3, "survivor", "1", "2000")
+    result.anchor = { type: "replaced", requested: "9", replacement: "3" }
+    return { type: "ready", page: result }
+  }), () => {})
+  const original = controller.open("session")
+  await controller.restoreViewport("session", { following: false, anchor: { id: "9", offset: -2 } })
+  stale.resolve({ type: "ready", page: page("session", 999) })
+  await original
+  expect(positions).toEqual([{ type: "latest" }, { type: "around", item: "9" }])
+  expect(controller.snapshot.following).toBe(false)
+  expect(controller.snapshot.page?.anchor).toEqual({ type: "replaced", requested: "9", replacement: "3" })
+  expect(controller.snapshot.page?.items[0]?.id).toBe("3")
+  await controller.restoreViewport("session", { following: true, anchor: null })
+  expect(positions.at(-1)).toEqual({ type: "latest" })
+  controller.dispose()
+})

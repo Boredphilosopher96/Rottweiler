@@ -6,6 +6,7 @@ import {
   type AppClientState,
   type ClientComposerState,
 } from "../recycle-state"
+import type { HistoryController } from "../history/controller"
 import type { RottweilerState } from "../state"
 import { kennelTheme, themeByName, type RottweilerTheme } from "../theme"
 import type { ChildUiController } from "./children"
@@ -50,6 +51,7 @@ interface ClientRestoreHost {
     | "toolsWorkspace"
     | "transcript"
   >
+  readonly history: HistoryController
   readonly pickerController: PickerController
   readonly children: ChildUiController
   readonly sessions: SessionUiController
@@ -107,15 +109,17 @@ export class ClientRestoreController {
       || this.host.sessions.pending
       || this.host.reviewOpen || this.host.ui.outputViewer.visible || this.host.ui.interactionPanel.visible
       || (kind !== null && !isRestorablePicker(kind))) return null
+    const history = this.host.ui.transcript.captureHistoryViewport()
+    if (history === null) return null
     const surface = this.clientPickerSurface()
     const selected = surface?.selectedId ?? this.host.ui.picker.select.getSelectedOption()?.value
     return parseTuiRecycleState({
-      schemaVersion: 2,
+      schemaVersion: 3,
       sessionId: this.host.sessionId,
       composer: this.captureComposerState(),
       subagentDrafts: [...this.host.children.drafts],
       primaryView: this.host.ui.primaryView,
-      scrollTop: Math.max(0, this.host.ui.transcript.scroller.scrollTop),
+      history,
       toolsScrollTop: Math.max(0, this.host.ui.toolsWorkspace.activityScroller.scrollTop),
       transcript: this.host.ui.transcript.captureClientState(),
       tools: this.host.ui.toolsWorkspace.captureClientState(),
@@ -177,6 +181,7 @@ export class ClientRestoreController {
         ? null : this.host.resolveTheme(themeByName(picker.themeBeforePreview) ?? kennelTheme))
       this.host.pickerController.refresh()
     }
+    void this.host.history.restoreViewport(this.host.sessionId, state.history)
     this.#pendingClientState = state
     this.host.ui.setState(this.host.ui.state)
     this.host.input.focusForInputMode()
@@ -186,14 +191,14 @@ export class ClientRestoreController {
   applyPendingRecycleScroll(): void {
     const state = this.#pendingClientState
     if (state === null) return
-    const transcriptReady = state.scrollTop === 0 || this.host.ui.transcript.mountedEntryCount > 0
+    const transcriptReady = !this.host.history.snapshot.loading
+      && this.host.history.snapshot.page !== null
     if (state.tools.expanded.length > 0 || state.tools.selectedId !== null || state.toolsScrollTop > 0) {
       this.host.updateToolsWorkspace(this.host.children.presentedState(), true)
     }
     const toolsReady = state.toolsScrollTop === 0 || this.host.ui.toolsWorkspace.mountedRowCount > 0
     const transcriptBlocksReady = this.host.ui.transcript.restoreClientState(state.transcript)
     const toolsBlocksReady = this.host.ui.toolsWorkspace.restoreClientState(state.tools)
-    if (transcriptReady) this.host.ui.transcript.setScrollOffset(state.scrollTop)
     if (toolsReady) this.host.ui.toolsWorkspace.activityScroller.scrollTo(state.toolsScrollTop)
     let pickerReady = true
     if (state.picker !== null && this.host.pickerController.kind === state.picker.kind) {
