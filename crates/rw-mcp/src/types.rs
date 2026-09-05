@@ -205,6 +205,11 @@ impl Default for McpLimits {
 
 #[derive(Debug, Error)]
 pub enum McpError {
+    #[error("MCP effects unsettled for {server}: {message}")]
+    EffectsUnsettled {
+        server: McpServerId,
+        message: String,
+    },
     #[error("invalid MCP executable or argument: {0}")]
     InvalidCommand(String),
     #[error("MCP server is already registered: {0}")]
@@ -223,8 +228,6 @@ pub enum McpError {
     Encoding(String),
     #[error("MCP overflow spool failed: {0}")]
     Spool(String),
-    #[error("MCP shutdown timed out for server: {0}")]
-    ShutdownTimeout(McpServerId),
     #[error("MCP login required for server {server} and resource {resource}")]
     PendingLogin {
         server: McpServerId,

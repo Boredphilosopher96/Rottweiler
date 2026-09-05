@@ -2876,6 +2876,7 @@ version = "0.1.4"
 dependencies = [
  "async-trait",
  "blake3",
+ "futures-util",
  "getrandom 0.4.3",
  "rmcp",
  "rustix",

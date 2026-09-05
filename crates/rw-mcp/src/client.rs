@@ -1,3 +1,5 @@
+mod closure;
+
 use std::{
     collections::BTreeMap,
     io,
@@ -27,12 +29,9 @@ use rw_tools::{
 };
 use rw_types::McpServerId;
 use serde_json::Value;
+use tokio::io::{AsyncRead, ReadBuf};
 #[cfg(feature = "test-support")]
 use tokio::process::Command;
-use tokio::{
-    io::{AsyncRead, ReadBuf},
-    sync::Mutex,
-};
 
 use crate::McpTransportConfig;
 use crate::{McpError, McpServerConfig};
@@ -241,8 +240,8 @@ impl TestOnlyUnsandboxedStdioConnector {
 
 struct RmcpClient {
     server: McpServerId,
-    service: Mutex<Option<RunningService<RoleClient, ()>>>,
-    child: Mutex<Option<Box<dyn ProtocolProcessHandle>>>,
+    peer: rmcp::Peer<RoleClient>,
+    closure: closure::ConnectionClosure,
 }
 
 impl RmcpClient {
@@ -253,18 +252,17 @@ impl RmcpClient {
     ) -> Self {
         Self {
             server,
-            service: Mutex::new(Some(service)),
-            child: Mutex::new(child),
+            peer: service.peer().clone(),
+            closure: closure::ConnectionClosure::new(service, child),
         }
     }
 
-    async fn peer(&self) -> Result<rmcp::Peer<RoleClient>, McpError> {
-        self.service
-            .lock()
-            .await
-            .as_ref()
-            .map(|service| service.peer().clone())
-            .ok_or_else(|| McpError::NotConnected(self.server.clone()))
+    fn peer(&self) -> Result<rmcp::Peer<RoleClient>, McpError> {
+        if self.closure.is_closed() {
+            Err(McpError::NotConnected(self.server.clone()))
+        } else {
+            Ok(self.peer.clone())
+        }
     }
 }
 
@@ -411,7 +409,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for BoundedLineReader<R> {
 #[async_trait]
 impl McpClient for RmcpClient {
     async fn list_tools(&self) -> Result<Vec<Value>, McpError> {
-        let peer = self.peer().await?;
+        let peer = self.peer()?;
         let mut cursor = None;
         let mut values = Vec::new();
         loop {
@@ -439,7 +437,7 @@ impl McpClient for RmcpClient {
     }
 
     async fn list_resources(&self) -> Result<Vec<Value>, McpError> {
-        let peer = self.peer().await?;
+        let peer = self.peer()?;
         let mut cursor = None;
         let mut values = Vec::new();
         loop {
@@ -467,7 +465,7 @@ impl McpClient for RmcpClient {
     }
 
     async fn list_prompts(&self) -> Result<Vec<Value>, McpError> {
-        let peer = self.peer().await?;
+        let peer = self.peer()?;
         let mut cursor = None;
         let mut values = Vec::new();
         loop {
@@ -497,19 +495,13 @@ impl McpClient for RmcpClient {
     async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value, McpError> {
         let request =
             CallToolRequestParams::new(name.to_owned()).with_arguments(json_object(&arguments)?);
-        let result = self
-            .peer()
-            .await?
-            .call_tool(request)
-            .await
-            .map_err(protocol)?;
+        let result = self.peer()?.call_tool(request).await.map_err(protocol)?;
         serde_json::to_value(result).map_err(protocol)
     }
 
     async fn read_resource(&self, uri: &str) -> Result<Value, McpError> {
         let result = self
-            .peer()
-            .await?
+            .peer()?
             .read_resource(ReadResourceRequestParams::new(uri))
             .await
             .map_err(protocol)?;
@@ -518,37 +510,18 @@ impl McpClient for RmcpClient {
 
     async fn get_prompt(&self, name: &str, arguments: Value) -> Result<Value, McpError> {
         let request = GetPromptRequestParams::new(name).with_arguments(json_object(&arguments)?);
-        let result = self
-            .peer()
-            .await?
-            .get_prompt(request)
-            .await
-            .map_err(protocol)?;
+        let result = self.peer()?.get_prompt(request).await.map_err(protocol)?;
         serde_json::to_value(result).map_err(protocol)
     }
 
     async fn close(&self, timeout: Duration) -> Result<(), McpError> {
-        let service_result = if let Some(mut service) = self.service.lock().await.take() {
-            match service.close_with_timeout(timeout).await {
-                Ok(Some(_)) => Ok(()),
-                Ok(None) => Err(McpError::ShutdownTimeout(self.server.clone())),
-                Err(_) => Err(protocol_failure()),
-            }
-        } else {
-            Ok(())
-        };
-        let child_result = if let Some(mut child) = self.child.lock().await.take() {
-            child
-                .terminate_and_reap(timeout)
-                .await
-                .map_err(|_| protocol_failure())
-        } else {
-            Ok(())
-        };
-        match (service_result, child_result) {
-            (Err(error), _) | (_, Err(error)) => Err(error),
-            _ => Ok(()),
-        }
+        self.closure
+            .close(timeout)
+            .await
+            .map_err(|message| McpError::EffectsUnsettled {
+                server: self.server.clone(),
+                message: message.to_string(),
+            })
     }
 }
 

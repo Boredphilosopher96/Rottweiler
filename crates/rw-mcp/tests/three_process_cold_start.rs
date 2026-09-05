@@ -8,15 +8,15 @@ use std::{
 
 use async_trait::async_trait;
 use rw_mcp::{
-    CompactJsonEncoder, FilesystemSpool, McpError, McpLimits, McpManager, McpServerConfig,
-    McpTransportConfig, StdioLaunchPolicy, TestOnlyUnsandboxedStdioConnector,
+    CompactJsonEncoder, FilesystemSpool, McpConnectionApprovalPolicy, McpError, McpLimits,
+    McpManager, McpServerConfig, McpTransportConfig, TestOnlyUnsandboxedStdioConnector,
 };
 use rw_types::McpServerId;
 
 struct ApprovedFixture(PathBuf);
 
 #[async_trait]
-impl StdioLaunchPolicy for ApprovedFixture {
+impl McpConnectionApprovalPolicy for ApprovedFixture {
     async fn approve(&self, config: &McpServerConfig) -> Result<(), McpError> {
         match &config.transport {
             McpTransportConfig::Stdio { executable, .. } if executable == &self.0 => Ok(()),

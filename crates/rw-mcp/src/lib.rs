@@ -8,10 +8,7 @@ mod spool;
 mod types;
 
 #[cfg(feature = "test-support")]
-pub use client::{
-    GuardedStreamableHttpConnector, McpConnectionApprovalPolicy as StdioLaunchPolicy,
-    TestOnlyUnsandboxedStdioConnector,
-};
+pub use client::{GuardedStreamableHttpConnector, TestOnlyUnsandboxedStdioConnector};
 pub use client::{
     McpAuthorizationProvider, McpClient, McpConnectionApprovalPolicy, McpConnector,
     SandboxedStdioConnector, boxed_running_http_client, sorted_headers,

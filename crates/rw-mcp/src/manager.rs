@@ -820,10 +820,10 @@ impl McpManager {
 
 fn status_message(error: &McpError) -> String {
     match error {
+        McpError::EffectsUnsettled { .. } => "MCP effects are unsettled".to_owned(),
         McpError::PendingLogin { .. } => "MCP login is required".to_owned(),
         McpError::Disabled(_) => "MCP server is disabled".to_owned(),
         McpError::NotConnected(_) => "MCP server is not connected".to_owned(),
-        McpError::ShutdownTimeout(_) => "MCP server shutdown timed out".to_owned(),
         McpError::Policy(_) => "MCP transport policy rejected the connection".to_owned(),
         McpError::Protocol(_) => "MCP protocol operation failed".to_owned(),
         McpError::Encoding(_) => "MCP response encoding failed".to_owned(),

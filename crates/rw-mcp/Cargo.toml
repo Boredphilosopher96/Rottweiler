@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 async-trait = "0.1.89"
 blake3.workspace = true
+futures-util = "0.3.31"
 getrandom.workspace = true
 rmcp.workspace = true
 rw-tools.workspace = true
