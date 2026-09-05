@@ -6,6 +6,7 @@ mod conversation_summary;
 pub(in crate::engine) use conversation_summary::ConversationSummary;
 mod handle;
 mod live_state;
+pub(in crate::engine) use live_state::CompactionPreview;
 mod plugin_capability;
 mod recovery;
 mod state;

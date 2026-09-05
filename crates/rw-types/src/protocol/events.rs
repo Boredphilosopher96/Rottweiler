@@ -541,6 +541,11 @@ pub enum EngineEvent {
     /// Connection-scoped boundary for one compaction provider attempt.
     /// This never enters the durable session sequence.
     CompactionAttemptStarted {
+        started: SequenceId,
+        #[serde(with = "decimal_u64")]
+        #[schemars(with = "String")]
+        #[ts(type = "string")]
+        revision: u64,
         session_id: SessionId,
         summary_turn_id: TurnId,
         attempt: u32,
@@ -548,6 +553,11 @@ pub enum EngineEvent {
     /// Connection-scoped provider text produced while a compaction summary is
     /// generated. This never enters the durable session sequence.
     CompactionTextDelta {
+        started: SequenceId,
+        #[serde(with = "decimal_u64")]
+        #[schemars(with = "String")]
+        #[ts(type = "string")]
+        revision: u64,
         session_id: SessionId,
         summary_turn_id: TurnId,
         attempt: u32,
@@ -555,6 +565,11 @@ pub enum EngineEvent {
     },
     /// Connection-scoped provider reasoning produced during compaction.
     CompactionThinkingDelta {
+        started: SequenceId,
+        #[serde(with = "decimal_u64")]
+        #[schemars(with = "String")]
+        #[ts(type = "string")]
+        revision: u64,
         session_id: SessionId,
         summary_turn_id: TurnId,
         attempt: u32,

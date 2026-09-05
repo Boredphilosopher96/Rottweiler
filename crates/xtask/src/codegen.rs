@@ -1246,17 +1246,23 @@ fn contract_fixture() -> ContractFixture {
                 reason: CompactionReason::Automatic,
             },
             EngineEvent::CompactionAttemptStarted {
+                started: SequenceId(0),
+                revision: 1,
                 session_id: SessionId("session-fixture".to_owned()),
                 summary_turn_id: TurnId("summary-turn".to_owned()),
                 attempt: 0,
             },
             EngineEvent::CompactionThinkingDelta {
+                started: SequenceId(0),
+                revision: 2,
                 session_id: SessionId("session-fixture".to_owned()),
                 summary_turn_id: TurnId("summary-turn".to_owned()),
                 attempt: 0,
                 text: "Identifying durable context".to_owned(),
             },
             EngineEvent::CompactionTextDelta {
+                started: SequenceId(0),
+                revision: 3,
                 session_id: SessionId("session-fixture".to_owned()),
                 summary_turn_id: TurnId("summary-turn".to_owned()),
                 attempt: 0,

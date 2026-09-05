@@ -25,6 +25,7 @@ pub(in crate::engine) fn snapshot(
         state.provider.prepared_bytes(),
         state.mode_id.prepared_bytes(),
         state.live.budget.prepared_bytes(),
+        state.live.compaction.prepared_bytes(),
     ];
     let mut prepared = 32 * 1024_usize;
     for bytes in header {

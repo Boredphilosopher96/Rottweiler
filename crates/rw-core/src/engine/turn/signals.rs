@@ -142,22 +142,43 @@ pub(in crate::engine) async fn handle_turn_signal(
             if state.running.as_ref().map(|running| running.id) != Some(progress.summary_turn) {
                 return Ok(());
             }
-            state
-                .live
-                .compaction_attempt(progress.summary_turn, progress.attempt);
+            let update = match &progress.kind {
+                CompactionProgressKind::AttemptStarted => {
+                    crate::engine::session::CompactionPreview::Started
+                }
+                CompactionProgressKind::Text(text) => {
+                    crate::engine::session::CompactionPreview::Text(text)
+                }
+                CompactionProgressKind::Thinking(text) => {
+                    crate::engine::session::CompactionPreview::Thinking(text)
+                }
+            };
+            let Some((started, revision)) =
+                state
+                    .live
+                    .compaction_progress(progress.summary_turn, progress.attempt, update)?
+            else {
+                return Ok(());
+            };
             let event = match progress.kind {
                 CompactionProgressKind::AttemptStarted => EngineEvent::CompactionAttemptStarted {
+                    started,
+                    revision,
                     session_id: state.session_id.clone(),
                     summary_turn_id: wire_turn_id(progress.summary_turn),
                     attempt: progress.attempt,
                 },
                 CompactionProgressKind::Text(text) => EngineEvent::CompactionTextDelta {
+                    started,
+                    revision,
                     session_id: state.session_id.clone(),
                     summary_turn_id: wire_turn_id(progress.summary_turn),
                     attempt: progress.attempt,
                     text,
                 },
                 CompactionProgressKind::Thinking(text) => EngineEvent::CompactionThinkingDelta {
+                    started,
+                    revision,
                     session_id: state.session_id.clone(),
                     summary_turn_id: wire_turn_id(progress.summary_turn),
                     attempt: progress.attempt,

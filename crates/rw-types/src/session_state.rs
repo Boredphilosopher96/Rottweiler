@@ -72,6 +72,12 @@ pub struct SessionShellState {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS, Allocation)]
 #[serde(deny_unknown_fields)]
 pub struct SessionCompactionState {
+    #[serde(with = "crate::protocol::decimal_u64")]
+    #[schemars(with = "String")]
+    #[ts(type = "string")]
+    pub revision: u64,
+    pub text: crate::transcript_tail::TranscriptTailText,
+    pub thinking: crate::transcript_tail::TranscriptTailText,
     pub summary_turn_id: TurnId,
     pub started: SequenceId,
     #[serde(deserialize_with = "Option::deserialize")]
