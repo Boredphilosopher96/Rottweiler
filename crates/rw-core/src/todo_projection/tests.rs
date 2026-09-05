@@ -20,7 +20,6 @@ fn append(journal: &mut SegmentedJournal, build: impl FnOnce(EventMeta) -> Engin
 }
 fn snapshot(content: &str) -> TodoSnapshot {
     TodoSnapshot {
-        count: 1,
         items: vec![TodoItem {
             id: "task".into(),
             content: content.into(),

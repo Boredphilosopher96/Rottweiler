@@ -231,10 +231,7 @@ impl Tool for TodoTool {
             .map(|item| format!("[{:?}] {}: {}", item.status, item.id, item.content))
             .collect::<Vec<_>>()
             .join("\n");
-        let snapshot = TodoSnapshot {
-            count: next.len(),
-            items: next,
-        };
+        let snapshot = TodoSnapshot { items: next };
         let result = ToolResult::new(
             model_text,
             serde_json::to_value(&snapshot)
@@ -340,7 +337,7 @@ mod tests {
             .execute(&context, serde_json::json!({"action": "list"}))
             .await
             .expect("list");
-        assert_eq!(result.data["count"], 0);
+        assert_eq!(result.data["items"].as_array().expect("items").len(), 0);
     }
 
     #[tokio::test]
@@ -436,13 +433,13 @@ mod tests {
             .execute(&second, serde_json::json!({"action": "list"}))
             .await
             .expect("second list");
-        assert_eq!(result.data["count"], 0);
+        assert_eq!(result.data["items"].as_array().expect("items").len(), 0);
         tool.clear_session(&rw_types::SessionId("first".to_owned()))
             .await;
         let cleared = tool
             .execute(&first, serde_json::json!({"action": "list"}))
             .await
             .expect("cleared list");
-        assert_eq!(cleared.data["count"], 0);
+        assert_eq!(cleared.data["items"].as_array().expect("items").len(), 0);
     }
 }

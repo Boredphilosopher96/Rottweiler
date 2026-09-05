@@ -1,4 +1,5 @@
 //! The bounded structured task list shared by tools, recovery, and clients.
+mod decode;
 use rw_memory_derive::PrepareAllocation as Allocation;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -19,21 +20,25 @@ pub enum TodoStatus {
     Blocked,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 #[serde(deny_unknown_fields)]
 pub struct TodoItem {
+    #[schemars(length(min = 1, max = MAX_TODO_ID_BYTES), regex(pattern = r"[^\u0009-\u000D\u0020\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]"), extend("x-rw-max-utf8-bytes" = MAX_TODO_ID_BYTES))]
     pub id: String,
+    #[schemars(length(min = 1, max = MAX_TODO_CONTENT_BYTES), regex(pattern = r"[^\u0009-\u000D\u0020\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]"), extend("x-rw-max-utf8-bytes" = MAX_TODO_CONTENT_BYTES))]
     pub content: String,
     pub status: TodoStatus,
 }
 
-#[derive(
-    Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation,
-)]
+#[derive(Clone, Debug, Default, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 #[serde(deny_unknown_fields)]
+#[schemars(extend("x-rw-item-budget" = {
+    "array": "items", "identity": "id", "fields": ["id", "content"],
+    "maxUtf8Bytes": MAX_TODO_TOTAL_BYTES
+}))]
 pub struct TodoSnapshot {
+    #[schemars(length(max = MAX_TODO_ITEMS))]
     pub items: Vec<TodoItem>,
-    pub count: usize,
 }
 
 /// Exact source prefix applied to a complete task-list read.
@@ -70,11 +75,8 @@ impl TodoSnapshot {
     /// Validate item identity, explicit status, and aggregate retained text.
     ///
     /// # Errors
-    /// Rejects count mismatch, duplicate/empty identities, and exceeded bounds.
+    /// Rejects duplicate/empty identities and exceeded bounds.
     pub fn validate(&self) -> Result<(), TodoError> {
-        if self.count != self.items.len() {
-            return Err(TodoError("item count mismatch"));
-        }
         validate_items(&self.items)
     }
 }
@@ -111,7 +113,16 @@ pub fn validate_items(items: &[TodoItem]) -> Result<(), TodoError> {
 mod tests {
     use super::{MAX_TODO_CONTENT_BYTES, TodoItem, TodoSnapshot, TodoStatus};
     #[test]
-    fn snapshot_requires_explicit_status_and_matching_count() {
+    fn schema_carries_item_count_and_utf8_budget_without_parallel_client_constants() {
+        let schema = schemars::schema_for!(TodoSnapshot);
+        let value = serde_json::to_value(schema).unwrap_or_else(|error| panic!("schema: {error}"));
+        assert_eq!(value["properties"]["items"]["maxItems"], 128);
+        assert_eq!(value["x-rw-item-budget"]["maxUtf8Bytes"], 65_536);
+        assert!(value["properties"].get("count").is_none());
+    }
+
+    #[test]
+    fn snapshot_requires_explicit_status_and_bounded_content() {
         assert!(
             serde_json::from_value::<TodoItem>(serde_json::json!({"id":"a","content":"task"}))
                 .is_err()
@@ -122,12 +133,8 @@ mod tests {
                 content: "task".into(),
                 status: TodoStatus::Pending,
             }],
-            count: 1,
         };
         assert!(snapshot.validate().is_ok());
-        snapshot.count = 0;
-        assert!(snapshot.validate().is_err());
-        snapshot.count = 1;
         snapshot.items[0].content = "x".repeat(MAX_TODO_CONTENT_BYTES + 1);
         assert!(snapshot.validate().is_err());
     }
