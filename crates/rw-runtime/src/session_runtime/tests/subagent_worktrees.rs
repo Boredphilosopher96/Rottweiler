@@ -50,12 +50,12 @@ use super::builtin_command_registry;
 use super::builtin_hook_dispatcher;
 use super::discard_rewound_subagent_record;
 use super::load_session_events;
-use super::project_session_events;
 use super::promote_pending_recovery_record;
 use super::recovery_workspace_authorized;
 use super::repair_incomplete_subagent_lifecycles;
 use super::test_provider_admission;
 use rw_core::SubagentMetadataStore;
+use rw_core::recovery::SessionHistory;
 use rw_tools::Tool;
 
 #[tokio::test]
@@ -234,11 +234,8 @@ async fn actor_applies_durable_child_artifact_then_reports_conflict_without_corr
     let history = ChildLifecycleReader::new(Arc::clone(&durable));
 
     let base_tools = Arc::new(ToolRegistry::new());
-    let unused_factory = ActorSubagentSessionFactory::new(
-        |_launch| -> std::result::Result<SessionActorConfig, AgentLoopError> {
-            panic!("fixture never spawns a child")
-        },
-    );
+    let unused_factory =
+        ActorSubagentSessionFactory::new(|_launch| panic!("fixture never spawns a child"));
     let orchestrator = SubagentOrchestrator::new(
         SubagentLimits::default(),
         Arc::new(unused_factory),
@@ -307,8 +304,16 @@ async fn actor_applies_durable_child_artifact_then_reports_conflict_without_corr
             None,
         )
         .expect("canonical owner");
-    let recovered =
-        project_session_events(&durable.load().expect("parent source")).expect("parent recovery");
+    let recovered = rw_core::SessionActorRecovery::from_bootstrap(
+        durable
+            .capture_history()
+            .await
+            .expect("parent history")
+            .bootstrap()
+            .await
+            .expect("parent bootstrap"),
+    )
+    .expect("parent recovery");
     let actor = SessionActor::spawn(SessionActorConfig {
         ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),
         ui_tool_source: std::sync::Arc::new(rw_core::ui::UnavailableUiToolSource),
@@ -699,7 +704,7 @@ async fn crashed_worktree_child_recovers_follows_up_and_applies_after_second_res
         }
     }
 
-    fn child_config(
+    async fn child_config(
         storage: &Path,
         session_id: &SessionId,
         workspace: &Path,
@@ -707,10 +712,6 @@ async fn crashed_worktree_child_recovers_follows_up_and_applies_after_second_res
         tools: Arc<ToolRegistry>,
     ) -> std::result::Result<SessionActorConfig, AgentLoopError> {
         let log = SessionEventLog::open(storage, &session_id.0)
-            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-        let events = load_session_events(&log)
-            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-        let recovered = project_session_events(&events)
             .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
         let sink = DurableEventSink::new(
             log,
@@ -722,6 +723,9 @@ async fn crashed_worktree_child_recovers_follows_up_and_applies_after_second_res
         sink.configure_canonical(
             Arc::new(rw_ext::ModeRegistry::builtins().expect("modes")),
             None,
+        )?;
+        let recovered = rw_core::SessionActorRecovery::from_bootstrap(
+            sink.capture_history().await?.bootstrap().await?,
         )?;
         Ok(SessionActorConfig {
             ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),
@@ -1000,22 +1004,34 @@ async fn crashed_worktree_child_recovers_follows_up_and_applies_after_second_res
     let rebind_model = Arc::clone(&model);
     let rebind_tools = Arc::clone(&child_tools);
     let actor_factory = ActorSubagentSessionFactory::new(move |launch| {
-        child_config(
-            &create_storage,
-            &launch.handle.session_id,
-            &launch.workspace_root,
-            Arc::clone(&create_model),
-            Arc::clone(&create_tools),
-        )
+        let create_storage = create_storage.clone();
+        let create_model = create_model.clone();
+        let create_tools = create_tools.clone();
+        Box::pin(async move {
+            child_config(
+                &create_storage,
+                &launch.handle.session_id,
+                &launch.workspace_root,
+                Arc::clone(&create_model),
+                Arc::clone(&create_tools),
+            )
+            .await
+        })
     })
     .with_rebuilder(move |session_id, workspace, _policy| {
-        child_config(
-            &rebind_storage,
-            session_id,
-            workspace,
-            Arc::clone(&rebind_model),
-            Arc::clone(&rebind_tools),
-        )
+        let rebind_storage = rebind_storage.clone();
+        let rebind_model = rebind_model.clone();
+        let rebind_tools = rebind_tools.clone();
+        Box::pin(async move {
+            child_config(
+                &rebind_storage,
+                session_id,
+                workspace,
+                Arc::clone(&rebind_model),
+                Arc::clone(&rebind_tools),
+            )
+            .await
+        })
     });
     let actor_factory: Arc<dyn SubagentSessionFactory> = Arc::new(actor_factory);
     let factory: Arc<dyn SubagentSessionFactory> = Arc::new(WorktreeSubagentSessionFactory::new(
@@ -1128,11 +1144,9 @@ async fn crashed_worktree_child_recovers_follows_up_and_applies_after_second_res
             .1
             .is_empty()
     );
-    let unused_factory = ActorSubagentSessionFactory::new(
-        |_launch| -> std::result::Result<SessionActorConfig, AgentLoopError> {
-            panic!("second restart only rebuilds durable authority")
-        },
-    );
+    let unused_factory = ActorSubagentSessionFactory::new(|_launch| {
+        panic!("second restart only rebuilds durable authority")
+    });
     let second_restart_orchestrator = SubagentOrchestrator::new(
         SubagentLimits::default(),
         Arc::new(unused_factory),

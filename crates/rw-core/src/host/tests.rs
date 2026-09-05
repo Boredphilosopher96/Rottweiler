@@ -236,7 +236,7 @@ impl StubFactory {
             workspace_roots: Arc::new(crate::NoopWorkspaceRootController),
             extension_development: Arc::new(crate::NoopSessionExtensionController),
             resources: Arc::new(crate::NoopSessionResources),
-            recovered: SessionRecoveredState::default(),
+            recovered: crate::SessionActorRecovery::default(),
             max_turns: 2,
             identical_tool_failure_limit: 2,
             max_output_tokens: 128,

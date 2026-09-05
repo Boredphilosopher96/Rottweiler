@@ -1,6 +1,6 @@
+use super::SessionActorRecovery;
 use crate::engine::AgentLoopError;
 use crate::engine::RoutedEvent;
-use crate::engine::SessionRecoveredState;
 use crate::engine::SessionUsage;
 use crate::engine::dispatch::handle_actor_command;
 use crate::engine::pending_event::PendingEvent;
@@ -56,6 +56,11 @@ impl SessionActor {
         if config.model_alias.trim().is_empty() {
             return Err(AgentLoopError::InvalidConfiguration(
                 "model alias must not be empty".to_owned(),
+            ));
+        }
+        if config.recovered.source.is_none() {
+            return Err(AgentLoopError::InvalidConfiguration(
+                "actor startup requires an admitted canonical bootstrap".into(),
             ));
         }
         let recovered_mode = config
@@ -196,7 +201,7 @@ pub(super) async fn dispatch_lifecycle_hook(
 #[allow(clippy::too_many_lines)]
 pub(super) async fn run_actor(
     config: Arc<SessionActorConfig>,
-    recovered: SessionRecoveredState,
+    mut recovered: SessionActorRecovery,
     mut tool_context: ToolContext,
     mut commands: mpsc::Receiver<ActorCommand>,
     events: broadcast::Sender<RoutedEvent>,
@@ -211,6 +216,7 @@ pub(super) async fn run_actor(
     let interrupted_turn = recovered.interrupted_turn;
     let interrupted_compaction = recovered.interrupted_compaction;
     let recovery_events = interrupted_turn_recovery_events(&recovered);
+    let accepted_messages = std::mem::take(&mut recovered.accepted_messages);
     let mut state = ActorState::recover(
         config.session_id.clone(),
         Arc::clone(&config.event_clock),
@@ -285,12 +291,24 @@ pub(super) async fn run_actor(
             });
             state.completed_turns = state.completed_turns.saturating_add(1);
         }
-        if !state.queued.is_empty() {
+        if !accepted_messages.is_empty() || !state.queued.is_empty() {
             state.queued_positions.clear();
-            let messages = state
-                .queued
-                .drain(..)
-                .map(|content| (content, Vec::new()))
+            let messages = accepted_messages
+                .into_iter()
+                .map(|message| {
+                    let attachments = message
+                        .attachments
+                        .into_iter()
+                        .map(|stored| rw_types::Attachment {
+                            name: stored.name,
+                            source_path: stored.source_path,
+                            media_type: stored.media_type,
+                            data: stored.data,
+                        })
+                        .collect();
+                    (message.content, attachments)
+                })
+                .chain(state.queued.drain(..).map(|content| (content, Vec::new())))
                 .collect();
             if start_turn(
                 &mut state,

@@ -19,9 +19,18 @@ use super::{
 
 /// Factory for production child actors. The builder supplies a distinct event
 /// sink and context; core overwrites security-sensitive launch fields.
-pub(super) type ActorConfigBuilder =
-    dyn Fn(&SubagentLaunch) -> Result<SessionActorConfig, AgentLoopError> + Send + Sync;
-pub(super) type ActorResumeBuilder = dyn Fn(&SessionId, &Path, &SubagentRecoveryPolicy) -> Result<SessionActorConfig, AgentLoopError>
+pub(super) type ActorConfigBuilder = dyn for<'a> Fn(
+        &'a SubagentLaunch,
+    )
+        -> futures_util::future::BoxFuture<'a, Result<SessionActorConfig, AgentLoopError>>
+    + Send
+    + Sync;
+pub(super) type ActorResumeBuilder = dyn for<'a> Fn(
+        &'a SessionId,
+        &'a Path,
+        &'a SubagentRecoveryPolicy,
+    )
+        -> futures_util::future::BoxFuture<'a, Result<SessionActorConfig, AgentLoopError>>
     + Send
     + Sync;
 
@@ -197,8 +206,12 @@ impl SubagentSession for WorktreeSubagentSession {
 impl ActorSubagentSessionFactory {
     #[must_use]
     pub fn new(
-        builder: impl Fn(&SubagentLaunch) -> Result<SessionActorConfig, AgentLoopError>
-        + Send
+        builder: impl for<'a> Fn(
+            &'a SubagentLaunch,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<SessionActorConfig, AgentLoopError>,
+        > + Send
         + Sync
         + 'static,
     ) -> Self {
@@ -216,12 +229,14 @@ impl ActorSubagentSessionFactory {
     #[must_use]
     pub fn with_rebuilder(
         mut self,
-        rebuilder: impl Fn(
-            &SessionId,
-            &Path,
-            &SubagentRecoveryPolicy,
-        ) -> Result<SessionActorConfig, AgentLoopError>
-        + Send
+        rebuilder: impl for<'a> Fn(
+            &'a SessionId,
+            &'a Path,
+            &'a SubagentRecoveryPolicy,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<SessionActorConfig, AgentLoopError>,
+        > + Send
         + Sync
         + 'static,
     ) -> Self {
@@ -237,6 +252,7 @@ impl SubagentSessionFactory for ActorSubagentSessionFactory {
         launch: SubagentLaunch,
     ) -> Result<Arc<dyn SubagentSession>, OrchestrationError> {
         let mut config = (self.builder)(&launch)
+            .await
             .map_err(|error| OrchestrationError::Session(error.to_string()))?;
         config.session_id = launch.handle.session_id.clone();
         config.workspace_root.clone_from(&launch.workspace_root);

@@ -335,6 +335,7 @@ async fn lazy_first_model_switch_does_not_activate_when_persistence_fails() {
         Some(ClientId("driver".into())),
         vec![],
     )
+    .await
     .expect("actor history");
     let actor = SessionActor::spawn(SessionActorConfig {
         ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),

@@ -117,6 +117,7 @@ async fn engine_switches_to_an_exact_model_route_staged_by_provider_activation()
         Some(ClientId("driver".into())),
         vec![],
     )
+    .await
     .expect("actor history");
     let actor = SessionActor::spawn(SessionActorConfig {
         ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),

@@ -10,7 +10,6 @@ use super::credential_resolution::DeferredWebSearchHeaders;
 use super::custom_commands::RuntimeCommandRegistry;
 use super::custom_commands::compose_runtime_commands;
 use super::durable_session::DurableEventSink;
-use super::durable_session::load_session_events;
 use super::extension_discovery::discover_runtime_extensions;
 use super::extension_discovery::extension_startup_notifications;
 use super::extension_discovery::extension_user_roots;
@@ -86,6 +85,7 @@ use rw_core::SubagentOrchestrator;
 use rw_core::SubagentSessionFactory;
 use rw_core::SystemEventClock;
 use rw_core::WorktreeSubagentSessionFactory;
+use rw_core::recovery::SessionHistory;
 use rw_ext::compose_agent_registry;
 use rw_providers::CacheBreakpointSupport;
 use rw_providers::FixtureRedactor;
@@ -318,8 +318,6 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
     })
     .await
     .map_err(|error| miette!("rewind recovery worker failed: {error}"))??;
-    let recovered_events = load_session_events(&log)?;
-    let recovered = crate::mode_recovery::project(&recovered_events, &runtime_modes)?;
     let durable_sink = DurableEventSink::new(
         log,
         storage_root.clone(),
@@ -330,6 +328,17 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
         .bind_canonical(Arc::clone(&runtime_modes))
         .await
         .map_err(|error| miette!("canonical recovery failed: {error}"))?;
+    let recovered = rw_core::SessionActorRecovery::from_bootstrap(
+        durable_sink
+            .capture_history()
+            .await
+            .map_err(display_agent_error)?
+            .bootstrap()
+            .await
+            .map_err(display_agent_error)?,
+    )
+    .map_err(display_agent_error)?;
+
     if matches!(&options.purpose, LocalSessionPurpose::Conversation { .. }) {
         durable_sink
             .reconcile_provider_attempts(&provider_admission)
@@ -942,11 +951,14 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
             max_turns: options.max_turns,
         });
         let create_template = Arc::clone(&template);
-        let factory =
-            ActorSubagentSessionFactory::new(move |launch| create_template.config(launch))
-                .with_rebuilder(move |session_id, root, policy| {
-                    template.rebind_config(session_id, root, policy)
-                });
+        let factory = ActorSubagentSessionFactory::new(move |launch| {
+            let template = Arc::clone(&create_template);
+            Box::pin(async move { template.config(launch).await })
+        })
+        .with_rebuilder(move |session_id, root, policy| {
+            let template = Arc::clone(&template);
+            Box::pin(async move { template.rebind_config(session_id, root, policy).await })
+        });
         let shared: Arc<dyn SubagentSessionFactory> = Arc::new(factory);
         let isolation = match worktree_isolation_task {
             Some(task) => match task.join().await {

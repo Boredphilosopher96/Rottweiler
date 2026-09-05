@@ -1,16 +1,7 @@
 //! Small actor metadata derived while a worker owns the conversation materialization.
 use rw_types::{ContextItemId, Role, Turn};
 
-#[derive(Clone, Default)]
-pub(in crate::engine) struct ConversationSummary {
-    pub turns: u64,
-    pub system_turns: u64,
-    pub resolved_model: Option<String>,
-    pub system_resolved_model: Option<String>,
-    pub title_prompt: Option<String>,
-    pub has_assistant_text: bool,
-    pub approved_plan_item: Option<ContextItemId>,
-}
+pub(in crate::engine) use crate::engine::recovery::ConversationMetadata as ConversationSummary;
 
 impl ConversationSummary {
     pub(in crate::engine) fn from_turns(turns: &[Turn]) -> Self {

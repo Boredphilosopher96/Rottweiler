@@ -635,48 +635,53 @@ needs = ["impl", "tests"]
     let child_storage = fixture.path().join("actor-history");
     let actor_factory: Arc<dyn SubagentSessionFactory> =
         Arc::new(ActorSubagentSessionFactory::new(move |launch| {
-            let source = crate::session_runtime::test_history::open(
-                &child_storage,
-                &launch.handle.session_id,
-                None,
-                vec![],
-            )?;
-            Ok(SessionActorConfig {
-                ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),
-                ui_tool_source: std::sync::Arc::new(rw_core::ui::UnavailableUiToolSource),
-                budget_session_id: launch.handle.session_id.clone(),
-                session_id: launch.handle.session_id.clone(),
-                workspace_root: launch.workspace_root.clone(),
-                additional_workspace_roots: Vec::new(),
-                workspace_generation: 0,
-                initial_session_context: Vec::new(),
-                startup_notifications: Vec::new(),
-                model_alias: launch.request.model.clone(),
-                model: Arc::clone(&child_model),
-                tools: Arc::new(ToolRegistry::new()),
-                permissions: Arc::new(PermissionGate::new(PermissionDecision::Allow)),
-                hooks: Arc::new(rw_core::builtin_hook_dispatcher()?),
-                commands: Arc::clone(&child_commands),
-                modes: Arc::new(
-                    rw_ext::ModeRegistry::builtins()
-                        .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?,
-                ),
-                history: source.history,
-                event_sink: source.sink,
-                event_clock: Arc::new(SystemEventClock),
-                provider_admission: crate::provider_admission::testing::admission(),
-                secret_redactor: Arc::new(NoopSecretRedactor),
-                checkpoints: Arc::new(NoopMutationCheckpointCoordinator),
-                folder_trust: Arc::new(NoopFolderTrustController),
-                workspace_roots: Arc::new(NoopWorkspaceRootController),
-                extension_development: Arc::new(rw_core::NoopSessionExtensionController),
-                resources: Arc::new(rw_core::NoopSessionResources),
-                recovered: source.recovered,
-                max_turns: 4,
-                identical_tool_failure_limit: 5,
-                max_output_tokens: 1024,
-                thinking: rw_types::config::ThinkingLevel::Off,
-                event_capacity: 64,
+            let child_storage = child_storage.clone();
+            let child_model = child_model.clone();
+            let child_commands = child_commands.clone();
+            Box::pin(async move {
+                let source = crate::session_runtime::test_history::open(
+                    &child_storage,
+                    &launch.handle.session_id,
+                    None,
+                    vec![],
+                )
+                .await?;
+                Ok(SessionActorConfig {
+                    ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),
+                    ui_tool_source: std::sync::Arc::new(rw_core::ui::UnavailableUiToolSource),
+                    budget_session_id: launch.handle.session_id.clone(),
+                    session_id: launch.handle.session_id.clone(),
+                    workspace_root: launch.workspace_root.clone(),
+                    additional_workspace_roots: Vec::new(),
+                    workspace_generation: 0,
+                    initial_session_context: Vec::new(),
+                    startup_notifications: Vec::new(),
+                    model_alias: launch.request.model.clone(),
+                    model: Arc::clone(&child_model),
+                    tools: Arc::new(ToolRegistry::new()),
+                    permissions: Arc::new(PermissionGate::new(PermissionDecision::Allow)),
+                    hooks: Arc::new(rw_core::builtin_hook_dispatcher()?),
+                    commands: Arc::clone(&child_commands),
+                    modes: Arc::new(rw_ext::ModeRegistry::builtins().map_err(|error| {
+                        AgentLoopError::InvalidConfiguration(error.to_string())
+                    })?),
+                    history: source.history,
+                    event_sink: source.sink,
+                    event_clock: Arc::new(SystemEventClock),
+                    provider_admission: crate::provider_admission::testing::admission(),
+                    secret_redactor: Arc::new(NoopSecretRedactor),
+                    checkpoints: Arc::new(NoopMutationCheckpointCoordinator),
+                    folder_trust: Arc::new(NoopFolderTrustController),
+                    workspace_roots: Arc::new(NoopWorkspaceRootController),
+                    extension_development: Arc::new(rw_core::NoopSessionExtensionController),
+                    resources: Arc::new(rw_core::NoopSessionResources),
+                    recovered: source.recovered,
+                    max_turns: 4,
+                    identical_tool_failure_limit: 5,
+                    max_output_tokens: 1024,
+                    thinking: rw_types::config::ThinkingLevel::Off,
+                    event_capacity: 64,
+                })
             })
         }));
     let isolation = Arc::new(
@@ -761,48 +766,55 @@ async fn production_actor_dispatches_command_node_through_typed_registry() {
     let child_storage = fixture.path().join("actor-history");
     let child_workspace = project.clone();
     let factory = Arc::new(ActorSubagentSessionFactory::new(move |launch| {
-        let source = crate::session_runtime::test_history::open(
-            &child_storage,
-            &launch.handle.session_id,
-            None,
-            vec![],
-        )?;
-        Ok(SessionActorConfig {
-            ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),
-            ui_tool_source: std::sync::Arc::new(rw_core::ui::UnavailableUiToolSource),
-            budget_session_id: launch.handle.session_id.clone(),
-            session_id: launch.handle.session_id.clone(),
-            workspace_root: child_workspace.clone(),
-            additional_workspace_roots: Vec::new(),
-            workspace_generation: 0,
-            initial_session_context: Vec::new(),
-            startup_notifications: Vec::new(),
-            model_alias: launch.request.model.clone(),
-            model: Arc::clone(&child_model),
-            tools: Arc::new(ToolRegistry::new()),
-            permissions: Arc::new(PermissionGate::new(PermissionDecision::Allow)),
-            hooks: Arc::new(rw_core::builtin_hook_dispatcher()?),
-            commands: Arc::clone(&child_commands),
-            modes: Arc::new(
-                rw_ext::ModeRegistry::builtins()
-                    .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?,
-            ),
-            history: source.history,
-            event_sink: source.sink,
-            event_clock: Arc::new(SystemEventClock),
-            provider_admission: crate::provider_admission::testing::admission(),
-            secret_redactor: Arc::new(NoopSecretRedactor),
-            checkpoints: Arc::new(NoopMutationCheckpointCoordinator),
-            folder_trust: Arc::new(NoopFolderTrustController),
-            workspace_roots: Arc::new(NoopWorkspaceRootController),
-            extension_development: Arc::new(rw_core::NoopSessionExtensionController),
-            resources: Arc::new(rw_core::NoopSessionResources),
-            recovered: source.recovered,
-            max_turns: 4,
-            identical_tool_failure_limit: 5,
-            max_output_tokens: 1024,
-            thinking: rw_types::config::ThinkingLevel::Off,
-            event_capacity: 64,
+        let child_storage = child_storage.clone();
+        let child_model = child_model.clone();
+        let child_commands = child_commands.clone();
+        let child_workspace = child_workspace.clone();
+        Box::pin(async move {
+            let source = crate::session_runtime::test_history::open(
+                &child_storage,
+                &launch.handle.session_id,
+                None,
+                vec![],
+            )
+            .await?;
+            Ok(SessionActorConfig {
+                ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),
+                ui_tool_source: std::sync::Arc::new(rw_core::ui::UnavailableUiToolSource),
+                budget_session_id: launch.handle.session_id.clone(),
+                session_id: launch.handle.session_id.clone(),
+                workspace_root: child_workspace.clone(),
+                additional_workspace_roots: Vec::new(),
+                workspace_generation: 0,
+                initial_session_context: Vec::new(),
+                startup_notifications: Vec::new(),
+                model_alias: launch.request.model.clone(),
+                model: Arc::clone(&child_model),
+                tools: Arc::new(ToolRegistry::new()),
+                permissions: Arc::new(PermissionGate::new(PermissionDecision::Allow)),
+                hooks: Arc::new(rw_core::builtin_hook_dispatcher()?),
+                commands: Arc::clone(&child_commands),
+                modes: Arc::new(
+                    rw_ext::ModeRegistry::builtins()
+                        .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?,
+                ),
+                history: source.history,
+                event_sink: source.sink,
+                event_clock: Arc::new(SystemEventClock),
+                provider_admission: crate::provider_admission::testing::admission(),
+                secret_redactor: Arc::new(NoopSecretRedactor),
+                checkpoints: Arc::new(NoopMutationCheckpointCoordinator),
+                folder_trust: Arc::new(NoopFolderTrustController),
+                workspace_roots: Arc::new(NoopWorkspaceRootController),
+                extension_development: Arc::new(rw_core::NoopSessionExtensionController),
+                resources: Arc::new(rw_core::NoopSessionResources),
+                recovered: source.recovered,
+                max_turns: 4,
+                identical_tool_failure_limit: 5,
+                max_output_tokens: 1024,
+                thinking: rw_types::config::ThinkingLevel::Off,
+                event_capacity: 64,
+            })
         })
     }));
     let orchestrator = SubagentOrchestrator::new(

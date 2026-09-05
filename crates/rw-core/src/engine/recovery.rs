@@ -38,8 +38,9 @@ mod workspace;
 pub use projector::{CanonicalRecovery, RecoveryProgress};
 use rw_store::session::recovery_index::RecoveryIndexError;
 pub use state::{
-    AcceptedSource, ActiveTurn, ConversationCut, ConversationSource, QuestionSource, QueuedSource,
-    RecoveryControl, RecoveryHead, SourceTotals, ToolStartIdentity, TurnSourceKind,
+    AcceptedSource, ActiveTurn, ConversationCut, ConversationMetadata, ConversationSource,
+    QuestionSource, QueuedSource, RecoveryControl, RecoveryHead, SourceTotals, ToolStartIdentity,
+    TurnSourceKind,
 };
 use thiserror::Error;
 pub use window::RecoveryBoundary;

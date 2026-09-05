@@ -1,4 +1,6 @@
 mod actor;
+mod bootstrap;
+pub use bootstrap::SessionActorRecovery;
 mod child_progress;
 mod config;
 mod control;

@@ -525,6 +525,25 @@ fn append_turn(
     if has_resolved_model {
         cut.resolved_model_source = Some(sequence);
     }
+    if turn.role == rw_types::Role::System {
+        cut.system_turns = cut
+            .system_turns
+            .checked_add(1)
+            .ok_or(RecoveryError::Limit("system turn counter"))?;
+        if has_resolved_model {
+            cut.system_model_source = Some(sequence);
+        }
+    }
+    let turns = std::slice::from_ref(turn);
+    if cut.first_user_source.is_none()
+        && crate::engine::turn::title::first_meaningful_user_prompt(turns).is_some()
+    {
+        cut.first_user_source = Some(sequence);
+    }
+    cut.has_assistant_text |= crate::engine::turn::title::has_successful_assistant_text(turns);
+    if crate::engine::projection::approved_plan_context_item(turns).is_some() {
+        cut.approved_plan_ordinal = Some(cut.turns);
+    }
     let bytes = serialized_size(turn)?;
     let decoded_bytes = super::encoding::turn_decode_bytes(turn)?;
     let tokens = LocalTokenEstimator::turn(turn);

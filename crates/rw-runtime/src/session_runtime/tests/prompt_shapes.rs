@@ -134,6 +134,7 @@ async fn historical_anthropic_prompt_shape_restores_cache_and_tool_schema_offlin
         None,
         vec![user],
     )
+    .await
     .expect("prompt source");
     let actor = SessionActor::spawn(SessionActorConfig {
         ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),

@@ -1,8 +1,8 @@
 //! Real source ownership for runtime actor fixtures.
 #![cfg(test)]
-use super::durable_session::{DurableEventSink, load_session_events};
+use super::durable_session::DurableEventSink;
 use crate::journal_service::JournalService;
-use rw_core::{AgentLoopError, SessionEventSink, SessionRecoveredState, recovery::SessionHistory};
+use rw_core::{AgentLoopError, SessionActorRecovery, SessionEventSink, recovery::SessionHistory};
 use rw_store::session::SessionEventLog;
 use rw_types::{ClientId, EngineEvent, EventMeta, SequenceId, SessionId, Turn};
 use std::{path::Path, sync::Arc};
@@ -10,10 +10,10 @@ use std::{path::Path, sync::Arc};
 pub(crate) struct ActorHistory {
     pub sink: Arc<dyn SessionEventSink>,
     pub history: Arc<dyn SessionHistory>,
-    pub recovered: SessionRecoveredState,
+    pub recovered: SessionActorRecovery,
 }
 
-pub(crate) fn open(
+pub(crate) async fn open(
     root: &Path,
     session: &SessionId,
     driver: Option<ClientId>,
@@ -50,10 +50,6 @@ pub(crate) fn open(
         })
         .map_err(failure)?;
     }
-    let events = load_session_events(&log)
-        .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-    let recovered = rw_core::project_session_events(&events)
-        .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
     let sink = DurableEventSink::new(
         log,
         root.to_path_buf(),
@@ -66,7 +62,9 @@ pub(crate) fn open(
         rw_ext::ModeRegistry::builtins()
             .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?,
     );
-    sink.configure_canonical(modes, None)?;
+    sink.bind_canonical(modes).await?;
+    let recovered =
+        SessionActorRecovery::from_bootstrap(sink.capture_history().await?.bootstrap().await?)?;
     Ok(ActorHistory {
         history: sink.clone(),
         sink,

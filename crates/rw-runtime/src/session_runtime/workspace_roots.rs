@@ -9,7 +9,6 @@ use super::credential_resolution::DeferredWebSearchHeaders;
 use super::credential_resolution::ResolvedToolProxy;
 use super::custom_commands::compose_runtime_commands;
 use super::durable_session::DurableEventSink;
-use super::durable_session::load_session_events;
 use super::extension_discovery::discover_runtime_extensions;
 use super::extension_discovery::discover_runtime_extensions_derived;
 use super::extension_discovery::skill_index_turn;
@@ -40,7 +39,7 @@ use rw_core::SessionActorConfig;
 use rw_core::SessionCommandContext;
 use rw_core::SessionCommandOutput;
 use rw_core::SystemEventClock;
-use rw_core::project_session_events_with_modes;
+use rw_core::recovery::SessionHistory;
 use rw_ext::CommandRegistry;
 use rw_ext::HookDispatcher;
 use rw_ext::compose_mode_registry;
@@ -163,7 +162,7 @@ pub(crate) struct PreparedRootGeneration {
 
 impl RuntimeWorkspaceRootController {
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-    pub(super) fn child_config(
+    pub(super) async fn child_config(
         &self,
         storage_root: &Path,
         budget_session_id: &SessionId,
@@ -244,10 +243,6 @@ impl RuntimeWorkspaceRootController {
             .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
         let log = SessionEventLog::open(storage_root, &session_id.0)
             .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-        let events = load_session_events(&log)
-            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-        let recovered = project_session_events_with_modes(&events, &mode_registry)
-            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
         let event_sink = DurableEventSink::new(
             log,
             storage_root.to_path_buf(),
@@ -256,7 +251,12 @@ impl RuntimeWorkspaceRootController {
         )
         .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
         let mode_registry = Arc::new(mode_registry);
-        event_sink.configure_canonical(Arc::clone(&mode_registry), None)?;
+        event_sink
+            .bind_canonical(Arc::clone(&mode_registry))
+            .await?;
+        let recovered = rw_core::SessionActorRecovery::from_bootstrap(
+            event_sink.capture_history().await?.bootstrap().await?,
+        )?;
         let mut initial_context = fresh_initial_session_context(storage_root, &roots)
             .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
         if let Some(index) = skill_index_turn(&catalog)

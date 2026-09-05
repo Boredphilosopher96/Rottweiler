@@ -1,7 +1,7 @@
 #![cfg(test)]
 #![allow(clippy::expect_used)]
 use super::ActorState;
-use crate::engine::{SessionRecoveredState, SystemEventClock, session::control::SessionControl};
+use crate::engine::{SessionActorRecovery, SystemEventClock, session::control::SessionControl};
 use rw_types::{Block, Role, SessionId, Turn, TurnMeta, config::ThinkingLevel};
 use std::sync::Arc;
 
@@ -15,9 +15,9 @@ fn recovery_retains_bounded_conversation_metadata() {
         blocks: vec![Block::Text { text }],
         meta: TurnMeta::default(),
     }];
-    let recovered = SessionRecoveredState {
-        conversation,
-        ..SessionRecoveredState::default()
+    let recovered = SessionActorRecovery {
+        conversation: super::super::ConversationSummary::from_turns(&conversation),
+        ..SessionActorRecovery::default()
     };
     let state = ActorState::recover(
         session.clone(),
@@ -42,7 +42,7 @@ fn recovery_retains_bounded_conversation_metadata() {
 mod live_state {
     use crate::engine::dispatch::live_state::snapshot;
     use crate::engine::{
-        SessionRecoveredState, SystemEventClock,
+        SessionActorRecovery, SystemEventClock,
         session::{ActorState, SessionControl},
     };
     use rw_types::{SessionId, config::ThinkingLevel, session_state::MAX_SESSION_QUEUE_ITEMS};
@@ -58,7 +58,7 @@ mod live_state {
             "model",
             ThinkingLevel::Off,
             &rw_ext::ModeRegistry::builtins().expect("modes"),
-            SessionRecoveredState::default(),
+            SessionActorRecovery::default(),
             Arc::new(SessionControl::new(session, None, clock)),
         );
         state.queued.push_back("a".repeat(1023) + "🙂end");

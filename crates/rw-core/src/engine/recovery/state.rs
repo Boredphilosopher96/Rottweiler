@@ -1,5 +1,5 @@
 use super::RecoveryError;
-use rw_types::{ClientId, ModeId, SequenceId, SessionId, SessionMode};
+use rw_types::{ClientId, ContextItemId, ModeId, SequenceId, SessionId, SessionMode};
 use serde::{Deserialize, Serialize};
 
 pub(super) const CONVERSATION: u8 = 1;
@@ -14,9 +14,26 @@ pub(super) const SOURCE_ORDINAL: u8 = 12;
 pub(super) const MAX_QUEUED: usize = rw_types::session_state::MAX_SESSION_QUEUE_ITEMS;
 pub(super) const MAX_QUESTIONS: usize = rw_types::question_admission::MAX_PENDING_QUESTION_REQUESTS;
 
+/// Bounded actor metadata; historical bodies remain source-addressed.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ConversationMetadata {
+    pub turns: u64,
+    pub system_turns: u64,
+    pub resolved_model: Option<String>,
+    pub system_resolved_model: Option<String>,
+    pub title_prompt: Option<String>,
+    pub has_assistant_text: bool,
+    pub approved_plan_item: Option<ContextItemId>,
+}
+
 /// Exact visible canonical conversation. Bodies remain in the authoritative journal.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ConversationCut {
+    pub first_user_source: Option<SequenceId>,
+    pub system_model_source: Option<SequenceId>,
+    pub system_turns: u64,
+    pub has_assistant_text: bool,
+    pub approved_plan_ordinal: Option<u64>,
     pub resolved_model_source: Option<SequenceId>,
     pub generation: u64,
     pub turns: u64,
@@ -217,6 +234,12 @@ pub struct RecoveryHead {
     pub(super) maintenance: Option<Maintenance>,
 }
 impl RecoveryHead {
+    /// An interrupted summary generation has not replaced visible conversation.
+    #[must_use]
+    pub const fn interrupted_compaction(&self) -> bool {
+        self.compacting.is_some()
+    }
+
     pub(super) fn new(
         fingerprint: [u8; 32],
         inherited_journal_through: Option<SequenceId>,

@@ -43,7 +43,7 @@ fn actor_rejects_session_ids_outside_the_storage_safe_alphabet() {
     );
     actor_config.session_id = SessionId("../escape".to_owned());
     assert!(matches!(
-        SessionActor::spawn(actor_config),
+        SessionActor::spawn(actor_config.inner),
         Err(AgentLoopError::InvalidConfiguration(_))
     ));
 }

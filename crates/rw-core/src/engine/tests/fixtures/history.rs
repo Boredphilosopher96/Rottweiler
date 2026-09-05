@@ -34,13 +34,44 @@ impl SessionHistory for UnboundHistory {
     }
 }
 
-pub(crate) async fn spawn(config: SessionActorConfig) -> Result<SessionHandle, AgentLoopError> {
-    SessionActor::spawn(bind(config).await?)
+pub(crate) struct TestActorConfig {
+    pub recovered: crate::engine::SessionRecoveredState,
+    pub inner: SessionActorConfig,
+}
+impl std::ops::Deref for TestActorConfig {
+    type Target = SessionActorConfig;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+impl std::ops::DerefMut for TestActorConfig {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+impl From<SessionActorConfig> for TestActorConfig {
+    fn from(inner: SessionActorConfig) -> Self {
+        Self {
+            inner,
+            recovered: crate::engine::SessionRecoveredState::default(),
+        }
+    }
+}
+
+pub(crate) async fn spawn(
+    input: impl Into<TestActorConfig>,
+) -> Result<SessionHandle, AgentLoopError> {
+    SessionActor::spawn(bind(input).await?)
 }
 
 pub(crate) async fn bind(
-    mut config: SessionActorConfig,
+    input: impl Into<TestActorConfig>,
 ) -> Result<SessionActorConfig, AgentLoopError> {
+    let TestActorConfig {
+        mut inner,
+        recovered,
+    } = input.into();
+    let config = &mut inner;
     let root = Arc::new(tempfile::tempdir().map_err(failure)?);
     let mut log = SegmentedJournal::open(root.path(), &config.session_id.0).map_err(failure)?;
     let source = config.event_sink.capture_read_view()?;
@@ -67,11 +98,13 @@ pub(crate) async fn bind(
         }
     }
     if seed.is_empty() {
-        seed = super::history_seed::events(&config)?;
+        seed = super::history_seed::events(config, &recovered)?;
+        if !seed.is_empty() {
+            crate::commit_session_events(Arc::clone(&config.event_sink), seed.clone()).await?;
+        }
     }
     if !seed.is_empty() {
         log.append_batch(seed).map_err(failure)?;
-        config.recovered.last_sequence = log.read_view().last_sequence();
     }
     let modes = Arc::clone(&config.modes);
     let mut index = CanonicalRecovery::open(&log.read_view(), &modes, None).map_err(failure)?;
@@ -83,9 +116,12 @@ pub(crate) async fn bind(
         modes,
         root,
     });
+    config.recovered = crate::engine::SessionActorRecovery::from_bootstrap(
+        authority.capture_history().await?.bootstrap().await?,
+    )?;
     config.history = authority.clone();
     config.event_sink = authority;
-    Ok(config)
+    Ok(inner)
 }
 
 fn failure(error: impl std::fmt::Display) -> AgentLoopError {

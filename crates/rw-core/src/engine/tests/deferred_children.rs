@@ -87,13 +87,13 @@ async fn resumed_followups_observe_only_their_own_turn() {
     let factory =
         ActorSubagentSessionFactory::new(|_| unreachable!()).with_rebuilder(move |_, root, _| {
             count.fetch_add(1, Ordering::SeqCst);
-            Ok(config(
+            Box::pin(super::fixtures::history::bind(config(
                 root,
                 model.clone(),
                 Arc::new(ToolRegistry::new()),
                 PermissionDecision::Allow,
                 builtin_hook_dispatcher().expect("hooks"),
-            ))
+            )))
         });
     let root = tempfile::tempdir().expect("root");
     let child = rebind(&factory, root.path()).await;
@@ -131,13 +131,13 @@ async fn dropped_activation_retains_preparation_and_close_waits_for_it() {
                 .send(())
                 .expect("notify");
             wait.lock().expect("release lock").recv().expect("release");
-            Ok(config(
+            Box::pin(super::fixtures::history::bind(config(
                 root,
                 Arc::new(ScriptedModel::default()),
                 Arc::new(ToolRegistry::new()),
                 PermissionDecision::Allow,
                 builtin_hook_dispatcher().expect("hooks"),
-            ))
+            )))
         });
     let root = tempfile::tempdir().expect("root");
     let child = rebind(&factory, root.path()).await;

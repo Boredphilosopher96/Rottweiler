@@ -1,3 +1,4 @@
+use super::SessionActorRecovery;
 use crate::PermissionRequest;
 use crate::engine::AgentLoopError;
 use crate::engine::MessageDisposition;
@@ -6,7 +7,6 @@ use crate::engine::event_clock::EventClock;
 use crate::engine::mode_permission_base;
 use crate::engine::mutation_checkpoints::RewindCheckpoint;
 use crate::engine::projection::RecoveredUserShell;
-use crate::engine::projection::SessionRecoveredState;
 use crate::engine::session_mode_name;
 use crate::engine::task_ownership;
 use crate::engine::turn::RunningTurn;
@@ -168,6 +168,7 @@ pub(in crate::engine) struct ActorState {
     pub(in crate::engine) pending_command:
         Option<crate::engine::dispatch::command_job::PendingCommand>,
     pub(in crate::engine) session_id: SessionId,
+    _recovery_source: Option<crate::engine::recovery::HistoryRead<()>>,
     pub(in crate::engine) session_title: Option<String>,
     pub(in crate::engine) title_generation_started: bool,
     pub(in crate::engine) event_clock: Arc<dyn EventClock>,
@@ -251,7 +252,7 @@ impl ActorState {
         default_model_alias: &str,
         default_thinking: ThinkingLevel,
         modes: &ModeRegistry,
-        recovered: SessionRecoveredState,
+        recovered: SessionActorRecovery,
         control: Arc<super::control::SessionControl>,
     ) -> Self {
         let pending_model_switches = recovered
@@ -302,34 +303,14 @@ impl ActorState {
             title_generation_started: recovered.title.is_some(),
             session_title: recovered.title,
             event_clock,
-            resolved_model: resolved_model(&recovered.conversation),
-            conversation_turns: recovered.conversation.len() as u64,
-            system_turns: recovered
-                .conversation
-                .iter()
-                .filter(|turn| turn.role == rw_types::Role::System)
-                .count() as u64,
-            system_resolved_model: recovered
-                .conversation
-                .iter()
-                .filter(|turn| turn.role == rw_types::Role::System)
-                .rev()
-                .find_map(|turn| {
-                    turn.meta
-                        .model
-                        .as_ref()
-                        .filter(|model| model.contains('/'))
-                        .cloned()
-                }),
-            title_prompt: crate::engine::turn::title::first_meaningful_user_prompt(
-                &recovered.conversation,
-            ),
-            has_assistant_text: crate::engine::turn::title::has_successful_assistant_text(
-                &recovered.conversation,
-            ),
-            approved_plan_item: crate::engine::projection::approved_plan_context_item(
-                &recovered.conversation,
-            ),
+            resolved_model: recovered.conversation.resolved_model,
+            conversation_turns: recovered.conversation.turns,
+            system_turns: recovered.conversation.system_turns,
+            system_resolved_model: recovered.conversation.system_resolved_model,
+            title_prompt: recovered.conversation.title_prompt,
+            has_assistant_text: recovered.conversation.has_assistant_text,
+            approved_plan_item: recovered.conversation.approved_plan_item,
+            _recovery_source: recovered.source,
             queued: recovered.queued_messages.into_iter().collect(),
             queued_positions,
             running: None,
@@ -384,15 +365,6 @@ impl ActorState {
 #[cfg(test)]
 mod tests;
 
-fn resolved_model(conversation: &[Turn]) -> Option<String> {
-    conversation.iter().rev().find_map(|turn| {
-        turn.meta
-            .model
-            .as_ref()
-            .filter(|model| model.contains('/'))
-            .cloned()
-    })
-}
 impl ActorState {
     pub(in crate::engine) fn has_conversation_context(&self) -> bool {
         self.conversation_turns > self.system_turns

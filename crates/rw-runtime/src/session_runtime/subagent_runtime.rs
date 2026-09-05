@@ -82,50 +82,54 @@ impl SubagentSessionFactory for RuntimeSubagentSessionFactory {
 }
 
 impl ChildActorTemplate {
-    pub(super) fn config(
+    pub(super) async fn config(
         &self,
         launch: &rw_core::SubagentLaunch,
     ) -> std::result::Result<SessionActorConfig, AgentLoopError> {
-        self.lease_runtime.child_config(
-            &self.storage_root,
-            &self.budget_session_id,
-            &launch.handle.session_id,
-            &launch.workspace_root,
-            &launch.request.model,
-            NativeModelGenerations::capture_child(
-                &self.model,
+        self.lease_runtime
+            .child_config(
+                &self.storage_root,
+                &self.budget_session_id,
+                &launch.handle.session_id,
                 &launch.workspace_root,
                 &launch.request.model,
-            )?,
-            Arc::clone(&self.secret_redactor),
-            self.permissions.as_ref(),
-            self.max_turns,
-            Arc::clone(&self.provider_admission),
-        )
+                NativeModelGenerations::capture_child(
+                    &self.model,
+                    &launch.workspace_root,
+                    &launch.request.model,
+                )?,
+                Arc::clone(&self.secret_redactor),
+                self.permissions.as_ref(),
+                self.max_turns,
+                Arc::clone(&self.provider_admission),
+            )
+            .await
     }
 
-    pub(super) fn rebind_config(
+    pub(super) async fn rebind_config(
         &self,
         session_id: &SessionId,
         workspace_root: &Path,
         policy: &rw_core::SubagentRecoveryPolicy,
     ) -> std::result::Result<SessionActorConfig, AgentLoopError> {
-        self.lease_runtime.child_config(
-            &self.storage_root,
-            &self.budget_session_id,
-            session_id,
-            workspace_root,
-            &policy.model_alias,
-            NativeModelGenerations::capture_child(
-                &self.model,
+        self.lease_runtime
+            .child_config(
+                &self.storage_root,
+                &self.budget_session_id,
+                session_id,
                 workspace_root,
                 &policy.model_alias,
-            )?,
-            Arc::clone(&self.secret_redactor),
-            self.permissions.as_ref(),
-            self.max_turns,
-            Arc::clone(&self.provider_admission),
-        )
+                NativeModelGenerations::capture_child(
+                    &self.model,
+                    workspace_root,
+                    &policy.model_alias,
+                )?,
+                Arc::clone(&self.secret_redactor),
+                self.permissions.as_ref(),
+                self.max_turns,
+                Arc::clone(&self.provider_admission),
+            )
+            .await
     }
 }
 

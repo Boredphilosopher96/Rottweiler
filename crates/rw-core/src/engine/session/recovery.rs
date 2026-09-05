@@ -1,11 +1,10 @@
+use super::SessionActorRecovery;
 use crate::engine::AgentLoopError;
 use crate::engine::AgentTurnStatus;
 use crate::engine::RoutedEvent;
 use crate::engine::SessionUsage;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::projection::InterruptedToolRepair;
-use crate::engine::projection::SessionRecoveredState;
-use crate::engine::projection::project_session_read_view;
 use crate::engine::session::config::SessionActorConfig;
 use crate::engine::session::state::ActorState;
 use crate::engine::turn::emit;
@@ -47,7 +46,7 @@ pub(in crate::engine) fn interrupted_tool_recovery_events(
 }
 
 pub(super) fn interrupted_turn_recovery_events(
-    recovered: &SessionRecoveredState,
+    recovered: &SessionActorRecovery,
 ) -> Vec<PendingEvent> {
     let Some(turn) = recovered.interrupted_turn else {
         return Vec::new();
@@ -57,6 +56,12 @@ pub(super) fn interrupted_turn_recovery_events(
         .iter()
         .flat_map(interrupted_tool_recovery_events)
         .collect::<Vec<_>>();
+    if let Some(assistant) = &recovered.interrupted_assistant_turn {
+        events.push(PendingEvent::ConversationTurnCommitted {
+            agent_turn: turn,
+            turn: assistant.clone(),
+        });
+    }
     if let Some(tool_turn) = &recovered.interrupted_tool_turn {
         events.push(PendingEvent::ConversationTurnCommitted {
             agent_turn: turn,
@@ -95,12 +100,9 @@ pub(in crate::engine) async fn recover_actor_from_journal(
         let _ = pending.respond.send(Err(rw_tools::ToolError::Cancelled));
     }
 
-    let recovered = project_session_read_view(
-        config.event_sink.capture_read_view()?,
-        &config.session_id,
-        &config.modes,
-    )
-    .await?;
+    let recovered = SessionActorRecovery::from_bootstrap(
+        config.history.capture_history().await?.bootstrap().await?,
+    )?;
     let client_roles = std::mem::take(&mut state.client_roles);
     let tasks = state.tasks.clone();
     let control = Arc::clone(&state.control);

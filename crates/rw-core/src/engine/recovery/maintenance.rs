@@ -102,8 +102,13 @@ impl CanonicalRecovery {
                     if item.role != rw_types::Role::System {
                         continue;
                     }
+                    to.system_turns = to
+                        .system_turns
+                        .checked_add(1)
+                        .ok_or(RecoveryError::Limit("system turn counter"))?;
                     if item.has_resolved_model {
                         to.resolved_model_source = Some(item.sequence);
+                        to.system_model_source = Some(item.sequence);
                     }
                     to.serialized_bytes = to
                         .serialized_bytes

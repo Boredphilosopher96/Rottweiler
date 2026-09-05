@@ -70,8 +70,9 @@ struct Recipe {
     _policy_permit: OwnedSemaphorePermit,
 }
 impl Recipe {
-    fn prepare(&self) -> Result<crate::SessionActorConfig, OrchestrationError> {
+    async fn prepare(&self) -> Result<crate::SessionActorConfig, OrchestrationError> {
         let mut config = (self.builder)(&self.session, &self.workspace, &self.policy)
+            .await
             .map_err(|error| OrchestrationError::Session(error.to_string()))?;
         config.session_id.clone_from(&self.session);
         config.workspace_root.clone_from(&self.workspace);
@@ -160,16 +161,18 @@ fn spawn_preparation(state: Arc<Mutex<State>>, recipe: Arc<Recipe>, done: watch:
     tokio::spawn(async move {
         // The task owns preparation even when its initiating run/cancel/close caller drops.
         let builder = recipe.clone();
-        let result = tokio::task::spawn_blocking(move || builder.prepare())
-            .await
-            .map_err(|error| {
-                OrchestrationError::EffectsUnsettled(format!("child preparation failed: {error}"))
-            })
-            .and_then(std::convert::identity)
-            .and_then(|config| {
-                crate::SessionActor::spawn(config)
-                    .map_err(|error| OrchestrationError::Session(error.to_string()))
-            });
+        let result = tokio::task::spawn_blocking(move || {
+            tokio::runtime::Handle::current().block_on(builder.prepare())
+        })
+        .await
+        .map_err(|error| {
+            OrchestrationError::EffectsUnsettled(format!("child preparation failed: {error}"))
+        })
+        .and_then(std::convert::identity)
+        .and_then(|config| {
+            crate::SessionActor::spawn(config)
+                .map_err(|error| OrchestrationError::Session(error.to_string()))
+        });
         let mut state = state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);

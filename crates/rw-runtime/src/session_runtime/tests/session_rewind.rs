@@ -28,6 +28,7 @@ use super::builtin_hook_dispatcher;
 use super::checkpoint_root;
 use super::tempdir;
 use super::test_provider_admission;
+use rw_core::recovery::SessionHistory;
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
@@ -90,6 +91,15 @@ async fn session_handle_rewind_restores_ten_agent_edits_to_turn_three() {
         coordinator_root.clone(),
         Arc::new(CheckpointStore::open(&coordinator_root, &workspace).expect("checkpoint store")),
     ));
+    let recovered = rw_core::SessionActorRecovery::from_bootstrap(
+        sink.capture_history()
+            .await
+            .expect("history")
+            .bootstrap()
+            .await
+            .expect("bootstrap"),
+    )
+    .expect("actor recovery");
     let actor = SessionActor::spawn(SessionActorConfig {
         ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),
         ui_tool_source: std::sync::Arc::new(rw_core::ui::UnavailableUiToolSource),
@@ -117,7 +127,7 @@ async fn session_handle_rewind_restores_ten_agent_edits_to_turn_three() {
         workspace_roots: Arc::new(rw_core::NoopWorkspaceRootController),
         extension_development: Arc::new(rw_core::NoopSessionExtensionController),
         resources: Arc::new(rw_core::NoopSessionResources),
-        recovered: rw_core::SessionRecoveredState::default(),
+        recovered,
         max_turns: 4,
         identical_tool_failure_limit: 5,
         max_output_tokens: 1024,

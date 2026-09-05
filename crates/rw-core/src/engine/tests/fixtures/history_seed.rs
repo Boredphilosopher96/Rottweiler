@@ -3,8 +3,10 @@
 use crate::engine::{AgentLoopError, PendingEvent, SessionActorConfig};
 use rw_types::{EngineEvent, EventMeta, SequenceId};
 
-pub(super) fn events(config: &SessionActorConfig) -> Result<Vec<EngineEvent>, AgentLoopError> {
-    let recovered = &config.recovered;
+pub(super) fn events(
+    config: &SessionActorConfig,
+    recovered: &crate::engine::SessionRecoveredState,
+) -> Result<Vec<EngineEvent>, AgentLoopError> {
     if recovered.last_sequence.is_some() {
         return Err(AgentLoopError::InvalidConfiguration(
             "recovered fixture prefix requires its actual source events".into(),

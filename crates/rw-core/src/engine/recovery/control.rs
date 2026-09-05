@@ -29,6 +29,7 @@ pub struct RecoveredMessage {
 /// Live payloads selected by the bounded recovery head. No historical IR is retained.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RecoveryControlPayloads {
+    pub conversation: super::ConversationMetadata,
     pub latest_budget: Option<rw_types::session_state::SessionBudgetState>,
     pub title: Option<String>,
     pub resolved_model: Option<String>,
@@ -171,6 +172,8 @@ impl CanonicalHistory {
             .resolved_model_source
             .map(|sequence| self.resolved_model(&mut reader, sequence))
             .transpose()?;
+        result.conversation =
+            self.conversation_metadata(head, &mut reader, result.resolved_model.clone())?;
         reader.selection(control, &mut result)?;
         reader.workspace_and_plans(control, &mut result)?;
         reader.messages(control, &mut result)?;
@@ -197,6 +200,43 @@ impl CanonicalHistory {
         result.source_bytes = reader.bytes;
         result.decoded_bytes = reader.decoded_bytes;
         Ok(result)
+    }
+    fn conversation_metadata(
+        &self,
+        head: &super::RecoveryHead,
+        reader: &mut ControlReader<'_>,
+        resolved_model: Option<String>,
+    ) -> Result<super::ConversationMetadata, RecoveryError> {
+        let cut = head.conversation;
+        let title_prompt = if let Some(sequence) = cut.first_user_source {
+            let PendingEvent::ConversationTurnCommitted { turn, .. } = reader.event(sequence)?
+            else {
+                return Err(RecoveryError::Invalid("title prompt source"));
+            };
+            Some(
+                crate::engine::turn::title::first_meaningful_user_prompt(std::slice::from_ref(
+                    &turn,
+                ))
+                .ok_or(RecoveryError::Invalid("title prompt source identity"))?,
+            )
+        } else {
+            None
+        };
+        let system_resolved_model = cut
+            .system_model_source
+            .map(|sequence| self.resolved_model(reader, sequence))
+            .transpose()?;
+        Ok(super::ConversationMetadata {
+            turns: cut.turns,
+            system_turns: cut.system_turns,
+            resolved_model,
+            system_resolved_model,
+            title_prompt,
+            has_assistant_text: cut.has_assistant_text,
+            approved_plan_item: cut
+                .approved_plan_ordinal
+                .map(|ordinal| rw_types::ContextItemId(format!("conversation:{ordinal}"))),
+        })
     }
     fn resolved_model(
         &self,

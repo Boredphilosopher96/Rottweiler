@@ -92,8 +92,8 @@ pub use projection::{
 };
 use session::ActorState;
 pub use session::{
-    PluginSessionBinding, PluginSessionCapability, SessionActor, SessionActorConfig, SessionHandle,
-    SessionSubscription, StartupNotification,
+    PluginSessionBinding, PluginSessionCapability, SessionActor, SessionActorConfig,
+    SessionActorRecovery, SessionHandle, SessionSubscription, StartupNotification,
 };
 pub use session_extension::{
     NoopSessionExtensionController, SessionExtensionController, SessionExtensionSnapshot,

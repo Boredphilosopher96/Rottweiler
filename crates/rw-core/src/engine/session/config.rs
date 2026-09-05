@@ -1,3 +1,4 @@
+use super::SessionActorRecovery;
 use crate::PermissionGate;
 use crate::engine::commands::FolderTrustController;
 use crate::engine::commands::SessionCommandContext;
@@ -8,7 +9,6 @@ use crate::engine::durability::SessionEventSink;
 use crate::engine::event_clock::EventClock;
 use crate::engine::model::ModelDriver;
 use crate::engine::mutation_checkpoints::MutationCheckpointCoordinator;
-use crate::engine::projection::SessionRecoveredState;
 use crate::engine::redaction::SecretRedactor;
 use crate::engine::session_extension::SessionExtensionController;
 use crate::engine::session_extension::SessionExtensionSnapshot;
@@ -66,7 +66,7 @@ pub struct SessionActorConfig {
     pub workspace_roots: Arc<dyn WorkspaceRootController>,
     pub extension_development: Arc<dyn SessionExtensionController>,
     pub resources: Arc<dyn SessionResources>,
-    pub recovered: SessionRecoveredState,
+    pub recovered: SessionActorRecovery,
     pub max_turns: usize,
     pub identical_tool_failure_limit: usize,
     pub max_output_tokens: u32,
@@ -130,7 +130,10 @@ impl SessionActorConfig {
             workspace_roots: Arc::clone(&self.workspace_roots),
             extension_development: Arc::clone(&self.extension_development),
             resources: Arc::clone(&self.resources),
-            recovered: self.recovered.clone(),
+            recovered: SessionActorRecovery {
+                provider: self.recovered.provider.clone(),
+                ..SessionActorRecovery::default()
+            },
             max_turns: self.max_turns,
             identical_tool_failure_limit: self.identical_tool_failure_limit,
             max_output_tokens: self.max_output_tokens,

@@ -232,7 +232,7 @@ pub(in crate::engine::tests) fn config(
     tools: Arc<ToolRegistry>,
     permissions: PermissionDecision,
     hooks: HookDispatcher,
-) -> SessionActorConfig {
+) -> super::history::TestActorConfig {
     SessionActorConfig {
         ui: std::sync::Arc::new(crate::ui::EmptyUiRegistry),
         ui_tool_source: std::sync::Arc::new(crate::ui::UnavailableUiToolSource),
@@ -260,13 +260,14 @@ pub(in crate::engine::tests) fn config(
         workspace_roots: Arc::new(NoopWorkspaceRootController),
         extension_development: Arc::new(NoopSessionExtensionController),
         resources: Arc::new(crate::NoopSessionResources),
-        recovered: SessionRecoveredState::default(),
+        recovered: crate::engine::SessionActorRecovery::default(),
         max_turns: 10,
         identical_tool_failure_limit: 5,
         max_output_tokens: 256,
         thinking: ThinkingLevel::Off,
         event_capacity: 256,
     }
+    .into()
 }
 
 #[derive(Debug)]
