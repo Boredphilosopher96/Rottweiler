@@ -21,6 +21,23 @@ impl EngineHost {
             return Err(HostError::ShuttingDown);
         }
         match command {
+            ClientCommand::GetSessionState { meta, session_id } => {
+                let session = self.ready_session(&session_id).await?;
+                let snapshot = session
+                    .handle()
+                    .live_state()
+                    .await
+                    .map_err(HostError::from)?;
+                Ok((
+                    CommandOutcome::Accepted {},
+                    Some(session_id.clone()),
+                    vec![EngineEvent::SessionStateReady {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        snapshot,
+                    }],
+                ))
+            }
             ClientCommand::GetSessionControls { meta, session_id } => {
                 let session = self.ready_session(&session_id).await?;
                 let snapshot = session.handle().controls().await.map_err(HostError::from)?;

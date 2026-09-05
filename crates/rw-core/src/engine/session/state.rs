@@ -41,6 +41,10 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 
 pub(in crate::engine) enum ActorCommand {
+    LiveState {
+        respond:
+            oneshot::Sender<Result<rw_types::session_state::SessionStateSnapshot, AgentLoopError>>,
+    },
     Controls {
         respond: oneshot::Sender<
             Result<rw_types::session_controls::SessionControlsSnapshot, AgentLoopError>,
@@ -155,6 +159,7 @@ pub(in crate::engine) enum ProtocolCompletion {
 
 #[allow(clippy::struct_excessive_bools)]
 pub(in crate::engine) struct ActorState {
+    pub(in crate::engine) live: super::live_state::LiveState,
     pub(in crate::engine) pending_plugin_tool:
         Option<crate::engine::turn::plugin_tool::PendingPluginTool>,
     pub(in crate::engine) pending_model_preparation:
@@ -285,6 +290,10 @@ impl ActorState {
             .get(&mode_id.0)
             .map_or(recovered.mode, mode_permission_base);
         Self {
+            live: super::live_state::LiveState {
+                budget: recovered.latest_budget,
+                ..Default::default()
+            },
             session_id,
             title_generation_started: recovered.title.is_some(),
             session_title: recovered.title,

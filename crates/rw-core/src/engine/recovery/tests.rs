@@ -16,7 +16,7 @@ pub(super) fn text(role: Role, body: &str) -> Turn {
         meta: TurnMeta::default(),
     }
 }
-fn event(sequence: u64, pending: PendingEvent) -> EngineEvent {
+pub(super) fn event(sequence: u64, pending: PendingEvent) -> EngineEvent {
     pending.stamp(EventMeta {
         protocol_version: PROTOCOL_VERSION,
         session_id: SessionId("canonical".into()),
@@ -25,7 +25,7 @@ fn event(sequence: u64, pending: PendingEvent) -> EngineEvent {
         caused_by: None,
     })
 }
-fn terminal(turn: u64) -> PendingEvent {
+pub(super) fn terminal(turn: u64) -> PendingEvent {
     PendingEvent::TurnFinished {
         turn,
         status: AgentTurnStatus::Completed,

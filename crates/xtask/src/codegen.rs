@@ -1,3 +1,7 @@
+use rw_types::session_state::{
+    SessionActiveTurn, SessionBudgetState, SessionCompactionState, SessionQueuedPreview,
+    SessionShellState, SessionStateSnapshot,
+};
 mod envelope;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -272,6 +276,22 @@ fn generate_typescript() -> Result<String, XtaskError> {
             rw_types::question_admission::MAX_PENDING_QUESTION_PREPARED_BYTES,
         ),
         (
+            "MAX_SESSION_STATE_BYTES",
+            rw_types::session_state::MAX_SESSION_STATE_BYTES,
+        ),
+        (
+            "MAX_SESSION_STATE_PREPARED_BYTES",
+            rw_types::session_state::MAX_SESSION_STATE_PREPARED_BYTES,
+        ),
+        (
+            "MAX_SESSION_QUEUE_PREVIEW_BYTES",
+            rw_types::session_state::MAX_SESSION_QUEUE_PREVIEW_BYTES,
+        ),
+        (
+            "MAX_SESSION_QUEUE_ITEMS",
+            rw_types::session_state::MAX_SESSION_QUEUE_ITEMS,
+        ),
+        (
             "MAX_SESSION_CONTROLS_BYTES",
             rw_types::session_controls::MAX_SESSION_CONTROLS_BYTES,
         ),
@@ -361,6 +381,12 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(TodoStatus);
     declaration!(SessionControls);
     declaration!(SessionControlsSnapshot);
+    declaration!(SessionStateSnapshot);
+    declaration!(SessionActiveTurn);
+    declaration!(SessionBudgetState);
+    declaration!(SessionCompactionState);
+    declaration!(SessionShellState);
+    declaration!(SessionQueuedPreview);
     declaration!(SessionApproval);
     declaration!(SessionQuestion);
     declaration!(TodoSnapshot);

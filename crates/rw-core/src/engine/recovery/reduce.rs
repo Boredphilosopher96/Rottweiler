@@ -49,6 +49,7 @@ pub(super) fn reduce(
         return Ok(());
     };
     match kind {
+        PendingEvent::BudgetStatus { .. } => head.latest_budget = Some(sequence),
         PendingEvent::TodoStateCommitted { snapshot } => {
             snapshot
                 .validate()
@@ -509,7 +510,6 @@ pub(super) fn reduce(
         | PendingEvent::HookFailure { .. }
         | PendingEvent::CommandFinished { .. }
         | PendingEvent::GuardTriggered { .. }
-        | PendingEvent::BudgetStatus { .. }
         | PendingEvent::SubagentSpawned { .. }
         | PendingEvent::SubagentFinished { .. }
         | PendingEvent::PluginMessageInjected { .. }

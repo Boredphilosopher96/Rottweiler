@@ -42,6 +42,11 @@ pub(super) async fn handle_plugin_message(
         || state.pending_command.is_some()
         || state.pending_model_preparation.is_some()
     {
+        if state.queued.len() >= rw_types::session_state::MAX_SESSION_QUEUE_ITEMS {
+            return Err(AgentLoopError::InvalidConfiguration(
+                "queued message count exceeds admission".into(),
+            ));
+        }
         let position = state
             .queued_positions
             .back()

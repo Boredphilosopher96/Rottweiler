@@ -60,6 +60,12 @@ pub(super) async fn dispatch_message(
         || state.pending_command.is_some()
         || state.pending_model_preparation.is_some()
     {
+        if state.queued.len() >= rw_types::session_state::MAX_SESSION_QUEUE_ITEMS {
+            let _ = respond.send(Err(AgentLoopError::InvalidConfiguration(
+                "queued message count exceeds admission".into(),
+            )));
+            return;
+        }
         let content = config.secret_redactor.redact(&content);
         let Some(position) = state
             .queued_positions

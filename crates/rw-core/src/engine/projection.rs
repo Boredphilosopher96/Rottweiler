@@ -24,6 +24,7 @@ pub struct SessionRecoveredState {
     pub context_surgery: Vec<ContextSurgeryAction>,
     pub pruned_tool_outputs: BTreeMap<String, u64>,
     pub accounting: crate::engine::SessionAccountingState,
+    pub latest_budget: Option<rw_types::session_state::SessionBudgetState>,
     pub budgeter: Budgeter,
     pub interrupted_compaction: bool,
     pub model_alias: Option<String>,
@@ -228,6 +229,7 @@ pub struct SessionProjector {
     context_surgery: Vec<ContextSurgeryAction>,
     pruned_tool_outputs: BTreeMap<String, u64>,
     accounting: crate::engine::SessionAccountingState,
+    latest_budget: Option<rw_types::session_state::SessionBudgetState>,
     model_alias: Option<String>,
     selected_provider: Option<String>,
     selected_thinking: Option<ThinkingLevel>,
@@ -271,6 +273,7 @@ impl Default for SessionProjector {
             context_surgery: Vec::new(),
             pruned_tool_outputs: BTreeMap::new(),
             accounting: crate::engine::SessionAccountingState::default(),
+            latest_budget: None,
             model_alias: None,
             selected_provider: None,
             selected_thinking: None,
@@ -343,6 +346,7 @@ impl SessionProjector {
             mut context_surgery,
             mut pruned_tool_outputs,
             mut accounting,
+            mut latest_budget,
             mut model_alias,
             mut selected_provider,
             mut selected_thinking,
@@ -620,8 +624,24 @@ impl SessionProjector {
                 | PendingEvent::SubagentFinished { .. }
                 | PendingEvent::HookFailure { .. }
                 | PendingEvent::CommandFinished { .. }
-                | PendingEvent::GuardTriggered { .. }
-                | PendingEvent::BudgetStatus { .. } => {}
+                | PendingEvent::GuardTriggered { .. } => {}
+                PendingEvent::BudgetStatus {
+                    turn,
+                    level,
+                    scope,
+                    unit,
+                    current,
+                    limit,
+                } => {
+                    latest_budget = Some(rw_types::session_state::SessionBudgetState {
+                        turn_id: wire_turn_id(*turn),
+                        level: level.clone(),
+                        scope: scope.clone(),
+                        unit: unit.clone(),
+                        current: *current,
+                        limit: *limit,
+                    });
+                }
                 PendingEvent::Error { .. } | PendingEvent::CompactionFailed { .. } => {
                     compacted_conversation = None;
                     if let Some(start) = compaction_surgery_start.take() {
@@ -897,6 +917,7 @@ impl SessionProjector {
             context_surgery,
             pruned_tool_outputs,
             accounting,
+            latest_budget,
             model_alias,
             selected_provider,
             selected_thinking,
@@ -945,6 +966,7 @@ impl SessionProjector {
             context_surgery,
             pruned_tool_outputs,
             accounting,
+            latest_budget,
             model_alias,
             selected_provider,
             selected_thinking,
@@ -1016,6 +1038,7 @@ impl SessionProjector {
             context_surgery,
             pruned_tool_outputs,
             accounting,
+            latest_budget,
             budgeter,
             interrupted_compaction,
             model_alias,

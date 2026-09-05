@@ -59,6 +59,7 @@ pub(super) fn is_host_command(command: &ClientCommand) -> bool {
             | ClientCommand::ResumeSession { .. }
             | ClientCommand::Fork { .. }
             | ClientCommand::ListSessions { .. }
+            | ClientCommand::GetSessionState { .. }
             | ClientCommand::GetSessionControls { .. }
             | ClientCommand::GetUiCatalog { .. }
             | ClientCommand::GetUiPanels { .. }

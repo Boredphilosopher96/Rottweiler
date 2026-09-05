@@ -50,6 +50,11 @@ pub enum EngineEvent {
         session_id: SessionId,
         target: crate::extension_control::SessionNavigationTarget,
     },
+    SessionStateReady {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        snapshot: crate::session_state::SessionStateSnapshot,
+    },
     SessionControlsReady {
         meta: CommandAckMeta,
         session_id: SessionId,
@@ -697,6 +702,7 @@ impl EngineEvent {
     pub fn command_meta_mut(&mut self) -> Option<&mut CommandAckMeta> {
         match self {
             Self::SessionNavigationRequested { meta, .. }
+            | Self::SessionStateReady { meta, .. }
             | Self::SessionControlsReady { meta, .. }
             | Self::UiCatalogReady { meta, .. }
             | Self::UiPanelsReady { meta, .. }
@@ -813,6 +819,7 @@ impl EngineEvent {
             Self::SessionNavigationRequested { .. }
             | Self::TranscriptPageReady { .. }
             | Self::TranscriptContentReady { .. }
+            | Self::SessionStateReady { .. }
             | Self::SessionControlsReady { .. }
             | Self::UiCatalogReady { .. }
             | Self::UiPanelsReady { .. }
@@ -914,6 +921,7 @@ impl EngineEvent {
             Self::SessionNavigationRequested { .. }
             | Self::TranscriptPageReady { .. }
             | Self::TranscriptContentReady { .. }
+            | Self::SessionStateReady { .. }
             | Self::SessionControlsReady { .. }
             | Self::UiCatalogReady { .. }
             | Self::UiPanelsReady { .. }

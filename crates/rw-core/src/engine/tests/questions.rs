@@ -118,6 +118,21 @@ async fn ask_user_is_persisted_and_answered_only_through_client_command() {
         .iter()
         .map(|event| event.wire.clone())
         .collect::<Vec<_>>();
+    let live = handle
+        .live_state()
+        .await
+        .expect("live metadata without replay");
+    assert_eq!(live.driver_client_id, Some(ClientId("driver".into())));
+    let active = live.active_turn.expect("question owns active turn");
+    let started = asked_prefix.iter().find_map(|event| match event {
+        EngineEvent::TurnStarted { meta, turn_id } if turn_id == &active.turn_id => {
+            Some(meta.sequence_id)
+        }
+        _ => None,
+    });
+    assert_eq!(active.started, started);
+    assert!(started.is_some());
+    assert!(live.through >= started);
     let asked_projection = project_session_events(&asked_prefix).expect("project asked question");
     assert!(
         asked_projection
@@ -161,6 +176,9 @@ async fn ask_user_is_persisted_and_answered_only_through_client_command() {
         }
     }
     assert!(durable_answer);
+    let settled = handle.live_state().await.expect("settled metadata");
+    assert!(settled.active_turn.is_none());
+    assert_eq!(settled.completed_turns, 1);
     let answered_log = sink
         .events
         .lock()

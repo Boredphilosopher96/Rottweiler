@@ -74,6 +74,9 @@ pub(in crate::engine) async fn emit_batch(
         .cloned()
         .collect();
     for event in persisted {
+        state
+            .live
+            .observe(&event, state.running.as_ref().map(|turn| turn.id));
         if let EngineEvent::SessionCreated {
             driver_client_id, ..
         }

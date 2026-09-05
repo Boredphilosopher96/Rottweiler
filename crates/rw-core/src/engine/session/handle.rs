@@ -744,3 +744,17 @@ impl SessionHandle {
         receive.await.map_err(|_| AgentLoopError::Closed)?
     }
 }
+
+impl SessionHandle {
+    /// This query requires the host's admitted direct-read owner.
+    pub(crate) async fn live_state(
+        &self,
+    ) -> Result<rw_types::session_state::SessionStateSnapshot, AgentLoopError> {
+        let (respond, receive) = oneshot::channel();
+        self.commands
+            .send(ActorCommand::LiveState { respond })
+            .await
+            .map_err(|_| AgentLoopError::Closed)?;
+        receive.await.map_err(|_| AgentLoopError::Closed)?
+    }
+}

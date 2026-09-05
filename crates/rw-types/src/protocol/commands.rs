@@ -16,6 +16,10 @@ use ts_rs::TS;
 #[ts(tag = "type", rename_all = "snake_case", optional_fields = nullable)]
 #[serde(deny_unknown_fields)]
 pub enum ClientCommand {
+    GetSessionState {
+        meta: CommandMeta,
+        session_id: SessionId,
+    },
     GetSessionControls {
         meta: CommandMeta,
         session_id: SessionId,
@@ -386,6 +390,7 @@ impl ClientCommand {
         match self {
             Self::ReadTranscript { meta, .. }
             | Self::ReadTranscriptContent { meta, .. }
+            | Self::GetSessionState { meta, .. }
             | Self::GetSessionControls { meta, .. }
             | Self::GetUiCatalog { meta, .. }
             | Self::GetUiPanels { meta, .. }
@@ -466,6 +471,7 @@ impl ClientCommand {
             | Self::ShutdownHost { .. } => None,
             Self::ReadTranscript { session_id, .. }
             | Self::ReadTranscriptContent { session_id, .. }
+            | Self::GetSessionState { session_id, .. }
             | Self::GetSessionControls { session_id, .. }
             | Self::GetUiCatalog { session_id, .. }
             | Self::GetUiPanels { session_id, .. }
@@ -537,6 +543,7 @@ impl ClientCommand {
         match self {
             Self::ReadTranscript { meta, .. }
             | Self::ReadTranscriptContent { meta, .. }
+            | Self::GetSessionState { meta, .. }
             | Self::GetSessionControls { meta, .. }
             | Self::GetUiCatalog { meta, .. }
             | Self::GetUiPanels { meta, .. }
@@ -637,6 +644,7 @@ macro_rules! read_commands {
     };
 }
 read_commands!(
+    GetSessionState,
     GetSessionControls,
     GetUiCatalog,
     GetUiPanels,

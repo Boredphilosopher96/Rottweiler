@@ -11,7 +11,7 @@ pub(super) const ACTIVE_ASSISTANT: u8 = 6;
 pub(super) const ACTIVE_TOOL_LIFECYCLE: u8 = 7;
 pub(super) const ACTIVE_TOOL_RESULTS: u8 = 8;
 pub(super) const SOURCE_ORDINAL: u8 = 12;
-pub(super) const MAX_QUEUED: usize = 128;
+pub(super) const MAX_QUEUED: usize = rw_types::session_state::MAX_SESSION_QUEUE_ITEMS;
 pub(super) const MAX_QUESTIONS: usize = rw_types::question_admission::MAX_PENDING_QUESTION_REQUESTS;
 
 /// Exact visible canonical conversation. Bodies remain in the authoritative journal.
@@ -208,6 +208,7 @@ pub struct RecoveryHead {
     pub control: RecoveryControl,
     pub budget: rw_context::BudgetSnapshot,
     pub accounting: crate::engine::SessionAccountingState,
+    pub latest_budget: Option<SequenceId>,
     pub(super) extension_root: Option<SequenceId>,
     pub(super) compacting: Option<ConversationCut>,
     pub(super) context_cut: u64,
@@ -228,6 +229,7 @@ impl RecoveryHead {
             control: RecoveryControl::default(),
             budget: rw_context::Budgeter::default().snapshot(),
             accounting: crate::engine::SessionAccountingState::default(),
+            latest_budget: None,
             compacting: None,
             context_cut: 0,
             maintenance: None,

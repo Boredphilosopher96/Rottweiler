@@ -147,3 +147,56 @@ fn overwritten_or_removed_control_sources_are_not_recovered() {
     assert_eq!(controls.title.as_deref(), Some("current"));
     assert!(controls.queued_messages.is_empty());
 }
+
+#[test]
+fn latest_budget_is_physical_state_after_conversation_rewind() {
+    let root = tempfile::tempdir().expect("root");
+    let modes = ModeRegistry::builtins().expect("modes");
+    let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
+    let mut recovery =
+        CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("recovery");
+    let pending = vec![
+        PendingEvent::TurnStarted { turn: 1 },
+        PendingEvent::ConversationTurnCommitted {
+            agent_turn: 1,
+            turn: text(Role::User, "first"),
+        },
+        super::tests::terminal(1),
+        PendingEvent::BudgetStatus {
+            turn: 2,
+            level: rw_types::BudgetLevel::HardCap,
+            scope: rw_types::BudgetScope::Session,
+            unit: rw_types::BudgetUnit::Tokens,
+            current: u64::MAX,
+            limit: u64::MAX - 1,
+        },
+        PendingEvent::ConversationRewound {
+            to_turn: 1,
+            operation_id: "rewind-budget".into(),
+            unrestorable_paths: vec![],
+        },
+    ];
+    let events = pending
+        .iter()
+        .enumerate()
+        .map(|(index, pending)| super::tests::event(index as u64, pending.clone()))
+        .collect::<Vec<_>>();
+    append(&mut journal, pending);
+    catch_up(&mut recovery, &journal.read_view(), &modes);
+    let snapshot = recovery
+        .snapshot()
+        .expect("snapshot")
+        .bind_source(&journal.read_view())
+        .expect("source");
+    let budget = snapshot
+        .bootstrap()
+        .expect("bootstrap")
+        .controls
+        .latest_budget
+        .expect("budget");
+    assert_eq!(budget.turn_id, crate::engine::wire_turn_id(2));
+    assert_eq!(budget.current, u64::MAX);
+    assert_eq!(budget.limit, u64::MAX - 1);
+    let projected = crate::engine::project_session_events(&events).expect("audit projection");
+    assert_eq!(projected.latest_budget, Some(budget));
+}

@@ -85,7 +85,8 @@ fn durable_mutation(command: &ClientCommand) -> bool {
         | ClientCommand::ConfigureBuiltinProvider { .. }
         | ClientCommand::ContinueSubagent { .. }
         | ClientCommand::CloseSubagent { .. } => true,
-        ClientCommand::GetSessionControls { .. }
+        ClientCommand::GetSessionState { .. }
+        | ClientCommand::GetSessionControls { .. }
         | ClientCommand::GetUiCatalog { .. }
         | ClientCommand::GetUiPanels { .. }
         | ClientCommand::GetTodos { .. }

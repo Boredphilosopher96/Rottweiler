@@ -29,6 +29,7 @@ pub struct RecoveredMessage {
 /// Live payloads selected by the bounded recovery head. No historical IR is retained.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RecoveryControlPayloads {
+    pub latest_budget: Option<rw_types::session_state::SessionBudgetState>,
     pub title: Option<String>,
     pub resolved_model: Option<String>,
     pub todos: rw_types::todo::TodoSnapshot,
@@ -126,6 +127,27 @@ impl CanonicalHistory {
                 .validate()
                 .map_err(|_| RecoveryError::Invalid("task snapshot"))?;
             result.todos = snapshot;
+        }
+        if let Some(sequence) = self.head.latest_budget {
+            let PendingEvent::BudgetStatus {
+                turn,
+                level,
+                scope,
+                unit,
+                current,
+                limit,
+            } = reader.event(sequence)?
+            else {
+                return Err(RecoveryError::Invalid("budget source selector"));
+            };
+            result.latest_budget = Some(rw_types::session_state::SessionBudgetState {
+                turn_id: crate::engine::wire_turn_id(turn),
+                level,
+                scope,
+                unit,
+                current,
+                limit,
+            });
         }
         result.resolved_model = self
             .head

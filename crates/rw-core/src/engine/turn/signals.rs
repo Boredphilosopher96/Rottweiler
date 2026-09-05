@@ -144,6 +144,9 @@ pub(in crate::engine) async fn handle_turn_signal(
             if state.running.as_ref().map(|running| running.id) != Some(progress.summary_turn) {
                 return Ok(());
             }
+            state
+                .live
+                .compaction_attempt(progress.summary_turn, progress.attempt);
             let event = match progress.kind {
                 CompactionProgressKind::AttemptStarted => EngineEvent::CompactionAttemptStarted {
                     session_id: state.session_id.clone(),

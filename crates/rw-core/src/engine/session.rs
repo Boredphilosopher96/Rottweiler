@@ -3,6 +3,7 @@ mod child_progress;
 mod config;
 mod control;
 mod handle;
+mod live_state;
 mod plugin_capability;
 mod recovery;
 mod state;

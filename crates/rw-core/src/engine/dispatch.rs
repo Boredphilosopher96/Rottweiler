@@ -9,6 +9,7 @@ mod completed_turns;
 mod context_surgery;
 mod controls;
 mod initialization;
+mod live_state;
 mod message_input;
 mod messages;
 pub(super) mod model_job;
@@ -78,6 +79,9 @@ pub(super) async fn handle_actor_command(
     mode_registry: &Arc<RwLock<Arc<ModeRegistry>>>,
 ) {
     match command {
+        ActorCommand::LiveState { respond } => {
+            let _ = respond.send(live_state::snapshot(state));
+        }
         ActorCommand::Controls { respond } => {
             let _ = respond.send(controls::snapshot(state));
         }
