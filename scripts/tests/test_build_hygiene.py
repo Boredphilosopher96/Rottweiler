@@ -74,6 +74,17 @@ class CleanupTests(unittest.TestCase):
         expanded = {a.path for a in CLEAN.candidates([self.root], ['packages/tui'], True)}
         self.assertEqual(expanded - paths, {self.root / 'packages/tui/node_modules'})
 
+    def test_explicit_target_cannot_contain_another_registered_worktree(self):
+        other = self.target / 'other-worktree'
+        other.mkdir()
+        (self.root / 'contracts').mkdir()
+        (self.root / 'contracts/package-inventory.json').write_text('{"packages": []}')
+        with patch.object(CLEAN, 'ROOT', self.root), \
+                patch.object(CLEAN, 'worktrees', return_value=[self.root, other]), \
+                patch.object(sys, 'argv', ['clean', '--target-dir', str(self.target)]), \
+                self.assertRaisesRegex(ValueError, 'workspace'):
+            CLEAN.main()
+
     def test_explicit_target_preview_does_not_clean_other_targets(self):
         with patch.object(sys, 'argv', ['clean', '--target-dir', str(self.target)]), \
                 patch.object(CLEAN, 'candidates', side_effect=AssertionError('wrong scope')), \

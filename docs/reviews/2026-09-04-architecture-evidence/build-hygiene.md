@@ -12,7 +12,8 @@ Git data, and evidence directories are outside the default candidate set.
 On September 4, the command removed the inactive `rw-context-sizing` and
 `rw-tool-scheduling` targets from this task. Preview estimated 2.85 GiB; Cargo
 reported 5,928 and 4,987 removed files. A second preview returned zero bytes.
-Active worktree caches were retained for ongoing verification.
+Active worktree caches were retained for ongoing verification. Every registered
+worktree is protected from deletion, even when selecting an external target.
 
 `AGENTS.md` requires separate reusable Cargo targets per worktree, stable source
 during integrated verification, evidence retention, and cleanup after work
@@ -25,6 +26,6 @@ ownership manifest and carry its marker; the only vendored source exception is
 the SHA-pinned Bottle acceptance fixture. No existing handwritten file gets a
 size exemption. Semantic module extraction is still in progress.
 
-Validation: 11 focused safety/line-count tests and the complete 169-test Python
+Validation: 12 focused safety/line-count tests and the complete 169-test Python
 contract suite pass. The CI size gate remains unsatisfied until every owned
 source split is integrated.

@@ -244,6 +244,7 @@ impl FileStamp {
 }
 
 struct IndexedFile {
+    truncated: bool,
     digest: blake3::Hash,
     stamp: Option<FileStamp>,
     seen_in_scan: u64,
@@ -490,6 +491,9 @@ impl SymbolIndex {
             && stamp.modified.is_some()
             && cached.stamp.as_ref() == Some(&stamp)
         {
+            if cached.truncated {
+                self.partial.store(true, Ordering::Release);
+            }
             return Ok(cached.symbols.len());
         }
         let mut source = String::new();
@@ -568,6 +572,9 @@ impl SymbolIndex {
             .get(&relative)
             && old.digest == digest
         {
+            if old.truncated {
+                self.partial.store(true, Ordering::Release);
+            }
             return Ok(old.symbols.len());
         }
         let mut parser = Parser::new();
@@ -634,6 +641,7 @@ impl SymbolIndex {
         files.insert(
             relative,
             IndexedFile {
+                truncated: count >= symbol_limit,
                 digest,
                 stamp: None,
                 seen_in_scan: 0,
@@ -922,6 +930,8 @@ mod tests {
             });
         index.index_workspace().expect("scan");
         assert_eq!(index.symbols_for_file("one.rs").expect("query").len(), 1);
+        assert!(index.is_partial());
+        index.index_workspace().expect("unchanged scan");
         assert!(index.is_partial());
     }
 

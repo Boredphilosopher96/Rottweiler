@@ -84,7 +84,8 @@ def main() -> int:
     scope.add_argument('--target-dir', action='append', default=[], type=Path,
                        help='clean ONLY these exact Cargo targets; may repeat')
     args = parser.parse_args()
-    roots = [root.resolve() for root in worktrees(ROOT)] if args.worktrees else [ROOT]
+    protected_roots = [root.resolve() for root in worktrees(ROOT)]
+    roots = protected_roots if args.worktrees else [ROOT]
     packages = [entry['directory'] for entry in json.loads(
         (ROOT / 'contracts/package-inventory.json').read_text())['packages']]
     artifacts = ([Artifact(canonical_path(path), 'cargo', ROOT) for path in args.target_dir]
@@ -93,7 +94,7 @@ def main() -> int:
     for artifact in artifacts:
         if not artifact.path.exists() and not artifact.path.is_symlink():
             continue
-        validate(artifact, roots)
+        validate(artifact, protected_roots)
         selected[artifact.path] = artifact
     total = 0
     for artifact in selected.values():
@@ -105,7 +106,7 @@ def main() -> int:
         print('Preview only. Stop builds/tests, then repeat with --apply to clean.')
         return 0
     for artifact in selected.values():
-        validate(artifact, roots)
+        validate(artifact, protected_roots)
         print(f'Cleaning {artifact.path}', flush=True)
         if artifact.kind == 'cargo':
             subprocess.run(['cargo', 'clean', '--target-dir', str(artifact.path)],
