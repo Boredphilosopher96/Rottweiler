@@ -1,232 +1,172 @@
-import type { ClientDiagnostics } from "./client-diagnostics"
-import { DocumentController } from "./history/document"
-import { HistoryPresentation } from "./history/presentation"
-import type { HistoryReader } from "./history/reader"
 import {
-  BoxRenderable,
-  CliRenderEvents,
-  StyledText,
-  bg,
-  bold,
-  fg,
-  t,
-  type KeyEvent,
-  type RenderContext,
-  type Selection,
-  type ThemeMode,
-  type TreeSitterClient,
+BoxRenderable,
+CliRenderEvents,
+StyledText,
+bg,
+bold,
+fg,
+t,
+type KeyEvent,
+type RenderContext,
+type Selection,
+type ThemeMode,
+type TreeSitterClient,
 } from "@opentui/core"
 import { homedir } from "node:os"
+import type { RottweilerAppOptions } from "./app/options"
+import { ProviderUiController } from "./app/provider"
+import { DocumentController } from "./history/document"
+import { HistoryPresentation } from "./history/presentation"
+export type { RottweilerAppOptions,TerminalHandoverAdapter } from "./app/options"
 
 import {
-  ComposerRenderable,
-  ContextPanelRenderable,
-  FuzzyPickerRenderable,
-  InteractionPanelRenderable,
-  ListDetailRenderable,
-  OutputViewerRenderable,
-  ReviewPanelRenderable,
-  StateBannerRenderable,
-  StatusLineRenderable,
-  SubagentTrayRenderable,
-  ToolsWorkspaceRenderable,
-  TranscriptRenderable,
-  formatSubagentElapsed,
-  type PickerItem,
-  type ListDetailItemRow,
-  type ListDetailPresentation,
+createCommandPaletteModel,
+type CommandPaletteCatalog,
+type CommandPaletteEntry,
+} from "./command-palette"
+import {
+ComposerRenderable,
+ContextPanelRenderable,
+FuzzyPickerRenderable,
+InteractionPanelRenderable,
+ListDetailRenderable,
+OutputViewerRenderable,
+ReviewPanelRenderable,
+StateBannerRenderable,
+StatusLineRenderable,
+SubagentTrayRenderable,
+ToolsWorkspaceRenderable,
+TranscriptRenderable,
+formatSubagentElapsed,
+type ListDetailItemRow,
+type ListDetailPresentation,
+type PickerItem,
 } from "./components"
 import {
-  createCommandPaletteModel,
-  type CommandPaletteCatalog,
-  type CommandPaletteEntry,
-} from "./command-palette"
-import { createThemeBrowserModel } from "./theme-browser"
-import {
-  createSettingsBrowserModel,
-  type SettingsBrowserAction,
-  type SettingsCatalog,
-} from "./settings-browser"
-import {
-  createMcpBrowserModel,
-  mcpBrowserRow,
-  type McpBrowserAction,
-  type McpCatalog,
-} from "./mcp-browser"
-import {
-  compileKeybindings,
-  formatKeycap,
-  keyStrokeFromEvent,
-  legacyMacNavigationAction,
-  KEYBINDING_ACTION_LABELS,
-  type CompiledKeybindings,
-  type InputMode,
-  type KeybindingAction,
-  type KeybindingConfiguration,
-  type KeybindingContext,
-  type KeybindingPreset,
-  type VimFocus,
+KEYBINDING_ACTION_LABELS,
+compileKeybindings,
+formatKeycap,
+keyStrokeFromEvent,
+legacyMacNavigationAction,
+type CompiledKeybindings,
+type InputMode,
+type KeybindingAction,
+type KeybindingContext,
+type KeybindingPreset,
+type VimFocus
 } from "./keybindings"
 import {
-  noExternalEditor,
-  noExternalUrl,
-  noImagePaste,
-  noNotifications,
-  noTextClipboard,
-  type EditorAdapter,
-  type ExternalUrlAdapter,
-  type ImagePasteAdapter,
-  type NotificationAdapter,
-  type TextClipboardAdapter,
+createMcpBrowserModel,
+mcpBrowserRow,
+type McpBrowserAction,
+type McpCatalog,
+} from "./mcp-browser"
+import { PickerController,type PickerKind } from "./picker-controller"
+import {
+noExternalEditor,
+noExternalUrl,
+noImagePaste,
+noNotifications,
+noTextClipboard
 } from "./platform"
 import {
-  type ApprovalDecision,
-  type ApprovalBinding,
-  type Attachment,
-  type ClientCommand,
-  type CommandOutcome,
-  type EngineEvent,
-  type PlanDecision,
-  type ModeId,
-  type PermissionDecision,
-  type PermissionApprovalScope,
-  type PermissionModeDescriptor,
-  MCP_SERVER_ID_PATTERN,
-} from "./protocol"
+PresentationController
+} from "./presentation"
 import {
-  ProjectionRequestBroker,
-  type ProjectionKind,
+ProjectionRequestBroker,
+type ProjectionKind,
 } from "./projection-requests"
 import {
-  PresentationController,
-  type PresentationFrameScheduler,
-} from "./presentation"
-import { PickerController, type PickerKind } from "./picker-controller"
+MCP_SERVER_ID_PATTERN,
+type ApprovalBinding,
+type ApprovalDecision,
+type Attachment,
+type CommandOutcome,
+type EngineEvent,
+type ModeId,
+type PermissionApprovalScope,
+type PermissionDecision,
+type PermissionModeDescriptor,
+type PlanDecision
+} from "./protocol"
 import {
-  presentError,
-  projectToolsWorkspace,
-  sanitizeErrorFragment,
-  stringCellWidth,
-  truncateToCells,
-  type ToolsWorkspacePresentation,
+isRestorablePicker,
+parseTuiRecycleState,
+type AppClientState,
+type ClientComposerState,
+} from "./recycle-state"
+import {
+presentError,
+projectToolsWorkspace,
+sanitizeErrorFragment,
+stringCellWidth,
+truncateToCells,
+type ToolsWorkspacePresentation,
 } from "./render"
 import { setWorkspaceRoots } from "./render/tool-presentation"
 import {
-  commandSourceLabel,
-  isTuiHandledSlashCommand,
-  isU64,
-  mergeSlashCommandChoices,
-  parseSessionAction,
-  type CommandChoice,
+commandSourceLabel,
+isTuiHandledSlashCommand,
+isU64,
+mergeSlashCommandChoices,
+parseSessionAction,
+type CommandChoice,
 } from "./session-commands"
 import {
-  createInitialState,
-  enterReplayMode,
-  engineEvent,
-  projectSessionTitleUpdate,
-  reduceRottweilerState,
-  type QuestionProjection,
-  type RottweilerState,
-  type ToolProjection,
+createSettingsBrowserModel,
+type SettingsBrowserAction,
+type SettingsCatalog,
+} from "./settings-browser"
+import {
+createInitialState,
+engineEvent,
+enterReplayMode,
+projectSessionTitleUpdate,
+reduceRottweilerState,
+type QuestionProjection,
+type RottweilerState,
+type ToolProjection,
 } from "./state"
 import {
-  boundSubagentState,
-  childEngineEvent,
-  childPassiveInteractionState,
-  initialSubagentState,
-  mergeComposerDraft,
-  sanitizeSubagentDescriptor,
-  type ComposerDraft,
-  type SubagentDescriptor,
+boundSubagentState,
+childEngineEvent,
+childPassiveInteractionState,
+initialSubagentState,
+mergeComposerDraft,
+sanitizeSubagentDescriptor,
+type ComposerDraft,
+type SubagentDescriptor,
 } from "./subagent-state"
 import {
-  createSyntaxStyle,
-  kennelTheme,
-  systemThemeFor,
-  THEME_ROLE_KEYS,
-  themeByName,
-  themeCatalog,
-  type RottweilerTheme,
+THEME_ROLE_KEYS,
+createSyntaxStyle,
+kennelTheme,
+systemThemeFor,
+themeByName,
+themeCatalog,
+type RottweilerTheme,
 } from "./theme"
+import { createThemeBrowserModel } from "./theme-browser"
 import {
-  durableSequenceId,
-  isRecord,
-  isSessionForkedEvent,
-  type WireEngineEvent,
+durableSequenceId,
+isRecord,
+isSessionForkedEvent,
+type WireEngineEvent,
 } from "./transport"
-import {
-  isRestorablePicker,
-  parseTuiRecycleState,
-  type AppClientState,
-  type ClientComposerState,
-} from "./recycle-state"
 import { stabilizeTreeSitterClient } from "./tree-sitter-client"
 import {
-  boundedUiText,
-  contextPanelHasContent,
-  mcpStateLabel,
-  mcpTransportLabel,
-  modePickerPresentation,
-  modelAliasDescription,
-  modelAvailabilityLabel,
-  permissionActionLabel,
-  permissionPatternLabel,
-  permissionRuleActionLabel,
-  providerConnectionStatus,
-  providerDisplayName,
-  providerName,
-  providerStatusDetail,
-  queuedMessageLabel,
-  nextModeId,
-  timelineTurnLabel,
+boundedUiText,
+contextPanelHasContent,
+mcpStateLabel,
+mcpTransportLabel,
+modePickerPresentation,
+nextModeId,
+permissionActionLabel,
+permissionPatternLabel,
+permissionRuleActionLabel,
+queuedMessageLabel,
+timelineTurnLabel
 } from "./ui-presentation"
-
-export interface RottweilerAppOptions {
-  readonly diagnostics?: ClientDiagnostics | undefined
-  readonly historyReader: HistoryReader
-  readonly initialEvent?: EngineEvent
-  readonly initialState?: RottweilerState
-  readonly sessionId?: string
-  readonly clientId?: string
-  readonly onCommand?: (
-    command: ClientCommand,
-  ) => void | CommandOutcome | null | Promise<void | CommandOutcome | null>
-  readonly onProviderApiKey?: (
-    provider: string,
-    apiKey: string
-  ) => Promise<{
-    readonly stored: true
-    readonly activated: boolean
-    readonly warnings: readonly string[]
-  }>
-  readonly onProviderActivate?: (provider: string) => Promise<void>
-  readonly requestId?: () => string
-  /** Presentation clock. Production uses wall time; deterministic fixtures may inject a fixed value. */
-  readonly nowMs?: () => number
-  readonly theme?: RottweilerTheme
-  readonly systemThemeMode?: ThemeMode | null
-  readonly systemTheme?: RottweilerTheme
-  readonly treeSitterClient?: TreeSitterClient
-  readonly notifications?: NotificationAdapter
-  readonly editor?: EditorAdapter
-  readonly imagePaste?: ImagePasteAdapter
-  readonly externalUrl?: ExternalUrlAdapter
-  readonly textClipboard?: TextClipboardAdapter
-  readonly terminalHandover?: TerminalHandoverAdapter
-  readonly onSessionSelect?: (sessionId: string) => void | Promise<void>
-  /** Close the complete supervised application. The supervisor reaps its owned engine. */
-  readonly onExit?: () => void
-  /** Historical presentation is observer-only; the composer and mutating interactions are hidden. */
-  readonly replaySessionId?: string
-  /** TUI-local bindings. Standard is the canonical map; Vim enables modal editing/navigation. */
-  readonly keybindings?: KeybindingConfiguration
-  /** Injectable frame scheduler used to coalesce presentation-only stream deltas. */
-  readonly presentationFrame?: PresentationFrameScheduler
-  /** Startup instrumentation invoked only after the composer accepts changed input. */
-  readonly onComposerInput?: (value: string) => void
-  /** Host platform used for terminal compatibility decoding. Injectable for production-path tests. */
-  readonly platform?: NodeJS.Platform
-}
 
 export type { PresentationFrameScheduler } from "./presentation"
 
@@ -236,11 +176,6 @@ interface PendingPresentationEvent {
   readonly commandRequestId: string | null
   readonly previous: RottweilerState
   readonly next: RottweilerState
-}
-
-export interface TerminalHandoverAdapter {
-  suspend(): void
-  resume(): void
 }
 
 export type { AppClientState } from "./recycle-state"
@@ -279,9 +214,6 @@ type SubagentAction =
   | { readonly kind: "running"; readonly subagent: SubagentDescriptor }
   | { readonly kind: "interrupt"; readonly subagent: SubagentDescriptor }
   | { readonly kind: "close"; readonly subagent: SubagentDescriptor }
-type ModelPickerChoice =
-  | { readonly kind: "alias"; readonly alias: RottweilerState["modelAliases"][number] }
-  | { readonly kind: "model"; readonly model: RottweilerState["models"][number] }
 
 type PermissionPickerAction =
   | { readonly kind: "refresh" }
@@ -382,12 +314,6 @@ const EXPORT_FORMAT_CHOICES: readonly {
   { format: "json", label: "JSON", description: "Structured data", extension: "json" },
 ]
 
-type ProviderAuthPickerAction =
-  | { readonly kind: "open_url"; readonly value: string }
-  | { readonly kind: "copy_url"; readonly value: string }
-  | { readonly kind: "copy_code"; readonly value: string }
-  | { readonly kind: "cancel" }
-
 type McpServerAction =
   | { readonly kind: "toggle"; readonly server: string; readonly enabled: boolean }
   | { readonly kind: "review"; readonly server: string }
@@ -412,6 +338,7 @@ export class RottweilerApp extends BoxRenderable {
   banner!: StateBannerRenderable
   main!: BoxRenderable
 
+  readonly #providers: ProviderUiController
   readonly #document: DocumentController
   readonly #history: HistoryPresentation
   #state: RottweilerState
@@ -459,20 +386,7 @@ export class RottweilerApp extends BoxRenderable {
   #subagentErrorBaseline: RottweilerState["errors"][number] | undefined
   #commandsRequested = false
   #commandCatalogTruncationNotified = false
-  #modelsRequested = false
-  #providerOnboardingOffered = false
-  #providerOnboardingModelsResponseReceived = false
-  #providerOnboardingSessionsResponseReceived = false
-  #providerPickerOnboarding = false
   #projectionErrors: Partial<Record<ProjectionKind, string>> = {}
-  #modelProviderFilter: string | null = null
-  #providerApiKeyProvider: string | null = null
-  #providerRecoveryProvider: RottweilerState["providers"][number] | null = null
-  #providerAuthActionInFlight = false
-  #providerAuthActionNotice: string | null = null
-  #providerAuthCompletionAttempts = new Set<string>()
-  #storedProviderKeys = new Set<string>()
-  #providerApiKeyPending: string | null = null
   #mcpDraftName: string | null = null
   #mcpDraftExecutable: string | null = null
   #mcpDraftArgs: string[] = []
@@ -813,6 +727,20 @@ export class RottweilerApp extends BoxRenderable {
       onClosed: (kind) => this.#afterPickerClosed(kind),
     })
 
+    const app = this
+    this.#providers = new ProviderUiController({
+      get state() { return app.#state },
+      get activeSubagentId() { return app.#activeSubagentId },
+      get draft() { return app.composer.value },
+      get picker() { return app.picker },
+      pickerController: this.#pickerController,
+      requests: this.#projectionRequests,
+      get projectionErrors() { return app.#projectionErrors },
+      options: this.#options,
+      closePicker: () => this.closePicker(),
+      clearProjectionError: kind => this.#clearProjectionError(kind),
+      projectError: (code, message, retryable) => this.#projectClientError(code, message, retryable),
+    })
     this.#createThemedSurface(theme)
     ctx.on(CliRenderEvents.FOCUS, this.#onTerminalFocus)
     ctx.on(CliRenderEvents.BLUR, this.#onTerminalBlur)
@@ -1210,7 +1138,7 @@ export class RottweilerApp extends BoxRenderable {
       this.#subagentErrorBaseline = undefined
       this.#commandsRequested = false
       this.#commandCatalogTruncationNotified = false
-      this.#modelsRequested = false
+      this.#providers.catalogSettled()
       this.#projectionErrors = {}
       this.#pendingReviewSelection = null
       this.#outputViewerToolCallId = null
@@ -1220,12 +1148,7 @@ export class RottweilerApp extends BoxRenderable {
       this.#composerNotice = null
       this.#pendingExport = null
       this.#clearExportNotice()
-      this.#providerApiKeyProvider = null
-      this.#providerRecoveryProvider = null
-      this.#storedProviderKeys.clear()
-      this.#providerAuthActionInFlight = false
-      this.#providerAuthActionNotice = null
-      this.#providerAuthCompletionAttempts.clear()
+      this.#providers.resetSession()
       this.outputViewer.closePresentation()
       this.reviewPanel.closePresentation()
     }
@@ -1238,7 +1161,7 @@ export class RottweilerApp extends BoxRenderable {
   resetConnectionProjections(): void {
     this.#projectionRequests.clearForReconnect()
     this.#commandsRequested = false
-    this.#modelsRequested = false
+    this.#providers.catalogSettled()
     this.#projectionErrors = {}
   }
 
@@ -1304,7 +1227,7 @@ export class RottweilerApp extends BoxRenderable {
     if (!this.#projectionRequests.acceptsEvent(event)) return
     const completedProjection = this.#projectionRequests.completeEvent(event)
     if (completedProjection === "commands") this.#commandsRequested = false
-    if (completedProjection === "models") this.#modelsRequested = false
+    if (completedProjection === "models") this.#providers.catalogSettled()
     if (completedProjection !== null) this.#clearProjectionError(completedProjection)
     const previous = this.#state
     const crossSessionTitle =
@@ -1540,107 +1463,8 @@ export class RottweilerApp extends BoxRenderable {
     if (event.type === "subagent_spawned" || event.type === "subagent_finished") {
       this.#requestSubagents()
     }
-    if (event.type === "models_listed") {
-      const activationCatalog = this.#projectionRequests.consumeProviderActivationModels(
-        commandRequestId,
-      )
-      if (
-        activationCatalog &&
-        !next.replay.active &&
-        this.#activeSubagentId === null
-      ) {
-        const availableModels = next.models.filter((model) => model.available !== false)
-        if (availableModels.length === 1) {
-          const model = availableModels[0]!
-          this.#projectionRequests.command({
-            type: "switch_model",
-            model: model.id,
-            provider: model.provider,
-          })
-          this.closePicker()
-        }
-      }
-      if (
-        !this.#providerOnboardingModelsResponseReceived &&
-        next.connection.phase === "connected"
-      ) {
-        this.#providerOnboardingModelsResponseReceived = true
-        this.#maybeOfferProviderOnboarding(next)
-      }
-    }
-    if (
-      event.type === "sessions_listed" &&
-      !this.#providerOnboardingSessionsResponseReceived &&
-      next.connection.phase === "connected"
-    ) {
-      this.#providerOnboardingSessionsResponseReceived = true
-      this.#maybeOfferProviderOnboarding(next)
-    }
-    if (event.type === "provider_auth_started") {
-      const provider = typeof eventRecord.provider === "string" ? eventRecord.provider : null
-      const attemptId = typeof eventRecord.attempt_id === "string" ? eventRecord.attempt_id : null
-      if (provider === null || attemptId === null) return
-      this.#providerAuthActionInFlight = false
-      this.#providerAuthActionNotice = null
-      const firstDelivery = !this.#providerAuthCompletionAttempts.has(attemptId)
-      if (firstDelivery) {
-        if (this.#providerAuthCompletionAttempts.size >= 64) {
-          const oldest = this.#providerAuthCompletionAttempts.values().next().value
-          if (oldest !== undefined) this.#providerAuthCompletionAttempts.delete(oldest)
-        }
-        this.#providerAuthCompletionAttempts.add(attemptId)
-        this.#projectionRequests.command({
-          type: "complete_provider_auth",
-          provider,
-          attemptId,
-        })
-      }
-      this.openProviderAuthPicker()
-      if (firstDelivery) {
-        const challenge = next.providerAuth.pending?.challenge
-        const url = challenge?.kind === "oauth"
-          ? challenge.authorization_url
-          : challenge?.verification_uri
-        if (url !== undefined) {
-          void this.#runProviderAuthAction(provider, attemptId, { kind: "open_url", value: url })
-        }
-      }
-    }
-    if (event.type === "provider_configured") {
-      const provider = typeof eventRecord.provider === "string" ? eventRecord.provider : null
-      if (provider === null) return
-      if (eventRecord.auth_kind === "oauth" || eventRecord.auth_kind === "device_flow") {
-        this.#projectionRequests.command({ type: "begin_provider_auth", provider })
-      } else if (eventRecord.auth_kind === "api_key") {
-        this.openProviderApiKeyPrompt(provider)
-      }
-    }
-    if (event.type === "provider_auth_finished") {
-      this.#providerAuthActionInFlight = false
-      if (eventRecord.success === true) {
-        this.#providerAuthActionNotice = "Signed in. Connecting provider and loading models…"
-      } else {
-        this.#providerAuthActionNotice = null
-        this.#projectClientError(
-          "provider_auth_failed",
-          typeof eventRecord.message === "string" ? eventRecord.message : "provider authentication failed",
-          true,
-        )
-      }
-    }
-    if (event.type === "provider_activation_finished") {
-      this.#providerAuthActionNotice = null
-      const message = typeof eventRecord.message === "string"
-        ? eventRecord.message
-        : "provider connection did not become ready"
-      if (eventRecord.success === true) {
-        this.#requestModels(true)
-        this.#projectionRequests.markProviderActivationModels()
-      } else {
-        this.#projectClientError("provider_activation_failed", message, true)
-      }
-      this.openProviderPicker()
-    }
+    this.#providers.afterEvent(event, eventRecord, commandRequestId, next)
+
     if (
       event.type === "tool_call_finished" ||
       event.type === "turn_finished" ||
@@ -1666,29 +1490,6 @@ export class RottweilerApp extends BoxRenderable {
     ) {
       this.#projectionRequests.command({ type: "get_context" })
       this.#projectionRequests.command({ type: "get_cost" })
-    }
-  }
-
-  #maybeOfferProviderOnboarding(state: RottweilerState): void {
-    if (
-      !this.#providerOnboardingModelsResponseReceived ||
-      !this.#providerOnboardingSessionsResponseReceived
-    ) return
-    // A cold catalog has not checked credentials or reachability. Only offer
-    // setup automatically when no provider is configured; explicit discovery
-    // and inference still report missing credentials and unavailable models.
-    const configured = state.providers.some((provider) => provider.configured)
-    if (
-      !configured &&
-      state.model === null &&
-      !this.#providerOnboardingOffered &&
-      !state.replay.active &&
-      this.#activeSubagentId === null &&
-      this.composer.value.length === 0 &&
-      this.#pickerController.kind === null
-    ) {
-      this.#providerOnboardingOffered = true
-      this.openProviderPicker(true)
     }
   }
 
@@ -1728,7 +1529,7 @@ export class RottweilerApp extends BoxRenderable {
     const kind = this.#pickerController.kind
     if (this.#activeSubagentId !== null || this.#composerSubmissionsInFlight > 0
       || this.#terminalSuspended || this.#state.shell.active || this.#state.replay.active
-      || this.#providerAuthActionInFlight || this.#providerApiKeyPending !== null
+      || this.#providers.hasPendingAction
       || this.#state.providerAuth.pending !== null || this.#mcpDraftName !== null
       || this.#pendingRewindIntent !== null || this.#pendingExport !== null
       || this.#reviewOpen || this.outputViewer.visible || this.interactionPanel.visible
@@ -1754,8 +1555,8 @@ export class RottweilerApp extends BoxRenderable {
         query: surface?.input.value ?? (this.#pickerController.anchored ? this.#pickerController.query : this.picker.input.value),
         selectedId: typeof selected === "string" ? selected : null,
         scrollOffset: surface?.scrollOffset ?? 0,
-        modelProviderFilter: this.#modelProviderFilter,
-        onboarding: this.#providerPickerOnboarding,
+        modelProviderFilter: this.#providers.modelProviderFilter,
+        onboarding: this.#providers.onboarding,
         themeBeforePreview: this.#themeBeforePreview?.name ?? null,
       },
     })
@@ -1764,7 +1565,7 @@ export class RottweilerApp extends BoxRenderable {
   /** Rebuild view bindings from client-owned data; projection responses remain engine-owned. */
   restoreRecycleState(state: AppClientState): void {
     if (state.sessionId !== this.#sessionId) return
-    this.#providerOnboardingOffered = true
+    this.#providers.suppressOnboarding()
     const theme = this.#resolvedTheme(themeByName(state.theme) ?? kennelTheme)
     if (theme.name !== this.#theme.name) this.#createThemedSurface(theme)
     this.#restoreComposerState(state.composer)
@@ -1858,8 +1659,7 @@ export class RottweilerApp extends BoxRenderable {
     }
     this.#state = state
     if (state.providerAuth.pending === null) {
-      this.#providerAuthActionInFlight = false
-      this.#providerAuthActionNotice = null
+      this.#providers.resetAuthentication()
     }
     const presented = this.#presentedState()
     this.composer.setImagePasteAvailable(this.#modelSupportsVision(presented))
@@ -1994,48 +1794,15 @@ export class RottweilerApp extends BoxRenderable {
     this.#pickerController.refresh()
   }
 
-  openModelPicker(provider: string | null = null): void {
-    this.#modelProviderFilter = provider
-    this.#pickerController.begin("models")
-    if (!this.#modelsRequested) {
-      this.#requestModels(true)
-    }
-    this.#projectionRequests.command({ type: "list_settings" })
-    this.#pickerController.refresh()
-  }
+  openModelPicker(provider: string | null = null): void { this.#providers.openModelPicker(provider) }
 
-  openProviderPicker(onboarding = false): void {
-    this.#modelProviderFilter = null
-    this.#providerPickerOnboarding = onboarding
-    this.#pickerController.begin("providers")
-    if (!this.#modelsRequested) {
-      this.#requestModels(true)
-    }
-    this.#pickerController.refresh()
-  }
+  openProviderPicker(onboarding = false): void { this.#providers.openProviderPicker(onboarding) }
 
-  openProviderAuthPicker(): void {
-    this.#pickerController.begin("providerAuth")
-    this.#pickerController.refresh()
-  }
+  openProviderAuthPicker(): void { this.#providers.openProviderAuthPicker() }
 
-  openProviderRecoveryPicker(provider: RottweilerState["providers"][number]): void {
-    this.#providerRecoveryProvider = provider
-    this.#pickerController.begin("providerRecovery")
-    this.#pickerController.refresh()
-  }
+  openProviderRecoveryPicker(provider: RottweilerState["providers"][number]): void { this.#providers.openProviderRecoveryPicker(provider) }
 
-  openProviderApiKeyPrompt(provider: string): void {
-    if (this.#state.replay.active || provider.length === 0) return
-    this.#pickerController.begin("providerApiKey")
-    this.#providerApiKeyProvider = provider
-    this.picker.openSecret(`Enter ${providerName(provider)} API key`, (apiKey) => {
-      const selectedProvider = this.#providerApiKeyProvider
-      this.closePicker()
-      if (selectedProvider !== null)
-        void this.#submitProviderApiKey(selectedProvider, apiKey)
-    })
-  }
+  openProviderApiKeyPrompt(provider: string): void { this.#providers.openProviderApiKeyPrompt(provider) }
 
   openSettingsPicker(): void {
     this.#pickerController.begin("settings")
@@ -2744,8 +2511,7 @@ export class RottweilerApp extends BoxRenderable {
       : this.#resolvedTheme(capturedTheme)
     this.#projectionRequests.clear("files")
     this.#projectionRequests.setFilePreview(null)
-    this.#providerApiKeyProvider = null
-    this.#providerRecoveryProvider = null
+    this.#providers.pickerClosed()
     this.#clearMcpDraft()
     this.#mcpActionName = null
     this.#budgetSettingKey = null
@@ -2803,6 +2569,7 @@ export class RottweilerApp extends BoxRenderable {
   override destroy(): void {
     if (this.#destroyed) return
     this.#destroyed = true
+    this.#providers.dispose()
     this.#document?.close()
     this.#history?.dispose()
     this.#presentation.destroy()
@@ -3707,337 +3474,13 @@ export class RottweilerApp extends BoxRenderable {
         break
       }
       case "models":
-        const models = this.#state.models.filter(
-          (model) =>
-            this.#modelProviderFilter === null ||
-            model.provider === this.#modelProviderFilter,
-        )
-        const concreteModelIds = new Set(models.map((model) => model.id))
-        const aliases = this.#modelProviderFilter === null
-          ? this.#state.modelAliases.filter(
-              (alias) =>
-                alias.candidates.length !== 1 ||
-                alias.alias !== alias.candidates[0] ||
-                !concreteModelIds.has(alias.candidates[0]!),
-            )
-          : []
-        const modelItems: PickerItem<ModelPickerChoice | null>[] = [
-          ...(aliases.length === 0
-            ? []
-            : [{
-                id: "models.section.failover-chains",
-                label: "Failover chains",
-                description: "",
-                value: null,
-                selectable: false,
-                sectionHeader: true,
-              }]),
-          ...aliases.map((alias) => ({
-            id: `model-alias:${alias.alias}`,
-            label: `${alias.current ? "● " : ""}${alias.alias}`,
-            description: modelAliasDescription(alias, models),
-            value: { kind: "alias" as const, alias },
-          })),
-          ...(models.length === 0
-            ? []
-            : [{
-                id: "models.section.models",
-                label: "Models",
-                description: "",
-                value: null,
-                selectable: false,
-                sectionHeader: true,
-              }]),
-          ...models.map((model) => ({
-            id: model.id,
-            label: `${model.current ? "● " : ""}${model.displayName}`,
-            description: [
-              model.provider,
-              modelAvailabilityLabel(model),
-              model.toolCalling ? "tools" : "",
-              model.vision ? "vision" : "",
-              model.thinking ? "thinking" : "",
-              "pinned route",
-            ]
-              .filter(Boolean)
-              .join(" · "),
-            value: { kind: "model" as const, model },
-          })),
-        ]
-        const modelError = this.#projectionErrors.models
-        if (modelError === undefined && this.#modelsRequested && modelItems.length === 0) {
-          this.#pickerController.showLoading("Models", "Loading available models")
-          break
-        }
-        if (modelError !== undefined) {
-          modelItems.unshift({
-            id: "models.error",
-            label: "Couldn't load models",
-            description: `${modelError} · select to retry`,
-            value: null,
-          })
-        }
-        if (modelItems.length === 0) {
-          this.#pickerController.showStatus(
-            "Models",
-            "No models are available",
-            "Connect a provider, then reopen this panel.",
-          )
-          break
-        }
-        this.#pickerController.show(
-          this.#modelProviderFilter === null
-            ? "Models"
-            : `Models · ${this.#modelProviderFilter}`,
-          modelItems,
-          (item) => {
-            const selection = item.value as ModelPickerChoice | null
-            if (selection === null) {
-              if (item.id === "models.error") {
-                this.#requestModels()
-                return
-              }
-              this.#projectClientError(
-                "models_unavailable",
-                "no configured model routes are available; configure a provider and model alias",
-              )
-              this.closePicker()
-              return
-            }
-            if (selection.kind === "alias") {
-              this.#projectionRequests.command({
-                type: "switch_model",
-                model: selection.alias.alias,
-              })
-            } else {
-              const model = selection.model
-              if (model.available === false) {
-                this.#projectClientError(
-                  "model_unavailable",
-                  model.status ?? `${model.displayName} is unavailable`,
-                  true,
-                )
-                return
-              }
-              this.#projectionRequests.command({
-                type: "switch_model",
-                model: model.id,
-                provider: model.provider,
-              })
-            }
-            this.closePicker()
-          },
-        )
-        break
-      case "providers": {
-        const providerChoices = this.#state.providers
-        const providerItems: PickerItem<RottweilerState["providers"][number] | null>[] =
-          providerChoices
-            .slice()
-            .sort((left, right) => left.name.localeCompare(right.name))
-            .map((provider) => ({
-              id: provider.name,
-              label: providerDisplayName(provider),
-              description: [
-                providerConnectionStatus(provider),
-                `${provider.modelCount} model${provider.modelCount === 1 ? "" : "s"}`,
-              this.#storedProviderKeys.has(
-                provider.name)
-                ? "credential stored"
-                : "",
-              providerStatusDetail(provider),
-              ].filter(Boolean).join(" · "),
-              value: provider,
-            }))
-        const providerError = this.#projectionErrors.models
-        if (providerError === undefined && this.#modelsRequested && providerItems.length === 0) {
-          this.#pickerController.showLoading("Providers", "Loading provider connections")
-          break
-        }
-        if (providerError !== undefined) {
-          providerItems.unshift({
-            id: "providers.error",
-            label: "Couldn't load providers",
-            description: `${providerError} · select to retry`,
-            value: null,
-          })
-        }
-        if (providerItems.length === 0) {
-          this.#pickerController.showStatus(
-            this.#providerPickerOnboarding
-              ? "Welcome to Rottweiler · connect a provider to start"
-              : "Providers",
-            "No providers are connected",
-            "Connect a provider, then reopen this panel.",
-          )
-          break
-        }
-        this.#pickerController.show(
-          this.#providerPickerOnboarding
-            ? "Welcome to Rottweiler · connect a provider to start"
-            : "Providers",
-          providerItems,
-          (item) => {
-            const provider = item.value as RottweilerState["providers"][number] | null
-            if (provider === null) {
-              if (item.id === "providers.error") {
-                this.#requestModels()
-                return
-              }
-              this.#projectClientError(
-                "providers_unavailable",
-                "no configured provider routes are available; authenticate and configure a provider",
-              )
-              this.closePicker()
-              return
-            }
-            if (provider.authenticated && !provider.reachable) {
-              this.openProviderRecoveryPicker(provider)
-              return
-            }
-            switch (provider.nextAction) {
-              case "select_models":
-                this.openModelPicker(provider.name)
-                break
-              case "authenticate":
-                this.#projectionRequests.command({ type: "begin_provider_auth", provider: provider.name })
-                break
-              case "api_key_cli":
-                if (this.#storedProviderKeys.has(provider.name)) {
-                  void this.#retryProviderActivation(provider.name)
-                } else {
-                  this.openProviderApiKeyPrompt(provider.name)
-                }
-                break
-              case "configure":
-                this.#projectionRequests.command({ type: "configure_builtin_provider", provider: provider.name })
-                break
-              case "none":
-                this.#projectClientError(
-                  "provider_auth_unavailable",
-                  provider.status ?? `${provider.name} has no safe authentication action`,
-                  true,
-                )
-                break
-            }
-          }
-        )
-        break
-      }
-      case "providerRecovery": {
-        const provider = this.#providerRecoveryProvider
-        if (provider === null) {
-          this.openProviderPicker()
-          break
-        }
-        const items: PickerItem<"activate" | "reauthenticate">[] = [
-          {
-            id: "provider-recovery.activate",
-            label: "Refresh models",
-            description: "Retry this provider's live model catalog with the saved sign-in",
-            value: "activate",
-          },
-        ]
-        if (provider.authKind !== "none") {
-          items.push({
-            id: "provider-recovery.reauthenticate",
-            label: provider.authKind === "api_key" ? "Replace API key" : "Re-authenticate",
-            description: "Replace the stored credential for this provider",
-            value: "reauthenticate",
-          })
-        }
-        this.#pickerController.show(`Reconnect ${providerName(provider.name)}`, items, (item) => {
-          if (item.value === "activate") {
-            void this.#retryProviderActivation(provider.name)
-          } else if (provider.authKind === "api_key") {
-            this.openProviderApiKeyPrompt(provider.name)
-          } else {
-            this.closePicker()
-            this.#projectionRequests.command({ type: "begin_provider_auth", provider: provider.name })
-          }
-        })
-        break
-      }
-      case "providerAuth": {
-        const pending = this.#state.providerAuth.pending
-        if (pending === null) {
-          this.openProviderPicker()
-          break
-        }
-        const authUrl =
-          pending.challenge.kind === "oauth"
-            ? pending.challenge.authorization_url
-            : pending.challenge.verification_uri
-        const prompt =
-          pending.challenge.kind === "oauth"
-            ? "Finish signing in in your browser; Rottweiler will continue automatically"
-            : `Enter code ${pending.challenge.user_code} on GitHub; Rottweiler will continue automatically`
-        const items: PickerItem<ProviderAuthPickerAction>[] = [
-          {
-            id: "provider-auth.open",
-            label: pending.challenge.kind === "oauth" ? "Continue in browser" : "Open GitHub",
-            description: this.#providerAuthActionNotice ?? prompt,
-            searchText: `open browser ${prompt}`,
-            value: { kind: "open_url", value: authUrl },
-          },
-        ]
-        if (pending.challenge.kind === "device_flow") {
-          items.push({
-            id: "provider-auth.copy-code",
-            label: `Copy code ${pending.challenge.user_code}`,
-            description: "Copy the one-time GitHub device code",
-            searchText: `copy code ${pending.challenge.user_code}`,
-            value: { kind: "copy_code", value: pending.challenge.user_code },
-          })
-        }
-        items.push(
-          {
-            id: "provider-auth.copy-url",
-            label: "Copy sign-in link",
-            description: "Copy the browser link to the clipboard",
-            searchText: `copy url ${authUrl}`,
-            value: { kind: "copy_url", value: authUrl },
-          },
-          {
-            id: "provider-auth.cancel",
-            label: "Cancel sign-in",
-            description: pending.warnings.join(" · ") || "Stop this sign-in attempt",
-            value: { kind: "cancel" },
-          },
-        )
-        this.#pickerController.show(
-          `Sign in · ${providerDisplayName({
-            name: pending.provider,
-            authKind: pending.challenge.kind === "oauth" ? "oauth" : "device_flow",
-          })}`,
-          items,
-          (item) => {
-            if (item.value.kind === "cancel") {
-              this.#providerAuthActionNotice = null
-              this.#projectionRequests.command({
-                type: "cancel_provider_auth",
-                provider: pending.provider,
-                attemptId: pending.attemptId,
-              })
-            } else {
-              void this.#runProviderAuthAction(
-                pending.provider,
-                pending.attemptId,
-                item.value,
-              )
-            }
-          },
-        )
-        break
-      }
+      case "providers":
+      case "providerRecovery":
+      case "providerAuth":
       case "providerApiKey":
-        if (this.#providerApiKeyPending !== null) {
-          this.#pickerController.showLoading(
-            `Provider credential · ${providerName(this.#providerApiKeyPending)}`,
-            "Storing and activating credential",
-          )
-        }
+        this.#providers.render(this.#pickerController.kind)
         break
+
       case "permissionInput":
         break
       case "mcpInput":
@@ -5380,12 +4823,6 @@ export class RottweilerApp extends BoxRenderable {
     this.#requestSubagents()
   }
 
-  #requestModels(refresh = false): void {
-    this.#modelsRequested = true
-    this.#clearProjectionError("models")
-    this.#projectionRequests.command({ type: "list_models", refresh })
-  }
-
   #requestModes(): void {
     this.#clearProjectionError("modes")
     this.#projectionRequests.command({ type: "list_modes" })
@@ -5784,129 +5221,6 @@ export class RottweilerApp extends BoxRenderable {
     }
   }
 
-  async #submitProviderApiKey(provider: string, apiKey: string): Promise<void> {
-    this.#providerApiKeyPending = provider
-    this.#pickerController.kind = "providerApiKey"
-    this.#pickerController.refresh()
-    try {
-      const result = await this.#options.onProviderApiKey?.(provider, apiKey)
-      if (result === undefined)
-        throw new Error("credential transport unavailable")
-      this.#requestModels(true)
-      if (result.activated) {
-        this.#storedProviderKeys.delete(provider)
-      } else {
-        if (this.#storedProviderKeys.size >= 32) {
-          const oldest = this.#storedProviderKeys.values().next().value
-          if (oldest !== undefined) this.#storedProviderKeys.delete(oldest)
-        }
-        this.#storedProviderKeys.add(provider)
-        this.#projectClientError(
-          "provider_activation_pending",
-          "credential stored securely, but activation is pending; select the provider again to refresh without re-entering the key",
-          true
-        )
-      }
-      this.openProviderPicker()
-      for (const warning of result.warnings.slice(0, 16)) {
-        this.#projectClientError("provider_credential_warning", warning)
-      }
-    } catch {
-      this.#projectClientError(
-        "provider_credential_failed",
-        "provider credential submission failed; verify the key and try again",
-        true
-      )
-      this.openProviderPicker()
-    } finally {
-      this.#providerApiKeyPending = null
-    }
-  }
-
-  async #retryProviderActivation(provider: string): Promise<void> {
-    this.#providerApiKeyPending = provider
-    this.#pickerController.kind = "providerApiKey"
-    this.#pickerController.refresh()
-    try {
-      if (this.#options.onProviderActivate === undefined) throw new Error("activation unavailable")
-      await this.#options.onProviderActivate(provider)
-      this.#storedProviderKeys.delete(provider)
-      this.#requestModels(true)
-      this.openProviderPicker()
-    } catch {
-      this.#projectClientError(
-        "provider_activation_failed",
-        "credential remains stored securely, but activation failed; retry from /providers",
-        true,
-      )
-      this.openProviderPicker()
-    } finally {
-      this.#providerApiKeyPending = null
-    }
-  }
-
-  async #runProviderAuthAction(
-    provider: string,
-    attemptId: string,
-    action: ProviderAuthPickerAction,
-  ): Promise<void> {
-    if (this.#providerAuthActionInFlight) return
-    const pending = this.#state.providerAuth.pending
-    if (
-      pending === null ||
-      pending.provider !== provider ||
-      pending.attemptId !== attemptId
-    )
-      return
-    this.#providerAuthActionInFlight = true
-    let failureCode = "provider_auth_action_failed"
-    let failureMessage =
-      "provider authentication action failed; copy the URL manually"
-    try {
-      switch (action.kind) {
-        case "open_url":
-          failureCode = "provider_auth_browser_failed"
-          failureMessage =
-            "couldn't open a browser; use Copy URL and open it manually"
-          await this.#options.externalUrl.open(action.value)
-          this.#providerAuthActionNotice =
-            "Browser opened · waiting for authentication"
-          break
-        case "copy_code":
-          failureCode = "provider_auth_copy_failed"
-          failureMessage =
-            "couldn't copy the device code; enter the displayed code manually"
-          await this.#options.textClipboard.writeText(action.value)
-          this.#providerAuthActionNotice =
-            "Code copied · waiting for authentication"
-          break
-        case "copy_url":
-          failureCode = "provider_auth_copy_failed"
-          failureMessage =
-            "couldn't copy the URL; open the displayed URL manually"
-          await this.#options.textClipboard.writeText(action.value)
-          this.#providerAuthActionNotice =
-            "URL copied · waiting for authentication"
-          break
-        case "cancel":
-          return
-      }
-    } catch {
-      this.#providerAuthActionNotice = null
-      this.#projectClientError(failureCode, failureMessage, true)
-    } finally {
-      this.#providerAuthActionInFlight = false
-      const current = this.#state.providerAuth.pending
-      if (
-        this.#pickerController.kind === "providerAuth" &&
-        current?.provider === provider &&
-        current.attemptId === attemptId
-      ) {
-        this.#pickerController.refresh()
-      }
-    }
-  }
-
   async #requestFork(atTurn: string | null): Promise<boolean> {
     const meta = this.#projectionRequests.meta()
     this.#projectionRequests.trackFork(meta.request_id)
@@ -5947,7 +5261,7 @@ export class RottweilerApp extends BoxRenderable {
     if (kind === "commands") {
       this.#commandsRequested = false
     } else if (kind === "models") {
-      this.#modelsRequested = false
+      this.#providers.catalogSettled()
     } else if (kind === "runtime_services" && this.#state.runtimeServices.length > 0) {
       this.setState({ ...this.#state, runtimeServices: [] })
     }
