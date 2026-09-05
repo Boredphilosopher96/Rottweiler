@@ -7,7 +7,7 @@ use super::{
     sqlite_schema,
     sqlite_snapshot::{read_only_index_snapshot, same_file_identity, validate_read_only_index},
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension as _, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension as _, TransactionBehavior, params};
 use rw_types::{AccountingAttribution, Cost, SequenceId, TurnId, Usage};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -251,7 +251,7 @@ impl AccountingLedger {
     pub fn record(&self, entry: &TurnAccountingEntry) -> Result<(), SessionStoreError> {
         validate_accounting_entry(entry)?;
         let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         insert_accounting_entry(&transaction, entry)?;
         transaction.commit()?;
         Ok(())
@@ -268,7 +268,7 @@ impl AccountingLedger {
             validate_accounting_entry(entry)?;
         }
         let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for entry in entries {
             insert_accounting_entry(&transaction, entry)?;
         }
