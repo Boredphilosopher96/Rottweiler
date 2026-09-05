@@ -518,3 +518,27 @@ test("production writer prioritizes control while preserving each provider termi
   send(stop)
   await serving
 })
+
+test("concurrent command contexts carry their exact host origin through duplex controls", async () => {
+  const definition: PluginDefinition = {
+    manifest: { name: "control-origin", version: "1", protocol: 3, capabilities: {
+      commands: [{ name: "control", description: "control" }], push: ["session/control"],
+    } },
+    handlers: { commands: { control: async (_params, { session }) => session.control({ action: "select_mode", mode: "plan" }) } },
+  }
+  const { frames, send, serving } = harness(definition)
+  const origins = ["01".repeat(16), "02".repeat(16)]
+  for (const [index, origin] of origins.entries()) {
+    send({ jsonrpc: "2.0", id: 10 + index, method: "command/execute", params: { name: "control", arguments: "", invocation_id: origin } })
+  }
+  await until(() => frames.filter(frame => frame.method === "session/control").length === 2)
+  const requests = frames.filter(frame => frame.method === "session/control")
+  expect(requests.map(frame => frame.params)).toEqual(origins.map(origin => ({ origin, control: { action: "select_mode", mode: "plan" } })))
+  for (const request of requests.toReversed()) send({ jsonrpc: "2.0", id: request.id!, result: { outcome: "applied" } })
+  await until(() => frames.some(frame => frame.id === 10) && frames.some(frame => frame.id === 11))
+  send({ jsonrpc: "2.0", id: 12, method: "command/execute", params: { name: "control", arguments: "" } })
+  await until(() => frames.some(frame => frame.id === 12))
+  expect(frames.find(frame => frame.id === 12)?.error).toMatchObject({ code: -32602 })
+  send(stop)
+  await serving
+})

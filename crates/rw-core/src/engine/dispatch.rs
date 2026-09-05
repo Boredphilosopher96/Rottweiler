@@ -120,8 +120,13 @@ pub(super) async fn handle_actor_command(
         ActorCommand::PluginContextRead { request, respond } => {
             let _ = respond.send(plugin_control::read_context(state, config, &request));
         }
-        ActorCommand::PluginControl { control, respond } => {
-            let result = plugin_control::control(state, config, events, control).await;
+        ActorCommand::PluginControl {
+            origin,
+            control,
+            respond,
+        } => {
+            let result =
+                plugin_control::control(state, config, events, origin.as_ref(), control).await;
             let _ = respond.send(result);
         }
         ActorCommand::PluginQuery { respond } => {

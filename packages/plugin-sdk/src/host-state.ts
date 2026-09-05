@@ -1,6 +1,6 @@
 import { RPC_METHODS, type JsonValue, type PluginPushMethod } from "./generated/protocol-3"
 import type {
-  ExtensionSessionSnapshot, ExtensionContextRead, ExtensionContextPage, ExtensionControl, ExtensionControlOutcome,
+  ExtensionInvocationId, ExtensionSessionSnapshot, ExtensionContextRead, ExtensionContextPage, ExtensionControl, ExtensionControlOutcome,
   ExtensionStateCommitOutcome,
   ExtensionStateSnapshot,
   ExtensionStateTransaction,
@@ -33,7 +33,7 @@ export interface HostStateApi {
 type HostRequest = (method: PluginPushMethod, params: JsonValue) => Promise<JsonValue>
 
 /** Uses the ordinary bounded, correlated host-request path and its admission. */
-export function hostStateContext(request: HostRequest): {
+export function hostStateContext(request: HostRequest, origin: ExtensionInvocationId | null): {
   readonly session: HostSessionApi
   readonly state: HostStateApi
 } {
@@ -47,7 +47,7 @@ export function hostStateContext(request: HostRequest): {
       },
       control: async params => {
         if (!validateControl(params)) throw new Error("invalid session control")
-        const result = await request(RPC_METHODS.sessionControl, params)
+        const result = await request(RPC_METHODS.sessionControl, { origin, control: params })
         if (!validateControlOutcome(result)) throw new Error("invalid control outcome")
         return result
       },

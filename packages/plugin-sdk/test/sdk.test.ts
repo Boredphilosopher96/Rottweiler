@@ -196,7 +196,7 @@ describe("wire protocol", () => {
       lifetime: { total_ms: 300000, idle_ms: 90000 }, name: "echo", input: { value: 7 },
     })
     await request(server, 3, RPC_METHODS.commandExecute, {
-      name: "fixture", arguments: "hello",
+      name: "fixture", arguments: "hello", invocation_id: null,
     })
     await request(server, 4, RPC_METHODS.hookInvoke, {
       hook: "pre_tool", payload: { id: "call", name: "bash", arguments: {} },

@@ -33,13 +33,14 @@ struct CallbackCommand {
     called_back: Notify,
     release: Notify,
     returned: AtomicBool,
+    origin: OnceLock<rw_types::extension_invocation::ExtensionInvocationId>,
 }
 #[async_trait]
 impl CommandHandler<SessionCommandContext, SessionCommandOutput> for CallbackCommand {
     async fn execute(
         &self,
         _: &mut SessionCommandContext,
-        _: CommandInvocation,
+        invocation: CommandInvocation,
     ) -> Result<SessionCommandOutput, CommandExecutionError> {
         let session = self.session.get().expect("session bound before invocation");
         session
@@ -48,12 +49,34 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for CallbackCom
             .expect("actor services callback");
         assert!(matches!(
             session
-                .control(ExtensionControl::SelectMode {
-                    mode: ModeId("plan".into())
-                })
+                .control(
+                    None,
+                    ExtensionControl::SelectMode {
+                        mode: ModeId("plan".into())
+                    }
+                )
                 .await
                 .expect("policy response"),
             ExtensionControlOutcome::Busy {}
+        ));
+        let origin = invocation
+            .origin()
+            .cloned()
+            .expect("host invocation identity");
+        self.origin
+            .set(origin.clone())
+            .expect("one admitted fixture invocation");
+        assert!(matches!(
+            session
+                .control(
+                    Some(origin),
+                    ExtensionControl::SelectMode {
+                        mode: ModeId("plan".into())
+                    }
+                )
+                .await
+                .expect("same command control"),
+            ExtensionControlOutcome::Applied {}
         ));
         self.called_back.notify_one();
         self.release.notified().await;
@@ -117,7 +140,7 @@ async fn command_callback_is_duplex_and_caller_drop_preserves_owned_execution() 
     );
     assert_eq!(
         handle.snapshot().await.expect("responsive snapshot").mode,
-        SessionMode::Execute
+        SessionMode::Plan
     );
     assert!(
         handle
@@ -139,6 +162,21 @@ async fn command_callback_is_duplex_and_caller_drop_preserves_owned_execution() 
         matches!(event.kind, PendingEvent::CommandFinished {message,..} if message == "completed callback")
     );
     assert!(callback.returned.load(Ordering::Acquire));
+    assert!(
+        callback
+            .session
+            .get()
+            .expect("capability")
+            .control(
+                callback.origin.get().cloned(),
+                ExtensionControl::SelectMode {
+                    mode: ModeId("execute".into())
+                }
+            )
+            .await
+            .is_err(),
+        "retired command origin cannot change state"
+    );
     handle.close().await.expect("settled close");
 }
 

@@ -29,6 +29,7 @@ impl CommandReply {
 }
 
 pub(in crate::engine) struct PendingCommand {
+    origin: rw_types::extension_invocation::ExtensionInvocationId,
     receive: oneshot::Receiver<Execution>,
     owner: Arc<SessionActorConfig>,
     mode: ModeId,
@@ -67,6 +68,15 @@ pub(super) async fn start(
             return;
         }
     };
+    let mut bytes = [0; 16];
+    if getrandom::fill(&mut bytes).is_err() {
+        let _ = reply.send(Err(AgentLoopError::InvalidConfiguration(
+            "command invocation identity unavailable".into(),
+        )));
+        return;
+    }
+    let origin = rw_types::extension_invocation::ExtensionInvocationId::from_bytes(bytes);
+    let bound = bound.with_origin(origin.clone());
     let name = bound.name().to_owned();
     let mut snapshot = super::command_snapshot::capture(context.state, context.config);
     let (send, receive) = oneshot::channel();
@@ -92,6 +102,7 @@ pub(super) async fn start(
             // ActorTasks owns completion independently of this join handle.
             drop(task);
             context.state.pending_command = Some(PendingCommand {
+                origin,
                 receive,
                 owner: Arc::clone(context.config),
                 mode: context.state.mode_id.clone(),
@@ -203,5 +214,19 @@ pub(super) fn admit_while_pending(command: &rw_types::ClientCommand) -> bool {
         | ClientCommand::DumpPrompt { .. }
         | ClientCommand::ListPermissions { .. } => true,
         _ => false,
+    }
+}
+
+impl PendingCommand {
+    pub(super) fn allows(
+        &self,
+        origin: &rw_types::extension_invocation::ExtensionInvocationId,
+        config: &Arc<SessionActorConfig>,
+        driver: Option<ClientId>,
+    ) -> bool {
+        &self.origin == origin && Arc::ptr_eq(&self.owner, config) && self.driver == driver
+    }
+    pub(super) fn update_mode(&mut self, mode: ModeId) {
+        self.mode = mode;
     }
 }

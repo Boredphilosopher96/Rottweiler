@@ -85,6 +85,7 @@ pub(in crate::engine) enum ActorCommand {
         >,
     },
     PluginControl {
+        origin: Option<rw_types::extension_invocation::ExtensionInvocationId>,
         control: rw_types::extension_control::ExtensionControl,
         respond: oneshot::Sender<
             Result<rw_types::extension_control::ExtensionControlOutcome, AgentLoopError>,

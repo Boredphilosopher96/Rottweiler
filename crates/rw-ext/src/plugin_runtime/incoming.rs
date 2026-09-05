@@ -244,15 +244,16 @@ fn start_host_command(request: RpcRequest, state: &ReaderState) -> bool {
     let redactor = Arc::clone(&state.redactor);
     let writer = state.writer.clone();
     let termination = Arc::clone(&state.termination);
+    let pending = Arc::clone(&state.pending);
     tokio::spawn(async move {
         // Keep this permit through the actual actor reply, even after teardown starts.
-        let response = handle_push_request(
-            &enforcer,
-            handler.as_ref(),
-            &request.method,
-            redactor.redact(request.params.unwrap_or(Value::Null)),
-        )
-        .await;
+        let params = redactor.redact(request.params.unwrap_or(Value::Null));
+        let response = match validate_control_origin(&pending, &request.method, &params).await {
+            Ok(()) => {
+                handle_push_request(&enforcer, handler.as_ref(), &request.method, params).await
+            }
+            Err(error) => Err(error),
+        };
         if termination.cancellation.is_cancelled() {
             lease.complete();
             return;
@@ -283,6 +284,34 @@ fn start_host_command(request: RpcRequest, state: &ReaderState) -> bool {
         lease.complete();
     });
     true
+}
+
+pub(super) async fn validate_control_origin(
+    pending: &Pending,
+    method: &str,
+    params: &Value,
+) -> Result<(), PluginRpcError> {
+    if method != rw_plugin_protocol::METHOD_SESSION_CONTROL {
+        return Ok(());
+    }
+    let request: rw_types::extension_invocation::ExtensionControlRequest =
+        serde_json::from_value(params.clone())
+            .map_err(|_| rpc_error("invalid_params", "invalid session control request"))?;
+    let Some(origin) = request.origin else {
+        return Ok(());
+    };
+    if pending
+        .lock()
+        .await
+        .values()
+        .any(|request| request.owns_origin(&origin))
+    {
+        return Ok(());
+    }
+    Err(rpc_error(
+        "invalid_origin",
+        "session control does not belong to an active command in this process",
+    ))
 }
 
 fn start_provider_http_request(request: RpcRequest, state: &ReaderState) -> bool {
@@ -577,10 +606,11 @@ pub(super) fn validate_push_params(method: &str, params: &Value) -> Result<(), P
             .map_err(|error| rpc_error("invalid_push", &error.to_string()));
     }
     if method == METHOD_SESSION_CONTROL {
-        let control: rw_types::extension_control::ExtensionControl =
+        let request: rw_types::extension_invocation::ExtensionControlRequest =
             serde_json::from_value(params.clone())
                 .map_err(|_| rpc_error("invalid_push", "invalid session control"))?;
-        return control
+        return request
+            .control
             .validate()
             .map_err(|error| rpc_error("invalid_push", error));
     }

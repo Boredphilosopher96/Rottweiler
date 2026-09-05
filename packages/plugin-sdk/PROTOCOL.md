@@ -150,6 +150,15 @@ mutation. The host retains ownership until the actor replies, including during
 process teardown. Commands require request IDs; these methods are not
 fire-and-forget notifications.
 
+`command/execute` requires `invocation_id`, a nullable host-minted identity.
+The SDK captures it in that handler's context and includes it as `origin` in
+`session/control`. The host accepts a non-null origin only while the same
+process owns its outbound command request and the actor retains that invocation,
+configuration, and driver authority. A command can apply its own idle session
+controls; unrelated callbacks receive `busy`, and retired origins are rejected.
+Context/state reads and panel publication remain serviceable while the command
+runs. The handler's actual completion owns release of command admission.
+
 ## Hooks
 
 A hook declaration requires `name`, `class`, and `failure_policy`. Classes run in

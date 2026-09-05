@@ -315,6 +315,7 @@ mod checkpoints;
 mod extensions;
 mod model_initialization;
 mod native_search;
+mod plugin_command_session;
 mod plugin_events;
 mod project_memory;
 mod prompt_shapes;

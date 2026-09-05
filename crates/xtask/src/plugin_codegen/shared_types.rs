@@ -66,6 +66,7 @@ pub(super) fn generate(root: &Path, check: bool) -> Result<(), String> {
     extension.visit::<ExtensionContextRead>();
     extension.visit::<ExtensionContextPage>();
     extension.visit::<ExtensionControl>();
+    extension.visit::<rw_types::extension_invocation::ExtensionControlRequest>();
     extension.visit::<ExtensionControlOutcome>();
     extension.visit::<ExtensionEventKind>();
     extension.visit::<ExtensionEventNotice>();
@@ -101,6 +102,14 @@ fn generate_schemas(root: &Path, check: bool) -> Result<(), String> {
         ("extension-context-read", schema::<ExtensionContextRead>()),
         ("extension-context-page", schema::<ExtensionContextPage>()),
         ("extension-control", schema::<ExtensionControl>()),
+        (
+            "extension-control-request",
+            schema::<rw_types::extension_invocation::ExtensionControlRequest>(),
+        ),
+        (
+            "extension-invocation-id",
+            schema::<rw_types::extension_invocation::ExtensionInvocationId>(),
+        ),
         (
             "extension-control-outcome",
             schema::<ExtensionControlOutcome>(),

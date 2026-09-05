@@ -57,7 +57,7 @@ fn typed_session_controls_reject_implicit_actions_and_foreign_authority() {
     assert!(
         validate_push_params(
             METHOD_SESSION_CONTROL,
-            &json!({"action":"select_model","model":"fast","provider":null})
+            &json!({"origin":null,"control":{"action":"select_model","model":"fast","provider":null}})
         )
         .is_ok()
     );
@@ -77,4 +77,48 @@ fn typed_session_controls_reject_implicit_actions_and_foreign_authority() {
         .is_ok()
     );
     assert!(validate_push_params(METHOD_SESSION_CONTEXT_READ, &json!({})).is_err());
+}
+
+#[tokio::test]
+async fn control_origin_is_bound_to_active_outbound_command_in_this_process() {
+    use super::super::incoming::validate_control_origin;
+    let origin = rw_types::extension_invocation::ExtensionInvocationId::from_bytes([1; 16]);
+    let other = rw_types::extension_invocation::ExtensionInvocationId::from_bytes([2; 16]);
+    let pending: Pending = Arc::new(Mutex::new(BTreeMap::new()));
+    let (send, _receive) = oneshot::channel();
+    let (mut request, _observer) = RequestPolicy::Ordinary {
+        allow_closed: false,
+    }
+    .begin(send, DEFAULT_REQUEST_TIMEOUT);
+    request
+        .bind_command(
+            METHOD_COMMAND_EXECUTE,
+            &json!({"name":"command", "arguments":"", "invocation_id":origin}),
+        )
+        .expect("command admission");
+    let params = json!({"origin":origin,"control":{"action":"select_mode","mode":"plan"}});
+    assert!(
+        validate_control_origin(&pending, METHOD_SESSION_CONTROL, &params)
+            .await
+            .is_err()
+    );
+    pending.lock().await.insert(RpcId::Number(1), request);
+    assert!(
+        validate_control_origin(&pending, METHOD_SESSION_CONTROL, &params)
+            .await
+            .is_ok()
+    );
+    let mut foreign = params.clone();
+    foreign["origin"] = json!(other);
+    assert!(
+        validate_control_origin(&pending, METHOD_SESSION_CONTROL, &foreign)
+            .await
+            .is_err()
+    );
+    pending.lock().await.remove(&RpcId::Number(1));
+    assert!(
+        validate_control_origin(&pending, METHOD_SESSION_CONTROL, &params)
+            .await
+            .is_err()
+    );
 }

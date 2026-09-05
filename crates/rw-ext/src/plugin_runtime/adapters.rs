@@ -151,6 +151,7 @@ where
                 .request(
                     METHOD_COMMAND_EXECUTE,
                     serde_json::to_value(CommandExecuteParams {
+                        invocation_id: invocation.origin().cloned(),
                         name: self.name.clone(),
                         arguments: invocation.arguments().to_owned(),
                     })

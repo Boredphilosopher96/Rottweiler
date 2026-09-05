@@ -65,11 +65,17 @@ impl CommandDescriptor {
 /// A parsed command invocation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommandInvocation {
+    origin: Option<rw_types::extension_invocation::ExtensionInvocationId>,
     name: String,
     arguments: String,
 }
 
 impl CommandInvocation {
+    #[must_use]
+    pub fn origin(&self) -> Option<&rw_types::extension_invocation::ExtensionInvocationId> {
+        self.origin.as_ref()
+    }
+
     /// Canonical command name, without the leading slash.
     #[must_use]
     pub fn name(&self) -> &str {
@@ -289,6 +295,7 @@ impl<Context, Output> CommandRegistry<Context, Output> {
         Ok(BoundCommand {
             handler: Arc::clone(&registered.handler),
             invocation: CommandInvocation {
+                origin: None,
                 name: name.to_owned(),
                 arguments,
             },
@@ -302,6 +309,15 @@ pub struct BoundCommand<Context, Output> {
     invocation: CommandInvocation,
 }
 impl<Context, Output> BoundCommand<Context, Output> {
+    #[must_use]
+    pub fn with_origin(
+        mut self,
+        origin: rw_types::extension_invocation::ExtensionInvocationId,
+    ) -> Self {
+        self.invocation.origin = Some(origin);
+        self
+    }
+
     #[must_use]
     pub fn name(&self) -> &str {
         self.invocation.name()
@@ -356,6 +372,7 @@ fn parse_invocation(line: &str) -> Result<CommandInvocation, CommandRegistryErro
     let name = &without_slash[..split_at];
     validate_name(name)?;
     Ok(CommandInvocation {
+        origin: None,
         name: name.to_owned(),
         arguments: without_slash[split_at..].trim_start().to_owned(),
     })

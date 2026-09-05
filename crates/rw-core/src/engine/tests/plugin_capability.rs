@@ -73,9 +73,12 @@ async fn plugin_machine_capability_preserves_driver_queue_and_durable_order() {
         .expect("plugin capability");
     assert!(matches!(
         plugin
-            .control(rw_types::extension_control::ExtensionControl::SelectMode {
-                mode: rw_types::ModeId("plan".into()),
-            })
+            .control(
+                None,
+                rw_types::extension_control::ExtensionControl::SelectMode {
+                    mode: rw_types::ModeId("plan".into()),
+                }
+            )
             .await
             .expect("busy control"),
         rw_types::extension_control::ExtensionControlOutcome::Busy {}
@@ -302,7 +305,7 @@ async fn typed_controls_preserve_policy_and_page_context_without_prompt_payloads
         .clone();
     assert!(matches!(
         plugin
-            .control(ExtensionControl::PinContext { item_id })
+            .control(None, ExtensionControl::PinContext { item_id })
             .await
             .expect("pin"),
         ExtensionControlOutcome::Applied {}
@@ -319,9 +322,12 @@ async fn typed_controls_preserve_policy_and_page_context_without_prompt_payloads
     ));
     assert!(
         plugin
-            .control(ExtensionControl::EvictContext {
-                item_id: rw_types::ContextItemId("system".into())
-            })
+            .control(
+                None,
+                ExtensionControl::EvictContext {
+                    item_id: rw_types::ContextItemId("system".into())
+                }
+            )
             .await
             .is_err()
     );
@@ -340,28 +346,37 @@ async fn assert_selection_policy(plugin: &crate::PluginSessionCapability) {
     use rw_types::extension_control::{ExtensionControl, ExtensionControlOutcome};
     assert!(matches!(
         plugin
-            .control(ExtensionControl::SelectMode {
-                mode: rw_types::ModeId("plan".into())
-            })
+            .control(
+                None,
+                ExtensionControl::SelectMode {
+                    mode: rw_types::ModeId("plan".into())
+                }
+            )
             .await
             .expect("plan"),
         ExtensionControlOutcome::Applied {}
     ));
     assert!(
         plugin
-            .control(ExtensionControl::SelectMode {
-                mode: rw_types::ModeId("execute".into())
-            })
+            .control(
+                None,
+                ExtensionControl::SelectMode {
+                    mode: rw_types::ModeId("execute".into())
+                }
+            )
             .await
             .is_err()
     );
     let before = plugin.query().await.expect("snapshot");
     assert!(matches!(
         plugin
-            .control(ExtensionControl::SelectModel {
-                model: rw_types::ModelAlias("other".into()),
-                provider: None
-            })
+            .control(
+                None,
+                ExtensionControl::SelectModel {
+                    model: rw_types::ModelAlias("other".into()),
+                    provider: None
+                }
+            )
             .await
             .expect("selection"),
         ExtensionControlOutcome::ContextChoiceRequired { .. }
@@ -372,9 +387,12 @@ async fn assert_selection_policy(plugin: &crate::PluginSessionCapability) {
     );
     assert!(matches!(
         plugin
-            .control(ExtensionControl::SelectMode {
-                mode: rw_types::ModeId("discuss".into())
-            })
+            .control(
+                None,
+                ExtensionControl::SelectMode {
+                    mode: rw_types::ModeId("discuss".into())
+                }
+            )
             .await
             .expect("busy"),
         ExtensionControlOutcome::Busy {}

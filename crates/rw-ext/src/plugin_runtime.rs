@@ -418,7 +418,8 @@ impl JsonRpcPluginClient {
                 .map_err(|_| rpc_error("id_exhausted", "plugin RPC request IDs exhausted"))?,
         );
         let (sender, receiver) = oneshot::channel();
-        let (pending, observer) = policy.begin(sender, self.timeout);
+        let (mut pending, observer) = policy.begin(sender, self.timeout);
+        pending.bind_command(method, &params)?;
         self.pending.lock().await.insert(id.clone(), pending);
         let mut guard = OrdinaryRequestGuard {
             termination: &self.termination,

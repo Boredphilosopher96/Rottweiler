@@ -14,7 +14,7 @@ test("state commit preserves explicit CAS and host-bound identity", async () => 
     calls.push([method, params])
     if (method === RPC_METHODS.stateRead) return snapshot
     return { outcome: "conflict", actual_revision: "8" }
-  })
+  }, null)
   expect(await state.read()).toEqual(snapshot)
   expect(await state.commit({ expected_revision: "7", mutations: [{ action: "delete", key: "review/count" }] }))
     .toEqual({ outcome: "conflict", actual_revision: "8" })
@@ -26,7 +26,7 @@ test("state commit preserves explicit CAS and host-bound identity", async () => 
 
 test("state callers cannot acknowledge delivery or attach routing identities", async () => {
   let calls = 0
-  const { state } = hostStateContext(async () => { calls++; return null })
+  const { state } = hostStateContext(async () => { calls++; return null }, null)
   const forged = { expected_revision: null, mutations: [], acknowledged: { session_id: "session", sequence: "9" } }
   await expect(state.commit(forged)).rejects.toThrow("host-owned")
   const crossNamespace = { expected_revision: null, mutations: [], plugin_id: "another" }
@@ -40,9 +40,9 @@ test("state and session replies reject missing nullable fields and additive data
     { ...snapshot, credentials: "must not cross" },
     { ...snapshot, revision: 7 },
   ]) {
-    await expect(hostStateContext(async () => value).state.read()).rejects.toThrow("invalid host")
+    await expect(hostStateContext(async () => value, null).state.read()).rejects.toThrow("invalid host")
   }
-  await expect(hostStateContext(async () => ({ outcome: "committed", revision: "9", ignored: true }))
+  await expect(hostStateContext(async () => ({ outcome: "committed", revision: "9", ignored: true }), null)
     .state.commit({ expected_revision: null, mutations: [{ action: "set", key: "a", value: 1 }] }))
     .rejects.toThrow("invalid host")
   const session = {
@@ -50,9 +50,9 @@ test("state and session replies reject missing nullable fields and additive data
     active_turn: null, queued_messages: 0, last_sequence: null,
   }
   const calls: [string, JsonValue][] = []
-  expect(await hostStateContext(async (method, params) => { calls.push([method, params]); return session }).session.query()).toEqual(session)
+  expect(await hostStateContext(async (method, params) => { calls.push([method, params]); return session }, null).session.query()).toEqual(session)
   expect(calls).toEqual([[RPC_METHODS.sessionQuery, {}]])
-  await expect(hostStateContext(async () => ({ ...session, provider_config: {} })).session.query()).rejects.toThrow("invalid host")
+  await expect(hostStateContext(async () => ({ ...session, provider_config: {} }), null).session.query()).rejects.toThrow("invalid host")
 })
 
 test("typed controls preserve pending outcomes and reject implicit authority", async () => {
@@ -60,17 +60,17 @@ test("typed controls preserve pending outcomes and reject implicit authority", a
   const session = hostStateContext(async (method, params) => {
     calls.push([method, params])
     return { outcome: "context_choice_required", question_id: "model-switch-1" }
-  }).session
+  }, null).session
   const operation = { action: "select_model", model: "fast", provider: null } as const
   expect(await session.control(operation)).toEqual({ outcome: "context_choice_required", question_id: "model-switch-1" })
-  expect(calls).toEqual([[RPC_METHODS.sessionControl, operation]])
+  expect(calls).toEqual([[RPC_METHODS.sessionControl, { origin: null, control: operation }]])
   await expect(session.control({ ...operation, session_id: "other" } as typeof operation)).rejects.toThrow("invalid session control")
   await expect(session.control({ action: "select_mode", mode: "界".repeat(100) })).rejects.toThrow("invalid session control")
   expect(calls.length).toBe(1)
   const read = { expected_sequence: null, after_item_id: null }
   const badPage = { outcome: "ready", sequence: null, items: [], next_after_item_id: null, prompt: "secret" }
-  await expect(hostStateContext(async () => badPage).session.readContext(read)).rejects.toThrow("invalid context page")
-  expect(await hostStateContext(async () => ({ outcome: "restart" })).session.readContext(read)).toEqual({ outcome: "restart" })
+  await expect(hostStateContext(async () => badPage, null).session.readContext(read)).rejects.toThrow("invalid context page")
+  expect(await hostStateContext(async () => ({ outcome: "restart" }), null).session.readContext(read)).toEqual({ outcome: "restart" })
 })
 
 test("context paging admits a complete namespaced tool identity", async () => {

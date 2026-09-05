@@ -107,10 +107,18 @@ pub(super) async fn control(
     state: &mut ActorState,
     config: &Arc<SessionActorConfig>,
     events: &broadcast::Sender<RoutedEvent>,
+    origin: Option<&rw_types::extension_invocation::ExtensionInvocationId>,
     control: ExtensionControl,
 ) -> Result<ExtensionControlOutcome, AgentLoopError> {
     control.validate().map_err(invalid)?;
-    if state.pending_command.is_some()
+    let own_command = match (&state.pending_command, origin) {
+        (Some(pending), Some(origin)) if pending.allows(origin, config, state.control.driver()) => {
+            true
+        }
+        (_, Some(_)) => return Err(invalid("extension command origin is no longer active")),
+        _ => false,
+    };
+    if (state.pending_command.is_some() && !own_command)
         || state.running.is_some()
         || state.active_shell.is_some()
         || state.initialization_running
@@ -171,6 +179,9 @@ pub(super) async fn control(
                 return Ok(ExtensionControlOutcome::ContextChoiceRequired { question_id });
             }
         }
+    }
+    if own_command && let Some(pending) = &mut state.pending_command {
+        pending.update_mode(state.mode_id.clone());
     }
     Ok(ExtensionControlOutcome::Applied {})
 }

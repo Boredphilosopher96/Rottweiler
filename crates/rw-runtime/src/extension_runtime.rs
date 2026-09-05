@@ -666,9 +666,11 @@ impl PushHandler for SessionPluginPushHandler {
                 plugin_push_result(capability.read_context(request).await)
             }
             METHOD_SESSION_CONTROL => {
-                let control = serde_json::from_value(params)
-                    .map_err(|_| plugin_push_error("invalid_push", "invalid session control"))?;
-                plugin_push_result(capability.control(control).await)
+                let request: rw_types::extension_invocation::ExtensionControlRequest =
+                    serde_json::from_value(params).map_err(|_| {
+                        plugin_push_error("invalid_push", "invalid session control")
+                    })?;
+                plugin_push_result(capability.control(request.origin, request.control).await)
             }
             METHOD_SESSION_QUERY => plugin_push_result(capability.query().await),
             METHOD_EXTENSION_STATE_READ => plugin_push_result(capability.read_state().await),

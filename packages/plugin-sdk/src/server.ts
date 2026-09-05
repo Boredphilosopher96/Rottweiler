@@ -1,3 +1,5 @@
+import validateInvocationId from "./generated/extension-invocation-id-validator.js"
+import type { ExtensionInvocationId } from "./generated/extension-contract"
 import validateUiPanelUpdate from "./generated/ui-panel-update-validator.js"
 import validateUiPanelUpdated from "./generated/ui-panel-updated-validator.js"
 import validateUiContribution from "./generated/ui-contribution-validator.js"
@@ -812,7 +814,7 @@ export class PluginServer {
       const params = this.#commandParams(rawParams)
       const handler = this.definition.handlers.commands?.[params.name]
       if (handler === undefined) throw new SafeRpcError(-32601, "command is not declared")
-      return this.#runHandler((context) => handler(params, context))
+      return this.#runHandler((context) => handler(params, context), undefined, params.invocation_id)
     }
     if (method === RPC_METHODS.hookInvoke) {
       const params = this.#hookParams(rawParams)
@@ -885,7 +887,7 @@ export class PluginServer {
       const result = await this.#invoke(() => {
           if (this.#lifetime.signal.aborted) call.abort()
           if (call.signal.aborted) throw new SafeRpcError(-32800, "plugin tool cancelled")
-          return handler(params, { ...this.#context(call.signal), progress: update => {
+          return handler(params, { ...this.#context(call.signal, undefined, null), progress: update => {
             if (call.signal.aborted) throw new SafeRpcError(-32800, "plugin tool cancelled")
             progress.report(update)
           } })
@@ -945,7 +947,7 @@ export class PluginServer {
     try {
       await this.#invoke(async () => {
         if (call.signal.aborted) throw new SafeRpcError(-32800, "plugin request cancelled")
-        const events = await providerHandler(params, this.#context(call.signal, params.alias))
+        const events = await providerHandler(params, this.#context(call.signal, params.alias, null))
         if (events === null || typeof events !== "object" || !(Symbol.asyncIterator in events)) {
           throw new SafeRpcError(-32603, "provider must return an async event stream")
         }
@@ -1006,9 +1008,11 @@ export class PluginServer {
 
   #commandParams(raw: unknown): CommandExecuteParams {
     const value = object(raw)
-    requireRpcKeys(value, "command/execute params", ["name", "arguments"])
+    requireRpcKeys(value, "command/execute params", ["name", "arguments", "invocation_id"])
+    if (value.invocation_id !== null && !validateInvocationId(value.invocation_id)) throw new SafeRpcError(-32602, "invalid command invocation identity")
     if (typeof value.arguments !== "string") throw new SafeRpcError(-32602, "invalid command arguments")
     return {
+      invocation_id: value.invocation_id,
       name: string(value.name, "command name"),
       arguments: value.arguments,
     }
@@ -1253,10 +1257,10 @@ export class PluginServer {
     }
   }
 
-  #context(signal: AbortSignal, providerAlias?: string): HandlerContext {
+  #context(signal: AbortSignal, providerAlias: string | undefined, origin: ExtensionInvocationId | null): HandlerContext {
     return {
       signal,
-      ...hostStateContext((method, params) => this.#push(method, params, signal)),
+      ...hostStateContext((method, params) => this.#push(method, params, signal), origin),
       providerHttp: {
         request: (credentialReference, request) => this.#providerHttpRequest(
           providerAlias, credentialReference, request, signal,
@@ -1307,6 +1311,7 @@ export class PluginServer {
   async #runHandler<T>(
     invoke: (context: HandlerContext) => T | Promise<T>,
     providerAlias?: string,
+    origin: ExtensionInvocationId | null = null,
   ): Promise<T> {
     if (this.#lifetime.signal.aborted) throw new SafeRpcError(-32800, "plugin request cancelled")
     const call = new AbortController()
@@ -1320,7 +1325,7 @@ export class PluginServer {
       call.abort()
     }, this.#handlerTimeoutMs)
     try {
-      const result = await this.#invoke(() => invoke(this.#context(call.signal, providerAlias)))
+      const result = await this.#invoke(() => invoke(this.#context(call.signal, providerAlias, origin)))
       call.signal.throwIfAborted()
       return result
     } catch (error) {

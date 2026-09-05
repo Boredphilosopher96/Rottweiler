@@ -17,6 +17,7 @@ mod error;
 pub mod extension_contract;
 pub mod extension_control;
 pub mod extension_events;
+pub mod extension_invocation;
 pub mod extension_ui;
 pub mod hook_contract;
 mod ir;

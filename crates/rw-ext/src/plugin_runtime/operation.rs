@@ -30,7 +30,10 @@ impl RequestPolicy {
     ) -> (PendingRequest, RequestObserver) {
         match self {
             Self::Ordinary { .. } => (
-                PendingRequest::Ordinary(response),
+                PendingRequest::Ordinary {
+                    response,
+                    origin: None,
+                },
                 RequestObserver::Ordinary(timeout),
             ),
             Self::Tool { lifetime, progress } => {
@@ -63,7 +66,10 @@ impl RequestPolicy {
 }
 
 pub(super) enum PendingRequest {
-    Ordinary(oneshot::Sender<Result<Value, PluginRpcError>>),
+    Ordinary {
+        response: oneshot::Sender<Result<Value, PluginRpcError>>,
+        origin: Option<rw_types::extension_invocation::ExtensionInvocationId>,
+    },
     Tool {
         response: oneshot::Sender<Result<Value, PluginRpcError>>,
         operation: ToolOperation,
@@ -71,9 +77,37 @@ pub(super) enum PendingRequest {
 }
 
 impl PendingRequest {
+    pub(super) fn bind_command(
+        &mut self,
+        method: &str,
+        params: &Value,
+    ) -> Result<(), PluginRpcError> {
+        if method != rw_plugin_protocol::METHOD_COMMAND_EXECUTE {
+            return Ok(());
+        }
+        let command: rw_plugin_protocol::CommandExecuteParams =
+            serde_json::from_value(params.clone())
+                .map_err(|_| rpc_error("invalid_params", "invalid command invocation"))?;
+        let Self::Ordinary { origin, .. } = self else {
+            return Err(rpc_error(
+                "invalid_method",
+                "command requires ordinary request admission",
+            ));
+        };
+        *origin = command.invocation_id;
+        Ok(())
+    }
+
+    pub(super) fn owns_origin(
+        &self,
+        expected: &rw_types::extension_invocation::ExtensionInvocationId,
+    ) -> bool {
+        matches!(self, Self::Ordinary { origin: Some(origin), .. } if origin == expected)
+    }
+
     pub(super) fn respond(self, result: Result<Value, PluginRpcError>) {
         match self {
-            Self::Ordinary(response) => {
+            Self::Ordinary { response, .. } => {
                 let _ = response.send(result);
             }
             Self::Tool {
@@ -325,6 +359,12 @@ mod tests {
         }
         assert!(!pending.progress(update(5)));
         let (ordinary, _receive) = oneshot::channel();
-        assert!(!PendingRequest::Ordinary(ordinary).progress(update(1)));
+        assert!(
+            !PendingRequest::Ordinary {
+                response: ordinary,
+                origin: None
+            }
+            .progress(update(1))
+        );
     }
 }

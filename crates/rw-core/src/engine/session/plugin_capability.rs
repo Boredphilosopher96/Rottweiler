@@ -55,6 +55,7 @@ impl PluginSessionCapability {
     /// Rejects invalid identities, exhausted admission, policy or persistence failure.
     pub async fn control(
         &self,
+        origin: Option<rw_types::extension_invocation::ExtensionInvocationId>,
         control: rw_types::extension_control::ExtensionControl,
     ) -> Result<rw_types::extension_control::ExtensionControlOutcome, AgentLoopError> {
         control
@@ -62,7 +63,11 @@ impl PluginSessionCapability {
             .map_err(|error| AgentLoopError::InvalidConfiguration(error.into()))?;
         let (respond, receive) = oneshot::channel();
         self.commands
-            .try_send(ActorCommand::PluginControl { control, respond })
+            .try_send(ActorCommand::PluginControl {
+                origin,
+                control,
+                respond,
+            })
             .map_err(|_| {
                 AgentLoopError::InvalidConfiguration("plugin control admission unavailable".into())
             })?;
