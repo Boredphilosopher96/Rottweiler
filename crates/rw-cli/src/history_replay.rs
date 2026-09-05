@@ -36,6 +36,9 @@ impl HistoricalReplayEngine {
         &self,
         command: ClientCommand,
     ) -> std::result::Result<(CommandOutcome, Vec<EngineEvent>), HostError> {
+        if command.session_id() != Some(&self.session_id) {
+            return Err(HostError::Protocol("historical session mismatch".into()));
+        }
         let meta = rw_core::CommandAckMeta {
             protocol_version: rw_core::PROTOCOL_VERSION,
             client_id: command.meta().client_id.clone(),
@@ -43,6 +46,11 @@ impl HistoricalReplayEngine {
             emitted_at: SystemEventClock.emitted_at(),
         };
         let event = match command {
+            ClientCommand::GetTodos { session_id, .. } => EngineEvent::TodosRead {
+                meta,
+                result: self.reader.todos(session_id.clone()).await?,
+                session_id,
+            },
             ClientCommand::ReadTranscript {
                 session_id, read, ..
             } => {

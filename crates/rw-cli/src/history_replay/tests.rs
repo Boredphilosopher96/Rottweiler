@@ -196,3 +196,59 @@ async fn historical_process_gets_read_only_runtime_and_leaves_no_build_junk() {
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn historical_task_reads_are_source_owned_and_session_bound() {
+    let (root, engine) = fixture(1);
+    let snapshot = rw_types::todo::TodoSnapshot {
+        items: vec![rw_types::todo::TodoItem {
+            id: "audit".into(),
+            content: "Inspect the source-owned task state".into(),
+            status: rw_types::todo::TodoStatus::Pending,
+        }],
+    };
+    let mut journal = SessionEventLog::open(root.path(), "history").expect("journal");
+    journal
+        .append(EngineEvent::TodoStateCommitted {
+            meta: EventMeta {
+                protocol_version: rw_core::PROTOCOL_VERSION,
+                session_id: SessionId("history".into()),
+                sequence_id: SequenceId(1),
+                emitted_at: "2026-09-04T00:00:00Z".into(),
+                caused_by: None,
+            },
+            snapshot: snapshot.clone(),
+        })
+        .expect("commit task state");
+    drop(journal);
+    let reply = engine
+        .dispatch(
+            ClientId("bound".into()),
+            ClientCommand::GetTodos {
+                meta: meta("tasks"),
+                session_id: SessionId("history".into()),
+            },
+        )
+        .await
+        .expect("task reply");
+    let parsed: CommandReply = serde_json::from_slice(&reply.bytes).expect("typed reply");
+    assert!(
+        matches!(parsed, CommandReply::Read { outcome: CommandOutcome::Accepted {}, events }
+        if matches!(&events[..], [EngineEvent::TodosRead { result: rw_types::todo::TodoReadResult::Ready { todos }, .. }]
+            if todos.through == Some(SequenceId(1)) && todos.snapshot == snapshot))
+    );
+    let foreign = engine
+        .dispatch(
+            ClientId("bound".into()),
+            ClientCommand::GetTodos {
+                meta: meta("foreign-tasks"),
+                session_id: SessionId("foreign".into()),
+            },
+        )
+        .await
+        .expect("rejected reply");
+    let parsed: CommandReply = serde_json::from_slice(&foreign.bytes).expect("typed rejection");
+    assert!(
+        matches!(parsed, CommandReply::Read { outcome: CommandOutcome::Rejected { .. }, events } if events.is_empty())
+    );
+}

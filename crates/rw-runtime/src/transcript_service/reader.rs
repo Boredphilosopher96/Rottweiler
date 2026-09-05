@@ -26,6 +26,17 @@ impl TranscriptReader {
         ))
     }
 
+    /// Read the exact task snapshot through the same descriptor-bound read admission.
+    ///
+    /// # Errors
+    /// Rejects invalid session identity, busy admission, or corrupt/unsafe storage.
+    pub async fn todos(
+        self: &Arc<Self>,
+        session: SessionId,
+    ) -> Result<rw_types::todo::TodoReadResult, HostError> {
+        crate::todo_service::read_todos(Arc::clone(&self.journals), session, || Ok(())).await
+    }
+
     /// Read a bounded current-effective transcript page without starting a session.
     ///
     /// # Errors
