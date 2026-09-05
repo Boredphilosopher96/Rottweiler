@@ -20,7 +20,6 @@ impl TranscriptReader {
         invocation: ToolInvocationId,
         expected_through: Option<SequenceId>,
     ) -> Result<Option<UiPresentation>, HostError> {
-        ToolInvocationId::validate(&invocation.0).map_err(storage)?;
         self.blocking(move |reader| {
             match reader.projected(&session, |index, journal| {
                 if journal.last_sequence() != expected_through {
