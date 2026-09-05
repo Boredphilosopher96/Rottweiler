@@ -207,6 +207,7 @@ fn artifact_frame_is_json_escaped_and_marks_inputs_untrusted() {
 }
 
 struct ReplayFactory {
+    parallel_barrier: Arc<tokio::sync::Barrier>,
     active: Arc<AtomicUsize>,
     maximum: Arc<AtomicUsize>,
     launches: Arc<Mutex<Vec<String>>>,
@@ -253,6 +254,7 @@ impl SubagentSessionFactory for ReplayFactory {
             .expect("launches")
             .push(launch.request.task.clone());
         Ok(Arc::new(ReplaySession {
+            parallel_barrier: Arc::clone(&self.parallel_barrier),
             id: launch.handle.session_id,
             active: Arc::clone(&self.active),
             maximum: Arc::clone(&self.maximum),
@@ -261,6 +263,7 @@ impl SubagentSessionFactory for ReplayFactory {
 }
 
 struct ReplaySession {
+    parallel_barrier: Arc<tokio::sync::Barrier>,
     id: SessionId,
     active: Arc<AtomicUsize>,
     maximum: Arc<AtomicUsize>,
@@ -280,10 +283,10 @@ impl SubagentSession for ReplaySession {
     ) -> Result<SubagentTurnResult, OrchestrationError> {
         let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.maximum.fetch_max(active, Ordering::SeqCst);
-        if prompt.contains("\"step\":\"impl\"") {
-            tokio::time::sleep(Duration::from_millis(40)).await;
-        } else if prompt.contains("\"step\":\"tests\"") {
-            tokio::time::sleep(Duration::from_millis(1)).await;
+        if prompt.contains("\"step\":\"impl\"") || prompt.contains("\"step\":\"tests\"") {
+            tokio::time::timeout(Duration::from_secs(5), self.parallel_barrier.wait())
+                .await
+                .expect("parallel workflow children must run concurrently");
         }
         self.active.fetch_sub(1, Ordering::SeqCst);
         let step = ["plan", "impl", "tests", "review"]
@@ -507,6 +510,7 @@ needs = ["impl", "tests"]
     let maximum = Arc::new(AtomicUsize::new(0));
     let launches = Arc::new(Mutex::new(Vec::new()));
     let factory = Arc::new(ReplayFactory {
+        parallel_barrier: Arc::new(tokio::sync::Barrier::new(2)),
         active,
         maximum: Arc::clone(&maximum),
         launches: Arc::clone(&launches),
@@ -833,6 +837,7 @@ async fn repeated_workflows_close_children_before_metadata_cap() {
         .resolve_tool_names(std::iter::empty())
         .expect("empty tools");
     let factory = Arc::new(ReplayFactory {
+        parallel_barrier: Arc::new(tokio::sync::Barrier::new(2)),
         active: Arc::new(AtomicUsize::new(0)),
         maximum: Arc::new(AtomicUsize::new(0)),
         launches: Arc::new(Mutex::new(Vec::new())),
