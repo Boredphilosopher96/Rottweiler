@@ -95,9 +95,12 @@ fn real_worker_revokes_inherited_bootstrap_effect_authority() {
         OsString::from(CHILD),
         OsString::from("worker"),
     ];
+    let helper = Path::new(env!("CARGO_BIN_EXE_rw-sandbox-helper"))
+        .canonicalize()
+        .expect("resolve fixture helper");
     let plan = shell_launch_plan(
         &policy,
-        Path::new(env!("CARGO_BIN_EXE_rw-sandbox-helper")),
+        &helper,
         Path::new(interpreter),
         &child_args,
     )
@@ -111,7 +114,7 @@ fn real_worker_revokes_inherited_bootstrap_effect_authority() {
     let mut baseline = worker.clone();
     let helper_index = baseline
         .iter()
-        .position(|value| value == env!("CARGO_BIN_EXE_rw-sandbox-helper"))
+        .position(|value| Path::new(value) == helper)
         .expect("helper in launch plan");
     baseline.drain(helper_index..helper_index + 2);
     *baseline.last_mut().expect("mode") = "baseline".to_owned();
