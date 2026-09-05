@@ -33,7 +33,7 @@ async fn closed_children_never_rebind_missing_workspaces_or_invent_publication()
             log,
             storage.clone(),
             parent.0.clone(),
-            JournalReads::new(&storage).expect("reads"),
+            JournalService::new(&storage).expect("reads"),
         )
         .expect("sink");
         let meta = |sequence| EventMeta {
@@ -44,20 +44,23 @@ async fn closed_children_never_rebind_missing_workspaces_or_invent_publication()
             caused_by: None,
         };
         if published {
-            sink.append(EngineEvent::TurnStarted {
-                meta: meta(0),
-                turn_id: TurnId("1".to_owned()),
-            })
+            rw_core::commit_session_events(
+                Arc::clone(&sink),
+                vec![
+                    EngineEvent::TurnStarted {
+                        meta: meta(0),
+                        turn_id: TurnId("1".to_owned()),
+                    },
+                    EngineEvent::SubagentSpawned {
+                        meta: meta(1),
+                        subagent_id: child.subagent_id.clone(),
+                        child_session_id: child.session_id.clone(),
+                        task: "closed before first turn".to_owned(),
+                    },
+                ],
+            )
             .await
-            .expect("turn");
-            sink.append(EngineEvent::SubagentSpawned {
-                meta: meta(1),
-                subagent_id: child.subagent_id.clone(),
-                child_session_id: child.session_id.clone(),
-                task: "closed before first turn".to_owned(),
-            })
-            .await
-            .expect("spawn");
+            .expect("published child");
         }
         let factory = Arc::new(RecoveryProbeFactory::default());
         let rebound = Arc::clone(&factory.rebound);

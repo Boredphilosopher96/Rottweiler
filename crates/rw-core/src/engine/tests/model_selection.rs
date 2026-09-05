@@ -1,5 +1,4 @@
 #![cfg(test)]
-use crate::engine::SessionEventSink;
 
 use crate::engine::builtin_hook_dispatcher;
 use crate::engine::durability::NoopSessionEventSink;
@@ -340,7 +339,9 @@ async fn pending_model_switch_question_recovers_and_can_be_answered() {
     assert!(recovered.pending_questions.contains_key(&question_id.0));
     let sink = Arc::new(NoopSessionEventSink::default());
     for event in events {
-        sink.append(event).await.expect("seed recovered journal");
+        crate::commit_session_events(Arc::clone(&sink), vec![event])
+            .await
+            .expect("seed recovered journal");
     }
 
     let root = TempDir::new().expect("recovery workspace");

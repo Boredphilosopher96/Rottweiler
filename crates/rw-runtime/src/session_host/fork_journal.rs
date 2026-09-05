@@ -137,7 +137,7 @@ impl RuntimeSessionFactory {
             ));
         }
         let lease = self
-            .journal_reads
+            .journal_service
             .capture(&request.parent.session_id.0)
             .map_err(|error| HostError::Persistence(error.to_string()))?;
         let (envelopes, _) = crate::history::load_events_from_view(

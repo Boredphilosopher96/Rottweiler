@@ -17,7 +17,7 @@ use super::FolderTrustOperation;
 use super::FolderTrustStore;
 use super::HashMap;
 use super::HeadlessQuestionAsker;
-use super::JournalReads;
+use super::JournalService;
 use super::MutationCheckpointOutcome;
 use super::MutationScope;
 use super::Mutex;
@@ -228,7 +228,7 @@ fn host_root_load_ignores_pre_event_committed_marker_after_crash() {
     );
 
     let visible = load_session_workspace_roots(
-        &JournalReads::new(&storage).expect("journal reads"),
+        &JournalService::new(&storage).expect("journal reads"),
         &storage,
         &primary,
         session_id,
@@ -276,7 +276,7 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
     );
     let controller = RuntimeWorkspaceRootController {
         index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
-        journal_reads: JournalReads::new(&private).expect("journal reads"),
+        journal_service: JournalService::new(&private).expect("journal reads"),
         checkpoint_root: checkpoint_root.clone(),
         storage_root: private.clone(),
         question_asker: Arc::new(HeadlessQuestionAsker),
@@ -621,7 +621,7 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
 
     let pending = RuntimeWorkspaceRootController {
         index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
-        journal_reads: JournalReads::new(&private).expect("journal reads"),
+        journal_service: JournalService::new(&private).expect("journal reads"),
         checkpoint_root: checkpoint_root.clone(),
         storage_root: private.clone(),
         question_asker: Arc::new(HeadlessQuestionAsker),

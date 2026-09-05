@@ -9,7 +9,7 @@ use super::ExistingRouteModel;
 use super::HostedProviderActivator;
 use super::HostedProviderMode;
 use super::HostedSessionComposition;
-use super::JournalReads;
+use super::JournalService;
 use super::ModelCatalogSource;
 use super::Mutex;
 use super::PermissionDecision;
@@ -569,7 +569,7 @@ async fn hosted_resume_with_unavailable_concrete_model_keeps_control_plane_usabl
         plugin_activation: Arc::new(crate::extension_runtime::PluginActivationBudget::default()),
         wasm_workers: rw_ext::WasmWorkerPool::new(),
         index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
-        journal_reads: JournalReads::new(&storage).expect("journal reads"),
+        journal_service: JournalService::new(&storage).expect("journal reads"),
         workspace: workspace.clone(),
         additional_workspaces: Vec::new(),
         allowed_workspace_roots: vec![workspace.clone()],

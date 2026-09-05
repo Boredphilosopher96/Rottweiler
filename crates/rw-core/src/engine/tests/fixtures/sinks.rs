@@ -1,4 +1,5 @@
 #![cfg(test)]
+use crate::engine::durability as rw_core_batch;
 
 use crate::engine::AgentLoopError;
 use crate::engine::durability::NoopSessionEventSink;
@@ -33,19 +34,22 @@ pub(in crate::engine::tests) struct RecordingSink {
 
 #[async_trait]
 impl SessionEventSink for RecordingSink {
-    async fn append(&self, event: EngineEvent) -> Result<EngineEvent, AgentLoopError> {
-        self.batch_sizes.lock().expect("batch sizes").push(1);
-        self.events
-            .lock()
-            .expect("event sink lock")
-            .push(observe_event(event.clone()).expect("durable fixture event"));
-        Ok(event)
+    async fn settle_effects(&self) -> Result<(), AgentLoopError> {
+        Ok(())
+    }
+    async fn reserve(
+        &self,
+        _plan: &rw_core_batch::EventBatchPlan,
+    ) -> Result<rw_core_batch::EventBatchReservation, AgentLoopError> {
+        Ok(rw_core_batch::EventBatchReservation::new(()))
     }
 
-    async fn append_batch(
-        &self,
-        events: Vec<EngineEvent>,
-    ) -> Result<Vec<EngineEvent>, AgentLoopError> {
+    async fn commit(
+        self: Arc<Self>,
+        batch: Arc<rw_core_batch::AdmittedEventBatch>,
+    ) -> Result<Arc<rw_core_batch::AdmittedEventBatch>, AgentLoopError> {
+        let events = batch.events();
+
         self.batch_sizes
             .lock()
             .expect("batch sizes")
@@ -56,7 +60,7 @@ impl SessionEventSink for RecordingSink {
                 .cloned()
                 .map(|event| observe_event(event).expect("durable fixture event")),
         );
-        Ok(events)
+        Ok(batch)
     }
 
     fn capture_read_view(&self) -> Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
@@ -101,20 +105,26 @@ impl SessionEventSink for RecordingSink {
 
 #[derive(Default)]
 pub(in crate::engine::tests) struct AccountingRecordingSink {
-    pub(in crate::engine::tests) inner: RecordingSink,
+    pub(in crate::engine::tests) inner: Arc<RecordingSink>,
 }
 
 #[async_trait]
 impl SessionEventSink for AccountingRecordingSink {
-    async fn append(&self, event: EngineEvent) -> Result<EngineEvent, AgentLoopError> {
-        self.inner.append(event).await
+    async fn settle_effects(&self) -> Result<(), AgentLoopError> {
+        Ok(())
+    }
+    async fn reserve(
+        &self,
+        _plan: &rw_core_batch::EventBatchPlan,
+    ) -> Result<rw_core_batch::EventBatchReservation, AgentLoopError> {
+        Ok(rw_core_batch::EventBatchReservation::new(()))
     }
 
-    async fn append_batch(
-        &self,
-        events: Vec<EngineEvent>,
-    ) -> Result<Vec<EngineEvent>, AgentLoopError> {
-        self.inner.append_batch(events).await
+    async fn commit(
+        self: Arc<Self>,
+        batch: Arc<rw_core_batch::AdmittedEventBatch>,
+    ) -> Result<Arc<rw_core_batch::AdmittedEventBatch>, AgentLoopError> {
+        Arc::clone(&self.inner).commit(batch).await
     }
 
     fn capture_read_view(&self) -> Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
@@ -202,7 +212,21 @@ pub(in crate::engine::tests) struct FailingSink;
 
 #[async_trait]
 impl SessionEventSink for FailingSink {
-    async fn append(&self, _event: EngineEvent) -> Result<EngineEvent, AgentLoopError> {
+    async fn settle_effects(&self) -> Result<(), AgentLoopError> {
+        Ok(())
+    }
+    async fn reserve(
+        &self,
+        _plan: &rw_core_batch::EventBatchPlan,
+    ) -> Result<rw_core_batch::EventBatchReservation, AgentLoopError> {
+        Ok(rw_core_batch::EventBatchReservation::new(()))
+    }
+
+    async fn commit(
+        self: Arc<Self>,
+        batch: Arc<rw_core_batch::AdmittedEventBatch>,
+    ) -> Result<Arc<rw_core_batch::AdmittedEventBatch>, AgentLoopError> {
+        drop(batch);
         Err(AgentLoopError::Persistence("fixture failure".to_owned()))
     }
 
@@ -213,20 +237,26 @@ impl SessionEventSink for FailingSink {
 
 #[derive(Default)]
 pub(in crate::engine::tests) struct FailCompactionLedgerSink {
-    pub(in crate::engine::tests) inner: RecordingSink,
+    pub(in crate::engine::tests) inner: Arc<RecordingSink>,
 }
 
 #[async_trait]
 impl SessionEventSink for FailCompactionLedgerSink {
-    async fn append(&self, event: EngineEvent) -> Result<EngineEvent, AgentLoopError> {
-        self.inner.append(event).await
+    async fn settle_effects(&self) -> Result<(), AgentLoopError> {
+        Ok(())
+    }
+    async fn reserve(
+        &self,
+        _plan: &rw_core_batch::EventBatchPlan,
+    ) -> Result<rw_core_batch::EventBatchReservation, AgentLoopError> {
+        Ok(rw_core_batch::EventBatchReservation::new(()))
     }
 
-    async fn append_batch(
-        &self,
-        events: Vec<EngineEvent>,
-    ) -> Result<Vec<EngineEvent>, AgentLoopError> {
-        self.inner.append_batch(events).await
+    async fn commit(
+        self: Arc<Self>,
+        batch: Arc<rw_core_batch::AdmittedEventBatch>,
+    ) -> Result<Arc<rw_core_batch::AdmittedEventBatch>, AgentLoopError> {
+        Arc::clone(&self.inner).commit(batch).await
     }
 
     fn capture_read_view(&self) -> Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
@@ -264,29 +294,32 @@ impl SessionEventSink for FailCompactionLedgerSink {
 
 #[derive(Default)]
 pub(in crate::engine::tests) struct FailNextBatchSink {
-    pub(in crate::engine::tests) inner: RecordingSink,
+    pub(in crate::engine::tests) inner: Arc<RecordingSink>,
     pub(in crate::engine::tests) fail_next: AtomicBool,
 }
 
 #[async_trait]
 impl SessionEventSink for FailNextBatchSink {
-    async fn append(&self, event: EngineEvent) -> Result<EngineEvent, AgentLoopError> {
-        self.append_batch(vec![event])
-            .await?
-            .pop()
-            .ok_or_else(|| AgentLoopError::Persistence("empty fixture batch".to_owned()))
+    async fn settle_effects(&self) -> Result<(), AgentLoopError> {
+        Ok(())
+    }
+    async fn reserve(
+        &self,
+        _plan: &rw_core_batch::EventBatchPlan,
+    ) -> Result<rw_core_batch::EventBatchReservation, AgentLoopError> {
+        Ok(rw_core_batch::EventBatchReservation::new(()))
     }
 
-    async fn append_batch(
-        &self,
-        events: Vec<EngineEvent>,
-    ) -> Result<Vec<EngineEvent>, AgentLoopError> {
+    async fn commit(
+        self: Arc<Self>,
+        batch: Arc<rw_core_batch::AdmittedEventBatch>,
+    ) -> Result<Arc<rw_core_batch::AdmittedEventBatch>, AgentLoopError> {
         if self.fail_next.swap(false, Ordering::AcqRel) {
             return Err(AgentLoopError::Persistence(
                 "transient fixture failure".to_owned(),
             ));
         }
-        self.inner.append_batch(events).await
+        Arc::clone(&self.inner).commit(batch).await
     }
 
     fn capture_read_view(&self) -> Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
@@ -300,23 +333,28 @@ impl SessionEventSink for FailNextBatchSink {
 
 #[derive(Default)]
 pub(in crate::engine::tests) struct FailFirstTextDeltaSink {
-    pub(in crate::engine::tests) inner: RecordingSink,
+    pub(in crate::engine::tests) inner: Arc<RecordingSink>,
     pub(in crate::engine::tests) failed: AtomicBool,
 }
 
 #[async_trait]
 impl SessionEventSink for FailFirstTextDeltaSink {
-    async fn append(&self, event: EngineEvent) -> Result<EngineEvent, AgentLoopError> {
-        self.append_batch(vec![event])
-            .await?
-            .pop()
-            .ok_or_else(|| AgentLoopError::Persistence("empty fixture batch".to_owned()))
+    async fn settle_effects(&self) -> Result<(), AgentLoopError> {
+        Ok(())
+    }
+    async fn reserve(
+        &self,
+        _plan: &rw_core_batch::EventBatchPlan,
+    ) -> Result<rw_core_batch::EventBatchReservation, AgentLoopError> {
+        Ok(rw_core_batch::EventBatchReservation::new(()))
     }
 
-    async fn append_batch(
-        &self,
-        events: Vec<EngineEvent>,
-    ) -> Result<Vec<EngineEvent>, AgentLoopError> {
+    async fn commit(
+        self: Arc<Self>,
+        batch: Arc<rw_core_batch::AdmittedEventBatch>,
+    ) -> Result<Arc<rw_core_batch::AdmittedEventBatch>, AgentLoopError> {
+        let events = batch.events();
+
         if !self.failed.load(Ordering::Acquire)
             && events
                 .iter()
@@ -327,7 +365,7 @@ impl SessionEventSink for FailFirstTextDeltaSink {
                 "transient text-delta fixture failure".to_owned(),
             ));
         }
-        self.inner.append_batch(events).await
+        Arc::clone(&self.inner).commit(batch).await
     }
 
     fn capture_read_view(&self) -> Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
@@ -341,24 +379,27 @@ impl SessionEventSink for FailFirstTextDeltaSink {
 
 #[derive(Default)]
 pub(in crate::engine::tests) struct WorkspaceChangeFailingSink {
-    pub(in crate::engine::tests) inner: RecordingSink,
+    pub(in crate::engine::tests) inner: Arc<RecordingSink>,
 }
 
 #[async_trait]
 impl SessionEventSink for WorkspaceChangeFailingSink {
-    async fn append(&self, event: EngineEvent) -> Result<EngineEvent, AgentLoopError> {
-        if matches!(&event, EngineEvent::WorkspaceRootsChanged { .. }) {
-            return Err(AgentLoopError::Persistence(
-                "workspace change fixture failure".to_owned(),
-            ));
-        }
-        self.inner.append(event).await
+    async fn settle_effects(&self) -> Result<(), AgentLoopError> {
+        Ok(())
+    }
+    async fn reserve(
+        &self,
+        _plan: &rw_core_batch::EventBatchPlan,
+    ) -> Result<rw_core_batch::EventBatchReservation, AgentLoopError> {
+        Ok(rw_core_batch::EventBatchReservation::new(()))
     }
 
-    async fn append_batch(
-        &self,
-        events: Vec<EngineEvent>,
-    ) -> Result<Vec<EngineEvent>, AgentLoopError> {
+    async fn commit(
+        self: Arc<Self>,
+        batch: Arc<rw_core_batch::AdmittedEventBatch>,
+    ) -> Result<Arc<rw_core_batch::AdmittedEventBatch>, AgentLoopError> {
+        let events = batch.events();
+
         if events
             .iter()
             .any(|event| matches!(event, EngineEvent::WorkspaceRootsChanged { .. }))
@@ -367,7 +408,7 @@ impl SessionEventSink for WorkspaceChangeFailingSink {
                 "workspace change fixture failure".to_owned(),
             ));
         }
-        self.inner.append_batch(events).await
+        Arc::clone(&self.inner).commit(batch).await
     }
 
     fn capture_read_view(&self) -> Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
@@ -387,21 +428,29 @@ pub(in crate::engine::tests) enum MalformedBatchMode {
 
 pub(in crate::engine::tests) struct MalformedBatchSink {
     pub(in crate::engine::tests) mode: MalformedBatchMode,
-    pub(in crate::engine::tests) inner: NoopSessionEventSink,
+    pub(in crate::engine::tests) inner: Arc<NoopSessionEventSink>,
 }
 
 #[async_trait]
 impl SessionEventSink for MalformedBatchSink {
-    async fn append(&self, event: EngineEvent) -> Result<EngineEvent, AgentLoopError> {
-        self.inner.append(event).await
+    async fn settle_effects(&self) -> Result<(), AgentLoopError> {
+        Ok(())
+    }
+    async fn reserve(
+        &self,
+        _plan: &rw_core_batch::EventBatchPlan,
+    ) -> Result<rw_core_batch::EventBatchReservation, AgentLoopError> {
+        Ok(rw_core_batch::EventBatchReservation::new(()))
     }
 
-    async fn append_batch(
-        &self,
-        mut events: Vec<EngineEvent>,
-    ) -> Result<Vec<EngineEvent>, AgentLoopError> {
+    async fn commit(
+        self: Arc<Self>,
+        batch: Arc<rw_core_batch::AdmittedEventBatch>,
+    ) -> Result<Arc<rw_core_batch::AdmittedEventBatch>, AgentLoopError> {
+        let mut events = batch.events().to_vec();
+
         if events.len() == 1 {
-            return self.inner.append_batch(events).await;
+            return Arc::clone(&self.inner).commit(batch).await;
         }
         match self.mode {
             MalformedBatchMode::Payload => {
@@ -425,7 +474,8 @@ impl SessionEventSink for MalformedBatchSink {
                 }
             }
         }
-        Ok(events)
+        Ok(rw_core_batch::EventBatchPlan::new(events)?
+            .prepare(rw_core_batch::EventBatchReservation::new(())))
     }
 
     fn capture_read_view(&self) -> Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
@@ -441,32 +491,38 @@ pub(in crate::engine::tests) struct BlockingBatchSink {
 }
 
 impl BlockingBatchSink {
-    pub(in crate::engine::tests) fn persist(&self, events: Vec<EngineEvent>) -> Vec<EngineEvent> {
+    pub(in crate::engine::tests) fn persist(&self, events: &[EngineEvent]) {
         self.persisted
             .lock()
             .expect("persisted events")
             .extend(events.iter().cloned());
-        events
     }
 }
 
 #[async_trait]
 impl SessionEventSink for BlockingBatchSink {
-    async fn append(&self, event: EngineEvent) -> Result<EngineEvent, AgentLoopError> {
-        self.persist(vec![event])
-            .pop()
-            .ok_or_else(|| AgentLoopError::Persistence("fixture append failed".to_owned()))
+    async fn settle_effects(&self) -> Result<(), AgentLoopError> {
+        Ok(())
+    }
+    async fn reserve(
+        &self,
+        _plan: &rw_core_batch::EventBatchPlan,
+    ) -> Result<rw_core_batch::EventBatchReservation, AgentLoopError> {
+        Ok(rw_core_batch::EventBatchReservation::new(()))
     }
 
-    async fn append_batch(
-        &self,
-        events: Vec<EngineEvent>,
-    ) -> Result<Vec<EngineEvent>, AgentLoopError> {
+    async fn commit(
+        self: Arc<Self>,
+        batch: Arc<rw_core_batch::AdmittedEventBatch>,
+    ) -> Result<Arc<rw_core_batch::AdmittedEventBatch>, AgentLoopError> {
+        let events = batch.events();
+
         if events.len() > 1 && !self.blocked_once.swap(true, Ordering::SeqCst) {
             self.entered.notify_one();
             self.release.notified().await;
         }
-        Ok(self.persist(events))
+        self.persist(events);
+        Ok(batch)
     }
 
     fn capture_read_view(&self) -> Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
@@ -499,31 +555,35 @@ pub(in crate::engine::tests) struct OrderedRewindSink {
 
 #[async_trait]
 impl SessionEventSink for OrderedRewindSink {
-    async fn append(&self, event: EngineEvent) -> Result<EngineEvent, AgentLoopError> {
-        if matches!(event, EngineEvent::ConversationRewound { .. }) {
-            self.order
-                .lock()
-                .expect("rewind order")
-                .push("persist".to_owned());
-            if self.fail_rewind.load(Ordering::SeqCst) {
-                return Err(AgentLoopError::Persistence(
-                    "fixture rewind append failed".to_owned(),
-                ));
-            }
-        }
-        self.events.lock().expect("events").push(event.clone());
-        Ok(event)
+    async fn settle_effects(&self) -> Result<(), AgentLoopError> {
+        Ok(())
+    }
+    async fn reserve(
+        &self,
+        _plan: &rw_core_batch::EventBatchPlan,
+    ) -> Result<rw_core_batch::EventBatchReservation, AgentLoopError> {
+        Ok(rw_core_batch::EventBatchReservation::new(()))
     }
 
-    async fn append_batch(
-        &self,
-        batch: Vec<EngineEvent>,
-    ) -> Result<Vec<EngineEvent>, AgentLoopError> {
-        let mut events = Vec::with_capacity(batch.len());
-        for event in batch {
-            events.push(self.append(event).await?);
+    async fn commit(
+        self: Arc<Self>,
+        batch: Arc<rw_core_batch::AdmittedEventBatch>,
+    ) -> Result<Arc<rw_core_batch::AdmittedEventBatch>, AgentLoopError> {
+        for event in batch.events() {
+            if matches!(event, EngineEvent::ConversationRewound { .. }) {
+                self.order
+                    .lock()
+                    .expect("rewind order")
+                    .push("persist".to_owned());
+                if self.fail_rewind.load(Ordering::SeqCst) {
+                    return Err(AgentLoopError::Persistence(
+                        "fixture rewind append failed".to_owned(),
+                    ));
+                }
+            }
+            self.events.lock().expect("events").push(event.clone());
         }
-        Ok(events)
+        Ok(batch)
     }
 
     fn capture_read_view(&self) -> Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
@@ -561,8 +621,21 @@ pub(in crate::engine::tests) struct CorruptGapSink {
 
 #[async_trait]
 impl SessionEventSink for CorruptGapSink {
-    async fn append(&self, event: EngineEvent) -> Result<EngineEvent, AgentLoopError> {
-        Ok(event)
+    async fn settle_effects(&self) -> Result<(), AgentLoopError> {
+        Ok(())
+    }
+    async fn reserve(
+        &self,
+        _plan: &rw_core_batch::EventBatchPlan,
+    ) -> Result<rw_core_batch::EventBatchReservation, AgentLoopError> {
+        Ok(rw_core_batch::EventBatchReservation::new(()))
+    }
+
+    async fn commit(
+        self: Arc<Self>,
+        batch: Arc<rw_core_batch::AdmittedEventBatch>,
+    ) -> Result<Arc<rw_core_batch::AdmittedEventBatch>, AgentLoopError> {
+        Ok(batch)
     }
 
     fn capture_read_view(&self) -> Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
@@ -580,23 +653,38 @@ impl SessionEventSink for CorruptGapSink {
 
 #[async_trait]
 impl SessionEventSink for ToggleLeaseSink {
-    async fn append(&self, event: EngineEvent) -> Result<EngineEvent, AgentLoopError> {
-        if self.fail_driver_change.load(Ordering::SeqCst)
-            && matches!(event, EngineEvent::DriverChanged { .. })
-        {
-            return Err(AgentLoopError::Persistence(
-                "fixture driver-change failure".to_owned(),
-            ));
+    async fn settle_effects(&self) -> Result<(), AgentLoopError> {
+        Ok(())
+    }
+    async fn reserve(
+        &self,
+        _plan: &rw_core_batch::EventBatchPlan,
+    ) -> Result<rw_core_batch::EventBatchReservation, AgentLoopError> {
+        Ok(rw_core_batch::EventBatchReservation::new(()))
+    }
+
+    async fn commit(
+        self: Arc<Self>,
+        batch: Arc<rw_core_batch::AdmittedEventBatch>,
+    ) -> Result<Arc<rw_core_batch::AdmittedEventBatch>, AgentLoopError> {
+        for event in batch.events() {
+            if self.fail_driver_change.load(Ordering::SeqCst)
+                && matches!(event, EngineEvent::DriverChanged { .. })
+            {
+                return Err(AgentLoopError::Persistence(
+                    "fixture driver-change failure".to_owned(),
+                ));
+            }
+            if self.fail_question_answer.load(Ordering::SeqCst)
+                && matches!(event, EngineEvent::QuestionAnswered { .. })
+            {
+                return Err(AgentLoopError::Persistence(
+                    "fixture question-answer failure".to_owned(),
+                ));
+            }
+            self.events.lock().expect("events").push(event.clone());
         }
-        if self.fail_question_answer.load(Ordering::SeqCst)
-            && matches!(event, EngineEvent::QuestionAnswered { .. })
-        {
-            return Err(AgentLoopError::Persistence(
-                "fixture question-answer failure".to_owned(),
-            ));
-        }
-        self.events.lock().expect("events").push(event.clone());
-        Ok(event)
+        Ok(batch)
     }
 
     fn capture_read_view(&self) -> Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
@@ -645,20 +733,27 @@ impl SessionEventReadView for CountedReplayView {
 
 #[derive(Default)]
 pub(in crate::engine::tests) struct CountedReplaySink {
-    pub(in crate::engine::tests) inner: NoopSessionEventSink,
+    pub(in crate::engine::tests) inner: Arc<NoopSessionEventSink>,
     pub(in crate::engine::tests) pages: Arc<Mutex<Vec<usize>>>,
 }
 
 #[async_trait]
 impl SessionEventSink for CountedReplaySink {
-    async fn append(&self, event: EngineEvent) -> Result<EngineEvent, AgentLoopError> {
-        self.inner.append(event).await
+    async fn settle_effects(&self) -> Result<(), AgentLoopError> {
+        Ok(())
     }
-    async fn append_batch(
+    async fn reserve(
         &self,
-        events: Vec<EngineEvent>,
-    ) -> Result<Vec<EngineEvent>, AgentLoopError> {
-        self.inner.append_batch(events).await
+        _plan: &rw_core_batch::EventBatchPlan,
+    ) -> Result<rw_core_batch::EventBatchReservation, AgentLoopError> {
+        Ok(rw_core_batch::EventBatchReservation::new(()))
+    }
+
+    async fn commit(
+        self: Arc<Self>,
+        batch: Arc<rw_core_batch::AdmittedEventBatch>,
+    ) -> Result<Arc<rw_core_batch::AdmittedEventBatch>, AgentLoopError> {
+        Arc::clone(&self.inner).commit(batch).await
     }
 
     fn capture_read_view(&self) -> Result<Arc<dyn SessionEventReadView>, AgentLoopError> {

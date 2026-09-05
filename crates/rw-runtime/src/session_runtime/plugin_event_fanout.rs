@@ -208,20 +208,24 @@ pub(super) fn plugin_event_payload(
 
 #[async_trait]
 impl SessionEventSink for PluginFanoutEventSink {
-    async fn append(&self, event: EngineEvent) -> std::result::Result<EngineEvent, AgentLoopError> {
-        let event = self.inner.append(event).await?;
-        self.publish(&event);
-        Ok(event)
+    async fn settle_effects(&self) -> std::result::Result<(), AgentLoopError> {
+        self.inner.settle_effects().await
     }
-    async fn append_batch(
+    async fn reserve(
         &self,
-        batch: Vec<EngineEvent>,
-    ) -> std::result::Result<Vec<EngineEvent>, AgentLoopError> {
-        let events = self.inner.append_batch(batch).await?;
-        for event in &events {
+        plan: &rw_core::EventBatchPlan,
+    ) -> std::result::Result<rw_core::EventBatchReservation, AgentLoopError> {
+        self.inner.reserve(plan).await
+    }
+    async fn commit(
+        self: Arc<Self>,
+        batch: Arc<rw_core::AdmittedEventBatch>,
+    ) -> std::result::Result<Arc<rw_core::AdmittedEventBatch>, AgentLoopError> {
+        let batch = Arc::clone(&self.inner).commit(batch).await?;
+        for event in batch.events() {
             self.publish(event);
         }
-        Ok(events)
+        Ok(batch)
     }
     fn capture_read_view(
         &self,

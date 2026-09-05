@@ -15,9 +15,10 @@ impl SessionFactory for RuntimeSessionFactory {
             .plugin_activation
             .close()
             .map_err(|error| HostError::Persistence(error.to_string()));
-        let (wasm, admission) = tokio::join!(
+        let (wasm, admission, journal) = tokio::join!(
             std::panic::AssertUnwindSafe(self.wasm_workers.shutdown()).catch_unwind(),
             std::panic::AssertUnwindSafe(self.provider_admission.shutdown()).catch_unwind(),
+            std::panic::AssertUnwindSafe(self.journal_service.commits.shutdown()).catch_unwind(),
         );
         let wasm = wasm
             .map_err(|_| HostError::Persistence("WASM shutdown owner panicked".to_owned()))?
@@ -27,7 +28,10 @@ impl SessionFactory for RuntimeSessionFactory {
                 HostError::Persistence("provider admission shutdown owner panicked".to_owned())
             })?
             .map_err(|error| HostError::Persistence(error.to_string()));
-        plugins.and(wasm).and(admission)
+        let journal = journal
+            .map_err(|_| HostError::Persistence("journal shutdown owner panicked".to_owned()))?
+            .map_err(|error| HostError::Persistence(error.to_string()));
+        plugins.and(wasm).and(admission).and(journal)
     }
 
     fn allocate_session_id(&self) -> Result<SessionId, HostError> {
@@ -174,7 +178,7 @@ impl SessionFactory for RuntimeSessionFactory {
                 let expected = factory.expected_fork_state(&request, &workspace_for_fork)?;
                 let operation_id = journal.operation_id.clone();
                 fork_hosted_session_storage(
-                    &factory.journal_reads,
+                    &factory.journal_service,
                     &storage_root,
                     &workspace_for_fork,
                     &parent_session_id,

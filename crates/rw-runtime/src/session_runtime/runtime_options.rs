@@ -1,5 +1,5 @@
 use crate::OutputFormat;
-use crate::journal_reads::JournalReads;
+use crate::journal_service::JournalService;
 use miette::miette;
 use rw_core::AgentLoopError;
 use rw_core::CachedModelCatalog;
@@ -94,7 +94,7 @@ pub(crate) struct HostedSessionComposition {
     pub plugin_activation: Arc<crate::extension_runtime::PluginActivationBudget>,
     pub wasm_workers: Arc<rw_ext::WasmWorkerPool>,
     pub index_pool: Arc<rw_tools::WorkspaceIndexPool>,
-    pub journal_reads: Arc<JournalReads>,
+    pub journal_service: Arc<JournalService>,
     pub workspace: PathBuf,
     pub additional_workspaces: Vec<PathBuf>,
     pub allowed_workspace_roots: Vec<PathBuf>,

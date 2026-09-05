@@ -13,7 +13,7 @@ mod native_fixture;
 mod extension_config;
 mod extension_runtime;
 mod history;
-mod journal_reads;
+mod journal_service;
 mod mode_recovery;
 mod plugin_process;
 mod project_commands;

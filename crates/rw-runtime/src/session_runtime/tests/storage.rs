@@ -6,7 +6,7 @@ use super::Cost;
 use super::DurableEventSink;
 use super::EngineEvent;
 use super::EventMeta;
-use super::JournalReads;
+use super::JournalService;
 use super::MAX_SESSION_METADATA_BYTES;
 use super::PathBuf;
 use super::SESSION_EVENT_VERSION;
@@ -64,7 +64,7 @@ async fn durable_event_sink_long_gap_metrics() {
         log,
         storage.path().to_owned(),
         session.0.clone(),
-        JournalReads::new(storage.path()).expect("journal reads"),
+        JournalService::new(storage.path()).expect("journal reads"),
     )
     .expect("durable sink");
 
@@ -429,7 +429,7 @@ fn fork_storage_starts_empty_review_and_skips_inherited_accounting() {
     let parent_bytes = std::fs::read(&parent_path).expect("parent bytes");
     let fork_modes = rw_ext::ModeRegistry::builtins().expect("built-in modes");
     fork_hosted_session_storage(
-        &JournalReads::new(&storage).expect("journal reads"),
+        &JournalService::new(&storage).expect("journal reads"),
         &storage,
         &workspace,
         &parent.0,
@@ -472,7 +472,7 @@ fn fork_storage_starts_empty_review_and_skips_inherited_accounting() {
     assert_eq!(child_metadata.fork_at_turn, Some(2));
     assert_eq!(
         load_session_workspace_roots(
-            &JournalReads::new(&storage).expect("journal reads"),
+            &JournalService::new(&storage).expect("journal reads"),
             &storage,
             &workspace,
             &parent.0
@@ -524,7 +524,7 @@ fn fork_storage_starts_empty_review_and_skips_inherited_accounting() {
         .expect("custom mode event");
     drop(parent_log);
     let error = fork_hosted_session_storage(
-        &JournalReads::new(&storage).expect("journal reads"),
+        &JournalService::new(&storage).expect("journal reads"),
         &storage,
         &workspace,
         &parent.0,

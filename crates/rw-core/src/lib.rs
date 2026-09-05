@@ -47,10 +47,11 @@ pub use admin::{
 pub use engine::recovery;
 
 pub use engine::{
-    AgentLoopError, AgentTurnStatus, BudgetLedgerQuery, BudgetLedgerTotals, CommandToolCall,
-    CommandToolOutputKind, ContextSurgeryAction, EventClock, FolderTrustController,
-    FolderTrustOperation, InterruptedToolRepair, MessageDisposition, ModelContextMetadata,
-    ModelDriver, MutationCheckpoint, MutationCheckpointCoordinator, MutationCheckpointOutcome,
+    AdmittedEventBatch, AgentLoopError, AgentTurnStatus, BudgetLedgerQuery, BudgetLedgerTotals,
+    CommandToolCall, CommandToolOutputKind, ContextSurgeryAction, EventBatchPlan,
+    EventBatchReservation, EventClock, FolderTrustController, FolderTrustOperation,
+    InterruptedToolRepair, MessageDisposition, ModelContextMetadata, ModelDriver,
+    MutationCheckpoint, MutationCheckpointCoordinator, MutationCheckpointOutcome,
     NoopFolderTrustController, NoopMutationCheckpointCoordinator, NoopSecretRedactor,
     NoopSessionEventSink, NoopSessionExtensionController, NoopSessionResources,
     NoopWorkspaceRootController, PluginSessionCapability, RecoveredQuestion, RewindCheckpoint,
@@ -60,8 +61,8 @@ pub use engine::{
     SessionProjector, SessionRecoveredState, SessionReplayLimits, SessionResources,
     SessionSnapshot, SessionSubscription, SessionUsage, StartupNotification, SystemEventClock,
     TOOL_CANCELLATION_GRACE, WorkspaceRootController, WorkspaceRuntimeGeneration,
-    builtin_command_registry, builtin_hook_dispatcher, project_session_events,
-    project_session_events_with_modes, project_session_read_view,
+    builtin_command_registry, builtin_hook_dispatcher, commit_session_events,
+    project_session_events, project_session_events_with_modes, project_session_read_view,
 };
 pub use host::{
     BoundClient, CompletedForkOperation, CreateSessionRequest, EngineHost, EngineHostConfig,

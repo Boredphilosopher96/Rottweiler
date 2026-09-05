@@ -8,7 +8,7 @@ use super::DurableEventSink;
 use super::EngineEvent;
 use super::EventMeta;
 use super::FinishReason;
-use super::JournalReads;
+use super::JournalService;
 use super::ModelDriver;
 use super::PermissionDecision;
 use super::PermissionGate;
@@ -44,7 +44,6 @@ use super::checkpoint_root;
 use super::restore_todo_state;
 use super::tempdir;
 use super::test_provider_admission;
-use rw_core::SessionEventSink;
 use rw_tools::Tool;
 
 #[tokio::test]
@@ -95,7 +94,7 @@ async fn rewind_event_reprojects_ephemeral_todo_state() {
         log,
         root.path().to_owned(),
         session.0.clone(),
-        JournalReads::new(root.path()).expect("journal reads"),
+        JournalService::new(root.path()).expect("journal reads"),
     )
     .expect("durable sink");
     sink.bind_todo(TodoRestoreBinding {
@@ -148,7 +147,9 @@ async fn rewind_event_reprojects_ephemeral_todo_state() {
             unrestorable_paths: Vec::new(),
         },
     ] {
-        sink.append(event).await.expect("fixture event append");
+        rw_core::commit_session_events(Arc::clone(&sink), vec![event])
+            .await
+            .expect("fixture event append");
     }
     let after = todo
         .execute(&context, serde_json::json!({"action": "list"}))
@@ -203,15 +204,13 @@ async fn session_handle_rewind_restores_ten_agent_edits_to_turn_three() {
         .register(Arc::new(WriteTool::new(ToolLimits::default())))
         .expect("write tool");
     let log = SessionEventLog::open(&storage, &session.0).expect("event log");
-    let sink = Arc::new(
-        DurableEventSink::new(
-            log,
-            storage.clone(),
-            session.0.clone(),
-            JournalReads::new(&(storage.clone())).expect("journal reads"),
-        )
-        .expect("durable sink"),
-    );
+    let sink = DurableEventSink::new(
+        log,
+        storage.clone(),
+        session.0.clone(),
+        JournalService::new(&(storage.clone())).expect("journal reads"),
+    )
+    .expect("durable sink");
     let coordinator_root = checkpoint_root(&storage, &workspace, &session.0);
     let checkpoints = Arc::new(DurableCheckpointCoordinator::new(
         coordinator_root.clone(),

@@ -7,7 +7,7 @@ use super::DurableEventSink;
 use super::EngineEvent;
 use super::EventMeta;
 use super::HistoricalPromptTool;
-use super::JournalReads;
+use super::JournalService;
 use super::Path;
 use super::RecoveryProbeFactory;
 use super::RecoveryProbeObserver;
@@ -28,7 +28,6 @@ use super::load_session_events;
 use super::recover_subagent_tree;
 use super::recovery_workspace_authorized;
 use super::repair_incomplete_subagent_lifecycles;
-use rw_core::SessionEventSink;
 use rw_core::SubagentMetadataStore;
 
 #[test]
@@ -162,7 +161,7 @@ async fn recovery_durably_repairs_incomplete_children_once_in_spawn_order() {
         log,
         storage.path().to_path_buf(),
         parent.0.clone(),
-        JournalReads::new(storage.path()).expect("journal reads"),
+        JournalService::new(storage.path()).expect("journal reads"),
     )
     .expect("durable sink");
     let meta = |sequence| EventMeta {
@@ -190,7 +189,9 @@ async fn recovery_durably_repairs_incomplete_children_once_in_spawn_order() {
             task: "second".to_owned(),
         },
     ] {
-        sink.append(event).await.expect("append lifecycle");
+        rw_core::commit_session_events(Arc::clone(&sink), vec![event])
+            .await
+            .expect("append lifecycle");
     }
     let before = sink.load().expect("load before repair");
     let repaired = repair_incomplete_subagent_lifecycles(&sink, &parent, &before)
@@ -225,13 +226,13 @@ async fn recovery_recursively_rebinds_depth_two_children_and_is_restart_idempote
         parent: &SessionId,
         child_id: &rw_types::SubagentId,
         child_session: &SessionId,
-    ) -> DurableEventSink {
+    ) -> Arc<DurableEventSink> {
         let log = SessionEventLog::open(storage, &parent.0).expect("open parent log");
         let sink = DurableEventSink::new(
             log,
             storage.to_path_buf(),
             parent.0.clone(),
-            JournalReads::new(storage).expect("journal reads"),
+            JournalService::new(storage).expect("journal reads"),
         )
         .expect("parent sink");
         let meta = |sequence| EventMeta {
@@ -241,18 +242,24 @@ async fn recovery_recursively_rebinds_depth_two_children_and_is_restart_idempote
             emitted_at: "2026-01-01T00:00:00.000Z".to_owned(),
             caused_by: None,
         };
-        sink.append(EngineEvent::TurnStarted {
-            meta: meta(0),
-            turn_id: TurnId("1".to_owned()),
-        })
+        rw_core::commit_session_events(
+            Arc::clone(&sink),
+            vec![EngineEvent::TurnStarted {
+                meta: meta(0),
+                turn_id: TurnId("1".to_owned()),
+            }],
+        )
         .await
         .expect("turn start");
-        sink.append(EngineEvent::SubagentSpawned {
-            meta: meta(1),
-            subagent_id: child_id.clone(),
-            child_session_id: child_session.clone(),
-            task: "interrupted nested task".to_owned(),
-        })
+        rw_core::commit_session_events(
+            Arc::clone(&sink),
+            vec![EngineEvent::SubagentSpawned {
+                meta: meta(1),
+                subagent_id: child_id.clone(),
+                child_session_id: child_session.clone(),
+                task: "interrupted nested task".to_owned(),
+            }],
+        )
         .await
         .expect("durable nested spawn");
         sink

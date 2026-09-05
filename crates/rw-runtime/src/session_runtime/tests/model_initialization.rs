@@ -344,7 +344,7 @@ async fn lazy_first_model_switch_does_not_activate_when_persistence_fails() {
         commands: Arc::new(builtin_command_registry().expect("commands")),
         modes: Arc::new(rw_ext::ModeRegistry::builtins().expect("built-in modes")),
         event_sink: Arc::new(FailModelChangedSink {
-            inner: rw_core::NoopSessionEventSink::default(),
+            inner: Arc::new(rw_core::NoopSessionEventSink::default()),
         }),
         event_clock: Arc::new(SystemEventClock),
         provider_admission: test_provider_admission(),

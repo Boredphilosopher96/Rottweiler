@@ -1,5 +1,5 @@
 use super::{TranscriptReader, page::storage};
-use crate::journal_reads::JournalReads;
+use crate::journal_service::JournalService;
 use rw_core::HostError;
 use rw_types::{
     EngineEvent, SequenceId, SessionId,
@@ -21,7 +21,9 @@ impl TranscriptReader {
     /// # Errors
     /// Rejects an unsafe or unavailable storage root.
     pub fn open(storage_root: &Path) -> Result<Arc<Self>, HostError> {
-        Ok(Self::new(JournalReads::new(storage_root).map_err(storage)?))
+        Ok(Self::new(
+            JournalService::new(storage_root).map_err(storage)?,
+        ))
     }
 
     /// Read a bounded current-effective transcript page without starting a session.

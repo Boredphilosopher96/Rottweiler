@@ -15,7 +15,7 @@ use super::session_metadata::persist_session_metadata_portable;
 use super::session_metadata::persist_session_metadata_unix;
 use super::session_metadata::validate_session_id;
 use super::session_selection::checkpoint_root;
-use crate::journal_reads::JournalReads;
+use crate::journal_service::JournalService;
 use miette::IntoDiagnostic;
 use miette::Result;
 use miette::miette;
@@ -32,7 +32,7 @@ use std::path::PathBuf;
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn fork_hosted_session_storage(
-    journal_reads: &JournalReads,
+    journal_service: &JournalService,
     storage_root: &Path,
     workspace: &Path,
     parent_session_id: &str,
@@ -47,7 +47,7 @@ pub(crate) fn fork_hosted_session_storage(
     validate_session_id(parent_session_id)?;
     validate_session_id(child_session_id)?;
     let parent_metadata = load_session_metadata(storage_root, parent_session_id, workspace)?;
-    let lease = journal_reads.capture(parent_session_id)?;
+    let lease = journal_service.capture(parent_session_id)?;
     let (parent_events, _) = crate::history::load_events_from_view(
         &lease.view,
         parent_session_id,

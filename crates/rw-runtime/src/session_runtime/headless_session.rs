@@ -71,7 +71,7 @@ use super::wasm_hooks::compose_runtime_hooks_with_extensions_validated;
 use super::workspace_roots::RuntimeWorkspaceRootController;
 use super::workspace_roots::WorkspaceRootAuthorization;
 use super::workspace_roots::canonical_workspace_roots;
-use crate::journal_reads::JournalReads;
+use crate::journal_service::JournalService;
 use crate::storage_root::initialize_private_storage_root;
 use miette::IntoDiagnostic;
 use miette::Result;
@@ -159,7 +159,7 @@ pub async fn run(options: RunOptions) -> Result<()> {
         .to_path_buf();
     initialize_private_storage_root(&storage_root).into_diagnostic()?;
     collect_abandoned_empty_sessions(&storage_root)?;
-    let journal_reads = JournalReads::new(&storage_root)?;
+    let journal_service = JournalService::new(&storage_root)?;
     let provider_admission = Arc::new(
         crate::provider_admission::DurableProviderAdmission::open(storage_root.clone())
             .await
@@ -173,7 +173,7 @@ pub async fn run(options: RunOptions) -> Result<()> {
 
     let session_id = select_session(&storage_root, &workspace, &options)?;
     validate_session_id(&session_id)?;
-    let session_exists = journal_reads.contains_session(&session_id)?;
+    let session_exists = journal_service.contains_session(&session_id)?;
     let resuming = (options.resume.is_some() || options.continue_latest) && session_exists;
     if !session_exists
         && (options.resume.is_some()
@@ -309,12 +309,12 @@ pub async fn run(options: RunOptions) -> Result<()> {
     .map_err(|error| miette!("rewind recovery worker failed: {error}"))??;
     let recovered_events = load_session_events(&log)?;
     let recovered = crate::mode_recovery::project(&recovered_events, &runtime_modes)?;
-    let durable_sink = Arc::new(DurableEventSink::new(
+    let durable_sink = DurableEventSink::new(
         log,
         storage_root.clone(),
         session_id.clone(),
-        Arc::clone(&journal_reads),
-    )?);
+        Arc::clone(&journal_service),
+    )?;
     durable_sink.reconcile_accounting(&recovered_events)?;
     let checkpoint_coordinator = Arc::new(DurableCheckpointCoordinator::from_stores(
         checkpoint_root.clone(),
@@ -811,7 +811,7 @@ pub async fn run(options: RunOptions) -> Result<()> {
     wasm_startup_notifications.extend(extension_startup_notifications(&extension_catalog));
     let workspace_root_controller = Arc::new(RuntimeWorkspaceRootController {
         index_pool: Arc::clone(&index_pool),
-        journal_reads: Arc::clone(&journal_reads),
+        journal_service: Arc::clone(&journal_service),
         checkpoint_root,
         storage_root: storage_root.clone(),
         question_asker: root_question_asker,
@@ -987,7 +987,7 @@ pub async fn run(options: RunOptions) -> Result<()> {
         recover_subagent_tree(
             &storage_root,
             &parent_session,
-            durable_sink.as_ref(),
+            &durable_sink,
             &recovered_events,
             &workspace_roots,
             loaded_config.config.engine.subagent_max_depth,

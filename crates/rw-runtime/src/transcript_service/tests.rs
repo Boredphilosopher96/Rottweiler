@@ -1,7 +1,7 @@
 #![allow(clippy::expect_used)]
 
 use super::*;
-use crate::journal_reads::JournalRegistration;
+use crate::journal_service::JournalRegistration;
 use rw_store::session::SessionEventLog;
 use rw_types::{
     Block, EngineEvent, EventMeta, PROTOCOL_VERSION, Role, Turn, TurnMeta,
@@ -20,7 +20,7 @@ struct Fixture {
 impl Fixture {
     fn new(count: u64, text: &str) -> Self {
         let root = tempfile::tempdir().expect("root");
-        let journals = JournalReads::new(root.path()).expect("read owner");
+        let journals = JournalService::new(root.path()).expect("read owner");
         let mut journal = SessionEventLog::open(root.path(), "semantic").expect("journal");
         journal
             .append_batch(

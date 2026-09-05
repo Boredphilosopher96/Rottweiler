@@ -1483,48 +1483,13 @@ pub(super) async fn emit_batch(
             }))
         })
         .collect::<Result<Vec<_>, AgentLoopError>>()?;
-    let persisted = sink.append_batch(requested.clone()).await?;
-    if persisted.len() != requested.len() {
-        return Err(AgentLoopError::Persistence(format!(
-            "event sink returned {} events for a batch of {}",
-            persisted.len(),
-            requested.len()
-        )));
-    }
-    for (offset, (event, requested_event)) in persisted.iter().zip(&requested).enumerate() {
-        let offset = u64::try_from(offset)
-            .map_err(|_| AgentLoopError::Persistence("event batch overflow".to_owned()))?;
-        let expected = first_expected
-            .checked_add(offset)
-            .ok_or_else(|| AgentLoopError::Persistence("event sequence overflow".to_owned()))?;
-        let meta = event.meta().ok_or_else(|| {
-            AgentLoopError::Persistence(
-                "event sink returned a connection-scoped acknowledgement".to_owned(),
-            )
-        })?;
-        if meta.protocol_version != SESSION_EVENT_VERSION {
-            return Err(AgentLoopError::Persistence(format!(
-                "event sink returned unsupported version {}",
-                meta.protocol_version
-            )));
-        }
-        if meta.session_id != state.session_id {
-            return Err(AgentLoopError::Persistence(
-                "event sink substituted a different session id".to_owned(),
-            ));
-        }
-        if meta.sequence_id.0 != expected {
-            return Err(AgentLoopError::Persistence(format!(
-                "event sink returned sequence {}, expected {expected}",
-                meta.sequence_id.0
-            )));
-        }
-        if event != requested_event {
-            return Err(AgentLoopError::Persistence(
-                "event sink substituted a different event payload".to_owned(),
-            ));
-        }
-    }
+    let persisted = super::durability::commit_session_events(Arc::clone(sink), requested).await?;
+    let persisted = Arc::try_unwrap(persisted).map_err(|_| {
+        AgentLoopError::Persistence(
+            "event sink retained the completed batch instead of transferring ownership".to_owned(),
+        )
+    })?;
+    let (persisted, reservation) = persisted.into_parts();
     state.sequence = persisted
         .last()
         .and_then(EngineEvent::meta)
@@ -1540,6 +1505,7 @@ pub(super) async fn emit_batch(
             event,
         });
     }
+    drop(reservation);
     Ok(receipts)
 }
 

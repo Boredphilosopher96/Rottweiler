@@ -30,6 +30,11 @@ impl<T: PrepareAllocation> AllocationPlan<T> {
         self.bytes
     }
 
+    #[must_use]
+    pub const fn value(&self) -> &T {
+        &self.value
+    }
+
     /// Normalizes opaque allocations after the caller reserves `bytes()`.
     /// No mutable reference to the prepared value escapes this boundary.
     #[must_use]
@@ -59,6 +64,14 @@ impl<T> PreparedAllocation<T> {
     #[must_use]
     pub const fn value(&self) -> &T {
         &self.value
+    }
+}
+
+impl<T> PreparedAllocation<T> {
+    /// Transfers the value to its next allocation owner.
+    #[must_use]
+    pub fn into_inner(self) -> T {
+        self.value
     }
 }
 

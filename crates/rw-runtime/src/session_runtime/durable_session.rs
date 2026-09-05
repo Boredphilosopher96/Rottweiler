@@ -7,9 +7,9 @@ use super::accounting_projection::upsert_session_projection;
 use super::append_tool_output;
 use super::prompt_shapes::PromptShapeJournal;
 use super::restore_todo_state;
-use crate::journal_reads::JournalReadLease;
-use crate::journal_reads::JournalReads;
-use crate::journal_reads::JournalRegistration;
+use crate::journal_service::JournalReadLease;
+use crate::journal_service::JournalRegistration;
+use crate::journal_service::JournalService;
 use async_trait::async_trait;
 use miette::Result;
 use miette::miette;
@@ -22,6 +22,7 @@ use rw_core::SessionEventReadView;
 use rw_core::SessionEventSink;
 use rw_core::SessionReplayLimits;
 use rw_core::project_session_events;
+use rw_core::{AdmittedEventBatch, EventBatchPlan, EventBatchReservation};
 use rw_store::session::AccountingLedger;
 use rw_store::session::SessionEventLog;
 use rw_store::session::SessionEventPageLimits;
@@ -36,6 +37,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use tracing::Instrument;
 
 #[derive(Debug)]
 pub(super) struct DurableReadView {
@@ -89,9 +91,10 @@ impl SessionEventReadView for DurableReadView {
 }
 
 pub(super) struct DurableEventSink {
-    pub(super) journal_reads: Arc<JournalReads>,
-    pub(super) _registration: JournalRegistration,
+    pub(super) journal_service: Arc<JournalService>,
+    pub(super) registration: JournalRegistration,
     pub(super) log: Arc<Mutex<SessionEventLog>>,
+    commit_order: Arc<tokio::sync::Mutex<()>>,
     pub(super) storage_root: PathBuf,
     pub(super) session_id: String,
     pub(super) hosted_projection: Option<Mutex<HostedSessionProjection>>,
@@ -166,9 +169,9 @@ impl DurableEventSink {
         log: SessionEventLog,
         storage_root: PathBuf,
         session_id: String,
-        journal_reads: Arc<JournalReads>,
-    ) -> Result<Self> {
-        Self::new_with_hosted_projection(log, storage_root, session_id, None, journal_reads)
+        journal_service: Arc<JournalService>,
+    ) -> Result<Arc<Self>> {
+        Self::new_with_hosted_projection(log, storage_root, session_id, None, journal_service)
     }
 
     pub(super) fn new_hosted(
@@ -176,8 +179,8 @@ impl DurableEventSink {
         storage_root: PathBuf,
         session_id: String,
         recovered_events: &[EngineEvent],
-        journal_reads: Arc<JournalReads>,
-    ) -> Result<Self> {
+        journal_service: Arc<JournalService>,
+    ) -> Result<Arc<Self>> {
         let projection =
             HostedSessionProjection::from_events(&session_id, recovered_events, log.path());
         Self::new_with_hosted_projection(
@@ -185,7 +188,7 @@ impl DurableEventSink {
             storage_root,
             session_id,
             Some(projection),
-            journal_reads,
+            journal_service,
         )
     }
 
@@ -194,30 +197,31 @@ impl DurableEventSink {
         storage_root: PathBuf,
         session_id: String,
         hosted_projection: Option<HostedSessionProjection>,
-        journal_reads: Arc<JournalReads>,
-    ) -> Result<Self> {
+        journal_service: Arc<JournalService>,
+    ) -> Result<Arc<Self>> {
         let log = Arc::new(Mutex::new(log));
-        let registration = journal_reads.register(
+        let registration = journal_service.register(
             &session_id,
             log.lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .read_view(),
         )?;
         let prompt_shapes = Arc::new(PromptShapeJournal::open(&storage_root, &session_id)?);
-        Ok(Self {
-            journal_reads,
-            _registration: registration,
+        Ok(Arc::new(Self {
+            journal_service,
+            registration,
             log,
+            commit_order: Arc::new(tokio::sync::Mutex::new(())),
             storage_root,
             session_id,
             hosted_projection: hosted_projection.map(Mutex::new),
             prompt_shapes,
             accounting_dirty: AtomicBool::new(false),
             todo_restore: Mutex::new(None),
-        })
+        }))
     }
 
-    pub(super) async fn update_hosted_projection(&self, persisted: &[EngineEvent]) {
+    fn update_hosted_projection(&self, persisted: &[EngineEvent]) {
         let projection = self.hosted_projection.as_ref().and_then(|hosted| {
             let path = self
                 .storage_root
@@ -236,15 +240,7 @@ impl DurableEventSink {
         let Some(projection) = projection else {
             return;
         };
-        let storage_root = self.storage_root.clone();
-        let update = move || upsert_session_projection(&storage_root, &projection);
-        let update_result = match tokio::runtime::Handle::current().runtime_flavor() {
-            tokio::runtime::RuntimeFlavor::MultiThread => tokio::task::block_in_place(update),
-            _ => match tokio::task::spawn_blocking(update).await {
-                Ok(result) => result,
-                Err(error) => Err(miette!(error.to_string())),
-            },
-        };
+        let update_result = upsert_session_projection(&self.storage_root, &projection);
         if let Err(error) = update_result {
             tracing::warn!(
                 session_id = %self.session_id,
@@ -272,111 +268,44 @@ impl DurableEventSink {
 
 #[async_trait]
 impl SessionEventSink for DurableEventSink {
-    async fn append(&self, event: EngineEvent) -> std::result::Result<EngineEvent, AgentLoopError> {
-        self.append_batch(vec![event])
-            .await?
-            .pop()
-            .ok_or_else(|| AgentLoopError::Persistence("event batch returned empty".to_owned()))
+    async fn settle_effects(&self) -> std::result::Result<(), AgentLoopError> {
+        let settled = self
+            .journal_service
+            .commits
+            .enter(Arc::clone(&self.commit_order))
+            .await?;
+        drop(settled);
+        Ok(())
     }
-
-    async fn append_batch(
+    async fn reserve(
         &self,
-        events: Vec<EngineEvent>,
-    ) -> std::result::Result<Vec<EngineEvent>, AgentLoopError> {
-        let rewound = events
-            .iter()
-            .any(|event| matches!(event, EngineEvent::ConversationRewound { .. }));
-        let log = Arc::clone(&self.log);
-        let publisher = Arc::clone(&self._registration.publisher);
-        let append = move || {
-            let mut log = log
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for (offset, event) in events.iter().enumerate() {
-                let offset = u64::try_from(offset).map_err(|_| {
-                    AgentLoopError::Persistence("event batch length overflow".to_owned())
-                })?;
-                let expected = log.next_sequence().checked_add(offset).ok_or_else(|| {
-                    AgentLoopError::Persistence("event sequence overflow".to_owned())
-                })?;
-                let meta = event.meta().ok_or_else(|| {
-                    AgentLoopError::Persistence(
-                        "connection acknowledgement cannot be persisted".to_owned(),
-                    )
-                })?;
-                if meta.sequence_id.0 != expected {
-                    return Err(AgentLoopError::Persistence(format!(
-                        "event sequence {} does not match log sequence {expected}",
-                        meta.sequence_id.0
-                    )));
-                }
-            }
-            let envelopes = log
-                .append_batch(events)
-                .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-            publisher.publish(log.read_view());
-            Ok(envelopes)
-        };
-        let envelopes = match tokio::runtime::Handle::current().runtime_flavor() {
-            tokio::runtime::RuntimeFlavor::MultiThread => tokio::task::block_in_place(append),
-            _ => tokio::task::spawn_blocking(append)
-                .await
-                .map_err(|error| AgentLoopError::Persistence(error.to_string()))?,
-        }?;
-        if rewound {
-            let binding = self
-                .todo_restore
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            if let Some(binding) = binding {
-                let events = self
-                    .load()
-                    .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-                let recovered = project_session_events(&events)
-                    .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-                restore_todo_state(
-                    &recovered.conversation,
-                    &binding.workspace,
-                    &binding.session_id,
-                    &binding.todo,
-                )
-                .await
-                .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-            }
-        }
-        let persisted = envelopes
-            .into_iter()
-            .map(|envelope| envelope.event)
-            .collect::<Vec<_>>();
-        for event in &persisted {
-            match event {
-                EngineEvent::TurnStarted { turn_id, .. } => {
-                    self.prompt_shapes.set_active_turn(turn_id.clone());
-                }
-                EngineEvent::TurnFinished { turn_id, .. } => {
-                    self.prompt_shapes.clear_active_turn(turn_id);
-                }
-                _ => {}
-            }
-        }
-        self.update_hosted_projection(&persisted).await;
-        if let Err(error) = self.reconcile_accounting(&persisted) {
-            self.accounting_dirty.store(true, Ordering::Release);
-            tracing::warn!(
-                session_id = %self.session_id,
-                reason = %error,
-                "durable accounting projection will be repaired on the next query"
-            );
-        }
-        Ok(persisted)
+        plan: &EventBatchPlan,
+    ) -> std::result::Result<EventBatchReservation, AgentLoopError> {
+        self.journal_service.commits.reserve(plan)
+    }
+    async fn commit(
+        self: Arc<Self>,
+        batch: Arc<AdmittedEventBatch>,
+    ) -> std::result::Result<Arc<AdmittedEventBatch>, AgentLoopError> {
+        let queue = Arc::clone(&self.journal_service.commits);
+        let order = queue.enter(Arc::clone(&self.commit_order)).instrument(tracing::trace_span!(target: "rw_performance", "journal.order_wait", session_id = %self.session_id)).await?;
+        let owner = Arc::clone(&self);
+        let submitted = Arc::clone(&batch);
+        queue
+            .execute(
+                owner,
+                batch,
+                order,
+                async move { self.persist(submitted).await },
+            )
+            .await
     }
 
     fn capture_read_view(
         &self,
     ) -> std::result::Result<Arc<dyn SessionEventReadView>, AgentLoopError> {
         let lease = self
-            .journal_reads
+            .journal_service
             .capture(&self.session_id)
             .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
         Ok(Arc::new(DurableReadView {
@@ -386,11 +315,7 @@ impl SessionEventSink for DurableEventSink {
     }
 
     async fn last_sequence(&self) -> std::result::Result<Option<SequenceId>, AgentLoopError> {
-        Ok(self
-            .log
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .last_sequence())
+        Ok(self.registration.publisher.last_sequence())
     }
 
     async fn budget_totals(
@@ -495,3 +420,120 @@ pub(super) fn validate_session_event_envelopes(
         })
         .collect()
 }
+
+impl DurableEventSink {
+    fn append_and_publish(
+        &self,
+        events: &[EngineEvent],
+    ) -> std::result::Result<(), AgentLoopError> {
+        let mut log = self
+            .log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (offset, event) in events.iter().enumerate() {
+            let offset = u64::try_from(offset).map_err(|_| {
+                AgentLoopError::Persistence("event batch length overflow".to_owned())
+            })?;
+            let expected = log
+                .next_sequence()
+                .checked_add(offset)
+                .ok_or_else(|| AgentLoopError::Persistence("event sequence overflow".to_owned()))?;
+            let meta = event.meta().ok_or_else(|| {
+                AgentLoopError::Persistence(
+                    "connection acknowledgement cannot be persisted".to_owned(),
+                )
+            })?;
+            if meta.sequence_id.0 != expected {
+                return Err(AgentLoopError::Persistence(format!(
+                    "event sequence {} does not match log sequence {expected}",
+                    meta.sequence_id.0
+                )));
+            }
+        }
+        let first = events
+            .first()
+            .and_then(EngineEvent::meta)
+            .ok_or_else(|| AgentLoopError::Persistence("empty journal batch".to_owned()))?
+            .sequence_id;
+        let prepared = rw_store::session::journal::JournalAppendPlan::measure(first, events)
+            .and_then(|plan| plan.encode(events))
+            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+        log.append_prepared(prepared)
+            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+        self.registration.publisher.publish(log.read_view());
+        Ok(())
+    }
+
+    async fn persist(
+        self: Arc<Self>,
+        batch: Arc<AdmittedEventBatch>,
+    ) -> std::result::Result<Arc<AdmittedEventBatch>, AgentLoopError> {
+        let events = batch.events();
+        let rewound = events
+            .iter()
+            .any(|event| matches!(event, EngineEvent::ConversationRewound { .. }));
+        let owner = Arc::clone(&self);
+        let submitted = Arc::clone(&batch);
+        tokio::task::spawn_blocking(move || owner.append_and_publish(submitted.events()))
+            .await
+            .map_err(|error| AgentLoopError::Persistence(error.to_string()))??;
+        if rewound {
+            let binding = self
+                .todo_restore
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(binding) = binding {
+                let recovery_owner = Arc::clone(&self);
+                let recovered = tokio::task::spawn_blocking(move || {
+                    let events = recovery_owner
+                        .load()
+                        .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+                    project_session_events(&events)
+                        .map_err(|error| AgentLoopError::Persistence(error.to_string()))
+                })
+                .await
+                .map_err(|error| AgentLoopError::Persistence(error.to_string()))??;
+                restore_todo_state(
+                    &recovered.conversation,
+                    &binding.workspace,
+                    &binding.session_id,
+                    &binding.todo,
+                )
+                .await
+                .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+            }
+        }
+        let batch = tokio::task::spawn_blocking(move || {
+            let persisted = batch.events();
+            for event in persisted {
+                match event {
+                    EngineEvent::TurnStarted { turn_id, .. } => {
+                        self.prompt_shapes.set_active_turn(turn_id.clone());
+                    }
+                    EngineEvent::TurnFinished { turn_id, .. } => {
+                        self.prompt_shapes.clear_active_turn(turn_id);
+                    }
+                    _ => {}
+                }
+            }
+            self.update_hosted_projection(persisted);
+            if let Err(error) = self.reconcile_accounting(persisted) {
+                self.accounting_dirty.store(true, Ordering::Release);
+                tracing::warn!(
+                    session_id = %self.session_id,
+                    reason = %error,
+                    "durable accounting projection will be repaired on the next query"
+                );
+            }
+            batch
+        })
+        .await
+        .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+
+        Ok(batch)
+    }
+}
+
+#[cfg(test)]
+mod commit_tests;

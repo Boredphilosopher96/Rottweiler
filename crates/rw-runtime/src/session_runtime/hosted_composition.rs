@@ -268,13 +268,13 @@ pub(crate) async fn compose_hosted_actor(
         .unwrap_or_else(|| persisted_model_alias.clone());
     let driver_client_id = recovered.driver_client_id.clone();
     let shell_active = recovered.active_shell.is_some();
-    let durable_sink = Arc::new(DurableEventSink::new_hosted(
+    let durable_sink = DurableEventSink::new_hosted(
         log,
         options.storage_root.clone(),
         session_id.clone(),
         &recovered_events,
-        Arc::clone(&options.journal_reads),
-    )?);
+        Arc::clone(&options.journal_service),
+    )?;
     durable_sink.reconcile_accounting(&recovered_events)?;
     let checkpoint_coordinator = Arc::new(DurableCheckpointCoordinator::from_stores(
         session_checkpoint_root,
@@ -605,7 +605,7 @@ pub(crate) async fn compose_hosted_actor(
     wasm_startup_notifications.extend(extension_startup_notifications(&extension_catalog));
     let workspace_root_controller = Arc::new(RuntimeWorkspaceRootController {
         index_pool: Arc::clone(&options.index_pool),
-        journal_reads: Arc::clone(&options.journal_reads),
+        journal_service: Arc::clone(&options.journal_service),
         checkpoint_root: checkpoint_root(&options.storage_root, &workspace, &session_id),
         storage_root: options.storage_root.clone(),
         question_asker: root_question_asker,
@@ -779,7 +779,7 @@ pub(crate) async fn compose_hosted_actor(
     recover_subagent_tree(
         &options.storage_root,
         &options.session_id,
-        durable_sink.as_ref(),
+        &durable_sink,
         &recovered_events,
         &allowed_workspace_roots,
         options.config.engine.subagent_max_depth,

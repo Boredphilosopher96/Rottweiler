@@ -1,15 +1,15 @@
 use super::durable_session::DurableEventSink;
 use super::durable_session::load_session_events;
-use crate::journal_reads::JournalReads;
+use crate::journal_service::JournalService;
 use rw_core::AgentLoopError;
 use rw_core::EngineEvent;
+use rw_core::EventClock;
 use rw_core::EventMeta;
 use rw_core::SESSION_EVENT_VERSION;
 use rw_core::SequenceId;
 use rw_core::SubagentMetadataStore;
 use rw_core::SubagentOrchestrator;
 use rw_core::SystemEventClock;
-use rw_core::{EventClock, SessionEventSink};
 use rw_store::session::SessionEventLog;
 use rw_tools::CancellationToken;
 use rw_tools::WorktreeIsolation;
@@ -151,7 +151,7 @@ pub(super) fn validate_subagent_recovery_record(
 }
 
 pub(super) async fn repair_incomplete_subagent_lifecycles(
-    sink: &DurableEventSink,
+    sink: &Arc<DurableEventSink>,
     parent_session_id: &SessionId,
     events: &[EngineEvent],
 ) -> std::result::Result<Vec<EngineEvent>, AgentLoopError> {
@@ -183,7 +183,7 @@ pub(super) async fn repair_incomplete_subagent_lifecycles(
             result: rw_core::interrupted_subagent_recovery_result(handle),
         })
         .collect::<Vec<_>>();
-    sink.append_batch(repairs).await?;
+    rw_core::commit_session_events(Arc::clone(sink), repairs).await?;
     sink.load()
         .map_err(|error| AgentLoopError::Persistence(error.to_string()))
 }
@@ -273,10 +273,10 @@ pub(super) struct SubagentRecoveryNode {
 }
 
 pub(super) fn open_subagent_recovery_log(
-    journal_reads: Arc<JournalReads>,
+    journal_service: Arc<JournalService>,
     storage_root: &Path,
     session_id: &SessionId,
-) -> std::result::Result<(DurableEventSink, Vec<EngineEvent>), AgentLoopError> {
+) -> std::result::Result<(Arc<DurableEventSink>, Vec<EngineEvent>), AgentLoopError> {
     let log = SessionEventLog::open(storage_root, &session_id.0)
         .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
     let events = load_session_events(&log)
@@ -285,7 +285,7 @@ pub(super) fn open_subagent_recovery_log(
         log,
         storage_root.to_path_buf(),
         session_id.0.clone(),
-        journal_reads,
+        journal_service,
     )
     .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
     Ok((sink, events))
@@ -298,7 +298,7 @@ pub(super) fn open_subagent_recovery_log(
 pub(super) async fn recover_subagent_tree(
     storage_root: &Path,
     root_session_id: &SessionId,
-    root_sink: &DurableEventSink,
+    root_sink: &Arc<DurableEventSink>,
     root_events: &[EngineEvent],
     root_authorized_roots: &[PathBuf],
     max_depth: usize,
@@ -325,7 +325,7 @@ pub(super) async fn recover_subagent_tree(
             (None, events)
         } else {
             let (sink, events) = open_subagent_recovery_log(
-                Arc::clone(&root_sink.journal_reads),
+                Arc::clone(&root_sink.journal_service),
                 storage_root,
                 &node.parent_session_id,
             )?;

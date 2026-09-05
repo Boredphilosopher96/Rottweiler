@@ -52,7 +52,9 @@ async fn large_reconnect_pages_pin_cursor_and_preserve_attach_ack_after_lag() {
         )
     }));
     let recovered = project_session_events(&seeded).expect("projection");
-    sink.append_batch(seeded).await.expect("seed");
+    crate::commit_session_events(Arc::clone(&sink), seeded)
+        .await
+        .expect("seed");
     let mut actor_config = config(
         root.path(),
         Arc::new(ScriptedModel::default()),

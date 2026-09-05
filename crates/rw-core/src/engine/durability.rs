@@ -1,3 +1,6 @@
+mod batch;
+pub use batch::{AdmittedEventBatch, EventBatchPlan, EventBatchReservation};
+
 use super::AgentLoopError;
 use super::BudgetLedgerQuery;
 use super::BudgetLedgerTotals;
@@ -15,25 +18,19 @@ use std::sync::Mutex;
 /// actor invokes this boundary before making the event visible to subscribers.
 #[async_trait]
 pub trait SessionEventSink: Send + Sync {
-    /// Durably append exactly the fully stamped protocol event supplied by the
-    /// actor and return that same event after persistence completes.
-    async fn append(&self, event: EngineEvent) -> Result<EngineEvent, AgentLoopError>;
+    /// Reserves all resources required to prepare, queue, commit and return this batch.
+    async fn reserve(&self, plan: &EventBatchPlan)
+    -> Result<EventBatchReservation, AgentLoopError>;
 
-    /// Appends an ordered event batch.
-    ///
-    /// The extensible default appends sequentially and may leave a recoverable
-    /// persisted prefix if a later append fails. Implementations with a native
-    /// batch primitive should override this to share one durable sync.
-    async fn append_batch(
-        &self,
-        batch: Vec<EngineEvent>,
-    ) -> Result<Vec<EngineEvent>, AgentLoopError> {
-        let mut events = Vec::with_capacity(batch.len());
-        for event in batch {
-            events.push(self.append(event).await?);
-        }
-        Ok(events)
-    }
+    /// Returns the exact submitted allocation only after durability and its owned
+    /// postcommit work finish. Accepted work remains owned when its waiter drops.
+    async fn commit(
+        self: Arc<Self>,
+        batch: Arc<AdmittedEventBatch>,
+    ) -> Result<Arc<AdmittedEventBatch>, AgentLoopError>;
+
+    /// Waits for accepted commit work, including abandoned waiters, before session resources close.
+    async fn settle_effects(&self) -> Result<(), AgentLoopError>;
 
     /// Captures an immutable acknowledged prefix for bounded replay.
     ///
@@ -78,37 +75,22 @@ impl NoopSessionEventSink {
 
 #[async_trait]
 impl SessionEventSink for NoopSessionEventSink {
-    async fn append(&self, event: EngineEvent) -> Result<EngineEvent, AgentLoopError> {
-        let mut next = self
-            .next_sequence
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let meta = event.meta().ok_or_else(|| {
-            AgentLoopError::Persistence(
-                "connection-scoped acknowledgement cannot enter a session log".to_owned(),
-            )
-        })?;
-        if meta.sequence_id.0 != *next {
-            return Err(AgentLoopError::Persistence(format!(
-                "event sequence {} does not match expected {}",
-                meta.sequence_id.0, *next
-            )));
-        }
-        *next = next
-            .checked_add(1)
-            .ok_or_else(|| AgentLoopError::Persistence("event sequence overflow".to_owned()))?;
-        self.events
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(event.clone());
-        Ok(event)
+    async fn settle_effects(&self) -> Result<(), AgentLoopError> {
+        Ok(())
+    }
+    async fn reserve(
+        &self,
+        _plan: &EventBatchPlan,
+    ) -> Result<EventBatchReservation, AgentLoopError> {
+        Ok(EventBatchReservation::new(()))
     }
 
-    async fn append_batch(
-        &self,
-        batch: Vec<EngineEvent>,
-    ) -> Result<Vec<EngineEvent>, AgentLoopError> {
-        let count = u64::try_from(batch.len())
+    async fn commit(
+        self: Arc<Self>,
+        batch: Arc<AdmittedEventBatch>,
+    ) -> Result<Arc<AdmittedEventBatch>, AgentLoopError> {
+        let events = batch.events();
+        let count = u64::try_from(events.len())
             .map_err(|_| AgentLoopError::Persistence("event batch length overflow".to_owned()))?;
         let mut next = self
             .next_sequence
@@ -117,7 +99,7 @@ impl SessionEventSink for NoopSessionEventSink {
         let advanced = next
             .checked_add(count)
             .ok_or_else(|| AgentLoopError::Persistence("event sequence overflow".to_owned()))?;
-        for (offset, event) in batch.iter().enumerate() {
+        for (offset, event) in events.iter().enumerate() {
             let offset = u64::try_from(offset)
                 .map_err(|_| AgentLoopError::Persistence("event batch overflow".to_owned()))?;
             let sequence = next
@@ -139,7 +121,7 @@ impl SessionEventSink for NoopSessionEventSink {
         self.events
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .extend(batch.iter().cloned());
+            .extend(events.iter().cloned());
         Ok(batch)
     }
 
@@ -161,4 +143,24 @@ impl SessionEventSink for NoopSessionEventSink {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok(next.checked_sub(1).map(SequenceId))
     }
+}
+
+/// Reserves before preparing and validates the exact acknowledged allocation.
+///
+/// # Errors
+/// Rejects admission, persistence failure and substituted batch ownership.
+pub async fn commit_session_events<S: SessionEventSink + ?Sized + 'static>(
+    sink: Arc<S>,
+    events: Vec<EngineEvent>,
+) -> Result<Arc<AdmittedEventBatch>, AgentLoopError> {
+    let plan = EventBatchPlan::new(events)?;
+    let reservation = sink.reserve(&plan).await?;
+    let requested = plan.prepare(reservation);
+    let committed = sink.commit(Arc::clone(&requested)).await?;
+    if !Arc::ptr_eq(&requested, &committed) {
+        return Err(AgentLoopError::Persistence(
+            "event sink substituted the submitted batch".to_owned(),
+        ));
+    }
+    Ok(committed)
 }

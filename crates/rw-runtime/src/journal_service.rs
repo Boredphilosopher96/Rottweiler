@@ -1,4 +1,6 @@
-//! Runtime-owned admission and routing for acknowledged journal prefixes.
+//! Runtime-owned journal commit admission and acknowledged read prefixes.
+mod commits;
+use commits::JournalCommits;
 
 use miette::{Result, miette};
 use rw_store::session::journal::{JournalReadView, JournalRoot};
@@ -12,8 +14,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 const MAX_ACTIVE_JOURNALS: usize = 1024;
 const MAX_READ_VIEWS: usize = 8;
 
-#[derive(Debug)]
-pub(crate) struct JournalReads {
+pub(crate) struct JournalService {
+    pub(crate) commits: Arc<JournalCommits>,
     root: JournalRoot,
     active: Mutex<HashMap<String, Weak<JournalPublication>>>,
     admission: Arc<Semaphore>,
@@ -42,6 +44,13 @@ impl JournalPublication {
         drop(previous);
     }
 
+    pub(crate) fn last_sequence(&self) -> Option<rw_types::SequenceId> {
+        self.committed
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .last_sequence()
+    }
+
     fn capture(&self) -> JournalReadView {
         self.committed
             .read()
@@ -51,7 +60,7 @@ impl JournalPublication {
 }
 
 pub(crate) struct JournalRegistration {
-    reads: Arc<JournalReads>,
+    reads: Arc<JournalService>,
     session: String,
     pub(crate) publisher: Arc<JournalPublication>,
 }
@@ -72,9 +81,10 @@ impl Drop for JournalRegistration {
     }
 }
 
-impl JournalReads {
+impl JournalService {
     pub(crate) fn new(root: &Path) -> Result<Arc<Self>> {
         Ok(Arc::new(Self {
+            commits: JournalCommits::new(),
             root: JournalRoot::open(root)
                 .map_err(|error| miette!("journal root could not open: {error}"))?,
             active: Mutex::new(HashMap::new()),
@@ -154,7 +164,7 @@ mod tests {
     #[test]
     fn active_offline_admission_and_duplicate_owner_are_explicit() {
         let root = tempfile::tempdir().expect("root");
-        let reads = JournalReads::new(root.path()).expect("service");
+        let reads = JournalService::new(root.path()).expect("service");
         let owner = Arc::new(Mutex::new(
             SessionEventLog::open(root.path(), "session").expect("writer"),
         ));
@@ -221,7 +231,7 @@ mod tests {
         let parent = tempfile::tempdir().expect("parent");
         let root = parent.path().join("root");
         std::fs::create_dir(&root).expect("root");
-        let reads = JournalReads::new(&root).expect("service");
+        let reads = JournalService::new(&root).expect("service");
         let owner = Arc::new(Mutex::new(
             SessionEventLog::open(&root, "session").expect("writer"),
         ));
@@ -249,7 +259,7 @@ mod tests {
     #[test]
     fn captures_published_prefix_while_writer_mutex_is_held() {
         let root = tempfile::tempdir().expect("root");
-        let reads = JournalReads::new(root.path()).expect("service");
+        let reads = JournalService::new(root.path()).expect("service");
         let writer = Mutex::new(SessionEventLog::open(root.path(), "session").expect("writer"));
         let mut guard = writer.lock().expect("writer mutex");
         let registration = reads

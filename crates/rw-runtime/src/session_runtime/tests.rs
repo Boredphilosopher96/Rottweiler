@@ -140,7 +140,7 @@ use super::websearch_recording::WEBSEARCH_REPLAY_FILE;
 use super::websearch_recording::WebSearchFixtureDirectory;
 use super::workspace_roots::RuntimeWorkspaceRootController;
 use super::workspace_roots::WorkspaceRootAuthorization;
-use crate::journal_reads::JournalReads;
+use crate::journal_service::JournalService;
 #[cfg(test)]
 use crate::provider_admission::testing::admission as test_provider_admission;
 #[cfg(test)]
@@ -599,19 +599,36 @@ fn unused_hosted_activator() -> Arc<HostedProviderActivator> {
     })
 }
 
+use rw_core as rw_core_batch;
+
 struct FailModelChangedSink {
-    inner: rw_core::NoopSessionEventSink,
+    inner: Arc<rw_core::NoopSessionEventSink>,
 }
 
 #[async_trait]
 impl SessionEventSink for FailModelChangedSink {
-    async fn append(&self, event: EngineEvent) -> std::result::Result<EngineEvent, AgentLoopError> {
-        if matches!(event, EngineEvent::ModelChanged { .. }) {
-            return Err(AgentLoopError::Persistence(
-                "model change fixture failure".to_owned(),
-            ));
+    async fn settle_effects(&self) -> Result<(), AgentLoopError> {
+        Ok(())
+    }
+    async fn reserve(
+        &self,
+        _plan: &rw_core_batch::EventBatchPlan,
+    ) -> Result<rw_core_batch::EventBatchReservation, AgentLoopError> {
+        Ok(rw_core_batch::EventBatchReservation::new(()))
+    }
+
+    async fn commit(
+        self: Arc<Self>,
+        batch: Arc<rw_core_batch::AdmittedEventBatch>,
+    ) -> Result<Arc<rw_core_batch::AdmittedEventBatch>, AgentLoopError> {
+        for event in batch.events() {
+            if matches!(event, EngineEvent::ModelChanged { .. }) {
+                return Err(AgentLoopError::Persistence(
+                    "model change fixture failure".to_owned(),
+                ));
+            }
         }
-        self.inner.append(event).await
+        Arc::clone(&self.inner).commit(batch).await
     }
 
     fn capture_read_view(

@@ -155,6 +155,9 @@ async fn cleanup(
             failure.get_or_insert_with(|| error.to_string());
         }
     }
+    if let Err(error) = config.event_sink.settle_effects().await {
+        failure.get_or_insert_with(|| error.to_string());
+    }
     if let Err(error) = config.checkpoints.settle_effects().await {
         failure.get_or_insert_with(|| error.to_string());
     }
@@ -188,6 +191,9 @@ async fn cleanup(
         failure.get_or_insert_with(|| error.to_string());
     }
     if let Err(error) = config.tools.end_session(&config.session_id).await {
+        failure.get_or_insert_with(|| error.to_string());
+    }
+    if let Err(error) = config.event_sink.settle_effects().await {
         failure.get_or_insert_with(|| error.to_string());
     }
     if let Err(error) = config.checkpoints.settle_effects().await {

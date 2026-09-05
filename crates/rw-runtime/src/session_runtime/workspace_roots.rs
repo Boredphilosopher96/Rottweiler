@@ -29,7 +29,7 @@ use super::tool_composition::trusted_lsp_roots;
 use super::toolchain::ToolchainRuntime;
 use super::wasm_hooks::NamedWasmHook;
 use super::wasm_hooks::compose_runtime_hooks_with_extensions;
-use crate::journal_reads::JournalReads;
+use crate::journal_service::JournalService;
 use async_trait::async_trait;
 use miette::IntoDiagnostic;
 use miette::Result;
@@ -99,7 +99,7 @@ pub(super) fn canonical_workspace_roots(
 #[allow(clippy::struct_excessive_bools)]
 pub(super) struct RuntimeWorkspaceRootController {
     pub(super) index_pool: Arc<rw_tools::WorkspaceIndexPool>,
-    pub(super) journal_reads: Arc<JournalReads>,
+    pub(super) journal_service: Arc<JournalService>,
     pub(super) checkpoint_root: PathBuf,
     pub(super) storage_root: PathBuf,
     pub(super) question_asker: Arc<dyn QuestionAsker>,
@@ -253,7 +253,7 @@ impl RuntimeWorkspaceRootController {
             log,
             storage_root.to_path_buf(),
             session_id.0.clone(),
-            Arc::clone(&self.journal_reads),
+            Arc::clone(&self.journal_service),
         )
         .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
         let mut initial_context = fresh_initial_session_context(storage_root, &roots)
@@ -277,7 +277,7 @@ impl RuntimeWorkspaceRootController {
             .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
         let workspace_controller = Arc::new(RuntimeWorkspaceRootController {
             index_pool: Arc::clone(&self.index_pool),
-            journal_reads: Arc::clone(&self.journal_reads),
+            journal_service: Arc::clone(&self.journal_service),
             checkpoint_root: child_checkpoint_root.clone(),
             storage_root: storage_root.to_path_buf(),
             question_asker: Arc::clone(&self.question_asker),
@@ -323,7 +323,7 @@ impl RuntimeWorkspaceRootController {
             hooks: Arc::new(hooks),
             commands: Arc::new(commands),
             modes: Arc::new(mode_registry),
-            event_sink: Arc::new(event_sink),
+            event_sink,
             event_clock: Arc::new(SystemEventClock),
             provider_admission,
             secret_redactor,

@@ -10,7 +10,7 @@ use super::DurableEventSink;
 use super::EngineEvent;
 use super::EventMeta;
 use super::FinishReason;
-use super::JournalReads;
+use super::JournalService;
 use super::ModelDriver;
 use super::Path;
 use super::PermissionDecision;
@@ -55,7 +55,6 @@ use super::promote_pending_recovery_record;
 use super::recovery_workspace_authorized;
 use super::repair_incomplete_subagent_lifecycles;
 use super::test_provider_admission;
-use rw_core::SessionEventSink;
 use rw_core::SubagentMetadataStore;
 use rw_tools::Tool;
 
@@ -158,7 +157,7 @@ async fn actor_applies_durable_child_artifact_then_reports_conflict_without_corr
         log,
         storage.clone(),
         parent_session.0.clone(),
-        JournalReads::new(&(storage.clone())).expect("journal reads"),
+        JournalService::new(&(storage.clone())).expect("journal reads"),
     )
     .expect("durable sink");
     let meta = |sequence| EventMeta {
@@ -168,30 +167,35 @@ async fn actor_applies_durable_child_artifact_then_reports_conflict_without_corr
         emitted_at: "2026-01-01T00:00:00.000Z".to_owned(),
         caused_by: None,
     };
-    durable
-        .append(EngineEvent::TurnStarted {
+    rw_core::commit_session_events(
+        Arc::clone(&durable),
+        vec![EngineEvent::TurnStarted {
             meta: meta(0),
             turn_id: TurnId("1".to_owned()),
-        })
-        .await
-        .expect("durable turn start");
+        }],
+    )
+    .await
+    .expect("durable turn start");
     for (sequence, name, artifact) in [
         (1_u64, "first-child", first.clone()),
         (3_u64, "second-child", second.clone()),
     ] {
         let subagent_id = rw_types::SubagentId(name.to_owned());
         let child_session_id = SessionId(format!("{name}-session"));
-        durable
-            .append(EngineEvent::SubagentSpawned {
+        rw_core::commit_session_events(
+            Arc::clone(&durable),
+            vec![EngineEvent::SubagentSpawned {
                 meta: meta(sequence),
                 subagent_id: subagent_id.clone(),
                 child_session_id: child_session_id.clone(),
                 task: format!("produce {name} diff"),
-            })
-            .await
-            .expect("durable child spawn");
-        durable
-            .append(EngineEvent::SubagentFinished {
+            }],
+        )
+        .await
+        .expect("durable child spawn");
+        rw_core::commit_session_events(
+            Arc::clone(&durable),
+            vec![EngineEvent::SubagentFinished {
                 meta: meta(sequence + 1),
                 subagent_id: subagent_id.clone(),
                 result: rw_types::SubagentResult {
@@ -208,12 +212,14 @@ async fn actor_applies_durable_child_artifact_then_reports_conflict_without_corr
                     turns: 1,
                     duration_millis: 1,
                 },
-            })
-            .await
-            .expect("durable child result");
+            }],
+        )
+        .await
+        .expect("durable child result");
     }
-    durable
-        .append(EngineEvent::TurnFinished {
+    rw_core::commit_session_events(
+        Arc::clone(&durable),
+        vec![EngineEvent::TurnFinished {
             meta: meta(5),
             turn_id: TurnId("1".to_owned()),
             status: TurnStatus::Completed,
@@ -221,9 +227,10 @@ async fn actor_applies_durable_child_artifact_then_reports_conflict_without_corr
             cost: Cost::Unavailable {
                 reason: "offline fixture".to_owned(),
             },
-        })
-        .await
-        .expect("durable turn finish");
+        }],
+    )
+    .await
+    .expect("durable turn finish");
     let lifecycle = effective_subagent_events(&durable.load().expect("load durable events"))
         .expect("effective durable lifecycle");
 
@@ -596,31 +603,35 @@ async fn crashed_worktree_child_recovers_follows_up_and_applies_after_second_res
             handle: &rw_core::SubagentHandle,
             task: &str,
         ) -> std::result::Result<(), rw_core::OrchestrationError> {
-            self.sink
-                .append(EngineEvent::SubagentSpawned {
+            rw_core::commit_session_events(
+                Arc::clone(&self.sink),
+                vec![EngineEvent::SubagentSpawned {
                     meta: self.meta(),
                     subagent_id: handle.subagent_id.clone(),
                     child_session_id: handle.session_id.clone(),
                     task: task.to_owned(),
-                })
-                .await
-                .map(|_| ())
-                .map_err(|error| rw_core::OrchestrationError::Observer(error.to_string()))
+                }],
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| rw_core::OrchestrationError::Observer(error.to_string()))
         }
 
         async fn finished(
             &self,
             result: &rw_types::SubagentResult,
         ) -> std::result::Result<(), rw_core::OrchestrationError> {
-            self.sink
-                .append(EngineEvent::SubagentFinished {
+            rw_core::commit_session_events(
+                Arc::clone(&self.sink),
+                vec![EngineEvent::SubagentFinished {
                     meta: self.meta(),
                     subagent_id: result.subagent_id.clone(),
                     result: result.clone(),
-                })
-                .await
-                .map(|_| ())
-                .map_err(|error| rw_core::OrchestrationError::Observer(error.to_string()))
+                }],
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| rw_core::OrchestrationError::Observer(error.to_string()))
         }
 
         async fn progress(
@@ -650,7 +661,7 @@ async fn crashed_worktree_child_recovers_follows_up_and_applies_after_second_res
             log,
             storage.to_path_buf(),
             session_id.0.clone(),
-            JournalReads::new(storage).expect("journal reads"),
+            JournalService::new(storage).expect("journal reads"),
         )
         .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
         Ok(SessionActorConfig {
@@ -676,7 +687,7 @@ async fn crashed_worktree_child_recovers_follows_up_and_applies_after_second_res
                 rw_ext::ModeRegistry::builtins()
                     .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?,
             ),
-            event_sink: Arc::new(sink),
+            event_sink: sink,
             event_clock: Arc::new(SystemEventClock),
             provider_admission: test_provider_admission(),
             secret_redactor: Arc::new(rw_core::NoopSecretRedactor),
@@ -790,7 +801,7 @@ async fn crashed_worktree_child_recovers_follows_up_and_applies_after_second_res
         initial_log,
         storage.clone(),
         parent.0.clone(),
-        JournalReads::new(&(storage.clone())).expect("journal reads"),
+        JournalService::new(&(storage.clone())).expect("journal reads"),
     )
     .expect("initial parent sink");
     let meta = |sequence| EventMeta {
@@ -800,38 +811,40 @@ async fn crashed_worktree_child_recovers_follows_up_and_applies_after_second_res
         emitted_at: "2026-01-01T00:00:00.000Z".to_owned(),
         caused_by: None,
     };
-    initial_sink
-        .append(EngineEvent::TurnStarted {
+    rw_core::commit_session_events(
+        Arc::clone(&initial_sink),
+        vec![EngineEvent::TurnStarted {
             meta: meta(0),
             turn_id: TurnId("1".to_owned()),
-        })
-        .await
-        .expect("parent turn start");
-    initial_sink
-        .append(EngineEvent::SubagentSpawned {
+        }],
+    )
+    .await
+    .expect("parent turn start");
+    rw_core::commit_session_events(
+        Arc::clone(&initial_sink),
+        vec![EngineEvent::SubagentSpawned {
             meta: meta(1),
             subagent_id: handle.subagent_id.clone(),
             child_session_id: handle.session_id.clone(),
             task: "task interrupted after durable spawn".to_owned(),
-        })
-        .await
-        .expect("durable spawn");
+        }],
+    )
+    .await
+    .expect("durable spawn");
     drop(initial_sink);
     drop(initial_lease);
     drop(initial_manager);
 
     let parent_log = SessionEventLog::open(&storage, &parent.0).expect("reopen parent log");
-    let parent_sink = Arc::new(
-        DurableEventSink::new(
-            parent_log,
-            storage.clone(),
-            parent.0.clone(),
-            JournalReads::new(&(storage.clone())).expect("journal reads"),
-        )
-        .expect("recovered parent sink"),
-    );
+    let parent_sink = DurableEventSink::new(
+        parent_log,
+        storage.clone(),
+        parent.0.clone(),
+        JournalService::new(&(storage.clone())).expect("journal reads"),
+    )
+    .expect("recovered parent sink");
     let repaired = repair_incomplete_subagent_lifecycles(
-        parent_sink.as_ref(),
+        &parent_sink,
         &parent,
         &parent_sink.load().expect("load interrupted lifecycle"),
     )
@@ -991,8 +1004,9 @@ async fn crashed_worktree_child_recovers_follows_up_and_applies_after_second_res
         b"follow-up completed\n"
     );
     assert!(!repository.join("recovered.txt").exists());
-    parent_sink
-        .append(EngineEvent::TurnFinished {
+    rw_core::commit_session_events(
+        Arc::clone(&parent_sink),
+        vec![EngineEvent::TurnFinished {
             meta: meta(5),
             turn_id: TurnId("1".to_owned()),
             status: TurnStatus::Completed,
@@ -1006,9 +1020,10 @@ async fn crashed_worktree_child_recovers_follows_up_and_applies_after_second_res
             cost: Cost::Unavailable {
                 reason: "offline recovery fixture".to_owned(),
             },
-        })
-        .await
-        .expect("finish recovered parent turn");
+        }],
+    )
+    .await
+    .expect("finish recovered parent turn");
     recovered_orchestrator
         .cancel(&parent, &handle.subagent_id)
         .await

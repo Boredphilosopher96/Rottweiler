@@ -23,6 +23,7 @@ use tempfile::TempDir;
 use tokio::sync::Notify;
 
 use super::*;
+use crate as rw_core_batch;
 use crate::{
     ModelDriver, NoopFolderTrustController, NoopMutationCheckpointCoordinator, NoopSecretRedactor,
     NoopSessionEventSink, PermissionGate, SessionActor, SessionActorConfig, SessionCommandAction,
@@ -309,7 +310,7 @@ const BLOCK_SHELL_INACTIVE: u8 = 3;
 
 #[derive(Default)]
 struct BlockingDescriptorSink {
-    inner: NoopSessionEventSink,
+    inner: Arc<NoopSessionEventSink>,
     block: AtomicU8,
     append_started: Notify,
     append_release: Notify,
@@ -336,13 +337,28 @@ impl BlockingDescriptorSink {
 
 #[async_trait]
 impl SessionEventSink for BlockingDescriptorSink {
-    async fn append(&self, event: EngineEvent) -> Result<EngineEvent, AgentLoopError> {
-        let target = Self::event_target(&event);
-        if target != 0 && target == self.block.load(Ordering::Acquire) {
-            self.append_started.notify_one();
-            self.append_release.notified().await;
+    async fn settle_effects(&self) -> Result<(), AgentLoopError> {
+        Ok(())
+    }
+    async fn reserve(
+        &self,
+        _plan: &rw_core_batch::EventBatchPlan,
+    ) -> Result<rw_core_batch::EventBatchReservation, AgentLoopError> {
+        Ok(rw_core_batch::EventBatchReservation::new(()))
+    }
+
+    async fn commit(
+        self: Arc<Self>,
+        batch: Arc<rw_core_batch::AdmittedEventBatch>,
+    ) -> Result<Arc<rw_core_batch::AdmittedEventBatch>, AgentLoopError> {
+        for event in batch.events() {
+            let target = Self::event_target(event);
+            if target != 0 && target == self.block.load(Ordering::Acquire) {
+                self.append_started.notify_one();
+                self.append_release.notified().await;
+            }
         }
-        self.inner.append(event).await
+        Arc::clone(&self.inner).commit(batch).await
     }
 
     fn capture_read_view(&self) -> Result<Arc<dyn crate::SessionEventReadView>, AgentLoopError> {

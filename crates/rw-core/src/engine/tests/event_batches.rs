@@ -126,7 +126,7 @@ async fn malformed_batch_payload_or_sequence_is_rejected_before_broadcast_or_mod
         );
         actor_config.event_sink = Arc::new(MalformedBatchSink {
             mode,
-            inner: NoopSessionEventSink::default(),
+            inner: Arc::new(NoopSessionEventSink::default()),
         });
         let handle = SessionActor::spawn(actor_config).expect("actor");
         handle.ensure_local_driver().await.expect("local driver");

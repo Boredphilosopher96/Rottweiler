@@ -246,7 +246,7 @@ pub struct RuntimeSessionFactory {
     plugin_activation: Arc<crate::extension_runtime::PluginActivationBudget>,
     wasm_workers: Arc<rw_ext::WasmWorkerPool>,
     index_pool: Arc<rw_tools::WorkspaceIndexPool>,
-    journal_reads: Arc<crate::journal_reads::JournalReads>,
+    journal_service: Arc<crate::journal_service::JournalService>,
     transcripts: Arc<crate::transcript_service::TranscriptReader>,
     provider_admission: Arc<crate::provider_admission::DurableProviderAdmission>,
     options: Arc<RuntimeHostOptions>,
@@ -427,7 +427,7 @@ impl RuntimeSessionFactory {
             inner: Arc::new(live_source),
             cache_path: catalog_cache_path,
         });
-        let journal_reads = crate::journal_reads::JournalReads::new(&options.storage_root)
+        let journal_service = crate::journal_service::JournalService::new(&options.storage_root)
             .map_err(|error| HostError::Persistence(error.to_string()))?;
         let provider_admission =
             crate::provider_admission::DurableProviderAdmission::open(options.storage_root.clone())
@@ -436,12 +436,12 @@ impl RuntimeSessionFactory {
         let factory = Self {
             provider_admission: Arc::new(provider_admission),
             transcripts: crate::transcript_service::TranscriptReader::new(Arc::clone(
-                &journal_reads,
+                &journal_service,
             )),
             plugin_activation: Arc::new(crate::extension_runtime::PluginActivationBudget::default()),
             wasm_workers: rw_ext::WasmWorkerPool::new(),
             index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
-            journal_reads,
+            journal_service,
             options: Arc::new(options),
             allowed_workspaces: Arc::new(allowed),
             model_catalog: Arc::new(CachedModelCatalog::with_initial(source, initial_catalog)),
@@ -458,7 +458,7 @@ impl RuntimeSessionFactory {
         force: bool,
     ) -> Result<String, HostError> {
         let lease = self
-            .journal_reads
+            .journal_service
             .capture(&session.session_id.0)
             .map_err(|error| HostError::Query(error.to_string()))?;
         let (events, _) = crate::history::load_events_from_view(
@@ -664,7 +664,7 @@ impl RuntimeSessionFactory {
     ) -> Result<Vec<PathBuf>, HostError> {
         let primary = self.workspace_for_session(descriptor)?;
         let configured = load_session_workspace_roots(
-            &self.journal_reads,
+            &self.journal_service,
             &self.options.storage_root,
             &primary,
             &descriptor.session_id.0,
@@ -711,7 +711,7 @@ impl RuntimeSessionFactory {
             plugin_activation: Arc::clone(&self.plugin_activation),
             wasm_workers: Arc::clone(&self.wasm_workers),
             index_pool: Arc::clone(&self.index_pool),
-            journal_reads: Arc::clone(&self.journal_reads),
+            journal_service: Arc::clone(&self.journal_service),
             provider_admission: Arc::clone(&self.provider_admission),
             workspace: workspace.clone(),
             additional_workspaces: Vec::new(),

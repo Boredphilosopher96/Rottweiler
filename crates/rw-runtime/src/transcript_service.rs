@@ -1,6 +1,6 @@
 //! Bounded runtime ownership for the rebuildable semantic transcript projection.
 
-use crate::journal_reads::JournalReads;
+use crate::journal_service::JournalService;
 use rw_core::{HostError, transcript::TranscriptProjector};
 use rw_types::{
     SequenceId, SessionId,
@@ -29,7 +29,7 @@ struct CachedProjector {
 
 /// Shared bounded transcript projection, document cache and blocking-worker owner.
 pub struct TranscriptReader {
-    journals: Arc<JournalReads>,
+    journals: Arc<JournalService>,
     projectors: Mutex<HashMap<SessionId, CachedProjector>>,
     clock: AtomicU64,
     documents: Mutex<content::DocumentCache>,
@@ -37,7 +37,7 @@ pub struct TranscriptReader {
 }
 
 impl TranscriptReader {
-    pub(crate) fn new(journals: Arc<JournalReads>) -> Arc<Self> {
+    pub(crate) fn new(journals: Arc<JournalService>) -> Arc<Self> {
         Arc::new(Self {
             journals,
             projectors: Mutex::new(HashMap::new()),

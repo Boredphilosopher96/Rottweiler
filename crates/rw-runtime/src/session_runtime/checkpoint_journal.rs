@@ -3,7 +3,7 @@ use super::runtime_options::MAX_WORKSPACE_ROOTS;
 use super::session_metadata::validate_session_id;
 use super::session_selection::checkpoint_root;
 use super::workspace_roots::canonical_workspace_roots;
-use crate::journal_reads::JournalReads;
+use crate::journal_service::JournalService;
 use miette::IntoDiagnostic;
 use miette::Result;
 use miette::miette;
@@ -239,13 +239,13 @@ pub(crate) fn load_checkpoint_roots_exact(
 }
 
 pub(crate) fn load_session_workspace_roots(
-    journal_reads: &JournalReads,
+    journal_service: &JournalService,
     storage_root: &Path,
     workspace: &Path,
     session_id: &str,
 ) -> Result<Vec<PathBuf>> {
     let root = checkpoint_root(storage_root, workspace, session_id);
-    let lease = journal_reads.capture(session_id)?;
+    let lease = journal_service.capture(session_id)?;
     let envelopes = lease
         .view
         .collect_bounded::<EngineEvent>(

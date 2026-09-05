@@ -345,3 +345,76 @@ async fn failed_hook_proof_never_finishes_tool_or_checkpoint() {
         );
     }
 }
+
+struct ClosingJournal {
+    inner: Arc<RecordingSink>,
+    entered: Notify,
+    release: Notify,
+    waited: AtomicBool,
+    fail: bool,
+}
+#[async_trait]
+impl crate::SessionEventSink for ClosingJournal {
+    async fn reserve(
+        &self,
+        plan: &crate::EventBatchPlan,
+    ) -> Result<crate::EventBatchReservation, AgentLoopError> {
+        self.inner.reserve(plan).await
+    }
+    async fn commit(
+        self: Arc<Self>,
+        batch: Arc<crate::AdmittedEventBatch>,
+    ) -> Result<Arc<crate::AdmittedEventBatch>, AgentLoopError> {
+        Arc::clone(&self.inner).commit(batch).await
+    }
+    async fn settle_effects(&self) -> Result<(), AgentLoopError> {
+        if !self.waited.swap(true, Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        if self.fail {
+            Err(AgentLoopError::EffectsUnsettled(
+                "journal proof failed".to_owned(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+    fn capture_read_view(&self) -> Result<Arc<dyn crate::SessionEventReadView>, AgentLoopError> {
+        self.inner.capture_read_view()
+    }
+}
+
+#[tokio::test]
+async fn actor_close_waits_for_journal_ownership_and_propagates_failed_proof() {
+    for fail in [false, true] {
+        let root = tempfile::tempdir().expect("root");
+        let sink = Arc::new(ClosingJournal {
+            inner: Arc::new(RecordingSink::default()),
+            entered: Notify::new(),
+            release: Notify::new(),
+            waited: AtomicBool::new(false),
+            fail,
+        });
+        let mut configuration = config(
+            root.path(),
+            Arc::new(ScriptedModel::new(Vec::new())),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            HookDispatcher::new(),
+        );
+        configuration.event_sink = sink.clone();
+        let handle = SessionActor::spawn(configuration).expect("actor");
+        let closing = tokio::spawn(async move { handle.close().await });
+        tokio::time::timeout(Duration::from_secs(1), sink.entered.notified())
+            .await
+            .expect("journal barrier entered");
+        assert!(!closing.is_finished());
+        sink.release.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(1), closing)
+            .await
+            .expect("proof deadline")
+            .expect("close task");
+        assert_eq!(result.is_err(), fail);
+    }
+}
