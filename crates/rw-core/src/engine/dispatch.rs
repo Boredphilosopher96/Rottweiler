@@ -1,6 +1,7 @@
 mod accepted;
 mod admission;
 mod compaction;
+mod completed_turns;
 mod context_surgery;
 mod initialization;
 mod message_input;

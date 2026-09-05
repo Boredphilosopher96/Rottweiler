@@ -260,6 +260,21 @@ impl DurableEventSink {
 
 #[async_trait]
 impl SessionEventSink for DurableEventSink {
+    async fn completed_turn(
+        &self,
+        turn: u64,
+    ) -> std::result::Result<Option<rw_core::CompletedTurn>, AgentLoopError> {
+        self.read_canonical(move |history| {
+            history.completed_boundary(turn).map(|boundary| {
+                boundary.map(|boundary| rw_core::CompletedTurn {
+                    sequence_id: boundary.source_sequence,
+                    completed_turns: boundary.control.completed_turns,
+                })
+            })
+        })
+        .await
+    }
+
     async fn todo_state(
         &self,
     ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {

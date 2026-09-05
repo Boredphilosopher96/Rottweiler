@@ -355,6 +355,13 @@ struct ClosingJournal {
 }
 #[async_trait]
 impl crate::SessionEventSink for ClosingJournal {
+    async fn completed_turn(
+        &self,
+        turn: u64,
+    ) -> Result<Option<crate::CompletedTurn>, AgentLoopError> {
+        self.inner.completed_turn(turn).await
+    }
+
     async fn todo_state(&self) -> Result<rw_types::todo::TodoSnapshot, crate::AgentLoopError> {
         self.inner.todo_state().await
     }

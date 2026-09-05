@@ -10,7 +10,7 @@ pub use durability::{
     AdmittedEventBatch, EventBatchPlan, EventBatchReservation, ExtensionStateView,
     NoopSessionEventSink,
 };
-pub use durability::{SessionEventSink, commit_session_events};
+pub use durability::{CompletedTurn, SessionEventSink, commit_session_events};
 mod mutation_checkpoints;
 pub use mutation_checkpoints::MutationCheckpoint;
 pub use mutation_checkpoints::MutationCheckpointCoordinator;

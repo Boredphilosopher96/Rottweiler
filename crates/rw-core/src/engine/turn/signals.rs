@@ -337,9 +337,6 @@ pub(in crate::engine) async fn handle_turn_signal(
                 cost: outcome.cost.clone(),
             });
             state.completed_turns = state.completed_turns.saturating_add(1);
-            state
-                .turn_ends
-                .insert(outcome.turn, state.conversation.len());
             let mut terminal_events = Vec::with_capacity(3);
             if let Some(text) = outcome.deferred_terminal_delta {
                 terminal_events.push(PendingEvent::TextDelta {

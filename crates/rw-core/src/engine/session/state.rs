@@ -153,7 +153,6 @@ pub(in crate::engine) struct ActorState {
     pub(in crate::engine) pending_approvals: BTreeMap<String, PendingApproval>,
     pub(in crate::engine) next_turn: u64,
     pub(in crate::engine) completed_turns: u64,
-    pub(in crate::engine) turn_ends: BTreeMap<u64, usize>,
     pub(in crate::engine) sequence: Option<u64>,
     pub(in crate::engine) pending_rewind: Option<(u64, RewindCheckpoint)>,
     pub(in crate::engine) transient_cause: Option<RequestId>,
@@ -277,7 +276,6 @@ impl ActorState {
                 .max(recovered.completed_turns.saturating_add(1))
                 .max(1),
             completed_turns: recovered.completed_turns,
-            turn_ends: recovered.turn_ends.clone(),
             sequence: recovered.last_sequence.map(|sequence| sequence.0),
             pending_rewind: None,
             transient_cause: None,

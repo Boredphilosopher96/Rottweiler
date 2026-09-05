@@ -161,43 +161,7 @@ async fn canonical_bootstrap_shares_committed_prefix_without_mutating_prior_resu
 async fn source_rewind_query_validates_exact_published_prefix() {
     let root = tempfile::tempdir().expect("root");
     let current = sink(root.path());
-    let mut events = Vec::new();
-    let meta = |sequence| EventMeta {
-        protocol_version: rw_core::SESSION_EVENT_VERSION,
-        session_id: SessionId("state".into()),
-        sequence_id: SequenceId(sequence),
-        emitted_at: "2026-09-05T00:00:00Z".into(),
-        caused_by: None,
-    };
-    for turn in 1..=2 {
-        let start = events.len() as u64;
-        events.extend([
-            EngineEvent::TurnStarted {
-                meta: meta(start),
-                turn_id: rw_types::TurnId(turn.to_string()),
-            },
-            EngineEvent::ConversationTurnCommitted {
-                meta: meta(start + 1),
-                agent_turn: turn,
-                turn: rw_types::Turn {
-                    role: rw_types::Role::User,
-                    blocks: vec![rw_types::Block::Text {
-                        text: "user".into(),
-                    }],
-                    meta: rw_types::TurnMeta::default(),
-                },
-            },
-            EngineEvent::TurnFinished {
-                meta: meta(start + 2),
-                turn_id: rw_types::TurnId(turn.to_string()),
-                status: rw_types::TurnStatus::Completed,
-                usage: rw_core::SessionUsage::default().into(),
-                cost: rw_types::Cost::Unavailable {
-                    reason: "fixture".into(),
-                },
-            },
-        ]);
-    }
+    let events = completed_events(1..=2, 0);
     commit_session_events(Arc::clone(&current), events)
         .await
         .expect("commit");
@@ -235,5 +199,103 @@ async fn source_rewind_query_validates_exact_published_prefix() {
             )
             .await
             .is_err()
+    );
+}
+
+fn completed_events(turns: std::ops::RangeInclusive<u64>, first_sequence: u64) -> Vec<EngineEvent> {
+    let mut events = Vec::new();
+    let meta = |sequence| EventMeta {
+        protocol_version: rw_core::SESSION_EVENT_VERSION,
+        session_id: SessionId("state".into()),
+        sequence_id: SequenceId(sequence),
+        emitted_at: "2026-09-05T00:00:00Z".into(),
+        caused_by: None,
+    };
+    for turn in turns {
+        let start = first_sequence + events.len() as u64;
+        events.extend([
+            EngineEvent::TurnStarted {
+                meta: meta(start),
+                turn_id: rw_types::TurnId(turn.to_string()),
+            },
+            EngineEvent::ConversationTurnCommitted {
+                meta: meta(start + 1),
+                agent_turn: turn,
+                turn: rw_types::Turn {
+                    role: rw_types::Role::User,
+                    blocks: vec![rw_types::Block::Text {
+                        text: "user".into(),
+                    }],
+                    meta: rw_types::TurnMeta::default(),
+                },
+            },
+            EngineEvent::TurnFinished {
+                meta: meta(start + 2),
+                turn_id: rw_types::TurnId(turn.to_string()),
+                status: rw_types::TurnStatus::Completed,
+                usage: rw_core::SessionUsage::default().into(),
+                cost: rw_types::Cost::Unavailable {
+                    reason: "fixture".into(),
+                },
+            },
+        ]);
+    }
+    events
+}
+
+#[tokio::test]
+async fn completed_turn_query_uses_effective_source_after_rewind_and_reopen() {
+    let root = tempfile::tempdir().expect("root");
+    let current = sink(root.path());
+    commit_session_events(Arc::clone(&current), completed_events(1..=2, 0))
+        .await
+        .expect("completed turns");
+    assert_eq!(
+        current.completed_turn(2).await.expect("second"),
+        Some(rw_core::CompletedTurn {
+            sequence_id: SequenceId(5),
+            completed_turns: 2,
+        })
+    );
+    commit_session_events(
+        Arc::clone(&current),
+        vec![EngineEvent::ConversationRewound {
+            meta: EventMeta {
+                protocol_version: rw_core::SESSION_EVENT_VERSION,
+                session_id: SessionId("state".into()),
+                sequence_id: SequenceId(6),
+                emitted_at: "2026-09-05T00:00:00Z".into(),
+                caused_by: None,
+            },
+            to_turn: 1,
+            operation_id: "rewind".into(),
+            unrestorable_paths: vec![],
+        }],
+    )
+    .await
+    .expect("rewind");
+    assert_eq!(current.completed_turn(2).await.expect("removed"), None);
+    assert_eq!(
+        current.completed_turn(1).await.expect("first"),
+        Some(rw_core::CompletedTurn {
+            sequence_id: SequenceId(2),
+            completed_turns: 1,
+        })
+    );
+    commit_session_events(Arc::clone(&current), completed_events(2..=2, 7))
+        .await
+        .expect("replacement");
+    current.settle_effects().await.expect("settle");
+    drop(current);
+    let reopened = sink(root.path());
+    assert_eq!(
+        reopened
+            .completed_turn(2)
+            .await
+            .expect("replacement source"),
+        Some(rw_core::CompletedTurn {
+            sequence_id: SequenceId(9),
+            completed_turns: 2,
+        })
     );
 }

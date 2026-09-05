@@ -433,6 +433,12 @@ impl BlockingDescriptorSink {
 
 #[async_trait]
 impl SessionEventSink for BlockingDescriptorSink {
+    async fn completed_turn(
+        &self,
+        turn: u64,
+    ) -> Result<Option<crate::CompletedTurn>, AgentLoopError> {
+        self.inner.completed_turn(turn).await
+    }
     async fn source_rewind_target(
         &self,
         _expected_through: SequenceId,

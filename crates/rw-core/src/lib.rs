@@ -50,7 +50,7 @@ pub use engine::recovery;
 
 pub use engine::{
     AdmittedEventBatch, AgentLoopError, AgentTurnStatus, BudgetLedgerQuery, BudgetLedgerTotals,
-    CommandToolCall, CommandToolOutputKind, ContextSurgeryAction, EventBatchPlan,
+    CommandToolCall, CommandToolOutputKind, CompletedTurn, ContextSurgeryAction, EventBatchPlan,
     EventBatchReservation, EventClock, ExtensionStateView, FolderTrustController,
     FolderTrustOperation, InterruptedToolRepair, MessageDisposition, ModelContextMetadata,
     ModelDriver, MutationCheckpoint, MutationCheckpointCoordinator, MutationCheckpointOutcome,

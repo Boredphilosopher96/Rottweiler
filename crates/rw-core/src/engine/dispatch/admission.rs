@@ -13,7 +13,6 @@ use crate::engine::dispatch::replies::send_connection_event;
 use crate::engine::mode_permission_base;
 use crate::engine::model_switch_answer;
 use crate::engine::pending_event::PendingEvent;
-use crate::engine::projection::parse_turn_id;
 use crate::engine::projection::review_hash_is_valid;
 use crate::engine::projection::review_path_is_valid;
 use crate::engine::replay::SessionReplayLimits;
@@ -146,6 +145,12 @@ pub(super) async fn dispatch_protocol(
 
     if let Err(error) = super::source_rewind::resolve(&mut command, state, config).await {
         let outcome = protocol_rejection("invalid_rewind_source", error.to_string());
+        send_ack(state, events, &meta, session, outcome.clone());
+        let _ = respond.send(outcome);
+        return;
+    }
+
+    if let Some(outcome) = super::completed_turns::rejection(&command, state, config).await {
         send_ack(state, events, &meta, session, outcome.clone());
         let _ = respond.send(outcome);
         return;
@@ -414,36 +419,6 @@ pub(super) async fn dispatch_protocol(
             let _ = respond.send(outcome);
             return;
         }
-        ClientCommand::Rewind {
-            target: RewindTarget::Turn { turn_id },
-            ..
-        } if parse_turn_id(turn_id).is_err() => {
-            let outcome = protocol_rejection(
-                "invalid_turn_id",
-                "rewind turn id must be an unsigned decimal integer",
-            );
-            send_ack(state, events, &meta, session, outcome.clone());
-            let _ = respond.send(outcome);
-            return;
-        }
-        ClientCommand::Rewind {
-            target: RewindTarget::Turn { turn_id },
-            ..
-        } if state.running.is_some()
-            || config.tools.session_activity(&state.session_id).is_some()
-            || parse_turn_id(turn_id).is_ok_and(|to_turn| {
-                !state.turn_ends.contains_key(&to_turn)
-                    && state.pending_rewind.as_ref().map(|pending| pending.0) != Some(to_turn)
-            }) =>
-        {
-            let outcome = protocol_rejection(
-                "invalid_rewind_target",
-                "rewind requires an idle session and a completed turn target",
-            );
-            send_ack(state, events, &meta, session, outcome.clone());
-            let _ = respond.send(outcome);
-            return;
-        }
         ClientCommand::GetSessionReview { .. }
             if state.running.is_some()
                 || state.active_shell.is_some()
@@ -620,24 +595,6 @@ pub(super) async fn dispatch_protocol(
                 let _ = respond.send(outcome);
                 return;
             }
-        }
-        ClientCommand::DumpPrompt {
-            turn_id: Some(turn_id),
-            ..
-        } if parse_turn_id(turn_id).is_err()
-            || (!state
-                .turn_ends
-                .contains_key(&turn_id.0.parse::<u64>().unwrap_or(u64::MAX))
-                && state.running.as_ref().map(|running| running.id)
-                    != turn_id.0.parse::<u64>().ok()) =>
-        {
-            let outcome = protocol_rejection(
-                "unknown_prompt_turn",
-                "prompt dump turn must identify a known completed or active turn",
-            );
-            send_ack(state, events, &meta, session, outcome.clone());
-            let _ = respond.send(outcome);
-            return;
         }
         _ => {}
     }

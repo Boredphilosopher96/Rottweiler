@@ -451,3 +451,11 @@ pub(in crate::engine::tests) fn text_turn(role: Role, text: impl Into<String>) -
         meta: TurnMeta::default(),
     }
 }
+
+pub(in crate::engine::tests) async fn completed_turn_fixture<S: SessionEventSink + ?Sized>(
+    sink: &S,
+    turn: u64,
+) -> Result<Option<crate::engine::CompletedTurn>, AgentLoopError> {
+    let events = sink.test_events_after(None).await?;
+    crate::engine::durability::completed_turn_in_memory(&events, turn)
+}

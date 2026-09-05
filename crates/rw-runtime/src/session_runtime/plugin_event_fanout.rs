@@ -54,6 +54,13 @@ fn error(error: impl std::fmt::Display) -> AgentLoopError {
 }
 #[async_trait]
 impl SessionEventSink for PluginFanoutEventSink {
+    async fn completed_turn(
+        &self,
+        turn: u64,
+    ) -> Result<Option<rw_core::CompletedTurn>, AgentLoopError> {
+        self.inner.completed_turn(turn).await
+    }
+
     async fn todo_state(
         &self,
     ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {

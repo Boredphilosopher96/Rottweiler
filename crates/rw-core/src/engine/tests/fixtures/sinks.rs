@@ -34,6 +34,13 @@ pub(in crate::engine::tests) struct RecordingSink {
 
 #[async_trait]
 impl SessionEventSink for RecordingSink {
+    async fn completed_turn(
+        &self,
+        turn: u64,
+    ) -> Result<Option<crate::engine::CompletedTurn>, AgentLoopError> {
+        crate::engine::tests::fixtures::support::completed_turn_fixture(self, turn).await
+    }
+
     async fn todo_state(&self) -> Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
         let mut current = rw_types::todo::TodoSnapshot::default();
         let mut boundaries = std::collections::BTreeMap::new();
@@ -148,6 +155,13 @@ pub(in crate::engine::tests) struct AccountingRecordingSink {
 
 #[async_trait]
 impl SessionEventSink for AccountingRecordingSink {
+    async fn completed_turn(
+        &self,
+        turn: u64,
+    ) -> Result<Option<crate::engine::CompletedTurn>, AgentLoopError> {
+        crate::engine::tests::fixtures::support::completed_turn_fixture(self, turn).await
+    }
+
     async fn todo_state(
         &self,
     ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
@@ -277,6 +291,13 @@ pub(in crate::engine::tests) struct FailingSink;
 
 #[async_trait]
 impl SessionEventSink for FailingSink {
+    async fn completed_turn(
+        &self,
+        turn: u64,
+    ) -> Result<Option<crate::engine::CompletedTurn>, AgentLoopError> {
+        crate::engine::tests::fixtures::support::completed_turn_fixture(self, turn).await
+    }
+
     async fn todo_state(
         &self,
     ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
@@ -334,6 +355,13 @@ pub(in crate::engine::tests) struct FailCompactionLedgerSink {
 
 #[async_trait]
 impl SessionEventSink for FailCompactionLedgerSink {
+    async fn completed_turn(
+        &self,
+        turn: u64,
+    ) -> Result<Option<crate::engine::CompletedTurn>, AgentLoopError> {
+        crate::engine::tests::fixtures::support::completed_turn_fixture(self, turn).await
+    }
+
     async fn todo_state(
         &self,
     ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
@@ -419,6 +447,13 @@ pub(in crate::engine::tests) struct FailNextBatchSink {
 
 #[async_trait]
 impl SessionEventSink for FailNextBatchSink {
+    async fn completed_turn(
+        &self,
+        turn: u64,
+    ) -> Result<Option<crate::engine::CompletedTurn>, AgentLoopError> {
+        crate::engine::tests::fixtures::support::completed_turn_fixture(self, turn).await
+    }
+
     async fn todo_state(
         &self,
     ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
@@ -485,6 +520,13 @@ pub(in crate::engine::tests) struct FailFirstTextDeltaSink {
 
 #[async_trait]
 impl SessionEventSink for FailFirstTextDeltaSink {
+    async fn completed_turn(
+        &self,
+        turn: u64,
+    ) -> Result<Option<crate::engine::CompletedTurn>, AgentLoopError> {
+        crate::engine::tests::fixtures::support::completed_turn_fixture(self, turn).await
+    }
+
     async fn todo_state(
         &self,
     ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
@@ -557,6 +599,13 @@ pub(in crate::engine::tests) struct WorkspaceChangeFailingSink {
 
 #[async_trait]
 impl SessionEventSink for WorkspaceChangeFailingSink {
+    async fn completed_turn(
+        &self,
+        turn: u64,
+    ) -> Result<Option<crate::engine::CompletedTurn>, AgentLoopError> {
+        crate::engine::tests::fixtures::support::completed_turn_fixture(self, turn).await
+    }
+
     async fn todo_state(
         &self,
     ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
@@ -633,6 +682,13 @@ pub(in crate::engine::tests) struct MalformedBatchSink {
 
 #[async_trait]
 impl SessionEventSink for MalformedBatchSink {
+    async fn completed_turn(
+        &self,
+        turn: u64,
+    ) -> Result<Option<crate::engine::CompletedTurn>, AgentLoopError> {
+        crate::engine::tests::fixtures::support::completed_turn_fixture(self, turn).await
+    }
+
     async fn todo_state(
         &self,
     ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
@@ -728,6 +784,13 @@ impl BlockingBatchSink {
 
 #[async_trait]
 impl SessionEventSink for BlockingBatchSink {
+    async fn completed_turn(
+        &self,
+        turn: u64,
+    ) -> Result<Option<crate::engine::CompletedTurn>, AgentLoopError> {
+        crate::engine::tests::fixtures::support::completed_turn_fixture(self, turn).await
+    }
+
     async fn todo_state(
         &self,
     ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
@@ -809,6 +872,13 @@ pub(in crate::engine::tests) struct OrderedRewindSink {
 
 #[async_trait]
 impl SessionEventSink for OrderedRewindSink {
+    async fn completed_turn(
+        &self,
+        turn: u64,
+    ) -> Result<Option<crate::engine::CompletedTurn>, AgentLoopError> {
+        crate::engine::tests::fixtures::support::completed_turn_fixture(self, turn).await
+    }
+
     async fn todo_state(
         &self,
     ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
@@ -902,6 +972,13 @@ pub(in crate::engine::tests) struct CorruptGapSink {
 
 #[async_trait]
 impl SessionEventSink for CorruptGapSink {
+    async fn completed_turn(
+        &self,
+        turn: u64,
+    ) -> Result<Option<crate::engine::CompletedTurn>, AgentLoopError> {
+        crate::engine::tests::fixtures::support::completed_turn_fixture(self, turn).await
+    }
+
     async fn todo_state(
         &self,
     ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
@@ -961,6 +1038,13 @@ impl SessionEventSink for CorruptGapSink {
 
 #[async_trait]
 impl SessionEventSink for ToggleLeaseSink {
+    async fn completed_turn(
+        &self,
+        turn: u64,
+    ) -> Result<Option<crate::engine::CompletedTurn>, AgentLoopError> {
+        crate::engine::tests::fixtures::support::completed_turn_fixture(self, turn).await
+    }
+
     async fn todo_state(
         &self,
     ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
@@ -1074,6 +1158,13 @@ pub(in crate::engine::tests) struct CountedReplaySink {
 
 #[async_trait]
 impl SessionEventSink for CountedReplaySink {
+    async fn completed_turn(
+        &self,
+        turn: u64,
+    ) -> Result<Option<crate::engine::CompletedTurn>, AgentLoopError> {
+        crate::engine::tests::fixtures::support::completed_turn_fixture(self, turn).await
+    }
+
     async fn todo_state(
         &self,
     ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {

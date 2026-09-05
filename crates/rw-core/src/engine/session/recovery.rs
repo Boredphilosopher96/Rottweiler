@@ -143,7 +143,6 @@ pub(in crate::engine) async fn recover_actor_from_journal(
             cost: unavailable_cost(),
         });
         state.completed_turns = state.completed_turns.saturating_add(1);
-        state.turn_ends.insert(turn, state.conversation.len());
     }
     Ok(())
 }

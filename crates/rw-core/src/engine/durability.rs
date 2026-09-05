@@ -20,12 +20,22 @@ pub struct ExtensionStateView {
     pub namespaces: usize,
 }
 
+/// One currently effective completed turn, resolved from the acknowledged prefix.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CompletedTurn {
+    pub sequence_id: SequenceId,
+    pub completed_turns: u64,
+}
+
 /// Provider/UI-neutral durability boundary for the sequenced session log.
 ///
 /// Implementations must not return until the event is durably appended. The
 /// actor invokes this boundary before making the event visible to subscribers.
 #[async_trait]
 pub trait SessionEventSink: Send + Sync {
+    /// Resolve an effective completed turn without materializing historical conversation.
+    async fn completed_turn(&self, turn: u64) -> Result<Option<CompletedTurn>, AgentLoopError>;
+
     /// Read the authoritative task snapshot at the acknowledged committed prefix.
     async fn todo_state(&self) -> Result<rw_types::todo::TodoSnapshot, AgentLoopError>;
 
@@ -99,6 +109,14 @@ impl NoopSessionEventSink {
 
 #[async_trait]
 impl SessionEventSink for NoopSessionEventSink {
+    async fn completed_turn(&self, turn: u64) -> Result<Option<CompletedTurn>, AgentLoopError> {
+        let events = self
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        completed_turn_in_memory(&events, turn)
+    }
+
     async fn todo_state(
         &self,
     ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
@@ -214,4 +232,38 @@ pub async fn commit_session_events<S: SessionEventSink + ?Sized + 'static>(
         ));
     }
     Ok(committed)
+}
+
+// Ephemeral sinks already own their complete source. Durable sinks implement the indexed query.
+pub(super) fn completed_turn_in_memory(
+    events: &[EngineEvent],
+    turn: u64,
+) -> Result<Option<CompletedTurn>, AgentLoopError> {
+    let mut boundary = None;
+    for (index, event) in events.iter().enumerate() {
+        match event {
+            EngineEvent::TurnFinished { turn_id, .. }
+                if super::projection::parse_turn_id(turn_id).ok() == Some(turn) =>
+            {
+                boundary = Some(index);
+            }
+            EngineEvent::ConversationRewound { to_turn, .. } if *to_turn < turn => {
+                boundary = None;
+            }
+            _ => {}
+        }
+    }
+    let Some(index) = boundary else {
+        return Ok(None);
+    };
+    let recovered = super::project_session_events(&events[..=index])
+        .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+    let sequence_id = events[index]
+        .meta()
+        .ok_or_else(|| AgentLoopError::Persistence("completed turn has no source identity".into()))?
+        .sequence_id;
+    Ok(Some(CompletedTurn {
+        sequence_id,
+        completed_turns: recovered.completed_turns,
+    }))
 }
