@@ -96,7 +96,7 @@ async fn abandoned_canonical_query_retains_worker_until_actual_completion() {
     });
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if owner.reads.active() == 1 {
+            if current.reads.active() == 1 {
                 break;
             }
             tokio::task::yield_now().await;
@@ -298,4 +298,61 @@ async fn completed_turn_query_uses_effective_source_after_rewind_and_reopen() {
             completed_turns: 2,
         })
     );
+}
+
+#[tokio::test]
+async fn captured_semantic_history_preserves_pages_and_charges_its_read_lifetime() {
+    use rw_core::recovery::{HistoryMaterializationLimits, SessionHistory};
+    let root = tempfile::tempdir().expect("root");
+    let current = sink(root.path());
+    let conversation = |sequence, text: &str| EngineEvent::ConversationTurnCommitted {
+        meta: EventMeta {
+            protocol_version: rw_core::SESSION_EVENT_VERSION,
+            session_id: SessionId("state".into()),
+            sequence_id: SequenceId(sequence),
+            emitted_at: "2026-09-05T00:00:00.000Z".into(),
+            caused_by: None,
+        },
+        agent_turn: 1,
+        turn: rw_types::Turn {
+            role: rw_types::Role::User,
+            blocks: vec![rw_types::Block::Text { text: text.into() }],
+            meta: rw_types::TurnMeta::default(),
+        },
+    };
+    commit_session_events(Arc::clone(&current), vec![conversation(0, "first")])
+        .await
+        .expect("commit");
+    let captured = current.capture_history().await.expect("history");
+    commit_session_events(Arc::clone(&current), vec![conversation(1, "second")])
+        .await
+        .expect("append after capture");
+    assert_eq!(captured.through(), Some(SequenceId(0)));
+    assert_eq!(captured.conversation().turns, 1);
+    let page = captured
+        .conversation_page(0..1, HistoryMaterializationLimits::default())
+        .await
+        .expect("captured page");
+    assert_eq!(page.sources[0].sequence, SequenceId(0));
+    assert!(!page.has_more);
+    assert!(
+        captured
+            .conversation_page(0..2, HistoryMaterializationLimits::default())
+            .await
+            .is_err()
+    );
+    let mut views = vec![captured];
+    for _ in 1..8 {
+        let view = current.capture_history().await.expect("admitted view");
+        assert_eq!(view.conversation().turns, 2);
+        views.push(view);
+    }
+    assert!(current.capture_history().await.is_err());
+    views.pop();
+    current
+        .capture_history()
+        .await
+        .expect("released view readmission");
+    drop(views);
+    current.settle_effects().await.expect("read jobs settled");
 }

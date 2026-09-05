@@ -6,6 +6,8 @@ mod accounting;
 pub use accounting::{
     AccountingReconciliationPage, MAX_ACCOUNTING_PAGE_BYTES, RecoveryAccountingPage,
 };
+mod capability;
+pub use capability::{SessionHistory, SessionHistoryView};
 mod control;
 pub use control::{
     MAX_CONTROL_SOURCE_BYTES, RecoveredMessage, RecoveredModelSelection, RecoveryBootstrap,

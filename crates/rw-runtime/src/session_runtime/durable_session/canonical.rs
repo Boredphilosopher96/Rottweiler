@@ -12,7 +12,6 @@ pub(super) struct CanonicalSession {
     recovery: Mutex<Option<CanonicalRecovery>>,
     inherited_journal_through: Option<rw_types::SequenceId>,
     modes: Arc<ModeRegistry>,
-    reads: Arc<super::reads::ReadOperations>,
 }
 fn persistence(error: impl std::fmt::Display) -> AgentLoopError {
     AgentLoopError::Persistence(error.to_string())
@@ -21,46 +20,35 @@ impl CanonicalSession {
     pub(super) const fn inherited_journal_through(&self) -> Option<rw_types::SequenceId> {
         self.inherited_journal_through
     }
-    async fn read<T: Send + 'static>(
-        self: Arc<Self>,
-        lease: JournalReadLease,
-        publication: Arc<JournalPublication>,
-        query: impl FnOnce(&CanonicalHistory) -> Result<T, RecoveryError> + Send + 'static,
-    ) -> Result<T, AgentLoopError> {
-        let reads = Arc::clone(&self.reads);
-        reads
-            .run(lease, move |lease| {
-                let mut recovery = self
-                    .recovery
-                    .lock()
-                    .map_err(|_| persistence("canonical recovery owner poisoned"))?;
-                lease.view = publication.capture();
-                if recovery.is_none() {
-                    *recovery = Some(
-                        CanonicalRecovery::open(
-                            &lease.view,
-                            &self.modes,
-                            self.inherited_journal_through,
-                        )
-                        .map_err(persistence)?,
-                    );
-                }
-                let recovery = recovery
-                    .as_mut()
-                    .ok_or_else(|| persistence("canonical owner initialization failed"))?;
-                while recovery
-                    .advance(&lease.view, &self.modes)
-                    .map_err(persistence)?
-                    .has_more
-                {}
-                let history = recovery
-                    .snapshot()
-                    .map_err(persistence)?
-                    .bind_source(&lease.view)
-                    .map_err(persistence)?;
-                query(&history).map_err(persistence)
-            })
-            .await
+    fn snapshot(
+        &self,
+        lease: &mut JournalReadLease,
+        publication: &JournalPublication,
+    ) -> Result<CanonicalHistory, AgentLoopError> {
+        let mut recovery = self
+            .recovery
+            .lock()
+            .map_err(|_| persistence("canonical recovery owner poisoned"))?;
+        lease.view = publication.capture();
+        if recovery.is_none() {
+            *recovery = Some(
+                CanonicalRecovery::open(&lease.view, &self.modes, self.inherited_journal_through)
+                    .map_err(persistence)?,
+            );
+        }
+        let recovery = recovery
+            .as_mut()
+            .ok_or_else(|| persistence("canonical owner initialization failed"))?;
+        while recovery
+            .advance(&lease.view, &self.modes)
+            .map_err(persistence)?
+            .has_more
+        {}
+        recovery
+            .snapshot()
+            .map_err(persistence)?
+            .bind_source(&lease.view)
+            .map_err(persistence)
     }
 }
 impl DurableEventSink {
@@ -74,7 +62,6 @@ impl DurableEventSink {
                 recovery: Mutex::new(None),
                 inherited_journal_through,
                 modes,
-                reads: Arc::clone(&self.reads),
             }))
             .map_err(|_| persistence("canonical owner is already bound"))
     }
@@ -116,8 +103,13 @@ impl DurableEventSink {
             .journal_service
             .capture(&self.session_id)
             .map_err(persistence)?;
-        Arc::clone(owner)
-            .read(lease, Arc::clone(&self.registration.publisher), query)
+        let owner = Arc::clone(owner);
+        let publication = Arc::clone(&self.registration.publisher);
+        self.reads
+            .run(lease, move |lease| {
+                let history = owner.snapshot(lease, &publication)?;
+                query(&history).map_err(persistence)
+            })
             .await
     }
 
@@ -136,3 +128,5 @@ impl DurableEventSink {
 
 #[cfg(test)]
 mod tests;
+
+mod history;
