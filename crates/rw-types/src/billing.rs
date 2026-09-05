@@ -12,7 +12,7 @@ pub const MAX_QUOTA_UNIT_BYTES: usize = 128;
 pub struct SubscriptionQuotaSummary {
     #[schemars(length(min = 1, max = MAX_QUOTA_QUANTITY_BYTES), regex(pattern = r"^[0-9]+(?:\.[0-9]+)?$"))]
     pub used: String,
-    #[schemars(length(min = 1, max = MAX_QUOTA_UNIT_BYTES), extend("x-rw-max-utf8-bytes" = MAX_QUOTA_UNIT_BYTES))]
+    #[schemars(length(min = 1, max = MAX_QUOTA_UNIT_BYTES), extend("x-rw-max-utf8-bytes" = MAX_QUOTA_UNIT_BYTES), regex(pattern = r"^[^\u0000-\u001f\u007f-\u009f]+$"))]
     pub unit: String,
 }
 impl<'de> Deserialize<'de> for SubscriptionQuotaSummary {
@@ -36,6 +36,7 @@ impl<'de> Deserialize<'de> for SubscriptionQuotaSummary {
             || parts.next().is_some()
             || fields.unit.is_empty()
             || fields.unit.len() > MAX_QUOTA_UNIT_BYTES
+            || fields.unit.chars().any(char::is_control)
         {
             return Err(serde::de::Error::custom(
                 "invalid subscription quota summary",
@@ -53,6 +54,14 @@ mod tests {
     use super::{MAX_QUOTA_UNIT_BYTES, SubscriptionQuotaSummary};
     #[test]
     fn quota_summary_rejects_invalid_quantity_and_excessive_utf8_unit() {
+        for unit in ["tokens\n", "\u{1b}[31m", "\u{85}"] {
+            assert!(
+                serde_json::from_value::<SubscriptionQuotaSummary>(
+                    serde_json::json!({"used":"1","unit":unit})
+                )
+                .is_err()
+            );
+        }
         for used in ["", "-1", "1e9", "1.", "NaN"] {
             assert!(
                 serde_json::from_value::<SubscriptionQuotaSummary>(

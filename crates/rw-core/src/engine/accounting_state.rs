@@ -69,6 +69,8 @@ impl SessionAccountingState {
                 self.subscription_quota_entries = self.subscription_quota_entries.saturating_add(1);
                 if let Some(used) = used {
                     self.quota.add(used, unit.as_deref());
+                } else {
+                    self.quota = Quota::Unavailable;
                 }
                 match cost.subscription_token_accounting() {
                     SubscriptionTokenAccounting::Metered(tokens) => {

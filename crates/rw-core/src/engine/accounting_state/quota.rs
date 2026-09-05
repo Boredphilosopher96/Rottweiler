@@ -11,7 +11,10 @@ pub(super) enum Quota {
 impl Quota {
     pub(super) fn add(&mut self, used: &str, unit: Option<&str>) {
         let unit = unit.unwrap_or("quota");
-        if unit.is_empty() || unit.len() > MAX_QUOTA_UNIT_BYTES {
+        if unit.is_empty()
+            || unit.len() > MAX_QUOTA_UNIT_BYTES
+            || unit.chars().any(char::is_control)
+        {
             *self = Self::Unavailable;
             return;
         }

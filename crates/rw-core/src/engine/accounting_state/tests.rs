@@ -57,5 +57,14 @@ fn incompatible_dispositions_keep_exact_separate_counters() {
     assert_eq!(state.subscription_tokens, 123);
     assert_eq!(state.unmetered_subscription_quota_entries, 1);
     assert_eq!(state.cost_unavailable_entries, 1);
-    assert_eq!(state.subscription_quota().expect("quota").used, "123");
+    assert!(state.subscription_quota().is_none());
+    state.record_actuals(
+        &usage(),
+        &Cost::SubscriptionQuota {
+            used: Some("456".into()),
+            unit: Some("tokens".into()),
+        },
+    );
+    assert!(state.subscription_quota().is_none());
+    assert_eq!(state.subscription_tokens, 579);
 }
