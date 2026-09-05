@@ -46,6 +46,22 @@ pub struct TodoReadSnapshot {
     pub snapshot: TodoSnapshot,
 }
 
+/// One bounded read either returns an exact snapshot or reports indexed progress.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[ts(optional_fields = nullable)]
+pub enum TodoReadResult {
+    Ready {
+        todos: TodoReadSnapshot,
+    },
+    CatchingUp {
+        #[serde(deserialize_with = "Option::deserialize")]
+        through: Option<crate::SequenceId>,
+        #[serde(deserialize_with = "Option::deserialize")]
+        target: Option<crate::SequenceId>,
+    },
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("invalid task list: {0}")]
 pub struct TodoError(pub &'static str);

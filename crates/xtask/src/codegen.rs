@@ -17,7 +17,7 @@ use rw_types::extension_ui::{
     UiAction, UiContribution, UiField, UiProjectedField, UiProjectedFields, UiSelectorStep,
     UiTableColumn,
 };
-use rw_types::todo::{TodoItem, TodoReadSnapshot, TodoSnapshot, TodoStatus};
+use rw_types::todo::{TodoItem, TodoReadResult, TodoReadSnapshot, TodoSnapshot, TodoStatus};
 use rw_types::{
     AccountingAttribution, Answer, ApprovalBinding, ApprovalDecision, Attachment, AttachmentData,
     Block, BudgetLevel, BudgetScope, BudgetUnit, CacheBreakpoint, ClientCommand, ClientId,
@@ -212,6 +212,7 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(TodoStatus);
     declaration!(TodoSnapshot);
     declaration!(TodoReadSnapshot);
+    declaration!(TodoReadResult);
 
     declaration!(ProgressAmount);
     declaration!(SessionId);
@@ -824,7 +825,7 @@ fn contract_fixture() -> ContractFixture {
             },
         ],
         engine_events: vec![
-            EngineEvent::TodosReady {
+            EngineEvent::TodosRead {
                 meta: CommandAckMeta {
                     protocol_version: rw_types::PROTOCOL_VERSION,
                     client_id: ClientId("client-fixture".to_owned()),
@@ -832,9 +833,11 @@ fn contract_fixture() -> ContractFixture {
                     emitted_at: "2026-01-01T00:00:00Z".to_owned(),
                 },
                 session_id: SessionId("session-fixture".to_owned()),
-                todos: TodoReadSnapshot {
-                    through: None,
-                    snapshot: TodoSnapshot::default(),
+                result: TodoReadResult::Ready {
+                    todos: TodoReadSnapshot {
+                        through: None,
+                        snapshot: TodoSnapshot::default(),
+                    },
                 },
             },
             EngineEvent::ProviderCallAccounted {

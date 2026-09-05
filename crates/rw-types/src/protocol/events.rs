@@ -49,10 +49,10 @@ pub enum EngineEvent {
         meta: EventMeta,
         snapshot: crate::todo::TodoSnapshot,
     },
-    TodosReady {
+    TodosRead {
         meta: CommandAckMeta,
         session_id: SessionId,
-        todos: crate::todo::TodoReadSnapshot,
+        result: crate::todo::TodoReadResult,
     },
     TranscriptPageReady {
         meta: CommandAckMeta,
@@ -770,7 +770,7 @@ impl EngineEvent {
         match self {
             Self::TranscriptPageReady { .. }
             | Self::TranscriptContentReady { .. }
-            | Self::TodosReady { .. }
+            | Self::TodosRead { .. }
             | Self::ToolProgress { .. }
             | Self::CommandAcknowledged { .. }
             | Self::ContextSnapshotReady { .. }
@@ -866,7 +866,7 @@ impl EngineEvent {
         match self {
             Self::TranscriptPageReady { .. }
             | Self::TranscriptContentReady { .. }
-            | Self::TodosReady { .. }
+            | Self::TodosRead { .. }
             | Self::ToolProgress { .. }
             | Self::CommandAcknowledged { .. }
             | Self::ContextSnapshotReady { .. }

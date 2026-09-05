@@ -331,10 +331,8 @@ pub trait SessionFactory: Send + Sync + 'static {
 /// Remote-safe host query boundary implemented by the CLI/storage layer.
 #[async_trait]
 pub trait HostQueryService: Send + Sync + 'static {
-    async fn todos(
-        &self,
-        session: &SessionId,
-    ) -> Result<rw_types::todo::TodoReadSnapshot, HostError>;
+    async fn todos(&self, session: &SessionId)
+    -> Result<rw_types::todo::TodoReadResult, HostError>;
 
     async fn read_transcript(
         &self,

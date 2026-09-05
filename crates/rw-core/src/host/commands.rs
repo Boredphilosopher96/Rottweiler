@@ -22,14 +22,14 @@ impl EngineHost {
         }
         match command {
             ClientCommand::GetTodos { meta, session_id } => {
-                let todos = self.queries.todos(&session_id).await?;
+                let result = self.queries.todos(&session_id).await?;
                 Ok((
                     CommandOutcome::Accepted {},
                     Some(session_id.clone()),
-                    vec![EngineEvent::TodosReady {
+                    vec![EngineEvent::TodosRead {
                         meta: ack_meta(&meta, &*self.clock),
                         session_id,
-                        todos,
+                        result,
                     }],
                 ))
             }
