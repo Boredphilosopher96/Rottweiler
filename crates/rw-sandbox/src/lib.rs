@@ -183,6 +183,7 @@ impl SandboxPolicy {
     }
 
     /// Forbids native child processes while retaining threads and in-place exec.
+    /// On macOS this also removes ambient service delegation and external task access.
     /// Host-brokered process work needs its own separately owned sandbox.
     #[must_use]
     pub fn without_process_creation(mut self) -> Self {
@@ -834,10 +835,10 @@ fn audited_linux_tool(candidates: &[&str]) -> Option<PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn seatbelt_profile(policy: &SandboxPolicy) -> String {
-    let process_rule = if policy.allow_process_creation {
-        ""
+    let authority = if policy.allow_process_creation {
+        "(allow default)"
     } else {
-        "(deny process-fork)"
+        "(deny default) (allow file-read* file-write* file-map-executable sysctl-read process-exec) (allow process-info* signal (target self))"
     };
     let writable = (0..policy.write_roots.len())
         .map(|index| format!("(subpath (param \"RW_WRITE_{index}\"))"))
@@ -852,7 +853,7 @@ fn seatbelt_profile(policy: &SandboxPolicy) -> String {
     let network = match &policy.network {
         NetworkPolicy::Deny => "(deny network*)".to_owned(),
         NetworkPolicy::PolicyProxy { port, .. } => format!(
-            "(deny network-outbound (require-not (remote ip \"localhost:{port}\"))) (deny network-bind) (deny network-inbound)"
+            "(allow network-outbound (remote ip \"localhost:{port}\")) (deny network-outbound (require-not (remote ip \"localhost:{port}\"))) (deny network-bind) (deny network-inbound)"
         ),
     };
     let directory_entries = (0..policy.read_directory_ancestors.len())
@@ -878,7 +879,7 @@ fn seatbelt_profile(policy: &SandboxPolicy) -> String {
         format!("(deny file-read* (require-any {secret_roots}))")
     };
     format!(
-        "(version 1) (allow default) {process_rule} {read_rule} {secret_rule} (deny file-write* (require-not (require-any (literal \"/dev/null\") {writable}))) {network}"
+        "(version 1) {authority} {read_rule} {secret_rule} (deny file-write* (require-not (require-any (literal \"/dev/null\") {writable}))) {network}"
     )
 }
 

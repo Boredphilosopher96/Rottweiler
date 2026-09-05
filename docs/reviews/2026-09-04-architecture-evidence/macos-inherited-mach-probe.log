@@ -1,0 +1,4 @@
+exit=0
+stdout=registered_port_count 3 harmless_send_result 0
+
+stderr=

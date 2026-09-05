@@ -1,0 +1,58 @@
+   Compiling rw-sandbox v0.1.4 (/Users/sumukhnitundila/MyProjects/Rottweiler-process-settlement/crates/rw-sandbox)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.49s
+     Running unittests src/lib.rs (target/debug/deps/rw_sandbox-1a0daa3885978437)
+
+running 20 tests
+test proxy::tests::client_hello_parser_fails_closed_for_absent_ech_only_and_malformed_sni ... ok
+test proxy::tests::corporate_proxy_url_rejects_paths_and_inline_credentials ... ok
+test proxy::tests::corporate_proxy_resolution_is_captured_once_before_credentials ... ok
+test tests::egress_gate_requires_domain_approval_and_hard_denies_ssrf_answers ... ok
+test tests::helper_marker_is_unambiguous_and_normal_invocations_are_ignored ... ok
+test tests::policy_canonicalizes_deduplicates_and_requires_roots ... ok
+test tests::seatbelt_broad_read_mode_explicitly_denies_user_credential_roots ... ok
+test tests::network_grant_fails_closed_until_the_policy_proxy_is_present ... ok
+test proxy::tests::plain_http_closes_after_one_message_and_rejects_smuggling_framing ... ok
+test proxy::tests::proxy_forwards_plain_http_absolute_form_without_proxy_credentials ... ok
+test tests::sensitive_home_policy_includes_shell_history_and_agent_credentials ... ok
+test proxy::tests::validated_pin_prevents_a_second_dns_resolution ... ok
+test proxy::tests::corporate_proxy_receives_only_pinned_target_and_injected_auth ... ok
+sandbox-test: line 2: /var/folders/_0/jwcrllt56r7gxt0nlm1zcgxc0000gn/T/.tmpidrOGJ/outside: Operation not permitted
+multi-root-test: /var/folders/_0/jwcrllt56r7gxt0nlm1zcgxc0000gn/T/.tmprI1QAH/adjacent/blocked: Operation not permitted
+test tests::second_root_is_writable_while_its_parent_remains_blocked ... ok
+test proxy::tests::proxy_blocks_private_targets_and_tunnels_only_after_global_opt_out ... ok
+test proxy::tests::corporate_connect_pins_ip_while_preserving_host_and_client_sni ... ok
+test proxy::tests::dropping_proxy_closes_active_tunnel_and_joins_connection_worker ... ok
+test proxy::tests::connect_sni_mismatch_never_reaches_shared_ip_upstream ... ok
+test tests::seatbelt_enforces_write_roots_and_network_denial_at_the_syscall ... ok
+test tests::seatbelt_proxy_route_is_exact_and_direct_socket_bypasses_get_eperm ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running unittests src/bin/rw-sandbox-helper.rs (target/debug/deps/rw_sandbox_helper-9a54b9024f60bb10)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/linux_egress.rs (target/debug/deps/linux_egress-fcd0fa3183f3e46a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/linux_helper_driver.rs (target/debug/deps/linux_helper_driver-d342b87a0249c678)
+     Running tests/linux_preparation_driver.rs (target/debug/deps/linux_preparation_driver-d357d694a9c092fc)
+     Running tests/macos_delegation.rs (target/debug/deps/macos_delegation-4ea4870fba6c1ab0)
+
+running 1 test
+test single_process_policy_denies_service_delegation_in_both_network_modes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+     Running tests/process_creation_driver.rs (target/debug/deps/process_creation_driver-b6fdd17a5d336de9)
+   Doc-tests rw_sandbox
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
