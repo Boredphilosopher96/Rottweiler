@@ -50,7 +50,7 @@ pub struct RecoveryControlPayloads {
 pub struct RecoveryBootstrap {
     pub head: super::RecoveryHead,
     pub controls: RecoveryControlPayloads,
-    pub interrupted: Option<super::InterruptedTurnInputs>,
+    pub interrupted: Option<super::InterruptedTurnRecovery>,
 }
 
 impl CanonicalHistory {
@@ -87,7 +87,10 @@ impl CanonicalHistory {
         Ok(RecoveryBootstrap {
             head: self.head.clone(),
             controls: self.control_payloads(MAX_CONTROL_SOURCE_BYTES)?,
-            interrupted: self.interrupted_inputs()?,
+            interrupted: self
+                .interrupted_inputs()?
+                .map(super::InterruptedTurnInputs::repair)
+                .transpose()?,
         })
     }
 

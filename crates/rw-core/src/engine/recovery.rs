@@ -21,10 +21,12 @@ mod projector;
 mod read;
 mod receipts;
 mod reduce;
+mod repair;
 pub use read::{
     CanonicalHistory, HistoryMaterializationLimits, MAX_MATERIALIZED_HISTORY_BYTES,
     MAX_MATERIALIZED_HISTORY_DECODE_BYTES, MAX_MATERIALIZED_HISTORY_TURNS, RecoverySnapshot,
 };
+pub use repair::InterruptedTurnRecovery;
 mod pages;
 mod state;
 mod subagents;
@@ -95,3 +97,6 @@ mod context_state_tests;
 
 #[cfg(test)]
 mod citation_tests;
+
+#[cfg(test)]
+mod repair_tests;

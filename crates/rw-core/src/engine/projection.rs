@@ -2,6 +2,7 @@
 use super::*;
 
 mod events;
+pub(in crate::engine) mod repair;
 pub(super) use events::recovered_pending_event;
 
 /// Persisted actor state supplied when resuming a session from its event log.
@@ -925,13 +926,13 @@ impl SessionProjector {
             active_turn,
             turn_ends,
             partial_assistant_blocks,
-            mut partial_tool_blocks,
+            partial_tool_blocks,
             next_turn,
             last_sequence,
             driver_client_id,
             session_id: _,
             mut interrupted_tool_repairs,
-            mut active_tool_starts,
+            active_tool_starts,
             mut interrupted_tool_turn,
             pending_questions,
             context_surgery,
@@ -965,96 +966,24 @@ impl SessionProjector {
             }
         }
         if let Some(interrupted_turn) = active_turn {
-            // Match each occurrence in order: providers may reuse call IDs in later iterations.
-            let mut pending = Vec::<(usize, usize, ToolCallId, String, Value)>::new();
-            let mut ordinal = 0;
-            for (turn, conversation_turn) in conversation_agent_turns.iter().zip(&conversation) {
-                if *turn != interrupted_turn {
-                    continue;
-                }
-                let mut call_index = 0;
-                for block in &conversation_turn.blocks {
-                    match block {
-                        Block::ToolCall { id, name, args } => {
-                            pending.push((
-                                ordinal,
-                                call_index,
-                                id.clone(),
-                                name.clone(),
-                                args.clone(),
-                            ));
-                            ordinal += 1;
-                            call_index += 1;
-                        }
-                        Block::ToolResult { id, .. } => {
-                            if let Some(index) = pending.iter().position(|call| &call.2 == id) {
-                                pending.remove(index);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            for block in &partial_tool_blocks {
-                if let Block::ToolResult { id, .. } = block
-                    && let Some(index) = pending.iter().position(|call| &call.2 == id)
-                {
-                    pending.remove(index);
-                }
-            }
-            for (ordinal, call_index, id, name, arguments) in pending {
-                let started = active_tool_starts
+            let repair = repair::repair_tools(
+                interrupted_turn,
+                conversation_agent_turns
                     .iter()
-                    .find(|(_, start)| start.id == id)
-                    .map(|(key, _)| key.clone())
-                    .and_then(|key| active_tool_starts.remove(&key));
-                let (invocation_id, index, missing_start) = if let Some(start) = started {
-                    (start.invocation_id, start.index, None)
-                } else {
-                    (
-                        rw_types::ToolInvocationId(format!(
-                            "turn-{interrupted_turn}:repair-{ordinal}"
-                        )),
-                        call_index,
-                        Some(InterruptedToolStart { name, arguments }),
-                    )
-                };
-                let output = ToolOutput::Text {
-                    text: "tool call was interrupted before a result was persisted".to_owned(),
-                };
-                interrupted_tool_repairs.push(InterruptedToolRepair {
-                    agent_turn: interrupted_turn,
-                    call_index: index,
-                    tool_call_id: id.clone(),
-                    invocation_id,
-                    missing_start,
-                    output: output.clone(),
-                });
-                partial_tool_blocks.push(Block::ToolResult {
-                    id,
-                    output,
-                    is_error: true,
-                });
-            }
-            // A recorded start without committed IR still owns a historical row, but cannot invent a model tool result.
-            for start in active_tool_starts.into_values() {
-                interrupted_tool_repairs.push(InterruptedToolRepair {
-                    agent_turn: interrupted_turn,
-                    call_index: start.index,
-                    tool_call_id: start.id,
-                    invocation_id: start.invocation_id,
-                    missing_start: None,
-                    output: ToolOutput::Text {
-                        text: "tool call was interrupted before a result was persisted".to_owned(),
-                    },
-                });
-            }
-            if !partial_tool_blocks.is_empty() {
-                let tool_turn = Turn {
-                    role: Role::Tool,
-                    blocks: partial_tool_blocks,
-                    meta: TurnMeta::default(),
-                };
+                    .zip(&conversation)
+                    .filter_map(|(turn, value)| (*turn == interrupted_turn).then_some(value)),
+                active_tool_starts
+                    .into_values()
+                    .map(|start| crate::engine::recovery::ToolStartIdentity {
+                        invocation_id: start.invocation_id,
+                        tool_call_id: start.id,
+                        index: start.index,
+                    })
+                    .collect(),
+                partial_tool_blocks,
+            );
+            interrupted_tool_repairs.extend(repair.tools);
+            if let Some(tool_turn) = repair.tool_turn {
                 conversation.push(tool_turn.clone());
                 interrupted_tool_turn = Some(tool_turn);
             }
