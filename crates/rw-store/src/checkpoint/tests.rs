@@ -19,7 +19,12 @@ fn oversized_preimage_is_refused_before_a_manifest_is_published()
     file.set_len(super::MAX_CAPTURE_FILE_BYTES + 1)?;
     let store = CheckpointStore::open(&root.path().join("storage"), &workspace)?;
     assert!(matches!(
-        store.checkpoint_known("session", 1, [PathBuf::from("huge.bin")]),
+        store.checkpoint_known(
+            "session",
+            1,
+            [PathBuf::from("huge.bin")],
+            &mut crate::checkpoint::CheckpointOperation::default()
+        ),
         Err(super::CheckpointError::CaptureFileLimit)
     ));
     assert!(!store.manifest_path("session", 1).exists());
@@ -58,7 +63,15 @@ fn capture_reads_fixed_chunks_and_cleans_up_partial_failure()
         remaining: 2 * super::CAPTURE_CHUNK_BYTES,
         fail: true,
     };
-    assert!(store.capture_reader(&mut failed, None).is_err());
+    assert!(
+        store
+            .capture_reader(
+                &mut failed,
+                None,
+                &mut crate::checkpoint::CheckpointOperation::default()
+            )
+            .is_err()
+    );
     assert_eq!(fs::read_dir(store.root.join("blobs"))?.count(), 0);
     let length = 5 * super::CAPTURE_CHUNK_BYTES + 7;
     let state = store.capture_reader(
@@ -67,6 +80,7 @@ fn capture_reads_fixed_chunks_and_cleans_up_partial_failure()
             fail: false,
         },
         None,
+        &mut crate::checkpoint::CheckpointOperation::default(),
     )?;
     let CheckpointFileState::Present { blob, bytes, .. } = state else {
         panic!("capture missing");
@@ -79,6 +93,7 @@ fn capture_reads_fixed_chunks_and_cleans_up_partial_failure()
             fail: false,
         },
         None,
+        &mut crate::checkpoint::CheckpointOperation::default(),
     )?;
     assert_eq!(
         duplicate,
@@ -98,7 +113,8 @@ fn capture_reads_fixed_chunks_and_cleans_up_partial_failure()
                 remaining: length,
                 fail: false
             },
-            None
+            None,
+            &mut crate::checkpoint::CheckpointOperation::default()
         ),
         Err(super::CheckpointError::CorruptBlob)
     ));
@@ -151,7 +167,12 @@ fn ten_edits_rewind_to_turn_three_byte_identically() {
         .unwrap_or_else(|error| panic!("checkpoint store must open: {error}"));
     for turn in 1_u64..=10 {
         store
-            .checkpoint_known("session", turn, [PathBuf::from("counter.txt")])
+            .checkpoint_known(
+                "session",
+                turn,
+                [PathBuf::from("counter.txt")],
+                &mut crate::checkpoint::CheckpointOperation::default(),
+            )
             .unwrap_or_else(|error| panic!("turn {turn} must checkpoint: {error}"));
         fs::write(&path, format!("turn-{turn}\n"))
             .unwrap_or_else(|error| panic!("turn {turn} must write: {error}"));
@@ -174,7 +195,12 @@ fn new_files_are_removed_and_unknown_shell_outputs_are_honest() {
     let store = CheckpointStore::open(&root.path().join("store"), &workspace)
         .unwrap_or_else(|error| panic!("checkpoint store must open: {error}"));
     let mut manifest = store
-        .checkpoint_known("session", 1, [PathBuf::from("created.txt")])
+        .checkpoint_known(
+            "session",
+            1,
+            [PathBuf::from("created.txt")],
+            &mut crate::checkpoint::CheckpointOperation::default(),
+        )
         .unwrap_or_else(|error| panic!("missing file must checkpoint: {error}"));
     fs::write(workspace.join("created.txt"), b"new")
         .unwrap_or_else(|error| panic!("new file must write: {error}"));
@@ -212,12 +238,22 @@ fn repeated_mutations_in_one_turn_preserve_the_earliest_pre_state() {
         .unwrap_or_else(|error| panic!("checkpoint store must open: {error}"));
 
     store
-        .checkpoint_known("session", 1, [PathBuf::from("file.txt")])
+        .checkpoint_known(
+            "session",
+            1,
+            [PathBuf::from("file.txt")],
+            &mut crate::checkpoint::CheckpointOperation::default(),
+        )
         .unwrap_or_else(|error| panic!("first mutation must checkpoint: {error}"));
     fs::write(&file, b"intermediate")
         .unwrap_or_else(|error| panic!("intermediate fixture must write: {error}"));
     store
-        .checkpoint_known("session", 1, [PathBuf::from("file.txt")])
+        .checkpoint_known(
+            "session",
+            1,
+            [PathBuf::from("file.txt")],
+            &mut crate::checkpoint::CheckpointOperation::default(),
+        )
         .unwrap_or_else(|error| panic!("second mutation must checkpoint: {error}"));
     fs::write(&file, b"final").unwrap_or_else(|error| panic!("final fixture must write: {error}"));
 
@@ -237,13 +273,23 @@ fn traversal_and_symlink_capture_fail_closed() {
         .unwrap_or_else(|error| panic!("checkpoint store must open: {error}"));
     assert!(
         store
-            .checkpoint_known("session", 1, [PathBuf::from("../escape")])
+            .checkpoint_known(
+                "session",
+                1,
+                [PathBuf::from("../escape")],
+                &mut crate::checkpoint::CheckpointOperation::default()
+            )
             .is_err()
     );
     fs::write(workspace.join("safe.txt"), b"safe")
         .unwrap_or_else(|error| panic!("safe fixture must write: {error}"));
     let mut manifest = store
-        .checkpoint_known("corrupt", 1, [PathBuf::from("safe.txt")])
+        .checkpoint_known(
+            "corrupt",
+            1,
+            [PathBuf::from("safe.txt")],
+            &mut crate::checkpoint::CheckpointOperation::default(),
+        )
         .unwrap_or_else(|error| panic!("safe fixture must checkpoint: {error}"));
     manifest.files.insert(
         "safe.txt".to_owned(),
@@ -264,7 +310,12 @@ fn traversal_and_symlink_capture_fail_closed() {
             .unwrap_or_else(|error| panic!("fixture symlink must create: {error}"));
         assert!(
             store
-                .checkpoint_known("session", 2, [PathBuf::from("link")])
+                .checkpoint_known(
+                    "session",
+                    2,
+                    [PathBuf::from("link")],
+                    &mut crate::checkpoint::CheckpointOperation::default()
+                )
                 .is_err()
         );
         fs::create_dir_all(root.path().join("outside"))
@@ -273,7 +324,12 @@ fn traversal_and_symlink_capture_fail_closed() {
             .unwrap_or_else(|error| panic!("parent symlink must create: {error}"));
         assert!(
             store
-                .checkpoint_known("session", 3, [PathBuf::from("parent-link/escape.txt")])
+                .checkpoint_known(
+                    "session",
+                    3,
+                    [PathBuf::from("parent-link/escape.txt")],
+                    &mut crate::checkpoint::CheckpointOperation::default()
+                )
                 .is_err()
         );
     }
@@ -302,6 +358,7 @@ fn rewind_replaces_final_symlinks_without_touching_their_targets_and_restores_mo
             "session",
             1,
             [PathBuf::from("present.txt"), PathBuf::from("absent.txt")],
+            &mut crate::checkpoint::CheckpointOperation::default(),
         )
         .unwrap_or_else(|error| panic!("paths must checkpoint: {error}"));
     fs::remove_file(&present)
@@ -348,7 +405,12 @@ fn stale_private_manifest_temp_is_recovered_but_unrecognized_entries_fail_closed
     let store = CheckpointStore::open(&storage, &workspace)
         .unwrap_or_else(|error| panic!("store must open: {error}"));
     store
-        .checkpoint_known("session", 1, [PathBuf::from("file.txt")])
+        .checkpoint_known(
+            "session",
+            1,
+            [PathBuf::from("file.txt")],
+            &mut crate::checkpoint::CheckpointOperation::default(),
+        )
         .unwrap_or_else(|error| panic!("fixture must checkpoint: {error}"));
     let manifest_directory = store.root.join("manifests/session");
     fs::write(manifest_directory.join(".rw-123-7.tmp"), b"partial")
@@ -391,6 +453,7 @@ fn rewind_prevalidates_every_blob_before_mutating_workspace() {
             "session",
             1,
             [PathBuf::from("a.txt"), PathBuf::from("b.txt")],
+            &mut crate::checkpoint::CheckpointOperation::default(),
         )
         .unwrap_or_else(|error| panic!("fixtures must checkpoint: {error}"));
     fs::write(workspace.join("a.txt"), b"a-after")
@@ -433,7 +496,12 @@ fn rewind_recovers_idempotently_after_apply_before_progress_persist() {
     let store = CheckpointStore::open(&storage, &workspace)
         .unwrap_or_else(|error| panic!("store must open: {error}"));
     store
-        .checkpoint_known("session", 1, [PathBuf::from("file.txt")])
+        .checkpoint_known(
+            "session",
+            1,
+            [PathBuf::from("file.txt")],
+            &mut crate::checkpoint::CheckpointOperation::default(),
+        )
         .unwrap_or_else(|error| panic!("fixture must checkpoint: {error}"));
     fs::write(workspace.join("file.txt"), b"after")
         .unwrap_or_else(|error| panic!("mutation must write: {error}"));
@@ -503,7 +571,11 @@ fn opaque_git_baseline_restores_tracked_marks_unknown_and_removes_new() {
     let store = CheckpointStore::open(&root.path().join("store"), &workspace)
         .unwrap_or_else(|error| panic!("store must open: {error}"));
     let mutation = store
-        .begin_opaque_mutation("session", 1)
+        .begin_opaque_mutation(
+            "session",
+            1,
+            &mut crate::checkpoint::CheckpointOperation::default(),
+        )
         .unwrap_or_else(|error| panic!("opaque baseline must begin: {error}"));
     fs::write(workspace.join("tracked.txt"), b"tracked-after")
         .unwrap_or_else(|error| panic!("tracked mutation must write: {error}"));
@@ -512,7 +584,10 @@ fn opaque_git_baseline_restores_tracked_marks_unknown_and_removes_new() {
     fs::write(workspace.join("created.txt"), b"created")
         .unwrap_or_else(|error| panic!("created fixture must write: {error}"));
     let manifest = store
-        .finish_opaque_mutation(&mutation)
+        .finish_opaque_mutation(
+            &mutation,
+            &mut crate::checkpoint::CheckpointOperation::default(),
+        )
         .unwrap_or_else(|error| panic!("opaque post-scan must finish: {error}"));
     assert!(matches!(
         manifest.files["tracked.txt"],
@@ -590,12 +665,19 @@ exec git -C "$workspace" "$@"
         .unwrap_or_else(|error| panic!("store must open: {error}"))
         .with_git_program(fake_git);
     let mutation = store
-        .begin_opaque_mutation("session", 1)
+        .begin_opaque_mutation(
+            "session",
+            1,
+            &mut crate::checkpoint::CheckpointOperation::default(),
+        )
         .unwrap_or_else(|error| panic!("failed diff must use conservative baseline: {error}"));
     fs::write(&tracked, b"agent-after")
         .unwrap_or_else(|error| panic!("agent mutation must write: {error}"));
     let manifest = store
-        .finish_opaque_mutation(&mutation)
+        .finish_opaque_mutation(
+            &mutation,
+            &mut crate::checkpoint::CheckpointOperation::default(),
+        )
         .unwrap_or_else(|error| panic!("opaque mutation must finish: {error}"));
     assert!(matches!(
         manifest.files["tracked.txt"],
@@ -626,7 +708,11 @@ fn opaque_recovery_does_not_follow_workspace_symlinks_and_rejects_corrupt_marker
     let store = CheckpointStore::open(&storage, &workspace)
         .unwrap_or_else(|error| panic!("store must open: {error}"));
     let mutation = store
-        .begin_opaque_mutation("session", 1)
+        .begin_opaque_mutation(
+            "session",
+            1,
+            &mut crate::checkpoint::CheckpointOperation::default(),
+        )
         .unwrap_or_else(|error| panic!("opaque baseline must begin: {error}"));
     let pending = store
         .load_pending("session", 1)
@@ -639,15 +725,18 @@ fn opaque_recovery_does_not_follow_workspace_symlinks_and_rejects_corrupt_marker
         .unwrap_or_else(|error| panic!("store must reopen: {error}"));
     assert_eq!(
         reopened
-            .recover_opaque_mutations()
-            .unwrap_or_else(|error| panic!("pending mutation must recover: {error}"))
-            .len(),
+            .recover_opaque_mutations(&mut crate::checkpoint::CheckpointOperation::default())
+            .unwrap_or_else(|error| panic!("pending mutation must recover: {error}")),
         1
     );
     assert!(!reopened.pending_path("session", 1).exists());
 
     let second = reopened
-        .begin_opaque_mutation("session", 2)
+        .begin_opaque_mutation(
+            "session",
+            2,
+            &mut crate::checkpoint::CheckpointOperation::default(),
+        )
         .unwrap_or_else(|error| panic!("second baseline must begin: {error}"));
     let path = reopened.pending_path("session", 2);
     let mut value: serde_json::Value = serde_json::from_slice(
@@ -661,7 +750,14 @@ fn opaque_recovery_does_not_follow_workspace_symlinks_and_rejects_corrupt_marker
             .unwrap_or_else(|error| panic!("corrupt pending must encode: {error}")),
     )
     .unwrap_or_else(|error| panic!("corrupt pending must write: {error}"));
-    assert!(reopened.finish_opaque_mutation(&second).is_err());
+    assert!(
+        reopened
+            .finish_opaque_mutation(
+                &second,
+                &mut crate::checkpoint::CheckpointOperation::default()
+            )
+            .is_err()
+    );
     assert!(path.exists());
     assert_eq!(mutation.session_id, "session");
 }
@@ -686,7 +782,12 @@ fn cumulative_review_ten_edits_reverts_one_file_and_preserves_accepted_peer() {
             ("alpha.txt", format!("alpha edit {turn}\n"))
         };
         store
-            .checkpoint_known("session", turn, [PathBuf::from(path)])
+            .checkpoint_known(
+                "session",
+                turn,
+                [PathBuf::from(path)],
+                &mut crate::checkpoint::CheckpointOperation::default(),
+            )
             .unwrap_or_else(|error| panic!("turn {turn} must checkpoint: {error}"));
         fs::write(workspace.join(path), content)
             .unwrap_or_else(|error| panic!("turn {turn} must edit: {error}"));
@@ -840,7 +941,12 @@ fn unsupported_symlink_target_swaps_cannot_be_accepted_or_reverted() {
     let store = CheckpointStore::open(&root.path().join("storage"), &workspace)
         .unwrap_or_else(|error| panic!("store must open: {error}"));
     store
-        .checkpoint_known("symlink-session", 1, [PathBuf::from("review.txt")])
+        .checkpoint_known(
+            "symlink-session",
+            1,
+            [PathBuf::from("review.txt")],
+            &mut crate::checkpoint::CheckpointOperation::default(),
+        )
         .unwrap_or_else(|error| panic!("baseline must checkpoint: {error}"));
     fs::remove_file(workspace.join("review.txt"))
         .unwrap_or_else(|error| panic!("baseline must remove: {error}"));
@@ -890,7 +996,12 @@ fn oversized_review_streams_identity_and_remains_safely_revertible() {
     let store = CheckpointStore::open(&root.path().join("storage"), &workspace)
         .unwrap_or_else(|error| panic!("store must open: {error}"));
     store
-        .checkpoint_known("large-session", 1, [PathBuf::from("large.bin")])
+        .checkpoint_known(
+            "large-session",
+            1,
+            [PathBuf::from("large.bin")],
+            &mut crate::checkpoint::CheckpointOperation::default(),
+        )
         .unwrap_or_else(|error| panic!("baseline must checkpoint: {error}"));
     let file = OpenOptions::new()
         .write(true)
@@ -931,7 +1042,12 @@ fn huge_sparse_review_is_bounded_and_marked_unreviewable() {
     let store = CheckpointStore::open(&root.path().join("storage"), &workspace)
         .unwrap_or_else(|error| panic!("store must open: {error}"));
     store
-        .checkpoint_known("huge-session", 1, [PathBuf::from("huge.bin")])
+        .checkpoint_known(
+            "huge-session",
+            1,
+            [PathBuf::from("huge.bin")],
+            &mut crate::checkpoint::CheckpointOperation::default(),
+        )
         .unwrap_or_else(|error| panic!("baseline must checkpoint: {error}"));
     OpenOptions::new()
         .write(true)
@@ -959,7 +1075,12 @@ fn checkpoint_fork_rebinds_child_manifests_without_changing_parent() {
         .unwrap_or_else(|error| panic!("store must open: {error}"));
     for turn in 1..=3_u64 {
         store
-            .checkpoint_known("parent", turn, [PathBuf::from("file.txt")])
+            .checkpoint_known(
+                "parent",
+                turn,
+                [PathBuf::from("file.txt")],
+                &mut crate::checkpoint::CheckpointOperation::default(),
+            )
             .unwrap_or_else(|error| panic!("parent checkpoint must write: {error}"));
         fs::write(workspace.join("file.txt"), format!("{turn}\n"))
             .unwrap_or_else(|error| panic!("parent edit must write: {error}"));

@@ -205,6 +205,9 @@ pub struct CheckpointStore {
 }
 
 mod capture;
+mod git;
+mod operation;
+pub use operation::{CheckpointCancellation, CheckpointOperation};
 mod review;
 mod rewind;
 
@@ -726,10 +729,11 @@ fn remove_file_or_symlink_confined(workspace: &Path, key: &str) -> Result<(), Ch
 fn inventory_confined(
     workspace: &Path,
     storage_relative: Option<&str>,
+    operation: &mut CheckpointOperation,
 ) -> Result<BTreeMap<String, InventoryEntry>, CheckpointError> {
     let root = open_workspace_root(workspace)?;
     let mut inventory = BTreeMap::new();
-    inventory_directory_fd(&root, "", storage_relative, &mut inventory)?;
+    inventory_directory_fd(&root, "", storage_relative, &mut inventory, operation)?;
     Ok(inventory)
 }
 
@@ -739,6 +743,7 @@ fn inventory_directory_fd(
     prefix: &str,
     storage_relative: Option<&str>,
     inventory: &mut BTreeMap<String, InventoryEntry>,
+    operation: &mut CheckpointOperation,
 ) -> Result<(), CheckpointError> {
     use std::os::unix::ffi::OsStrExt as _;
 
@@ -763,6 +768,7 @@ fn inventory_directory_fd(
         {
             continue;
         }
+        operation.path(&key)?;
         let stat = rustix::fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)
             .map_err(std::io::Error::from)?;
         let file_type = FileType::from_raw_mode(stat.st_mode);
@@ -785,7 +791,7 @@ fn inventory_directory_fd(
             )
             .map_err(std::io::Error::from)?;
             inventory.insert(key.clone(), InventoryEntry::Directory);
-            inventory_directory_fd(&child, &key, storage_relative, inventory)?;
+            inventory_directory_fd(&child, &key, storage_relative, inventory, operation)?;
         } else if file_type.is_file() {
             let descriptor = rustix::fs::openat(
                 directory,
@@ -801,7 +807,7 @@ fn inventory_directory_fd(
             inventory.insert(
                 key,
                 InventoryEntry::Regular {
-                    digest: hash_inventory_file(File::from(descriptor))?
+                    digest: hash_inventory_file(File::from(descriptor), operation)?
                         .to_hex()
                         .to_string(),
                 },
@@ -869,6 +875,7 @@ fn remove_file_or_symlink_confined(workspace: &Path, key: &str) -> Result<(), Ch
 fn inventory_confined(
     workspace: &Path,
     storage_relative: Option<&str>,
+    operation: &mut CheckpointOperation,
 ) -> Result<BTreeMap<String, InventoryEntry>, CheckpointError> {
     fn scan(
         workspace: &Path,
@@ -876,6 +883,7 @@ fn inventory_confined(
         prefix: &Path,
         storage_relative: Option<&str>,
         output: &mut BTreeMap<String, InventoryEntry>,
+        operation: &mut CheckpointOperation,
     ) -> Result<(), CheckpointError> {
         for entry in fs::read_dir(directory)? {
             let entry = entry?;
@@ -889,6 +897,7 @@ fn inventory_confined(
             {
                 continue;
             }
+            operation.path(&key)?;
             let metadata = fs::symlink_metadata(entry.path())?;
             if metadata.file_type().is_symlink() {
                 output.insert(
@@ -905,6 +914,7 @@ fn inventory_confined(
                     &relative,
                     storage_relative,
                     output,
+                    operation,
                 )?;
             } else if metadata.is_file() {
                 let file = capture_regular_confined(workspace, &key)?
@@ -913,7 +923,7 @@ fn inventory_confined(
                 output.insert(
                     key,
                     InventoryEntry::Regular {
-                        digest: hash_inventory_file(file)?.to_hex().to_string(),
+                        digest: hash_inventory_file(file, operation)?.to_hex().to_string(),
                     },
                 );
             }
@@ -927,6 +937,7 @@ fn inventory_confined(
         Path::new(""),
         storage_relative,
         &mut output,
+        operation,
     )?;
     Ok(output)
 }
@@ -968,9 +979,12 @@ fn hash_reader(mut reader: impl Read) -> Result<blake3::Hash, CheckpointError> {
     }
 }
 
-fn hash_inventory_file(mut file: File) -> Result<blake3::Hash, CheckpointError> {
+fn hash_inventory_file(
+    mut file: File,
+    operation: &mut CheckpointOperation,
+) -> Result<blake3::Hash, CheckpointError> {
     let before = file.metadata()?;
-    let hash = hash_reader(&mut file)?;
+    let hash = operation.hash(&mut file)?;
     if !same_open_file_identity(&before, &file.metadata()?) {
         return Err(CheckpointError::CaptureChanged);
     }
@@ -1003,6 +1017,12 @@ fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), CheckpointError> {
 /// Checkpoint failure with no captured file contents in diagnostics.
 #[derive(Debug, Error)]
 pub enum CheckpointError {
+    /// Worker cancellation stops further scan/capture work, retaining recovery markers.
+    #[error("checkpoint operation cancelled")]
+    Cancelled,
+    /// Aggregate work exceeded the operation allowance.
+    #[error("checkpoint operation exceeded {0}")]
+    OperationLimit(&'static str),
     /// A preimage cannot be captured within its file byte budget.
     #[error("checkpoint preimage exceeds the 64 MiB file capture limit; mutation was not admitted")]
     CaptureFileLimit,

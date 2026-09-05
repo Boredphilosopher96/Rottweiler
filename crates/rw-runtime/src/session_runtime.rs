@@ -1438,8 +1438,9 @@ pub async fn run(options: RunOptions) -> Result<()> {
     let checkpoint_stores = open_checkpoint_stores(&checkpoint_root, &workspace_roots)?;
     let recovery_stores = Arc::clone(&checkpoint_stores);
     tokio::task::spawn_blocking(move || {
+        let mut operation = rw_store::checkpoint::CheckpointOperation::default();
         for store in recovery_stores.iter() {
-            store.recover_opaque_mutations()?;
+            store.recover_opaque_mutations(&mut operation)?;
         }
         Ok::<_, rw_store::checkpoint::CheckpointError>(())
     })
@@ -2419,8 +2420,9 @@ pub(crate) async fn compose_hosted_actor(
     let checkpoint_stores = open_checkpoint_stores(&session_checkpoint_root, &workspace_roots)?;
     let recovery_stores = Arc::clone(&checkpoint_stores);
     tokio::task::spawn_blocking(move || {
+        let mut operation = rw_store::checkpoint::CheckpointOperation::default();
         for store in recovery_stores.iter() {
-            store.recover_opaque_mutations()?;
+            store.recover_opaque_mutations(&mut operation)?;
         }
         Ok::<_, rw_store::checkpoint::CheckpointError>(())
     })
@@ -17873,7 +17875,7 @@ mod tests {
         commit_checkpoint_root_generation(&parent_checkpoint_root, 2).expect("commit later root");
         std::fs::write(workspace.join("tracked.txt"), "base\n").expect("baseline file");
         parent_stores[0]
-            .checkpoint_known(&parent.0, 1, [PathBuf::from("tracked.txt")])
+            .checkpoint_known(&parent.0, 1, [PathBuf::from("tracked.txt")], &mut rw_store::checkpoint::CheckpointOperation::default())
             .expect("parent checkpoint");
         std::fs::write(workspace.join("tracked.txt"), "parent change\n").expect("parent mutation");
         assert_eq!(
@@ -18048,7 +18050,7 @@ mod tests {
                 .is_empty()
         }));
         child_stores[0]
-            .checkpoint_known(&child.0, 3, [PathBuf::from("tracked.txt")])
+            .checkpoint_known(&child.0, 3, [PathBuf::from("tracked.txt")], &mut rw_store::checkpoint::CheckpointOperation::default())
             .expect("child checkpoint");
         std::fs::write(workspace.join("tracked.txt"), "child change\n").expect("child edit");
         assert_eq!(
@@ -18586,22 +18588,22 @@ mod tests {
         let store_a = CheckpointStore::open(&root_a, &workspace_a).expect("store a");
         let store_b = CheckpointStore::open(&root_b, &workspace_b).expect("store b");
         let pending_a = store_a
-            .begin_opaque_mutation(session_a, 1)
+            .begin_opaque_mutation(session_a, 1, &mut rw_store::checkpoint::CheckpointOperation::default())
             .expect("pending a");
         let pending_b = store_b
-            .begin_opaque_mutation(session_b, 1)
+            .begin_opaque_mutation(session_b, 1, &mut rw_store::checkpoint::CheckpointOperation::default())
             .expect("pending b");
         std::fs::write(workspace_a.join("file.txt"), "a-after").expect("mutate a");
         std::fs::write(workspace_b.join("file.txt"), "b-after").expect("mutate b");
 
-        let recovered = store_a.recover_opaque_mutations().expect("recover a only");
-        assert_eq!(recovered.len(), 1);
+        let recovered = store_a.recover_opaque_mutations( &mut rw_store::checkpoint::CheckpointOperation::default()).expect("recover a only");
+        assert_eq!(recovered, 1);
         assert!(
-            store_a.finish_opaque_mutation(&pending_a).is_err(),
+            store_a.finish_opaque_mutation(&pending_a, &mut rw_store::checkpoint::CheckpointOperation::default()).is_err(),
             "a marker was consumed by its recovery"
         );
         store_b
-            .finish_opaque_mutation(&pending_b)
+            .finish_opaque_mutation(&pending_b, &mut rw_store::checkpoint::CheckpointOperation::default())
             .expect("b marker must remain untouched");
         assert_eq!(
             std::fs::read_to_string(workspace_b.join("file.txt")).expect("b file"),
@@ -18615,12 +18617,12 @@ mod tests {
             std::fs::write(workspace.join("file.txt"), format!("{prefix}-zero"))
                 .expect("reset file");
             store
-                .checkpoint_known(session, 10, [PathBuf::from("file.txt")])
+                .checkpoint_known(session, 10, [PathBuf::from("file.txt")], &mut rw_store::checkpoint::CheckpointOperation::default())
                 .expect("turn one checkpoint");
             std::fs::write(workspace.join("file.txt"), format!("{prefix}-one"))
                 .expect("turn one edit");
             store
-                .checkpoint_known(session, 11, [PathBuf::from("file.txt")])
+                .checkpoint_known(session, 11, [PathBuf::from("file.txt")], &mut rw_store::checkpoint::CheckpointOperation::default())
                 .expect("turn two checkpoint");
             std::fs::write(workspace.join("file.txt"), format!("{prefix}-two"))
                 .expect("turn two edit");
@@ -18907,7 +18909,7 @@ mod tests {
         for (store, workspace) in stores.iter().zip([&first, &second]) {
             std::fs::write(workspace.join("state.txt"), b"before").expect("initial state");
             store
-                .checkpoint_known(&session.0, 1, [PathBuf::from("state.txt")])
+                .checkpoint_known(&session.0, 1, [PathBuf::from("state.txt")], &mut rw_store::checkpoint::CheckpointOperation::default())
                 .expect("checkpoint");
             std::fs::write(workspace.join("state.txt"), b"after").expect("mutated state");
         }
@@ -18968,7 +18970,7 @@ mod tests {
         for (store, workspace) in stores.iter().zip([&first, &second]) {
             std::fs::write(workspace.join("state.txt"), b"before").expect("initial state");
             store
-                .checkpoint_known(&session.0, 1, [PathBuf::from("state.txt")])
+                .checkpoint_known(&session.0, 1, [PathBuf::from("state.txt")], &mut rw_store::checkpoint::CheckpointOperation::default())
                 .expect("checkpoint");
             std::fs::write(workspace.join("state.txt"), b"after").expect("mutated state");
         }
@@ -19034,7 +19036,7 @@ mod tests {
         for (store, workspace) in stores.iter().zip([&first, &second]) {
             std::fs::write(workspace.join("state.txt"), b"before").expect("initial state");
             store
-                .checkpoint_known(&session.0, 1, [PathBuf::from("state.txt")])
+                .checkpoint_known(&session.0, 1, [PathBuf::from("state.txt")], &mut rw_store::checkpoint::CheckpointOperation::default())
                 .expect("checkpoint");
             std::fs::write(workspace.join("state.txt"), b"after").expect("mutated state");
         }
@@ -19091,7 +19093,7 @@ mod tests {
         for (store, workspace) in stores.iter().zip([&first, &second]) {
             std::fs::write(workspace.join("state.txt"), b"before").expect("initial state");
             store
-                .checkpoint_known(&session.0, 1, [PathBuf::from("state.txt")])
+                .checkpoint_known(&session.0, 1, [PathBuf::from("state.txt")], &mut rw_store::checkpoint::CheckpointOperation::default())
                 .expect("checkpoint");
             std::fs::write(workspace.join("state.txt"), b"after").expect("mutated state");
         }

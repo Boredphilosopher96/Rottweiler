@@ -1,10 +1,13 @@
-use super::TEMP_COUNTER;
+use super::{
+    CheckpointOperation, TEMP_COUNTER,
+    operation::{read_metadata, serialize_metadata},
+};
 use std::{
-    collections::{BTreeMap, BTreeSet, btree_map::Entry},
+    collections::{BTreeMap, btree_map::Entry},
     fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Command,
     sync::atomic::Ordering,
 };
 
@@ -70,6 +73,7 @@ impl CheckpointStore {
         session_id: &str,
         turn: u64,
         relative_paths: impl IntoIterator<Item = PathBuf>,
+        operation: &mut CheckpointOperation,
     ) -> Result<CheckpointManifest, CheckpointError> {
         validate_session_id(session_id)?;
         let path = self.manifest_path(session_id, turn);
@@ -80,9 +84,10 @@ impl CheckpointStore {
         };
         for relative in relative_paths {
             let key = normalize_relative(&relative)?;
+            operation.path(&key)?;
             if let Entry::Vacant(entry) = files.entry(key) {
                 let key = entry.key().clone();
-                let state = self.capture(&key)?;
+                let state = self.capture(&key, operation)?;
                 entry.insert(state);
             }
         }
@@ -129,7 +134,7 @@ impl CheckpointStore {
         turn: u64,
     ) -> Result<CheckpointManifest, CheckpointError> {
         validate_session_id(session_id)?;
-        let bytes = fs::read(self.manifest_path(session_id, turn))?;
+        let bytes = read_metadata(&self.manifest_path(session_id, turn))?;
         let manifest: CheckpointManifest = serde_json::from_slice(&bytes)?;
         Self::validate_manifest(&manifest, session_id, turn)?;
         Ok(manifest)
@@ -150,15 +155,16 @@ impl CheckpointStore {
         &self,
         session_id: &str,
         turn: u64,
+        operation: &mut CheckpointOperation,
     ) -> Result<OpaqueMutation, CheckpointError> {
         validate_session_id(session_id)?;
         let pending_path = self.pending_path(session_id, turn);
         if pending_path.exists() {
             return Err(CheckpointError::OpaqueMutationPending);
         }
-        let before = self.workspace_inventory()?;
-        let tracked = self.git_tracked_baseline()?;
-        let dirty = self.git_dirty_tracked_paths()?;
+        let before = self.workspace_inventory(operation)?;
+        let tracked = self.git_tracked_baseline(operation)?;
+        let dirty = self.git_dirty_tracked_paths(operation)?;
         let dirty = if tracked.complete && !dirty.complete {
             tracked.paths.clone()
         } else {
@@ -168,8 +174,9 @@ impl CheckpointStore {
             .load_manifest_if_exists(session_id, turn)?
             .map_or_else(BTreeMap::new, |manifest| manifest.files);
         for path in dirty {
+            operation.path(&path)?;
             if let Entry::Vacant(entry) = files.entry(path.clone()) {
-                let state = match self.capture(&path) {
+                let state = match self.capture(&path, operation) {
                     Ok(state) => state,
                     Err(CheckpointError::UnsupportedFileKind(_)) => {
                         CheckpointFileState::Unrestorable {
@@ -189,7 +196,9 @@ impl CheckpointStore {
             before,
             tracked: tracked.entries,
         };
-        atomic_replace(&pending_path, &serde_json::to_vec(&pending)?)?;
+        let bytes = serialize_metadata(&pending, false)?;
+        operation.check()?;
+        atomic_replace(&pending_path, &bytes)?;
         Ok(OpaqueMutation {
             session_id: session_id.to_owned(),
             turn,
@@ -208,15 +217,17 @@ impl CheckpointStore {
     pub fn finish_opaque_mutation(
         &self,
         mutation: &OpaqueMutation,
+        operation: &mut CheckpointOperation,
     ) -> Result<CheckpointManifest, CheckpointError> {
         validate_session_id(&mutation.session_id)?;
         let pending = self.load_pending(&mutation.session_id, mutation.turn)?;
-        let after = self.workspace_inventory()?;
+        let after = self.workspace_inventory(operation)?;
         let mut manifest = self
             .load_manifest_if_exists(&mutation.session_id, mutation.turn)?
             .ok_or(CheckpointError::CorruptManifest)?;
         let changed = changed_inventory_paths(&pending.before, &after);
         for path in changed {
+            operation.path(&path)?;
             if manifest.files.contains_key(&path) {
                 continue;
             }
@@ -230,7 +241,7 @@ impl CheckpointStore {
                     | None => CheckpointFileState::Absent,
                 }
             } else if let Some(tracked) = pending.tracked.get(&path) {
-                self.capture_git_preimage(tracked).unwrap_or_else(|| {
+                self.capture_git_preimage(tracked, operation)?.unwrap_or_else(|| {
                     CheckpointFileState::Unrestorable {
                         reason: "opaque command changed a tracked path whose Git preimage is unavailable"
                             .to_owned(),
@@ -255,15 +266,19 @@ impl CheckpointStore {
     /// # Errors
     ///
     /// Returns an error rather than silently discarding an invalid marker.
-    pub fn recover_opaque_mutations(&self) -> Result<Vec<CheckpointManifest>, CheckpointError> {
-        let mut pending = self.enumerate_pending()?;
+    pub fn recover_opaque_mutations(
+        &self,
+        operation: &mut CheckpointOperation,
+    ) -> Result<usize, CheckpointError> {
+        let mut pending = self.enumerate_pending(operation)?;
         pending.sort_by(|left, right| {
             (&left.session_id, left.turn).cmp(&(&right.session_id, right.turn))
         });
-        pending
-            .into_iter()
-            .map(|mutation| self.finish_opaque_mutation(&mutation))
-            .collect()
+        let count = pending.len();
+        for mutation in pending {
+            self.finish_opaque_mutation(&mutation, operation)?;
+        }
+        Ok(count)
     }
 
     /// Copies checkpoint ownership through `through_turn` to a child session.
@@ -352,7 +367,11 @@ impl CheckpointStore {
         result
     }
 
-    pub(super) fn capture(&self, key: &str) -> Result<CheckpointFileState, CheckpointError> {
+    pub(super) fn capture(
+        &self,
+        key: &str,
+        operation: &mut CheckpointOperation,
+    ) -> Result<CheckpointFileState, CheckpointError> {
         let Some((mut file, unix_mode)) = capture_regular_confined(&self.workspace, key)? else {
             return Ok(CheckpointFileState::Absent);
         };
@@ -360,7 +379,7 @@ impl CheckpointStore {
         if before.len() > MAX_CAPTURE_FILE_BYTES {
             return Err(CheckpointError::CaptureFileLimit);
         }
-        let state = self.capture_reader(&mut file, unix_mode)?;
+        let state = self.capture_reader(&mut file, unix_mode, operation)?;
         if !same_open_file_identity(&before, &file.metadata()?) {
             return Err(CheckpointError::CaptureChanged);
         }
@@ -371,6 +390,7 @@ impl CheckpointStore {
         &self,
         reader: &mut impl Read,
         unix_mode: Option<u32>,
+        operation: &mut CheckpointOperation,
     ) -> Result<CheckpointFileState, CheckpointError> {
         let blobs = self.root.join("blobs");
         let mut temporary = tempfile::Builder::new()
@@ -380,6 +400,7 @@ impl CheckpointStore {
         let mut bytes = 0_u64;
         let mut chunk = vec![0_u8; CAPTURE_CHUNK_BYTES].into_boxed_slice();
         loop {
+            operation.check()?;
             let count = reader.read(&mut chunk)?;
             if count == 0 {
                 break;
@@ -388,6 +409,7 @@ impl CheckpointStore {
             if bytes > MAX_CAPTURE_FILE_BYTES {
                 return Err(CheckpointError::CaptureFileLimit);
             }
+            operation.capture(count)?;
             hash.update(&chunk[..count]);
             temporary.write_all(&chunk[..count])?;
         }
@@ -402,7 +424,7 @@ impl CheckpointStore {
             Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
                 let existing = File::open(directory.join(&digest))?;
                 if existing.metadata()?.len() != bytes
-                    || hash_reader(existing.take(bytes + 1))?.to_hex().as_str() != digest
+                    || operation.hash(existing.take(bytes + 1))?.to_hex().as_str() != digest
                 {
                     return Err(CheckpointError::CorruptBlob);
                 }
@@ -419,28 +441,28 @@ impl CheckpointStore {
     pub(super) fn capture_git_preimage(
         &self,
         tracked: &GitTrackedEntry,
-    ) -> Option<CheckpointFileState> {
-        let unix_mode = tracked.unix_mode?;
-        let mut child = self
-            .git_command()
-            .arg("-C")
-            .arg(&self.workspace)
-            .args(["cat-file", "blob", &tracked.object_id])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()?;
-        let result = match child.stdout.take() {
-            Some(mut stdout) => self.capture_reader(&mut stdout, Some(unix_mode)),
-            None => Err(CheckpointError::GitBaselineCorrupt),
+        operation: &mut CheckpointOperation,
+    ) -> Result<Option<CheckpointFileState>, CheckpointError> {
+        let Some(unix_mode) = tracked.unix_mode else {
+            return Ok(None);
         };
-        if result.is_err() {
-            let _ = child.kill();
-        }
-        if !child.wait().ok()?.success() {
-            return None;
-        }
-        result.ok()
+        operation.check()?;
+        let mut pipe = match super::git::GitPipe::spawn(
+            self.git_command().arg("-C").arg(&self.workspace).args([
+                "cat-file",
+                "blob",
+                &tracked.object_id,
+            ]),
+            operation,
+        ) {
+            Ok(pipe) => pipe,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let result = self.capture_reader(&mut pipe, Some(unix_mode), operation);
+        operation.check()?;
+        let state = result?;
+        Ok(pipe.finish()?.then_some(state))
     }
 
     pub(super) fn persist_manifest(
@@ -464,7 +486,7 @@ impl CheckpointStore {
         manifest: &CheckpointManifest,
     ) -> Result<(), CheckpointError> {
         Self::validate_manifest(manifest, &manifest.session_id, manifest.turn)?;
-        let bytes = serde_json::to_vec_pretty(manifest)?;
+        let bytes = serialize_metadata(manifest, true)?;
         atomic_replace(
             &self.manifest_path(&manifest.session_id, manifest.turn),
             &bytes,
@@ -561,26 +583,30 @@ impl CheckpointStore {
 
     pub(super) fn workspace_inventory(
         &self,
+        operation: &mut CheckpointOperation,
     ) -> Result<BTreeMap<String, InventoryEntry>, CheckpointError> {
-        inventory_confined(&self.workspace, self.storage_relative.as_deref())
+        inventory_confined(&self.workspace, self.storage_relative.as_deref(), operation)
     }
 
-    pub(super) fn git_tracked_baseline(&self) -> Result<GitTrackedBaseline, CheckpointError> {
-        let output = match self
-            .git_command()
-            .arg("-C")
-            .arg(&self.workspace)
-            .args(["ls-files", "--cached", "--stage", "-z", "--", "."])
-            .output()
-        {
-            Ok(output) if output.status.success() => output,
-            Ok(_) | Err(_) => return Ok(GitTrackedBaseline::default()),
+    pub(super) fn git_tracked_baseline(
+        &self,
+        operation: &mut CheckpointOperation,
+    ) -> Result<GitTrackedBaseline, CheckpointError> {
+        let Some(output) = super::git::query(
+            self.git_command()
+                .arg("-C")
+                .arg(&self.workspace)
+                .args(["ls-files", "--cached", "--stage", "-z", "--", "."]),
+            operation,
+        )?
+        else {
+            return Ok(GitTrackedBaseline::default());
         };
         let mut baseline = GitTrackedBaseline {
             complete: true,
             ..GitTrackedBaseline::default()
         };
-        for record in output.stdout.split(|byte| *byte == 0) {
+        for record in output.split(|byte| *byte == 0) {
             if record.is_empty() {
                 continue;
             }
@@ -596,6 +622,7 @@ impl CheckpointStore {
                 .to_owned();
             let stage = fields.next().ok_or(CheckpointError::GitBaselineCorrupt)?;
             let key = normalize_relative(Path::new(path))?;
+            operation.path(&key)?;
             baseline.paths.insert(key.clone());
             if stage != "0" {
                 continue;
@@ -623,7 +650,10 @@ impl CheckpointStore {
         Ok(baseline)
     }
 
-    pub(super) fn git_dirty_tracked_paths(&self) -> Result<GitDirtyPaths, CheckpointError> {
+    pub(super) fn git_dirty_tracked_paths(
+        &self,
+        operation: &mut CheckpointOperation,
+    ) -> Result<GitDirtyPaths, CheckpointError> {
         let mut query = GitDirtyPaths {
             complete: true,
             ..GitDirtyPaths::default()
@@ -644,24 +674,20 @@ impl CheckpointStore {
                 .iter()
                 .copied()
                 .filter(|argument| !argument.is_empty());
-            let output = match self
-                .git_command()
-                .arg("-C")
-                .arg(&self.workspace)
-                .args(args)
-                .output()
-            {
-                Ok(output) if output.status.success() => output,
-                Ok(_) | Err(_) => {
-                    query.complete = false;
-                    continue;
-                }
+            let Some(output) = super::git::query(
+                self.git_command().arg("-C").arg(&self.workspace).args(args),
+                operation,
+            )?
+            else {
+                query.complete = false;
+                continue;
             };
-            for path in output.stdout.split(|byte| *byte == 0) {
+            for path in output.split(|byte| *byte == 0) {
                 if path.is_empty() {
                     continue;
                 }
                 let path = std::str::from_utf8(path).map_err(|_| CheckpointError::UnsafePath)?;
+                operation.path(path)?;
                 query.paths.insert(normalize_relative(Path::new(path))?);
             }
         }
@@ -684,7 +710,7 @@ impl CheckpointStore {
         turn: u64,
     ) -> Result<OpaquePending, CheckpointError> {
         let pending: OpaquePending =
-            serde_json::from_slice(&fs::read(self.pending_path(session_id, turn))?)?;
+            serde_json::from_slice(&read_metadata(&self.pending_path(session_id, turn))?)?;
         if pending.version != OPAQUE_PENDING_VERSION
             || pending.session_id != session_id
             || pending.turn != turn
@@ -720,11 +746,15 @@ impl CheckpointStore {
         Ok(pending)
     }
 
-    pub(super) fn enumerate_pending(&self) -> Result<Vec<OpaqueMutation>, CheckpointError> {
+    pub(super) fn enumerate_pending(
+        &self,
+        operation: &mut CheckpointOperation,
+    ) -> Result<Vec<OpaqueMutation>, CheckpointError> {
         let root = self.root.join("pending");
         cleanup_stale_temporaries_in(&root)?;
         let mut mutations = Vec::new();
         for session in fs::read_dir(&root)? {
+            operation.check()?;
             let session = session?;
             let metadata = fs::symlink_metadata(session.path())?;
             if !metadata.is_dir() || metadata.file_type().is_symlink() {
@@ -743,6 +773,7 @@ impl CheckpointStore {
                 if !fs::symlink_metadata(entry.path())?.is_file() {
                     return Err(CheckpointError::CorruptOpaqueMutation);
                 }
+                operation.path(&format!("{session_id}/{turn}"))?;
                 mutations.push(OpaqueMutation {
                     session_id: session_id.clone(),
                     turn,
@@ -805,10 +836,11 @@ impl CheckpointStore {
             return Err(CheckpointError::CorruptManifest);
         }
         validate_session_id(&manifest.session_id)?;
-        let mut canonical = BTreeSet::new();
+        let mut allowance = CheckpointOperation::default();
         for (key, state) in &manifest.files {
+            allowance.path(key)?;
             let normalized = normalize_relative(Path::new(key))?;
-            if normalized != *key || !canonical.insert(normalized) {
+            if normalized != *key {
                 return Err(CheckpointError::CorruptManifest);
             }
             match state {

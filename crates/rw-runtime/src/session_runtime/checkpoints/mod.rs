@@ -26,6 +26,8 @@ use std::{
     },
 };
 
+mod ownership;
+use ownership::{CheckpointWorkers, MutationGuard};
 mod paths;
 mod recovery;
 pub(super) use recovery::recover_rewind_transactions;
@@ -37,13 +39,13 @@ enum ActiveCheckpointState {
 
 struct ActiveCheckpoint {
     state: ActiveCheckpointState,
-    _workspace_guard: tokio::sync::OwnedMutexGuard<()>,
+    workspace_guard: MutationGuard,
 }
 
 struct ActiveRewind {
     handles: Vec<RewindHandle>,
     target_turn: u64,
-    _workspace_guard: tokio::sync::OwnedMutexGuard<()>,
+    workspace_guard: MutationGuard,
 }
 
 struct WorkspaceMutationState {
@@ -79,6 +81,7 @@ pub(super) struct DurableCheckpointCoordinator {
     checkpoint_root: PathBuf,
     stores: Arc<Vec<Arc<CheckpointStore>>>,
     workspace_mutation: Arc<WorkspaceMutationState>,
+    workers: CheckpointWorkers,
     active: Mutex<HashMap<String, ActiveCheckpoint>>,
     rewinds: Mutex<HashMap<String, ActiveRewind>>,
     #[cfg(test)]
@@ -107,6 +110,7 @@ impl DurableCheckpointCoordinator {
             checkpoint_root,
             stores,
             workspace_mutation,
+            workers: CheckpointWorkers::new(),
             active: Mutex::new(HashMap::new()),
             rewinds: Mutex::new(HashMap::new()),
             #[cfg(test)]
@@ -135,8 +139,7 @@ impl DurableCheckpointCoordinator {
     fn ensure_workspace_consistent(&self) -> std::result::Result<(), AgentLoopError> {
         if self.workspace_mutation.poisoned.load(Ordering::Acquire) {
             return Err(AgentLoopError::Persistence(
-                "workspace mutations are blocked until committed rewind recovery completes"
-                    .to_owned(),
+                "workspace mutations are blocked until checkpoint recovery completes".to_owned(),
             ));
         }
         Ok(())
@@ -264,44 +267,61 @@ impl MutationCheckpointCoordinator for DurableCheckpointCoordinator {
         let session_id = session_id.0.clone();
         let scope = scope.clone();
         let stores = Arc::clone(&self.stores);
-        let active = tokio::task::spawn_blocking(move || {
-            Ok::<_, AgentLoopError>(match scope {
-                MutationScope::None => unreachable!("none returned before the worker"),
-                MutationScope::Paths(paths) => {
-                    let grouped = group_checkpoint_paths(&stores, paths)?;
-                    for (root_index, paths) in grouped {
-                        stores[root_index]
-                            .checkpoint_known(&session_id, agent_turn, paths)
-                            .map_err(checkpoint_agent_error)?;
+        let workspace_guard = MutationGuard::new(
+            workspace_guard,
+            Arc::clone(&self.workspace_mutation.poisoned),
+        );
+        let active = self
+            .workers
+            .run(move |mut operation| {
+                let mut workspace_guard = workspace_guard;
+                let state = match scope {
+                    MutationScope::None => unreachable!("none returned before the worker"),
+                    MutationScope::Paths(paths) => {
+                        let captured = (|| {
+                            let grouped = group_checkpoint_paths(&stores, paths)?;
+                            for (root_index, paths) in grouped {
+                                stores[root_index]
+                                    .checkpoint_known(
+                                        &session_id,
+                                        agent_turn,
+                                        paths,
+                                        &mut operation,
+                                    )
+                                    .map_err(checkpoint_agent_error)?;
+                            }
+                            Ok::<_, AgentLoopError>(())
+                        })();
+                        // Known preimages need no finalization until the tool is admitted.
+                        if captured.is_err() {
+                            workspace_guard.complete();
+                        }
+                        captured?;
+                        ActiveCheckpointState::Known
                     }
-                    ActiveCheckpointState::Known
-                }
-                MutationScope::OpaqueWorkspace => {
-                    let mut mutations = Vec::with_capacity(stores.len());
-                    for (root_index, store) in stores.iter().enumerate() {
-                        mutations.push((
-                            root_index,
-                            store
-                                .begin_opaque_mutation(&session_id, agent_turn)
-                                .map_err(checkpoint_agent_error)?,
-                        ));
+                    MutationScope::OpaqueWorkspace => {
+                        let mut mutations = Vec::with_capacity(stores.len());
+                        for (root_index, store) in stores.iter().enumerate() {
+                            mutations.push((
+                                root_index,
+                                store
+                                    .begin_opaque_mutation(&session_id, agent_turn, &mut operation)
+                                    .map_err(checkpoint_agent_error)?,
+                            ));
+                        }
+                        ActiveCheckpointState::Opaque(mutations)
                     }
-                    ActiveCheckpointState::Opaque(mutations)
-                }
+                };
+                Ok(ActiveCheckpoint {
+                    state,
+                    workspace_guard,
+                })
             })
-        })
-        .await
-        .map_err(|error| AgentLoopError::Persistence(error.to_string()))??;
+            .await?;
         self.active
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                tool_call_id.to_owned(),
-                ActiveCheckpoint {
-                    state: active,
-                    _workspace_guard: workspace_guard,
-                },
-            );
+            .insert(tool_call_id.to_owned(), active);
         Ok(MutationCheckpoint {
             id: Some(tool_call_id.to_owned()),
         })
@@ -321,19 +341,27 @@ impl MutationCheckpointCoordinator for DurableCheckpointCoordinator {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(id)
             .ok_or_else(|| AgentLoopError::Persistence("unknown mutation checkpoint".to_owned()))?;
-        if let ActiveCheckpointState::Opaque(mutations) = active.state {
-            let stores = Arc::clone(&self.stores);
-            tokio::task::spawn_blocking(move || {
+        let ActiveCheckpoint {
+            state,
+            mut workspace_guard,
+        } = active;
+        let ActiveCheckpointState::Opaque(mutations) = state else {
+            workspace_guard.complete();
+            return Ok(());
+        };
+        let stores = Arc::clone(&self.stores);
+        self.workers
+            .run(move |mut operation| {
+                let mut workspace_guard = workspace_guard;
                 for (root_index, mutation) in mutations {
-                    stores[root_index].finish_opaque_mutation(&mutation)?;
+                    stores[root_index]
+                        .finish_opaque_mutation(&mutation, &mut operation)
+                        .map_err(checkpoint_agent_error)?;
                 }
-                Ok::<_, rw_store::checkpoint::CheckpointError>(())
+                workspace_guard.complete();
+                Ok(())
             })
             .await
-            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?
-            .map_err(checkpoint_agent_error)?;
-        }
-        Ok(())
     }
 
     async fn prepare_apply_rewind(
@@ -347,7 +375,10 @@ impl MutationCheckpointCoordinator for DurableCheckpointCoordinator {
         self.ensure_workspace_consistent()?;
         let stores = Arc::clone(&self.stores);
         let checkpoint_root = self.checkpoint_root.clone();
-        let workspace_poisoned = Arc::clone(&self.workspace_mutation.poisoned);
+        let workspace_guard = MutationGuard::new(
+            workspace_guard,
+            Arc::clone(&self.workspace_mutation.poisoned),
+        );
         let session_id = session_id.0.clone();
         let operation_id_owned = operation_id.to_owned();
         #[cfg(test)]
@@ -372,48 +403,44 @@ impl MutationCheckpointCoordinator for DurableCheckpointCoordinator {
         let fail_rewind_apply_root = None;
         #[cfg(not(test))]
         let fail_rewind_apply_persistently = false;
-        let (handles, unrestorable_paths) = tokio::task::spawn_blocking(move || {
-            let handles = prepare_coordinated_rewind(
-                &checkpoint_root,
-                &stores,
-                &session_id,
-                &operation_id_owned,
-                to_turn,
-            )?;
-            if fail_after_committed_decision {
-                return Err(AgentLoopError::Persistence(
-                    "injected crash after committed rewind decision".to_owned(),
-                ));
-            }
-            let unrestorable_paths = match apply_coordinated_rewind(
-                &stores,
-                &handles,
-                RewindApplyFault {
-                    root_index: fail_rewind_apply_root,
-                    persistent: fail_rewind_apply_persistently,
-                },
-            ) {
-                Ok(paths) => paths,
-                Err(error) => {
-                    workspace_poisoned.store(true, Ordering::Release);
-                    return Err(error);
+        let (rewind, unrestorable_paths) = self
+            .workers
+            .run(move |_operation| {
+                let workspace_guard = workspace_guard;
+                let handles = prepare_coordinated_rewind(
+                    &checkpoint_root,
+                    &stores,
+                    &session_id,
+                    &operation_id_owned,
+                    to_turn,
+                )?;
+                if fail_after_committed_decision {
+                    return Err(AgentLoopError::Persistence(
+                        "injected crash after committed rewind decision".to_owned(),
+                    ));
                 }
-            };
-            Ok::<_, AgentLoopError>((handles, unrestorable_paths))
-        })
-        .await
-        .map_err(|error| AgentLoopError::Persistence(error.to_string()))??;
+                let unrestorable_paths = apply_coordinated_rewind(
+                    &stores,
+                    &handles,
+                    RewindApplyFault {
+                        root_index: fail_rewind_apply_root,
+                        persistent: fail_rewind_apply_persistently,
+                    },
+                )?;
+                Ok((
+                    ActiveRewind {
+                        handles,
+                        target_turn: to_turn,
+                        workspace_guard,
+                    },
+                    unrestorable_paths,
+                ))
+            })
+            .await?;
         self.rewinds
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                operation_id.to_owned(),
-                ActiveRewind {
-                    handles,
-                    target_turn: to_turn,
-                    _workspace_guard: workspace_guard,
-                },
-            );
+            .insert(operation_id.to_owned(), rewind);
         Ok(RewindCheckpoint {
             id: operation_id.to_owned(),
             unrestorable_paths,
@@ -430,49 +457,54 @@ impl MutationCheckpointCoordinator for DurableCheckpointCoordinator {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&checkpoint.id)
             .ok_or_else(|| AgentLoopError::Persistence("unknown rewind checkpoint".to_owned()))?;
-        let handles = rewind.handles;
-        let target_turn = rewind.target_turn;
         let stores = Arc::clone(&self.stores);
         let checkpoint_root = self.checkpoint_root.clone();
         let operation_id = checkpoint.id.clone();
-        tokio::task::spawn_blocking(move || {
-            if handles.len() != stores.len() {
-                return Err(AgentLoopError::Persistence(
-                    "rewind root count differs from coordinator".to_owned(),
-                ));
-            }
-            let decision = load_rewind_coordinator(&checkpoint_root)
-                .map_err(checkpoint_agent_error)?
-                .ok_or_else(|| {
-                    AgentLoopError::Persistence(
-                        "committed rewind coordinator is missing".to_owned(),
-                    )
+        self.workers
+            .run(move |_operation| {
+                let ActiveRewind {
+                    handles,
+                    target_turn,
+                    mut workspace_guard,
+                } = rewind;
+                if handles.len() != stores.len() {
+                    return Err(AgentLoopError::Persistence(
+                        "rewind root count differs from coordinator".to_owned(),
+                    ));
+                }
+                let decision = load_rewind_coordinator(&checkpoint_root)
+                    .map_err(checkpoint_agent_error)?
+                    .ok_or_else(|| {
+                        AgentLoopError::Persistence(
+                            "committed rewind coordinator is missing".to_owned(),
+                        )
+                    })?;
+                if decision.state != RewindCoordinatorState::Committed
+                    || decision.operation_id != operation_id
+                    || decision.target_turn != target_turn
+                    || decision.root_count != stores.len()
+                    || handles
+                        .iter()
+                        .any(|handle| handle.session_id != decision.session_id)
+                {
+                    return Err(AgentLoopError::Persistence(
+                        "committed rewind coordinator identity differs".to_owned(),
+                    ));
+                }
+                for (store, handle) in stores.iter().zip(&handles) {
+                    store
+                        .acknowledge_rewind(handle)
+                        .map_err(checkpoint_agent_error)?;
+                }
+                remove_rewind_coordinator(&checkpoint_root).map_err(|error| {
+                    AgentLoopError::Persistence(format!(
+                        "rewind coordinator acknowledgement failed: {error}"
+                    ))
                 })?;
-            if decision.state != RewindCoordinatorState::Committed
-                || decision.operation_id != operation_id
-                || decision.target_turn != target_turn
-                || decision.root_count != stores.len()
-                || handles
-                    .iter()
-                    .any(|handle| handle.session_id != decision.session_id)
-            {
-                return Err(AgentLoopError::Persistence(
-                    "committed rewind coordinator identity differs".to_owned(),
-                ));
-            }
-            for (store, handle) in stores.iter().zip(&handles) {
-                store
-                    .acknowledge_rewind(handle)
-                    .map_err(checkpoint_agent_error)?;
-            }
-            remove_rewind_coordinator(&checkpoint_root).map_err(|error| {
-                AgentLoopError::Persistence(format!(
-                    "rewind coordinator acknowledgement failed: {error}"
-                ))
+                workspace_guard.complete();
+                Ok(())
             })
-        })
-        .await
-        .map_err(|error| AgentLoopError::Persistence(error.to_string()))?
+            .await
     }
 
     async fn session_review(
@@ -484,19 +516,20 @@ impl MutationCheckpointCoordinator for DurableCheckpointCoordinator {
         self.ensure_workspace_consistent()?;
         let stores = Arc::clone(&self.stores);
         let session_id = session_id.clone();
-        tokio::task::spawn_blocking(move || {
-            let reviews = stores
-                .iter()
-                .map(|store| {
-                    store
-                        .session_review(&session_id.0)
-                        .map_err(checkpoint_agent_error)
-                })
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            merge_root_reviews(session_id, reviews)
-        })
-        .await
-        .map_err(|error| AgentLoopError::Persistence(error.to_string()))?
+        self.workers
+            .run(move |_operation| {
+                let _workspace_guard = _workspace_guard;
+                let reviews = stores
+                    .iter()
+                    .map(|store| {
+                        store
+                            .session_review(&session_id.0)
+                            .map_err(checkpoint_agent_error)
+                    })
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                merge_root_reviews(session_id, reviews)
+            })
+            .await
     }
 
     async fn resolve_review_file(
@@ -513,25 +546,32 @@ impl MutationCheckpointCoordinator for DurableCheckpointCoordinator {
         let session_id = session_id.clone();
         let path = path.to_path_buf();
         let current_hash = current_hash.to_owned();
-        tokio::task::spawn_blocking(move || {
-            let (root_index, relative) = resolve_review_display_path(stores.len(), &path)?;
-            let mut reviews = stores
-                .iter()
-                .map(|store| {
-                    store
-                        .session_review(&session_id.0)
-                        .map_err(checkpoint_agent_error)
-                })
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            let _ = merge_root_reviews(session_id.clone(), reviews.clone())?;
-            let target_review = stores[root_index]
-                .resolve_review_file(&session_id.0, &relative, decision, &current_hash)
-                .map_err(checkpoint_agent_error)?;
-            reviews[root_index] = target_review;
-            merge_root_reviews(session_id, reviews)
-        })
-        .await
-        .map_err(|error| AgentLoopError::Persistence(error.to_string()))?
+        self.workers
+            .run(move |_operation| {
+                let _workspace_guard = _workspace_guard;
+                let (root_index, relative) = resolve_review_display_path(stores.len(), &path)?;
+                let mut reviews = stores
+                    .iter()
+                    .map(|store| {
+                        store
+                            .session_review(&session_id.0)
+                            .map_err(checkpoint_agent_error)
+                    })
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                let _ = merge_root_reviews(session_id.clone(), reviews.clone())?;
+                let target_review = stores[root_index]
+                    .resolve_review_file(&session_id.0, &relative, decision, &current_hash)
+                    .map_err(checkpoint_agent_error)?;
+                reviews[root_index] = target_review;
+                let review = merge_root_reviews(session_id, reviews)?;
+                Ok(review)
+            })
+            .await
+    }
+
+    async fn settle_effects(&self) -> std::result::Result<(), AgentLoopError> {
+        self.workers.settle().await;
+        self.ensure_workspace_consistent()
     }
 }
 

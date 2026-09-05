@@ -257,7 +257,12 @@ fn generated_files_are_byte_rewindable_from_the_planned_checkpoint_scope() {
         "open checkpoint store",
     );
     must(
-        store.checkpoint_known("init-session", 1, plan.files().keys().cloned()),
+        store.checkpoint_known(
+            "init-session",
+            1,
+            plan.files().keys().cloned(),
+            &mut rw_store::checkpoint::CheckpointOperation::default(),
+        ),
         "checkpoint generated paths",
     );
     let created = must(apply_init_plan(&plan), "apply init plan");
