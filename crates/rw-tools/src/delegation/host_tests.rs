@@ -78,6 +78,13 @@ async fn dropped_callback_retains_blocking_authorization_until_settlement() {
     );
     call.abort();
     assert!(call.await.expect_err("caller dropped").is_cancelled());
+    assert!(
+        matches!(
+            host.call(&grant, "blocked_read", json!({})).await,
+            Err(ToolError::DelegationDenied(_))
+        ),
+        "abandoned authorization keeps admission closed before explicit retirement"
+    );
     let settling = tokio::spawn({
         let host = host.clone();
         async move { host.close_and_settle().await }

@@ -107,7 +107,11 @@ impl ToolEffectHost for DelegatedTools {
                 "another nested effect is still owned by this invocation".into(),
             )
         })?;
-        if self.closed.load(Ordering::Acquire) || self.failed.load(Ordering::Acquire) {
+        if self.closed.load(Ordering::Acquire)
+            || self.failed.load(Ordering::Acquire)
+            || self.cancellation.is_cancelled()
+            || self.context.cancellation.is_cancelled()
+        {
             return Err(ToolError::DelegationDenied(
                 "invocation effect scope is closed".into(),
             ));
