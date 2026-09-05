@@ -116,29 +116,30 @@ def install(root: Path, ids: list[str], build_dependencies: bool = False) -> Non
     packages = {p["id"]: p for p in inventory(root)["packages"]}
     directories = {str((root / p["directory"]).resolve()): p["id"] for p in packages.values()}
     installed: set[str] = set()
+    built: set[str] = set()
     visiting: set[str] = set()
 
     def visit(name: str, dependency: bool = False) -> None:
-        if name in installed:
-            return
         if name in visiting:
             raise ValueError("cyclic local package dependency")
-        visiting.add(name)
         package = packages[name]
         directory = root / package["directory"]
         manifest = json.loads((directory / "package.json").read_text())
-        dependencies = manifest.get("dependencies", {}) | manifest.get("devDependencies", {})
-        for spec in dependencies.values():
-            if isinstance(spec, str) and spec.startswith("file:"):
-                target = str((directory / spec[5:]).resolve())
-                if target not in directories:
-                    raise ValueError(f"unregistered local package dependency: {name}")
-                visit(directories[target], dependency=True)
-        subprocess.run(["bun", "install", "--frozen-lockfile"], cwd=directory, check=True)
-        if dependency and build_dependencies and "build" in manifest.get("scripts", {}):
+        if name not in installed:
+            visiting.add(name)
+            dependencies = manifest.get("dependencies", {}) | manifest.get("devDependencies", {})
+            for spec in dependencies.values():
+                if isinstance(spec, str) and spec.startswith("file:"):
+                    target = str((directory / spec[5:]).resolve())
+                    if target not in directories:
+                        raise ValueError(f"unregistered local package dependency: {name}")
+                    visit(directories[target], dependency=True)
+            subprocess.run(["bun", "install", "--frozen-lockfile"], cwd=directory, check=True)
+            visiting.remove(name)
+            installed.add(name)
+        if dependency and build_dependencies and name not in built and "build" in manifest.get("scripts", {}):
             subprocess.run(["bun", "run", "build"], cwd=directory, check=True)
-        visiting.remove(name)
-        installed.add(name)
+            built.add(name)
 
     for name in ids or list(packages):
         visit(name)
@@ -148,6 +149,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["check", "matrix", "install", "package", "required"])
     parser.add_argument("packages", nargs="*")
+    parser.add_argument("--build-dependencies", action="store_true",
+                        help="build local package exports before installing their consumers")
     args = parser.parse_args()
     errors: list[str] = []
     if args.command == "matrix":
@@ -164,7 +167,7 @@ def main() -> int:
             with open(path, "a") as stream:
                 stream.write(summary)
     else:
-        install(ROOT, args.packages, build_dependencies=args.command == "package")
+        install(ROOT, args.packages, build_dependencies=args.build_dependencies or args.command == "package")
         if args.command == "package":
             if len(args.packages) != 1:
                 raise ValueError("package verification requires exactly one package")
