@@ -133,3 +133,54 @@ impl Write for EventWriter {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    fn event() -> EngineEvent {
+        EngineEvent::HostShutdown {
+            meta: crate::CommandAckMeta {
+                protocol_version: crate::PROTOCOL_VERSION,
+                client_id: crate::ClientId("client".into()),
+                request_id: crate::RequestId("shutdown".into()),
+                emitted_at: "2026-01-01T00:00:00Z".into(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn final_byte_clone_owns_credit_after_all_event_wrappers_drop() {
+        let budget = HostEventBudget::default();
+        let capacity = budget.bytes.available_permits();
+        let event = budget.encode(&event()).await.expect("encoded");
+        let retained = budget.bytes.available_permits();
+        assert!(retained < capacity);
+        let clone = event.clone();
+        assert_eq!(clone.json.as_ptr(), event.json.as_ptr());
+        let transport = clone.json.clone();
+        drop(event);
+        drop(clone);
+        assert_eq!(budget.bytes.available_permits(), retained);
+        let decoded: EngineEvent = serde_json::from_slice(&transport).expect("protocol JSON");
+        assert!(matches!(decoded, EngineEvent::HostShutdown { .. }));
+        drop(transport);
+        assert_eq!(budget.bytes.available_permits(), capacity);
+    }
+
+    #[tokio::test]
+    async fn exhausted_admission_rejects_before_encoding_and_recovers() {
+        let budget = HostEventBudget::default();
+        let credit = budget
+            .bytes
+            .clone()
+            .acquire_many_owned(96 * 1024)
+            .await
+            .expect("reserve");
+        assert!(budget.encode(&event()).await.is_err());
+        assert_eq!(budget.encoders.available_permits(), 4);
+        drop(credit);
+        assert!(budget.encode(&event()).await.is_ok());
+    }
+}
