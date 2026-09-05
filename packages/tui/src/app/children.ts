@@ -1,3 +1,4 @@
+import { ComposerDraftStore } from "../composer-drafts"
 import { fg, t } from "@opentui/core"
 import {
   formatSubagentElapsed,
@@ -10,13 +11,12 @@ import type { HistoryPresentation } from "../history/presentation"
 import type { KeybindingAction } from "../keybindings"
 import type { PickerController } from "../picker-controller"
 import type { ProjectionRequestBroker } from "../projection-requests"
-import type { Attachment, CommandOutcome, EngineEvent } from "../protocol"
+import type { CommandOutcome, EngineEvent } from "../protocol"
 import { presentError } from "../render"
 import { createInitialState, engineEvent, reduceRottweilerState, type RottweilerState } from "../state"
 import {
   boundSubagentState,
   initialSubagentState,
-  mergeComposerDraft,
   sanitizeSubagentDescriptor,
   type ComposerDraft,
   type SubagentDescriptor,
@@ -57,24 +57,24 @@ export class ChildUiController {
   #subagentDescriptors: readonly SubagentDescriptor[] = []
   #activeChildState: RottweilerState | null = null
   #historicalChild: { readonly sessionId: string; readonly task: string } | null = null
-  #parentComposerDraft: ComposerDraft = { content: "", attachments: [] }
-  #subagentComposerDrafts = new Map<string, ComposerDraft>()
+  readonly draftStore = new ComposerDraftStore()
   #activeSubagentId: string | null = null
   #subagentActionId: string | null = null
   #subagentErrorBaseline: RottweilerState["errors"][number] | undefined
   constructor(host: ChildUiHost) { this.#host = host }
   get activeId(): string | null { return this.#activeSubagentId }
   get historical(): { readonly sessionId: string; readonly task: string } | null { return this.#historicalChild }
-  get drafts(): readonly { readonly id: string; readonly draft: ComposerDraft }[] { return [...this.#subagentComposerDrafts].map(([id, draft]) => ({ id, draft })) }
-  restoreDrafts(parent: ComposerDraft, children: readonly { readonly id: string; readonly draft: ComposerDraft }[]): void {
-    this.#parentComposerDraft = parent
-    this.#subagentComposerDrafts = new Map(children.map(({ id, draft }) => [id, draft]))
+  get drafts(): readonly { readonly id: string; readonly draft: ComposerDraft }[] {
+    return this.draftStore.entries().filter(entry => entry.scope.startsWith("child:")).map(entry => ({ id: entry.scope.slice(6), draft: entry.draft }))
+  }
+  restoreDrafts(parent: ComposerDraft, children: readonly { readonly id: string; readonly draft: ComposerDraft }[]): boolean {
+    return this.draftStore.replace([{ scope: "parent", draft: parent },
+      ...children.map(({ id, draft }) => ({ scope: `child:${id}`, draft }))])
   }
   reset(): void {
     this.#scope = {}
     this.#subagentListError = null; this.#subagentDescriptors = []; this.#activeChildState = null
-    this.#historicalChild = null; this.#parentComposerDraft = { content: "", attachments: [] }
-    this.#subagentComposerDrafts.clear(); this.#activeSubagentId = null; this.#subagentActionId = null
+    this.#historicalChild = null; this.draftStore.clear(); this.#activeSubagentId = null; this.#subagentActionId = null
     this.#subagentErrorBaseline = undefined
   }
   pickerClosed(): void { this.#subagentActionId = null }
@@ -89,7 +89,7 @@ export class ChildUiController {
     if (this.subagentDescriptor(child.subagentId)?.child_session_id === child.sessionId) {
       void this.enterSubagent(child.subagentId); return
     }
-    this.saveComposerDraft()
+    if (!this.saveComposerDraft()) return
     this.#historicalChild = { sessionId: child.sessionId, task: boundedUiText(child.task, 512) }
     this.#activeSubagentId = child.subagentId
     this.#activeChildState = createInitialState()
@@ -179,7 +179,7 @@ export class ChildUiController {
   async enterSubagent(subagentId: string): Promise<void> {
     const descriptor = this.subagentDescriptor(subagentId)
     if (descriptor === undefined) return
-    this.saveComposerDraft()
+    if (!this.saveComposerDraft()) return
     this.#activeSubagentId = subagentId
     this.#historicalChild = null
     this.restoreComposerDraft(subagentId)
@@ -191,7 +191,7 @@ export class ChildUiController {
 
   leaveSubagent(): void {
     if (this.#activeSubagentId === null) return
-    this.saveComposerDraft()
+    if (!this.saveComposerDraft()) return
     this.#activeSubagentId = null
     this.#historicalChild = null
     this.#activeChildState = null
@@ -202,38 +202,20 @@ export class ChildUiController {
     this.#host.focus()
   }
 
-  saveComposerDraft(): void {
-    const draft: ComposerDraft = {
-      content: this.#host.composer.value,
-      attachments: [...this.#host.composer.attachments],
-    }
-    if (this.#activeSubagentId === null) this.#parentComposerDraft = draft
-    else this.#subagentComposerDrafts.set(this.#activeSubagentId, draft)
+  saveComposerDraft(): boolean {
+    const accepted = this.draftStore.set(this.composerScope(), {
+      content: this.#host.composer.value, attachments: this.#host.composer.attachments,
+    })
+    if (!accepted) this.#host.projectError("draft_budget_full", "Draft storage is full. Shorten a draft or remove an attachment before switching.")
+    return accepted
   }
 
   composerScope(): string {
     return this.#activeSubagentId === null ? "parent" : `child:${this.#activeSubagentId}`
   }
 
-  restoreDetachedSubmission(
-    scope: string,
-    content: string,
-    attachments: readonly Attachment[],
-  ): void {
-    const childId = scope.startsWith("child:") ? scope.slice("child:".length) : null
-    if (scope !== "parent" && (childId === null || this.subagentDescriptor(childId) === undefined)) return
-    const current = childId === null
-      ? this.#parentComposerDraft
-      : this.#subagentComposerDrafts.get(childId) ?? { content: "", attachments: [] }
-    const restored = mergeComposerDraft(current, content, attachments)
-    if (childId === null) this.#parentComposerDraft = restored
-    else this.#subagentComposerDrafts.set(childId, restored)
-  }
-
   restoreComposerDraft(subagentId: string | null): void {
-    const draft = subagentId === null
-      ? this.#parentComposerDraft
-      : this.#subagentComposerDrafts.get(subagentId) ?? { content: "", attachments: [] }
+    const draft = this.draftStore.get(subagentId === null ? "parent" : `child:${subagentId}`)
     this.#host.composer.restoreDraft(draft.content, draft.attachments)
   }
 
@@ -423,7 +405,7 @@ export class ChildUiController {
     this.#subagentDescriptors = this.#subagentDescriptors.filter(
       (subagent) => subagent.subagent_id !== subagentId,
     )
-    this.#subagentComposerDrafts.delete(subagentId)
+    this.draftStore.remove(`child:${subagentId}`)
     this.#host.refresh()
     this.requestSubagents()
   }

@@ -142,11 +142,11 @@ export class ClientRestoreController {
   /** Rebuild view bindings from client-owned data; projection responses remain engine-owned. */
   restoreRecycleState(state: AppClientState): void {
     if (state.sessionId !== this.host.sessionId) return
+    if (!this.host.children.restoreDrafts({ content: state.composer.content, attachments: state.composer.attachments }, state.subagentDrafts)) return
     this.host.providers.suppressOnboarding()
     const theme = this.host.resolveTheme(themeByName(state.theme) ?? kennelTheme)
     if (theme.name !== this.host.theme.name) this.host.applyTheme(theme)
     this.restoreComposerState(state.composer)
-    this.host.children.restoreDrafts({ content: state.composer.content, attachments: state.composer.attachments }, state.subagentDrafts)
     this.host.submission.restoreInput(state.composer.content)
     this.host.input.restore(state.inputMode, state.focus)
     this.host.setPrimaryView(state.primaryView)

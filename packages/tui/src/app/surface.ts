@@ -231,8 +231,7 @@ export function buildSurface(host: SurfaceHost, theme: RottweilerTheme): void {
       ...(externalEditorKeycap === null ? {} : { externalEditorKeycap }),
       onSubmit: host.onSubmit,
       submissionScope: () => host.children.composerScope(),
-      onDetachedSubmissionRejected: (scope, content, attachments) =>
-        host.children.restoreDetachedSubmission(scope, content, attachments),
+      drafts: host.children.draftStore,
       onFileMention: (mention) => host.ui.openFilePicker(mention.query, true),
       onManageAttachments: () => host.ui.openAttachmentPicker(),
       onAttachmentError: (message) =>

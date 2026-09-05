@@ -503,7 +503,7 @@ describe("Rottweiler attachments", () => {
     expect(await submission).toBeFalse()
     expect(app.composer.value).toBe("inspect\nnew draft")
     expect(app.composer.attachments.map((attachment) => attachment.name))
-      .toEqual(["second.txt", "third.txt"])
+      .toEqual(["second.txt", "third.txt", "first.txt"])
   })
 
   test("defers retheming until an in-flight rejected submission restores its draft", async () => {
@@ -593,7 +593,7 @@ describe("Rottweiler attachments", () => {
     expectCoherentTheme(app, kennelTheme)
   })
 
-  test("preserves current attachments before backfilling a rejected full attachment batch", async () => {
+  test("retains every rejected attachment and refuses resubmission until the combined draft fits", async () => {
     const setup = await createTestRenderer({ width: 88, height: 20, useThread: false })
     renderer = setup.renderer
     let finish!: (outcome: CommandOutcome) => void
@@ -623,8 +623,11 @@ describe("Rottweiler attachments", () => {
       error: { category: "protocol", code: "retry", message: "retry", retryable: true },
     })
     expect(await submission).toBeFalse()
-    expect(app.composer.attachments).toHaveLength(16)
+    expect(app.composer.attachments).toHaveLength(17)
     expect(app.composer.attachments[0]?.name).toBe("new.txt")
-    expect(app.state.errors.at(-1)?.message).toContain("rejected send")
+    expect(app.composer.attachments.at(-1)?.name).toBe("old-15.txt")
+    expect(await app.composer.submit()).toBe(false)
+    expect(app.composer.attachments).toHaveLength(17)
+    expect(app.state.errors.at(-1)?.message).toContain("too large to send")
   })
 })

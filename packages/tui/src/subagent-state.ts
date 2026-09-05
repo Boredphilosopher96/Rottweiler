@@ -1,5 +1,4 @@
 import {
-  MAX_ATTACHMENTS_PER_MESSAGE,
   ENGINE_EVENT_DELIVERY,
   type Attachment,
   type EngineEvent,
@@ -66,25 +65,6 @@ export function childEngineEvent(
   const session = delivery[value.type] === "transient" && "session_id" in value ? value.session_id
     : "meta" in value && "session_id" in value.meta ? value.meta.session_id : undefined
   return session === expectedSessionId ? value : null
-}
-
-export function mergeComposerDraft(
-  draft: ComposerDraft,
-  rejectedContent: string,
-  rejectedAttachments: readonly Attachment[],
-): ComposerDraft {
-  const content = draft.content.length === 0
-    ? rejectedContent
-    : `${rejectedContent}\n${draft.content}`
-  const attachments: Attachment[] = [...draft.attachments]
-  const identities = new Set(attachments.map((attachment) => JSON.stringify(attachment)))
-  for (const attachment of rejectedAttachments) {
-    const identity = JSON.stringify(attachment)
-    if (identities.has(identity) || attachments.length >= MAX_ATTACHMENTS_PER_MESSAGE) continue
-    identities.add(identity)
-    attachments.push(attachment)
-  }
-  return { content, attachments }
 }
 
 export function boundSubagentState(state: RottweilerState): RottweilerState {

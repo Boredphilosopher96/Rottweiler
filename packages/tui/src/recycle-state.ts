@@ -12,9 +12,10 @@ import {
 import { dirname } from "node:path"
 
 import type { Attachment } from "./protocol"
-import { MAX_ATTACHMENTS_PER_MESSAGE } from "./protocol"
+import { MAX_ATTACHMENTS_PER_DRAFT } from "./composer-drafts"
 import type { ComposerDraft } from "./subagent-state"
 import type { HistoryViewport } from "./history/controller"
+import { jsonEncodedBytes } from "./json-size"
 import { parseU64 } from "./transport/types"
 import type { InputMode, VimFocus } from "./keybindings"
 
@@ -95,8 +96,8 @@ export function readTuiRecycleState(path: string | undefined): AppClientState | 
 /** Atomically persist the small TUI-only state lost during an RSS recycle. */
 export function writeTuiRecycleState(path: string | undefined, state: AppClientState): boolean {
   if (path === undefined || path.length === 0) return false
+  if (jsonEncodedBytes(state, MAX_RECYCLE_STATE_BYTES - 1) > MAX_RECYCLE_STATE_BYTES - 1) return false
   const encoded = `${JSON.stringify(state)}\n`
-  if (Buffer.byteLength(encoded) > MAX_RECYCLE_STATE_BYTES) return false
   const temporary = `${path}.${process.pid}.tmp`
   let descriptor: number | null = null
   try {
@@ -149,7 +150,7 @@ const nullableLabel = (value: unknown): value is string | null => value === null
 
 function parseDraft(value: unknown): ComposerDraft | null {
   if (!record(value) || typeof value.content !== "string" || !Array.isArray(value.attachments)
-    || value.attachments.length > MAX_ATTACHMENTS_PER_MESSAGE) return null
+    || value.attachments.length > MAX_ATTACHMENTS_PER_DRAFT) return null
   const attachments: Attachment[] = []
   for (const item of value.attachments) {
     if (!record(item) || !label(item.name) || !label(item.media_type) || !record(item.data)
@@ -191,7 +192,7 @@ export function parseTuiRecycleState(value: unknown): AppClientState | null {
     || (value.focus !== "composer" && value.focus !== "transcript")
     || !label(value.theme) || !Array.isArray(value.subagentDrafts) || value.subagentDrafts.length > 256
   ) return null
-  if (Buffer.byteLength(JSON.stringify(value)) > MAX_RECYCLE_STATE_BYTES) return null
+  if (jsonEncodedBytes(value, MAX_RECYCLE_STATE_BYTES) > MAX_RECYCLE_STATE_BYTES) return null
   if (!record(value.history) || typeof value.history.following !== "boolean") return null
   let anchor: HistoryViewport["anchor"] = null
   if (value.history.anchor !== null) {
