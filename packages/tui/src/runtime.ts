@@ -1,3 +1,4 @@
+import type { ClientDiagnostics } from "./client-diagnostics"
 import { CLIENT_COMMAND_EXECUTION } from "./protocol"
 import type { HistoryReader } from "./history/reader"
 import { chmod, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises"
@@ -84,6 +85,7 @@ export interface RuntimeEngineClient {
 }
 
 export interface CreateEngineRuntimeOptions {
+  readonly diagnostics?: ClientDiagnostics | undefined
   readonly environment?: EngineRuntimeEnvironment
   readonly files?: RuntimeFileSystem
   readonly fetch?: typeof fetch
@@ -830,6 +832,7 @@ export async function createEngineRuntimeFromEnvironment(
   const client =
     options.client ??
     new EngineHttpSseClient({
+      diagnostics: options.diagnostics,
       socketPath: config.socketPath,
       bootstrapToken: async () => {
         const tokenFile = nonEmpty(environment.ROTTWEILER_ENGINE_TOKEN_FILE)

@@ -1,3 +1,4 @@
+import type { ClientDiagnostics } from "../client-diagnostics"
 import validateCommandReply from "../../../../protocol/command-reply-validator.js"
 import { CLIENT_COMMAND_EXECUTION, ENGINE_EVENT_DELIVERY, MAX_COMMAND_REPLY_BYTES, PROTOCOL_VERSION } from "../protocol"
 import { boundedJson } from "./json"
@@ -21,6 +22,7 @@ import {
 } from "./types"
 
 export interface EngineTransportOptions {
+  readonly diagnostics?: ClientDiagnostics | undefined
   readonly socketPath: string
   readonly bootstrapToken: string | BootstrapTokenProvider
   readonly origin?: string
@@ -55,6 +57,7 @@ interface ActiveEventStream {
 }
 
 export class EngineHttpSseClient {
+  readonly #diagnostics: ClientDiagnostics | undefined
   readonly #socketPath: string
   readonly #bootstrapToken: BootstrapTokenProvider
   readonly #origin: string
@@ -77,6 +80,7 @@ export class EngineHttpSseClient {
     if (typeof options.bootstrapToken === "string" && options.bootstrapToken.length === 0) {
       throw new TypeError("engine bootstrap token must not be empty")
     }
+    this.#diagnostics = options.diagnostics
     this.#socketPath = options.socketPath
     this.#bootstrapToken =
       typeof options.bootstrapToken === "string"
@@ -123,22 +127,25 @@ export class EngineHttpSseClient {
     if (!contentType.toLowerCase().includes("application/json")) {
       return null
     }
-    const reply: unknown = await boundedJson(response, MAX_COMMAND_REPLY_BYTES)
-    if (!validateCommandReply(reply)) {
-      throw new EngineTransportError("engine returned an invalid command reply")
-    }
-    const expectedReply = CLIENT_COMMAND_EXECUTION[command.type] === "read" ? "read" : "command"
-    if (reply.type !== expectedReply) {
-      throw new EngineTransportError("engine reply class does not match the command")
-    }
-    if (reply.type === "read" && reply.events.some(event =>
-      ENGINE_EVENT_DELIVERY[event.type] !== "connection" || !("meta" in event) || event.meta.protocol_version !== PROTOCOL_VERSION
-      || !("client_id" in event.meta) || event.meta.client_id !== auth.clientId
-      || !("request_id" in event.meta) || event.meta.request_id !== command.meta.request_id
-      || ("session_id" in command && "session_id" in event && event.session_id !== command.session_id))) {
-      throw new EngineTransportError("engine read reply contains non-query events")
-    }
-    return reply
+    const reply: unknown = await boundedJson(response, MAX_COMMAND_REPLY_BYTES, this.#diagnostics)
+    const validatedAt = this.#diagnostics?.start()
+    try {
+      if (!validateCommandReply(reply)) {
+        throw new EngineTransportError("engine returned an invalid command reply")
+      }
+      const expectedReply = CLIENT_COMMAND_EXECUTION[command.type] === "read" ? "read" : "command"
+      if (reply.type !== expectedReply) {
+        throw new EngineTransportError("engine reply class does not match the command")
+      }
+      if (reply.type === "read" && reply.events.some(event =>
+        ENGINE_EVENT_DELIVERY[event.type] !== "connection" || !("meta" in event) || event.meta.protocol_version !== PROTOCOL_VERSION
+        || !("client_id" in event.meta) || event.meta.client_id !== auth.clientId
+        || !("request_id" in event.meta) || event.meta.request_id !== command.meta.request_id
+        || ("session_id" in command && "session_id" in event && event.session_id !== command.session_id))) {
+        throw new EngineTransportError("engine read reply contains non-query events")
+      }
+      return reply
+    } finally { if (validatedAt !== undefined) this.#diagnostics?.finish("reply_validation", validatedAt) }
   }
 
   async submitProviderApiKey(
@@ -275,7 +282,10 @@ export class EngineHttpSseClient {
           this.#sse,
           eventStreamController.signal,
         )) {
-          const value = normalizeWireEngineEvent(parseEventJson(frame.data))
+          const decodedAt = this.#diagnostics?.start()
+          let value: WireEngineEvent | null
+          try { value = normalizeWireEngineEvent(parseEventJson(frame.data)) }
+          finally { if (decodedAt !== undefined) this.#diagnostics?.finish("event_decode", decodedAt) }
           if (value === null) {
             throw new EngineProtocolError("engine event stream emitted an invalid event")
           }

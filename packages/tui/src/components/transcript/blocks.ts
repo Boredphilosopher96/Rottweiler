@@ -1,3 +1,4 @@
+import type { ClientDiagnostics } from "../../client-diagnostics"
 import { bindSelectableClick } from "../selectable-click"
 import type { HistoryAnchor } from "../../history/controller"
 import type { TranscriptContent } from "../../protocol"
@@ -48,6 +49,7 @@ import type {
 import type { RottweilerTheme } from "../../theme"
 
 export interface TranscriptRenderableOptions {
+  readonly diagnostics?: ClientDiagnostics | undefined
   readonly syntaxStyle: SyntaxStyle
   readonly treeSitterClient?: TreeSitterClient
   readonly onInteraction?: () => void

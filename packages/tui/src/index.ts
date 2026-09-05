@@ -26,6 +26,8 @@ function emitStartupMarker(markerVariable: string, epochVariable?: string): void
 }
 
 async function main(): Promise<void> {
+  const diagnostics = process.env.ROTTWEILER_CLIENT_TIMINGS === "1"
+    ? new (await import("./client-diagnostics")).ClientDiagnostics() : undefined
   const expectedSupervisorPid = Number.parseInt(
     process.env.ROTTWEILER_SUPERVISOR_PID ?? "",
     10,
@@ -67,6 +69,7 @@ async function main(): Promise<void> {
     // so terminal navigation can never masquerade as the external-editor key.
     useKittyKeyboard: enhancedKeyboardOptions,
     onDestroy: () => {
+      if (diagnostics !== undefined) process.stderr.write(`[rw-client-timings] ${JSON.stringify(diagnostics.snapshot())}\n`)
       if (rssRecycleTimer !== undefined) clearInterval(rssRecycleTimer)
       if (supervisorDeathTimer !== undefined) clearInterval(supervisorDeathTimer)
       // Closing the renderer must release the SSE/runtime handles so a normal
@@ -137,6 +140,7 @@ async function main(): Promise<void> {
   const { reduceRottweilerState, transportDisconnected } = stateModule
 
   const runtimeBootstrap: Promise<RuntimeBootstrap> = createEngineRuntimeFromEnvironment({
+    diagnostics,
     onDriverReady: () => {
       const marker = process.env.ROTTWEILER_DRIVER_READY_MARKER
       if (marker !== undefined && marker.length > 0) {
@@ -199,6 +203,7 @@ async function main(): Promise<void> {
   })
   const terminalHandover = createTerminalHandover(renderer)
   const app = appModule.createRottweilerApp(renderer, {
+    diagnostics,
     ...(configuredSession === undefined || configuredSession.length === 0
       ? {}
       : { sessionId: configuredSession }),

@@ -1,9 +1,11 @@
+import type { ClientDiagnostics } from "./client-diagnostics"
 export interface PresentationFrameScheduler {
   schedule(callback: () => void, delayMs: number): unknown
   cancel(handle: unknown): void
 }
 
 interface PresentationControllerOptions<T> {
+  readonly diagnostics?: ClientDiagnostics | undefined
   readonly scheduler: PresentationFrameScheduler | undefined
   readonly destroyed: () => boolean
   readonly present: (pending: readonly T[], dirty: boolean) => void
@@ -13,6 +15,7 @@ interface PresentationControllerOptions<T> {
 export class PresentationController<T> {
   readonly #options: PresentationControllerOptions<T>
   #queue: T[] = []
+  #queuedAt: number | undefined
   #dirty = false
   #frameHandle: unknown | null = null
   #presenting = false
@@ -25,6 +28,7 @@ export class PresentationController<T> {
   }
 
   enqueue(item: T, deferToFrame: boolean): void {
+    this.#queuedAt ??= this.#options.diagnostics?.start()
     if (this.#suspended && this.#coalesceWhileSuspended) {
       this.#queue = [item]
       return
@@ -36,6 +40,7 @@ export class PresentationController<T> {
   }
 
   markDirty(deferToFrame: boolean): void {
+    this.#queuedAt ??= this.#options.diagnostics?.start()
     this.#dirty = true
     if (this.#suspended) return
     if (deferToFrame) this.#scheduleFrame()
@@ -50,6 +55,11 @@ export class PresentationController<T> {
     if (this.#suspended) return
     this.#cancelFrame()
     if (this.#options.destroyed() || (this.#queue.length === 0 && !this.#dirty)) return
+    const startedAt = this.#options.diagnostics?.start()
+    if (startedAt !== undefined && this.#queuedAt !== undefined) {
+      this.#options.diagnostics?.record("presentation_queue_age", startedAt - this.#queuedAt)
+    }
+    this.#queuedAt = undefined
     const pending = this.#queue
     this.#queue = []
     const dirty = this.#dirty
@@ -59,12 +69,14 @@ export class PresentationController<T> {
       this.#options.present(pending, dirty)
     } finally {
       this.#presenting = false
+      if (startedAt !== undefined) this.#options.diagnostics?.finish("presentation", startedAt, pending.length)
     }
     this.#lastFlushAt = performance.now()
     for (const item of pending) this.#options.afterPresent(item)
   }
 
   destroy(): void {
+    this.#queuedAt = undefined
     this.#cancelFrame()
     this.#queue = []
     this.#dirty = false

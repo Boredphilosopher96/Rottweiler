@@ -1,3 +1,4 @@
+import type { ClientDiagnostics } from "./client-diagnostics"
 import { DocumentController } from "./history/document"
 import { HistoryPresentation } from "./history/presentation"
 import type { HistoryReader } from "./history/reader"
@@ -181,6 +182,7 @@ import {
 } from "./ui-presentation"
 
 export interface RottweilerAppOptions {
+  readonly diagnostics?: ClientDiagnostics | undefined
   readonly historyReader: HistoryReader
   readonly initialEvent?: EngineEvent
   readonly initialState?: RottweilerState
@@ -720,7 +722,7 @@ export class RottweilerApp extends BoxRenderable {
     }
     this.#history = new HistoryPresentation(options.historyReader, snapshot => {
       if (!this.#destroyed && this.transcript !== undefined) this.transcript.setHistory(snapshot)
-    })
+    }, options.diagnostics)
     this.#document = new DocumentController(options.historyReader, this.#history.controller.cache, snapshot => {
         if (!this.#destroyed && this.outputViewer !== undefined) {
           if (snapshot.open) this.outputViewer.showDocument(snapshot)
@@ -776,6 +778,7 @@ export class RottweilerApp extends BoxRenderable {
     }
     this.#presentation = new PresentationController({
       scheduler: options.presentationFrame,
+      diagnostics: options.diagnostics,
       destroyed: () => this.#destroyed,
       present: (pending, subagentDirty) => {
         const latest = pending.at(-1)
@@ -898,6 +901,7 @@ export class RottweilerApp extends BoxRenderable {
       gap: 0,
     })
     this.transcript = new TranscriptRenderable(this.ctx, theme, {
+      diagnostics: this.#options.diagnostics,
       syntaxStyle: this.#syntaxStyle,
       ...(this.#treeSitterClient === undefined
         ? {}
@@ -1307,6 +1311,7 @@ export class RottweilerApp extends BoxRenderable {
       event.type === "session_title_updated" &&
       isRecord(event.meta) &&
       event.meta.session_id !== this.#sessionId
+    const reducedAt = this.#options.diagnostics?.start()
     let next =
       crossSessionTitle
         ? projectSessionTitleUpdate(
@@ -1314,6 +1319,7 @@ export class RottweilerApp extends BoxRenderable {
             event as Extract<EngineEvent, { type: "session_title_updated" }>,
           )
         : reduceRottweilerState(previous, engineEvent(event), this.#sessionId)
+    if (reducedAt !== undefined) this.#options.diagnostics?.finish("reducer", reducedAt)
     // Advance protocol state immediately so reconnect cursors and durable handoff
     // observe every accepted event even when its presentation waits for a frame.
     this.#state = next
@@ -5193,7 +5199,9 @@ export class RottweilerApp extends BoxRenderable {
     const descriptor = this.#subagentDescriptor(subagentId)
     if (descriptor === undefined) return
     const previous = this.#activeChildState ?? initialSubagentState(this.#state, descriptor)
+    const reducedAt = this.#options.diagnostics?.start()
     const next = boundSubagentState(reduceRottweilerState(previous, engineEvent(event)))
+    if (reducedAt !== undefined) this.#options.diagnostics?.finish("reducer", reducedAt)
     this.#activeChildState = next
     this.#subagentErrorBaseline = this.#state.errors.at(-1)
     if (event.type === "turn_finished") this.#setSubagentActivity(subagentId, "idle")

@@ -182,6 +182,7 @@ export class TranscriptRenderable extends BoxRenderable {
       contentOptions: { flexDirection: "column", width: "100%" },
       verticalScrollbarOptions: { visible: false, showArrows: false },
     })
+    this.scroller.diagnostics = options.diagnostics
     this.scroller.afterLayout = () => {
       if (this.#restoreAnchor()) return
       this.#settledAnchor = this.#captureAnchor()
@@ -439,55 +440,58 @@ export class TranscriptRenderable extends BoxRenderable {
   }
 
   setHistory(history: HistorySnapshot): void {
-    const sessionChanged = this.#history?.sessionId !== history.sessionId
-    if (sessionChanged) {
-      for (const card of this.mountedCards.values()) {
-        this.scroller.remove(card)
-        card.destroyRecursively()
-      }
-      this.mountedCards.clear()
-      this.#selectedBlockId = null
-      this.#toolExpansion.clear()
-      this.#reasoningExpansion.clear()
-      this.#requestedAnchor = null
-      this.#pendingAnchor = null
-      this.#settledAnchor = null
-    }
-    const selected = history.selection !== null && history.selection !== this.#history?.selection
-    const changed = this.#history?.page !== history.page || selected
-    const anchor = this.#requestedAnchor ?? this.#captureAnchor() ?? history.anchor
-    this.#history = history
-    if (changed) {
-      this.#finalHistoryInvocations.clear()
-      for (const item of history.page?.items ?? []) {
-        if (item.content.type === "tool" && item.content.status.type === "finished") {
-          this.#finalHistoryInvocations.add(item.content.invocation_id)
+    const startedAt = this.#historyOptions.diagnostics?.start()
+    try {
+      const sessionChanged = this.#history?.sessionId !== history.sessionId
+      if (sessionChanged) {
+        for (const card of this.mountedCards.values()) {
+          this.scroller.remove(card)
+          card.destroyRecursively()
         }
+        this.mountedCards.clear()
+        this.#selectedBlockId = null
+        this.#toolExpansion.clear()
+        this.#reasoningExpansion.clear()
+        this.#requestedAnchor = null
+        this.#pendingAnchor = null
+        this.#settledAnchor = null
       }
-      const items = history.page?.items ?? []
-      this.#requestedAnchor = null
-      const previousIndex = anchor === null ? -1 : items.findIndex(item => item.id === anchor.id)
-      const selectionIndex = history.selection === null ? -1 : items.findIndex(item => BigInt(item.ordinal) === history.selection?.ordinal)
-      const replacement = history.page?.anchor.type === "replaced" ? history.page.anchor.replacement : null
-      const replacementIndex = replacement === null ? -1 : items.findIndex(item => item.id === replacement)
-      const target = selectionIndex >= 0 ? selectionIndex : previousIndex >= 0 ? previousIndex : replacementIndex
-      this.#windowStart = history.following ? Math.max(0, items.length - MAX_MOUNTED_TRANSCRIPT_ENTRIES)
-        : Math.max(0, Math.min(items.length - MAX_MOUNTED_TRANSCRIPT_ENTRIES, target < 0 ? 0 : target - 4))
-      const selectedItem = items[selectionIndex]
-      this.#pendingAnchor = history.following ? null : selectedItem !== undefined
-        ? { id: selectedItem.id, offset: 0 } : previousIndex >= 0 ? anchor
-          : replacement === null ? null : { id: replacement, offset: 0 }
-      this.#pendingBottom = history.following
-      this.#reconcileHistory()
-      if (history.following) this.scroller.scrollTo(this.scroller.scrollHeight)
-    }
-    this.#syncOrdinalBar()
-    if (this.#state !== null) {
-      this.#updateEmptyState(this.#state)
-      this.#updateTail(this.#state)
-      this.#syncBlockSelection()
-    }
-    this.requestRender()
+      const selected = history.selection !== null && history.selection !== this.#history?.selection
+      const changed = this.#history?.page !== history.page || selected
+      const anchor = this.#requestedAnchor ?? this.#captureAnchor() ?? history.anchor
+      this.#history = history
+      if (changed) {
+        this.#finalHistoryInvocations.clear()
+        for (const item of history.page?.items ?? []) {
+          if (item.content.type === "tool" && item.content.status.type === "finished") {
+            this.#finalHistoryInvocations.add(item.content.invocation_id)
+          }
+        }
+        const items = history.page?.items ?? []
+        this.#requestedAnchor = null
+        const previousIndex = anchor === null ? -1 : items.findIndex(item => item.id === anchor.id)
+        const selectionIndex = history.selection === null ? -1 : items.findIndex(item => BigInt(item.ordinal) === history.selection?.ordinal)
+        const replacement = history.page?.anchor.type === "replaced" ? history.page.anchor.replacement : null
+        const replacementIndex = replacement === null ? -1 : items.findIndex(item => item.id === replacement)
+        const target = selectionIndex >= 0 ? selectionIndex : previousIndex >= 0 ? previousIndex : replacementIndex
+        this.#windowStart = history.following ? Math.max(0, items.length - MAX_MOUNTED_TRANSCRIPT_ENTRIES)
+          : Math.max(0, Math.min(items.length - MAX_MOUNTED_TRANSCRIPT_ENTRIES, target < 0 ? 0 : target - 4))
+        const selectedItem = items[selectionIndex]
+        this.#pendingAnchor = history.following ? null : selectedItem !== undefined
+          ? { id: selectedItem.id, offset: 0 } : previousIndex >= 0 ? anchor
+            : replacement === null ? null : { id: replacement, offset: 0 }
+        this.#pendingBottom = history.following
+        this.#reconcileHistory()
+        if (history.following) this.scroller.scrollTo(this.scroller.scrollHeight)
+      }
+      this.#syncOrdinalBar()
+      if (this.#state !== null) {
+        this.#updateEmptyState(this.#state)
+        this.#updateTail(this.#state)
+        this.#syncBlockSelection()
+      }
+      this.requestRender()
+    } finally { if (startedAt !== undefined) this.#historyOptions.diagnostics?.finish("history_update", startedAt) }
   }
 
   update(state: RottweilerState, agentName = "Rottweiler"): void {

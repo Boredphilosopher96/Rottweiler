@@ -1,5 +1,6 @@
+import type { ClientDiagnostics } from "../client-diagnostics"
 /** A response body owns one amortized buffer; fragmented input cannot grow a chunk array. */
-export async function boundedJson(response: Response, maxBytes: number): Promise<unknown> {
+export async function boundedJson(response: Response, maxBytes: number, diagnostics?: ClientDiagnostics): Promise<unknown> {
   const declared = response.headers.get("content-length")
   if (declared !== null && Number(declared) > maxBytes) throw new Error("reply exceeds its byte limit")
   if (response.body === null) throw new Error("reply has no body")
@@ -20,7 +21,12 @@ export async function boundedJson(response: Response, maxBytes: number): Promise
       buffer.set(result.value, length)
       length = needed
     }
-    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, length)))
+    const startedAt = diagnostics?.start()
+    try {
+      return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, length)))
+    } finally {
+      if (startedAt !== undefined) diagnostics?.finish("reply_decode", startedAt, length)
+    }
   } catch (error) {
     await reader.cancel(error).catch(() => undefined)
     throw error

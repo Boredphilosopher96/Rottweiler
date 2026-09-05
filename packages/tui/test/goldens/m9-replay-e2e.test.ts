@@ -1,3 +1,4 @@
+import { ClientDiagnostics } from "../../src/client-diagnostics"
 import { expect, test } from "bun:test"
 import { createTestRenderer, MockTreeSitterClient } from "@opentui/core/testing"
 import { createRottweilerApp } from "../../src/app"
@@ -15,6 +16,7 @@ test("authenticated observer reads semantic pages without replaying lifetime eve
     meta: { protocol_version: PROTOCOL_VERSION, client_id: "minted-client", request_id: "history-ready", emitted_at: "2026-01-01T00:00:10Z" },
     session_id: SESSION_ID, through_sequence: "8",
   } satisfies EngineEvent
+  const diagnostics = new ClientDiagnostics()
   const source = historyReaderFor([
     conversationItem(2, "user", "Inspect the persisted project plan."),
     toolItem(4, "read", '{"path":"PROJECT.md"}', "The canonical project plan."),
@@ -36,9 +38,9 @@ test("authenticated observer reads semantic pages without replaying lifetime eve
   let nextRequest = 0
   const runtime = new TuiEngineRuntime({ socketPath: engine.socketPath, bootstrapToken: engine.bootstrapToken,
     sessionId: SESSION_ID, lastSeenSequence: null, lastSeenFile: null, replayMode: true,
-  }, new EngineHttpSseClient({ socketPath: engine.socketPath, bootstrapToken: engine.bootstrapToken }), undefined,
+  }, new EngineHttpSseClient({ socketPath: engine.socketPath, bootstrapToken: engine.bootstrapToken, diagnostics }), undefined,
   () => `m9-runtime-${nextRequest++}`)
-  const app = createRottweilerApp(setup.renderer, { historyReader: runtime.historyReader,
+  const app = createRottweilerApp(setup.renderer, { historyReader: runtime.historyReader, diagnostics,
     sessionId: SESSION_ID, replaySessionId: SESSION_ID, treeSitterClient: treeSitter })
   setup.renderer.root.add(app)
   runtime.bind(app)
@@ -62,6 +64,11 @@ test("authenticated observer reads semantic pages without replaying lifetime eve
     app.transcript.toggleSelectedBlock()
     await waitForHistory(setup, () => !treeSitter.isHighlighting())
     expect(setup.captureCharFrame()).toContain("The canonical project plan.")
+    const stages = diagnostics.snapshot().stages
+    for (const stage of ["event_decode", "reply_decode", "reply_validation", "reducer", "presentation", "history_admission", "history_update", "history_layout"] as const) {
+      expect(stages.find(value => value.stage === stage)?.count).toBeGreaterThan(0)
+    }
+    expect(JSON.stringify(stages)).not.toContain("PROJECT.md")
   } finally {
     await runtime.stop()
     await running

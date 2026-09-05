@@ -1,3 +1,4 @@
+import type { ClientDiagnostics } from "../client-diagnostics"
 import { HistoryController, type HistorySnapshot } from "./controller"
 import type { HistoryReader } from "./reader"
 
@@ -5,22 +6,26 @@ import type { HistoryReader } from "./reader"
 export class HistoryPresentation {
   readonly controller: HistoryController
   readonly #changed: (snapshot: HistorySnapshot) => void
+  readonly #diagnostics: ClientDiagnostics | undefined
+  #queuedAt: number | undefined
   #dirty = false
   #timer: ReturnType<typeof setTimeout> | null = null
   #disposed = false
   #nextReadAt = 0
 
-  constructor(reader: HistoryReader, changed: (snapshot: HistorySnapshot) => void) {
+  constructor(reader: HistoryReader, changed: (snapshot: HistorySnapshot) => void, diagnostics?: ClientDiagnostics) {
+    this.#diagnostics = diagnostics
     this.#changed = changed
     this.controller = new HistoryController(reader, () => {
       this.#changed(this.controller.snapshot)
       this.#schedule()
-    })
+    }, undefined, diagnostics)
   }
 
   present(sessionId: string): void {
     if (this.#disposed || this.controller.snapshot.sessionId === sessionId) return
     this.#dirty = false
+    this.#queuedAt = undefined
     this.#clearTimer()
     this.#nextReadAt = performance.now() + 100
     void this.controller.open(sessionId)
@@ -28,6 +33,7 @@ export class HistoryPresentation {
 
   invalidate(sessionId: string): void {
     if (this.#disposed || this.controller.snapshot.sessionId !== sessionId) return
+    this.#queuedAt ??= this.#diagnostics?.start()
     this.#dirty = true
     this.#schedule()
   }
@@ -42,6 +48,8 @@ export class HistoryPresentation {
     if (this.#disposed || !this.#dirty || this.#timer !== null || this.controller.snapshot.loading) return
     this.#timer = setTimeout(() => {
       this.#timer = null
+      if (this.#queuedAt !== undefined) this.#diagnostics?.finish("history_queue_age", this.#queuedAt)
+      this.#queuedAt = undefined
       this.#dirty = false
       this.#nextReadAt = performance.now() + 100
       void this.controller.refresh()

@@ -129,7 +129,7 @@ describe("retained transcript layout", () => {
       0,
       app.transcript.scroller.scrollHeight - app.transcript.scroller.viewport.height,
     )
-    for (let attempt = 0; attempt < 500 && priorBottomTop < bottom(); attempt += 1) {
+    for (let attempt = 0; attempt < 500 && (priorBottomTop < bottom() || !renderer.captureCharFrame().includes("CARD_23")); attempt += 1) {
       await renderer.mockMouse.scroll(
         app.transcript.scroller.x + 2,
         app.transcript.scroller.y + 2,

@@ -1,3 +1,4 @@
+import type { ClientDiagnostics } from "../client-diagnostics"
 import type { TranscriptContentPage, TranscriptItemId, TranscriptPage, TranscriptPosition, TranscriptView } from "../protocol"
 import { TRANSCRIPT_PROJECTION_VERSION } from "../protocol"
 import { parseU64 } from "../transport/types"
@@ -55,7 +56,7 @@ export class HistoryController {
   #disposed = false
   #revision = 0
 
-  constructor(reader: HistoryReader, changed: () => void, cache = new ClientCache<HistoryCacheValue>()) {
+  constructor(reader: HistoryReader, changed: () => void, cache = new ClientCache<HistoryCacheValue>(), readonly diagnostics?: ClientDiagnostics) {
     this.#reader = reader
     this.#changed = changed
     this.cache = cache
@@ -131,6 +132,7 @@ export class HistoryController {
           continue
         }
         const page = result.page
+        const admittedAt = this.diagnostics?.start()
         validatePage(page, sessionId)
         if (session.view?.through != null && (page.view.through == null
           || requiredU64(page.view.through) < requiredU64(session.view.through))) {
@@ -155,6 +157,7 @@ export class HistoryController {
           this.cache.remove(oldest)
           session.pages.delete(oldest)
         }
+        if (admittedAt !== undefined) this.diagnostics?.finish("history_admission", admittedAt, page.items.length)
         break
       }
     } catch (error) {
