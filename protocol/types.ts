@@ -13,6 +13,7 @@ export const MAX_TOTAL_ATTACHMENT_BYTES = 10485760 as const;
 export const MAX_MCP_SERVER_ID_BYTES = 96 as const;
 export const MAX_COMMAND_REPLY_BYTES = 8388608 as const;
 export const MAX_CLIENT_READS = 2 as const;
+export const MAX_SESSION_READ_ANCESTORS = 8 as const;
 export const MAX_CLIENT_CONTROLS = 8 as const;
 export const MAX_UI_CONTRIBUTIONS = 128 as const;
 export const MAX_UI_DESCRIPTOR_BYTES = 262144 as const;
@@ -391,7 +392,7 @@ project_rules: Array<PermissionRuleDescriptor>,
  */
 session_rules: Array<PermissionRuleDescriptor>, approvals: Array<PermissionApprovalDescriptor>, truncated: boolean, };
 
-export type ClientCommand = { "type": "get_ui_catalog", meta: CommandMeta, session_id: SessionId, } | { "type": "get_ui_panels", meta: CommandMeta, session_id: SessionId, } | { "type": "invoke_ui_action", meta: CommandMeta, session_id: SessionId, request: UiActionRequest, } | { "type": "get_todos", meta: CommandMeta, session_id: SessionId, } | { "type": "read_transcript", meta: CommandMeta, session_id: SessionId, read: TranscriptRead, } | { "type": "read_transcript_content", meta: CommandMeta, session_id: SessionId, read: TranscriptContentRead, } | { "type": "create_session", meta: CommandMeta, cwd: string, model?: ModelAlias | null, } | { "type": "resume_session", meta: CommandMeta, session_id: SessionId, last_seen_sequence?: SequenceId | null, role: ClientRole, } | { "type": "attach_session", meta: CommandMeta, session_id: SessionId, last_seen_sequence?: SequenceId | null, role: ClientRole, } | { "type": "send_message", meta: CommandMeta, session_id: SessionId, content: string, attachments: Array<Attachment>, } | { "type": "interrupt", meta: CommandMeta, session_id: SessionId, } | { "type": "approve_tool", meta: CommandMeta, session_id: SessionId, tool_call_id: ToolCallId, invocation_id: ToolInvocationId, decision: ApprovalDecision,
+export type ClientCommand = { "type": "get_ui_catalog", meta: CommandMeta, session_id: SessionId, } | { "type": "get_ui_panels", meta: CommandMeta, session_id: SessionId, } | { "type": "invoke_ui_action", meta: CommandMeta, session_id: SessionId, request: UiActionRequest, } | { "type": "get_todos", meta: CommandMeta, session_id: SessionId, scope: SessionReadScope, } | { "type": "read_transcript", meta: CommandMeta, session_id: SessionId, scope: SessionReadScope, read: TranscriptRead, } | { "type": "read_transcript_content", meta: CommandMeta, session_id: SessionId, scope: SessionReadScope, read: TranscriptContentRead, } | { "type": "create_session", meta: CommandMeta, cwd: string, model?: ModelAlias | null, } | { "type": "resume_session", meta: CommandMeta, session_id: SessionId, last_seen_sequence?: SequenceId | null, role: ClientRole, } | { "type": "attach_session", meta: CommandMeta, session_id: SessionId, last_seen_sequence?: SequenceId | null, role: ClientRole, } | { "type": "send_message", meta: CommandMeta, session_id: SessionId, content: string, attachments: Array<Attachment>, } | { "type": "interrupt", meta: CommandMeta, session_id: SessionId, } | { "type": "approve_tool", meta: CommandMeta, session_id: SessionId, tool_call_id: ToolCallId, invocation_id: ToolInvocationId, decision: ApprovalDecision,
 /**
  * Required when the pending approval displayed a unified diff. The
  * actor rejects missing or stale bindings without consuming the ask.
@@ -462,6 +463,10 @@ provider?: string | null,
 thinking?: ThinkingLevel, } | { "type": "model_context_cleared", meta: EventMeta, strategy: ModelContextTransfer, } | { "type": "context_item_pinned", meta: EventMeta, item_id: ContextItemId, effective_after_agent_turn: string, } | { "type": "context_item_evicted", meta: EventMeta, item_id: ContextItemId, effective_after_agent_turn: string, } | { "type": "user_shell_state_changed", meta: EventMeta, shell_id: ShellId, command?: string | null, active: boolean, status?: number | null, captured_output?: string | null, } | { "type": "hook_failed", meta: EventMeta, event: string, hook_id: string, fail_closed: boolean, message: string, } | { "type": "command_finished", meta: EventMeta, name: string, message: string, unrestorable_paths: Array<UnrestorablePath>, } | { "type": "guard_triggered", meta: EventMeta, turn_id: TurnId, guard: string, message: string, } | { "type": "error", meta: EventMeta, error: EngineError, };
 
 export type CommandReply = { "type": "command", outcome: CommandOutcome, } | { "type": "read", outcome: CommandOutcome, events: Array<EngineEvent>, };
+
+export type SessionReadAncestor = { subagent_id: SubagentId, session_id: SessionId, source_sequence: SequenceId, };
+
+export type SessionReadScope = { "type": "session", } | { "type": "descendant", root_session_id: SessionId, ancestry: Array<SessionReadAncestor>, };
 
 export type TranscriptOrdinal = string;
 

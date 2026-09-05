@@ -329,7 +329,10 @@ export const contractFixture = {
         "client_id": "client-fixture",
         "request_id": "request-fixture"
       },
-      "session_id": "session-fixture"
+      "session_id": "session-fixture",
+      "scope": {
+        "type": "session"
+      }
     },
     {
       "type": "get_context",

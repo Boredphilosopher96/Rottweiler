@@ -79,6 +79,9 @@
         "session_id": {
           "$ref": "#/$defs/SessionId"
         },
+        "scope": {
+          "$ref": "#/$defs/SessionReadScope"
+        },
         "type": {
           "type": "string",
           "const": "get_todos"
@@ -88,7 +91,8 @@
       "required": [
         "type",
         "meta",
-        "session_id"
+        "session_id",
+        "scope"
       ]
     },
     {
@@ -99,6 +103,9 @@
         },
         "session_id": {
           "$ref": "#/$defs/SessionId"
+        },
+        "scope": {
+          "$ref": "#/$defs/SessionReadScope"
         },
         "read": {
           "$ref": "#/$defs/TranscriptRead"
@@ -113,6 +120,7 @@
         "type",
         "meta",
         "session_id",
+        "scope",
         "read"
       ]
     },
@@ -124,6 +132,9 @@
         },
         "session_id": {
           "$ref": "#/$defs/SessionId"
+        },
+        "scope": {
+          "$ref": "#/$defs/SessionReadScope"
         },
         "read": {
           "$ref": "#/$defs/TranscriptContentRead"
@@ -138,6 +149,7 @@
         "type",
         "meta",
         "session_id",
+        "scope",
         "read"
       ]
     },
@@ -1930,6 +1942,80 @@
       "description": "Host-owned identity of one tool execution, independent of provider call IDs.",
       "type": "string"
     },
+    "SessionReadScope": {
+      "description": "Direct session authority or an explicit path from an independently authorized root.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "session"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "root_session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "ancestry": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SessionReadAncestor"
+              },
+              "minItems": 1,
+              "maxItems": 8
+            },
+            "type": {
+              "type": "string",
+              "const": "descendant"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "root_session_id",
+            "ancestry"
+          ]
+        }
+      ]
+    },
+    "SessionReadAncestor": {
+      "description": "A hop is bound to its parent's canonical spawn source, never just a child name.",
+      "type": "object",
+      "properties": {
+        "subagent_id": {
+          "$ref": "#/$defs/SubagentId",
+          "x-rw-max-utf8-bytes": 128
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "source_sequence": {
+          "$ref": "#/$defs/SequenceId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "subagent_id",
+        "session_id",
+        "source_sequence"
+      ]
+    },
+    "SubagentId": {
+      "description": "Stable identifier of a child agent session.",
+      "type": "string"
+    },
+    "SequenceId": {
+      "description": "Monotonic per-session sequence encoded as a decimal string on the wire.",
+      "type": "string"
+    },
     "TranscriptRead": {
       "type": "object",
       "properties": {
@@ -2011,10 +2097,6 @@
     },
     "TranscriptGeneration": {
       "description": "Current semantic ordering generation, changed by rewind.",
-      "type": "string"
-    },
-    "SequenceId": {
-      "description": "Monotonic per-session sequence encoded as a decimal string on the wire.",
       "type": "string"
     },
     "TranscriptPosition": {
@@ -2632,10 +2714,6 @@
     },
     "ProviderAuthAttemptId": {
       "description": "Connection-scoped identifier of one provider authentication attempt.",
-      "type": "string"
-    },
-    "SubagentId": {
-      "description": "Stable identifier of a child agent session.",
       "type": "string"
     }
   }
