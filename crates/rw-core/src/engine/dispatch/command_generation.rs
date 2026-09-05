@@ -208,7 +208,9 @@ async fn apply_workspace(
     mut context: DispatchContext<'_>,
 ) -> Result<(), AgentLoopError> {
     let replacement = ToolContext::from_workspace_roots(&generation.roots)
-        .map_err(|_error| AgentLoopError::ToolContext("workspace tool context could not prepare".into()))?
+        .map_err(|_error| {
+            AgentLoopError::ToolContext("workspace tool context could not prepare".into())
+        })?
         .with_session_id(context.config.session_id.clone())
         .with_mcp_tool_policy(context.config.tools.mcp_tool_policy().clone());
     let result = commit_workspace(generation, &mut context).await;
