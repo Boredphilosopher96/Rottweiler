@@ -124,3 +124,71 @@ fn separately_created_fixture_unique_index_is_rejected() {
         })
     ));
 }
+
+#[test]
+fn database_initializer_process() {
+    use std::io::Read as _;
+    let Some(root) = std::env::var_os("RW_TEST_SQLITE_INITIALIZER_ROOT") else {
+        return;
+    };
+    let root = std::path::PathBuf::from(root);
+    std::io::stdin().read_exact(&mut [0]).expect("start signal");
+    let index = SessionIndex::open(&root).expect("concurrent index open");
+    let ledger = AccountingLedger::open(&root).expect("concurrent accounting open");
+    let mut entry = charge();
+    entry.session_id = std::env::var("RW_TEST_SQLITE_INITIALIZER_ID").expect("identity");
+    ledger.record(&entry).expect("independent charge");
+    assert!(index.list(10).expect("index read").is_empty());
+}
+
+#[test]
+fn independent_processes_initialize_search_and_accounting_atomically() {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+    let root = tempdir().expect("root");
+    let executable = std::env::current_exe().expect("test executable");
+    let mut children = (0..8)
+        .map(|id| {
+            Command::new(&executable)
+                .args([
+                    "--exact",
+                    "session::sqlite_schema_tests::database_initializer_process",
+                    "--nocapture",
+                ])
+                .env("RW_TEST_SQLITE_INITIALIZER_ROOT", root.path())
+                .env("RW_TEST_SQLITE_INITIALIZER_ID", format!("process-{id}"))
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn database initializer")
+        })
+        .collect::<Vec<_>>();
+    for child in &mut children {
+        child
+            .stdin
+            .take()
+            .expect("signal pipe")
+            .write_all(&[1])
+            .expect("start child");
+    }
+    // Reap every child before asserting, including when an initializer fails.
+    let results = children
+        .into_iter()
+        .map(|child| child.wait_with_output().expect("reap child"))
+        .collect::<Vec<_>>();
+    for result in results {
+        assert!(
+            result.status.success(),
+            "initializer failed: {}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    let entries = AccountingLedger::open(root.path())
+        .expect("ledger")
+        .entries_bounded(None, 4096)
+        .expect("charges");
+    assert_eq!(entries.len(), 8);
+    assert!(entries.iter().all(|entry| entry.cost == charge().cost));
+}

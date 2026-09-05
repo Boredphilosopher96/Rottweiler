@@ -121,7 +121,7 @@ impl SessionIndex {
         ensure_accounting_schema(&connection)?;
         let transaction = connection.transaction()?;
         transaction.execute_batch("DROP TRIGGER IF EXISTS search_documents_ai; DROP TRIGGER IF EXISTS search_documents_ad; DROP TRIGGER IF EXISTS search_documents_au; DROP TABLE IF EXISTS sessions_fts; DROP TABLE IF EXISTS search_documents; DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS search_invocations;")?;
-        sqlite_schema::ensure_sessions_schema(&transaction)?;
+        sqlite_schema::create_sessions_schema(&transaction)?;
         transaction.commit()?;
         Ok(index)
     }

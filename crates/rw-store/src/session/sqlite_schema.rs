@@ -1,6 +1,6 @@
 //! Schema admission for the shared `SQLite` authority and derived tables.
 use super::SessionStoreError;
-use rusqlite::{Connection, OptionalExtension as _};
+use rusqlite::{Connection, OptionalExtension as _, Transaction, TransactionBehavior};
 use std::path::Path;
 
 pub(super) const ACCOUNTING_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS turn_accounting(
@@ -168,22 +168,38 @@ fn normalized_schema(schema: &str) -> String {
 
 pub(super) fn configure_connection(connection: &Connection) -> Result<(), SessionStoreError> {
     connection.busy_timeout(std::time::Duration::from_secs(5))?;
-    connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
+    // WAL admission upgrades SQLite's own lock. Competing first-open connections
+    // can make that upgrade return BUSY without invoking its busy handler. Only
+    // retry this idempotent mode admission, before any schema or accounting work.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match connection.query_row("PRAGMA journal_mode=WAL", [], |row| row.get::<_, String>(0)) {
+            Ok(mode) if mode == "wal" => break,
+            Ok(_) => {
+                return Err(SessionStoreError::UnsupportedSqliteSchema {
+                    table: "journal_mode",
+                });
+            }
+            Err(error)
+                if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    connection.execute_batch("PRAGMA synchronous=FULL;")?;
     Ok(())
 }
 pub(super) fn ensure_accounting_schema(connection: &Connection) -> Result<(), SessionStoreError> {
-    validate_accounting(connection)?;
-    connection.execute_batch("SAVEPOINT rw_accounting_schema")?;
-    match create_accounting_schema(connection) {
-        Ok(()) => connection
-            .execute_batch("RELEASE rw_accounting_schema")
-            .map_err(SessionStoreError::from),
-        Err(error) => {
-            connection
-                .execute_batch("ROLLBACK TO rw_accounting_schema; RELEASE rw_accounting_schema")?;
-            Err(error)
-        }
-    }
+    // Acquire the writer before reading schema state: a deferred read cannot
+    // safely upgrade after another initializer commits its schema or totals.
+    let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
+    validate_accounting(&transaction)?;
+    create_accounting_schema(&transaction)?;
+    transaction.commit()?;
+    Ok(())
 }
 fn create_accounting_schema(connection: &Connection) -> Result<(), SessionStoreError> {
     connection.execute_batch(ACCOUNTING_SCHEMA)?;
@@ -204,27 +220,25 @@ fn create_accounting_schema(connection: &Connection) -> Result<(), SessionStoreE
     Ok(())
 }
 pub(super) fn ensure_sessions_schema(connection: &Connection) -> Result<(), SessionStoreError> {
-    validate_sessions(connection)?;
-    connection.execute_batch("SAVEPOINT rw_search_schema")?;
-    let result = (|| {
-        connection.execute_batch(SESSIONS_SCHEMA)?;
-        connection.execute_batch(DOCUMENTS_SCHEMA)?;
-        connection.execute_batch(INVOCATIONS_SCHEMA)?;
-        connection.execute_batch(FTS_SCHEMA)?;
-        for (_, _, schema) in SEARCH_OBJECTS {
-            connection.execute_batch(schema)?;
-        }
-        Ok::<(), SessionStoreError>(())
-    })();
-    match result {
-        Ok(()) => connection
-            .execute_batch("RELEASE rw_search_schema")
-            .map_err(Into::into),
-        Err(error) => {
-            connection.execute_batch("ROLLBACK TO rw_search_schema; RELEASE rw_search_schema")?;
-            Err(error)
-        }
+    let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
+    validate_sessions(&transaction)?;
+    create_sessions_schema(&transaction)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// The caller owns a write transaction, including any removal of derived tables.
+pub(super) fn create_sessions_schema(
+    transaction: &Transaction<'_>,
+) -> Result<(), SessionStoreError> {
+    transaction.execute_batch(SESSIONS_SCHEMA)?;
+    transaction.execute_batch(DOCUMENTS_SCHEMA)?;
+    transaction.execute_batch(INVOCATIONS_SCHEMA)?;
+    transaction.execute_batch(FTS_SCHEMA)?;
+    for (_, _, schema) in SEARCH_OBJECTS {
+        transaction.execute_batch(schema)?;
     }
+    Ok(())
 }
 
 pub(super) fn open_accounting_connection(path: &Path) -> Result<Connection, SessionStoreError> {
