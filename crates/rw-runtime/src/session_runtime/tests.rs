@@ -317,6 +317,7 @@ mod native_search;
 mod plugin_command_session;
 mod plugin_event_recovery;
 mod plugin_events;
+mod plugin_navigation;
 mod project_memory;
 mod prompt_shapes;
 mod provider_activation;

@@ -145,6 +145,7 @@ async fn sdk_command_controls_state_and_panel_reenter_the_live_actor() {
     assert_eq!(panels.panels.len(), 1);
     assert_eq!(panels.panels[0].revision, 1);
     verify_root_recomposition(&runtime, &workspace, state.revision).await;
+    super::plugin_navigation::verify_deferred_navigation(&runtime.handle).await;
     runtime
         .handle
         .close()
