@@ -206,6 +206,15 @@ mod tests {
 
     #[async_trait]
     impl HostQueryService for EmptyFactory {
+        async fn todos(
+            &self,
+            _session: &rw_types::SessionId,
+        ) -> Result<rw_types::todo::TodoReadSnapshot, HostError> {
+            Ok(rw_types::todo::TodoReadSnapshot {
+                through: None,
+                snapshot: rw_types::todo::TodoSnapshot::default(),
+            })
+        }
         async fn command_descriptors(&self) -> Result<Vec<CommandDescriptor>, HostError> {
             Ok(Vec::new())
         }

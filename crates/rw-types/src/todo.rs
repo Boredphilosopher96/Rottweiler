@@ -36,6 +36,16 @@ pub struct TodoSnapshot {
     pub count: usize,
 }
 
+/// Exact source prefix applied to a complete task-list read.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
+#[ts(optional_fields = nullable)]
+pub struct TodoReadSnapshot {
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub through: Option<crate::SequenceId>,
+    pub snapshot: TodoSnapshot,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("invalid task list: {0}")]
 pub struct TodoError(pub &'static str);

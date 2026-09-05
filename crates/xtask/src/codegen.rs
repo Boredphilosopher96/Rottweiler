@@ -17,6 +17,7 @@ use rw_types::extension_ui::{
     UiAction, UiContribution, UiField, UiProjectedField, UiProjectedFields, UiSelectorStep,
     UiTableColumn,
 };
+use rw_types::todo::{TodoItem, TodoReadSnapshot, TodoSnapshot, TodoStatus};
 use rw_types::{
     AccountingAttribution, Answer, ApprovalBinding, ApprovalDecision, Attachment, AttachmentData,
     Block, BudgetLevel, BudgetScope, BudgetUnit, CacheBreakpoint, ClientCommand, ClientId,
@@ -166,6 +167,13 @@ fn generate_typescript() -> Result<String, XtaskError> {
         ("MAX_MCP_SERVER_ID_BYTES", MAX_MCP_SERVER_ID_BYTES),
         ("MAX_COMMAND_REPLY_BYTES", rw_types::MAX_COMMAND_REPLY_BYTES),
         ("MAX_CLIENT_READS", rw_types::MAX_CLIENT_READS),
+        ("MAX_TODO_ITEMS", rw_types::todo::MAX_TODO_ITEMS),
+        ("MAX_TODO_ID_BYTES", rw_types::todo::MAX_TODO_ID_BYTES),
+        (
+            "MAX_TODO_CONTENT_BYTES",
+            rw_types::todo::MAX_TODO_CONTENT_BYTES,
+        ),
+        ("MAX_TODO_TOTAL_BYTES", rw_types::todo::MAX_TODO_TOTAL_BYTES),
     ] {
         output.push_str("export const ");
         output.push_str(name);
@@ -200,6 +208,10 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(UiProjectedFields);
     declaration!(UiSelectorStep);
     declaration!(UiTableColumn);
+    declaration!(TodoItem);
+    declaration!(TodoStatus);
+    declaration!(TodoSnapshot);
+    declaration!(TodoReadSnapshot);
 
     declaration!(ProgressAmount);
     declaration!(SessionId);
@@ -773,6 +785,10 @@ fn contract_fixture() -> ContractFixture {
                 session_id: SessionId("session-fixture".to_owned()),
                 item_id: ContextItemId("context-2".to_owned()),
             },
+            ClientCommand::GetTodos {
+                meta: command_meta.clone(),
+                session_id: SessionId("session-fixture".to_owned()),
+            },
             ClientCommand::GetContext {
                 meta: command_meta.clone(),
                 session_id: SessionId("session-fixture".to_owned()),
@@ -808,6 +824,19 @@ fn contract_fixture() -> ContractFixture {
             },
         ],
         engine_events: vec![
+            EngineEvent::TodosReady {
+                meta: CommandAckMeta {
+                    protocol_version: rw_types::PROTOCOL_VERSION,
+                    client_id: ClientId("client-fixture".to_owned()),
+                    request_id: RequestId("todo-ready".to_owned()),
+                    emitted_at: "2026-01-01T00:00:00Z".to_owned(),
+                },
+                session_id: SessionId("session-fixture".to_owned()),
+                todos: TodoReadSnapshot {
+                    through: None,
+                    snapshot: TodoSnapshot::default(),
+                },
+            },
             EngineEvent::ProviderCallAccounted {
                 meta: event_meta(),
                 call: ProviderCallIdentity {

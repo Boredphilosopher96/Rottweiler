@@ -16,6 +16,10 @@ use ts_rs::TS;
 #[ts(tag = "type", rename_all = "snake_case", optional_fields = nullable)]
 #[serde(deny_unknown_fields)]
 pub enum ClientCommand {
+    GetTodos {
+        meta: CommandMeta,
+        session_id: SessionId,
+    },
     ReadTranscript {
         meta: CommandMeta,
         session_id: SessionId,
@@ -362,6 +366,7 @@ impl ClientCommand {
         match self {
             Self::ReadTranscript { meta, .. }
             | Self::ReadTranscriptContent { meta, .. }
+            | Self::GetTodos { meta, .. }
             | Self::CreateSession { meta, .. }
             | Self::ResumeSession { meta, .. }
             | Self::AttachSession { meta, .. }
@@ -437,6 +442,7 @@ impl ClientCommand {
             | Self::ShutdownHost { .. } => None,
             Self::ReadTranscript { session_id, .. }
             | Self::ReadTranscriptContent { session_id, .. }
+            | Self::GetTodos { session_id, .. }
             | Self::ResumeSession { session_id, .. }
             | Self::AttachSession { session_id, .. }
             | Self::SendMessage { session_id, .. }
@@ -503,6 +509,7 @@ impl ClientCommand {
         match self {
             Self::ReadTranscript { meta, .. }
             | Self::ReadTranscriptContent { meta, .. }
+            | Self::GetTodos { meta, .. }
             | Self::CreateSession { meta, .. }
             | Self::ResumeSession { meta, .. }
             | Self::AttachSession { meta, .. }
@@ -598,6 +605,7 @@ macro_rules! read_commands {
     };
 }
 read_commands!(
+    GetTodos,
     ReadTranscript,
     ReadTranscriptContent,
     ListSessions,

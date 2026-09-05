@@ -616,6 +616,7 @@ pub(super) async fn apply_accepted(
         }
         ClientCommand::ReadTranscript { .. }
         | ClientCommand::ReadTranscriptContent { .. }
+        | ClientCommand::GetTodos { .. }
         | ClientCommand::CreateSession { .. }
         | ClientCommand::ResumeSession { .. }
         | ClientCommand::Fork { .. }

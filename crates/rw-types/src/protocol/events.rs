@@ -770,6 +770,7 @@ impl EngineEvent {
         match self {
             Self::TranscriptPageReady { .. }
             | Self::TranscriptContentReady { .. }
+            | Self::TodosReady { .. }
             | Self::ToolProgress { .. }
             | Self::CommandAcknowledged { .. }
             | Self::ContextSnapshotReady { .. }
@@ -865,6 +866,7 @@ impl EngineEvent {
         match self {
             Self::TranscriptPageReady { .. }
             | Self::TranscriptContentReady { .. }
+            | Self::TodosReady { .. }
             | Self::ToolProgress { .. }
             | Self::CommandAcknowledged { .. }
             | Self::ContextSnapshotReady { .. }

@@ -21,6 +21,18 @@ impl EngineHost {
             return Err(HostError::ShuttingDown);
         }
         match command {
+            ClientCommand::GetTodos { meta, session_id } => {
+                let todos = self.queries.todos(&session_id).await?;
+                Ok((
+                    CommandOutcome::Accepted {},
+                    Some(session_id.clone()),
+                    vec![EngineEvent::TodosReady {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        todos,
+                    }],
+                ))
+            }
             ClientCommand::ReadTranscript {
                 meta,
                 session_id,
