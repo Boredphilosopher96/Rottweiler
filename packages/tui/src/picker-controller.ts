@@ -16,6 +16,8 @@ export type PickerKind =
   | "timeline" | "timelineActions"
   | "themes"
 
+export type PickerCloseReason = "dismiss" | "scope_change"
+
 interface PickerControllerOptions {
   readonly picker: () => FuzzyPickerRenderable<unknown>
   readonly terminalHeight: () => number
@@ -25,7 +27,7 @@ interface PickerControllerOptions {
   readonly renderPicker: (kind: PickerKind | null) => void
   readonly withRefreshGuard: (kind: PickerKind | null, refresh: () => void) => void
   readonly onModalOpened: () => void
-  readonly onClosed: (kind: PickerKind | null) => void
+  readonly onClosed: (kind: PickerKind | null, reason: PickerCloseReason) => void
 }
 
 export class PickerController {
@@ -110,13 +112,13 @@ export class PickerController {
     if (this.#anchored) this.#options.focusComposer()
   }
 
-  close(): void {
+  close(reason: PickerCloseReason = "dismiss"): void {
     const kind = this.#kind
     this.#kind = null
     this.#options.picker().close()
     this.#anchored = false
     this.#query = ""
-    this.#options.onClosed(kind)
+    this.#options.onClosed(kind, reason)
   }
 
   position(anchored = this.#anchored): void {

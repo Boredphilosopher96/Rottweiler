@@ -88,6 +88,14 @@ export interface PickerItem<T> {
   readonly sectionHeader?: boolean
 }
 
+export interface TextPromptOptions {
+  readonly title: string
+  readonly placeholder: string
+  readonly onSubmit: (value: string) => void
+  readonly maxBytes: number
+  readonly empty: "allow" | "reject"
+}
+
 export class FuzzyPickerRenderable<T> extends BoxRenderable {
   readonly input: InputRenderable
   readonly status: TextRenderable
@@ -105,7 +113,9 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
   #secretValue = ""
   #onSecretSubmit: ((secret: string) => void) | undefined
   #onTextSubmit: ((value: string) => void) | undefined
+  readonly #queryMaxLength: number
   #textMaxBytes = 2048
+  #textAllowsEmpty = false
   #theme: RottweilerTheme
   #onKey = (key: KeyEvent) => {
     if (!this.visible) return
@@ -122,7 +132,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     if (this.#textMode && !key.ctrl && !key.meta && !key.option) {
       if (key.name === "return" || key.name === "kpenter") {
         const value = this.input.value.trim()
-        if (value.length > 0) {
+        if (value.length > 0 || this.#textAllowsEmpty) {
           const onSubmit = this.#onTextSubmit
           this.#clearInputModes()
           onSubmit?.(value)
@@ -131,7 +141,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
         this.input.value = Array.from(this.input.value).slice(0, -1).join("")
       } else if (isPrintableInput(key.sequence)) {
         const candidate = this.input.value + key.sequence
-        if (new TextEncoder().encode(candidate).length <= this.#textMaxBytes) {
+        if (Buffer.byteLength(candidate) <= this.#textMaxBytes) {
           this.input.value = candidate
         }
       } else {
@@ -155,7 +165,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
         this.#secretValue = Array.from(this.#secretValue).slice(0, -1).join("")
         this.#renderSecretMask()
       } else if (plain && isPrintableInput(key.sequence)) {
-        if (new TextEncoder().encode(this.#secretValue).length + new TextEncoder().encode(key.sequence).length <= 8 * 1024) {
+        if (Buffer.byteLength(this.#secretValue) + Buffer.byteLength(key.sequence) <= 8 * 1024) {
           this.#secretValue += key.sequence
           this.#renderSecretMask()
         }
@@ -220,7 +230,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     }
     if (this.#textMode) {
       const candidate = this.input.value + pasted
-      if (new TextEncoder().encode(candidate).length <= this.#textMaxBytes) {
+      if (Buffer.byteLength(candidate) <= this.#textMaxBytes) {
         this.input.value = candidate
       }
       event.preventDefault()
@@ -267,6 +277,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
       focusedBackgroundColor: theme.backgroundElement,
       focusedTextColor: theme.text,
     })
+    this.#queryMaxLength = this.input.maxLength
     this.select = new SelectRenderable(ctx, {
       id: "picker-results",
       width: "100%",
@@ -387,11 +398,13 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.input.focus()
   }
 
-  openTextPrompt(title: string, placeholder: string, onSubmit: (value: string) => void, maxBytes = 2048): void {
+  openTextPrompt({ title, placeholder, onSubmit, maxBytes, empty }: TextPromptOptions): void {
     this.#clearInputModes()
     this.#textMode = true
+    this.#textAllowsEmpty = empty === "allow"
     this.#onTextSubmit = onSubmit
     this.#textMaxBytes = Math.max(1, Math.min(maxBytes, 8192))
+    this.input.maxLength = this.#textMaxBytes
     this.#configurePresentation(false, 0)
     this.title = ` ${title} `
     this.#items = []
@@ -569,9 +582,11 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.#secretMode = false
     this.#onSecretSubmit = undefined
     this.#textMode = false
+    this.#textAllowsEmpty = false
     this.#onTextSubmit = undefined
     this.#textMaxBytes = 2048
     this.input.value = ""
+    this.input.maxLength = this.#queryMaxLength
   }
 
   #configurePresentation(

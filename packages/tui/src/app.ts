@@ -13,6 +13,7 @@ type ThemeMode,
 type TreeSitterClient,
 } from "@opentui/core"
 import { homedir } from "node:os"
+import { McpUiController } from "./app/mcp"
 import type { RottweilerAppOptions } from "./app/options"
 import { ProviderUiController } from "./app/provider"
 import { DocumentController } from "./history/document"
@@ -56,12 +57,10 @@ type KeybindingPreset,
 type VimFocus
 } from "./keybindings"
 import {
-createMcpBrowserModel,
 mcpBrowserRow,
-type McpBrowserAction,
-type McpCatalog,
+type McpBrowserAction
 } from "./mcp-browser"
-import { PickerController,type PickerKind } from "./picker-controller"
+import { PickerController,type PickerKind, type PickerCloseReason } from "./picker-controller"
 import {
 noExternalEditor,
 noExternalUrl,
@@ -77,7 +76,6 @@ ProjectionRequestBroker,
 type ProjectionKind,
 } from "./projection-requests"
 import {
-MCP_SERVER_ID_PATTERN,
 type ApprovalBinding,
 type ApprovalDecision,
 type Attachment,
@@ -157,8 +155,6 @@ import { stabilizeTreeSitterClient } from "./tree-sitter-client"
 import {
 boundedUiText,
 contextPanelHasContent,
-mcpStateLabel,
-mcpTransportLabel,
 modePickerPresentation,
 nextModeId,
 permissionActionLabel,
@@ -188,7 +184,6 @@ type BudgetSettingKey =
   | "budget.token_rate_alarm_per_minute"
   | "budget.warn_at_percent"
 const MAX_VISIBLE_SUBAGENTS = 256
-const EMPTY_TEXT_PROMPT_SENTINEL = "\u200B"
 
 interface TimelineTurnChoice {
   readonly sequenceId: string
@@ -314,12 +309,6 @@ const EXPORT_FORMAT_CHOICES: readonly {
   { format: "json", label: "JSON", description: "Structured data", extension: "json" },
 ]
 
-type McpServerAction =
-  | { readonly kind: "toggle"; readonly server: string; readonly enabled: boolean }
-  | { readonly kind: "review"; readonly server: string }
-  | { readonly kind: "approve"; readonly server: string; readonly fingerprint: string }
-  | { readonly kind: "remove"; readonly server: string }
-
 export class RottweilerApp extends BoxRenderable {
   transcript!: TranscriptRenderable
   toolsWorkspace!: ToolsWorkspaceRenderable
@@ -338,6 +327,7 @@ export class RottweilerApp extends BoxRenderable {
   banner!: StateBannerRenderable
   main!: BoxRenderable
 
+  readonly #mcp: McpUiController
   readonly #providers: ProviderUiController
   readonly #document: DocumentController
   readonly #history: HistoryPresentation
@@ -387,11 +377,6 @@ export class RottweilerApp extends BoxRenderable {
   #commandsRequested = false
   #commandCatalogTruncationNotified = false
   #projectionErrors: Partial<Record<ProjectionKind, string>> = {}
-  #mcpDraftName: string | null = null
-  #mcpDraftExecutable: string | null = null
-  #mcpDraftArgs: string[] = []
-  #mcpDraftEnvironment: Array<{ readonly key: string; readonly value: string }> = []
-  #mcpActionName: string | null = null
   #budgetSettingKey: BudgetSettingKey | null = null
   #settingChoiceKey: string | null = null
   #outputViewerToolCallId: string | null = null
@@ -718,13 +703,8 @@ export class RottweilerApp extends BoxRenderable {
           this.#rethemeInProgress = rethemeWasInProgress
         }
       },
-      onModalOpened: () => {
-        if (this.#keybindings.preset !== "vim" || this.#vimFocus === "picker") return
-        this.#vimFocusBeforePicker = this.#vimFocus
-        this.#vimFocus = "picker"
-        this.#setInputMode("insert")
-      },
-      onClosed: (kind) => this.#afterPickerClosed(kind),
+      onModalOpened: () => this.#modalOpened(),
+      onClosed: (kind, reason) => this.#afterPickerClosed(kind, reason),
     })
 
     const app = this
@@ -739,6 +719,22 @@ export class RottweilerApp extends BoxRenderable {
       options: this.#options,
       closePicker: () => this.closePicker(),
       clearProjectionError: kind => this.#clearProjectionError(kind),
+      projectError: (code, message, retryable) => this.#projectClientError(code, message, retryable),
+    })
+    this.#mcp = new McpUiController({
+      get state() { return app.#state },
+      get picker() { return app.picker },
+      get browser() { return app.mcpBrowser },
+      pickerController: this.#pickerController,
+      requests: this.#projectionRequests,
+      get projectionErrors() { return app.#projectionErrors },
+      get terminalWidth() { return app.width || app.ctx.width },
+      get terminalHeight() { return app.height || app.ctx.height },
+      get statusHeight() { return app.statusLine.height },
+      get composerDockHeight() { return app.composer.dockHeight },
+      get vim() { return app.#keybindings.preset === "vim" },
+      closePicker: () => this.closePicker(),
+      modalOpened: () => this.#modalOpened(),
       projectError: (code, message, retryable) => this.#projectClientError(code, message, retryable),
     })
     this.#createThemedSurface(theme)
@@ -1126,6 +1122,7 @@ export class RottweilerApp extends BoxRenderable {
   /** Update command routing only after the runtime owns the new driver lease. */
   setSessionId(sessionId: string): void {
     if (sessionId !== this.#sessionId) {
+      this.closePicker("scope_change")
       this.#projectionRequests.clearForSessionChange()
       this.#subagentListError = null
       this.#subagentDescriptors = []
@@ -1530,7 +1527,7 @@ export class RottweilerApp extends BoxRenderable {
     if (this.#activeSubagentId !== null || this.#composerSubmissionsInFlight > 0
       || this.#terminalSuspended || this.#state.shell.active || this.#state.replay.active
       || this.#providers.hasPendingAction
-      || this.#state.providerAuth.pending !== null || this.#mcpDraftName !== null
+      || this.#state.providerAuth.pending !== null || this.#mcp.hasDraft
       || this.#pendingRewindIntent !== null || this.#pendingExport !== null
       || this.#reviewOpen || this.outputViewer.visible || this.interactionPanel.visible
       || (kind !== null && !isRestorablePicker(kind))) return null
@@ -1876,13 +1873,13 @@ export class RottweilerApp extends BoxRenderable {
       : key.includes("token")
         ? "250000"
         : "12.50"
-    this.picker.openTextPrompt(prompt, placeholder, (value) => {
+    this.picker.openTextPrompt({ title: prompt, placeholder: placeholder, onSubmit: (value) => {
       const selectedKey = this.#budgetSettingKey
       this.closePicker()
       if (selectedKey !== null) {
         this.#projectionRequests.command({ type: "set_setting", key: selectedKey, value })
       }
-    }, 32)
+    }, maxBytes: 32, empty: "reject" })
   }
 
   openPermissionModePicker(): void {
@@ -1917,16 +1914,11 @@ export class RottweilerApp extends BoxRenderable {
     const choice = EXPORT_FORMAT_CHOICES.find((item) => item.format === format)
     if (choice === undefined) return
     this.#pickerController.kind = "exportPath"
-    this.picker.openTextPrompt(
-      "Save to path, e.g. ~/transcript.md",
-      `~/rottweiler-export.${choice.extension}`,
-      (value) => {
+    this.picker.openTextPrompt({ title: "Save to path, e.g. ~/transcript.md", placeholder: `~/rottweiler-export.${choice.extension}`, onSubmit: (value) => {
         this.closePicker()
         const outputPath = expandLeadingHome(value.trim())
         void this.#submitSessionExport(format, outputPath, false)
-      },
-      4_096,
-    )
+      }, maxBytes: 4_096, empty: "reject" })
   }
 
   async #submitSessionExport(
@@ -1988,209 +1980,17 @@ export class RottweilerApp extends BoxRenderable {
     this.#pickerController.begin("workspaceRoots")
     this.#pickerController.refresh()
   }
+  openMcpPicker(): void { this.#mcp.openMcpPicker() }
 
-  openMcpPicker(): void {
-    if (this.#state.replay.active) return
-    this.#mcpActionName = null
-    this.#clearMcpDraft()
-    this.#pickerController.begin("mcp")
-    this.#resizeMcpBrowser(
-      this.width === 0 ? this.ctx.width : this.width,
-      this.height === 0 ? this.ctx.height : this.height,
-    )
-    this.#projectionRequests.command({ type: "list_mcp_servers" })
-    this.#pickerController.refresh()
-    this.mcpBrowser.input.focus()
-  }
-
-  #activateMcpBrowserAction(action: McpBrowserAction): void {
-    if (action.kind === "retry") {
-      this.#projectionRequests.command({ type: "list_mcp_servers" })
-      this.#pickerController.refresh()
-      return
-    }
-    this.mcpBrowser.visible = false
-    this.mcpBrowser.input.blur()
-    if (action.kind === "addHttp") {
-      this.#openMcpHttpNamePrompt()
-    } else if (action.kind === "addStdio") {
-      this.#openMcpStdioNamePrompt()
-    } else {
-      this.#openMcpActionPicker(action.server)
-    }
-  }
-
-  #openMcpActionPicker(server: string): void {
-    if (this.#state.replay.active) return
-    this.#mcpActionName = server
-    this.#pickerController.kind = "mcpActions"
-    this.#pickerController.refresh()
-  }
-
-  #openMcpHttpNamePrompt(): void {
-    if (this.#state.replay.active) return
-    this.#pickerController.kind = "mcpInput"
-    this.picker.openTextPrompt(
-      "Add remote MCP server",
-      "server name",
-      (name) => {
-        if (!new RegExp(MCP_SERVER_ID_PATTERN).test(name)) {
-          this.#projectClientError(
-            "mcp_name_invalid",
-            "MCP server name is invalid"
-          )
-          return
-        }
-        this.#mcpDraftName = name
-        this.picker.openTextPrompt(
-          "Remote MCP endpoint",
-          "https://example.com/mcp",
-          (endpoint) => {
-            const server = this.#mcpDraftName
-            this.#mcpDraftName = null
-            this.closePicker()
-            if (server === null) return
-            let parsed: URL
-            try {
-              parsed = new URL(endpoint)
-            } catch {
-              this.#projectClientError(
-                "mcp_endpoint_invalid",
-                "MCP endpoint must be an absolute HTTPS URL"
-              )
-              return
-            }
-            if (
-              parsed.protocol !== "https:" ||
-              parsed.username !== "" ||
-              parsed.password !== "" ||
-              parsed.search !== "" ||
-              parsed.hash !== ""
-            ) {
-              this.#projectClientError(
-                "mcp_endpoint_invalid",
-                "MCP endpoint must be HTTPS without credentials, query, or fragment"
-              )
-              return
-            }
-            this.#projectionRequests.command({ type: "add_mcp_http_server", name: server, endpoint })
-            this.openMcpPicker()
-          }
-        )
-      }
-    )
-  }
-
-  #openMcpStdioNamePrompt(): void {
-    if (this.#state.replay.active) return
-    this.#clearMcpDraft()
-    this.#pickerController.kind = "mcpInput"
-    this.picker.openTextPrompt(
-      "Server name, e.g. docs",
-      "docs",
-      (name) => {
-        if (!new RegExp(MCP_SERVER_ID_PATTERN).test(name)) {
-          this.#projectClientError("mcp_name_invalid", "MCP server name is invalid")
-          return
-        }
-        this.#mcpDraftName = name
-        this.picker.openTextPrompt(
-          "Executable path, e.g. /usr/local/bin/docs-mcp",
-          "/usr/local/bin/docs-mcp",
-          (executable) => {
-            this.#mcpDraftExecutable = executable
-            this.picker.openTextPrompt(
-              "Arguments separated by spaces · quoting is not supported · leave empty for none",
-              "--stdio",
-              (submitted) => {
-                const argumentsText = submitted.startsWith(EMPTY_TEXT_PROMPT_SENTINEL)
-                  ? submitted.slice(EMPTY_TEXT_PROMPT_SENTINEL.length)
-                  : submitted
-                const trimmed = argumentsText.trim()
-                this.#mcpDraftArgs = trimmed.length === 0
-                  ? []
-                  : trimmed.split(/[\t\n\v\f\r ]+/)
-                this.#openMcpEnvironmentPrompt()
-              },
-              64 * 1024,
-            )
-            this.picker.input.value = EMPTY_TEXT_PROMPT_SENTINEL
-          },
-          16 * 1024,
-        )
-      },
-      96,
-    )
-  }
-
-  #openMcpEnvironmentPrompt(): void {
-    if (this.#state.replay.active) {
-      this.closePicker()
-      return
-    }
-    this.picker.openTextPrompt(
-      "Environment variable as KEY=VALUE · leave empty to finish",
-      "",
-      (submitted) => {
-        const entry = submitted.startsWith(EMPTY_TEXT_PROMPT_SENTINEL)
-          ? submitted.slice(EMPTY_TEXT_PROMPT_SENTINEL.length)
-          : submitted
-        if (entry.length === 0) {
-          const name = this.#mcpDraftName
-          const executable = this.#mcpDraftExecutable
-          const args = [...this.#mcpDraftArgs]
-          const environment = [...this.#mcpDraftEnvironment]
-          this.closePicker()
-          if (name === null || executable === null) return
-          this.#projectionRequests.command({
-            type: "add_mcp_stdio_server",
-            name,
-            executable,
-            args,
-            environment,
-          })
-          this.openMcpPicker()
-          return
-        }
-        const separator = entry.indexOf("=")
-        if (separator <= 0) {
-          this.#projectClientError(
-            "mcp_environment_invalid",
-            "Environment variable must use KEY=VALUE with a non-empty key",
-          )
-          this.#openMcpEnvironmentPrompt()
-          return
-        }
-        this.#mcpDraftEnvironment.push({
-          key: entry.slice(0, separator),
-          value: entry.slice(separator + 1),
-        })
-        this.#openMcpEnvironmentPrompt()
-      },
-      16 * 1024 + 129,
-    )
-    this.picker.input.value = EMPTY_TEXT_PROMPT_SENTINEL
-  }
-
-  #clearMcpDraft(): void {
-    this.#mcpDraftName = null
-    this.#mcpDraftExecutable = null
-    this.#mcpDraftArgs = []
-    this.#mcpDraftEnvironment = []
-  }
 
   #openPermissionPatternPrompt(
     action: PermissionDecision
   ): void {
     this.#pickerController.kind = "permissionInput"
-    this.picker.openTextPrompt(
-      `Add ${action} permission rule`,
-      "tool(glob), e.g. bash(cargo test*)",
-      (pattern) => {
+    this.picker.openTextPrompt({ title: `Add ${action} permission rule`, placeholder: "tool(glob), e.g. bash(cargo test*)", onSubmit: (pattern) => {
         this.closePicker()
         this.#projectionRequests.command({ type: "add_session_permission_rule", pattern, action })
-      }
-    )
+      }, maxBytes: 2048, empty: "reject" })
   }
 
   openThemePicker(): void {
@@ -2226,14 +2026,6 @@ export class RottweilerApp extends BoxRenderable {
       height - this.statusLine.height - this.composer.dockHeight,
     )
     this.settingsBrowser.resizeForTerminal(width, height, primaryHeight)
-  }
-
-  #resizeMcpBrowser(width: number, height: number): void {
-    const primaryHeight = Math.max(
-      6,
-      height - this.statusLine.height - this.composer.dockHeight,
-    )
-    this.mcpBrowser.resizeForTerminal(width, height, primaryHeight)
   }
 
   #resizeReviewPanel(width: number, height: number): void {
@@ -2338,10 +2130,7 @@ export class RottweilerApp extends BoxRenderable {
   #openSessionRenamePrompt(session: SessionProjection): void {
     this.#sessionActionId = session.sessionId
     this.#pickerController.kind = "sessionRename"
-    this.picker.openTextPrompt(
-      "Rename session, e.g. Auth refactor",
-      session.title ?? session.workspaceName,
-      (title) => {
+    this.picker.openTextPrompt({ title: "Rename session, e.g. Auth refactor", placeholder: session.title ?? session.workspaceName, onSubmit: (title) => {
         const sessionId = this.#sessionActionId
         this.#pickerController.kind = "sessions"
         this.#pickerController.query = ""
@@ -2349,9 +2138,7 @@ export class RottweilerApp extends BoxRenderable {
           this.#projectionRequests.command({ type: "rename_session", sessionId, title })
         }
         this.#pickerController.refresh()
-      },
-      288,
-    )
+      }, maxBytes: 288, empty: "reject" })
   }
 
   openSubagentPicker(): void {
@@ -2489,18 +2276,25 @@ export class RottweilerApp extends BoxRenderable {
     this.#projectionRequests.command({ type: "get_session_review" })
   }
 
-  closePicker(): void {
+  closePicker(reason: PickerCloseReason = "dismiss"): void {
     this.#pendingClientState = null
     if (this.mcpBrowser.visible) this.mcpBrowser.close()
     if (this.settingsBrowser.visible) this.settingsBrowser.close()
     if (this.themeBrowser.visible) this.themeBrowser.close()
     if (this.commandPalette.visible) this.commandPalette.close()
-    this.#pickerController.close()
+    this.#pickerController.close(reason)
   }
 
-  #afterPickerClosed(kind: PickerKind | null): void {
-    const restoreSettingsBrowser = kind === "settingChoices"
-    const restoreMcpBrowser = kind === "mcpActions" || kind === "mcpInput" || kind === "mcpRemoveConfirm"
+  #modalOpened(): void {
+    if (this.#keybindings.preset !== "vim" || this.#vimFocus === "picker") return
+    this.#vimFocusBeforePicker = this.#vimFocus
+    this.#vimFocus = "picker"
+    this.#setInputMode("insert")
+  }
+
+  #afterPickerClosed(kind: PickerKind | null, reason: PickerCloseReason): void {
+    const restoreSettingsBrowser = reason === "dismiss" && kind === "settingChoices"
+    const restoreMcpBrowser = reason === "dismiss" && (kind === "mcpActions" || kind === "mcpInput" || kind === "mcpRemoveConfirm")
     const capturedTheme =
       kind === "themes"
         && !this.#themePreviewCommitted
@@ -2512,8 +2306,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#projectionRequests.clear("files")
     this.#projectionRequests.setFilePreview(null)
     this.#providers.pickerClosed()
-    this.#clearMcpDraft()
-    this.#mcpActionName = null
+    this.#mcp.pickerClosed()
     this.#budgetSettingKey = null
     this.#settingChoiceKey = null
     this.#subagentActionId = null
@@ -2559,7 +2352,7 @@ export class RottweilerApp extends BoxRenderable {
     )
     this.outputViewer.resizeForTerminal(height)
     this.#resizeReviewPanel(width, height)
-    if (this.mcpBrowser.visible) this.#resizeMcpBrowser(width, height)
+    if (this.mcpBrowser.visible) this.#mcp.resize(width, height)
     else if (this.settingsBrowser.visible) this.#resizeSettingsBrowser(width, height)
     else if (this.themeBrowser.visible) this.#resizeThemeBrowser(width, height)
     else if (this.commandPalette.visible) this.commandPalette.resizeForTerminal(width, height)
@@ -2570,6 +2363,7 @@ export class RottweilerApp extends BoxRenderable {
     if (this.#destroyed) return
     this.#destroyed = true
     this.#providers.dispose()
+    this.#mcp.pickerClosed()
     this.#document?.close()
     this.#history?.dispose()
     this.#presentation.destroy()
@@ -3062,11 +2856,7 @@ export class RottweilerApp extends BoxRenderable {
               this.#renderPicker()
             },
           })
-          if (this.#keybindings.preset === "vim" && this.#vimFocus !== "picker") {
-            this.#vimFocusBeforePicker = this.#vimFocus
-            this.#vimFocus = "picker"
-            this.#setInputMode("insert")
-          }
+          this.#modalOpened()
         }
         break
       }
@@ -3483,150 +3273,13 @@ export class RottweilerApp extends BoxRenderable {
 
       case "permissionInput":
         break
+      case "mcp":
       case "mcpInput":
+      case "mcpActions":
+      case "mcpRemoveConfirm":
+        this.#mcp.render(this.#pickerController.kind)
         break
-      case "mcp": {
-        this.#resizeMcpBrowser(
-          this.width === 0 ? this.ctx.width : this.width,
-          this.height === 0 ? this.ctx.height : this.height,
-        )
-        const catalog: McpCatalog = this.#projectionErrors.mcp === undefined
-          ? this.#state.mcpServers.length === 0 && this.#projectionRequests.current("mcp") !== null
-            ? { kind: "loading" }
-            : { kind: "ready", servers: this.#state.mcpServers }
-          : {
-              kind: "error",
-              message: this.#projectionErrors.mcp,
-              stale: this.#state.mcpServers,
-            }
-        const query = this.mcpBrowser.visible
-          ? this.mcpBrowser.input.value
-          : this.#pickerController.query
-        const preserveSelection = query === this.#pickerController.query
-        this.#pickerController.query = query
-        const model = createMcpBrowserModel({
-          catalog,
-          review: this.#state.mcpApprovalReview,
-          query,
-          selectedId: this.mcpBrowser.visible && preserveSelection
-            ? this.mcpBrowser.selectedId
-            : null,
-        })
-        const presentation = this.#keybindings.preset === "vim" && model.status.includes("Esc close")
-          ? { ...model, status: model.status.replace("Esc close", "Esc×2 close") }
-          : model
-        if (this.mcpBrowser.visible) {
-          this.mcpBrowser.refresh(presentation)
-        } else {
-          this.picker.close()
-          this.mcpBrowser.open(presentation, (action) => {
-            this.#activateMcpBrowserAction(action)
-          }, {
-            onQuery: () => this.#renderPicker(),
-            onSelection: () => this.#renderPicker(),
-            onRetry: () => {
-              this.#projectionRequests.command({ type: "list_mcp_servers" })
-              this.#pickerController.refresh()
-            },
-          })
-          if (this.#keybindings.preset === "vim" && this.#vimFocus !== "picker") {
-            this.#vimFocusBeforePicker = this.#vimFocus
-            this.#vimFocus = "picker"
-            this.#setInputMode("insert")
-          }
-        }
-        break
-      }
-      case "mcpActions": {
-        const server = this.#state.mcpServers.find(
-          (candidate) => candidate.name === this.#mcpActionName,
-        )
-        if (server === undefined) {
-          this.#mcpActionName = null
-          this.#pickerController.kind = "mcp"
-          this.#pickerController.refresh()
-          break
-        }
-        const review = this.#state.mcpApprovalReview?.server === server.name
-          ? this.#state.mcpApprovalReview
-          : null
-        const deferred = server.enabled && server.state.type === "disabled"
-        const items: PickerItem<McpServerAction>[] = [
-          {
-            id: `mcp.toggle.${server.name}`,
-            label: deferred || !server.enabled ? "Enable" : "Disable",
-            description: `${mcpStateLabel(server.state.type)} · applies to this live session and persists after validation`,
-            value: {
-              kind: "toggle",
-              server: server.name,
-              enabled: deferred ? false : server.enabled,
-            },
-          },
-          {
-            id: `mcp.review.${server.name}`,
-            label: "Review fingerprint",
-            description: server.approved ? "Review the approved configuration identity" : "Review before approval",
-            value: { kind: "review", server: server.name },
-          },
-          ...(review === null ? [] : [{
-            id: `mcp.approve.${review.server}`,
-            label: "Approve",
-            description: `${mcpTransportLabel(review.transport)} · ${review.endpoint ?? "local process"} · configuration fingerprint ${review.fingerprint}`,
-            value: { kind: "approve", server: review.server, fingerprint: review.fingerprint },
-          }] satisfies PickerItem<McpServerAction>[]),
-          {
-            id: `mcp.remove.${server.name}`,
-            label: "Remove",
-            description: "Delete this server from the live session and user configuration",
-            value: { kind: "remove", server: server.name },
-          },
-        ]
-        this.#pickerController.show(
-          `MCP actions · ${server.name}`,
-          items,
-          (item) => {
-            const action = item.value
-            if (action.kind === "toggle") {
-              this.#projectionRequests.command({ type: "set_mcp_server_enabled", name: action.server, enabled: !action.enabled })
-            } else if (action.kind === "review") {
-              this.#projectionRequests.command({ type: "review_mcp_server", name: action.server })
-            } else if (action.kind === "approve") {
-              this.#projectionRequests.command({ type: "approve_mcp_server", name: action.server, fingerprint: action.fingerprint })
-            } else {
-              this.#mcpActionName = action.server
-              this.#pickerController.kind = "mcpRemoveConfirm"
-              this.#pickerController.refresh()
-            }
-          },
-        )
-        break
-      }
-      case "mcpRemoveConfirm": {
-        const server = this.#mcpActionName
-        if (server === null) {
-          this.#pickerController.kind = "mcp"
-          this.#pickerController.refresh()
-          break
-        }
-        this.#pickerController.show(
-          `Remove ${server}? This deletes its configuration`,
-          [
-            { id: "mcp.remove.confirm", label: "Remove", description: "Disable if needed, then delete", value: true },
-            { id: "mcp.remove.cancel", label: "Cancel", description: "Keep this server", value: false },
-          ],
-          (item) => {
-            if (item.value) {
-              this.#projectionRequests.command({ type: "remove_mcp_server", name: server })
-              this.#mcpActionName = null
-              this.#pickerController.kind = "mcp"
-            } else {
-              this.#pickerController.kind = "mcpActions"
-            }
-            this.#pickerController.refresh()
-          },
-        )
-        break
-      }
+
       case "trust":
         this.#pickerController.show(
           "Folder trust",
@@ -3944,11 +3597,7 @@ export class RottweilerApp extends BoxRenderable {
               this.#pickerController.refresh()
             },
           })
-          if (this.#keybindings.preset === "vim" && this.#vimFocus !== "picker") {
-            this.#vimFocusBeforePicker = this.#vimFocus
-            this.#vimFocus = "picker"
-            this.#setInputMode("insert")
-          }
+          this.#modalOpened()
         }
         break
       }
@@ -4044,11 +3693,7 @@ export class RottweilerApp extends BoxRenderable {
               this.#previewTheme(selectedTheme)
             },
           })
-          if (this.#keybindings.preset === "vim" && this.#vimFocus !== "picker") {
-            this.#vimFocusBeforePicker = this.#vimFocus
-            this.#vimFocus = "picker"
-            this.#setInputMode("insert")
-          }
+          this.#modalOpened()
         }
         break
       }
