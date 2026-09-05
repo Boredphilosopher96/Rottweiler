@@ -8,3 +8,4 @@ export { MAX_SHELL_COMMAND_BYTES, MAX_SHELL_OUTPUT_BYTES, MAX_SHELL_OUTPUT_LINES
 export { reduceRottweilerState, reduceWireEvent, projectSessionTitleUpdate } from "./reducer"
 export * from "./display-buffer"
 export * from "./todos"
+export * from "./tool-display"

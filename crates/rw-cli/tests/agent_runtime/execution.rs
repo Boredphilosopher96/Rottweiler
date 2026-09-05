@@ -555,6 +555,17 @@ fn supervised_tui_crosses_the_real_host_for_commands_and_tool_approval() {
             .is_some_and(|value| value.contains("approval.txt"))
     );
     assert_eq!(report["toolStatus"], "finished");
+    assert!(
+        report["toolDisplay"]["details"]
+            .as_str()
+            .is_some_and(|text| { text.contains("approval.txt") && text.len() <= 4096 })
+    );
+    assert_eq!(report["toolSource"]["selector"]["type"], "tool_output");
+    assert!(
+        report["toolSource"]["sequence"]
+            .as_str()
+            .is_some_and(|value| value.parse::<u64>().is_ok())
+    );
     assert_eq!(report["errors"], json!([]), "{}", report["errorDetails"]);
     assert_eq!(
         fs::read_to_string(run.workspace.join("approval.txt")).expect("approved write output"),

@@ -339,7 +339,9 @@ describe("state queries", () => {
       status: "finished",
       rationale: "fixture",
       chunks: toolOutputBuffer([]),
-      output: { type: "text", text: "done" },
+      display: { details: "done" },
+      args: null,
+      source: { sequence: "7", selector: { type: "tool_output" } },
     })
     expect(state.questions["question-1"]).toMatchObject({ answered: true })
     expect(state.shell).toEqual({

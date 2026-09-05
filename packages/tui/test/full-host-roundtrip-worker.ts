@@ -44,7 +44,8 @@ try {
     approvalBanner,
     approvalPanel,
     toolStatus: tool?.status ?? null,
-    toolOutput: tool?.output ?? null,
+    toolDisplay: tool?.display ?? null,
+    toolSource: tool?.source ?? null,
     errors: app.state.errors.map((error) => error.code),
     errorDetails: app.state.errors.map((error) => error.message),
   }))

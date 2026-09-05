@@ -1,3 +1,4 @@
+import type { ToolDisplay } from "./tool-display"
 import { emptyTodos, type TodoState } from "./todos"
 import { MAX_TAIL_TEXT_BYTES, utf8Prefix, type ToolOutputBuffer } from "./display-buffer"
 import type {
@@ -26,7 +27,7 @@ import type {
   RuntimeServiceDescriptor,
   SubagentStatus as SubagentTerminalStatus,
   ToolCapability,
-  ToolOutput,
+  TranscriptContentSource,
   TurnStatus,
   UnifiedDiff,
   Usage,
@@ -136,7 +137,8 @@ export interface ToolProjection {
   readonly rationale: string | null
   readonly diff: UnifiedDiff | null
   readonly chunks: ToolOutputBuffer
-  readonly output: ToolOutput | null
+  readonly display: ToolDisplay | null
+  readonly source: TranscriptContentSource | null
   readonly isError: boolean | null
   readonly callIndex: number
   readonly timing: ActivityTimingProjection

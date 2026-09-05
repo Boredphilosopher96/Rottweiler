@@ -1,7 +1,9 @@
+import { MAX_PENDING_TOOL_INVOCATIONS } from "../../../../protocol/types"
 import type { ToolOutputStream } from "../protocol"
 
-// Leave room for the engine's terminal truncation marker after its 1 MiB / 1024 chunk limit.
-export const MAX_TOOL_DISPLAY_BYTES = 1024 * 1024 + 1024
+// The admitted live invocation set shares a fixed preview payload allowance.
+export const MAX_ACTIVE_TOOL_DISPLAY_BYTES = 8 * 1024 * 1024
+export const MAX_TOOL_DISPLAY_BYTES = Math.floor(MAX_ACTIVE_TOOL_DISPLAY_BYTES / MAX_PENDING_TOOL_INVOCATIONS)
 export const MAX_TOOL_DISPLAY_CHUNKS = 1025
 export const MAX_TAIL_TEXT_BYTES = 1024 * 1024
 export const LIVE_OUTPUT_TRUNCATION_MARKER = "[live tool output truncated; command output continues to drain]"
@@ -63,6 +65,7 @@ interface StreamCache {
   windowInputCodeUnits: number
 }
 const materializations = new WeakMap<object, StreamCache>()
+const truncatedMaterializations = new WeakMap<Materialization, ToolOutputView>()
 const EMPTY_WINDOW: LineWindow = { lines: [""], visibleLines: [], lineCount: 1, visibleLineCount: 0, endedWithCR: false }
 const EMPTY_MATERIALIZATION: Materialization = {
   node: null, count: 0, plain: "", labeled: "", tailLines: [], lineCount: 0, sourceTruncated: false,
@@ -190,13 +193,17 @@ export class ToolOutputBuffer {
       if (this.count >= cache.current.count) cache.current = result
     }
     if (!this.truncated) return result
-    return {
+    const existing = truncatedMaterializations.get(result)
+    if (existing !== undefined) return existing
+    const view: ToolOutputView = {
       ...result, sourceTruncated: true,
       plainWindow: appendRawWindow(result.plainWindow, `\n${DISPLAY_TRUNCATION_MARKER}`),
       labeledWindow: appendRawWindow(result.labeledWindow, `\n${DISPLAY_TRUNCATION_MARKER}`),
       plain: `${result.plain}\n${DISPLAY_TRUNCATION_MARKER}`,
       labeled: `${result.labeled}\n${DISPLAY_TRUNCATION_MARKER}`,
     }
+    truncatedMaterializations.set(result, view)
+    return view
   }
 
   get materializationWork(): { readonly visitedNodes: number; readonly retainedVersions: number; readonly windowInputCodeUnits: number } {

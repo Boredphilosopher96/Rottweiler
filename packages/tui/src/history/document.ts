@@ -3,7 +3,7 @@ import { readToolSurface } from "./tool-surface"
 import type { UiSurfaceModel } from "../ui/presentation"
 import type { TranscriptContentPage, TranscriptContentSource, TranscriptView } from "../protocol"
 import type { CacheLease, ClientCache } from "./cache"
-import type { HistoryCacheValue } from "./controller"
+import { HISTORY_PAGE_BYTES, type HistoryCacheValue } from "./controller"
 import type { SessionReader, SessionReadTarget } from "../session-reader"
 
 const CHUNK_BYTES = 4096
@@ -31,6 +31,8 @@ export class DocumentController {
   #index = 0
   #loading = false
   #error: string | null = null
+  #sourceRequest: AbortController | null = null
+  #sourceOpen = false
 
   constructor(reader: Pick<SessionReader, "page" | "content">, cache: ClientCache<HistoryCacheValue>, changed: (snapshot: DocumentSnapshot) => void) {
     this.#reader = reader
@@ -41,7 +43,7 @@ export class DocumentController {
   get snapshot(): DocumentSnapshot {
     const value = this.#active?.value
     return {
-      open: this.#selection !== null, page: value?.kind === "document" ? value.page : null,
+      open: this.#selection !== null || this.#sourceOpen, page: value?.kind === "document" ? value.page : null,
       surface: value?.kind === "surface" ? value.surface : null,
       loading: this.#loading, error: this.#error, previous: this.#index > 0
     }
@@ -52,6 +54,44 @@ export class DocumentController {
     if (target.sessionId !== view.session_id) return Promise.reject(new Error("Document authority does not match its source session."))
     this.#selection = { target, view, source, key: JSON.stringify([target, view, source]) }
     return this.#load(0, 0)
+  }
+
+  /** Resolve the source against a fresh bounded view without moving the transcript viewport. */
+  async openSource(target: SessionReadTarget, source: TranscriptContentSource): Promise<void> {
+    this.close()
+    const request = new AbortController()
+    this.#sourceRequest = request
+    this.#sourceOpen = true
+    this.#loading = true
+    this.#changed(this.snapshot)
+    try {
+      for (;;) {
+        const result = await this.#reader.page(target, {
+          known_view: null, position: { type: "latest" }, max_items: 1, max_bytes: HISTORY_PAGE_BYTES,
+        }, request.signal)
+        if (this.#sourceRequest !== request || request.signal.aborted) return
+        if (result.type !== "ready") {
+          await new Promise<void>(resolve => setTimeout(resolve, 0))
+          request.signal.throwIfAborted()
+          continue
+        }
+        if (result.page.view.session_id !== target.sessionId) throw new Error("Tool content authority does not match its source session.")
+        this.#sourceRequest = null
+        this.#sourceOpen = false
+        await this.open(target, result.page.view, source)
+        return
+      }
+    } catch (error) {
+      if (this.#sourceRequest === request && !request.signal.aborted) {
+        this.#error = error instanceof Error ? error.message : "Tool content read failed."
+      }
+    } finally {
+      if (this.#sourceRequest === request) {
+        this.#sourceRequest = null
+        this.#loading = false
+        this.#changed(this.snapshot)
+      }
+    }
   }
 
   pinAction(): UiActionLease | null {
@@ -83,6 +123,9 @@ export class DocumentController {
   }
 
   close(): void {
+    this.#sourceRequest?.abort()
+    this.#sourceRequest = null
+    this.#sourceOpen = false
     this.#request?.abort()
     this.#request = null
     const previous = this.#active

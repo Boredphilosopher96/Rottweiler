@@ -68,7 +68,7 @@ describe("subagent state boundary", () => {
           rationale: null,
           diff: null,
           chunks: toolOutputBuffer([]),
-          output: null,
+          display: null, source: null,
           isError: null,
           callIndex: 0,
           timing: { kind: "unknown" },

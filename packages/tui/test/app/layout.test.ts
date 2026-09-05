@@ -153,7 +153,7 @@ describe("Rottweiler layout", () => {
             truncated: false,
           },
           chunks: toolOutputBuffer([]),
-          output: null,
+          display: null, source: null,
           isError: null,
           callIndex: 0,
           timing: { kind: "unknown" },

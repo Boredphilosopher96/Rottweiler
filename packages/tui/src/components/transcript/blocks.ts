@@ -671,11 +671,13 @@ export class ToolBlockRenderable extends BoxRenderable {
 /** Complete tool-card body content before compact transcript preview bounding. */
 export function toolOutputContent(tool: ToolProjection): string {
   let output: string
-  if (tool.status === "finished" || (bashCommand(tool) !== null && tool.chunks.count > 0)) {
+  if (tool.status === "finished") {
     output = presentTool(tool).details
+    if (tool.display?.truncated) output += "\n… Open full output for the complete result."
   } else {
-    const live = tool.chunks.read().plain
-    output = live === "" ? "" : `Live output\n${live}`
+    const view = tool.chunks.read()
+    output = bashCommand(tool) !== null && tool.chunks.count > 0 ? view.labeled
+      : view.plain === "" ? "" : `Live output\n${view.plain}`
   }
   const activity = tool.status === "awaiting_approval"
     ? "Awaiting approval…"
@@ -714,8 +716,9 @@ export function toolRationale(tool: ToolProjection): string {
 }
 
 export function bashCommand(tool: ToolProjection): string | null {
-  if ((tool.name !== "bash" && tool.name !== "shell") || !isRecord(tool.args)) return null
-  return typeof tool.args.command === "string" ? tool.args.command : null
+  if (tool.name !== "bash") return null
+  if (tool.status === "finished") return tool.display?.command ?? null
+  return isRecord(tool.args) && typeof tool.args.command === "string" ? tool.args.command : null
 }
 
 export function visibleBashCommand(command: string): string {

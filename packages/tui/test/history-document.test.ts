@@ -75,3 +75,53 @@ test("document cache identity includes its ancestry and rejects a foreign target
   controller.close(); cache.clear()
   expect(cache.usage.bytes).toBe(0)
 })
+
+
+test("finished output resolves a bounded view using the same descendant authority", async () => {
+  const cache = new ClientCache<HistoryCacheValue>()
+  const target = descendantSessionRead(directSessionRead("root"), { session_id: view.session_id, subagent_id: "child", source_sequence: "2" })
+  const calls: string[] = []
+  const controller = new DocumentController({
+    page: async (actual, read) => {
+      expect(actual).toEqual(target)
+      expect(read.max_items).toBe(1)
+      expect(read.known_view).toBeNull()
+      calls.push("view")
+      return { type: "ready", page: { view, first_ordinal: "0", total_items: "0", items: [], anchor: { type: "unspecified" }, invalidation: { type: "none" } } }
+    },
+    content: async (actual, read) => {
+      expect(actual).toEqual(target)
+      expect(read.source).toEqual(source)
+      expect(read.view).toEqual(view)
+      calls.push("content")
+      return { view, source, offset: 0, next_offset: null, total_bytes: 4, format: "text", text: "full" }
+    },
+  }, cache, () => {})
+  await controller.openSource(target, source)
+  expect(calls).toEqual(["view", "content"])
+  expect(controller.snapshot.page?.text).toBe("full")
+  controller.close()
+  expect(cache.usage.pinnedEntries).toBe(0)
+})
+
+test("closing source resolution prevents its late view from opening a document", async () => {
+  const cache = new ClientCache<HistoryCacheValue>()
+  let finish!: () => void
+  let signal!: AbortSignal
+  const controller = new DocumentController({
+    page: async (_target, _read, requestSignal) => {
+      signal = requestSignal!
+      await new Promise<void>(resolve => { finish = resolve })
+      return { type: "ready", page: { view, first_ordinal: "0", total_items: "0", items: [], anchor: { type: "unspecified" }, invalidation: { type: "none" } } }
+    },
+    content: async () => { throw new Error("closed resolution must never fetch content") },
+  }, cache, () => {})
+  const pending = controller.openSource(directSessionRead(view.session_id), source)
+  expect(controller.snapshot.loading).toBe(true)
+  expect(controller.snapshot.open).toBe(true)
+  controller.close()
+  expect(signal.aborted).toBe(true)
+  finish(); await pending
+  expect(controller.snapshot.open).toBe(false)
+  expect(cache.usage.bytes).toBe(0)
+})

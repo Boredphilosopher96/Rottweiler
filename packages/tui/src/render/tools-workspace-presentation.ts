@@ -5,7 +5,6 @@ import type {
   ToolProjection,
 } from "../state"
 import { presentTool } from "./tool-presentation"
-import { toolPlainText, toolStructuredData } from "./format"
 import { truncateToCells } from "./text"
 
 import { DISPLAY_TRUNCATION_MARKER, LIVE_OUTPUT_TRUNCATION_MARKER, type ToolOutputView } from "../state/display-buffer"
@@ -144,7 +143,7 @@ export function projectToolActivity(
   const presentation = presentTool(tool)
   const outcome = toolOutcome(tool, presentation.summary)
   const output = tool.status === "finished"
-    ? outputWindow(presentation.details, "head", presentation.details.includes(LIVE_OUTPUT_TRUNCATION_MARKER) || hasDroppedOutput(tool))
+    ? outputWindow(presentation.details, "head", presentation.details.includes(LIVE_OUTPUT_TRUNCATION_MARKER) || tool.display?.truncated === true)
     : liveOutputWindow(tool.chunks.read())
   const fallbackSubject = argumentSubject(tool.args)
 
@@ -226,7 +225,7 @@ function toolOutcome(tool: ToolProjection, summary: string): ToolOutcomePresenta
 }
 
 function isPermissionDenied(tool: ToolProjection): boolean {
-  return tool.isError === true && /^permission denied for tool/i.test(toolPlainText(tool.output).trim())
+  return tool.display?.permissionDenied === true
 }
 
 function liveOutputWindow(view: ToolOutputView): ActivityOutputPresentation {
@@ -300,17 +299,6 @@ function argumentSubject(args: unknown): string {
     if (typeof value === "string" && value.trim() !== "") return value
   }
   return ""
-}
-
-function hasDroppedOutput(tool: ToolProjection): boolean {
-  const data = toolStructuredData(tool.output)
-  return isRecord(data) && positiveNumber(data.dropped_output_bytes)
-}
-
-function positiveNumber(value: unknown): boolean {
-  if (typeof value === "number") return Number.isFinite(value) && value > 0
-  if (typeof value === "string") return /^\d+$/.test(value) && BigInt(value) > 0n
-  return false
 }
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {

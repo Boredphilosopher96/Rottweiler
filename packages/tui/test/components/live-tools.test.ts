@@ -1,3 +1,4 @@
+import { prepareToolDisplay } from "../../src/state/tool-display"
 import { DiffRenderable, SyntaxStyle } from "@opentui/core"
 import {
   createTestRenderer,
@@ -86,7 +87,7 @@ describe("live-tools components", () => {
         rationale: null,
         diff: null,
         chunks: toolOutputBuffer([]),
-        output: null,
+        display: null, source: null,
         isError: null,
         callIndex: 0,
         timing: { kind: "unknown" as const },
@@ -120,7 +121,7 @@ describe("live-tools components", () => {
       rationale: null,
       diff: null,
       chunks: toolOutputBuffer([]),
-      output: { type: "text", text: "Path=src/main.rs" },
+      display: prepareToolDisplay({ type: "text", text: "Path=src/main.rs" }, null, { path: "src/main.rs" }, false), source: null,
       isError: false,
       callIndex: 0,
       timing: { kind: "unknown" as const },
@@ -129,7 +130,7 @@ describe("live-tools components", () => {
     await setup.renderOnce()
 
     expect(card.header.plainText).toStartWith("▸ custom-tool")
-    expect(card.header.plainText).toEndWith("✓ Path=src/main.rs")
+    expect(card.header.plainText).toEndWith("✓ Completed")
     expect(card.header.plainText.match(/src\/main\.rs/g)).toHaveLength(1)
   })
 
@@ -155,7 +156,7 @@ describe("live-tools components", () => {
         truncated: false,
       },
       chunks: toolOutputBuffer([]),
-      output: { type: "text", text: "1 change applied" },
+      display: prepareToolDisplay({ type: "text", text: "1 change applied" }, null, { path: "src/main.rs" }, false), source: null,
       isError: false,
       callIndex: 0,
       timing: { kind: "unknown" },
@@ -183,7 +184,7 @@ describe("live-tools components", () => {
       rationale: "Apply the requested change",
       diff: null,
       chunks: toolOutputBuffer([]),
-      output: null,
+      display: null, source: null,
       isError: null,
       callIndex: 0,
       timing: { kind: "unknown" as const },
@@ -206,7 +207,7 @@ describe("live-tools components", () => {
         diff_hash: "diff",
         truncated: false,
       },
-      output: { type: "text", text: "1 change applied" },
+      display: prepareToolDisplay({ type: "text", text: "1 change applied" }, null, null, false), source: null,
       isError: false,
     })
     await setup.renderOnce()
@@ -237,7 +238,7 @@ describe("live-tools components", () => {
         stream: "stdout" as const,
         chunk: `progress-${index + 1}\n`,
       }))),
-      output: null,
+      display: null, source: null,
       isError: null,
       callIndex: 0,
       timing: { kind: "unknown" as const },
@@ -283,7 +284,7 @@ describe("live-tools components", () => {
         stream: "stdout" as const,
         chunk: `line-${index + 1}\n`,
       }))),
-      output: null,
+      display: null, source: null,
       isError: null,
       callIndex: 0,
       timing: { kind: "unknown" as const },
@@ -388,7 +389,7 @@ describe("live-tools components", () => {
         stream: "stdout" as const,
         chunk: `selection-${index + 1}\n`,
       }))),
-      output: null,
+      display: null, source: null,
       isError: null,
       callIndex: 0,
       timing: { kind: "unknown" },

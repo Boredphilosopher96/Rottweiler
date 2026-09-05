@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { CustomSpeedScroll, diffStats, filetypeForPath, formatCost, formatSessionCost, formatStatusContext, formatStatusModel, formatStatusSessionCost, formatTokenCount, getScrollAcceleration, minimalUnifiedDiff, presentableUnifiedDiff, splitDiffVisualRows, toolOutputText, truncateUnifiedDiff, turnMarkdown, turnReasoningMarkdown } from "../src/render"
+import { CustomSpeedScroll, diffStats, filetypeForPath, formatCost, formatSessionCost, formatStatusContext, formatStatusModel, formatStatusSessionCost, formatTokenCount, getScrollAcceleration, minimalUnifiedDiff, presentableUnifiedDiff, splitDiffVisualRows, truncateUnifiedDiff, turnMarkdown, turnReasoningMarkdown } from "../src/render"
 import { embeddedParserConfigurations } from "../src/tree-sitter-runtime"
 
 describe("bounded retained rendering", () => {
@@ -314,30 +314,6 @@ describe("bounded retained rendering", () => {
     })).toBe("736 tokens")
   })
 
-  test("summarizes a maximum-size subagent diff before serializing tool output", () => {
-    const text = toolOutputText({
-      type: "structured",
-      value: {
-        status: "completed",
-        final_text: "done",
-        diff_artifact: {
-          id: "diff-id",
-          base_commit: "0".repeat(40),
-          touched_files: Array.from({ length: 4_096 }, (_, index) => ({
-            path: `file-${index}.txt`,
-            status: "modified",
-          })),
-          unified_diff: "x".repeat(4 * 1024 * 1024),
-        },
-      },
-    })
-
-    expect(text).toContain("diff-id")
-    expect(text).toContain("4194304 chars")
-    expect(text).not.toContain("file-4095.txt")
-    expect(text.length).toBeLessThan(2_000)
-  })
-
   test("keeps provider-facing tool JSON and internal identifiers out of transcript text", () => {
     const output = {
       type: "mixed" as const,
@@ -353,7 +329,6 @@ describe("bounded retained rendering", () => {
         },
       ],
     }
-    expect(toolOutputText(output)).toBe("README.md")
 
     const markdown = turnMarkdown({
       role: "tool",
@@ -384,24 +359,7 @@ describe("bounded retained rendering", () => {
       blocks: [{ type: "thinking", content: " [REDACTED] \n", signature: null }],
     })).toBe("")
 
-    const structuredOnly = toolOutputText({
-      type: "structured",
-      value: {
-        source: "tool_registry",
-        kind: "tool_definitions",
-        machine_local_path: "/private/repo",
-        count: 3,
-      },
-    })
-    expect(structuredOnly).toBe("Count · 3")
-    expect(structuredOnly).not.toContain("tool_registry")
-    expect(structuredOnly).not.toContain("tool_definitions")
-    expect(structuredOnly).not.toContain("/private/repo")
 
-    expect(toolOutputText({
-      type: "text",
-      text: "{\n  \"name\": \"user-authored.json\"\n}",
-    })).toContain('"name": "user-authored.json"')
   })
 
 })

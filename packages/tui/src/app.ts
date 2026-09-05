@@ -1,3 +1,4 @@
+import { updateOutputViewer } from "./app/output"
 import { UiContributionController } from "./app/ui-contributions"
 import { TodoController } from "./todo-controller"
 import { notifyTransition } from "./app/notifications"
@@ -973,19 +974,9 @@ export class RottweilerApp extends BoxRenderable {
       this.transcript.setHistory(this.#history.controller.snapshot)
     }
     this.#updateToolsWorkspace(presented)
-    const viewedTool = this.#outputViewerInvocationId === null
-      ? undefined
-      : presented.tools[this.#outputViewerInvocationId]
-    if (this.#outputViewerInvocationId !== null && viewedTool === undefined) {
-      this.#outputViewerInvocationId = null
-      this.outputViewer.closePresentation()
-    } else if (viewedTool !== undefined) {
-      if (this.outputViewer.invocationId === viewedTool.invocationId) {
-        this.outputViewer.update(viewedTool)
-      } else {
-        this.outputViewer.open(viewedTool)
-      }
-    }
+    this.#outputViewerInvocationId = updateOutputViewer(
+      this.outputViewer, this.#document, this.#children.readTarget, presented, this.#outputViewerInvocationId,
+    )
     this.subagentTray.update(state)
     this.contextPanel.update(presented)
     this.#applyPrimaryViewVisibility()
@@ -1191,8 +1182,13 @@ export class RottweilerApp extends BoxRenderable {
     const tool = this.#children.presentedState().tools[invocationId]
     if (tool === undefined) return
     this.#document?.close()
-    this.#outputViewerInvocationId = invocationId
-    this.outputViewer.open(tool)
+    if (tool.status === "finished" && tool.source !== null && this.#document !== null) {
+      this.#outputViewerInvocationId = null
+      void this.#document.openSource(this.#children.readTarget, tool.source)
+    } else {
+      this.#outputViewerInvocationId = invocationId
+      this.outputViewer.open(tool)
+    }
     this.setState(this.#state)
     this.outputViewer.focusPresentation()
   }

@@ -1,3 +1,4 @@
+import { prepareToolDisplay } from "../../src/state/tool-display"
 import { createTestRenderer, MockTreeSitterClient, type TestRenderer } from "@opentui/core/testing"
 import { afterEach, describe, expect, spyOn, test } from "bun:test"
 import { PROTOCOL_VERSION } from "../../../../protocol/types"
@@ -173,6 +174,43 @@ describe("Rottweiler tools-history", () => {
     expect(app.picker.title).toContain("Modes")
   })
 
+  test("an open live output reader follows completion into canonical content", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 24, useThread: false })
+    renderer = setup.renderer
+    let contentReads = 0
+    const app = createRottweilerApp(renderer, {
+      initialState: toolsAppState(), sessionId: "session-tools",
+      sessionReader: {
+        ...emptySessionReader,
+        content: async (target, read) => {
+          expect(target.sessionId).toBe("session-tools")
+          expect(read.source).toEqual({ sequence: "100", selector: { type: "tool_output" } })
+          contentReads++
+          return { view: read.view, source: read.source, offset: 0, next_offset: null, total_bytes: 21, format: "text", text: "Canonical full output" }
+        },
+      },
+    })
+    renderer.root.add(app)
+    app.showToolsView()
+    await setup.renderOnce()
+    expect(app.toolsWorkspace.rowForKey("tool:tools-0")?.openOutput()).toBeTrue()
+    expect(app.outputViewer.visible).toBeTrue()
+    const original = app.state.tools["tools-0"]!
+    app.handleEvent({
+      type: "tool_call_finished",
+      meta: { protocol_version: PROTOCOL_VERSION, session_id: "session-tools", sequence_id: "100", emitted_at: "2026-01-01T12:01:00Z" },
+      turn_id: original.turnId, tool_call_id: original.toolCallId, invocation_id: original.invocationId,
+      output: { type: "text", text: "bounded preview" }, presentation: null, is_error: false, call_index: 0,
+    })
+    await setup.flush()
+    expect(contentReads).toBe(1)
+    expect(app.outputViewer.visible).toBeTrue()
+    expect(setup.captureCharFrame()).toContain("Canonical full output")
+    app.setState({ ...app.state })
+    await setup.flush()
+    expect(contentReads).toBe(1)
+  })
+
   test("keeps approval focus above Tools and preserves existing output viewer lifecycle", async () => {
     const setup = await createTestRenderer({ width: 110, height: 24, useThread: false })
     renderer = setup.renderer
@@ -241,7 +279,7 @@ describe("Rottweiler tools-history", () => {
       rationale: null,
       diff: null,
       chunks: toolOutputBuffer([]),
-      output: { type: "text", text: `turn ${turnId}` },
+      display: prepareToolDisplay({ type: "text", text: `turn ${turnId}` }, null, { path: `${turnId}.txt` }, false), source: null,
       isError: false,
       callIndex: 0,
       timing: { kind: "unknown" },

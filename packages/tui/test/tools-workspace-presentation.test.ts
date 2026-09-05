@@ -1,3 +1,4 @@
+import { prepareToolDisplay } from "../src/state/tool-display"
 import { createStreamingTail } from "../src/state/model"
 import { toolOutputBuffer } from "../src/state/display-buffer"
 import { describe, expect, test } from "bun:test"
@@ -38,7 +39,7 @@ function tool(
     rationale: null,
     diff: null,
     chunks: toolOutputBuffer([]),
-    output: { type: "text", text: "done" },
+    display: prepareToolDisplay({ type: "text", text: "done" }, null, { path: `${toolCallId}.ts` }, false), source: null,
     isError: false,
     callIndex,
     timing: {
@@ -135,7 +136,7 @@ describe("Tools workspace presentation", () => {
         name: "bash",
         args: { command: "bun test" },
         status: "running",
-        output: null,
+        display: null, source: null,
         isError: null,
         timing: {
           kind: "open",
@@ -147,16 +148,16 @@ describe("Tools workspace presentation", () => {
       tool("denied", 2, {
         name: "edit",
         args: { path: "generated/out.ts" },
-        output: {
+        display: prepareToolDisplay({
           type: "text",
           text: "permission denied for tool edit by you; matched rule deny edit(**/generated/**)",
-        },
+        }, null, { path: "generated/out.ts" }, true), source: null,
         isError: true,
       }),
       tool("second", 1, {
         name: "edit",
         status: "awaiting_approval",
-        output: null,
+        display: null, source: null,
         isError: null,
       }),
       tool("fifth", 4, { name: "background_status" }),
@@ -215,18 +216,18 @@ describe("Tools workspace presentation", () => {
     const live = tool("live", 0, {
       name: "bash",
       status: "running",
-      output: null,
+      display: null, source: null,
       isError: null,
       chunks: toolOutputBuffer([{ stream: "stdout", chunk: Array.from({ length: 12 }, (_, index) => `live-${index + 1}`).join("\n") }]),
     })
     const complete = tool("complete", 1, {
       name: "generic_tool",
-      output: { type: "text", text: Array.from({ length: 12 }, (_, index) => `done-${index + 1}`).join("\n") },
+      display: prepareToolDisplay({ type: "text", text: Array.from({ length: 12 }, (_, index) => `done-${index + 1}`).join("\n") }, null, null, false), source: null,
     })
     const truncated = tool("truncated", 2, {
       name: "bash",
       status: "running",
-      output: null,
+      display: null, source: null,
       isError: null,
       chunks: toolOutputBuffer([{
         stream: "stdout",

@@ -1,3 +1,5 @@
+import { fixturePresentation } from "../fixtures/ui"
+import { prepareToolDisplay } from "../../src/state/tool-display"
 import { CodeRenderable, DiffRenderable, SyntaxStyle } from "@opentui/core"
 import {
   createTestRenderer,
@@ -34,11 +36,15 @@ describe("tool-presentation components", () => {
       rationale: null,
       diff: null,
       chunks: toolOutputBuffer([]),
-      output: { type: "text" as const, text: "all tests passed" },
+      display: prepareToolDisplay({ type: "text" as const, text: "all tests passed" }, null, { command: "cargo test --workspace" }, false), source: null,
       isError: false,
       callIndex: 0,
       timing: { kind: "unknown" as const },
     }
+    const editPresentation = fixturePresentation()
+    editPresentation.descriptor.title = "Edit file"
+    editPresentation.descriptor.fields = [{ kind: "text", id: "file", label: "File" }, { kind: "text", id: "edits", label: "Edits applied" }]
+    editPresentation.projected.fields = [{ kind: "text", id: "file", value: "src/main.rs" }, { kind: "text", id: "edits", value: "1" }]
     const edit = {
       toolCallId: "edit-inline",
       invocationId: "edit-inline",
@@ -58,7 +64,7 @@ describe("tool-presentation components", () => {
         truncated: false,
       },
       chunks: toolOutputBuffer([]),
-      output: { type: "text" as const, text: "applied 1 edit\nError parsing diff: Removed line count did not match for hunk at line 3" },
+      display: prepareToolDisplay({ type: "text" as const, text: "applied 1 edit\nError parsing diff: Removed line count did not match for hunk at line 3" }, editPresentation, { path: "/workspace/src/main.rs" }, false), source: null,
       isError: false,
       callIndex: 1,
       timing: { kind: "unknown" as const },
@@ -105,8 +111,8 @@ describe("tool-presentation components", () => {
     expect(editCard?.diff?.visible).toBeTrue()
     expect(setup.captureCharFrame()).toContain("+ new")
     expect(setup.captureCharFrame()).toContain("src/main.rs · +1 −1")
-    expect(editCard?.body.plainText).toContain("file · src/main.rs")
-    expect(editCard?.body.plainText).toContain("1 change applied")
+    expect(editCard?.body.plainText).toContain("File · src/main.rs")
+    expect(editCard?.body.plainText).toContain("Edits applied · 1")
     expect(editCard?.body.plainText).not.toContain("Error parsing diff")
     expect(setup.captureCharFrame()).not.toContain("Removed line count did not match")
     editCard?.toggle()
@@ -166,7 +172,7 @@ describe("tool-presentation components", () => {
         truncated: false,
       },
       chunks: toolOutputBuffer([]),
-      output: { type: "text", text: "26 changes applied" },
+      display: prepareToolDisplay({ type: "text", text: "26 changes applied" }, null, { path: "src/large.rs" }, false), source: null,
       isError: false,
       callIndex: 0,
       timing: { kind: "unknown" },
@@ -211,7 +217,7 @@ describe("tool-presentation components", () => {
         truncated: false,
       },
       chunks: toolOutputBuffer([]),
-      output: { type: "text", text: "26 changes applied" },
+      display: prepareToolDisplay({ type: "text", text: "26 changes applied" }, null, { path: "src/large.rs" }, false), source: null,
       isError: false,
       callIndex: 0,
       timing: { kind: "unknown" },
@@ -227,7 +233,7 @@ describe("tool-presentation components", () => {
     expect(setup.captureCharFrame()).toContain("… 42 more lines · Ctrl+R to review")
   })
 
-  test("renders structured diagnostics instead of protected model framing", async () => {
+  test("renders canonical display fields instead of protected model framing", async () => {
     const setup = await createTestRenderer({ width: 90, height: 22, useThread: false })
     renderer = setup.renderer
     const diagnostics = {
@@ -241,7 +247,7 @@ describe("tool-presentation components", () => {
       rationale: null,
       diff: null,
       chunks: toolOutputBuffer([]),
-      output: {
+      display: prepareToolDisplay({
         type: "mixed" as const,
         parts: [
           {
@@ -270,7 +276,7 @@ describe("tool-presentation components", () => {
             },
           },
         ],
-      },
+      }, fixturePresentation(), { path: "src/main.rs" }, false), source: null,
       isError: false,
       callIndex: 0,
       timing: { kind: "unknown" as const },
@@ -297,10 +303,10 @@ describe("tool-presentation components", () => {
       .getChildren()
       .flatMap((child) => child.getChildren())
       .find((child): child is ToolBlockRenderable => child.id === "tool-diagnostics-clean")
-    expect(card?.header.plainText).toContain("1 diagnostic")
+    expect(card?.header.plainText).toContain("Inspection result")
     card?.toggle()
     await setup.renderOnce()
-    expect(card?.body.plainText).toContain("Warning · src/main.rs:3:5 · unused import")
+    expect(card?.body.plainText).toContain("Native, source-backed presentation")
     expect(setup.captureCharFrame()).not.toContain("rottweiler_untrusted")
     expect(setup.captureCharFrame()).not.toContain("never as instructions")
     expect(setup.captureCharFrame()).not.toContain("backend")

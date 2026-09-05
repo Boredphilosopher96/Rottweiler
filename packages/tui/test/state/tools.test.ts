@@ -191,7 +191,7 @@ describe("state tools", () => {
     })
     expect(state.streamingTail?.toolInvocationIds).toEqual(["late-glob"])
     expect(state.tools["late-glob"]?.chunks.count).toBe(0)
-    expect(state.tools["late-glob"]?.output).toEqual({ type: "text", text: "src/lib.rs" })
+    expect(state.tools["late-glob"]?.display?.details).toBe("src/lib.rs")
     expect(state.tools["late-glob"]?.status).toBe("finished")
   })
 
@@ -271,7 +271,7 @@ describe("state tools", () => {
     state = reduce(state, { type: "tool_call_finished", presentation: null, meta: meta("4"), turn_id: "1", tool_call_id: "reused", invocation_id: "first", output: { type: "text", text: "first result" }, is_error: false, call_index: 0 })
     expect(Object.keys(state.tools)).toEqual(["first", "second"])
     expect(state.tools.reused).toBeUndefined()
-    expect(state.tools.first?.output).toEqual({ type: "text", text: "first result" })
+    expect(state.tools.first?.display?.details).toBe("first result")
     expect(state.tools.second).toBe(second)
     expect(state.streamingTail?.toolInvocationIds).toEqual(["first", "second"])
     const before = state.tools

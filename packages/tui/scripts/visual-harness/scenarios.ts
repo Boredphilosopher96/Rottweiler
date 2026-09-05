@@ -1,3 +1,4 @@
+import { prepareToolDisplay } from "../../src/state/tool-display"
 import { toolOutputBuffer } from "../../src/state/display-buffer"
 import { createStreamingTail } from "../../src/state/model"
 import type { RottweilerState, ToolProjection } from "../../src/state"
@@ -20,7 +21,7 @@ export function scenarioState(scenario: VisualScenario): RottweilerState {
     status: "awaiting_approval",
     capabilities: ["execute"],
     rationale: "Run the focused reconnect regression suite",
-    output: null,
+    display: null, source: null,
     chunks: toolOutputBuffer([]),
     isError: null,
   })
@@ -207,7 +208,7 @@ function toolsState(): RottweilerState {
     rationale: null,
     diff: null,
     chunks: toolOutputBuffer([]),
-    output: { type: "text", text: "Completed retained output" },
+    display: prepareToolDisplay({ type: "text", text: "Completed retained output" }, null, { path: `${toolCallId}.ts` }, false), source: null,
     isError: false,
     callIndex,
     timing: { kind: "closed", startedAtMs, finishedAtMs: startedAtMs + 5_000 },
@@ -217,12 +218,12 @@ function toolsState(): RottweilerState {
     makeTool("read-app", 0, {
       name: "read",
       args: { path: "packages/tui/src/app.ts" },
-      output: { type: "text", text: "Read 5,894 lines" },
+      display: prepareToolDisplay({ type: "text", text: "Read 5,894 lines" }, null, { path: "packages/tui/src/app.ts" }, false), source: null,
     }),
     makeTool("search-workspace", 1, {
       name: "grep",
       args: { pattern: "ToolsWorkspaceRenderable" },
-      output: { type: "text", text: "packages/tui/src/app.ts: ToolsWorkspaceRenderable" },
+      display: prepareToolDisplay({ type: "text", text: "packages/tui/src/app.ts: ToolsWorkspaceRenderable" }, null, { pattern: "ToolsWorkspaceRenderable" }, false), source: null,
     }),
     makeTool("component-tests", 2, {
       name: "bash",
@@ -232,25 +233,25 @@ function toolsState(): RottweilerState {
         stream: "stdout",
         chunk: Array.from({ length: 12 }, (_, index) => `component check ${index + 1} passed`).join("\n"),
       }]),
-      output: null,
+      display: null, source: null,
       isError: null,
       timing: { kind: "open", startedAtMs, lastObservedAtMs: startedAtMs + 40_000 },
     }),
     makeTool("denied-generated-edit", 3, {
       name: "edit",
       args: { path: "generated/output.ts" },
-      output: { type: "text", text: "permission denied for tool edit" },
+      display: prepareToolDisplay({ type: "text", text: "permission denied for tool edit" }, null, { path: "generated/output.ts" }, true), source: null,
       isError: true,
     }),
     makeTool("write-component", 4, {
       name: "write",
       args: { path: "packages/tui/src/components/tools-workspace.ts" },
-      output: { type: "text", text: "Wrote the retained workspace component" },
+      display: prepareToolDisplay({ type: "text", text: "Wrote the retained workspace component" }, null, { path: "packages/tui/src/components/tools-workspace.ts" }, false), source: null,
     }),
     makeTool("explicit-diagnostics", 5, {
       name: "diagnostics",
       args: { path: "packages/tui/src/app.ts" },
-      output: { type: "text", text: "No diagnostics." },
+      display: prepareToolDisplay({ type: "text", text: "No diagnostics." }, null, { path: "packages/tui/src/app.ts" }, false), source: null,
     }),
   ]
   return {
@@ -293,7 +294,7 @@ function conversationState(): RottweilerState {
     status: "finished",
     capabilities: ["write_filesystem"],
     rationale: "Track the durable cursor independently",
-    output: { type: "text", text: "Updated core/cursor.rs" },
+    display: prepareToolDisplay({ type: "text", text: "Updated core/cursor.rs" }, null, { path: "core/cursor.rs" }, false), source: null,
     chunks: toolOutputBuffer([]),
     isError: false,
   })
@@ -304,7 +305,7 @@ function conversationState(): RottweilerState {
     status: "finished",
     capabilities: ["execute"],
     rationale: "Run the focused regression suite",
-    output: { type: "text", text: "18 passed; 0 failed" },
+    display: prepareToolDisplay({ type: "text", text: "18 passed; 0 failed" }, null, { command: "cargo test -p rw-core" }, false), source: null,
     chunks: toolOutputBuffer([]),
     isError: false,
   })
@@ -315,7 +316,7 @@ function conversationState(): RottweilerState {
     status: "finished",
     capabilities: ["read_filesystem"],
     rationale: "Confirm the reconnect contract",
-    output: { type: "text", text: "184 lines" },
+    display: prepareToolDisplay({ type: "text", text: "184 lines" }, null, { path: "protocol/session-log.md" }, false), source: null,
     chunks: toolOutputBuffer([]),
     isError: false,
   })

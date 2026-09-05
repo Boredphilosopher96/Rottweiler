@@ -118,7 +118,7 @@ export function toolsAppState(): RottweilerState {
         stream: "stdout",
         chunk: Array.from({ length: 8 }, (__, line) => `tools-${index}-${line + 1}`).join("\n"),
       }]),
-      output: null,
+      display: null, source: null,
       isError: null,
       callIndex: index,
       timing: {

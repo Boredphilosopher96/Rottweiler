@@ -1,3 +1,4 @@
+import { prepareToolDisplay } from "../../src/state/tool-display"
 import { conversationItem, toolItem, sessionReaderFor, emptySessionReader } from "../fixtures/history"
 import { createStreamingTail } from "../../src/state/model"
 import { toolOutputBuffer } from "../../src/state/display-buffer"
@@ -165,7 +166,7 @@ function pendingTool(diff: boolean): ToolProjection {
         }
       : null,
     chunks: toolOutputBuffer([]),
-    output: null,
+    display: null, source: null,
     isError: null,
     callIndex: 0,
     timing: { kind: "unknown" },
@@ -209,7 +210,7 @@ function toolsFixtureState(): RottweilerState {
     rationale: null,
     diff: null,
     chunks: toolOutputBuffer([]),
-    output: { type: "text", text: "Completed retained output" },
+    display: prepareToolDisplay({ type: "text", text: "Completed retained output" }, null, { path: `${toolCallId}.ts` }, false), source: null,
     isError: false,
     callIndex,
     timing: { kind: "closed", startedAtMs, finishedAtMs: startedAtMs + 5_000 },
@@ -226,26 +227,26 @@ function toolsFixtureState(): RottweilerState {
         stream: "stdout",
         chunk: Array.from({ length: 12 }, (_, index) => `component check ${index + 1} passed`).join("\n"),
       }]),
-      output: null,
+      display: null, source: null,
       isError: null,
       timing: { kind: "open", startedAtMs, lastObservedAtMs: startedAtMs + 39_000 },
     }),
     makeTool("denied-edit", 3, {
       name: "edit",
       args: { path: "generated/output.ts" },
-      output: { type: "text", text: "permission denied for tool edit" },
+      display: prepareToolDisplay({ type: "text", text: "permission denied for tool edit" }, null, { path: "generated/output.ts" }, true), source: null,
       isError: true,
     }),
     makeTool("failed-edit", 4, {
       name: "edit",
       args: { path: "packages/tui/src/app.ts" },
-      output: { type: "text", text: "validation failed" },
+      display: prepareToolDisplay({ type: "text", text: "validation failed" }, null, { path: "packages/tui/src/app.ts" }, true), source: null,
       isError: true,
     }),
     makeTool("explicit-diagnostics", 5, {
       name: "diagnostics",
       args: { path: "packages/tui/src/app.ts" },
-      output: { type: "text", text: "No diagnostics." },
+      display: prepareToolDisplay({ type: "text", text: "No diagnostics." }, null, { path: "packages/tui/src/app.ts" }, false), source: null,
     }),
   ]
   return {
