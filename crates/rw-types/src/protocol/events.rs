@@ -661,7 +661,8 @@ impl EngineEvent {
     #[must_use]
     pub fn command_meta_mut(&mut self) -> Option<&mut CommandAckMeta> {
         match self {
-            Self::TranscriptPageReady { meta, .. }
+            Self::TodosRead { meta, .. }
+            | Self::TranscriptPageReady { meta, .. }
             | Self::TranscriptContentReady { meta, .. }
             | Self::CommandAcknowledged { meta, .. }
             | Self::ContextSnapshotReady { meta, .. }
@@ -693,7 +694,8 @@ impl EngineEvent {
             | Self::WorkspaceStatusReady { meta, .. }
             | Self::WorkspaceDiffReady { meta, .. }
             | Self::HostShutdown { meta, .. } => Some(meta),
-            Self::SessionCreated { .. }
+            Self::TodoStateCommitted { .. }
+            | Self::SessionCreated { .. }
             | Self::WorkspaceRootsChanged { .. }
             | Self::DriverChanged { .. }
             | Self::MessageQueued { .. }

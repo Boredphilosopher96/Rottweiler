@@ -84,7 +84,8 @@ fn durable_mutation(command: &ClientCommand) -> bool {
         | ClientCommand::ConfigureBuiltinProvider { .. }
         | ClientCommand::ContinueSubagent { .. }
         | ClientCommand::CloseSubagent { .. } => true,
-        ClientCommand::ReadTranscript { .. }
+        ClientCommand::GetTodos { .. }
+        | ClientCommand::ReadTranscript { .. }
         | ClientCommand::ReadTranscriptContent { .. }
         | ClientCommand::ResumeSession { .. }
         | ClientCommand::AttachSession { .. }
