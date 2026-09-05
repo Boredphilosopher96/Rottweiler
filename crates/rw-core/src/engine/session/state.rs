@@ -150,9 +150,9 @@ pub(in crate::engine) enum ActorCommand {
 pub(in crate::engine) enum ProtocolCompletion {
     Message(MessageDisposition),
     Rewind(Vec<UnrestorablePath>),
-    Context(ContextSnapshot),
+    Context(crate::recovery::HistoryRead<ContextSnapshot>),
     Cost(Box<CostSnapshot>),
-    Prompt(PromptDump),
+    Prompt(crate::recovery::HistoryRead<PromptDump>),
     Unit,
 }
 

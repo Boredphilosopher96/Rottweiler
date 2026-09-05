@@ -17,11 +17,9 @@ type PluginReply =
 
 pub(in crate::engine) enum Target {
     Context {
-        meta: CommandMeta,
         completion: Option<Completion>,
     },
     Prompt {
-        meta: CommandMeta,
         turn: Option<TurnId>,
         completion: Option<Completion>,
     },
@@ -261,44 +259,41 @@ pub(in crate::engine) async fn finish(
             return;
         }
     };
-    match (pending.target, &*output) {
-        (Target::Plugin { reply, .. }, Output::Plugin(page)) => {
-            let _ = reply.send(Ok(page.clone()));
+    match pending.target {
+        Target::Plugin { reply, .. } => {
+            let result = match &*output {
+                Output::Plugin(page) => Ok(page.clone()),
+                _ => Err(invalid("context request result mismatch")),
+            };
+            let _ = reply.send(result);
         }
-        (Target::Context { meta, completion }, Output::Context(snapshot)) => {
-            send_connection_event(
-                events,
-                &meta.client_id,
-                EngineEvent::ContextSnapshotReady {
-                    meta: query_meta(state, &meta),
-                    session_id: state.session_id.clone(),
-                    snapshot: snapshot.clone(),
-                },
-            );
+        Target::Context { completion, .. } => {
             if let Some(reply) = completion {
-                let _ = reply.send(Ok(ProtocolCompletion::Context(snapshot.clone())));
+                let result = output.try_map(|output| match output {
+                    Output::Context(snapshot) => Ok(snapshot),
+                    _ => Err(invalid("context request result mismatch")),
+                });
+                let _ = reply.send(result.map(ProtocolCompletion::Context));
             }
         }
-        (
-            Target::Prompt {
-                meta, completion, ..
-            },
-            Output::Prompt(dump),
-        ) => {
-            send_connection_event(
-                events,
-                &meta.client_id,
-                EngineEvent::PromptDumpReady {
-                    meta: query_meta(state, &meta),
-                    session_id: state.session_id.clone(),
-                    dump: dump.clone(),
-                },
-            );
+        Target::Prompt { completion, .. } => {
             if let Some(reply) = completion {
-                let _ = reply.send(Ok(ProtocolCompletion::Prompt(dump.clone())));
+                let result = output.try_map(|output| match output {
+                    Output::Prompt(dump) => Ok(dump),
+                    _ => Err(invalid("prompt request result mismatch")),
+                });
+                let _ = reply.send(result.map(ProtocolCompletion::Prompt));
             }
         }
-        (Target::Command { meta, reply }, Output::Context(snapshot)) => {
+        Target::Command { meta, reply } => {
+            if state.control.driver().as_ref() != Some(&meta.client_id) {
+                let _ = reply.send(Err(invalid("context command driver changed")));
+                return;
+            }
+            let Output::Context(snapshot) = &*output else {
+                let _ = reply.send(Err(invalid("context command result mismatch")));
+                return;
+            };
             send_connection_event(
                 events,
                 &meta.client_id,
@@ -324,9 +319,9 @@ pub(in crate::engine) async fn finish(
             state.transient_cause = previous;
             let _ = reply.send(result);
         }
-        (target, _) => target.reject(invalid("context result does not match its request")),
     }
 }
+
 fn invalid(message: &str) -> AgentLoopError {
     AgentLoopError::InvalidConfiguration(message.into())
 }

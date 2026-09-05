@@ -5,8 +5,6 @@ use crate::engine::dispatch::compaction::start_manual_compaction;
 use crate::engine::dispatch::context_surgery::apply_context_surgery;
 use crate::engine::dispatch::handle_actor_command;
 use crate::engine::dispatch::model_switch::commit_prepared_model_switch;
-use crate::engine::dispatch::replies::query_meta;
-use crate::engine::dispatch::replies::send_connection_event;
 use crate::engine::dispatch::rewind::rewind_state;
 use crate::engine::mode_permission_base;
 use crate::engine::pending_event::PendingEvent;
@@ -493,24 +491,12 @@ pub(super) async fn apply_accepted(
                 state,
                 config,
                 super::context_job::Target::Context {
-                    meta: meta.clone(),
                     completion: completion.take(),
                 },
             );
         }
         ClientCommand::GetCost { .. } => {
             let result = build_cost_snapshot(state, config).await;
-            if let Ok(snapshot) = &result {
-                send_connection_event(
-                    events,
-                    &meta.client_id,
-                    EngineEvent::CostSnapshotReady {
-                        meta: query_meta(state, &meta),
-                        session_id: state.session_id.clone(),
-                        snapshot: snapshot.clone(),
-                    },
-                );
-            }
             if let Some(complete) = completion.take() {
                 let _ = complete
                     .send(result.map(|snapshot| ProtocolCompletion::Cost(Box::new(snapshot))));
@@ -521,7 +507,6 @@ pub(super) async fn apply_accepted(
                 state,
                 config,
                 super::context_job::Target::Prompt {
-                    meta: meta.clone(),
                     turn: turn_id,
                     completion: completion.take(),
                 },

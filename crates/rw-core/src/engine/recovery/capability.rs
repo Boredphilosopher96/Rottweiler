@@ -57,6 +57,19 @@ impl<T> HistoryRead<T> {
         }
     }
 
+    /// Transfer a decoded value and its allowance separately to an admitted encoder.
+    /// The returned guard must outlive the value until another owner takes its charge.
+    #[must_use]
+    pub fn into_parts(self) -> (T, HistoryRead<()>) {
+        (
+            self.value,
+            HistoryRead {
+                value: (),
+                owner: self.owner,
+            },
+        )
+    }
+
     /// Attach another existing allowance without releasing either resource owner.
     #[must_use]
     pub fn retain(self, owner: impl Send + Sync + 'static) -> Self {

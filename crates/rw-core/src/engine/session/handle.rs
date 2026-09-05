@@ -25,6 +25,7 @@ use rw_types::CommandOutcome;
 use rw_types::ContextItemId;
 use rw_types::ContextSnapshot;
 use rw_types::CostSnapshot;
+use rw_types::EngineEvent;
 use rw_types::PROTOCOL_VERSION;
 use rw_types::PlanDecision;
 use rw_types::PromptDump;
@@ -201,6 +202,16 @@ impl SessionHandle {
     ///
     /// Returns [`AgentLoopError::Closed`] if the actor is unavailable.
     pub async fn dispatch(&self, command: ClientCommand) -> Result<CommandOutcome, AgentLoopError> {
+        if matches!(
+            command,
+            ClientCommand::GetContext { .. }
+                | ClientCommand::DumpPrompt { .. }
+                | ClientCommand::GetCost { .. }
+        ) {
+            return Err(AgentLoopError::InvalidConfiguration(
+                "inspection requests require an owned read result".into(),
+            ));
+        }
         if let ClientCommand::Interrupt { meta, session_id } = &command {
             return Ok(self
                 .shutdown
@@ -348,6 +359,40 @@ impl SessionHandle {
             CommandOutcome::Rejected { error } => {
                 Err(AgentLoopError::InvalidConfiguration(error.message))
             }
+        }
+    }
+
+    /// Complete one admitted host inspection without broadcasting its decoded payload.
+    pub(crate) async fn read_inspection(
+        &self,
+        command: ClientCommand,
+        meta: rw_types::CommandAckMeta,
+    ) -> Result<crate::recovery::HistoryRead<EngineEvent>, AgentLoopError> {
+        let session_id = self.session_id.clone();
+        match self.dispatch_wait(command).await? {
+            ProtocolCompletion::Context(snapshot) => {
+                Ok(snapshot.map(|snapshot| EngineEvent::ContextSnapshotReady {
+                    meta,
+                    session_id,
+                    snapshot,
+                }))
+            }
+            ProtocolCompletion::Prompt(dump) => Ok(dump.map(|dump| EngineEvent::PromptDumpReady {
+                meta,
+                session_id,
+                dump,
+            })),
+            ProtocolCompletion::Cost(snapshot) => Ok(crate::recovery::HistoryRead::new(
+                EngineEvent::CostSnapshotReady {
+                    meta,
+                    session_id,
+                    snapshot: *snapshot,
+                },
+                (),
+            )),
+            _ => Err(AgentLoopError::InvalidConfiguration(
+                "request is not an actor inspection".into(),
+            )),
         }
     }
 
@@ -572,7 +617,9 @@ impl SessionHandle {
     /// # Errors
     ///
     /// Returns actor, persistence, or assembly failures.
-    pub async fn context_snapshot(&self) -> Result<ContextSnapshot, AgentLoopError> {
+    pub async fn context_snapshot(
+        &self,
+    ) -> Result<crate::recovery::HistoryRead<ContextSnapshot>, AgentLoopError> {
         match self
             .dispatch_wait(ClientCommand::GetContext {
                 meta: self.local_meta(),
@@ -608,7 +655,10 @@ impl SessionHandle {
     /// # Errors
     ///
     /// Returns actor, historical projection, or assembly failures.
-    pub async fn dump_prompt(&self, turn_id: Option<TurnId>) -> Result<PromptDump, AgentLoopError> {
+    pub async fn dump_prompt(
+        &self,
+        turn_id: Option<TurnId>,
+    ) -> Result<crate::recovery::HistoryRead<PromptDump>, AgentLoopError> {
         match self
             .dispatch_wait(ClientCommand::DumpPrompt {
                 meta: self.local_meta(),

@@ -14,7 +14,7 @@ pub struct LocalSession {
     handle: rw_core::SessionHandle,
     session_id: String,
     storage_root: PathBuf,
-    prompt_dump: Option<rw_types::PromptDump>,
+    prompt_dump: Option<rw_core::recovery::HistoryRead<rw_types::PromptDump>>,
     lifetime: Arc<RuntimeSessionResources>,
 }
 
@@ -23,7 +23,7 @@ impl LocalSession {
         handle: rw_core::SessionHandle,
         session_id: String,
         storage_root: PathBuf,
-        prompt_dump: Option<rw_types::PromptDump>,
+        prompt_dump: Option<rw_core::recovery::HistoryRead<rw_types::PromptDump>>,
         lifetime: Arc<RuntimeSessionResources>,
     ) -> Self {
         Self {
@@ -53,7 +53,7 @@ impl LocalSession {
     /// Exact validated request shape for a prompt-inspection session.
     #[must_use]
     pub fn prompt_dump(&self) -> Option<&rw_types::PromptDump> {
-        self.prompt_dump.as_ref()
+        self.prompt_dump.as_deref()
     }
 
     /// Waits for actor effects, session finalization, and service shutdown.

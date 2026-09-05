@@ -265,9 +265,31 @@ impl EngineHost {
             CommandExecution::Read => {
                 self.read_channel
                     .dispatch(bound, command, |command| async {
-                        self.execute_inner(command)
-                            .await
-                            .map(|(outcome, _, events)| HostReadResult::new(outcome, events, ()))
+                        if matches!(
+                            command,
+                            ClientCommand::GetContext { .. }
+                                | ClientCommand::DumpPrompt { .. }
+                                | ClientCommand::GetCost { .. }
+                        ) {
+                            let session_id = command.session_id().ok_or_else(|| {
+                                HostError::Protocol("inspection session is missing".into())
+                            })?;
+                            let session = self.ready_session(session_id).await?;
+                            let meta = super::ack_meta(command.meta(), &*self.clock);
+                            let read = session.handle().read_inspection(command, meta).await?;
+                            let (event, owner) = read.into_parts();
+                            Ok(HostReadResult::new(
+                                CommandOutcome::Accepted {},
+                                vec![event],
+                                owner,
+                            ))
+                        } else {
+                            self.execute_inner(command)
+                                .await
+                                .map(|(outcome, _, events)| {
+                                    HostReadResult::new(outcome, events, ())
+                                })
+                        }
                     })
                     .await
             }

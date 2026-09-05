@@ -187,7 +187,7 @@ fn active_child_snapshot_bounds_unicode_and_rejects_excess_associations() {
     for child in 0..256 {
         events.push(PendingEvent::SubagentSpawned {
             subagent_id: SubagentId(format!("child-{child}")),
-            child_session_id: SessionId(format!("session-{child}")),
+            child_session_id: SessionId(format!("session-child-{child}")),
             task: "犬".repeat(400),
         });
     }
