@@ -1,6 +1,7 @@
 mod accounting;
 mod canonical;
 mod provider_recovery;
+mod reads;
 use super::accounting_projection::compact_title;
 use super::accounting_projection::is_session_projection_boundary;
 use super::accounting_projection::session_projection_updated_at;
@@ -39,6 +40,7 @@ use tracing::Instrument;
 #[derive(Debug)]
 pub(super) struct DurableReadView {
     pub(super) lease: JournalReadLease,
+    reads: Arc<reads::ReadOperations>,
     pub(super) session_id: String,
 }
 
@@ -55,35 +57,37 @@ impl SessionEventReadView for DurableReadView {
     ) -> std::result::Result<Vec<EngineEvent>, AgentLoopError> {
         let lease = self.lease.clone();
         let session = self.session_id.clone();
-        tokio::task::spawn_blocking(move || {
-            let page = lease
-                .view
-                .page::<EngineEvent>(
-                    after,
-                    SessionEventPageLimits {
-                        max_page_events: limits.max_events,
-                        max_page_bytes: limits.max_bytes as u64,
-                        ..SessionEventPageLimits::default()
-                    },
-                )
-                .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-            page.events
-                .into_iter()
-                .map(|envelope| {
-                    let meta = envelope.event.meta().ok_or_else(|| {
-                        AgentLoopError::Persistence("transient event in durable journal".to_owned())
-                    })?;
-                    if meta.session_id.0 != session || meta.sequence_id != envelope.sequence {
-                        return Err(AgentLoopError::Persistence(
-                            "durable event identity differs from its envelope".to_owned(),
-                        ));
-                    }
-                    Ok(envelope.event)
-                })
-                .collect()
-        })
-        .await
-        .map_err(|error| AgentLoopError::Persistence(format!("journal reader failed: {error}")))?
+        self.reads
+            .run(lease, move |lease| {
+                let page = lease
+                    .view
+                    .page::<EngineEvent>(
+                        after,
+                        SessionEventPageLimits {
+                            max_page_events: limits.max_events,
+                            max_page_bytes: limits.max_bytes as u64,
+                            ..SessionEventPageLimits::default()
+                        },
+                    )
+                    .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+                page.events
+                    .into_iter()
+                    .map(|envelope| {
+                        let meta = envelope.event.meta().ok_or_else(|| {
+                            AgentLoopError::Persistence(
+                                "transient event in durable journal".to_owned(),
+                            )
+                        })?;
+                        if meta.session_id.0 != session || meta.sequence_id != envelope.sequence {
+                            return Err(AgentLoopError::Persistence(
+                                "durable event identity differs from its envelope".to_owned(),
+                            ));
+                        }
+                        Ok(envelope.event)
+                    })
+                    .collect()
+            })
+            .await
     }
 }
 
@@ -92,6 +96,7 @@ pub(super) struct DurableEventSink {
     pub(super) registration: JournalRegistration,
     pub(super) log: Arc<Mutex<SessionEventLog>>,
     commit_order: Arc<tokio::sync::Mutex<()>>,
+    reads: Arc<reads::ReadOperations>,
     canonical: std::sync::OnceLock<Arc<canonical::CanonicalSession>>,
     pub(super) storage_root: PathBuf,
     pub(super) session_id: String,
@@ -212,6 +217,7 @@ impl DurableEventSink {
             log,
             commit_order: Arc::new(tokio::sync::Mutex::new(())),
             canonical: std::sync::OnceLock::new(),
+            reads: reads::ReadOperations::new(),
             storage_root,
             session_id,
             hosted_projection: hosted_projection.map(Mutex::new),
@@ -308,9 +314,7 @@ impl SessionEventSink for DurableEventSink {
             .enter(Arc::clone(&self.commit_order))
             .await?;
         drop(settled);
-        if let Some(canonical) = self.canonical.get() {
-            canonical.settle().await?;
-        }
+        self.reads.settle().await?;
         Ok(())
     }
     async fn reserve(
@@ -345,6 +349,7 @@ impl SessionEventSink for DurableEventSink {
             .capture(&self.session_id)
             .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
         Ok(Arc::new(DurableReadView {
+            reads: Arc::clone(&self.reads),
             lease,
             session_id: self.session_id.clone(),
         }))
@@ -371,16 +376,22 @@ impl SessionEventSink for DurableEventSink {
             .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
         let trailing_start = UtcTimestamp::from_unix_millis(query.trailing_minute_start_unix_ms)
             .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-        let totals = AccountingLedger::open(&self.storage_root)
-            .and_then(|ledger| {
-                ledger.totals(
-                    &self.session_id,
-                    &day_start.utc_day(),
-                    &trailing_start,
-                    &now,
-                )
-            })
+        let root = self.storage_root.clone();
+        let session = self.session_id.clone();
+        let admission = self
+            .journal_service
+            .admit_read()
             .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+        let totals = self
+            .reads
+            .run(admission, move |_| {
+                AccountingLedger::open(&root)
+                    .and_then(|ledger| {
+                        ledger.totals(&session, &day_start.utc_day(), &trailing_start, &now)
+                    })
+                    .map_err(|error| AgentLoopError::Persistence(error.to_string()))
+            })
+            .await?;
         Ok(BudgetLedgerTotals {
             authoritative: true,
             session_cost_micros_usd: totals.session_micros_usd,

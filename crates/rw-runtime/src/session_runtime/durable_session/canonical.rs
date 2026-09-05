@@ -7,32 +7,12 @@ use rw_core::{
 };
 use rw_ext::ModeRegistry;
 use std::sync::{Arc, Mutex};
-use tokio::sync::Notify;
 
 pub(super) struct CanonicalSession {
     recovery: Mutex<Option<CanonicalRecovery>>,
     inherited_journal_through: Option<rw_types::SequenceId>,
     modes: Arc<ModeRegistry>,
-    jobs: Mutex<Jobs>,
-    changed: Notify,
-}
-#[derive(Default)]
-struct Jobs {
-    active: usize,
-    failed: bool,
-}
-struct Operation(Arc<CanonicalSession>);
-impl Drop for Operation {
-    fn drop(&mut self) {
-        let mut jobs = self
-            .0
-            .jobs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        jobs.failed |= std::thread::panicking();
-        jobs.active -= 1;
-        self.0.changed.notify_waiters();
-    }
+    reads: Arc<super::reads::ReadOperations>,
 }
 fn persistence(error: impl std::fmt::Display) -> AgentLoopError {
     AgentLoopError::Persistence(error.to_string())
@@ -41,26 +21,15 @@ impl CanonicalSession {
     pub(super) const fn inherited_journal_through(&self) -> Option<rw_types::SequenceId> {
         self.inherited_journal_through
     }
-    fn admit(self: &Arc<Self>) -> Result<Operation, AgentLoopError> {
-        let mut jobs = self
-            .jobs
-            .lock()
-            .map_err(|_| persistence("canonical job owner poisoned"))?;
-        if jobs.failed {
-            return Err(persistence("canonical worker proof failed"));
-        }
-        jobs.active += 1;
-        Ok(Operation(Arc::clone(self)))
-    }
     async fn read<T: Send + 'static>(
         self: Arc<Self>,
-        mut lease: JournalReadLease,
+        lease: JournalReadLease,
         publication: Arc<JournalPublication>,
         query: impl FnOnce(&CanonicalHistory) -> Result<T, RecoveryError> + Send + 'static,
     ) -> Result<T, AgentLoopError> {
-        let operation = self.admit()?;
-        let (result, _lease) = tokio::task::spawn_blocking(move || {
-            let result = (|| {
+        let reads = Arc::clone(&self.reads);
+        reads
+            .run(lease, move |lease| {
                 let mut recovery = self
                     .recovery
                     .lock()
@@ -90,41 +59,8 @@ impl CanonicalSession {
                     .bind_source(&lease.view)
                     .map_err(persistence)?;
                 query(&history).map_err(persistence)
-            })();
-            drop(operation);
-            (result, lease)
-        })
-        .await
-        .map_err(|error| persistence(format!("canonical worker failed: {error}")))?;
-        result
-    }
-    pub(super) async fn settle(&self) -> Result<(), AgentLoopError> {
-        let wait = async {
-            loop {
-                let changed = self.changed.notified();
-                {
-                    let jobs = self
-                        .jobs
-                        .lock()
-                        .map_err(|_| persistence("canonical job owner poisoned"))?;
-                    if jobs.failed {
-                        return Err(persistence("canonical worker proof failed"));
-                    }
-                    if jobs.active == 0 {
-                        return Ok(());
-                    }
-                }
-                changed.await;
-            }
-        };
-        if let Ok(result) = tokio::time::timeout(std::time::Duration::from_secs(30), wait).await {
-            return result;
-        }
-        self.jobs
-            .lock()
-            .map_err(|_| persistence("canonical job owner poisoned"))?
-            .failed = true;
-        Err(persistence("canonical worker effects remain unsettled"))
+            })
+            .await
     }
 }
 impl DurableEventSink {
@@ -138,8 +74,7 @@ impl DurableEventSink {
                 recovery: Mutex::new(None),
                 inherited_journal_through,
                 modes,
-                jobs: Mutex::new(Jobs::default()),
-                changed: Notify::new(),
+                reads: Arc::clone(&self.reads),
             }))
             .map_err(|_| persistence("canonical owner is already bound"))
     }
@@ -152,13 +87,18 @@ impl DurableEventSink {
         }
         let storage_root = self.storage_root.clone();
         let session_id = self.session_id.clone();
-        let inherited = tokio::task::spawn_blocking(move || {
-            super::super::session_metadata::load_session_metadata_any(&storage_root, &session_id)
+        let admission = self.journal_service.admit_read().map_err(persistence)?;
+        let inherited = self
+            .reads
+            .run(admission, move |_| {
+                super::super::session_metadata::load_session_metadata_any(
+                    &storage_root,
+                    &session_id,
+                )
                 .map(|metadata| metadata.inherited_journal_through)
                 .map_err(persistence)
-        })
-        .await
-        .map_err(|error| persistence(format!("canonical metadata read failed: {error}")))??;
+            })
+            .await?;
         self.configure_canonical(modes, inherited)?;
         // Publish the owner before starting index I/O so close can prove its completion.
         self.read_canonical(|_| Ok(())).await

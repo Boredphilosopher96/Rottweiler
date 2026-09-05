@@ -96,7 +96,7 @@ async fn abandoned_canonical_query_retains_worker_until_actual_completion() {
     });
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if owner.jobs.lock().expect("jobs").active == 1 {
+            if owner.reads.active() == 1 {
                 break;
             }
             tokio::task::yield_now().await;
