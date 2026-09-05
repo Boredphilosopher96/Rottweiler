@@ -17,6 +17,8 @@ use thiserror::Error;
 
 mod projector;
 pub use projector::{TranscriptProjectionProgress, TranscriptProjector};
+mod content;
+pub use content::{TranscriptDocument, TranscriptDocumentChunk};
 
 /// Constant-sized state; mutable entity bindings belong to the derived index.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -204,13 +206,19 @@ fn project_content(
         } => {
             let binding = entity_binding("shell", &[&shell_id.0]);
             let prior = rows.bound_row(&binding)?;
-            let prior_command = if let Some(prior) = &prior {
-                let TranscriptContent::Shell { command, .. } = decode(prior)? else {
+            let (prior_command, prior_output, prior_status) = if let Some(prior) = &prior {
+                let TranscriptContent::Shell {
+                    command,
+                    output,
+                    status,
+                    ..
+                } = decode(prior)?
+                else {
                     return Err(TranscriptProjectionError::Invalid("shell binding kind"));
                 };
-                command
+                (command, output, status)
             } else {
-                None
+                (None, None, None)
             };
             let command = command
                 .as_ref()
@@ -230,14 +238,17 @@ fn project_content(
                 binding: Some(binding),
                 content: TranscriptContent::Shell {
                     command,
-                    output: captured_output.as_ref().map(|text| {
-                        PreviewBudget(2 * 1024).text(
-                            text,
-                            source(meta.sequence_id, TranscriptContentSelector::ShellOutput),
-                        )
-                    }),
+                    output: captured_output
+                        .as_ref()
+                        .map(|text| {
+                            PreviewBudget(2 * 1024).text(
+                                text,
+                                source(meta.sequence_id, TranscriptContentSelector::ShellOutput),
+                            )
+                        })
+                        .or(prior_output),
                     active: *active,
-                    status: *status,
+                    status: status.or(prior_status),
                 },
             }))
         }
@@ -352,7 +363,6 @@ fn project_tool_start(
                         args,
                         source(meta.sequence_id, TranscriptContentSelector::ToolArguments),
                     )?,
-                    output: None,
                     diff: None,
                     status: TranscriptToolStatus::Running,
                 },
@@ -379,7 +389,6 @@ fn project_tool_update(
             let prior = required_row(rows, &binding)?;
             let mut content = decode(&prior)?;
             let TranscriptContent::Tool {
-                output: body,
                 status,
                 call_index: started_index,
                 ..
@@ -394,12 +403,13 @@ fn project_tool_update(
             }
             let reference = source(meta.sequence_id, TranscriptContentSelector::ToolOutput);
             let mut budget = PreviewBudget(2 * 1024);
-            *body = Some(match output {
+            let output = match output {
                 ToolOutput::Text { text } => budget.text(text, reference),
                 _ => budget.json(output, reference)?,
-            });
+            };
             *status = TranscriptToolStatus::Finished {
                 is_error: *is_error,
+                output,
             };
             Ok(Some(ProjectedRow {
                 prior: Some(prior),
@@ -470,7 +480,6 @@ fn project_child(
                         source(meta.sequence_id, TranscriptContentSelector::SubagentTask),
                     ),
                     status: TranscriptSubagentStatus::Running,
-                    result: None,
                 },
             }))
         }
@@ -482,10 +491,7 @@ fn project_child(
             let prior = required_row(rows, &entity_binding("subagent", &[&subagent_id.0]))?;
             let mut content = decode(&prior)?;
             let TranscriptContent::Subagent {
-                session_id,
-                status,
-                result: preview,
-                ..
+                session_id, status, ..
             } = &mut content
             else {
                 return Err(TranscriptProjectionError::Invalid("child binding kind"));
@@ -500,11 +506,11 @@ fn project_child(
             }
             *status = TranscriptSubagentStatus::Finished {
                 status: result.status.clone(),
+                result: PreviewBudget(2 * 1024).text(
+                    &result.final_text,
+                    source(meta.sequence_id, TranscriptContentSelector::SubagentResult),
+                ),
             };
-            *preview = Some(PreviewBudget(2 * 1024).text(
-                &result.final_text,
-                source(meta.sequence_id, TranscriptContentSelector::SubagentResult),
-            ));
             let agent_turn = prior.agent_turn;
             Ok(Some(ProjectedRow {
                 prior: Some(prior),

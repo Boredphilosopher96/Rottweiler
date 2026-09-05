@@ -141,7 +141,7 @@ fn tool_identity_survives_reopen_and_provider_ir_does_not_duplicate_rows() {
         vec![(0, 2), (4, 5)]
     );
     let TranscriptContent::Tool {
-        output: Some(output),
+        status: TranscriptToolStatus::Finished { output, .. },
         ..
     } = decode(&page.rows[0]).expect("first tool")
     else {
@@ -311,17 +311,31 @@ fn shell_completion_updates_original_row_and_commands_are_not_rewind_owned() {
         &mut index,
         &mut state,
     );
+    commit(
+        &EngineEvent::UserShellStateChanged {
+            meta: meta(3),
+            shell_id: rw_types::ShellId("shell-1".into()),
+            command: None,
+            active: false,
+            status: None,
+            captured_output: None,
+        },
+        &mut journal,
+        &mut index,
+        &mut state,
+    );
     let page = index.page(0, 64, 1024 * 1024).expect("page");
     assert_eq!(page.rows.len(), 2);
     assert!(page.rows.iter().all(|row| row.agent_turn.is_none()));
     assert_eq!(
         (page.rows[0].source, page.rows[0].revision),
-        (SequenceId(0), SequenceId(2))
+        (SequenceId(0), SequenceId(3))
     );
     let TranscriptContent::Shell {
         command: Some(command),
         output: Some(output),
-        ..
+        status: Some(0),
+        active: false,
     } = decode(&page.rows[0]).expect("shell")
     else {
         panic!("missing shell content");
@@ -385,7 +399,7 @@ fn bounded_projector_resumes_hidden_rewind_after_every_transaction() {
                 .expect("original tool row");
             assert_eq!(tool.revision, SequenceId(53));
             let TranscriptContent::Tool {
-                output: Some(output),
+                status: TranscriptToolStatus::Finished { output, .. },
                 ..
             } = decode(tool).expect("tool")
             else {
@@ -639,11 +653,241 @@ fn projector_finishes_a_tool_from_an_earlier_raw_page_after_reopen() {
         (SequenceId(0), SequenceId(65))
     );
     let TranscriptContent::Tool {
-        output: Some(output),
+        status: TranscriptToolStatus::Finished { output, .. },
         ..
     } = decode(&page.rows[0]).expect("tool")
     else {
         panic!("missing complete output");
     };
     assert_eq!(output.text, "complete body from a later page");
+}
+
+#[test]
+fn full_content_moves_text_and_reads_utf8_chunks_without_body_copies() {
+    let text = "🦀source\n".repeat(50_000);
+    let pointer = text.as_ptr();
+    let bytes = text.len();
+    let document = TranscriptDocument::from_event(
+        EngineEvent::CommandFinished {
+            meta: meta(0),
+            name: "probe".into(),
+            message: text,
+            unrestorable_paths: vec![],
+        },
+        &source(SequenceId(0), TranscriptContentSelector::CommandMessage),
+        bytes,
+    )
+    .expect("move body into owner");
+    assert_eq!(document.total_bytes(), bytes);
+    assert_eq!(document.retained_bytes(), bytes);
+    let first = document.chunk(0, 7).expect("UTF-8 slice");
+    assert_eq!(first.text.as_ptr(), pointer);
+    assert_eq!(first.text, "🦀sou");
+    assert_eq!(first.next_offset, Some(7));
+    assert!(document.chunk(1, 1024).is_err());
+    assert!(document.chunk(0, 3).is_err());
+    assert!(document.chunk(bytes + 1, 1024).is_err());
+    assert!(document.chunk(0, 0).is_err());
+    let mut position = 0;
+    loop {
+        let chunk = document
+            .chunk(position, 8193)
+            .expect("bounded continuation");
+        assert!(chunk.text.len() <= 8193);
+        assert_eq!(chunk.text.as_ptr(), pointer.wrapping_add(position));
+        if let Some(next) = chunk.next_offset {
+            assert!(next > position);
+            position = next;
+        } else {
+            assert_eq!(position + chunk.text.len(), bytes);
+            break;
+        }
+    }
+    assert_eq!(document.chunk(bytes, 1024).expect("EOF").text, "");
+}
+
+#[test]
+fn full_conversation_has_no_reasoning_signature_or_duplicate_tool_ir() {
+    let event = turn(
+        7,
+        1,
+        Role::Assistant,
+        vec![
+            Block::Thinking {
+                content: "visible thought".into(),
+                signature: Some("PRIVATE-CONTINUATION".into()),
+            },
+            Block::ToolCall {
+                id: ToolCallId("tool".into()),
+                name: "read".into(),
+                args: serde_json::json!({"hidden":true}),
+            },
+            Block::Text {
+                text: "visible answer".into(),
+            },
+        ],
+    );
+    let document = TranscriptDocument::from_event(
+        event.clone(),
+        &source(SequenceId(7), TranscriptContentSelector::Conversation),
+        4096,
+    )
+    .expect("display document");
+    let body = document.chunk(0, 4096).expect("complete JSON");
+    let value: serde_json::Value = serde_json::from_str(body.text).expect("complete JSON syntax");
+    assert_eq!(value["blocks"].as_array().expect("display blocks").len(), 2);
+    assert_eq!(value["blocks"][0]["content"], "visible thought");
+    assert!(!body.text.contains("PRIVATE-CONTINUATION"));
+    assert!(!body.text.contains("signature"));
+    assert!(!body.text.contains("hidden"));
+    let thought = TranscriptDocument::from_event(
+        event.clone(),
+        &source(
+            SequenceId(7),
+            TranscriptContentSelector::ConversationBlock { index: 0 },
+        ),
+        4096,
+    )
+    .expect("reasoning text");
+    assert_eq!(
+        thought.chunk(0, 4096).expect("thought").text,
+        "visible thought"
+    );
+    assert!(
+        TranscriptDocument::from_event(
+            event.clone(),
+            &source(
+                SequenceId(7),
+                TranscriptContentSelector::ConversationBlock { index: 1 }
+            ),
+            4096
+        )
+        .is_err()
+    );
+    assert!(
+        TranscriptDocument::from_event(
+            event.clone(),
+            &source(
+                SequenceId(7),
+                TranscriptContentSelector::ConversationBlock { index: 99 }
+            ),
+            4096
+        )
+        .is_err()
+    );
+    assert!(
+        TranscriptDocument::from_event(
+            event.clone(),
+            &source(SequenceId(8), TranscriptContentSelector::Conversation),
+            4096
+        )
+        .is_err()
+    );
+    assert!(
+        TranscriptDocument::from_event(
+            event,
+            &source(SequenceId(7), TranscriptContentSelector::ToolOutput),
+            4096
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn full_structured_content_is_serialized_once_with_an_allocation_ceiling() {
+    let mut event = start(0, 0);
+    if let EngineEvent::ToolCallStarted { args, .. } = &mut event {
+        *args = serde_json::json!({"escaped":"\u{0}".repeat(8192)});
+    }
+    let reference = source(SequenceId(0), TranscriptContentSelector::ToolArguments);
+    assert!(TranscriptDocument::from_event(event.clone(), &reference, 8192).is_err());
+    let document =
+        TranscriptDocument::from_event(event, &reference, 65536).expect("bounded JSON document");
+    assert_eq!(document.format(), TranscriptPreviewFormat::Json);
+    assert!(document.retained_bytes() <= 65536);
+    let mut result = String::new();
+    let mut offset = 0;
+    loop {
+        let chunk = document
+            .chunk(offset, 113)
+            .expect("small JSON continuation");
+        result.push_str(chunk.text);
+        if let Some(next) = chunk.next_offset {
+            offset = next;
+        } else {
+            break;
+        }
+    }
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&result).expect("reassembled JSON")["escaped"],
+        "\u{0}".repeat(8192)
+    );
+}
+
+#[test]
+fn child_completion_retains_one_row_and_authoritative_full_result() {
+    let root = tempdir().expect("root");
+    let mut journal = SegmentedJournal::open(root.path(), "semantic").expect("journal");
+    let mut index = TranscriptIndex::open(&journal.read_view(), 1).expect("index");
+    let mut state = TranscriptProjectionState::default();
+    let id = rw_types::SubagentId("child-1".into());
+    let child_session = SessionId("child-session".into());
+    commit(
+        &EngineEvent::SubagentSpawned {
+            meta: meta(0),
+            subagent_id: id.clone(),
+            child_session_id: child_session.clone(),
+            task: "inspect workspace".into(),
+        },
+        &mut journal,
+        &mut index,
+        &mut state,
+    );
+    let event = EngineEvent::SubagentFinished {
+        meta: meta(1),
+        subagent_id: id.clone(),
+        result: rw_types::SubagentResult {
+            subagent_id: id,
+            session_id: child_session,
+            status: rw_types::SubagentStatus::Completed,
+            final_text: "complete output ".repeat(1000),
+            touched_files: vec![],
+            diff_artifact: None,
+            usage: rw_types::Usage {
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+            },
+            cost: rw_types::Cost::Unavailable {
+                reason: "fixture".into(),
+            },
+            turns: 1,
+            duration_millis: 1,
+        },
+    };
+    commit(&event, &mut journal, &mut index, &mut state);
+    let page = index.page(0, 64, 1024 * 1024).expect("page");
+    assert_eq!(page.rows.len(), 1);
+    assert_eq!(
+        (page.rows[0].source, page.rows[0].revision),
+        (SequenceId(0), SequenceId(1))
+    );
+    let TranscriptContent::Subagent {
+        status: TranscriptSubagentStatus::Finished { result, status },
+        ..
+    } = decode(&page.rows[0]).expect("child result")
+    else {
+        panic!("missing finished child body");
+    };
+    assert_eq!(status, rw_types::SubagentStatus::Completed);
+    assert!(!result.complete);
+    assert_eq!(result.source.sequence, SequenceId(1));
+    let document = TranscriptDocument::from_event(event, &result.source, 65536)
+        .expect("authoritative full result");
+    assert_eq!(
+        document.chunk(0, 65536).expect("complete result").text,
+        "complete output ".repeat(1000)
+    );
 }

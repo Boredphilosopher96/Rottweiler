@@ -75,7 +75,10 @@ pub enum TranscriptConversationBlock {
 #[ts(tag = "type", rename_all = "snake_case")]
 pub enum TranscriptToolStatus {
     Running,
-    Finished { is_error: bool },
+    Finished {
+        is_error: bool,
+        output: TranscriptBodyPreview,
+    },
 }
 
 /// Child lifecycle without retaining its full historical event projection.
@@ -84,7 +87,10 @@ pub enum TranscriptToolStatus {
 #[ts(tag = "type", rename_all = "snake_case")]
 pub enum TranscriptSubagentStatus {
     Running,
-    Finished { status: SubagentStatus },
+    Finished {
+        status: SubagentStatus,
+        result: TranscriptBodyPreview,
+    },
 }
 
 /// Bounded, renderer-independent content of one stable logical transcript row.
@@ -102,7 +108,6 @@ pub enum TranscriptContent {
         name: String,
         call_index: u32,
         arguments: TranscriptBodyPreview,
-        output: Option<TranscriptBodyPreview>,
         diff: Option<TranscriptBodyPreview>,
         status: TranscriptToolStatus,
     },
@@ -121,6 +126,5 @@ pub enum TranscriptContent {
         session_id: SessionId,
         task: TranscriptBodyPreview,
         status: TranscriptSubagentStatus,
-        result: Option<TranscriptBodyPreview>,
     },
 }
