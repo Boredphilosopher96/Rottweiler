@@ -1,3 +1,4 @@
+import { addSchemaBudgets } from "./schema-budgets"
 import { readFile } from "node:fs/promises"
 import { fileURLToPath } from "node:url"
 import Ajv2020 from "ajv/dist/2020"
@@ -59,6 +60,7 @@ export async function standaloneValidator({ schema, typeName, typeImport, banner
     // remain enforced. Runtime protocol version and u64 cursors use shared owners.
     validateFormats: false,
   })
+  addSchemaBudgets(ajv)
   const prepared = structuredClone(schema)
   addDiscriminators(prepared)
   const validate = ajv.compile(prepared)
