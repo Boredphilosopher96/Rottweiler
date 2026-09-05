@@ -42,7 +42,7 @@ def valid_manifest(extra: str = "") -> str:
         outputs = ["generated/protocol.ts"]
 
         [[shadow]]
-        id = "legacy-session-validator"
+        id = "duplicate-session-validator"
         owner = "session-protocol"
         path = "client/session.ts"
         pattern = "function\\\\s+validateSessionId\\\\s*\\\\("
@@ -162,7 +162,7 @@ class OwnershipCheckerTests(unittest.TestCase):
 
             failures = self.checker.validate_repository(root, manifest)
 
-            self.assertTrue(any("legacy-session-validator" in failure for failure in failures))
+            self.assertTrue(any("duplicate-session-validator" in failure for failure in failures))
 
     def test_rust_child_module_retains_shadow_checks(self) -> None:
         for entrypoint in ["client/session.rs", "client/session/mod.rs"]:

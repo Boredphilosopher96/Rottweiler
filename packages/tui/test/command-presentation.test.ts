@@ -4,7 +4,7 @@ import { commandResultMarkdown } from "../src/render"
 import type { CommandResultProjection } from "../src/state"
 
 describe("command result presentation", () => {
-  test("renders every structured projection variant with legacy Markdown parity", () => {
+  test("renders every structured projection variant as Markdown", () => {
     const fixtures: readonly [CommandResultProjection, string][] = [
       [{
         kind: "context",

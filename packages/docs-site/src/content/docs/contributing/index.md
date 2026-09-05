@@ -20,8 +20,8 @@ The release builder compiles and validates every required sibling executable.
 
 - Add a fact to its domain owner, then generate or check projections.
 - Do not copy protocol values into docs, SDKs, hosts, or tests.
-- Do not add compatibility aliases. Migrate callers and delete the obsolete
-  surface in the same change.
+- Keep implementation, callers, schemas, and fixtures aligned with the owned
+  contract. Reject inputs outside that contract.
 - Keep UI behavior in the client and session behavior in the Rust engine.
 - Keep `/updates/**` under the release workflow's exclusive ownership.
 

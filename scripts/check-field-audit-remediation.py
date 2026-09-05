@@ -89,12 +89,6 @@ def main() -> int:
         "derived_rebuild_preserves_authority_and_rolls_back_on_accounting_conflict",
         "explicit_search_rebuild_can_replace_an_unsupported_derived_schema",
     )
-    store_sources = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in (ROOT / "crates/rw-store/src/session").rglob("*.rs")
-    )
-    for removed in ("backfill_unknown_turn_counts", "ensure_accounting_columns", "remove_legacy_turn_uniqueness", "session_index_has_turn_count"):
-        require(f"fn {removed}(" not in store_sources, f"removed compatibility path {removed} returned")
     require_contains(
         "crates/rw-cli/src/main.rs",
         "UPDATED (UTC)",
