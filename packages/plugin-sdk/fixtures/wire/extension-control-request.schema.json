@@ -33,6 +33,24 @@
     "ExtensionControl": {
       "oneOf": [
         {
+          "description": "Only an active driver command may request client navigation.",
+          "type": "object",
+          "properties": {
+            "target": {
+              "$ref": "#/$defs/SessionNavigationTarget"
+            },
+            "action": {
+              "type": "string",
+              "const": "navigate"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "action",
+            "target"
+          ]
+        },
+        {
           "type": "object",
           "properties": {
             "item_id": {
@@ -132,6 +150,54 @@
           ]
         }
       ]
+    },
+    "SessionNavigationTarget": {
+      "description": "A request to the initiating client, resolved through its ordinary session/history APIs.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "session"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "session_id"
+          ]
+        },
+        {
+          "description": "Select the nearest surviving transcript row at or before this durable sequence.",
+          "type": "object",
+          "properties": {
+            "sequence": {
+              "$ref": "#/$defs/SequenceId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "transcript"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "sequence"
+          ]
+        }
+      ]
+    },
+    "SessionId": {
+      "description": "Stable identifier of an engine session.",
+      "type": "string"
+    },
+    "SequenceId": {
+      "description": "Monotonic per-session sequence encoded as a decimal string on the wire.",
+      "type": "string"
     }
   }
 }

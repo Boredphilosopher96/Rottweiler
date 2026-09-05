@@ -75,6 +75,7 @@
                   "session_exported",
                   "session_forked",
                   "session_history_ready",
+                  "session_navigation_requested",
                   "session_replay_completed",
                   "session_review_ready",
                   "session_review_updated",

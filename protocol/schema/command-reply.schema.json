@@ -132,6 +132,31 @@
             "session_id": {
               "$ref": "#/$defs/SessionId"
             },
+            "target": {
+              "$ref": "#/$defs/SessionNavigationTarget"
+            },
+            "type": {
+              "type": "string",
+              "const": "session_navigation_requested"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "target"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
             "catalog": {
               "$ref": "#/$defs/UiCatalog"
             },
@@ -2880,6 +2905,50 @@
       "description": "Stable identifier of an engine session.",
       "type": "string"
     },
+    "SessionNavigationTarget": {
+      "description": "A request to the initiating client, resolved through its ordinary session/history APIs.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "session"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "session_id"
+          ]
+        },
+        {
+          "description": "Select the nearest surviving transcript row at or before this durable sequence.",
+          "type": "object",
+          "properties": {
+            "sequence": {
+              "$ref": "#/$defs/SequenceId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "transcript"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "sequence"
+          ]
+        }
+      ]
+    },
+    "SequenceId": {
+      "description": "Monotonic per-session sequence encoded as a decimal string on the wire.",
+      "type": "string"
+    },
     "UiCatalog": {
       "type": "object",
       "properties": {
@@ -3231,7 +3300,33 @@
         "descriptor",
         "projected"
       ],
-      "x-rw-max-json-bytes": 65536
+      "x-rw-max-json-bytes": 65536,
+      "x-rw-array-pair": {
+        "left": [
+          "descriptor",
+          "fields"
+        ],
+        "right": [
+          "projected",
+          "fields"
+        ],
+        "identity": "id",
+        "discriminator": "kind",
+        "maxItems": 32,
+        "collections": [
+          {
+            "tag": "list",
+            "values": "values",
+            "limit": "max_items"
+          },
+          {
+            "tag": "table",
+            "values": "rows",
+            "limit": "max_rows",
+            "width": "columns"
+          }
+        ]
+      }
     },
     "UiProjectedFields": {
       "type": "object",
@@ -3434,10 +3529,6 @@
         "sequence_id",
         "emitted_at"
       ]
-    },
-    "SequenceId": {
-      "description": "Monotonic per-session sequence encoded as a decimal string on the wire.",
-      "type": "string"
     },
     "TodoSnapshot": {
       "type": "object",

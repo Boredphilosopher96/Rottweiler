@@ -21,6 +21,32 @@
     "projected"
   ],
   "x-rw-max-json-bytes": 65536,
+  "x-rw-array-pair": {
+    "left": [
+      "descriptor",
+      "fields"
+    ],
+    "right": [
+      "projected",
+      "fields"
+    ],
+    "identity": "id",
+    "discriminator": "kind",
+    "maxItems": 32,
+    "collections": [
+      {
+        "tag": "list",
+        "values": "values",
+        "limit": "max_items"
+      },
+      {
+        "tag": "table",
+        "values": "rows",
+        "limit": "max_rows",
+        "width": "columns"
+      }
+    ]
+  },
   "$defs": {
     "UiContributionOwner": {
       "type": "object",
