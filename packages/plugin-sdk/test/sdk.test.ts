@@ -156,6 +156,7 @@ describe("wire protocol", () => {
       contextRead: "session/context_read",
       sessionControl: "session/control",
       sessionToolCall: "session/tool_call",
+      effectToolCall: "effect/tool_call",
       stateRead: "extension/state_read",
       stateCommit: "extension/state_commit",
       injectMessage: "session/inject_message",

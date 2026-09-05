@@ -84,6 +84,7 @@ pub const METHOD_EVENT_READ: &str = "event/read";
 pub const METHOD_SESSION_CONTEXT_READ: &str = "session/context_read";
 pub const METHOD_SESSION_CONTROL: &str = "session/control";
 pub const METHOD_SESSION_TOOL_CALL: &str = "session/tool_call";
+pub const METHOD_EFFECT_TOOL_CALL: &str = "effect/tool_call";
 pub const METHOD_SESSION_QUERY: &str = "session/query";
 pub const METHOD_EXTENSION_STATE_READ: &str = "extension/state_read";
 pub const METHOD_EXTENSION_STATE_COMMIT: &str = "extension/state_commit";
@@ -405,6 +406,8 @@ pub enum PluginPush {
     SessionControl,
     #[serde(rename = "session/tool_call")]
     SessionToolCall,
+    #[serde(rename = "effect/tool_call")]
+    EffectToolCall,
     #[serde(rename = "extension/state_read")]
     ExtensionStateRead,
     #[serde(rename = "extension/state_commit")]
@@ -428,6 +431,7 @@ impl PluginPush {
             Self::SessionContextRead => METHOD_SESSION_CONTEXT_READ,
             Self::SessionControl => METHOD_SESSION_CONTROL,
             Self::SessionToolCall => METHOD_SESSION_TOOL_CALL,
+            Self::EffectToolCall => METHOD_EFFECT_TOOL_CALL,
             Self::ExtensionStateRead => METHOD_EXTENSION_STATE_READ,
             Self::ExtensionStateCommit => METHOD_EXTENSION_STATE_COMMIT,
             Self::SessionInjectMessage => METHOD_SESSION_INJECT_MESSAGE,

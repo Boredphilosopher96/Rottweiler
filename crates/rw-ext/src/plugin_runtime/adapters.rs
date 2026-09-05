@@ -5,6 +5,7 @@ pub struct RpcToolAdapter {
     declaration: rw_plugin_protocol::PluginToolCapability,
     endpoint: Arc<dyn PluginEndpoint>,
     presentation: Option<Arc<rw_types::extension_ui::UiContribution>>,
+    effects: Arc<crate::tool_effects::ToolEffectsOwner>,
 }
 
 impl RpcToolAdapter {
@@ -27,6 +28,7 @@ impl RpcToolAdapter {
             declaration,
             endpoint,
             presentation,
+            effects: Arc::default(),
         })
     }
 }
@@ -34,10 +36,15 @@ impl RpcToolAdapter {
 #[async_trait]
 impl Tool for RpcToolAdapter {
     async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
-        self.endpoint
-            .settle_effects()
-            .await
+        let (endpoint, effects) =
+            tokio::join!(self.endpoint.settle_effects(), self.effects.settle(),);
+        endpoint
             .map_err(|error| ToolError::EffectsUnsettled(error.to_string()))
+            .and(effects)
+    }
+
+    fn delegates_effects(&self) -> bool {
+        true
     }
     fn descriptor(&self) -> ToolDescriptor {
         let process_effects = self.endpoint.metadata().process_tool_effects();
@@ -72,6 +79,16 @@ impl Tool for RpcToolAdapter {
             .enforcer()
             .check_tool(&self.declaration.name)
             .map_err(|error| ToolError::Output(error.to_string()))?;
+        let effects = _context
+            .effect_host()
+            .map(|host| {
+                let grant = rw_tools::ToolEffectGrant::new(
+                    CapabilityManifest::new(self.declaration.caps.iter().copied().map(tool_effect)),
+                    connection.effect_domains(),
+                )?;
+                self.effects.begin(host, grant)
+            })
+            .transpose()?;
         let result = connection
             .client()
             .call_tool(
@@ -82,9 +99,15 @@ impl Tool for RpcToolAdapter {
                 },
                 &_context.cancellation,
                 Arc::clone(&_context.progress),
+                effects
+                    .as_ref()
+                    .map(crate::tool_effects::ToolEffectsCall::effects),
             )
-            .await
-            .map_err(|error| ToolError::Output(error.to_string()))?;
+            .await;
+        if let Some(effects) = effects {
+            effects.finish().await?;
+        }
+        let result = result.map_err(|error| ToolError::Output(error.to_string()))?;
         let result: ToolResult = serde_json::from_value(result).map_err(|error| {
             ToolError::Output(format!("plugin returned invalid tool result: {error}"))
         })?;

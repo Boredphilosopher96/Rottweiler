@@ -5,6 +5,7 @@ mod catalog;
 mod sdk;
 mod settlement;
 mod state;
+mod tool_effects;
 mod transport;
 
 use std::collections::BTreeMap;

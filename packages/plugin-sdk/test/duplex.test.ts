@@ -594,3 +594,32 @@ test("host tool callback inherits remaining command time while controls keep the
   send(stop)
   await serving
 })
+
+
+test("native tool effects correlate to the active request while duplex replies remain live", async () => {
+  const definition: PluginDefinition = {
+    manifest: { name: "tool-effects", version: "1", protocol: 3, capabilities: {
+      tools: [{name:"inspect", description:"host file reader", schema:{}, caps:["reads-fs"]}],
+      push: ["effect/tool_call"],
+    } },
+    handlers: { tools: { inspect: async (_params, { effects }) =>
+      await effects.callTool("read", {path:"file", line_count:null}),
+    } },
+  }
+  const { frames, send, serving } = harness(definition, 10)
+  send({jsonrpc:"2.0", id:2, method:"tool/call", params:{
+    name:"inspect", input:{}, lifetime:{total_ms:300, idle_ms:300},
+  }})
+  await until(() => frames.some(frame => frame.method === "effect/tool_call"))
+  const request = frames.find(frame => frame.method === "effect/tool_call")
+  expect(request?.params).toEqual({request_id:2, name:"read", input:{path:"file", line_count:null}})
+  expect(frames.some(frame => frame.id === 2)).toBe(false)
+  await Bun.sleep(30)
+  const response = {content:"owned host bytes", data:null, truncated:false}
+  if (request?.id === undefined) throw new Error("missing correlated effect request")
+  send({jsonrpc:"2.0", id:request.id, result:response})
+  await until(() => frames.some(frame => frame.id === 2))
+  expect(frames.find(frame => frame.id === 2)?.result).toEqual(response)
+  send(stop)
+  await serving
+})

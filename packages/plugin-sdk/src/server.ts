@@ -1,3 +1,4 @@
+import validateEffectCall from "./generated/extension-effect-call-validator.js"
 import validateToolResponse from "./generated/tool-response-validator.js"
 import validateInvocationId from "./generated/extension-invocation-id-validator.js"
 import type { ExtensionInvocationId } from "./generated/extension-contract"
@@ -84,6 +85,9 @@ export interface HandlerContext {
 }
 
 export interface ToolHandlerContext extends HandlerContext {
+  /** File and HTTP tools run inside this request's approved host scope. */
+  readonly effects: { callTool(name: string, input: JsonValue): Promise<ToolResponse> }
+
   /** Replaces pending progress; delivery renews idle time within the immutable total deadline. */
   progress(update: ToolProgress): void
 }
@@ -319,7 +323,7 @@ function validateManifest(manifest: PluginManifest): void {
   requireUnique(push, "push")
   const validPush = new Set<PluginPushMethod>([
     RPC_METHODS.injectMessage, RPC_METHODS.setStatus, RPC_METHODS.notify, RPC_METHODS.publishPanel,
-    RPC_METHODS.sessionQuery, RPC_METHODS.contextRead, RPC_METHODS.sessionControl, RPC_METHODS.sessionToolCall, RPC_METHODS.stateRead, RPC_METHODS.stateCommit, RPC_METHODS.eventRead,
+    RPC_METHODS.sessionQuery, RPC_METHODS.contextRead, RPC_METHODS.sessionControl, RPC_METHODS.sessionToolCall, RPC_METHODS.effectToolCall, RPC_METHODS.stateRead, RPC_METHODS.stateCommit, RPC_METHODS.eventRead,
   ])
   if (push.some((method) => !validPush.has(method))) throw new Error("unknown push capability")
 
@@ -872,6 +876,7 @@ export class PluginServer {
       const handler = this.definition.handlers.tools?.[params.name]
       if (handler === undefined) throw new SafeRpcError(-32601, "tool is not declared")
       const { total_ms: totalMs, idle_ms: idleMs } = params.lifetime
+      const deadlineAt = performance.now() + totalMs
       const renewIdle = () => {
         clearTimeout(idleTimer)
         if (!call.signal.aborted) idleTimer = setTimeout(expire, idleMs)
@@ -888,7 +893,14 @@ export class PluginServer {
       const result = await this.#invoke(() => {
           if (this.#lifetime.signal.aborted) call.abort()
           if (call.signal.aborted) throw new SafeRpcError(-32800, "plugin tool cancelled")
-          return handler(params, { ...this.#context(call.signal, undefined, null), progress: update => {
+          return handler(params, { ...this.#context(call.signal, undefined, null),
+            effects: { callTool: async (name, input) => {
+              const request = { request_id: id, name, input }
+              if (!validateEffectCall(request)) throw new SafeRpcError(-32602, "invalid host effect request")
+              const result = await this.#push(RPC_METHODS.effectToolCall, request, call.signal, deadlineAt)
+              if (!validateToolResponse(result)) throw new SafeRpcError(-32603, "invalid host effect result")
+              return result as unknown as ToolResponse
+            } }, progress: update => {
             if (call.signal.aborted) throw new SafeRpcError(-32800, "plugin tool cancelled")
             progress.report(update)
           } })

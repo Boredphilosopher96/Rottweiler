@@ -18,6 +18,7 @@ pub(super) enum RequestPolicy {
     Tool {
         lifetime: OperationLifetime,
         progress: Arc<dyn ToolProgressSink>,
+        effects: Option<Arc<crate::PluginToolEffects>>,
     },
 }
 
@@ -53,7 +54,11 @@ impl RequestPolicy {
                 },
                 RequestObserver::Ordinary(timeout),
             ),
-            Self::Tool { lifetime, progress } => {
+            Self::Tool {
+                lifetime,
+                progress,
+                effects,
+            } => {
                 let now = Instant::now();
                 let total = now + Duration::from_millis(u64::from(lifetime.total_ms()));
                 let idle = now + Duration::from_millis(u64::from(lifetime.idle_ms()));
@@ -61,6 +66,7 @@ impl RequestPolicy {
                 (
                     PendingRequest::Tool {
                         response,
+                        effects,
                         operation: ToolOperation {
                             total,
                             idle,
@@ -95,10 +101,22 @@ pub(super) enum PendingRequest {
     Tool {
         response: oneshot::Sender<Result<Value, PluginRpcError>>,
         operation: ToolOperation,
+        effects: Option<Arc<crate::PluginToolEffects>>,
     },
 }
 
 impl PendingRequest {
+    pub(super) fn effects(&self) -> Option<Arc<crate::PluginToolEffects>> {
+        match self {
+            Self::Tool {
+                operation, effects, ..
+            } if Instant::now() < operation.total && Instant::now() < operation.idle => {
+                effects.clone()
+            }
+            _ => None,
+        }
+    }
+
     pub(super) fn bind_command(
         &mut self,
         method: &str,
@@ -148,6 +166,7 @@ impl PendingRequest {
             Self::Tool {
                 response,
                 operation,
+                ..
             } => {
                 let now = Instant::now();
                 let result = if now >= operation.total {
@@ -359,6 +378,7 @@ mod tests {
         let (mut pending, observer) = RequestPolicy::Tool {
             lifetime: OperationLifetime::new(120, 75).unwrap(),
             progress: sink.clone(),
+            effects: None,
         }
         .begin(send, Duration::from_millis(1));
         let waiting =
@@ -387,6 +407,7 @@ mod tests {
             let (pending, observer) = RequestPolicy::Tool {
                 lifetime: OperationLifetime::default(),
                 progress: Arc::new(Updates::default()),
+                effects: None,
             }
             .begin(send, Duration::from_millis(1));
             let waiting =
@@ -404,6 +425,7 @@ mod tests {
         let (mut pending, observer) = RequestPolicy::Tool {
             lifetime: OperationLifetime::default(),
             progress: Arc::new(Updates::default()),
+            effects: None,
         }
         .begin(send, Duration::from_secs(5));
         if let PendingRequest::Tool { operation, .. } = &mut pending {
@@ -423,6 +445,7 @@ mod tests {
         let (mut pending, _observer) = RequestPolicy::Tool {
             lifetime: OperationLifetime::default(),
             progress: Arc::new(Updates::default()),
+            effects: None,
         }
         .begin(send, Duration::from_secs(5));
         assert!(!pending.progress(update(0)));

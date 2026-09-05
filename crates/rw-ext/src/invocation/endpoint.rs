@@ -115,11 +115,12 @@ impl PluginRpcClient for ManagedClient {
         params: rw_plugin_protocol::ToolCallParams,
         cancellation: &CancellationToken,
         progress: Arc<dyn ToolProgressSink>,
+        effects: Option<Arc<crate::PluginToolEffects>>,
     ) -> Result<Value, PluginRpcError> {
         let lease = self.admit()?;
         tokio::select! {
             ()=cancellation.cancelled()=>Err(error("cancelled","extension tool was cancelled")),
-            result=self.inner.call_tool(params,&lease.cancellation,progress)=>result,
+            result=self.inner.call_tool(params,&lease.cancellation,progress,effects)=>result,
         }
     }
     async fn notify(&self, method: &str, params: Value) -> Result<(), PluginRpcError> {

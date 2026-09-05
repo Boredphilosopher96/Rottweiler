@@ -849,6 +849,7 @@ mod tests {
                 },
                 &rw_tools::CancellationToken::default(),
                 Arc::new(rw_tools::NoopProgressSink),
+                None,
             )
             .await
             .expect("probe response");

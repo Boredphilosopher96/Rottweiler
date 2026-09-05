@@ -91,6 +91,7 @@ async fn typed_tool_progress_crosses_the_real_reader_without_extending_control_d
                     },
                     &CancellationToken::default(),
                     progress,
+                    None,
                 )
                 .await
         })

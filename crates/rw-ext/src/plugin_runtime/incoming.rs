@@ -248,12 +248,24 @@ fn start_host_command(request: RpcRequest, state: &ReaderState) -> bool {
     tokio::spawn(async move {
         // Keep this permit through the actual actor reply, even after teardown starts.
         let params = redactor.redact(request.params.unwrap_or(Value::Null));
-        let response = match validate_control_origin(&pending, &request.method, &params).await {
-            Ok(()) => {
-                handle_push_request(&enforcer, handler.as_ref(), &request.method, params).await
+        let response = if request.method == rw_plugin_protocol::METHOD_EFFECT_TOOL_CALL {
+            handle_tool_effect(&pending, params).await
+        } else {
+            match validate_control_origin(&pending, &request.method, &params).await {
+                Ok(()) => {
+                    handle_push_request(&enforcer, handler.as_ref(), &request.method, params).await
+                }
+                Err(error) => Err(error),
             }
-            Err(error) => Err(error),
         };
+        if response
+            .as_ref()
+            .is_err_and(|error| error.code == "effects_unsettled")
+        {
+            // An errored proof cannot release the process-wide host-effect
+            // barrier. HostCommandLease retains its credit on this exit.
+            return;
+        }
         if termination.cancellation.is_cancelled() {
             lease.complete();
             return;
@@ -284,6 +296,41 @@ fn start_host_command(request: RpcRequest, state: &ReaderState) -> bool {
         lease.complete();
     });
     true
+}
+
+async fn handle_tool_effect(pending: &Pending, params: Value) -> Result<Value, PluginRpcError> {
+    let request: rw_types::extension_tools::ExtensionEffectCall = serde_json::from_value(params)
+        .map_err(|_| rpc_error("invalid_params", "invalid nested tool effect request"))?;
+    request
+        .validate()
+        .map_err(|message| rpc_error("invalid_params", message))?;
+    let id = i64::try_from(request.request_id)
+        .map(RpcId::Number)
+        .map_err(|_| rpc_error("invalid_params", "invalid effect request identity"))?;
+    let effects = pending
+        .lock()
+        .await
+        .get(&id)
+        .and_then(PendingRequest::effects)
+        .ok_or_else(|| {
+            rpc_error(
+                "effect_denied",
+                "no active host effect scope belongs to this tool request",
+            )
+        })?;
+    let result = effects
+        .call(&request.name, request.input)
+        .await
+        .map_err(|error| {
+            let code = match &error {
+                ToolError::EffectsUnsettled(_) => "effects_unsettled",
+                ToolError::Cancelled => "cancelled",
+                _ => "effect_denied",
+            };
+            rpc_error(code, &error.to_string())
+        })?;
+    serde_json::to_value(result)
+        .map_err(|_| rpc_error("invalid_result", "nested tool result could not encode"))
 }
 
 pub(super) async fn validate_control_origin(

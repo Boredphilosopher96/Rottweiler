@@ -76,6 +76,7 @@ async fn typed_tool_idle_timeout_settles_parent_and_child_effects() {
                     },
                     &CancellationToken::default(),
                     Arc::new(rw_tools::NoopProgressSink),
+                    None,
                 )
                 .await
         })

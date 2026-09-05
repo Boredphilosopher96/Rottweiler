@@ -412,7 +412,12 @@ impl JsonRpcPluginClient {
         if self.closed.load(Ordering::Acquire) && !allow_closed {
             return Err(rpc_error("closed", "plugin RPC client is closed"));
         }
-        let numeric = self.next_id.fetch_add(1, Ordering::AcqRel);
+        let numeric = self
+            .next_id
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |id| {
+                (id <= 9_007_199_254_740_991).then(|| id + 1)
+            })
+            .map_err(|_| rpc_error("id_exhausted", "plugin RPC request IDs exhausted"))?;
         let id = RpcId::Number(
             i64::try_from(numeric)
                 .map_err(|_| rpc_error("id_exhausted", "plugin RPC request IDs exhausted"))?,
@@ -578,7 +583,12 @@ impl JsonRpcPluginClient {
         }
         let deadline = tokio::time::Instant::now()
             + Duration::from_millis(rw_plugin_protocol::MAX_OPERATION_DURATION_MS);
-        let numeric = self.next_id.fetch_add(1, Ordering::AcqRel);
+        let numeric = self
+            .next_id
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |id| {
+                (id <= 9_007_199_254_740_991).then(|| id + 1)
+            })
+            .map_err(|_| rpc_error("id_exhausted", "plugin RPC request IDs exhausted"))?;
         let id = RpcId::Number(
             i64::try_from(numeric)
                 .map_err(|_| rpc_error("id_exhausted", "plugin RPC request IDs exhausted"))?,
@@ -775,6 +785,7 @@ impl PluginRpcClient for JsonRpcPluginClient {
         params: ToolCallParams,
         cancellation: &CancellationToken,
         progress: Arc<dyn rw_tools::ToolProgressSink>,
+        effects: Option<Arc<crate::PluginToolEffects>>,
     ) -> Result<Value, PluginRpcError> {
         let lifetime = params.lifetime;
         let params = serde_json::to_value(params)
@@ -783,7 +794,11 @@ impl PluginRpcClient for JsonRpcPluginClient {
             METHOD_TOOL_CALL,
             params,
             cancellation,
-            RequestPolicy::Tool { lifetime, progress },
+            RequestPolicy::Tool {
+                lifetime,
+                progress,
+                effects,
+            },
         )
         .await
     }

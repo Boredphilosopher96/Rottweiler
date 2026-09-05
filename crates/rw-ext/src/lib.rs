@@ -12,6 +12,8 @@ mod plugin;
 mod plugin_endpoint;
 mod plugin_runtime;
 mod registry;
+mod tool_effects;
+pub use tool_effects::PluginToolEffects;
 mod wasm;
 mod wasm_process;
 mod workflow;

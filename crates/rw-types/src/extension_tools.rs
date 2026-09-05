@@ -23,21 +23,47 @@ impl ExtensionToolCall {
     /// # Errors
     /// Rejects oversized identities and input before actor admission.
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.name.is_empty() || self.name.len() > crate::tool_admission::MAX_TOOL_NAME_BYTES {
-            return Err("invalid host tool identity");
-        }
-        if self
-            .input
-            .prepared_bytes()
-            .is_none_or(|bytes| bytes > MAX_EXTENSION_TOOL_INPUT_PREPARED_BYTES)
-        {
-            return Err("host tool input allocation exceeds admission");
-        }
-        if !within_json_limit(&self.input, MAX_EXTENSION_TOOL_INPUT_BYTES) {
-            return Err("host tool input exceeds its byte limit");
-        }
-        Ok(())
+        validate_tool_input(&self.name, &self.input)
     }
+}
+
+/// A callback is correlated to one host-originated tool request in the same
+/// native process; it cannot select a session, driver, checkpoint or generation.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, TS, PrepareAllocation)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionEffectCall {
+    #[ts(type = "number")]
+    #[schemars(range(min = 1, max = 9_007_199_254_740_991_u64))]
+    pub request_id: u64,
+    #[schemars(length(min = 1, max = 256))]
+    pub name: String,
+    #[schemars(extend("x-rw-max-json-bytes" = MAX_EXTENSION_TOOL_INPUT_BYTES))]
+    pub input: serde_json::Value,
+}
+impl ExtensionEffectCall {
+    /// # Errors
+    /// Rejects invalid request correlation and excessive retained input.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.request_id == 0 || self.request_id > 9_007_199_254_740_991 {
+            return Err("invalid host tool request identity");
+        }
+        validate_tool_input(&self.name, &self.input)
+    }
+}
+fn validate_tool_input(name: &str, input: &serde_json::Value) -> Result<(), &'static str> {
+    if name.is_empty() || name.len() > crate::tool_admission::MAX_TOOL_NAME_BYTES {
+        return Err("invalid host tool identity");
+    }
+    if input
+        .prepared_bytes()
+        .is_none_or(|bytes| bytes > MAX_EXTENSION_TOOL_INPUT_PREPARED_BYTES)
+    {
+        return Err("host tool input allocation exceeds admission");
+    }
+    if !within_json_limit(input, MAX_EXTENSION_TOOL_INPUT_BYTES) {
+        return Err("host tool input exceeds its byte limit");
+    }
+    Ok(())
 }
 
 /// Full output stays in the canonical tool event. An oversized callback output

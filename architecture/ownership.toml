@@ -293,6 +293,7 @@ outputs = [
   "packages/plugin-sdk/src/generated/tool-contract.ts",
   "packages/plugin-sdk/fixtures/wire/tool-response.schema.json",
   "packages/plugin-sdk/fixtures/wire/extension-tool-call.schema.json",
+  "packages/plugin-sdk/fixtures/wire/extension-effect-call.schema.json",
   "packages/plugin-sdk/fixtures/wire/extension-tool-outcome.schema.json",
 ]
 
@@ -1003,6 +1004,8 @@ outputs = [
   "packages/plugin-sdk/src/generated/tool-response-validator.js",
   "packages/plugin-sdk/src/generated/tool-response-validator.d.ts",
   "packages/plugin-sdk/src/generated/extension-tool-call-validator.js",
+  "packages/plugin-sdk/src/generated/extension-effect-call-validator.js",
+  "packages/plugin-sdk/src/generated/extension-effect-call-validator.d.ts",
   "packages/plugin-sdk/src/generated/extension-tool-call-validator.d.ts",
   "packages/plugin-sdk/src/generated/extension-tool-outcome-validator.js",
   "packages/plugin-sdk/src/generated/extension-tool-outcome-validator.d.ts",
@@ -1036,7 +1039,7 @@ patterns = ["packages/plugin-sdk/src/generated/protocol-*.ts", "packages/plugin-
 [[owner]]
 id = "extension-tool-contract"
 path = "crates/rw-types/src/extension_tools.rs"
-symbols = ["ExtensionToolCall", "ExtensionToolOutcome", "MAX_EXTENSION_TOOL_OUTPUT_BYTES"]
+symbols = ["ExtensionToolCall", "ExtensionToolOutcome", "ExtensionEffectCall", "MAX_EXTENSION_TOOL_OUTPUT_BYTES"]
 
 [[inventory]]
 id = "plugin-validator-projections"

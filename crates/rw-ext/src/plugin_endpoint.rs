@@ -82,6 +82,7 @@ impl PluginEndpointMetadata {
 pub struct PluginConnection {
     client: Arc<dyn PluginRpcClient>,
     enforcer: Arc<CapabilityEnforcer>,
+    effect_domains: Arc<[String]>,
     continuation_provenance: rw_providers::ContinuationProvenance,
 }
 
@@ -96,6 +97,7 @@ impl PluginConnection {
         Self {
             client: host.client(),
             enforcer: host.enforcer(),
+            effect_domains: host.effect_domains(),
             continuation_provenance: host.continuation_provenance().clone(),
         }
     }
@@ -109,6 +111,10 @@ impl PluginConnection {
     pub fn enforcer(&self) -> &Arc<CapabilityEnforcer> {
         &self.enforcer
     }
+    pub(crate) fn effect_domains(&self) -> &[String] {
+        &self.effect_domains
+    }
+
     #[must_use]
     pub fn continuation_provenance(&self) -> &rw_providers::ContinuationProvenance {
         &self.continuation_provenance
@@ -223,6 +229,7 @@ pub(crate) fn fixture_endpoint(
     Arc::new(FixtureEndpoint {
         metadata,
         connection: PluginConnection {
+            effect_domains: Arc::from([]),
             client,
             enforcer,
             continuation_provenance: rw_providers::ContinuationProvenance::bind(&[b"fixture"]),

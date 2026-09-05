@@ -968,6 +968,7 @@ pub trait PluginRpcClient: Send + Sync {
         _params: rw_plugin_protocol::ToolCallParams,
         _cancellation: &rw_tools::CancellationToken,
         _progress: Arc<dyn rw_tools::ToolProgressSink>,
+        _effects: Option<Arc<crate::PluginToolEffects>>,
     ) -> Result<Value, PluginRpcError> {
         Err(PluginRpcError {
             code: "unsupported".to_owned(),

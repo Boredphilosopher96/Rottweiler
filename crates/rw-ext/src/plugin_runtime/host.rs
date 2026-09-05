@@ -3,6 +3,7 @@ use super::*;
 /// Running plugin with an immutable manifest/capability snapshot.
 pub struct PluginHost {
     manifest: PluginManifest,
+    effect_domains: Arc<[String]>,
     continuation_provenance: rw_providers::ContinuationProvenance,
     pub(super) client: Arc<JsonRpcPluginClient>,
     enforcer: Arc<CapabilityEnforcer>,
@@ -192,6 +193,12 @@ impl PluginHost {
         }
         Ok(Self {
             manifest: initialized,
+            effect_domains: config
+                .allowed_domains()
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .into(),
             continuation_provenance,
             client,
             enforcer,
@@ -202,6 +209,10 @@ impl PluginHost {
     pub const fn manifest(&self) -> &PluginManifest {
         &self.manifest
     }
+    pub(crate) fn effect_domains(&self) -> Arc<[String]> {
+        self.effect_domains.clone()
+    }
+
     #[must_use]
     pub fn continuation_provenance(&self) -> &rw_providers::ContinuationProvenance {
         &self.continuation_provenance

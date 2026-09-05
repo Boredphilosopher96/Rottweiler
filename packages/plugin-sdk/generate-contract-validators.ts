@@ -5,6 +5,7 @@ const check = process.argv.includes("--check")
 const schemas: readonly (readonly [string, string, string])[] = [
   ["tool-response", "ToolResponse", "tool-contract"],
   ["extension-tool-call", "ExtensionToolCall", "extension-contract"],
+  ["extension-effect-call", "ExtensionEffectCall", "extension-contract"],
   ["extension-tool-outcome", "ExtensionToolOutcome", "extension-contract"],
   ["ui-panel-update", "UiPanelUpdate", "ui-contract"],
   ["ui-panel-updated", "UiPanelUpdated", "ui-contract"],
