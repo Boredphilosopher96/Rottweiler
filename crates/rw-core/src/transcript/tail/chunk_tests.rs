@@ -1,7 +1,7 @@
 #![allow(clippy::expect_used)]
 use super::*;
 use rw_store::session::transcript_index::{TranscriptIndexError, TranscriptIndexRow};
-use std::{cell::Cell, collections::BTreeMap, io::Write as _};
+use std::{cell::Cell, collections::BTreeMap};
 
 #[derive(Default)]
 struct Cells {
