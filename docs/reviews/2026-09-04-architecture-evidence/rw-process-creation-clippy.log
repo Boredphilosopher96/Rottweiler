@@ -1,8 +1,0 @@
-    Checking serde_json v1.0.151
-    Checking serde v1.0.229
-    Checking ts-rs v12.0.1
-    Checking schemars v1.2.2
-    Checking rw-operation-contract v0.1.4 (/Users/sumukhnitundila/MyProjects/Rottweiler/crates/rw-operation-contract)
-    Checking rw-types v0.1.4 (/Users/sumukhnitundila/MyProjects/Rottweiler/crates/rw-types)
-    Checking rw-sandbox v0.1.4 (/Users/sumukhnitundila/MyProjects/Rottweiler/crates/rw-sandbox)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 10.62s

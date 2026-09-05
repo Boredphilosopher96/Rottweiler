@@ -6,7 +6,7 @@ Keep communication concise and direct. A question alone is not authorization to 
 ## Code structure
 
 - Handwritten source and test files must contain at most 1,500 lines, including comments and blanks. Run `python3 scripts/check-source-size.py` before delivery.
-- Split by responsibility and behavior. Use small module entrypoints with explicit dependencies. Do not replace a large file with numbered fragments, blanket lint exceptions, or compatibility wrappers.
+- Split by responsibility and behavior. Use small module entrypoints with explicit dependencies. Do not replace a large file with numbered fragments or blanket lint exceptions.
 - Generated outputs are recognized through `architecture/ownership.toml` and their generator markers. Do not label handwritten code as generated to bypass the limit.
 - Implement one coherent product design. Keep its implementation, callers, schemas, fixtures, tests, and documentation aligned. Define required inputs explicitly and reject data outside those contracts. Describe behavior and rationale directly; keep development chronology, progress reports, and iteration narratives out of the product repository. Provider protocols and terminal input conventions are external interfaces with their own semantics.
 

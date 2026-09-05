@@ -1,6 +1,6 @@
-# 03 — Decision Log (ADRs)
+# Design decisions
 
-Format: context → decision → rationale → revisit-when. The implementing agent must not silently deviate; write a superseding ADR first.
+These records define the product design, its constraints, and its rationale. Keep implementation, tests, and the relevant record aligned.
 
 ---
 
@@ -36,16 +36,13 @@ Format: context → decision → rationale → revisit-when. The implementing ag
 
 ---
 
-## ADR-003: Extensibility = config tier + RPC plugins now; WASM later
+## ADR-003: Declarative, RPC, and WASM extensions
 
-**Decision.** Three tiers (details in 04-EXTENSIBILITY):
-1. **Declarative** — Markdown/TOML: commands, skills, agents, modes, workflows. Ships in v1.
-2. **RPC plugins** — out-of-process, any language, JSON-RPC over stdio (LSP/MCP-style), with a capability handshake. Ships in v1. Official TypeScript SDK first (largest plugin-author community — this is how we match pi's extensibility).
-3. **WASM components** — in-process wasmtime for latency-critical hooks. Post-v1.
+Declarative Markdown and TOML define commands, skills, agents, modes, and workflows. RPC plugins run in supervised processes and expose tools, commands, hooks, providers, and events through the typed stdio protocol. The TypeScript SDK supports the same plugin contract.
 
-**Rationale.** RPC-over-stdio is proven (LSP, MCP, DAP), language-agnostic, crash-isolated, and trivially sandboxable. Embedding a scripting language (Lua/Rhai/QuickJS) was rejected: picks a winner language, weaker isolation, and pi's ecosystem shows authors want their own language + npm packages. WASM deferred: component-model DX is still rough; RPC latency (sub-ms locally) is fine for hooks that gate tool calls.
+WASM hook components execute in bounded private helpers through the hook dispatcher. Their component ABI has no ambient host imports. Declarative discovery, RPC activation, and WASM worker lifetimes each have explicit owners and share the extension registries described in `04-EXTENSIBILITY.md`.
 
-**Revisit when.** A hook demonstrably needs <100µs latency, or wasm component tooling matures.
+Process isolation supports arbitrary plugin languages and keeps plugin failures outside the Rust engine. The component tier supplies a narrower execution contract for hooks.
 
 ---
 
@@ -64,20 +61,18 @@ Format: context → decision → rationale → revisit-when. The implementing ag
 
 ---
 
-## ADR-006: Session store = JSONL event log + SQLite index, checkpoints = content-addressed blobs
+## ADR-006: Durable sessions and workspace checkpoints
 
-**Status.** Physical event layout and read-integrity policy superseded by ADR-029.
-SQLite search projections and content-addressed workspace checkpoints remain in force.
+The authoritative session stream uses immutable JSONL segments and a bounded active append segment. Pinned read views expose committed events through bounded pages. ADR-029 defines persistence and recovery ownership.
 
-**Decision.** As stated. Not "everything in SQLite," not git-based checkpoints.
-**Rationale.** JSONL is append-only-crash-safe, human-inspectable, trivially exportable, and the natural shape of an event-sourced session. SQLite does what it's good at (list/search). Shadow-git for checkpoints was rejected: interferes with user repos, slow on large trees; content-addressed blobs of *touched files only* are O(changes).
+Search indexes are derived from session events. Workspace checkpoints store content-addressed blobs for touched files, keeping capture work proportional to the mutation scope. Checkpoint operations preserve the user's Git repository and record explicit outcomes for unrestorable paths.
 
 ---
 
 ## ADR-007: Sandbox = OS-native primitives, per-command policy
 
 **Decision.** macOS Seatbelt (`sandbox-exec` profile), Linux Landlock + seccomp (bubblewrap fallback when unavailable). Three-way command classification: **safe-list** (read-only, run sandboxed without asking), **ask** (default), **deny-list**. Network egress blocked inside sandbox by default, with a proxy escape hatch per-domain. Details in 05-SECURITY.
-**Rationale.** Matches the brief ("sandbox for only some commands") and current best practice (Codex CLI, Claude Code sandbox). Container-based isolation rejected for v1: heavy, breaks local toolchains.
+**Rationale.** Matches the brief ("sandbox for only some commands") and current best practice (Codex CLI, Claude Code sandbox). Container-based isolation adds startup cost and changes local toolchain access.
 **Revisit when.** Windows-native support demanded (currently: warn + no sandbox on Windows, WSL recommended).
 
 ---
@@ -133,7 +128,7 @@ SQLite search projections and content-addressed workspace checkpoints remain in 
 
 **Rationale.** Schema-first tooling for Rust is mediocre (weak enum/discriminated-union codegen); Rust-first with export gives the same cross-language guarantee minus the toolchain fight. The engine is the protocol's owner anyway.
 
-**Constraint + de-risk.** Protocol enums are restricted to codegen-friendly shapes (struct variants with named fields, internally-tagged serde, no tuple variants, no untyped `Value` where a type is known). **M0 includes a mandatory spike**: run the chosen toolchain over the real `Block`/`ToolOutput`/event enums and round-trip fixtures through Rust and TS *before* any other M0 work is considered done — if the toolchain can't handle the shapes, the shapes change in M0, not in M4.
+**Constraint.** Protocol enums are restricted to codegen-friendly shapes (struct variants with named fields, internally-tagged serde, no tuple variants, no untyped `Value` where a type is known). Cross-language fixtures must round-trip the actual protocol variants through Rust and TypeScript.
 
 **Revisit when.** A third non-generated consumer (e.g. a Go client) appears and needs schema-first neutrality.
 
@@ -157,15 +152,15 @@ SQLite search projections and content-addressed workspace checkpoints remain in 
 
 **Rationale.** Client/server exists precisely so different UIs can attach to the same engine — local vs remote must be the same code path or it will rot. SSH is the transport users already trust and have configured; we inherit its auth, encryption, and firewall story instead of building one. Consequence: the protocol is designed connection-oriented with resync (event sequence ids) from day one, and no event may embed machine-local absolute paths without marking them as such.
 
-**Sequencing guard.** Remote mode ships in M4, one milestone before the sandbox/permission-rules/trust milestone (M5). Until M5 lands, remote sessions force the strictest interactive policy (every mutating tool prompts, no safe-list, no remembered approvals) — a remote engine on a shared host must never be the least-protected configuration.
+Remote sessions use a launch-fixed strict permission policy.
 
 **Revisit when.** Demand for browser clients requires WebSocket+TLS listening; that's additive.
 
 ---
 
-## ADR-016: Code intelligence = tree-sitter index (always on) + LSP (auto-start), both in v1
+## ADR-016: Code intelligence = tree-sitter index (always on) + LSP (auto-start)
 
-**Decision.** Two tiers, both v1: a tree-sitter symbol index (zero-config, incremental, powers the `symbols` tool) and LSP client integration (auto-start servers found on PATH; diagnostics-after-edit; go-to-def/references/rename tools). Formatters/linters are not LSP's job here: they load through the declarative `[toolchain]` config, which registers built-in `post_tool` hooks on the public hook API.
+**Decision.** Two tiers: a tree-sitter symbol index (zero-config, incremental, powers the `symbols` tool) and LSP client integration (auto-start servers found on PATH; diagnostics-after-edit; go-to-def/references/rename tools). Formatters/linters are not LSP's job here: they load through the declarative `[toolchain]` config, which registers built-in `post_tool` hooks on the public hook API.
 
 **Rationale.** Tree-sitter gives every language a floor with no setup; LSP gives depth where servers exist; hooks give formatters/linters a uniform mechanism that third parties can extend (dogfooding rule: the built-in `[toolchain]` tier is sugar over the same hook registration a plugin would use).
 
@@ -175,13 +170,13 @@ SQLite search projections and content-addressed workspace checkpoints remain in 
 
 ## ADR-017: Built-in subscription providers are isolated, pinned compatibility profiles
 
-**Decision.** `openai_codex` and `github_copilot` are the only built-in consumer-subscription profiles in v1. They are direct provider adapters over Rottweiler IR, never nested coding-agent processes. They have separate adapter kinds, credentials, fixed production origins, header policies, capability/model tables, reasoning-signature namespaces, accounting semantics, record/replay fixtures, and live compatibility canaries. Ordinary `openai` and `anthropic` remain API-key providers and cannot consume subscription credentials. ChatGPT uses its own Rottweiler login and credential bundle; Claude subscription login is explicitly not supported. GitHub Copilot uses the audited public Copilot CLI-compatible OAuth device client identity required for the subscription model catalog. Rottweiler performs its own device grant and stores its own token; it does not copy or silently reuse OpenCode, VS Code, Copilot CLI, or `gh` credential caches. All credentials share one versioned owner-private Rottweiler file (mode 0600 on Unix).
+**Decision.** `openai_codex` and `github_copilot` are the only built-in consumer-subscription profiles. They are direct provider adapters over Rottweiler IR, never nested coding-agent processes. They have separate adapter kinds, credentials, fixed production origins, header policies, capability/model tables, reasoning-signature namespaces, accounting semantics, record/replay fixtures, and live compatibility canaries. Ordinary `openai` and `anthropic` remain API-key providers and cannot consume subscription credentials. ChatGPT uses its own Rottweiler login and credential bundle; Claude subscription login is explicitly not supported. GitHub Copilot uses the audited public Copilot CLI-compatible OAuth device client identity required for the subscription model catalog. Rottweiler performs its own device grant and stores its own token; it does not copy or silently reuse OpenCode, VS Code, Copilot CLI, or `gh` credential caches. All credentials share one versioned owner-private Rottweiler file (mode 0600 on Unix).
 
 **Rationale.** Users already pay for these coding subscriptions and both products expose working native-client paths used by established coding harnesses. Treating them as explicit compatibility profiles provides useful batteries-included defaults without contaminating the provider-neutral IR or pretending undocumented consumer transports are stable public APIs. Isolation, pinned upstream audits, deterministic wire fixtures, and paid/quota live canaries make drift visible. A single owner-private file gives deterministic persistence without any macOS credential store authorization surface.
 
 **Constraints.** ChatGPT tokens may reach only the fixed ChatGPT Codex backend; Copilot tokens may reach only the exact GitHub auth and Copilot API origins. Redirects are disabled. Project config cannot override those origins or client identities. Subscription usage is never mislabeled as ordinary API-key cost. Any unsupported IR field fails before network or has an explicit, tested compatibility mapping. Upstream behavior is pinned and audited as a compatibility contract; Rottweiler still owns its grant, storage, redaction, and request boundaries.
 
-**Revisit when.** OpenAI or GitHub publishes a stable first-party raw provider API/SDK that preserves Rottweiler's headless provider boundary, or a compatibility canary fails; migrate the implementation and fixtures together without retaining the superseded path.
+**Revisit when.** OpenAI or GitHub publishes a stable first-party raw provider API/SDK that preserves Rottweiler's headless provider boundary, or a compatibility canary fails. The implementation and fixtures must match the provider contract.
 
 ---
 
@@ -224,8 +219,6 @@ weakening ADR-001's renderer requirement.
 
 ## ADR-019: Live catalogs are authoritative; sanitized provider state may cross the UI boundary
 
-**Status:** accepted 2026-07-12; narrows and supersedes ADR-008 only for model availability and explicit user selection. Role aliases remain the default internal routing abstraction.
-
 **Decision.** Provider-authenticated live discovery is the authority for which concrete models are currently selectable. The refreshable `models.toml` table enriches discovered ids with capabilities and pricing but never invents availability. A short-lived provider-neutral cache may expose bounded concrete ids/display names, capabilities, alias membership, current selection, and a sanitized provider inventory containing only display name, auth interaction kind, boolean authenticated/reachable state, model count, and category-only status. This information contains no credentials or connection configuration. Explicit selection may bind a session to a validated concrete `provider/model`; that binding is durable and must be revalidated/reconstructed on live resume while deterministic replay remains socket-free.
 
 The TUI may initiate provider-neutral OAuth or device-flow interactions through engine commands. Configured inference, discovery, authorization, and token endpoints; pending login objects; OAuth client identity; credential references/values; account ids; token responses; and provider wire errors stay behind the Rust provider/core boundary. The narrow interaction exception is the bounded authorization or device-verification URL, loopback redirect URI, and one-time user code that the human must open or enter. That challenge is connection-scoped only: it is never appended to session or control logs, captured by provider record/replay, returned in reconnect gaps, exported, or retained after completion/cancellation. API-key entry uses a secret-input channel and is not represented as an ordinary setting value.
@@ -237,8 +230,6 @@ The TUI may initiate provider-neutral OAuth or device-flow interactions through 
 ---
 
 ## ADR-020: Routine prompts are mutation prompts; isolation remains capability-driven
-
-**Status:** accepted 2026-07-13; supersedes the prompt defaults in ADR-007 and ADR-011 without weakening sandbox, trust, fingerprint, or explicit-deny gates.
 
 **Decision.** In a normal local interactive Execute session, the default `ask` policy prompts only for tools that may write the filesystem and shell invocations outside the audited read-only safe-list. Reads, search/glob/list operations, todo bookkeeping, web fetch/search, and non-writing network or execution tools run without a routine permission dialog. MCP tools use the same rule: declared filesystem mutations prompt; other calls remain constrained by the server sandbox and first-use server approval. Explicit deny rules, malformed-request rejection, Discuss/Plan mode restrictions, permission hooks, native sandbox grants, SSRF policy, and plugin/MCP fingerprint approval remain independent fail-closed gates.
 
@@ -252,15 +243,13 @@ The built-in no-prompt shell list is intentionally narrow and implemented as har
 
 ---
 
-## ADR-021: WASM hook components and a signed extension registry ship now
+## ADR-021: WASM hook components and a signed extension registry
 
-**Status:** accepted 2026-07-13; supersedes ADR-003's WASM deferral for the hook subset only.
-
-**Decision.** Rottweiler ships Wasmtime's component-model runtime in a private `rottweiler-wasm-host` helper beside `rw` and exposes one versioned, length-bounded string/JSON hook ABI. This is still one installed application and one public `rw` entrypoint; the helper is never placed on the user's PATH. Keeping Wasmtime out of the normal `rw` dependency graph preserves no-extension startup latency and makes a guest-runtime failure process-isolated. WASM hooks register on the existing `HookDispatcher`, use the same current capability manifest and hook names as RPC plugins, and receive a fresh short-lived store for each invocation. The helper clears its environment and provides no WASI and no filesystem, network, process, environment, clock, randomness, or credential imports. Component size, protocol frames, serialized input bytes, linear-memory/table/instance counts, aggregate enabled bytes, fuel, and the complete helper request lifetime are bounded. A helper that stalls during validation, request writes, response reads, or shutdown is killed and reaped before the request fails. Fuel-based async yielding makes dispatcher cancellation observable while guest code is running. The component ABI's owned-string return is checked immediately after canonical lifting; the tighter linear-memory ceiling bounds the unavoidable allocation before that check. Tools, commands, providers, events, and push methods remain on the crash-isolated RPC tier until their component interfaces can preserve the same security and cancellation contracts.
+**Decision.** Rottweiler ships Wasmtime's component-model runtime in a private `rottweiler-wasm-host` helper beside `rw` and exposes one versioned, length-bounded string/JSON hook ABI. This is still one installed application and one public `rw` entrypoint; the helper is never placed on the user's PATH. Keeping Wasmtime out of the normal `rw` dependency graph preserves no-extension startup latency and makes a guest-runtime failure process-isolated. WASM hooks register on `HookDispatcher`, use the same capability manifest and hook names as RPC plugins, and receive a fresh short-lived store for each invocation. The helper clears its environment and provides no WASI and no filesystem, network, process, environment, clock, randomness, or credential imports. Component size, protocol frames, serialized input bytes, linear-memory/table/instance counts, aggregate enabled bytes, fuel, and the complete helper request lifetime are bounded. A helper that stalls during validation, request writes, response reads, or shutdown is killed and reaped before the request fails. Fuel-based async yielding makes dispatcher cancellation observable while guest code is running. The component ABI's owned-string return is checked immediately after canonical lifting; the tighter linear-memory ceiling bounds the unavoidable allocation before that check. Tools, commands, providers, events, and push methods remain on the crash-isolated RPC tier until their component interfaces can preserve the same security and cancellation contracts.
 
 The extension registry is a distribution layer, not a trust root. Each release contains its exact manifest, semantic version, HTTPS artifact location, byte size, BLAKE3 digest, publisher public key, and an Ed25519 signature over all of that metadata. Installation requires the publisher key to be trusted independently of the fetched catalog, verifies the signature and artifact bytes, and atomically publishes the complete manifest/component/signed-release record beneath the extension store. The approved publisher key is pinned separately in `trusted-publishers.json`; it is not accepted from the adjacent installed release record. Activation re-verifies the persisted signature against that separate key pin, rechecks the manifest and artifact, and records the publisher-key, manifest, and component fingerprints before capability approval; installation alone never executes code. Thus a coordinated rewrite of an inactive release record, manifest, and component cannot nominate a replacement publisher. Descriptor-relative no-follow reads protect installed artifacts on Unix, with opened-handle type/size validation on other supported platforms. Invalid installed or enabled records remain visible in `rw extension status`; a corrupt extension is skipped without preventing engine startup, and the durable plugin-status/UI-notification event stream surfaces a bounded control-stripped recovery warning in attached clients. Catalog files are bounded caches; signed release metadata plus the user's separate publisher-key and capability approvals are authoritative. A session retains the exact successfully validated WASM hook generation across workspace-root recomposition, while registration conflicts fail the root change instead of silently disabling hooks.
 
-**Rationale.** The user explicitly reprioritized the previously post-v1 WASM tier and registry. A component-only hook ABI captures the intended low-latency benefit without creating a second extension system or granting ambient machine authority. Independent publisher-key trust prevents a compromised catalog from substituting code, while exact artifact and manifest binding makes updates reviewable.
+**Rationale.** A component-only hook ABI captures the intended low-latency benefit without creating a second extension system or granting ambient machine authority. Independent publisher-key trust prevents a compromised catalog from substituting code, while exact artifact and manifest binding makes updates reviewable.
 
 **Revisit when.** Component-model interfaces for tools/providers can carry streaming, cancellation, permission, and redaction semantics without host imports that weaken this boundary; add those capabilities to the same manifest and dispatcher rather than introducing a parallel host.
 
@@ -268,25 +257,19 @@ The extension registry is a distribution layer, not a trust root. Each release c
 
 ## ADR-022: Plugin-provider authentication is host-mediated, never credential-passing
 
-**Status:** accepted 2026-08-02.
-
 **Decision.** A plugin provider never receives a credential. It asks the host over its provider RPC to perform the authenticated request, naming a credential reference; the host resolves that reference and sends the request through the guarded provider HTTP path.
 
 **Rationale.** Plugin processes run behind a supervised egress proxy configured from their `allowed_domains` policy and injected through `HTTP_PROXY`/`HTTPS_PROXY`. That proxy cannot add an `Authorization` header to HTTPS traffic: CONNECT reads only a bounded TLS ClientHello to validate SNI, then tunnels encrypted bytes without terminating TLS. Making it authenticate on the plugin's behalf would therefore require a plugin-trusted MITM CA, widening the attack surface substantially for a weaker boundary. The plugin environment is deliberately presentation-only as well: its allowlist rejects names containing `KEY`, `TOKEN`, `SECRET`, or `PASSWORD`.
 
 **Consequences (accepted).** Plugin-provider traffic joins the same guarded HTTP path as built-in providers, so per-provider proxying, retry/backoff, and secret redaction apply uniformly.
 
-Because the host now owns the socket, this decision *enables* recording actual request/response wire frames. **That is not implemented.** Plugin adapters remain pinned to `WireMode::NormalizedReplay` (`crates/rw-runtime/src/extension_runtime.rs:1510`, `crates/rw-ext/src/plugin_runtime.rs:1983`): capturing raw HTTP bytes alone would leave the replay provider unable to interpret an arbitrary plugin-specific wire dialect, so wire-fidelity replay needs a replay-through-plugin design that has not been done.
-
-Consequently the "deterministic replay is sacred" tenet holds for plugin providers only at **normalized-event fidelity**, not wire fidelity. This is a known, accepted limitation of the current implementation, not a property this ADR delivers.
+Plugin providers use `WireMode::NormalizedReplay`. Recordings preserve normalized provider events. Raw HTTP alone cannot replay an arbitrary plugin dialect because its interpretation belongs to the plugin.
 
 **Revisit when.** Never for raw credential delivery. Revisit only the shape of the narrowly scoped host request/signing RPC if a provider's documented authentication scheme cannot be represented without exposing a reusable secret.
 
 ---
 
 ## ADR-023: Declarative extension discovery is fail-soft; fail-closed scopes to the artifact
-
-**Status:** accepted 2026-08-02.
 
 **Decision.** A malformed, unreadable, or unsafe declarative artifact is skipped and reported as a diagnostic; it never prevents engine startup. “Fail closed” means that artifact does not load, not that the program does not start.
 
@@ -302,8 +285,6 @@ Consequently the "deterministic replay is sacred" tenet holds for plugin provide
 
 ## ADR-024: Configurable gateways use typed fields; adapter kinds and wire modes remain closed
 
-**Status:** accepted 2026-08-02.
-
 **Decision.** Provider configuration exposes typed gateway extension points: static custom headers and credential-referenced header values, authentication scheme and placement, extra query parameters, extra body fields, and catalog-to-wire model-id mappings. These cover mainstream gateways without Rust changes. `AdapterKind` and `WireMode` remain closed core enums.
 
 **Rationale.** Header/auth placement, parameters, bodies, and model naming are configuration concerns. A wire dialect is not: it determines parsing, error semantics, streaming, recording, and replay. An arbitrary config string for a novel dialect would turn a correctness and replay-determinism boundary into unvalidated data. A genuinely novel wire format belongs behind the plugin-provider protocol, where it can be explicitly versioned and constrained.
@@ -316,21 +297,17 @@ Consequently the "deterministic replay is sacred" tenet holds for plugin provide
 
 ## ADR-025: Providers remain on the trusted native RPC tier
 
-**Status:** accepted 2026-08-02; narrows ADR-021's future-provider revisit condition without changing its WASM hook or registry decisions.
-
 **Decision.** The WASM component tier continues to reject provider, tool, command, event-subscription, and push capabilities. Third-party providers remain trusted native RPC processes until a component interface can preserve the required streaming and permission contracts.
 
-**Rationale.** The component tier is intentionally capability-scoped and signature-verified, but its current hook ABI is a bounded request/response string/JSON interface. It cannot express a provider's incremental stream, consumer cancellation, bounded backpressure, host-mediated credential operation, wire-frame recording/redaction, and per-request permission contract without introducing host imports that weaken the isolation it exists to provide.
+**Rationale.** The component tier is intentionally capability-scoped and signature-verified, but its hook ABI is a bounded request/response string/JSON interface. It cannot express a provider's incremental stream, consumer cancellation, bounded backpressure, host-mediated credential operation, wire-frame recording/redaction, and per-request permission contract without introducing host imports that weaken the isolation it exists to provide.
 
-**Consequences (accepted).** “Any provider” currently entails a native-process supply-chain surface rather than the component tier's tighter capability boundary. The signed extension registry already protects signed WASM hook-component distribution; it does not make a native RPC provider a component or remove the native-process trust decision.
+**Consequences (accepted).** RPC providers entail a native-process supply-chain surface rather than the component tier's tighter capability boundary. The signed extension registry already protects signed WASM hook-component distribution; it does not make a native RPC provider a component or remove the native-process trust decision.
 
 **Revisit when.** The component model supplies a versioned provider capability with authenticated host calls that do not disclose credentials, incremental streaming with bounded backpressure and cancellation, recordable/redactable wire framing, and capability permissions that remain enforceable at each host boundary. Move providers through the existing manifest and dispatcher only after a conformance suite proves those contracts.
 
 ---
 
 ## ADR-026: Release qualification is derived from the major version
-
-**Status:** accepted 2026-08-20.
 
 **Decision.** The release tag remains the immutable publication identity, and
 its canonical semantic version selects one closed qualification tier. Every
@@ -374,9 +351,6 @@ to become publication inputs rather than authorization evidence.
 
 ## ADR-027: TypeScript source plugins use a sealed, per-plugin process host
 
-**Status:** implemented 2026-08-22. Registry publication of the SDK remains an
-exact-tag release operation.
-
 **Decision.** Rottweiler ships one private, authenticated TypeScript host and
 spawns one sandboxed host process per active TypeScript plugin. Production resolves
 an inert manifest plus an exact source and locked-dependency graph into a sealed,
@@ -392,24 +366,17 @@ RPC tier remains supported.
 **Rationale.** A release-owned runtime removes the embedded Bun copy from every
 plugin without moving JavaScript into the Rust engine or combining unrelated
 plugins into one failure and authority domain. Sealing from a two-pass private
-snapshot makes source approval describe the bytes that execute. Resolving the new
-artifact into the current process contract minimizes the production migration;
-actor-owned generations provide the Pi-like development loop without unsafe
-mutable registries.
+snapshot makes source approval describe the bytes that execute. The sealed artifact uses the supervised process contract. Actor-owned generations keep live development registry changes atomic.
 
 **Specification.** `docs/design/typescript-source-plugin-host.md` defines the
 preparation protocol, identity and sandbox rules, failure states, live attachment,
-release gates, migration checkpoints, and non-goals.
+release gates, and scope.
 
-**Revisit when.** The compiled-host feasibility spike cannot load a sealed external
-ESM module under both native sandboxes, or a shared-process design can prove equal
-kernel authority and crash containment. Either outcome requires a superseding ADR.
+**Revisit when.** A shared-process design can prove equivalent kernel authority and crash containment.
 
 ---
 
 ## ADR-028: Each contract and feature catalog has one owner
-
-**Status:** accepted 2026-08-22.
 
 **Decision.** Each piece of contract data and each feature catalog has one
 hand-maintained owner. A consumer imports that owner or reads a generated
@@ -425,17 +392,12 @@ generated reference when exact values matter.
 
 `architecture/ownership.toml` registers the high-risk boundaries that the
 repository can check mechanically. Its entries name the owner, the generator,
-the generated outputs, and specific definitions that would reintroduce an old
-shadow. The checker does not scan for repeated literals because the same number
+the generated outputs, and specific forbidden duplicate definitions. The checker does not scan for repeated literals because the same number
 can have unrelated meanings.
 
-**Rationale.** Release packaging, update verification, client limits, and feature
-catalogs had acquired separate hand-maintained definitions. Some copies drifted
-while each local test remained green. Naming one owner makes dependency direction
-explicit and lets CI reject the known ways that a second owner can return.
+**Rationale.** One owner makes dependency direction explicit. Generated projections and ownership checks detect divergence across release packaging, update verification, client limits, and feature catalogs.
 
-**Consequences.** A migration moves all callers to the owner and deletes the old
-definition in the same change. Runtime-specific adapters may supply dependencies
+**Consequences.** Every caller consumes the owner. Runtime-specific adapters may supply dependencies
 or optional capabilities, but they do not maintain another copy of the common
 feature list. The manifest covers only registered boundaries. A passing ownership
 check does not prove that every unregistered behavior has one implementation.
@@ -451,12 +413,7 @@ detects divergence.
 
 ## ADR-029: Session journals use immutable segments and bounded replay views
 
-**Context.** A single lifetime JSONL file makes cursor reads proportional to session
-age: the current implementation reads and hashes the entire journal under the
-writer mutex before decoding a suffix. History pages retain bounded results but
-scan the complete journal. The core sink then returns the whole gap in one vector
-and each subscriber retains it. These costs conflict with bounded memory,
-responsive interruption and independent read/write progress.
+**Context.** Journal reads must have bounded memory and work independently of session age. Readers pin committed state without blocking the writer.
 
 **Decision.** Store the authoritative logical event stream in bounded JSONL
 segments: immutable sealed segments plus one active append segment. Preserve
@@ -465,8 +422,7 @@ interrupted-tail recovery. Sparse sequence indexes and the segment catalog are
 rebuildable projections. A reader owns a view pinned to a committed durable tail;
 rotation and later appends cannot change that view. Cursor reads and subscriptions
 page through it with explicit byte/event bounds and a bounded descriptor count.
-Remove the whole-gap sink interface and migrate all callers; do not retain a
-compatibility path for the lifetime-file layout.
+The sink exposes bounded pages from the pinned view.
 
 The store owns physical layout, safe descriptor opening, writer exclusion,
 checksums, indexes and opaque checkpoint storage. Core owns event identity,
@@ -490,7 +446,7 @@ Sealed files use `<first:020>-<next:020>-<bytes:020>-<blake3>.jsonl`; `next`
 is exclusive. File names form the sparse sequence catalog, and payload checksums
 are verified when their segments are read. `active.jsonl` is at most 16 MiB;
 ordinary segments seal around 1 MiB, preserving batch atomicity. The store rejects
-an existing `events.jsonl` session layout before creating a new journal directory.
+an existing `events.jsonl` session layout before creating a journal directory.
 Captured views share an append-only catalog and retain an immutable entry count.
 Catalog entries occupy fixed-size chunks; rotation never copies prior entries.
 Each boundary caches its cumulative byte count and prefix hash, so a historical
@@ -526,13 +482,12 @@ byte bound. Reject incompatible, corrupt, future or mismatched snapshots and
 rebuild from authoritative events. Checkpoint live recovery state separately from
 lifetime transcript/history: serializing an unbounded conversation or accounting
 vector does not establish bounded cold recovery. Historical context, rewind and
-inspection use journal cursors and paged projections (A04); the live snapshot owns
+inspection use journal cursors and paged projections; the live snapshot owns
 only the bounded state needed to resume safely. Measure ordinary checkpoint-based
 open separately from an explicit rebuild after missing/corrupt metadata.
 
 **SQLite authority and schema admission.** The shared database admits only the
-current accounting and search table definitions. No column backfill, inferred
-accounting defaults or legacy uniqueness migration runs on open. Unsupported
+declared accounting and search table definitions. Unsupported
 accounting layouts fail before write pragmas; explicit search rebuild may recreate
 unsupported derived sessions/FTS tables, but it preserves charged entries and
 independent authoritative tables. Accounting reconciliation inserts missing
@@ -564,8 +519,6 @@ policies through explicit validation rather than restoring whole-gap reads.
 ---
 
 ## ADR-031: Bounded plugin operations own their effects through settlement
-
-**Status:** accepted 2026-09-04.
 
 **Decision.** Protocol 3 gives host commands correlated typed outcomes and gives
 streaming operations explicit bounded delivery and finite host-issued lifetimes.
@@ -608,8 +561,7 @@ Per-stream cancellation without enforced per-invocation authority cannot prove
 effect settlement. A periodically renewed total deadline admits infinite work.
 
 **Consequences.** Rust owns the wire types, limits, and generated SDK projections.
-Protocol 2 is removed rather than supported through a compatibility layer. Host
-command errors and unknown outcomes are distinct; retrying an unknown mutation
+Host command errors and unknown outcomes are distinct; retrying an unknown mutation
 is not automatically safe. Active correlation IDs must be unique. These are
 process-bound operations, not durable tasks: disconnect fails pending work and
 reconnect requires a fresh process and fresh operation. Durable task recovery
@@ -672,11 +624,7 @@ Native card count and preview bytes are bounded; complete content uses a paged
 reader under the same cache. Scroll/reconnect/recycle state is a stable item plus
 an offset, never only an absolute scroll position.
 
-**Initial limitation.** Transcript pages do not recover permissions, todos,
-accepted input, active operations or other control state. Keep existing live
-replay until a complete bounded recovery snapshot replaces it. A04 by itself does
-not establish constant-cost initial session attachment or aggregate bounds for
-arbitrarily many active operations.
+**Control state.** Permissions, todos, accepted input, and active operations belong to session recovery. Transcript pages describe conversation history. Each service owns its memory and replay bounds.
 
 **Validation.** Exercise real mixed 10K-item history, tool changes across page
 boundaries, rewinds, large bodies, content reads, eviction/reload and child caches.
@@ -686,8 +634,6 @@ read/update work and rebuild work independently. Assert bytes, descriptors,
 mounted cards and per-frame traversal while preserving existing frame budgets.
 The detailed contract is in `docs/design/paged-transcript-client.md`.
 ## ADR-032: Reuse bounded supervised WASM workers
-
-**Status:** accepted 2026-09-04; replaces ADR-021's per-invocation helper process lifetime.
 
 **Decision.** An application-owned `WasmWorkerPool` admits bounded work and lazily
 starts private helpers. Hosted sessions share their factory's pool. Each worker
@@ -703,16 +649,13 @@ slot is not reusable until its process is reaped or returned healthy.
 idle process memory with installed count. Recompiling in a new helper preserves
 isolation but repeats startup and compilation on the hook path. The shared pool
 bounds processes independently of plugin count and keeps Wasmtime out of `rw`.
-The initial two-worker ceiling is provisional. Worker capacity must follow cold/warm and concurrent measurements; reuse alone
-does not establish a performance budget or native Linux qualification.
+The pool admits at most two workers. Cold, warm, and concurrent measurements qualify its capacity and latency on each native target.
 
-**Consequences.** The private helper protocol becomes a sequential load/call
-protocol and the one-shot API is removed. Traps, protocol failures, and timeouts
+**Consequences.** The private helper protocol uses sequential load/call requests. Traps, protocol failures, and timeouts
 retire a worker. Compiled state is immutable; mutable instance state never crosses
 calls or sessions. The pool is explicit application state, avoiding process-global
 IO objects tied to an unrelated Tokio runtime. Native RPC plugins retain their
 separate ambient-effect settlement requirements.
-
 
 ---
 
@@ -767,8 +710,6 @@ covered by tests. Performance qualification remains separate from these invarian
 
 ## ADR-033: Host reads return directly under byte-owned admission
 
-**Status:** accepted 2026-09-04.
-
 **Decision.** The authenticated command channel carries a source-owned read or
 control operation. `CommandReply::Read` contains its outcome and typed query
 results directly. A read never puts its payload into mutation deduplication or
@@ -798,16 +739,13 @@ A second unauthenticated or method-specific history endpoint duplicates identity
 and admission rules. Count-only response admission does not account for live
 transport buffers after the query function returns.
 
-**Consequences.** Existing host query consumers move directly to typed replies;
-there is no old response adapter. Query services remain responsible for bounded
+**Consequences.** Host queries return typed replies. Query services remain responsible for bounded
 work and decoded data before serialization. The reply reservation bounds encoded
 buffers, not arbitrary query implementations or client caches. Mutation cache
 ownership, historical projection catch-up, and viewport/cache limits are
-separate obligations; direct replies alone do not close A04 or A09.
+separate obligations.
 
 ## ADR-036: Reserve provider work at the shared accounting root
-
-**Status:** Accepted; implementation and production adoption in progress.
 
 **Context:** Checking completed usage before a request allows concurrent sessions or engine processes to spend the same remaining budget. Cancellation and process failure can also leave provider billing ambiguous.
 
@@ -817,15 +755,11 @@ The engine first durably appends `ProviderCallAccounted` with the exact call/att
 
 Known USD, credit, and subscription-token bounds remain distinct. Unknown pricing or provider behavior is explicitly best-effort. It must not become a zero-price assumption or a strict-cap claim. Admission queues, retained reservations, and plan/actual metadata have fixed bounds. A retry obtains a distinct attempt identity.
 
-**Validation required:** Two independent engine processes competing for one remainder; cancellation during admission/start/terminal writes; crashes; ambiguous failures; exact and conflicting retries; actual usage corrections; mixed billing units; and attribution-specific accounting transfer. No A12 completion claim is made by the interface alone.
+**Validation required:** Two independent engine processes competing for one remainder; cancellation during admission/start/terminal writes; crashes; ambiguous failures; exact and conflicting retries; actual usage corrections; mixed billing units; and attribution-specific accounting transfer.
 
-Admission totals use a fixed-depth time index over the validated UTC calendar key. A transaction updates separate session and root totals using checked 128-bit integers stored as fixed-width bytes. This preserves all u64 provider charges without SQLite signed-integer overflow or floating-point rounding. Queries exclude future receipts and include unfinished reservations from earlier days. Neither receipt count nor session age changes the maximum lookup depth. Turn-only historical databases cannot prove exact attempt accounting and are refused for new admission without deleting their records.
-
+Admission totals use a fixed-depth time index over the validated UTC calendar key. A transaction updates separate session and root totals using checked 128-bit integers stored as fixed-width bytes. This preserves all u64 provider charges without SQLite signed-integer overflow or floating-point rounding. Queries exclude future receipts and include unfinished reservations from earlier days. Neither receipt count nor session age changes the maximum lookup depth. Admission requires exact attempt accounting. A database that cannot establish it is rejected before writes.
 
 ## ADR-035: Register dormant plugins and own activation through settlement
-
-**Status:** Accepted; implementation proceeds through separately verified preparation
-and activation units. **Date:** 2026-09-04.
 
 Session composition reads and validates bounded plugin manifests, then registers
 inert tool, hook, command, provider, and event descriptors. It does not launch
@@ -874,15 +808,9 @@ Revisit limits using measured cold and warm activation distributions, memory,
 and cancellation latency. Preserve the fixed total deadline, effect settlement,
 and independent control/response liveness when changing capacity.
 
-The preparation foundation exposed Bun's ancestor-directory enumeration during
-graph construction. macOS preparation grants only exact directory entries; normal
-plugin execution does not receive that authority. Landlock's recursive directory
-rules cannot represent that grant. Linux must use a controlled preparation
-filesystem or hermetic resolver instead of broadening ancestor access. The
-native Linux arm64 failure and macOS production checks are recorded in
-[preparation evidence](reviews/2026-09-04-architecture-evidence/source-preparation-settlement.md).
+Bun enumerates ancestor directories during graph construction. macOS preparation grants access to exact directory entries; plugin execution does not receive that authority. Linux preparation uses a controlled filesystem because Landlock directory grants are recursive.
 
-Linux preparation now uses `PreparationFilesystem`: immutable, disjoint physical
+Linux preparation uses `PreparationFilesystem`: immutable, disjoint physical
 code, work, mount, and optional output roots. The helper creates a private mount
 namespace and exposes code at `/plugin`, owned work at `/scratch`, and output at
 `/output`. It binds only declared code and reviewed runtime roots, masks home and
@@ -907,9 +835,7 @@ Required user and mount namespaces remain a deployment prerequisite.
 
 ## ADR-037: Workflow tasks retain durable ownership across interruption
 
-**Status:** Implementation in progress; acceptance is tracked under A31.
-
-**Decision:** Extend the existing DAG runner with a required durable journal. A run has a random identity, a parent session, an exact definition digest and a bounded task map. The runner claims a whole wave before starting effects, binds each created child before its first turn and persists terminal outcomes only after cleanup. Reopening reuses completed dependencies. A started task without a terminal receipt remains unresolved and cannot repeat automatically. This applies to both agent and command nodes.
+**Decision:** The DAG runner requires a durable journal. A run has a random identity, a parent session, an exact definition digest and a bounded task map. The runner claims a whole wave before starting effects, binds each created child before its first turn and persists terminal outcomes only after cleanup. Reopening reuses completed dependencies. A started task without a terminal receipt remains unresolved and cannot repeat automatically. This applies to both agent and command nodes.
 
 A separate writer lock survives atomic snapshot replacement. Snapshots contain at most 64 tasks and 1 MiB of immutable shared outcome payloads, with a 2 MiB serialized ceiling. Readers can inspect an active run without acquiring its writer lock. Status reads validate the caller's parent session. Run identity appears in command and tool results so an observer can attach later.
 
@@ -917,9 +843,9 @@ Creation, caller delivery and cleanup have explicit owners. A child startup repl
 
 Failed cleanup returns an explicit unsettled error while retaining its resource and accounting obligations. It neither acknowledges ordinary completion nor makes a settlement caller wait forever. Tool and model interfaces must propagate this distinction through turn and shutdown barriers.
 
-**Consequences:** The first resumable unit is the current workflow runner. No distributed scheduler, compatibility adapter or replay-based permission to repeat effects is added. Automatic reconciliation of an ambiguously completed step needs a separate proof; operator retries cannot bypass the started state. Native process-kill recovery and shared control-latency qualification remain acceptance work.
+**Consequences:** An ambiguously completed task remains unresolved. Operator retries cannot bypass its durable started state. Native process-kill recovery and control-latency checks validate that ownership contract.
 
-Host session creation, fresh preparation, resume and fork transfer their identity reservation to an owned composition task before yielding. Host shutdown first closes session admission, then settles every ready actor and accepted opener, and only then shuts down shared factory services. Final accounting and SessionEnd hooks remain able to use those services during cleanup. A failed dependent proof retains the factory. The bounded shutdown result is sticky and does not acknowledge HostShutdown on failure. See [host closure evidence](reviews/2026-09-04-architecture-evidence/host-session-closure.md).
+Host session creation, fresh preparation, resume and fork transfer their identity reservation to an owned composition task before yielding. Host shutdown first closes session admission, then settles every ready actor and accepted opener, and only then shuts down shared factory services. Final accounting and SessionEnd hooks remain able to use those services during cleanup. A failed dependent proof retains the factory. The bounded shutdown result is sticky and does not acknowledge HostShutdown on failure.
 
 ## ADR-040: macOS worker authority
 

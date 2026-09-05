@@ -1,1 +1,0 @@
-{"schema_version":1,"metrics":{"tui_frame_p95_us":5333,"tui_frame_p999_us":7579,"tui_input_echo_best_p99_us":1989,"tui_tool_output_frame_p95_us":6341,"tui_tools_workspace_frame_p95_us":4006,"tui_vim_echo_best_p99_us":1129}}

@@ -1,4 +1,0 @@
-graph exit=0
-{"abi":1,"format":"bun-esm-v1","inputs":[{"path":"entry.ts","bytes":33},{"path":"package.json","bytes":17}]}
-bundle exit=0
-{"abi":1,"format":"bun-esm-v1","inputs":[{"path":"entry.ts","bytes":33},{"path":"package.json","bytes":17}]}

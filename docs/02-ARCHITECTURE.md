@@ -201,7 +201,7 @@ session's event log, participate in reconnect/resync, and are available to
 hooks/extensions. The checked-in durable-envelope schema mechanically excludes
 every generated `CommandAckMeta` variant. One event schema, three consumers:
 UI, storage, extensions.
-Versioning uses serde-compatible evolution rules; 64-bit counters and sequence
+Messages must match the generated schema; 64-bit counters and sequence
 ids cross JSON as decimal strings so JavaScript clients never lose precision.
 
 Historical `rw stats` is deliberately outside the live engine/provider path. It
@@ -310,11 +310,10 @@ resolve(alias) → [candidate models] → adapter → provider
 - Connection-scoped acknowledgements are excluded from session journals/replay.
 - `rw sessions verify <id>` checks every segment and typed event identity in an
   offline journal. Normal tail reads verify only referenced segments.
-- The old lifetime-file journal layout is rejected explicitly; it is not opened
-  as an empty segmented session or migrated implicitly.
+- Journal open validates the complete segmented layout before admitting reads or writes.
 - `index.sqlite` — session listing/search tables and reconciled durable accounting.
-  Normal opens admit only current table definitions. Unsupported accounting schemas
-  are rejected without inferred defaults or row migration. Explicit search rebuild
+  Normal opens admit the declared table definitions. Unsupported accounting schemas
+  are rejected before writes. Explicit search rebuild
   replaces only its derived tables in one transaction; accounting and independent
   authoritative tables survive. An unreadable database is never deleted as a
   search-repair shortcut.
@@ -495,7 +494,7 @@ Built on OpenTUI (per ADR-001), which supplies the retained component tree and t
 - `EngineEvent::delivery()` owns durable, transient, and connection-scoped event
   lifetime. Protocol codegen derives a complete TypeScript delivery map from the
   Rust event schema, and the reducer consumes that projection. Unknown wire
-  discriminators remain an additive compatibility path.
+  discriminators are rejected at ingress.
 
 ## Cross-cutting behaviors
 

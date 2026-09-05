@@ -200,8 +200,7 @@ preparation, handshake, or collision failure retains the last good development
 generation. Authority expansion requires a new attachment grant. In-flight calls
 pin their old generation. Ctrl-C detaches explicitly; session or engine shutdown
 kills the process-owned generation. A rejected candidate is shut down and reaped
-before the last-good snapshot remains active. The former standalone development
-supervisor was deleted rather than retained as a compatibility path.
+before the last-good snapshot remains active.
 
 ## Distribution and SDK publication
 
@@ -218,28 +217,6 @@ extracted helper and verifies its semantic identity. Source acceptance separatel
 runs sandboxed preparation and approval with no system JavaScript runtime used at
 execution time.
 
-## Migration record
-
-The repository-side checkpoints ended in directly verifiable states. Public npm
-state changes only from the exact-tag workflow.
-
-1. Prepare exact-tag SDK publication and remove CI source substitution. Registry
-   publication occurs on the next qualified tag.
-2. Make inert `manifest.json` the only authored declaration and validate its SDK
-   import. Retain the current standalone executable path.
-3. Prove a compiled private host can import one sealed external ESM module under
-   the production sandbox on macOS and Linux. Stop if this fails.
-4. Add logical source-graph, bundle, prepared-root, and approval identities. Prove
-   direct-plugin fingerprints remain unchanged.
-5. Add two-pass preparation and the private immutable cache without launching it
-   in sessions.
-6. Package and authenticate the inert helper across every distribution surface.
-7. Add opt-in TypeScript `source` configuration and resolve it into the existing
-   `PluginHost` path.
-8. Change the scaffold quickstart to source mode. Keep the generic executable
-   recipe available.
-9. Add actor-owned live attachment and remove the standalone dev supervisor only
-   after reload, last-good, detach, and process-reap acceptance passes.
 
 ## Required verification
 
