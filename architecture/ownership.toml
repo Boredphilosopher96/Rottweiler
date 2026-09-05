@@ -992,3 +992,8 @@ outputs = ["packages/plugin-sdk/src/generated/hook-input-validator.js", "package
 id = "extension-state-contract"
 path = "crates/rw-types/src/extension_contract.rs"
 symbols = ["ExtensionStateTransaction", "ExtensionStateSnapshot", "ExtensionStateCommitOutcome", "ExtensionSessionSnapshot"]
+
+[[owner]]
+id = "extension-presentation-contract"
+path = "crates/rw-types/src/extension_ui.rs"
+symbols = ["UiContribution", "UiField", "UiSelectorStep", "UiProjectedFields"]

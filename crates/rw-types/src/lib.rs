@@ -13,6 +13,7 @@ pub mod attachment_contract;
 pub mod config;
 mod error;
 pub mod extension_contract;
+pub mod extension_ui;
 pub mod hook_contract;
 mod ir;
 pub mod mcp;

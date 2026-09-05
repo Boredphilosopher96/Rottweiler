@@ -13,6 +13,10 @@ use rw_types::config::{PermissionDecision, ThinkingLevel};
 use rw_types::extension_contract::{
     ExtensionDeliveryCursor, ExtensionStateMutation, ExtensionStateTransaction,
 };
+use rw_types::extension_ui::{
+    UiAction, UiContribution, UiField, UiProjectedField, UiProjectedFields, UiSelectorStep,
+    UiTableColumn,
+};
 use rw_types::{
     AccountingAttribution, Answer, ApprovalBinding, ApprovalDecision, Attachment, AttachmentData,
     Block, BudgetLevel, BudgetScope, BudgetUnit, CacheBreakpoint, ClientCommand, ClientId,
@@ -188,6 +192,14 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(ExtensionDeliveryCursor);
     declaration!(ExtensionStateMutation);
     declaration!(ExtensionStateTransaction);
+    declaration!(UiAction);
+    declaration!(UiContribution);
+    declaration!(UiField);
+    declaration!(UiProjectedField);
+    declaration!(UiProjectedFields);
+    declaration!(UiSelectorStep);
+    declaration!(UiTableColumn);
+
     declaration!(ProgressAmount);
     declaration!(SessionId);
     declaration!(ClientId);
