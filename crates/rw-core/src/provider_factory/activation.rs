@@ -364,6 +364,7 @@ where
                     Vec::new()
                 };
                 let bounded: Arc<dyn Provider> = Arc::new(ModelBoundProvider {
+                    continuation_configuration: continuation_configuration(config, provider_name)?,
                     inner: Arc::clone(inner),
                     name: candidate.clone(),
                     expected_model: model.clone(),
@@ -473,6 +474,7 @@ where
                 }
             };
             let bounded: Arc<dyn Provider> = Arc::new(ModelBoundProvider {
+                continuation_configuration: continuation_configuration(config, provider_name)?,
                 inner,
                 name: candidate.clone(),
                 expected_model: model.clone(),

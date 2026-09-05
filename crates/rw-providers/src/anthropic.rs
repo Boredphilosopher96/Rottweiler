@@ -324,6 +324,16 @@ fn nonempty(value: &str) -> Option<&str> {
 
 #[async_trait]
 impl Provider for AnthropicProvider {
+    async fn continuation_provenance(
+        &self,
+    ) -> Result<Option<crate::ContinuationProvenance>, ProviderError> {
+        Ok(Some(crate::ContinuationProvenance::bind(&[
+            b"anthropic-messages",
+            self.config.endpoint.as_str().as_bytes(),
+            format!("{:?}", self.config.thinking_strategy).as_bytes(),
+        ])))
+    }
+
     fn name(&self) -> &str {
         &self.config.name
     }

@@ -942,14 +942,7 @@ export class PluginServer {
 
   #validateProviderEvent(event: ProviderEvent, sawFinished: boolean): void {
     if (!validateProviderEvent(event)) throw new SafeRpcError(-32603, "invalid provider event")
-    if (event === null || typeof event !== "object" || Array.isArray(event) || typeof event.type !== "string") {
-      throw new SafeRpcError(-32603, "provider emitted an invalid event")
-    }
-    const allowed = new Set([
-      "route_selected", "message_start", "text_delta", "thinking_delta", "tool_call_start",
-      "tool_call_arguments_delta", "tool_call_end", "citation", "usage", "finished",
-    ])
-    if (!allowed.has(event.type) || sawFinished) {
+    if (sawFinished) {
       throw new SafeRpcError(-32603, "provider emitted an invalid event sequence")
     }
   }

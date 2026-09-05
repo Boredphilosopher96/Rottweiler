@@ -8,6 +8,7 @@
 mod anthropic;
 mod attempt;
 mod auth;
+mod continuation;
 mod github_copilot;
 mod http;
 mod models_dev;
@@ -31,6 +32,7 @@ pub use auth::{
     OAuthRefreshConfig, OAuthTokenSet, ProxyAuthentication, RefreshTokenSink, RefreshingOAuth,
     Secret, StaticAuth, SystemOAuthEntropy,
 };
+pub use continuation::ContinuationProvenance;
 pub use github_copilot::{
     DeviceFlowCancellation, GITHUB_COPILOT_ACCESS_TOKEN_ENDPOINT, GITHUB_COPILOT_API_VERSION,
     GITHUB_COPILOT_BASE_URL, GITHUB_COPILOT_CLIENT_ID, GITHUB_COPILOT_DEVICE_CODE_ENDPOINT,

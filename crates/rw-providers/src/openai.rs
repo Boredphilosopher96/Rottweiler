@@ -457,6 +457,24 @@ fn apply_subscription_request_shape(
 
 #[async_trait]
 impl Provider for OpenAiCompatibleProvider {
+    async fn continuation_provenance(
+        &self,
+    ) -> Result<Option<crate::ContinuationProvenance>, ProviderError> {
+        let identity = serde_json::json!({
+            "endpoint": self.config.endpoint.as_str(),
+            "dialect": format!("{:?}", self.config.wire_mode),
+            "profile": format!("{:?}", self.config.chat_request_profile),
+            "headers": self.config.headers,
+            "body": self.config.extra_body,
+            "models": self.config.model_ids,
+            "path": self.config.path_template,
+        });
+        Ok(Some(crate::ContinuationProvenance::bind(&[
+            b"openai",
+            identity.to_string().as_bytes(),
+        ])))
+    }
+
     fn name(&self) -> &str {
         &self.config.name
     }

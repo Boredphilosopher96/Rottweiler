@@ -405,6 +405,9 @@ pub enum FinishReason {
 pub enum ProviderEvent {
     /// Opaque router-owned identity for the candidate that served this stream.
     /// It is consumed by accounting and never exposed as a provider name.
+    #[serde(skip_deserializing)]
+    #[schemars(skip)]
+    #[ts(skip)]
     RouteSelected { route: String },
     /// Provider accepted the message and selected a concrete model.
     MessageStart { model: String },
@@ -572,6 +575,15 @@ pub(crate) struct RawSseFrame {
 /// A backend adapter. Record/replay implements this same boundary.
 #[async_trait]
 pub trait Provider: Send + Sync {
+    /// Resolves the configuration and approved code identity for opaque state.
+    /// `None` declares a provider whose events cannot carry continuation data.
+    /// Lazy adapters may activate here; the operation owner retains their effects.
+    async fn continuation_provenance(
+        &self,
+    ) -> Result<Option<crate::ContinuationProvenance>, ProviderError> {
+        Ok(None)
+    }
+
     /// Waits for host-owned effects abandoned by a dropped invocation or stream.
     /// The default is valid only when dropping futures also drops all local work.
     /// This never proves that a remote HTTP service stopped work or billing.

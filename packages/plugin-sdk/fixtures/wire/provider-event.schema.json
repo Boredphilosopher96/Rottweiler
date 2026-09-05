@@ -4,24 +4,6 @@
   "description": "The normalized event stream consumed by the engine and replay harness.",
   "oneOf": [
     {
-      "description": "Opaque router-owned identity for the candidate that served this stream.\nIt is consumed by accounting and never exposed as a provider name.",
-      "type": "object",
-      "properties": {
-        "route": {
-          "type": "string"
-        },
-        "type": {
-          "type": "string",
-          "const": "route_selected"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "route"
-      ]
-    },
-    {
       "description": "Provider accepted the message and selected a concrete model.",
       "type": "object",
       "properties": {

@@ -357,6 +357,17 @@ fn common_plugin_limit(
 
 #[async_trait]
 impl Provider for RpcProviderAdapter {
+    async fn continuation_provenance(
+        &self,
+    ) -> Result<Option<rw_providers::ContinuationProvenance>, ProviderError> {
+        let connection = self
+            .endpoint
+            .connect(&CancellationToken::default())
+            .await
+            .map_err(|error| ProviderError::new(ProviderErrorKind::Protocol, error.to_string()))?;
+        Ok(Some(connection.continuation_provenance().clone()))
+    }
+
     async fn settle_effects(&self) -> std::result::Result<(), rw_providers::ProviderError> {
         self.endpoint.settle_effects().await.map_err(|error| {
             ProviderError::new(ProviderErrorKind::EffectsUnsettled, error.to_string())

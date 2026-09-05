@@ -292,6 +292,17 @@ impl GitHubCopilotProvider {
 
 #[async_trait]
 impl Provider for GitHubCopilotProvider {
+    async fn continuation_provenance(
+        &self,
+    ) -> Result<Option<crate::ContinuationProvenance>, ProviderError> {
+        let resolved = self.resolved().await?;
+        Ok(Some(crate::ContinuationProvenance::bind(&[
+            b"github-copilot",
+            self.config.runtime.base_url.as_str().as_bytes(),
+            format!("{:?}", resolved.model.endpoint).as_bytes(),
+        ])))
+    }
+
     fn name(&self) -> &str {
         &self.config.name
     }

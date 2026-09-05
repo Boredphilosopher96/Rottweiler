@@ -3,6 +3,7 @@ use super::*;
 /// Running plugin with an immutable manifest/capability snapshot.
 pub struct PluginHost {
     manifest: PluginManifest,
+    continuation_provenance: rw_providers::ContinuationProvenance,
     pub(super) client: Arc<JsonRpcPluginClient>,
     enforcer: Arc<CapabilityEnforcer>,
 }
@@ -130,6 +131,11 @@ impl PluginHost {
     ) -> Result<Self, PluginHostError> {
         let profile =
             approved_plugin_profile(store, config, origin, approved_roots, &expected_manifest)?;
+        let identity = approval_identity(&expected_manifest, config, origin)?.fingerprint()?;
+        let roots = serde_json::to_vec(&profile.approved_roots)
+            .map_err(|error| PluginHostError::Protocol(error.to_string()))?;
+        let continuation_provenance =
+            rw_providers::ContinuationProvenance::bind(&[identity.as_bytes(), &roots]);
         let child = launcher.launch(config, &profile).await?;
         if child.executable_identity != *config.executable_identity() {
             terminate_and_reap(child.process.as_ref()).await;
@@ -186,6 +192,7 @@ impl PluginHost {
         }
         Ok(Self {
             manifest: initialized,
+            continuation_provenance,
             client,
             enforcer,
         })
@@ -194,6 +201,10 @@ impl PluginHost {
     #[must_use]
     pub const fn manifest(&self) -> &PluginManifest {
         &self.manifest
+    }
+    #[must_use]
+    pub fn continuation_provenance(&self) -> &rw_providers::ContinuationProvenance {
+        &self.continuation_provenance
     }
     #[must_use]
     pub fn client(&self) -> Arc<dyn PluginRpcClient> {

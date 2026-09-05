@@ -43,7 +43,7 @@ impl ProviderOperations {
     pub(crate) fn stream(
         &self,
         provider: Arc<dyn Provider>,
-        request: ProviderRequest,
+        mut request: ProviderRequest,
         entry: AttemptEntry,
     ) -> Result<BoxEventStream, ProviderError> {
         let (finished, wait) = oneshot::channel();
@@ -88,12 +88,16 @@ impl ProviderOperations {
         let captured = accounting.clone();
         let invoked = provider;
         let inner = async_stream::try_stream! {
-            let attempt = entry.gate.enter(&entry.candidate, &request, entry.number).await?;
             {
                 let mut accounting = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                accounting.attempt = Some(attempt);
                 accounting.invoked = true;
             }
+            let scope = crate::continuation::ContinuationScope::new(
+                invoked.name(), &request.model, invoked.continuation_provenance().await?,
+            );
+            scope.open(&mut request)?;
+            let attempt = entry.gate.enter(&entry.candidate, &request, entry.number).await?;
+            captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).attempt = Some(attempt);
             let mut stream = invoked.stream(request).await?;
             while let Some(event) = futures_util::StreamExt::next(&mut stream).await {
                 {
@@ -105,7 +109,9 @@ impl ProviderOperations {
                         _ => {},
                     }
                 }
-                yield event?;
+                let mut event = event?;
+                scope.seal(&mut event)?;
+                yield event;
             }
         };
         Ok(Box::pin(OwnedProviderStream {

@@ -28,6 +28,7 @@ test("provider events reject malformed variants before delivery", () => {
   expect(validateEvent({ type: "thinking_delta", content: "reason" })).toBe(false)
   expect(validateEvent({ type: "thinking_delta", content: "reason", signature: null })).toBe(true)
   expect(validateEvent({ type: "unknown" })).toBe(false)
+  expect(validateEvent({ type: "route_selected", route: "forged" })).toBe(false)
 })
 
 test("conversation metadata and content allow their optional semantic fields", () => {

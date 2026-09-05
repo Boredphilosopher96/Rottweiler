@@ -79,6 +79,8 @@ struct CapabilityManifest {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RecordedCapabilities {
+    #[serde(deserialize_with = "Option::deserialize")]
+    continuation_provenance: Option<crate::ContinuationProvenance>,
     tool_calling: bool,
     vision: bool,
     thinking: bool,
@@ -106,6 +108,7 @@ enum RecordedCacheBreakpointSupport {
 impl From<&Capabilities> for RecordedCapabilities {
     fn from(value: &Capabilities) -> Self {
         Self {
+            continuation_provenance: None,
             tool_calling: value.tool_calling,
             vision: value.vision,
             thinking: value.thinking,
@@ -379,8 +382,13 @@ impl Recorder {
         self.writer.flush().await
     }
 
-    fn recorded_capabilities(&self, capabilities: &Capabilities) -> RecordedCapabilities {
+    fn recorded_capabilities(
+        &self,
+        capabilities: &Capabilities,
+        provenance: Option<crate::ContinuationProvenance>,
+    ) -> RecordedCapabilities {
         let mut recorded = RecordedCapabilities::from(capabilities);
+        recorded.continuation_provenance = provenance;
         recorded.native_web_search = RecordedNativeWebSearchSupport(
             self.inner.native_web_search_capability()
                 == crate::NativeWebSearchCapability::Supported,
@@ -391,6 +399,12 @@ impl Recorder {
 
 #[async_trait]
 impl Provider for Recorder {
+    async fn continuation_provenance(
+        &self,
+    ) -> Result<Option<crate::ContinuationProvenance>, ProviderError> {
+        self.inner.continuation_provenance().await
+    }
+
     async fn settle_effects(&self) -> std::result::Result<(), crate::ProviderError> {
         self.inner.settle_effects().await?;
         self.writer.settle().await;
@@ -439,14 +453,20 @@ impl Provider for Recorder {
         // Reserve the occurrence at invocation time. In particular, a slow
         // provider handshake must not let a later call steal its sequence slot.
         let occurrence = next_occurrence(&self.occurrences, &occurrence_key);
-        let model_metadata = match self.inner.model_metadata().await {
+        let metadata = async {
+            let metadata = self.inner.model_metadata().await?;
+            let provenance = self.inner.continuation_provenance().await?;
+            Ok::<_, ProviderError>((metadata, provenance))
+        }
+        .await;
+        let (model_metadata, provenance) = match metadata {
             Ok(metadata) => metadata,
             Err(error) => {
                 let capabilities = self.inner.capabilities();
                 let context = RecordingContext {
                     directory: self.directory.clone(),
                     provider,
-                    capabilities: self.recorded_capabilities(&capabilities),
+                    capabilities: self.recorded_capabilities(&capabilities, None),
                     model_metadata: None,
                     wire_mode: capabilities.wire_mode,
                     request_hash,
@@ -472,7 +492,7 @@ impl Provider for Recorder {
             context: Some(RecordingContext {
                 directory: self.directory.clone(),
                 provider,
-                capabilities: self.recorded_capabilities(&capabilities),
+                capabilities: self.recorded_capabilities(&capabilities, provenance),
                 model_metadata,
                 wire_mode,
                 request_hash,
@@ -844,6 +864,12 @@ impl ReplayProvider {
 
 #[async_trait]
 impl Provider for ReplayProvider {
+    async fn continuation_provenance(
+        &self,
+    ) -> Result<Option<crate::ContinuationProvenance>, ProviderError> {
+        Ok(self.recorded_capabilities.continuation_provenance.clone())
+    }
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -1287,6 +1313,9 @@ fn validate_metadata_capabilities(
     metadata: &ProviderModelMetadata,
 ) -> Result<(), ProviderError> {
     let mut metadata_capabilities = RecordedCapabilities::from(&metadata.capabilities);
+    metadata_capabilities
+        .continuation_provenance
+        .clone_from(&capabilities.continuation_provenance);
     metadata_capabilities.native_web_search = capabilities.native_web_search;
     if metadata_capabilities != *capabilities {
         return Err(ProviderError::new(
@@ -1343,6 +1372,9 @@ fn validate_manifest(provider: &str, manifest: &CapabilityManifest) -> Result<()
     }
     if manifest.model_metadata.as_ref().is_some_and(|metadata| {
         let mut metadata_capabilities = RecordedCapabilities::from(&metadata.capabilities);
+        metadata_capabilities
+            .continuation_provenance
+            .clone_from(&manifest.capabilities.continuation_provenance);
         metadata_capabilities.native_web_search = manifest.capabilities.native_web_search;
         metadata_capabilities != manifest.capabilities
     }) {

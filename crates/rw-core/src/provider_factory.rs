@@ -431,6 +431,7 @@ impl RuntimeWarnings {
 }
 
 struct ModelBoundProvider {
+    continuation_configuration: Vec<u8>,
     inner: Arc<dyn Provider>,
     name: String,
     expected_model: String,
@@ -595,6 +596,16 @@ fn block_contains_image(block: &rw_types::Block) -> bool {
 
 #[async_trait]
 impl Provider for ModelBoundProvider {
+    async fn continuation_provenance(
+        &self,
+    ) -> Result<Option<rw_providers::ContinuationProvenance>, ProviderError> {
+        Ok(self
+            .inner
+            .continuation_provenance()
+            .await?
+            .map(|provenance| provenance.qualified(&self.continuation_configuration)))
+    }
+
     async fn settle_effects(&self) -> std::result::Result<(), rw_providers::ProviderError> {
         self.inner.settle_effects().await
     }
@@ -1016,3 +1027,19 @@ mod provider_profile_tests;
 
 #[cfg(test)]
 mod native_search_tests;
+
+fn continuation_configuration(
+    config: &Config,
+    provider: &str,
+) -> Result<Vec<u8>, ProviderFactoryError> {
+    let configuration = config.providers.get(provider).cloned().map(|mut value| {
+        value.pricing.clear();
+        value
+    });
+    serde_json::to_vec(&configuration).map_err(|_| {
+        ProviderFactoryError::new(
+            provider,
+            "provider continuation configuration could not be encoded",
+        )
+    })
+}

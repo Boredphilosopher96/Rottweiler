@@ -849,6 +849,7 @@ impl ProviderRuntime {
             _ => UsageAccounting::UnpricedApi,
         };
         let bounded: Arc<dyn Provider> = Arc::new(ModelBoundProvider {
+            continuation_configuration: continuation_configuration(&self.config, provider_name)?,
             inner,
             name: candidate.to_owned(),
             expected_model: model.to_owned(),
@@ -928,6 +929,7 @@ impl ProviderRuntime {
             defer_capabilities,
         )?;
         let bounded: Arc<dyn Provider> = Arc::new(ModelBoundProvider {
+            continuation_configuration: continuation_configuration(&self.config, provider_name)?,
             inner,
             name: candidate.to_owned(),
             expected_model: model.to_owned(),

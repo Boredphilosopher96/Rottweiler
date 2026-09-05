@@ -480,6 +480,17 @@ logical provider name; only compatible adapters use an exact logical
 `provider/model` catalog entry. A misleading local name therefore cannot
 shadow official capability metadata.
 
+Opaque reasoning continuations belong to the producing adapter. The provider
+operation binds each payload to the provider name, concrete model, and a digest
+of adapter configuration and authority. Native plugins derive that digest from
+the exact approved, initialized generation. Lazy activation remains owned while
+the digest is resolved. The operation rejects mismatched or malformed state
+before inference admission, then passes only the adapter payload to the provider.
+Returned continuations are bounded to 256 KiB including their envelope. A provider
+without declared provenance cannot consume or emit opaque state. Recordings retain
+the provenance explicitly, so replay reconstructs the same conversation values
+without network access. Failover cannot transfer a continuation to another route.
+
 ### TUI (`packages/tui`, OpenTUI)
 
 Built on OpenTUI (per ADR-001), which supplies the retained component tree and the Zig renderer (double-buffered cell diffing, damage-tracked partial redraws) — do not reimplement rendering primitives it already provides. Our layer on top:

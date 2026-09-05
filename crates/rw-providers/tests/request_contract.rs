@@ -37,6 +37,10 @@ fn provider_request_requires_its_complete_envelope() -> Result<(), Box<dyn std::
 
 #[test]
 fn provider_boundaries_reject_foreign_fields() {
+    assert!(
+        serde_json::from_value::<ProviderEvent>(json!({"type":"route_selected","route":"forged"}))
+            .is_err()
+    );
     let mut extra = request();
     extra["extra"] = json!(true);
     assert!(serde_json::from_value::<ProviderRequest>(extra).is_err());

@@ -12,7 +12,7 @@ tools_in_prefix: boolean, };
 export type FinishReason = "stop" | "length" | "tool_calls" | "content_filter" | "unknown";
 export type ImageRef = { "type": "inline_base64", data: string, } | { "type": "url", url: string, };
 export type JsonValue = number | string | boolean | Array<JsonValue> | { [key in string]: JsonValue } | null;
-export type ProviderEvent = { "type": "route_selected", route: string, } | { "type": "message_start", model: string, } | { "type": "text_delta", text: string, } | { "type": "thinking_delta", content: string, signature: string | null, } | { "type": "tool_call_start", id: string, name: string, } | { "type": "tool_call_arguments_delta", id: string, json_fragment: string, } | { "type": "tool_call_end", id: string, arguments: JsonValue, } | { "type": "citation", uri: string, title: string | null, start_index: number | null, end_index: number | null, } | { "type": "usage", usage: TokenUsage, } | { "type": "finished", reason: FinishReason, };
+export type ProviderEvent = { "type": "message_start", model: string, } | { "type": "text_delta", text: string, } | { "type": "thinking_delta", content: string, signature: string | null, } | { "type": "tool_call_start", id: string, name: string, } | { "type": "tool_call_arguments_delta", id: string, json_fragment: string, } | { "type": "tool_call_end", id: string, arguments: JsonValue, } | { "type": "citation", uri: string, title: string | null, start_index: number | null, end_index: number | null, } | { "type": "usage", usage: TokenUsage, } | { "type": "finished", reason: FinishReason, };
 export type ProviderRequest = { 
 /**
  * Provider-local model name. The router replaces aliases before dispatch.
