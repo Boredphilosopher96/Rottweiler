@@ -1,6 +1,8 @@
 //! Bounded immutable journal segments and descriptor-pinned read views (ADR-029).
 
+mod catalog;
 mod proof;
+use catalog::SegmentCatalog;
 pub use proof::{JournalAdvance, JournalPageProof, VerifiedJournalPage};
 
 use super::{
@@ -16,7 +18,7 @@ use std::io::Write as _;
 use std::{
     fs::{self, File},
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::Arc,
 };
 
 const SEGMENT_TARGET_BYTES: usize = 1024 * 1024;
@@ -76,126 +78,6 @@ impl Segment {
             digest,
             name: name.to_owned(),
         })
-    }
-}
-
-/// Append-only metadata shared by captured prefixes. Payload I/O never holds its lock.
-#[derive(Debug, Default)]
-struct SegmentCatalog {
-    entries: RwLock<CatalogEntries>,
-}
-
-const CATALOG_CHUNK_ENTRIES: usize = 256;
-
-#[derive(Debug, Default)]
-struct CatalogEntries {
-    chunks: Vec<Vec<CatalogEntry>>,
-    len: usize,
-}
-
-impl CatalogEntries {
-    fn get(&self, index: usize) -> Option<&CatalogEntry> {
-        self.chunks
-            .get(index / CATALOG_CHUNK_ENTRIES)?
-            .get(index % CATALOG_CHUNK_ENTRIES)
-    }
-
-    fn last(&self) -> Option<&CatalogEntry> {
-        self.len.checked_sub(1).and_then(|index| self.get(index))
-    }
-
-    fn push(&mut self, entry: CatalogEntry) {
-        let chunk = self.len / CATALOG_CHUNK_ENTRIES;
-        if chunk == self.chunks.len() {
-            self.chunks.push(Vec::with_capacity(CATALOG_CHUNK_ENTRIES));
-        }
-        self.chunks[chunk].push(entry);
-        self.len += 1;
-    }
-}
-
-impl std::ops::Index<usize> for CatalogEntries {
-    type Output = CatalogEntry;
-
-    fn index(&self, index: usize) -> &Self::Output {
-        &self.chunks[index / CATALOG_CHUNK_ENTRIES][index % CATALOG_CHUNK_ENTRIES]
-    }
-}
-
-#[derive(Debug)]
-struct CatalogEntry {
-    segment: Segment,
-    cumulative_bytes: u64,
-    cumulative_identity: blake3::Hash,
-}
-
-impl SegmentCatalog {
-    fn from_segments(segments: Vec<Segment>) -> Self {
-        let catalog = Self::default();
-        for segment in segments {
-            catalog.push(segment);
-        }
-        catalog
-    }
-
-    fn push(&self, segment: Segment) {
-        let mut entries = self
-            .entries
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (bytes, identity) = entries.last().map_or((0, blake3::hash(b"")), |entry| {
-            (entry.cumulative_bytes, entry.cumulative_identity)
-        });
-        entries.push(CatalogEntry {
-            cumulative_bytes: bytes + segment.bytes,
-            cumulative_identity: segment.extend_identity(identity),
-            segment,
-        });
-    }
-
-    fn len(&self) -> usize {
-        self.entries
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len
-    }
-
-    fn get(&self, index: usize) -> Option<Segment> {
-        self.entries
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(index)
-            .map(|entry| entry.segment.clone())
-    }
-
-    fn prefix(&self, count: usize) -> (u64, blake3::Hash) {
-        if count == 0 {
-            return (0, blake3::hash(b""));
-        }
-        let entries = self
-            .entries
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let entry = &entries[count - 1];
-        (entry.cumulative_bytes, entry.cumulative_identity)
-    }
-
-    fn partition(&self, count: usize, predicate: impl Fn(&Segment) -> bool) -> usize {
-        let entries = self
-            .entries
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut left = 0;
-        let mut right = count;
-        while left < right {
-            let middle = left + (right - left) / 2;
-            if predicate(&entries[middle].segment) {
-                left = middle + 1;
-            } else {
-                right = middle;
-            }
-        }
-        left
     }
 }
 
@@ -687,6 +569,11 @@ impl SegmentedJournal {
         &mut self,
         events: impl IntoIterator<Item = T>,
     ) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
+        let span = tracing::trace_span!(target: "rw_performance", "journal.append",
+            session_id = ?self.directory.path.parent().and_then(Path::file_name),
+            first_sequence = self.next_sequence,
+            events = tracing::field::Empty, bytes = tracing::field::Empty);
+        let _entered = span.enter();
         if self.poisoned {
             return Err(SessionStoreError::EventWriterPoisoned);
         }
@@ -694,34 +581,40 @@ impl SegmentedJournal {
             self.poisoned = true;
             return Err(error);
         }
-        let mut bounded = BoundedBatch::default();
-        let mut envelopes = Vec::new();
-        for event in events {
-            let sequence = self
-                .next_sequence
-                .checked_add(envelopes.len() as u64)
-                .ok_or(SessionStoreError::SequenceOverflow)?;
-            let envelope = EventEnvelope {
-                schema_version: EVENT_SCHEMA_VERSION,
-                sequence: SequenceId(sequence),
-                event,
-            };
-            let serialized = serde_json::to_writer(&mut bounded, &envelope);
-            if bounded.exceeded {
-                return Err(SessionStoreError::EventRecordTooLarge {
-                    max_line_bytes: MAX_SEGMENT_BYTES,
-                });
+        let (bytes, envelopes) = {
+            let _serialize =
+                tracing::trace_span!(target: "rw_performance", "journal.serialize").entered();
+            let mut bounded = BoundedBatch::default();
+            let mut envelopes = Vec::new();
+            for event in events {
+                let sequence = self
+                    .next_sequence
+                    .checked_add(envelopes.len() as u64)
+                    .ok_or(SessionStoreError::SequenceOverflow)?;
+                let envelope = EventEnvelope {
+                    schema_version: EVENT_SCHEMA_VERSION,
+                    sequence: SequenceId(sequence),
+                    event,
+                };
+                let serialized = serde_json::to_writer(&mut bounded, &envelope);
+                if bounded.exceeded {
+                    return Err(SessionStoreError::EventRecordTooLarge {
+                        max_line_bytes: MAX_SEGMENT_BYTES,
+                    });
+                }
+                serialized?;
+                if bounded.bytes.len() == MAX_SEGMENT_BYTES {
+                    return Err(SessionStoreError::EventRecordTooLarge {
+                        max_line_bytes: MAX_SEGMENT_BYTES,
+                    });
+                }
+                bounded.bytes.push(b'\n');
+                envelopes.push(envelope);
             }
-            serialized?;
-            if bounded.bytes.len() == MAX_SEGMENT_BYTES {
-                return Err(SessionStoreError::EventRecordTooLarge {
-                    max_line_bytes: MAX_SEGMENT_BYTES,
-                });
-            }
-            bounded.bytes.push(b'\n');
-            envelopes.push(envelope);
-        }
-        let bytes = bounded.bytes;
+            (bounded.bytes, envelopes)
+        };
+        span.record("events", envelopes.len());
+        span.record("bytes", bytes.len());
         let next_sequence = self
             .next_sequence
             .checked_add(envelopes.len() as u64)
@@ -740,8 +633,16 @@ impl SegmentedJournal {
                 "active journal length changed after validation",
             ));
         }
-        let append = super::write_event_bytes(&mut &*self.active, &bytes)
-            .and_then(|()| super::sync_event_file(&self.active));
+        let append = {
+            let _write = tracing::trace_span!(target: "rw_performance", "journal.write", bytes = bytes.len()).entered();
+            super::write_event_bytes(&mut &*self.active, &bytes)
+        }
+        .and_then(|()| {
+            let _sync = tracing::trace_span!(target: "rw_performance", "journal.sync").entered();
+            #[cfg(test)]
+            telemetry_tests::run_sync_hook();
+            super::sync_event_file(&self.active)
+        });
         if let Err(error) = append {
             if let Err(rollback) =
                 super::truncate_and_sync_event_file(&self.active, self.active_bytes)
@@ -1179,12 +1080,11 @@ impl JournalReadView {
         self.page_internal(after, limits, None)
     }
 
-    fn page_internal<T: DeserializeOwned>(
+    fn checked_page_start(
         &self,
         after: Option<SequenceId>,
         limits: SessionEventPageLimits,
-        mut proof: Option<&mut proof::ProofBuilder>,
-    ) -> Result<(SessionEventPage<T>, JournalReadMetrics), SessionStoreError> {
+    ) -> Result<u64, SessionStoreError> {
         if limits.max_page_events == 0
             || limits.max_page_bytes == 0
             || limits.max_line_bytes == 0
@@ -1193,7 +1093,6 @@ impl JournalReadView {
         {
             return Err(SessionStoreError::InvalidEventPageLimits);
         }
-        let mut metrics = JournalReadMetrics::default();
         let first = match after {
             Some(sequence) => sequence
                 .0
@@ -1204,6 +1103,23 @@ impl JournalReadView {
         if first > self.next_sequence {
             return Err(SessionStoreError::EventPageCursorAhead);
         }
+        Ok(first)
+    }
+
+    fn page_internal<T: DeserializeOwned>(
+        &self,
+        after: Option<SequenceId>,
+        limits: SessionEventPageLimits,
+        mut proof: Option<&mut proof::ProofBuilder>,
+    ) -> Result<(SessionEventPage<T>, JournalReadMetrics), SessionStoreError> {
+        let span = tracing::trace_span!(target: "rw_performance", "journal.page",
+            session_id = ?self.directory.path.parent().and_then(Path::file_name),
+            after = ?after, through = self.next_sequence,
+            bytes_read = tracing::field::Empty, records_scanned = tracing::field::Empty,
+            records_decoded = tracing::field::Empty, segments_read = tracing::field::Empty);
+        let _entered = span.enter();
+        let first = self.checked_page_start(after, limits)?;
+        let mut metrics = JournalReadMetrics::default();
         let mut events = Vec::new();
         let mut page_bytes = 0;
         let mut next = first;
@@ -1268,6 +1184,10 @@ impl JournalReadView {
                 "journal segment index exceeds its records",
             ));
         }
+        span.record("bytes_read", metrics.bytes_read);
+        span.record("records_scanned", metrics.records_scanned);
+        span.record("records_decoded", metrics.records_decoded);
+        span.record("segments_read", metrics.segments_read);
         Ok((
             SessionEventPage {
                 events,
@@ -1455,3 +1375,6 @@ mod tests;
 
 #[cfg(test)]
 mod proof_tests;
+
+#[cfg(test)]
+mod telemetry_tests;

@@ -11,34 +11,6 @@ fn page_limits(events: usize) -> SessionEventPageLimits {
 }
 
 #[test]
-fn catalog_growth_keeps_existing_entries_and_prefix_queries_stable() {
-    let catalog = SegmentCatalog::default();
-    let segment = |index| Segment {
-        first: index,
-        next: index + 1,
-        bytes: 1,
-        digest: blake3::hash(&index.to_le_bytes()),
-        name: index.to_string(),
-    };
-    catalog.push(segment(0));
-    let pointer = {
-        let entries = catalog.entries.read().expect("catalog");
-        std::ptr::from_ref(&entries[0]) as usize
-    };
-    let first = catalog.prefix(1);
-    for index in 1..16_384 {
-        catalog.push(segment(index));
-    }
-    assert_eq!(catalog.prefix(1), first);
-    assert_eq!(catalog.prefix(16_384).0, 16_384);
-    assert_eq!(catalog.partition(128, |entry| entry.next <= 97), 97);
-    assert_eq!(catalog.partition(128, |entry| entry.next <= 20_000), 128);
-    let entries = catalog.entries.read().expect("catalog");
-    assert_eq!(std::ptr::from_ref(&entries[0]) as usize, pointer);
-    assert_eq!(entries.chunks.len(), 64);
-}
-
-#[test]
 fn views_pin_their_tail_across_append_rotation_and_writer_reopen() {
     let root = tempdir().expect("root");
     let mut journal = SegmentedJournal::open(root.path(), "rotation").expect("journal");
