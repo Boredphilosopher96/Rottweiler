@@ -1,3 +1,4 @@
+import { ChildUiController } from "./app/children"
 import { SessionUiController } from "./app/sessions"
 import {
 BoxRenderable,
@@ -160,14 +161,7 @@ interface PendingPresentationEvent {
 }
 
 export type { AppClientState } from "./recycle-state"
-const MAX_VISIBLE_SUBAGENTS = 256
 
-type SubagentAction =
-  | { readonly kind: "inspect"; readonly subagent: SubagentDescriptor }
-  | { readonly kind: "continue"; readonly subagent: SubagentDescriptor }
-  | { readonly kind: "running"; readonly subagent: SubagentDescriptor }
-  | { readonly kind: "interrupt"; readonly subagent: SubagentDescriptor }
-  | { readonly kind: "close"; readonly subagent: SubagentDescriptor }
 interface PaletteAction {
   readonly id: string
   readonly title: string
@@ -233,6 +227,7 @@ export class RottweilerApp extends BoxRenderable {
   banner!: StateBannerRenderable
   main!: BoxRenderable
 
+  readonly #children: ChildUiController
   readonly #sessions: SessionUiController
   readonly #themes: ThemeUiController
   readonly #settings: SettingsUiController
@@ -270,17 +265,8 @@ export class RottweilerApp extends BoxRenderable {
   #systemTheme: RottweilerTheme
   #projectionRequests: ProjectionRequestBroker
   #pickerController: PickerController
-  #subagentListError: string | null = null
-  #subagentDescriptors: readonly SubagentDescriptor[] = []
-  #activeChildState: RottweilerState | null = null
-  #historicalChild: { readonly sessionId: string; readonly task: string } | null = null
   #activeSubagentReadOnly = false
-  #parentComposerDraft: ComposerDraft = { content: "", attachments: [] }
-  #subagentComposerDrafts = new Map<string, ComposerDraft>()
-  #activeSubagentId: string | null = null
-  #subagentActionId: string | null = null
   #interruptSubagentId: string | null = null
-  #subagentErrorBaseline: RottweilerState["errors"][number] | undefined
   #commandsRequested = false
   #commandCatalogTruncationNotified = false
   #projectionErrors: Partial<Record<ProjectionKind, string>> = {}
@@ -369,7 +355,7 @@ export class RottweilerApp extends BoxRenderable {
     if (!plainEscape && this.#interruptEscapeArmed) this.#clearInterruptEscape()
     if (
       plainEscape &&
-      this.#activeSubagentId !== null &&
+      this.#children.activeId !== null &&
       !this.#pickerVisible() &&
       !this.outputViewer.visible &&
       !this.#reviewOpen
@@ -380,9 +366,9 @@ export class RottweilerApp extends BoxRenderable {
         key.stopPropagation()
         return
       }
-      const subagentId = this.#activeSubagentId
-      const running = this.#subagentDescriptor(subagentId)?.activity === "running"
-      this.#leaveSubagent()
+      const subagentId = this.#children.activeId
+      const running = this.#children.subagentDescriptor(subagentId)?.activity === "running"
+      this.#children.leaveSubagent()
       if (running) this.#armInterruptEscape(subagentId)
       key.preventDefault()
       key.stopPropagation()
@@ -601,6 +587,18 @@ export class RottweilerApp extends BoxRenderable {
     })
 
     const app = this
+    this.#children = new ChildUiController({
+      get state() { return app.#state }, set state(value) { app.#state = value },
+      get sessionId() { return app.#sessionId }, get composer() { return app.composer },
+      get banner() { return app.banner }, get theme() { return app.#theme },
+      get history() { return app.#history }, get diagnostics() { return app.#options.diagnostics },
+      pickerController: this.#pickerController, requests: this.#projectionRequests,
+      focus: () => this.#focusForInputMode(), refresh: () => this.setState(this.#state),
+      presentEvent: event => this.#presentation.markDirty(deferPresentationForEvent(event)),
+      closePicker: () => this.closePicker(), binding: action => this.#paletteBinding(action),
+      projectError: (code, message, retryable) => this.#projectClientError(code, message, retryable),
+      projectRejection: outcome => this.#projectRejection(outcome),
+    })
     this.#sessions = new SessionUiController({
       get state() { return app.#state }, get sessionId() { return app.#sessionId },
       get picker() { return app.picker }, get composer() { return app.composer },
@@ -616,7 +614,7 @@ export class RottweilerApp extends BoxRenderable {
     })
     this.#providers = new ProviderUiController({
       get state() { return app.#state },
-      get activeSubagentId() { return app.#activeSubagentId },
+      get activeSubagentId() { return app.#children.activeId },
       get draft() { return app.composer.value },
       get picker() { return app.picker },
       pickerController: this.#pickerController,
@@ -770,20 +768,10 @@ export class RottweilerApp extends BoxRenderable {
         : { treeSitterClient: this.#treeSitterClient }),
       onInteraction: () => this.#restoreFocusAfterTranscriptInteraction(),
       onOpenSubagent: (subagentId) => {
-        void this.#enterSubagent(subagentId)
+        void this.#children.enterSubagent(subagentId)
       },
       onOpenChild: child => {
-        if (this.#subagentDescriptor(child.subagent_id)?.child_session_id === child.session_id) {
-          void this.#enterSubagent(child.subagent_id)
-          return
-        }
-        this.#saveComposerDraft()
-        this.#historicalChild = { sessionId: child.session_id, task: boundedUiText(child.task.text, 512) }
-        this.#activeSubagentId = child.subagent_id
-        this.#activeChildState = createInitialState()
-        this.#restoreComposerDraft(child.subagent_id)
-        this.setState(this.#state)
-        this.#focusForInputMode()
+        this.#children.openHistorical({ sessionId: child.session_id, subagentId: child.subagent_id, task: child.task.text })
       },
       onOpenContent: source => {
         const view = this.#history?.controller.snapshot.page?.view
@@ -807,7 +795,7 @@ export class RottweilerApp extends BoxRenderable {
     this.contextPanel = new ContextPanelRenderable(this.ctx, theme, {
       onOpenDiff: (path) => this.#openChangedFileDiff(path),
       onOpenSubagent: (subagentId) => {
-        void this.#enterSubagent(subagentId)
+        void this.#children.enterSubagent(subagentId)
       },
     })
     this.main.add(this.transcript)
@@ -853,9 +841,9 @@ export class RottweilerApp extends BoxRenderable {
     this.subagentTray = new SubagentTrayRenderable(
       this.ctx,
       theme,
-      (subagentId) => void this.#enterSubagent(subagentId),
+      (subagentId) => void this.#children.enterSubagent(subagentId),
       () => {
-        if (this.#activeSubagentId !== null) this.#updateSubagentBanner(this.#presentedState())
+        if (this.#children.activeId !== null) this.#children.updateSubagentBanner(this.#children.presentedState())
       },
     )
     const picker = new FuzzyPickerRenderable(this.ctx, theme, (query) => {
@@ -914,9 +902,9 @@ export class RottweilerApp extends BoxRenderable {
         this.#composerSubmissionsInFlight += 1
         return await this.#sendMessage(content, submittedAttachments)
       },
-      submissionScope: () => this.#composerScope(),
+      submissionScope: () => this.#children.composerScope(),
       onDetachedSubmissionRejected: (scope, content, attachments) =>
-        this.#restoreDetachedSubmission(scope, content, attachments),
+        this.#children.restoreDetachedSubmission(scope, content, attachments),
       onFileMention: (mention) => this.openFilePicker(mention.query, true),
       onManageAttachments: () => this.openAttachmentPicker(),
       onAttachmentError: (message) =>
@@ -970,7 +958,7 @@ export class RottweilerApp extends BoxRenderable {
     if (composerState !== null) this.#restoreComposerState(composerState)
     if (transcriptClientState !== null) this.transcript.restoreClientState(transcriptClientState)
     if (toolsClientState !== null) {
-      this.#updateToolsWorkspace(this.#presentedState(), true)
+      this.#updateToolsWorkspace(this.#children.presentedState(), true)
       this.toolsWorkspace.restoreClientState(toolsClientState)
     }
     this.transcript.setScrollOffset(scrollTop)
@@ -1040,12 +1028,12 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   get activeSubagentId(): string | null {
-    return this.#activeSubagentId
+    return this.#children.activeId
   }
 
   /** Presentation state is exposed for focused UI tests; parent state remains `state`. */
   get visibleState(): RottweilerState {
-    return this.#presentedState()
+    return this.#children.presentedState()
   }
 
   setSystemTheme(theme: RottweilerTheme): void {
@@ -1062,15 +1050,7 @@ export class RottweilerApp extends BoxRenderable {
     if (sessionId !== this.#sessionId) {
       this.closePicker("scope_change")
       this.#projectionRequests.clearForSessionChange()
-      this.#subagentListError = null
-      this.#subagentDescriptors = []
-      this.#activeChildState = null
-      this.#historicalChild = null
-      this.#parentComposerDraft = { content: "", attachments: [] }
-      this.#subagentComposerDrafts.clear()
-      this.#activeSubagentId = null
-      this.#subagentActionId = null
-      this.#subagentErrorBaseline = undefined
+      this.#children.reset()
       this.#commandsRequested = false
       this.#commandCatalogTruncationNotified = false
       this.#providers.catalogSettled()
@@ -1116,27 +1096,18 @@ export class RottweilerApp extends BoxRenderable {
         !this.#projectionRequests.matches("subagents", commandRequestId)
       ) return
       this.#projectionRequests.clear("subagents")
-      this.#subagentListError = null
-      this.#subagentDescriptors = listed.subagents
-        .slice(0, MAX_VISIBLE_SUBAGENTS)
-        .map(sanitizeSubagentDescriptor)
-        .filter((descriptor): descriptor is SubagentDescriptor => descriptor !== null)
-      if (
-        this.#activeSubagentId !== null &&
-        this.#subagentDescriptor(this.#activeSubagentId) === undefined && this.#historicalChild === null
-      ) this.#leaveSubagent()
-      else this.setState(this.#state)
+      this.#children.acceptCatalog(listed.subagents)
       return
     }
     if (event.type === "subagent_progress") {
       const progress = event as Extract<EngineEvent, { type: "subagent_progress" }>
       if (progress.parent_session_id !== this.#sessionId) return
-      const descriptor = this.#subagentDescriptor(progress.subagent_id)
+      const descriptor = this.#children.subagentDescriptor(progress.subagent_id)
       if (descriptor === undefined || descriptor.child_session_id !== progress.child_session_id) return
       const childEvent = childEngineEvent(progress.event, progress.child_session_id)
       if (childEvent !== null) {
         this.#history?.invalidate(progress.child_session_id)
-        if (this.#activeSubagentId === progress.subagent_id) this.#applySubagentEvent(progress.subagent_id, childEvent)
+        if (this.#children.activeId === progress.subagent_id) this.#children.applySubagentEvent(progress.subagent_id, childEvent)
       }
       const existing = this.#state.subagents[progress.subagent_id]
       if (existing === undefined || existing.childSessionId !== progress.child_session_id) return
@@ -1307,7 +1278,7 @@ export class RottweilerApp extends BoxRenderable {
       this.#requestModes()
     }
     if (event.type === "subagent_spawned" || event.type === "subagent_finished") {
-      this.#requestSubagents()
+      this.#children.requestSubagents()
     }
     this.#providers.afterEvent(event, eventRecord, commandRequestId, next)
 
@@ -1373,7 +1344,7 @@ export class RottweilerApp extends BoxRenderable {
   /** Return no handoff while an interaction needs its current process or cannot fit the private cap. */
   recycleState(): AppClientState | null {
     const kind = this.#pickerController.kind
-    if (this.#activeSubagentId !== null || this.#composerSubmissionsInFlight > 0
+    if (this.#children.activeId !== null || this.#composerSubmissionsInFlight > 0
       || this.#terminalSuspended || this.#state.shell.active || this.#state.replay.active
       || this.#providers.hasPendingAction
       || this.#state.providerAuth.pending !== null || this.#mcp.hasDraft
@@ -1386,7 +1357,7 @@ export class RottweilerApp extends BoxRenderable {
       schemaVersion: 2,
       sessionId: this.#sessionId,
       composer: this.#captureComposerState(),
-      subagentDrafts: [...this.#subagentComposerDrafts].map(([id, draft]) => ({ id, draft })),
+      subagentDrafts: [...this.#children.drafts],
       primaryView: this.#primaryView,
       scrollTop: Math.max(0, this.transcript.scroller.scrollTop),
       toolsScrollTop: Math.max(0, this.toolsWorkspace.activityScroller.scrollTop),
@@ -1415,8 +1386,7 @@ export class RottweilerApp extends BoxRenderable {
     const theme = this.#resolvedTheme(themeByName(state.theme) ?? kennelTheme)
     if (theme.name !== this.#theme.name) this.#createThemedSurface(theme)
     this.#restoreComposerState(state.composer)
-    this.#parentComposerDraft = { content: state.composer.content, attachments: state.composer.attachments }
-    this.#subagentComposerDrafts = new Map(state.subagentDrafts.map(({ id, draft }) => [id, draft]))
+    this.#children.restoreDrafts({ content: state.composer.content, attachments: state.composer.attachments }, state.subagentDrafts)
     this.#lastComposerValue = state.composer.content
     this.#inputMode = state.inputMode
     this.#vimFocus = state.focus
@@ -1464,7 +1434,7 @@ export class RottweilerApp extends BoxRenderable {
     if (state === null) return
     const transcriptReady = state.scrollTop === 0 || this.transcript.mountedEntryCount > 0
     if (state.tools.expanded.length > 0 || state.tools.selectedId !== null || state.toolsScrollTop > 0) {
-      this.#updateToolsWorkspace(this.#presentedState(), true)
+      this.#updateToolsWorkspace(this.#children.presentedState(), true)
     }
     const toolsReady = state.toolsScrollTop === 0 || this.toolsWorkspace.mountedRowCount > 0
     const transcriptBlocksReady = this.transcript.restoreClientState(state.transcript)
@@ -1507,18 +1477,18 @@ export class RottweilerApp extends BoxRenderable {
     if (state.providerAuth.pending === null) {
       this.#providers.resetAuthentication()
     }
-    const presented = this.#presentedState()
+    const presented = this.#children.presentedState()
     this.composer.setImagePasteAvailable(this.#modelSupportsVision(presented))
-    const viewingSubagent = this.#activeSubagentId !== null
-    const childDescriptor = this.#activeSubagentId === null
+    const viewingSubagent = this.#children.activeId !== null
+    const childDescriptor = this.#children.activeId === null
       ? undefined
-      : this.#subagentDescriptor(this.#activeSubagentId)
+      : this.#children.subagentDescriptor(this.#children.activeId)
     this.transcript.update(
       presented,
       viewingSubagent ? childDescriptor?.agent || "Child agent" : "Rottweiler",
     )
     if (this.#history !== null) {
-      this.#history.present(childDescriptor?.child_session_id ?? this.#historicalChild?.sessionId ?? this.#sessionId)
+      this.#history.present(childDescriptor?.child_session_id ?? this.#children.historical?.sessionId ?? this.#sessionId)
       this.transcript.setHistory(this.#history.controller.snapshot)
     }
     this.#updateToolsWorkspace(presented)
@@ -1550,7 +1520,7 @@ export class RottweilerApp extends BoxRenderable {
     this.composer.setQueuedMessages(
       viewingSubagent || this.#primaryView === "tools" ? [] : state.queuedMessages,
     )
-    const subagentReadOnly = this.#historicalChild !== null || this.#isActiveSubagentRunning()
+    const subagentReadOnly = this.#children.historical !== null || this.#children.isActiveSubagentRunning()
     const subagentBecameWritable = this.#activeSubagentReadOnly && !subagentReadOnly
     this.#activeSubagentReadOnly = subagentReadOnly
     const composerVisible =
@@ -1592,7 +1562,7 @@ export class RottweilerApp extends BoxRenderable {
       this.banner.fg = this.#theme.textMuted
       this.banner.content = this.#composerNotice
     }
-    if (viewingSubagent) this.#updateSubagentBanner(presented)
+    if (viewingSubagent) this.#children.updateSubagentBanner(presented)
     if (!this.#isInterruptible()) this.#clearInterruptEscape(false)
     if (this.#interruptEscapeArmed) {
       this.banner.visible = true
@@ -1605,7 +1575,7 @@ export class RottweilerApp extends BoxRenderable {
       this.#pickerController.refresh()
     }
     if (state.connection.phase === "connected" && previousConnectionPhase !== "connected") {
-      this.#history?.invalidate(childDescriptor?.child_session_id ?? this.#historicalChild?.sessionId ?? this.#sessionId)
+      this.#history?.invalidate(childDescriptor?.child_session_id ?? this.#children.historical?.sessionId ?? this.#sessionId)
     }
 
   }
@@ -1688,35 +1658,18 @@ export class RottweilerApp extends BoxRenderable {
 
   openSessionPicker(): void { this.#sessions.openSessionPicker() }
 
-  openSubagentPicker(): void {
-    if (this.#state.replay.active) {
-      this.#projectClientError(
-        "subagents_unavailable_in_replay",
-        "Child-agent controls are available from the live parent session, not historical replay.",
-      )
-      return
-    }
-    this.#pickerController.begin("agents")
-    this.#requestSubagents()
-    this.#pickerController.refresh()
-  }
-
-  openSubagentActionPicker(subagentId = this.#activeSubagentId): void {
-    if (subagentId === null || this.#subagentDescriptor(subagentId) === undefined) return
-    this.#subagentActionId = subagentId
-    this.#pickerController.begin("agentActions")
-    this.#pickerController.refresh()
-  }
+  openSubagentPicker(): void { this.#children.openSubagentPicker() }
+  openSubagentActionPicker(subagentId = this.#children.activeId): void { this.#children.openSubagentActionPicker(subagentId) }
 
   #setPrimaryView(view: PrimaryView): void {
     if (this.#primaryView === view) {
       this.#applyPrimaryViewVisibility()
-      this.#updateToolsWorkspace(this.#presentedState())
+      this.#updateToolsWorkspace(this.#children.presentedState())
       return
     }
     this.#primaryView = view
     this.#applyPrimaryViewVisibility()
-    this.#updateToolsWorkspace(this.#presentedState())
+    this.#updateToolsWorkspace(this.#children.presentedState())
   }
 
   #applyPrimaryViewVisibility(): void {
@@ -1727,13 +1680,13 @@ export class RottweilerApp extends BoxRenderable {
     const height = this.height === 0 ? this.ctx.height : this.height
     this.contextPanel.visible =
       !toolsVisible &&
-      this.#activeSubagentId === null &&
+      this.#children.activeId === null &&
       !this.#state.replay.active &&
       contextPanelHasContent(this.#state) &&
       width >= 100 &&
       height >= 12
     this.composer.setQueuedMessages(
-      toolsVisible || this.#activeSubagentId !== null ? [] : this.#state.queuedMessages,
+      toolsVisible || this.#children.activeId !== null ? [] : this.#state.queuedMessages,
     )
     this.subagentTray.setPresentationEnabled(!this.contextPanel.visible)
   }
@@ -1769,7 +1722,7 @@ export class RottweilerApp extends BoxRenderable {
         this.#clearToolsElapsedTimer()
         return
       }
-      const presented = this.#presentedState()
+      const presented = this.#children.presentedState()
       if (presented.replay.active) {
         this.#clearToolsElapsedTimer()
         return
@@ -1795,7 +1748,7 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #openToolOutput(toolCallId: string): void {
-    const tool = this.#presentedState().tools[toolCallId]
+    const tool = this.#children.presentedState().tools[toolCallId]
     if (tool === undefined) return
     this.#document?.close()
     this.#outputViewerToolCallId = toolCallId
@@ -1853,7 +1806,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#providers.pickerClosed()
     this.#mcp.pickerClosed()
     this.#settings.pickerClosed()
-    this.#subagentActionId = null
+    this.#children.pickerClosed()
     this.#sessions.pickerClosed()
     if (restoreMcpBrowser) {
       this.#pickerController.kind = "mcp"
@@ -1875,7 +1828,7 @@ export class RottweilerApp extends BoxRenderable {
       this.composer.setKeybindingMode(
         this.#inputMode === "normal" ? "normal" : "insert",
       )
-      this.statusLine.update(this.#presentedState())
+      this.statusLine.update(this.#children.presentedState())
     }
   }
 
@@ -1899,6 +1852,7 @@ export class RottweilerApp extends BoxRenderable {
     if (this.#destroyed) return
     this.#destroyed = true
     this.#sessions.reset()
+    this.#children.reset()
     this.#themes.dispose()
     this.#pickerController.dispose()
     this.#providers.dispose()
@@ -2017,7 +1971,7 @@ export class RottweilerApp extends BoxRenderable {
         this.openModePicker()
         return true
       case "paste_image":
-        if (!this.#modelSupportsVision(this.#presentedState())) return false
+        if (!this.#modelSupportsVision(this.#children.presentedState())) return false
         void this.composer.pasteImage()
         // Let the terminal's normal text-paste path continue. When the
         // clipboard contains an image pasteImage attaches it asynchronously;
@@ -2136,7 +2090,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#focusForInputMode()
     this.statusLine.setKeybindingMode(mode, this.#statusFocusOwner())
     this.composer.setKeybindingMode(mode)
-    this.statusLine.update(this.#presentedState())
+    this.statusLine.update(this.#children.presentedState())
   }
 
   #focusForInputMode(): void {
@@ -2152,7 +2106,7 @@ export class RottweilerApp extends BoxRenderable {
       this.interactionPanel.select.focus()
       return
     }
-    if (this.#isActiveSubagentRunning()) {
+    if (this.#children.isActiveSubagentRunning()) {
       this.composer.editor.showCursor = false
       this.transcript.scroller.focus()
       return
@@ -2203,7 +2157,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#focusForInputMode()
     this.statusLine.setKeybindingMode("normal", this.#vimFocus)
     this.composer.setKeybindingMode("normal")
-    this.statusLine.update(this.#presentedState())
+    this.statusLine.update(this.#children.presentedState())
   }
 
   #moveVertical(direction: 1 | -1): void {
@@ -2272,7 +2226,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#focusForInputMode()
     this.statusLine.setKeybindingMode(this.#inputMode, "transcript")
     this.composer.setKeybindingMode(this.#inputMode)
-    this.statusLine.update(this.#presentedState())
+    this.statusLine.update(this.#children.presentedState())
   }
 
   #visibleFocusOwner(): VimFocus | "interaction" | "output" | "review" {
@@ -2281,7 +2235,7 @@ export class RottweilerApp extends BoxRenderable {
     if (this.reviewPanel.visible) return "review"
     if (this.interactionPanel.capturesInput) return "interaction"
     if (this.#state.replay.active) return "transcript"
-    if (this.#isActiveSubagentRunning()) return "transcript"
+    if (this.#children.isActiveSubagentRunning()) return "transcript"
     return this.#vimFocus
   }
 
@@ -2682,107 +2636,8 @@ export class RottweilerApp extends BoxRenderable {
         )
         break
       }
-      case "agents": {
-        if (this.#subagentListError !== null) {
-          this.#pickerController.show(
-            "Child agents · load failed",
-            [{
-              id: "agents.retry",
-              label: "Retry loading child agents",
-              description: boundedUiText(this.#subagentListError, 160),
-              value: null,
-            }],
-            () => this.#requestSubagents(),
-          )
-          break
-        }
-        if (
-          this.#projectionRequests.current("subagents") !== null &&
-          this.#subagentDescriptors.length === 0
-        ) {
-          this.#pickerController.showLoading("Child agents", "Loading child agents")
-          break
-        }
-        const items: PickerItem<SubagentDescriptor>[] = this.#subagentDescriptors.map((subagent) => ({
-          id: subagent.subagent_id,
-          label: subagent.task,
-          description: `${subagent.activity === "running" ? "Running" : "Idle"} · ${subagent.agent} · ${subagent.model} · ${subagent.isolation}`,
-          searchText: `${subagent.task} ${subagent.agent} ${subagent.model} ${subagent.activity}`,
-          value: subagent,
-        }))
-        if (items.length === 0) {
-          this.#pickerController.showStatus(
-            "Child agents",
-            "No child agents",
-            "Child agents started by this session will appear here.",
-          )
-          break
-        }
-        this.#pickerController.show("Child agents · Enter to inspect", items, (item) => {
-          this.closePicker()
-          void this.#enterSubagent(item.value.subagent_id)
-        })
-        break
-      }
-      case "agentActions": {
-        const subagent = this.#subagentActionId === null
-          ? undefined
-          : this.#subagentDescriptor(this.#subagentActionId)
-        if (subagent === undefined) {
-          this.closePicker()
-          break
-        }
-        const items: PickerItem<SubagentAction>[] = [
-          {
-            id: "inspect",
-            label: "Inspect transcript",
-            description: "Open this child's live, typed event stream",
-            value: { kind: "inspect", subagent },
-          },
-          ...(subagent.activity === "running"
-            ? [{
-                id: "running",
-                label: "Child is still running",
-                description: "Inspect progress or interrupt before sending a follow-up",
-                value: { kind: "running", subagent } as SubagentAction,
-                selectable: false,
-              }]
-            : [{
-                id: "continue",
-                label: "Resume with follow-up",
-                description: "Focus the child composer; Enter sends to this child",
-                value: { kind: "continue", subagent } as SubagentAction,
-              }]),
-          ...(subagent.activity === "running"
-            ? [{
-                id: "interrupt",
-                label: "Interrupt child",
-                description: "Stop the active child response",
-                value: { kind: "interrupt", subagent } as SubagentAction,
-              }]
-            : []),
-          {
-            id: "close",
-            label: "Close child",
-            description: "Release this retained child agent",
-            value: { kind: "close", subagent },
-          },
-        ]
-        this.#pickerController.show(`Child actions · ${boundedUiText(subagent.task, 64)}`, items, (item) => {
-          const action = item.value
-          if (action.kind === "running") return
-          this.closePicker()
-          if (action.kind === "inspect") void this.#enterSubagent(action.subagent.subagent_id)
-          else if (action.kind === "continue") {
-            void this.#enterSubagent(action.subagent.subagent_id)
-          } else if (action.kind === "interrupt") {
-            void this.#interruptSubagent(action.subagent.subagent_id)
-          } else {
-            void this.#closeSubagent(action.subagent.subagent_id)
-          }
-        })
-        break
-      }
+      case "agents": this.#children.render("agents"); break
+      case "agentActions": this.#children.render("agentActions"); break
       case "sessions": this.#sessions.render("sessions"); break
       case "sessionActions": this.#sessions.render("sessionActions"); break
       case "sessionRename": this.#sessions.render("sessionRename"); break
@@ -2844,7 +2699,7 @@ export class RottweilerApp extends BoxRenderable {
       this.composer.focus()
     }
     const actions: PaletteAction[] = [
-      ...(Object.values(this.#presentedState().turns).some((turn) => turn.status === "running")
+      ...(Object.values(this.#children.presentedState().turns).some((turn) => turn.status === "running")
         ? [{ id: "interrupt.run", title: "Interrupt turn", section: "Conversation", description: "Stop the active turn", run: submit("/interrupt") } satisfies PaletteAction]
         : []),
       { id: "compact.run", title: "Compact context", section: "Conversation", description: "Compact the conversation context", run: submit("/compact") },
@@ -2862,12 +2717,12 @@ export class RottweilerApp extends BoxRenderable {
       { id: "provider.list", title: "Switch provider route", section: "Agents & models", description: "Choose a configured provider and model route", run: open(() => this.openProviderPicker()) },
       { id: "mode.list", title: "Switch mode", section: "Agents & models", description: this.#paletteDescription("Choose discuss, plan, or execute", "open_mode_picker"), run: open(() => this.openModePicker()) },
       { id: "agent.children", title: "Child agents", section: "Agents & models", description: this.#paletteDescription("Inspect, resume, interrupt, or close child agents", "open_subagent_picker"), run: open(() => this.openSubagentPicker()) },
-      ...(this.#activeSubagentId === null ? [] : [{
+      ...(this.#children.activeId === null ? [] : [{
         id: "agent.current.actions",
         title: "Current child actions",
         section: "Agents & models",
         description: "Inspect, continue, interrupt, or close the visible child",
-        run: open(() => this.openSubagentActionPicker(this.#activeSubagentId)),
+        run: open(() => this.openSubagentActionPicker(this.#children.activeId)),
       } satisfies PaletteAction]),
       { id: "status.show", title: "Show agent status", section: "Agents & models", description: "Display running and queue state", run: submit("/status") },
 
@@ -2954,308 +2809,6 @@ export class RottweilerApp extends BoxRenderable {
     this.#projectionRequests.command({ type: "list_commands" })
   }
 
-  #requestSubagents(): void {
-    if (this.#state.replay.active) return
-    this.#subagentListError = null
-    const meta = this.#projectionRequests.issue("subagents")
-    void this.#projectionRequests.emit({
-      type: "list_subagents",
-      meta,
-      session_id: this.#sessionId,
-    }).then((outcome) => {
-      if (
-        outcome?.type === "rejected" &&
-        this.#projectionRequests.matches("subagents", meta.request_id)
-      ) {
-        this.#projectionRequests.clear("subagents")
-        this.#subagentListError = presentError({
-          category: outcome.error.category,
-          code: outcome.error.code,
-          message: outcome.error.message,
-          requestId: meta.request_id,
-        }).text
-        this.#projectRejection(outcome)
-        if (this.#pickerController.kind === "agents") this.#pickerController.refresh()
-      } else if (
-        outcome == null &&
-        this.#projectionRequests.matches("subagents", meta.request_id)
-      ) {
-        this.#projectionRequests.clear("subagents")
-        const presentation = presentError({
-          category: "protocol",
-          code: "subagents_unavailable",
-          message: "Couldn't load child agents because the engine connection is unavailable.",
-          requestId: meta.request_id,
-        })
-        this.#subagentListError = presentation.text
-        this.#projectClientError(
-          "subagents_unavailable",
-          presentation.text,
-          true,
-        )
-        if (this.#pickerController.kind === "agents") this.#pickerController.refresh()
-      }
-    }).catch((error) => {
-      if (!this.#projectionRequests.matches("subagents", meta.request_id)) return
-      this.#projectionRequests.clear("subagents")
-      const presentation = presentError({
-        category: "protocol",
-        code: "subagents_failed",
-        message: safeErrorMessage(error),
-        requestId: meta.request_id,
-      })
-      this.#subagentListError = presentation.text
-      this.#projectClientError("subagents_failed", presentation.text, true)
-      if (this.#pickerController.kind === "agents") this.#pickerController.refresh()
-    })
-  }
-
-  async #enterSubagent(subagentId: string): Promise<void> {
-    const descriptor = this.#subagentDescriptor(subagentId)
-    if (descriptor === undefined) return
-    this.#saveComposerDraft()
-    this.#activeSubagentId = subagentId
-    this.#historicalChild = null
-    this.#restoreComposerDraft(subagentId)
-    this.#subagentErrorBaseline = this.#state.errors.at(-1)
-    this.#activeChildState = initialSubagentState(this.#state, descriptor)
-    this.setState(this.#state)
-    this.#focusForInputMode()
-  }
-
-  #leaveSubagent(): void {
-    if (this.#activeSubagentId === null) return
-    this.#saveComposerDraft()
-    this.#activeSubagentId = null
-    this.#historicalChild = null
-    this.#activeChildState = null
-    this.#restoreComposerDraft(null)
-    this.#subagentActionId = null
-    this.#subagentErrorBaseline = undefined
-    this.setState(this.#state)
-    this.#focusForInputMode()
-  }
-
-  #saveComposerDraft(): void {
-    const draft: ComposerDraft = {
-      content: this.composer.value,
-      attachments: [...this.composer.attachments],
-    }
-    if (this.#activeSubagentId === null) this.#parentComposerDraft = draft
-    else this.#subagentComposerDrafts.set(this.#activeSubagentId, draft)
-  }
-
-  #composerScope(): string {
-    return this.#activeSubagentId === null ? "parent" : `child:${this.#activeSubagentId}`
-  }
-
-  #restoreDetachedSubmission(
-    scope: string,
-    content: string,
-    attachments: readonly Attachment[],
-  ): void {
-    const childId = scope.startsWith("child:") ? scope.slice("child:".length) : null
-    if (scope !== "parent" && (childId === null || this.#subagentDescriptor(childId) === undefined)) return
-    const current = childId === null
-      ? this.#parentComposerDraft
-      : this.#subagentComposerDrafts.get(childId) ?? { content: "", attachments: [] }
-    const restored = mergeComposerDraft(current, content, attachments)
-    if (childId === null) this.#parentComposerDraft = restored
-    else this.#subagentComposerDrafts.set(childId, restored)
-  }
-
-  #restoreComposerDraft(subagentId: string | null): void {
-    const draft = subagentId === null
-      ? this.#parentComposerDraft
-      : this.#subagentComposerDrafts.get(subagentId) ?? { content: "", attachments: [] }
-    this.composer.restoreDraft(draft.content, draft.attachments)
-  }
-
-  #applySubagentEvent(subagentId: string, event: EngineEvent): void {
-    const descriptor = this.#subagentDescriptor(subagentId)
-    if (descriptor === undefined) return
-    const previous = this.#activeChildState ?? initialSubagentState(this.#state, descriptor)
-    const reducedAt = this.#options.diagnostics?.start()
-    const next = boundSubagentState(reduceRottweilerState(previous, engineEvent(event)))
-    if (reducedAt !== undefined) this.#options.diagnostics?.finish("reducer", reducedAt)
-    this.#activeChildState = next
-    this.#subagentErrorBaseline = this.#state.errors.at(-1)
-    if (event.type === "turn_finished") this.#setSubagentActivity(subagentId, "idle")
-    else if (event.type === "turn_started") this.#setSubagentActivity(subagentId, "running")
-    this.#presentation.markDirty(deferPresentationForEvent(event))
-  }
-
-  #subagentDescriptor(subagentId: string): SubagentDescriptor | undefined {
-    return this.#subagentDescriptors.find((subagent) => subagent.subagent_id === subagentId)
-  }
-
-  #isActiveSubagentRunning(): boolean {
-    return this.#activeSubagentId !== null &&
-      this.#subagentDescriptor(this.#activeSubagentId)?.activity === "running"
-  }
-
-  #setSubagentActivity(subagentId: string, activity: SubagentDescriptor["activity"]): void {
-    this.#subagentDescriptors = this.#subagentDescriptors.map((subagent) =>
-      subagent.subagent_id === subagentId ? { ...subagent, activity } : subagent,
-    )
-  }
-
-  #presentedState(): RottweilerState {
-    if (this.#activeSubagentId === null) return this.#state
-    if (this.#activeChildState !== null) return this.#activeChildState
-    const descriptor = this.#subagentDescriptor(this.#activeSubagentId)
-    if (descriptor === undefined) return this.#state
-    return this.#activeChildState ?? initialSubagentState(this.#state, descriptor)
-  }
-
-  #updateSubagentBanner(state: RottweilerState): void {
-    if (this.#activeSubagentId === null) return
-    if (this.#historicalChild !== null) {
-      this.banner.visible = true
-      this.banner.content = `Child transcript · ${this.#historicalChild.task} · Esc parent`
-      return
-    }
-    const descriptor = this.#subagentDescriptor(this.#activeSubagentId)
-    if (descriptor === undefined) return
-    const approval = Object.values(state.tools).some((tool) => tool.status === "awaiting_approval")
-    const history = this.#history?.controller.snapshot
-    const replaying = history?.loading ?? false
-    const latestError = this.#state.errors.at(-1)
-    const hasErrorContext = latestError !== undefined && latestError !== this.#subagentErrorBaseline
-    const projection = this.#state.subagents[this.#activeSubagentId] ?? Object.values(
-      this.#state.subagents,
-    ).findLast((subagent) => subagent.subagentId === this.#activeSubagentId)
-    const status = projection?.status.replaceAll("_", " ") ?? descriptor.activity
-    const elapsed = projection?.status === "running"
-      ? formatSubagentElapsed(projection.spawnedAtMs)
-      : null
-    const activity = replaying
-      ? "loading transcript"
-      : approval
-        ? "approval requested by child"
-        : projection?.activity ?? descriptor.activity
-    const activitySegment = activity.trim()
-    const detail = [
-      status,
-      ...(activitySegment === "" || activitySegment.toLowerCase() === status.trim().toLowerCase()
-        ? []
-        : [activitySegment]),
-      ...(elapsed === null ? [] : [elapsed]),
-      ...(status.toLowerCase() === "running" && !replaying && !approval && !hasErrorContext
-        ? ["read-only", "interrupt to reply"]
-        : []),
-    ].join(" · ")
-    const errorPresentation = hasErrorContext && latestError !== undefined
-      ? presentError(latestError)
-      : null
-    const context = errorPresentation !== null
-      ? errorPresentation.text
-      : history?.error ?? null
-    this.banner.visible = true
-    this.banner.fg = errorPresentation !== null
-      ? this.#theme[errorPresentation.severity]
-      : approval
-        ? this.#theme.warning
-        : this.#theme.info
-    const childrenHint = this.#paletteBinding("open_subagent_picker")
-    const paletteHint = this.#paletteBinding("open_command_picker")
-    const hints = [
-      "Esc parent",
-      ...(childrenHint === null ? [] : [`${childrenHint} children`]),
-      ...(paletteHint === null ? [] : [`${paletteHint} palette`]),
-    ]
-    this.banner.content = t`${fg(this.#theme.primary)("◉ child agent")} · ${descriptor.task} · ${detail}${context === null ? "" : ` · ${context}`} · ${hints.join(" · ")}`
-  }
-
-  async #interruptSubagent(subagentId: string): Promise<void> {
-    let outcome: void | CommandOutcome | null
-    try {
-      outcome = await this.#projectionRequests.emit({
-        type: "interrupt_subagent",
-        meta: this.#projectionRequests.meta(),
-        session_id: this.#sessionId,
-        subagent_id: subagentId,
-      })
-    } catch (error) {
-      this.#projectClientError(
-        "subagent_interrupt_failed",
-        presentError({
-          category: "protocol",
-          code: "subagent_interrupt_failed",
-          message: safeErrorMessage(error),
-        }).text,
-        true,
-      )
-      return
-    }
-    if (outcome?.type === "rejected") this.#projectRejection(outcome)
-    else if (outcome == null) {
-      const presentation = presentError({
-        category: "protocol",
-        code: "subagent_interrupt_unavailable",
-        message: "Couldn't interrupt the child because the engine connection is unavailable.",
-      })
-      this.#projectClientError(
-        "subagent_interrupt_unavailable",
-        presentation.text,
-        true,
-      )
-    }
-  }
-
-  async #closeSubagent(subagentId: string): Promise<void> {
-    let outcome: void | CommandOutcome | null
-    try {
-      outcome = await this.#projectionRequests.emit({
-        type: "close_subagent",
-        meta: this.#projectionRequests.meta(),
-        session_id: this.#sessionId,
-        subagent_id: subagentId,
-      })
-    } catch (error) {
-      this.#projectClientError(
-        "subagent_close_failed",
-        presentError({
-          category: "protocol",
-          code: "subagent_close_failed",
-          message: safeErrorMessage(error),
-        }).text,
-        true,
-      )
-      return
-    }
-    if (outcome?.type === "rejected") {
-      this.#projectRejection(outcome)
-      return
-    }
-    if (outcome == null) {
-      const presentation = presentError({
-        category: "protocol",
-        code: "subagent_close_unavailable",
-        message: "Couldn't close the child because the engine connection is unavailable.",
-      })
-      this.#projectClientError(
-        "subagent_close_unavailable",
-        presentation.text,
-        true,
-      )
-      return
-    }
-    if (this.#activeSubagentId === subagentId) this.#leaveSubagent()
-    const { [subagentId]: _closed, ...subagents } = this.#state.subagents
-    this.#state = {
-      ...this.#state,
-      subagents,
-      subagentOrder: this.#state.subagentOrder.filter((candidate) => candidate !== subagentId),
-    }
-    this.#subagentDescriptors = this.#subagentDescriptors.filter(
-      (subagent) => subagent.subagent_id !== subagentId,
-    )
-    this.#subagentComposerDrafts.delete(subagentId)
-    this.setState(this.#state)
-    this.#requestSubagents()
-  }
-
   #requestModes(): void {
     this.#clearProjectionError("modes")
     this.#projectionRequests.command({ type: "list_modes" })
@@ -3308,14 +2861,14 @@ export class RottweilerApp extends BoxRenderable {
       return false
     }
     if (content.startsWith("!")) {
-      const originatingSubagentId = this.#activeSubagentId
+      const originatingSubagentId = this.#children.activeId
       const accepted = await this.#startForegroundShell(content, attachments)
-      if (accepted && originatingSubagentId !== null && this.#activeSubagentId === originatingSubagentId) {
-        this.#leaveSubagent()
+      if (accepted && originatingSubagentId !== null && this.#children.activeId === originatingSubagentId) {
+        this.#children.leaveSubagent()
       }
       return accepted
     }
-    if (this.#activeSubagentId !== null) {
+    if (this.#children.activeId !== null) {
       const action = attachments.length === 0 ? parseSessionAction(content) : null
       if (action?.type === "exit") {
         this.#options.onExit?.()
@@ -3333,8 +2886,8 @@ export class RottweilerApp extends BoxRenderable {
         )
         return false
       }
-      const subagentId = this.#activeSubagentId
-      if (this.#subagentDescriptor(subagentId)?.activity === "running") {
+      const subagentId = this.#children.activeId
+      if (this.#children.subagentDescriptor(subagentId)?.activity === "running") {
         this.#projectClientError(
           "subagent_still_running",
           "This child is still working. Inspect its progress or interrupt it before sending a follow-up.",
@@ -3374,8 +2927,7 @@ export class RottweilerApp extends BoxRenderable {
         }
         return false
       }
-      this.#subagentErrorBaseline = this.#state.errors.at(-1)
-      this.#setSubagentActivity(subagentId, "running")
+      this.#children.responseStarted(subagentId)
       this.setState(this.#state)
       return true
     }
@@ -3752,7 +3304,7 @@ export class RottweilerApp extends BoxRenderable {
   async #interruptActiveResponse(subagentId: string | null = this.#interruptSubagentId): Promise<void> {
     if (subagentId !== null) {
       this.#interruptSubagentId = null
-      await this.#interruptSubagent(subagentId)
+      await this.#children.interruptSubagent(subagentId)
       return
     }
     const outcome = await this.#projectionRequests.emit({
