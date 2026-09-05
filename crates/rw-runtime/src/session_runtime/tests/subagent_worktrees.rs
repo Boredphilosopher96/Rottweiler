@@ -549,8 +549,12 @@ async fn rewound_changed_worktree_is_discarded_before_metadata_tombstone_removal
     assert!(!lease_path.exists());
     assert_eq!(
         metadata
-            .load_parent(&parent_session_id)
+            .load_parent_page(&parent_session_id, None)
             .expect("metadata retained")
+            .records
+            .into_iter()
+            .map(|(record, _)| record)
+            .collect::<Vec<_>>()
             .len(),
         1
     );
@@ -561,8 +565,12 @@ async fn rewound_changed_worktree_is_discarded_before_metadata_tombstone_removal
     );
     assert!(
         metadata
-            .load_parent(&parent_session_id)
+            .load_parent_page(&parent_session_id, None)
             .expect("load metadata")
+            .records
+            .into_iter()
+            .map(|(record, _)| record)
+            .collect::<Vec<_>>()
             .is_empty()
     );
     assert!(String::from_utf8_lossy(&git(&["status", "--porcelain=v1"]).stdout).is_empty());
@@ -580,8 +588,12 @@ async fn rewound_changed_worktree_is_discarded_before_metadata_tombstone_removal
     );
     assert!(
         metadata
-            .load_parent(&parent_session_id)
+            .load_parent_page(&parent_session_id, None)
             .expect("pending removed")
+            .records
+            .into_iter()
+            .map(|(record, _)| record)
+            .collect::<Vec<_>>()
             .is_empty()
     );
 
@@ -595,8 +607,12 @@ async fn rewound_changed_worktree_is_discarded_before_metadata_tombstone_removal
     assert_eq!(pending.phase, rw_core::SubagentRecoveryPhase::Active);
     assert_eq!(
         metadata
-            .load_parent(&parent_session_id)
-            .expect("promoted metadata")[0]
+            .load_parent_page(&parent_session_id, None)
+            .expect("promoted metadata")
+            .records
+            .into_iter()
+            .map(|(record, _)| record)
+            .collect::<Vec<_>>()[0]
             .phase,
         rw_core::SubagentRecoveryPhase::Active
     );
@@ -897,8 +913,12 @@ async fn crashed_worktree_child_recovers_follows_up_and_applies_after_second_res
         .expect("recovered worktree manager"),
     );
     let mut recovered_record = metadata
-        .load_parent(&parent)
+        .load_parent_page(&parent, None)
         .expect("load pending metadata")
+        .records
+        .into_iter()
+        .map(|(record, _)| record)
+        .collect::<Vec<_>>()
         .into_iter()
         .next()
         .expect("pending record");

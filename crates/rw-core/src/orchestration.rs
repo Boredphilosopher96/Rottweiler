@@ -94,6 +94,7 @@ impl SubagentRequest {
 
 /// Stable handle retained by the parent for waiting, cancellation, and follow-up.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubagentHandle {
     pub subagent_id: SubagentId,
     pub session_id: SessionId,
@@ -102,8 +103,10 @@ pub struct SubagentHandle {
 /// Exact immutable child policy required to recreate a continuable session.
 /// This remains host-private with the recovery record.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubagentRecoveryPolicy {
     pub model_alias: String,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub system_prompt: Option<String>,
     pub permission_mode: SessionMode,
     pub max_turns: usize,
@@ -112,21 +115,20 @@ pub struct SubagentRecoveryPolicy {
 /// Host-private restart metadata. This must never enter model context or the
 /// public parent event stream.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubagentRecoveryRecord {
     pub parent_session_id: SessionId,
     pub handle: SubagentHandle,
-    #[serde(default)]
     pub task: String,
-    #[serde(default)]
     pub agent: String,
     pub depth: usize,
     pub workspace_root: PathBuf,
     pub isolation: SubagentIsolation,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub worktree: Option<WorktreeLeaseRecord>,
     pub capabilities: CapabilityManifest,
     pub tool_names: Vec<String>,
     pub policy: SubagentRecoveryPolicy,
-    #[serde(default)]
     pub phase: SubagentRecoveryPhase,
 }
 

@@ -176,6 +176,7 @@ pub(super) async fn recover_subagent_tree(
     }]);
     let mut visited = HashSet::new();
     let mut records = Vec::new();
+    let mut retained_bytes = 0usize;
 
     while let Some(node) = queue.pop_front() {
         if !visited.insert(node.parent_session_id.clone()) {
@@ -195,69 +196,92 @@ pub(super) async fn recover_subagent_tree(
         let expected_depth = node.parent_depth.checked_add(1).ok_or_else(|| {
             AgentLoopError::Persistence("persisted child depth overflow".to_owned())
         })?;
-        for mut record in metadata
-            .load_parent(&node.parent_session_id)
-            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?
-        {
-            if record.depth != expected_depth || record.depth > max_depth {
-                return Err(AgentLoopError::Persistence(format!(
-                    "persisted child depth {} does not match expected depth {expected_depth} or configured maximum {max_depth}",
-                    record.depth
-                )));
-            }
-            if record.phase == rw_core::SubagentRecoveryPhase::Closed {
-                if let Some(binding) = history
-                    .binding(&node.parent_session_id, &record.handle.subagent_id)
-                    .await?
-                    && binding.session_id == record.handle.session_id
-                    && binding.terminal.is_none()
+        let mut after = None;
+        loop {
+            let page = metadata
+                .load_parent_page(&node.parent_session_id, after.as_ref())
+                .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+            after = page.next;
+            for (mut record, charge) in page.records {
+                // The page owns at most 16 MiB while retained records own at most 48 MiB.
+                if retained_bytes
+                    .checked_add(charge)
+                    .is_none_or(|bytes| bytes > 48 * 1024 * 1024)
                 {
                     return Err(AgentLoopError::Persistence(
-                        "closed child still lacks durable terminal proof".into(),
+                        "subagent recovery aggregate allocation exceeded".into(),
                     ));
                 }
-                metadata
-                    .remove(&record.parent_session_id, &record.handle.subagent_id)
-                    .await
-                    .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-                continue;
+                if records.len() == 256 {
+                    return Err(AgentLoopError::Persistence(
+                        "subagent recovery child capacity exceeded".into(),
+                    ));
+                }
+                if record.depth != expected_depth || record.depth > max_depth {
+                    return Err(AgentLoopError::Persistence(format!(
+                        "persisted child depth {} does not match expected depth {expected_depth} or configured maximum {max_depth}",
+                        record.depth
+                    )));
+                }
+                if record.phase == rw_core::SubagentRecoveryPhase::Closed {
+                    if let Some(binding) = history
+                        .binding(&node.parent_session_id, &record.handle.subagent_id)
+                        .await?
+                        && binding.session_id == record.handle.session_id
+                        && binding.terminal.is_none()
+                    {
+                        return Err(AgentLoopError::Persistence(
+                            "closed child still lacks durable terminal proof".into(),
+                        ));
+                    }
+                    metadata
+                        .remove(&record.parent_session_id, &record.handle.subagent_id)
+                        .await
+                        .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+                    continue;
+                }
+                if !recovery_workspace_authorized(&record, &node.authorized_roots) {
+                    return Err(AgentLoopError::Persistence(
+                        "persisted child workspace root is outside its recovered parent workspace"
+                            .to_owned(),
+                    ));
+                }
+                if discard_rewound_subagent_record(&record, history, worktree_manager, metadata)
+                    .await?
+                {
+                    continue;
+                }
+                let child_root = if let Some(lease) = record.worktree.as_ref() {
+                    let manager = worktree_manager.ok_or_else(|| {
+                        AgentLoopError::Persistence(
+                            "persisted nested worktree cannot be validated".to_owned(),
+                        )
+                    })?;
+                    manager
+                        .rebind(lease, CancellationToken::default())
+                        .await
+                        .map_err(|error| {
+                            AgentLoopError::Persistence(format!(
+                                "persisted child worktree could not be validated: {error}"
+                            ))
+                        })?
+                        .path()
+                        .to_path_buf()
+                } else {
+                    record.workspace_root.clone()
+                };
+                promote_pending_recovery_record(&mut record, metadata).await?;
+                queue.push_back(SubagentRecoveryNode {
+                    parent_session_id: record.handle.session_id.clone(),
+                    parent_depth: record.depth,
+                    authorized_roots: vec![child_root],
+                });
+                retained_bytes += charge;
+                records.push(record);
             }
-            if !recovery_workspace_authorized(&record, &node.authorized_roots) {
-                return Err(AgentLoopError::Persistence(
-                    "persisted child workspace root is outside its recovered parent workspace"
-                        .to_owned(),
-                ));
+            if after.is_none() {
+                break;
             }
-            if discard_rewound_subagent_record(&record, history, worktree_manager, metadata).await?
-            {
-                continue;
-            }
-            let child_root = if let Some(lease) = record.worktree.as_ref() {
-                let manager = worktree_manager.ok_or_else(|| {
-                    AgentLoopError::Persistence(
-                        "persisted nested worktree cannot be validated".to_owned(),
-                    )
-                })?;
-                manager
-                    .rebind(lease, CancellationToken::default())
-                    .await
-                    .map_err(|error| {
-                        AgentLoopError::Persistence(format!(
-                            "persisted child worktree could not be validated: {error}"
-                        ))
-                    })?
-                    .path()
-                    .to_path_buf()
-            } else {
-                record.workspace_root.clone()
-            };
-            promote_pending_recovery_record(&mut record, metadata).await?;
-            queue.push_back(SubagentRecoveryNode {
-                parent_session_id: record.handle.session_id.clone(),
-                parent_depth: record.depth,
-                authorized_roots: vec![child_root],
-            });
-            records.push(record);
         }
     }
 

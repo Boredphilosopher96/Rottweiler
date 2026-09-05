@@ -823,16 +823,8 @@ impl SubagentOrchestrator {
                 record.handle.subagent_id.clone(),
                 SessionRecord {
                     handle: record.handle,
-                    task: if record.task.is_empty() {
-                        "Recovered subagent".to_owned()
-                    } else {
-                        record.task
-                    },
-                    agent: if record.agent.is_empty() {
-                        "subagent".to_owned()
-                    } else {
-                        record.agent
-                    },
+                    task: record.task,
+                    agent: record.agent,
                     model: record.policy.model_alias.clone(),
                     session,
                     state: SessionState::Inactive,

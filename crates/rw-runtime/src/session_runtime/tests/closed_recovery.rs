@@ -89,8 +89,12 @@ async fn closed_children_never_rebind_missing_workspaces_or_invent_publication()
         assert!(rebound.lock().expect("rebound").is_empty());
         assert!(
             metadata
-                .load_parent(&parent)
+                .load_parent_page(&parent, None)
                 .expect("remaining metadata")
+                .records
+                .into_iter()
+                .map(|(record, _)| record)
+                .collect::<Vec<_>>()
                 .is_empty()
         );
         let events = sink.load().expect("events after repair");
