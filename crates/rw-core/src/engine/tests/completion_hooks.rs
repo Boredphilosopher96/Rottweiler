@@ -1,8 +1,8 @@
 use super::fixtures::checkpoints::RecordingCheckpoints;
 use super::fixtures::models::ScriptedModel;
 use super::fixtures::support::{collect_turn, config, next_matching, stop_script};
+use crate::engine::AgentTurnStatus;
 use crate::engine::pending_event::PendingEvent;
-use crate::engine::{AgentTurnStatus, SessionActor};
 use async_trait::async_trait;
 use rw_ext::{
     HookClass, HookDirective, HookDispatcher, HookEffect, HookError, HookEvent, HookFailurePolicy,
@@ -97,7 +97,9 @@ async fn completion_policy_is_authorized_and_checkpointed_before_invocation() {
             hooks,
         );
         cfg.checkpoints = checkpoints.clone();
-        let handle = SessionActor::spawn(cfg).expect("actor");
+        let handle = crate::engine::tests::fixtures::history::spawn(cfg)
+            .await
+            .expect("actor");
         let mut events = handle.subscribe().expect("events");
         handle.send_message("run").await.expect("message");
         let event = next_matching(&mut events, |kind| {
@@ -178,7 +180,9 @@ async fn read_only_modes_deny_mutating_completion_policies() {
         );
         cfg.checkpoints = checkpoints.clone();
         cfg.recovered.mode = mode;
-        let handle = SessionActor::spawn(cfg).expect("actor");
+        let handle = crate::engine::tests::fixtures::history::spawn(cfg)
+            .await
+            .expect("actor");
         let mut events = handle.subscribe().expect("events");
         handle.send_message("run").await.expect("message");
         let events = collect_turn(&mut events).await;
@@ -222,7 +226,9 @@ async fn failed_provider_turn_never_admits_completion_mutation() {
         hooks,
     );
     cfg.checkpoints = checkpoints.clone();
-    let handle = SessionActor::spawn(cfg).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(cfg)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("events");
     handle.send_message("run").await.expect("message");
     let events = collect_turn(&mut events).await;
@@ -263,7 +269,9 @@ async fn interrupt_retains_completion_checkpoint_until_physical_effects_settle()
         hooks,
     );
     cfg.checkpoints = checkpoints.clone();
-    let handle = SessionActor::spawn(cfg).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(cfg)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("events");
     handle.send_message("run").await.expect("message");
     tokio::time::timeout(std::time::Duration::from_secs(3), async {

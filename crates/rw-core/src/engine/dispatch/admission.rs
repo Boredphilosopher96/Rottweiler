@@ -20,7 +20,6 @@ use crate::engine::session::PrecommittedAnswer;
 use crate::engine::session::ProtocolCompletion;
 use crate::engine::session::recover_actor_from_journal;
 use crate::engine::session::validate_gap;
-use crate::engine::turn::assemble_session_context;
 use crate::engine::turn::current_approval_diff;
 use crate::engine::turn::emit;
 use crate::engine::turn::normalize_manual_session_title;
@@ -583,15 +582,11 @@ pub(super) async fn dispatch_protocol(
                 let _ = respond.send(outcome);
                 return false;
             }
-            let known = assemble_session_context(
-                config,
-                &state.conversation,
-                &state.queued,
-                &state.context_surgery,
-                &state.pruned_tool_outputs,
-                false,
-            )
-            .is_ok_and(|assembled| assembled.items.iter().any(|item| item.id.0 == item_id.0));
+            let known = item_id
+                .0
+                .strip_prefix("conversation:")
+                .and_then(|ordinal| ordinal.parse::<u64>().ok())
+                .is_some_and(|ordinal| ordinal < state.conversation_turns);
             if !known {
                 let outcome = protocol_rejection(
                     "unknown_context_item",

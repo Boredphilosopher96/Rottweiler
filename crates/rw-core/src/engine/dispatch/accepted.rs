@@ -10,7 +10,6 @@ use crate::engine::dispatch::replies::send_connection_event;
 use crate::engine::dispatch::rewind::rewind_state;
 use crate::engine::mode_permission_base;
 use crate::engine::pending_event::PendingEvent;
-use crate::engine::projection::ContextSurgeryAction;
 use crate::engine::projection::RecoveredUserShell;
 use crate::engine::projection::SessionRecoveredState;
 use crate::engine::projection::find_journal_boundary;
@@ -153,7 +152,7 @@ pub(super) async fn apply_accepted(
                 revisions: revisions.clone(),
             }];
             let context_turn = plan_review_context_turn(&artifact, decision, revisions.as_deref());
-            let item_id = ContextItemId(format!("conversation:{}", state.conversation.len()));
+            let item_id = ContextItemId(format!("conversation:{}", state.conversation_turns));
             if let Some(turn) = context_turn.clone() {
                 durable.push(PendingEvent::ConversationTurnCommitted {
                     agent_turn: state.completed_turns,
@@ -181,11 +180,6 @@ pub(super) async fn apply_accepted(
                 if let Some(definition) = execute_definition {
                     state.approved_plan = Some(artifact);
                     state.plan_gate_active = false;
-                    state.context_surgery.push(ContextSurgeryAction {
-                        item_id,
-                        pinned: true,
-                        effective_after_agent_turn: state.completed_turns,
-                    });
                     state.mode = mode_permission_base(definition);
                     state.mode_id = ModeId("execute".to_owned());
                 }
@@ -424,7 +418,7 @@ pub(super) async fn apply_accepted(
                                 ),
                                 Some(prepared),
                                 completion,
-                            );
+                            ).await;
                             }
                             ModelContextTransfer::PassFullContext
                             | ModelContextTransfer::StartWithoutContext => {
@@ -612,7 +606,8 @@ pub(super) async fn apply_accepted(
                 instructions,
                 None,
                 completion,
-            );
+            )
+            .await;
         }
         ClientCommand::ReadTranscriptTail { .. }
         | ClientCommand::ReadTranscript { .. }

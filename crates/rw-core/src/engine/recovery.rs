@@ -10,6 +10,7 @@ mod capability;
 pub use capability::{HistoryRead, SessionHistory, SessionHistoryView};
 mod context_state;
 mod control;
+mod pruning;
 pub use control::{
     MAX_CONTROL_SOURCE_BYTES, RecoveredMessage, RecoveredModelSelection, RecoveryBootstrap,
     RecoveryControlPayloads,

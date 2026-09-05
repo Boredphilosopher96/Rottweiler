@@ -108,14 +108,12 @@ pub(super) async fn run_turn(
     {
         return TurnOutcome {
             turn,
-            conversation,
+            conversation: crate::engine::session::ConversationSummary::from_turns(&conversation),
             status: AgentTurnStatus::Failed,
             usage: SessionUsage::default(),
             cost: unavailable_cost(),
             deferred_terminal_delta: None,
             deferred_terminal_turn: None,
-            context_surgery,
-            pruned_tool_outputs,
             budgeter,
         };
     }
@@ -132,14 +130,14 @@ pub(super) async fn run_turn(
         else {
             return TurnOutcome {
                 turn,
-                conversation,
+                conversation: crate::engine::session::ConversationSummary::from_turns(
+                    &conversation,
+                ),
                 status: AgentTurnStatus::Interrupted,
                 usage: SessionUsage::default(),
                 cost: unavailable_cost(),
                 deferred_terminal_delta: None,
                 deferred_terminal_turn: None,
-                context_surgery,
-                pruned_tool_outputs,
                 budgeter,
             };
         };
@@ -152,14 +150,14 @@ pub(super) async fn run_turn(
         if !hook.completed() {
             return TurnOutcome {
                 turn,
-                conversation,
+                conversation: crate::engine::session::ConversationSummary::from_turns(
+                    &conversation,
+                ),
                 status: AgentTurnStatus::Failed,
                 usage: SessionUsage::default(),
                 cost: unavailable_cost(),
                 deferred_terminal_delta: None,
                 deferred_terminal_turn: None,
-                context_surgery,
-                pruned_tool_outputs,
                 budgeter,
             };
         }
@@ -181,14 +179,14 @@ pub(super) async fn run_turn(
         {
             return TurnOutcome {
                 turn,
-                conversation,
+                conversation: crate::engine::session::ConversationSummary::from_turns(
+                    &conversation,
+                ),
                 status: AgentTurnStatus::Failed,
                 usage: SessionUsage::default(),
                 cost: unavailable_cost(),
                 deferred_terminal_delta: None,
                 deferred_terminal_turn: None,
-                context_surgery,
-                pruned_tool_outputs,
                 budgeter,
             };
         }
@@ -1159,14 +1157,12 @@ pub(super) async fn run_turn(
     let cost = turn_cost.unwrap_or_else(unavailable_cost);
     TurnOutcome {
         turn,
-        conversation,
+        conversation: crate::engine::session::ConversationSummary::from_turns(&conversation),
         status,
         usage,
         cost,
         deferred_terminal_delta,
         deferred_terminal_turn,
-        context_surgery,
-        pruned_tool_outputs,
         budgeter,
     }
 }

@@ -34,8 +34,6 @@ pub(in crate::engine) async fn commit_prepared_model_switch(
     if result.is_ok() {
         if clear_context {
             state.clear_conversation_except_system();
-            state.context_surgery.clear();
-            state.pruned_tool_outputs.clear();
         }
         config.model.commit_prepared_model(&prepared.model.0);
         state.model_alias = prepared.model.0;

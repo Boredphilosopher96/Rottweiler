@@ -558,8 +558,7 @@ fn validate_question_input(request: &AskUserInput) -> Result<(), ToolError> {
             request
                 .options
                 .capacity()
-                .checked_mul(std::mem::size_of::<String>())
-                .unwrap_or(usize::MAX),
+                .saturating_mul(std::mem::size_of::<String>()),
         ),
         |total, option| {
             total.and_then(|bytes| bytes.checked_add(option.capacity().saturating_mul(2)))

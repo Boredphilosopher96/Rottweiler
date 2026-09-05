@@ -6,7 +6,6 @@ use crate::engine::builtin_hook_dispatcher;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::projection::SessionRecoveredState;
 use crate::engine::projection::project_session_events;
-use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::models::PendingModel;
 use crate::engine::tests::fixtures::models::ScriptedModel;
 use crate::engine::tests::fixtures::sinks::FailFirstTextDeltaSink;
@@ -75,7 +74,9 @@ async fn recovered_sequence_and_user_message_are_appended_before_broadcast() {
         turn_ends: BTreeMap::new(),
         ..SessionRecoveredState::default()
     };
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("persist me").await.expect("message");
     let started = next_matching(&mut events, |kind| {
@@ -113,7 +114,9 @@ async fn persistence_failure_is_returned_before_provider_work_or_broadcast() {
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.event_sink = Arc::new(FailingSink);
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     assert!(matches!(
         handle.send_message("must persist").await,
         Err(AgentLoopError::Persistence(_))
@@ -133,7 +136,9 @@ async fn transient_turn_opening_failure_does_not_poison_the_live_session() {
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.event_sink = sink.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     handle.ensure_local_driver().await.expect("local driver");
 
     sink.fail_next.store(true, Ordering::Release);
@@ -171,7 +176,9 @@ async fn transient_turn_signal_failure_recovers_journal_and_accepts_next_turn() 
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.event_sink = sink.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.ensure_local_driver().await.expect("local driver");
 

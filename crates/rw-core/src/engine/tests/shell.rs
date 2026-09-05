@@ -2,7 +2,6 @@
 
 use crate::engine::MAX_CAPTURED_SHELL_OUTPUT_BYTES;
 use crate::engine::projection::project_session_events;
-use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::models::AliasVisionModel;
 use crate::engine::tests::fixtures::support::ShellSecretRedactor;
 use crate::engine::tests::fixtures::support::TestEventSinkExt;
@@ -37,7 +36,9 @@ async fn shell_gate_and_model_alias_are_durable_and_fail_closed() {
         HookDispatcher::new(),
     );
     actor_config.secret_redactor = Arc::new(ShellSecretRedactor);
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     assert_eq!(
         handle
             .dispatch(ClientCommand::AttachSession {

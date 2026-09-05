@@ -2,10 +2,8 @@ use crate::engine::AgentLoopError;
 use crate::engine::RoutedEvent;
 use crate::engine::durability::SessionEventSink;
 use crate::engine::pending_event::PendingEvent;
-use crate::engine::projection::ContextSurgeryAction;
 use crate::engine::session::ActorState;
 use crate::engine::session::SessionActorConfig;
-use crate::engine::turn::assemble_session_context;
 use crate::engine::turn::emit;
 use rw_types::ContextItemId;
 use std::sync::Arc;
@@ -31,11 +29,6 @@ pub(super) async fn apply_context_surgery(
         }
     };
     emit(state, events, sink, pending).await.map(|_| ())?;
-    state.context_surgery.push(ContextSurgeryAction {
-        item_id,
-        pinned,
-        effective_after_agent_turn,
-    });
     Ok(())
 }
 
@@ -52,15 +45,11 @@ pub(super) async fn apply_registered_context_surgery(
                 .to_owned(),
         ));
     }
-    let known = assemble_session_context(
-        config,
-        &state.conversation,
-        &state.queued,
-        &state.context_surgery,
-        &state.pruned_tool_outputs,
-        false,
-    )
-    .is_ok_and(|assembled| assembled.items.iter().any(|item| item.id.0 == item_id.0));
+    let known = item_id
+        .0
+        .strip_prefix("conversation:")
+        .and_then(|ordinal| ordinal.parse::<u64>().ok())
+        .is_some_and(|ordinal| ordinal < state.conversation_turns);
     if !known {
         return Err(AgentLoopError::InvalidConfiguration(
             "unknown_context_item: context item is not present in the current inventory".to_owned(),

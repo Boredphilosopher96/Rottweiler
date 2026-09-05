@@ -4,7 +4,7 @@ use super::fixtures::{
     support::{collect_turn, config},
     tools::{StubOutcome, StubTool},
 };
-use crate::engine::{AgentTurnStatus, PendingEvent, SessionActor, builtin_hook_dispatcher};
+use crate::engine::{AgentTurnStatus, PendingEvent, builtin_hook_dispatcher};
 use rw_providers::{FinishReason, ProviderEvent};
 use rw_tools::ToolRegistry;
 use rw_types::{
@@ -39,13 +39,14 @@ async fn rejected_batch(count: usize, argument_bytes: usize) {
     ));
     let mut tools = ToolRegistry::new();
     tools.register(tool.clone()).expect("tool");
-    let actor = SessionActor::spawn(config(
+    let actor = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model,
         Arc::new(tools),
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut subscription = actor.subscribe().expect("subscription");
     actor.send_message("run tool batch").await.expect("message");
@@ -120,7 +121,9 @@ async fn oversized_redacted_preview_fails_tool_before_diff_or_approval_publicati
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.secret_redactor = Arc::new(ExpandingApprovalRedactor);
-    let actor = SessionActor::spawn(actor_config).expect("actor");
+    let actor = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = actor.subscribe().expect("subscription");
     actor.send_message("write file").await.expect("message");
     let events = collect_turn(&mut events).await;

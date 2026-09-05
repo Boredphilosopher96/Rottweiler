@@ -7,7 +7,6 @@ use crate::engine::pending_event::PendingEvent;
 use crate::engine::projection::SessionRecoveredState;
 use crate::engine::projection::project_session_events;
 use crate::engine::session;
-use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::models::ScriptedModel;
 use crate::engine::tests::fixtures::sinks::RecordingSink;
 use crate::engine::tests::fixtures::support::config;
@@ -318,7 +317,9 @@ async fn resume_durably_closes_projected_inflight_turn_before_new_commands() {
         turn_ends: BTreeMap::new(),
         ..SessionRecoveredState::default()
     };
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     handle.send_message("/status").await.expect("status");
     let persisted = sink.events.lock().expect("sink events");
     assert!(matches!(
@@ -365,7 +366,9 @@ async fn resume_closes_interrupted_tail_then_auto_starts_recovered_queue() {
         turn_ends: BTreeMap::new(),
         ..SessionRecoveredState::default()
     };
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     timeout(Duration::from_secs(3), async {
         loop {
             if handle.snapshot().await.expect("snapshot").completed_turns == 2 {
@@ -550,7 +553,9 @@ async fn resume_persists_tool_result_repairs_before_interrupted_closure() {
     );
     actor_config.recovered = recovered;
     actor_config.event_sink = sink.clone();
-    let _handle = SessionActor::spawn(actor_config).expect("actor");
+    let _handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     timeout(Duration::from_secs(1), async {
         loop {
             if sink.events.lock().expect("events").len() >= 4 {

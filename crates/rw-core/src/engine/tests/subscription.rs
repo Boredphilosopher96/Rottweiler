@@ -5,7 +5,6 @@ use crate::engine::AgentLoopError;
 use crate::engine::builtin_hook_dispatcher;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::projection::project_session_events;
-use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::models::PendingModel;
 use crate::engine::tests::fixtures::models::ScriptedModel;
 use crate::engine::tests::fixtures::sinks::CorruptGapSink;
@@ -65,7 +64,9 @@ async fn large_reconnect_pages_pin_cursor_and_preserve_attach_ack_after_lag() {
     actor_config.event_sink = sink.clone();
     actor_config.recovered = recovered;
     actor_config.event_capacity = 1;
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let session = SessionId("fixture-session".to_owned());
     let mut observer = handle
         .subscribe_client(ClientId("observer".to_owned()), Some(SequenceId(499)))
@@ -144,7 +145,9 @@ async fn lagged_subscription_replays_every_durable_sequence_and_continues_live()
     );
     actor_config.event_sink = sink.clone();
     actor_config.event_capacity = 1;
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let session_id = SessionId("fixture-session".to_owned());
     let mut events = handle
         .subscribe_client(ClientId("driver".to_owned()), None)
@@ -246,7 +249,9 @@ async fn attach_and_subscription_reject_wrong_session_or_protocol_gap_events() {
             builtin_hook_dispatcher().expect("hooks"),
         );
         actor_config.event_sink = Arc::new(CorruptGapSink { event });
-        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+            .await
+            .expect("actor");
         let mut subscription = handle
             .subscribe_client(ClientId("driver".to_owned()), None)
             .expect("subscription");
@@ -281,7 +286,9 @@ async fn failed_takeover_does_not_mutate_the_driver_lease() {
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.event_sink = sink.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let session_id = SessionId("fixture-session".to_owned());
     assert!(matches!(
         handle

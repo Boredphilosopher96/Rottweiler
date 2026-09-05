@@ -2,7 +2,6 @@
 
 use crate::engine::builtin_hook_dispatcher;
 use crate::engine::projection::project_session_events;
-use crate::engine::session::SessionActor;
 use crate::engine::session::StartupNotification;
 use crate::engine::tests::fixtures::models::InstructionModel;
 use crate::engine::tests::fixtures::models::ScriptedModel;
@@ -40,7 +39,9 @@ async fn startup_notifications_are_persisted_as_status_and_ui_events() {
         title: "WASM extension unavailable".to_owned(),
         message: "The component failed validation.".to_owned(),
     }];
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             if sink.events.lock().expect("events").len() >= 2 {
@@ -88,7 +89,9 @@ async fn initial_project_instructions_steer_replay_without_entering_committed_hi
         meta: TurnMeta::default(),
     }];
     actor_config.event_sink = sink.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("what word?").await.expect("message");
     collect_turn(&mut events).await;

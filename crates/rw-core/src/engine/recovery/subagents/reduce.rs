@@ -98,55 +98,7 @@ pub(super) fn apply(
             result,
             ..
         } => {
-            let scope = rows
-                .lookup(IDENTITIES, identity(subagent_id)?)?
-                .ok_or(RecoveryError::Invalid("child result without spawn"))?;
-            let mut current: SubagentBinding =
-                rows.get(key(STATES, 0, scope))?
-                    .ok_or(RecoveryError::Invalid(
-                        "child result without effective spawn",
-                    ))?;
-            if current.terminal.is_some()
-                || &current.session_id != &result.session_id
-                || &result.subagent_id != subagent_id
-            {
-                return Err(RecoveryError::Invalid("child terminal identity"));
-            }
-            current.terminal = Some(sequence);
-            current.latest_result = Some(sequence);
-            current.latest_artifact = result
-                .diff_artifact
-                .as_ref()
-                .map(|artifact| artifact.id.clone());
-            current.revision = sequence;
-            if let Some(artifact) = &result.diff_artifact {
-                let id = artifact.id.as_bytes();
-                if id.is_empty() || id.len() > 256 {
-                    return Err(RecoveryError::Invalid("child artifact identity"));
-                }
-                let digest = digest(artifact)?;
-                let bound = if let Some(bound) =
-                    rows.lookup::<ArtifactIdentity>(ARTIFACT_IDENTITIES, id)?
-                {
-                    if bound.digest != digest {
-                        return Err(RecoveryError::Invalid("artifact identity changed contents"));
-                    }
-                    bound
-                } else {
-                    let bound = ArtifactIdentity {
-                        scope: sequence.0,
-                        digest,
-                    };
-                    rows.put_lookup(ARTIFACT_IDENTITIES, id.to_vec(), &bound)?;
-                    bound
-                };
-                current.artifact_scope = Some(bound.scope);
-                rows.put(key(ARTIFACTS, bound.scope, sequence.0), &current.scope)?;
-            }
-            let turn = head.active_turn.unwrap_or(current.spawned_turn);
-            rows.delete(key(PENDING, 0, current.spawned.0));
-            version(rows, turn, &current)?;
-            publish(rows, &current)?;
+            finish(head, rows, sequence, subagent_id, result)?;
         }
         _ => {}
     }
@@ -156,6 +108,63 @@ pub(super) fn apply(
         .ok_or(RecoveryError::Invalid("child sequence overflow"))?;
     Ok(())
 }
+fn finish(
+    head: &Head,
+    rows: &mut BatchRows,
+    sequence: SequenceId,
+    subagent_id: &rw_types::SubagentId,
+    result: &rw_types::SubagentResult,
+) -> Result<(), RecoveryError> {
+    let scope = rows
+        .lookup(IDENTITIES, identity(subagent_id)?)?
+        .ok_or(RecoveryError::Invalid("child result without spawn"))?;
+    let mut current: SubagentBinding =
+        rows.get(key(STATES, 0, scope))?
+            .ok_or(RecoveryError::Invalid(
+                "child result without effective spawn",
+            ))?;
+    if current.terminal.is_some()
+        || current.session_id != result.session_id
+        || &result.subagent_id != subagent_id
+    {
+        return Err(RecoveryError::Invalid("child terminal identity"));
+    }
+    current.terminal = Some(sequence);
+    current.latest_result = Some(sequence);
+    current.latest_artifact = result
+        .diff_artifact
+        .as_ref()
+        .map(|artifact| artifact.id.clone());
+    current.revision = sequence;
+    if let Some(artifact) = &result.diff_artifact {
+        let id = artifact.id.as_bytes();
+        if id.is_empty() || id.len() > 256 {
+            return Err(RecoveryError::Invalid("child artifact identity"));
+        }
+        let digest = digest(artifact)?;
+        let bound = if let Some(bound) = rows.lookup::<ArtifactIdentity>(ARTIFACT_IDENTITIES, id)? {
+            if bound.digest != digest {
+                return Err(RecoveryError::Invalid("artifact identity changed contents"));
+            }
+            bound
+        } else {
+            let bound = ArtifactIdentity {
+                scope: sequence.0,
+                digest,
+            };
+            rows.put_lookup(ARTIFACT_IDENTITIES, id.to_vec(), &bound)?;
+            bound
+        };
+        current.artifact_scope = Some(bound.scope);
+        rows.put(key(ARTIFACTS, bound.scope, sequence.0), &current.scope)?;
+    }
+    let turn = head.active_turn.unwrap_or(current.spawned_turn);
+    rows.delete(key(PENDING, 0, current.spawned.0));
+    version(rows, turn, &current)?;
+    publish(rows, &current)?;
+    Ok(())
+}
+
 fn version(rows: &mut BatchRows, turn: u64, state: &SubagentBinding) -> Result<(), RecoveryError> {
     rows.put(key(VERSIONS, state.scope, state.revision.0), state)?;
     rows.put(key(TURN_KEYS, 0, turn), &())?;

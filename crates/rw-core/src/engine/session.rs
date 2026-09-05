@@ -2,6 +2,8 @@ mod actor;
 mod child_progress;
 mod config;
 mod control;
+mod conversation_summary;
+pub(in crate::engine) use conversation_summary::ConversationSummary;
 mod handle;
 mod live_state;
 mod plugin_capability;

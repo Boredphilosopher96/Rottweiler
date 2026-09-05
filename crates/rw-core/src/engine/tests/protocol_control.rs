@@ -9,7 +9,6 @@ use crate::engine::builtin_hook_dispatcher;
 use crate::engine::dispatch::permission_state;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::projection::project_session_events;
-use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::controllers::StaticApprover;
 use crate::engine::tests::fixtures::models::PendingModel;
 use crate::engine::tests::fixtures::sinks::RecordingSink;
@@ -43,13 +42,14 @@ use tempfile::TempDir;
 #[allow(clippy::too_many_lines)]
 async fn protocol_ack_lease_observer_and_takeover_are_one_durable_event_stream() {
     let root = TempDir::new().expect("tempdir");
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         Arc::new(PendingModel),
         Arc::new(ToolRegistry::new()),
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let session_id = SessionId("fixture-session".to_owned());
     let mut driver_events = handle
@@ -170,7 +170,9 @@ async fn queued_message_mutations_are_durable_broadcast_and_reject_stale_targets
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.event_sink = sink.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let session_id = SessionId("fixture-session".to_owned());
     let mut driver_events = handle
         .subscribe_client(ClientId("local".to_owned()), None)
@@ -404,7 +406,9 @@ async fn typed_permission_inventory_is_observer_safe_and_mutations_are_driver_ga
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.permissions = Arc::clone(&permissions);
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let session_id = SessionId("fixture-session".to_owned());
     let mut driver_events = handle
         .subscribe_client(ClientId("driver".to_owned()), None)

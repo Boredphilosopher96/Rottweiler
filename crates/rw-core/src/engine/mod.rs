@@ -548,7 +548,7 @@ async fn apply_mode_change(
     })?;
     let mode = mode_permission_base(definition);
     let evicted = (mode == SessionMode::Plan)
-        .then(|| approved_plan_context_item(&state.conversation))
+        .then(|| state.approved_plan_item.clone())
         .flatten();
     let mut durable = Vec::with_capacity(usize::from(evicted.is_some()) + 1);
     if let Some(item_id) = &evicted {
@@ -562,13 +562,6 @@ async fn apply_mode_change(
         definition_fingerprint: definition.semantic_fingerprint(),
     });
     emit_batch(state, events, sink, durable).await?;
-    if let Some(item_id) = evicted {
-        state.context_surgery.push(ContextSurgeryAction {
-            item_id,
-            pinned: false,
-            effective_after_agent_turn: state.completed_turns,
-        });
-    }
     state.mode = mode;
     state.mode_id = mode_id;
     if mode == SessionMode::Plan {
@@ -652,4 +645,4 @@ struct RoutedEvent {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

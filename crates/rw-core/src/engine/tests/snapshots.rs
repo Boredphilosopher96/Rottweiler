@@ -1,9 +1,9 @@
 #![cfg(test)]
+use crate::engine::builtin_hook_dispatcher;
 use crate::engine::tests::fixtures::{
     models::M3Model,
     support::{config, text_turn},
 };
-use crate::engine::{SessionActor, builtin_hook_dispatcher};
 use rw_tools::ToolRegistry;
 use rw_types::{Role, config::PermissionDecision};
 use std::sync::Arc;
@@ -27,7 +27,9 @@ async fn session_snapshot_reports_history_metadata_without_returning_bodies() {
     let mut alias_only = text_turn(Role::Assistant, "another answer");
     alias_only.meta.model = Some("fast".into());
     config.recovered.conversation.push(alias_only);
-    let handle = SessionActor::spawn(config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(config)
+        .await
+        .expect("actor");
     let snapshot = handle.snapshot().await.expect("snapshot");
     assert_eq!(snapshot.conversation_turns, 18);
     assert_eq!(snapshot.resolved_model.as_deref(), Some("provider/model"));

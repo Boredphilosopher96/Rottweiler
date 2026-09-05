@@ -1,9 +1,9 @@
 use super::fixtures::models::ScriptedModel;
 use super::fixtures::sinks::BlockingBatchSink;
 use super::fixtures::support::{FixedClock, collect_turn, config, protocol_meta, stop_script};
+use crate::engine::AgentTurnStatus;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::session::SessionControl;
-use crate::engine::{AgentTurnStatus, SessionActor};
 use rw_tools::{CancellationToken, ToolRegistry};
 use rw_types::config::PermissionDecision;
 use rw_types::{ClientCommand, ClientId, CommandOutcome, EngineEvent, SessionId};
@@ -27,7 +27,9 @@ async fn interrupt_acknowledges_while_opening_journal_commit_is_blocked() {
         rw_ext::HookDispatcher::new(),
     );
     cfg.event_sink = sink.clone();
-    let handle = SessionActor::spawn(cfg).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(cfg)
+        .await
+        .expect("actor");
     handle.ensure_local_driver().await.expect("driver");
     let mut events = handle.subscribe().expect("events");
     let sender = {

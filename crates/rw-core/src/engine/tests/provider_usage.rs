@@ -5,7 +5,6 @@ use crate::engine::SessionUsage;
 use crate::engine::builtin_hook_dispatcher;
 use crate::engine::model::ModelContextMetadata;
 use crate::engine::pending_event::PendingEvent;
-use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::models::M3Model;
 use crate::engine::tests::fixtures::models::ScriptedModel;
 use crate::engine::tests::fixtures::sinks::AccountingRecordingSink;
@@ -49,13 +48,14 @@ async fn provider_error_preserves_partial_output_and_emits_failed_terminal() {
             "fixture stream failed",
         )),
     ]]));
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model,
         Arc::new(ToolRegistry::new()),
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("run").await.expect("message");
@@ -116,13 +116,14 @@ async fn usage_accumulates_latest_totals_once_per_provider_iteration() {
     ));
     let mut tools = ToolRegistry::new();
     tools.register(tool).expect("register tool");
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model,
         Arc::new(tools),
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("run").await.expect("message");
@@ -182,13 +183,14 @@ async fn provider_usage_reconciles_next_meter_and_surfaces_cache_hits() {
             StubOutcome::Success(ToolResult::new("ok", Value::Null)),
         )))
         .expect("register tool");
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model,
         Arc::new(tools),
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("run").await.expect("message");
@@ -233,13 +235,14 @@ async fn known_subscription_capacity_produces_nonzero_post_turn_context_usage() 
         used: Some("736".to_owned()),
         unit: Some("tokens".to_owned()),
     });
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         Arc::new(model),
         Arc::new(ToolRegistry::new()),
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle
@@ -281,7 +284,9 @@ async fn subscription_token_cap_stops_after_the_response_and_blocks_later_dispat
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.event_sink = Arc::new(AccountingRecordingSink::default());
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
 
     handle.send_message("first").await.expect("first message");

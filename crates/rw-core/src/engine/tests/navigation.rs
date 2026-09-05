@@ -7,7 +7,7 @@ use crate::engine::{
     commands::{
         SessionCommandAction, SessionCommandContext, SessionCommandOutput, builtin_command_registry,
     },
-    session::{PluginSessionCapability, SessionActor, SessionHandle},
+    session::{PluginSessionCapability, SessionHandle},
 };
 use async_trait::async_trait;
 use rw_ext::{CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation};
@@ -59,7 +59,7 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for NavigateCal
         })
     }
 }
-fn actor(root: &std::path::Path, callback: &Arc<NavigateCallback>) -> SessionHandle {
+async fn actor(root: &std::path::Path, callback: &Arc<NavigateCallback>) -> SessionHandle {
     let mut configuration = config(
         root,
         Arc::new(ScriptedModel::default()),
@@ -75,7 +75,9 @@ fn actor(root: &std::path::Path, callback: &Arc<NavigateCallback>) -> SessionHan
         )
         .expect("registry");
     configuration.commands = Arc::new(commands);
-    let handle = SessionActor::spawn(configuration).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(configuration)
+        .await
+        .expect("actor");
     callback
         .capability
         .set(
@@ -92,7 +94,7 @@ async fn navigation_waits_for_command_settlement_and_is_revoked_by_driver_takeov
     for takeover in [false, true] {
         let root = tempfile::tempdir().expect("root");
         let callback = Arc::new(NavigateCallback::default());
-        let handle = actor(root.path(), &callback);
+        let handle = actor(root.path(), &callback).await;
         let mut events = handle.subscribe().expect("events");
         let caller = tokio::spawn({
             let handle = handle.clone();
@@ -145,7 +147,7 @@ async fn navigation_waits_for_command_settlement_and_is_revoked_by_driver_takeov
 async fn builtin_navigation_uses_the_control_contract_and_rejects_unowned_or_future_requests() {
     let root = tempfile::tempdir().expect("root");
     let callback = Arc::new(NavigateCallback::default());
-    let handle = actor(root.path(), &callback);
+    let handle = actor(root.path(), &callback).await;
     let mut events = handle.subscribe().expect("events");
     assert!(
         callback

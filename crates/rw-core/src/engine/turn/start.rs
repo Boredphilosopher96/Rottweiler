@@ -188,6 +188,9 @@ pub(in crate::engine) async fn start_turn_with_overrides(
         messages,
         tool_calls,
     } = prepare_turn_start(state, runtime.config, messages, overrides)?;
+    let history =
+        super::history_context::capture(runtime.config, state.sequence.map(rw_types::SequenceId))
+            .await?;
     let turn = state.next_turn;
     let native_search = config.model.native_web_searcher(
         &config.model_alias,
@@ -216,12 +219,12 @@ pub(in crate::engine) async fn start_turn_with_overrides(
         .len()
         == 0
         && tool_calls.is_empty();
-    let mut conversation = state.conversation.clone();
+    let mut opening_conversation = Vec::new();
     let opening_events = prepare_turn_opening(
         turn,
         &messages,
         prepare_users_synchronously,
-        &mut conversation,
+        &mut opening_conversation,
     );
     if let Err(error) = emit_batch(
         state,
@@ -236,7 +239,7 @@ pub(in crate::engine) async fn start_turn_with_overrides(
         runtime.active_turn.store(0, Ordering::Release);
         return Err(error);
     }
-    let panic_conversation = conversation.clone();
+    let panic_conversation = state.conversation_summary();
     let run_messages = if prepare_users_synchronously {
         Vec::new()
     } else {
@@ -258,10 +261,6 @@ pub(in crate::engine) async fn start_turn_with_overrides(
             runtime.signals.clone(),
         )));
     let signals = runtime.signals.clone();
-    let state_context_surgery = state.context_surgery.clone();
-    let state_pruned_tool_outputs = state.pruned_tool_outputs.clone();
-    let panic_context_surgery = state_context_surgery.clone();
-    let panic_pruned_tool_outputs = state_pruned_tool_outputs.clone();
     let state_budgeter = state.budgeter;
     let local_session_accounting = session_accounting_fallback(&state.accounting);
     let state_mode = state.mode;
@@ -269,41 +268,73 @@ pub(in crate::engine) async fn start_turn_with_overrides(
     let tasks = state.tasks.clone();
     let turn_tasks = tasks.clone();
     tasks.spawn(Arc::clone(&config), cancellation.clone(), async move {
-        let outcome = AssertUnwindSafe(run_turn(
-            turn,
-            turn_tasks,
-            run_messages,
-            tool_calls,
-            conversation,
-            config,
-            tool_context,
-            cancellation,
-            signals.clone(),
-            state_context_surgery,
-            state_pruned_tool_outputs,
-            state_budgeter,
-            local_session_accounting,
-            state_mode,
-        ))
+        let fallback = panic_conversation.clone();
+        let outcome = AssertUnwindSafe(async {
+            let page = super::history_context::read_view(&history).await?;
+            let run_signals = signals.clone();
+            let completed = page
+                .map_async(|mut page| async move {
+                    page.turns.extend(opening_conversation);
+                    run_turn(
+                        turn,
+                        turn_tasks,
+                        run_messages,
+                        tool_calls,
+                        page.turns,
+                        config,
+                        tool_context,
+                        cancellation,
+                        run_signals,
+                        page.context_actions.into_iter().flatten().collect(),
+                        page.pruned_tool_outputs,
+                        state_budgeter,
+                        local_session_accounting,
+                        state_mode,
+                    )
+                    .await
+                })
+                .await;
+            // Completion contains scalar metadata; release historical bodies and
+            // their admitted source owner before the actor receives the result.
+            let mut outcome = None;
+            drop(completed.map(|result| {
+                outcome = Some(result);
+            }));
+            outcome.ok_or_else(|| AgentLoopError::Persistence("missing owned turn outcome".into()))
+        })
         .catch_unwind()
-        .await
-        .unwrap_or_else(|_| {
-            let _ = signals.send(TurnSignal::EffectsUnsettled {
-                message: "turn owner panicked before effect settlement".to_owned(),
-            });
-            TurnOutcome {
-                turn,
-                conversation: panic_conversation,
-                status: AgentTurnStatus::Failed,
-                usage: SessionUsage::default(),
-                cost: unavailable_cost(),
-                deferred_terminal_delta: None,
-                deferred_terminal_turn: None,
-                context_surgery: panic_context_surgery,
-                pruned_tool_outputs: panic_pruned_tool_outputs,
-                budgeter: state_budgeter,
+        .await;
+        let outcome = match outcome {
+            Ok(Ok(outcome)) => outcome,
+            failed => {
+                let message = match failed {
+                    Ok(Err(error)) => error.to_string(),
+                    Err(_) => {
+                        let message = "turn owner panicked before effect settlement".to_owned();
+                        let _ = signals.send(TurnSignal::EffectsUnsettled {
+                            message: message.clone(),
+                        });
+                        message
+                    }
+                    Ok(Ok(_)) => unreachable!(),
+                };
+                let _ = super::provider_messages::persist_event(
+                    &signals,
+                    PendingEvent::Error { message },
+                )
+                .await;
+                TurnOutcome {
+                    turn,
+                    conversation: fallback,
+                    status: AgentTurnStatus::Failed,
+                    usage: SessionUsage::default(),
+                    cost: unavailable_cost(),
+                    deferred_terminal_delta: None,
+                    deferred_terminal_turn: None,
+                    budgeter: state_budgeter,
+                }
             }
-        });
+        };
         if let Err(error) = provider_owner.settle_effects().await {
             let _ = signals.send(TurnSignal::EffectsUnsettled {
                 message: error.to_string(),

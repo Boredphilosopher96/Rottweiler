@@ -24,26 +24,39 @@ use rw_types::config::ThinkingLevel;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-fn first_meaningful_user_prompt(conversation: &[Turn]) -> Option<String> {
+pub(in crate::engine) fn first_meaningful_user_prompt(conversation: &[Turn]) -> Option<String> {
     conversation.iter().find_map(|turn| {
         if turn.role != Role::User || turn.meta.synthetic {
             return None;
         }
-        let text = turn
+        let mut prompt = String::new();
+        let mut count = 0;
+        for word in turn
             .blocks
             .iter()
             .filter_map(|block| match block {
                 Block::Text { text } => Some(text.as_str()),
                 _ => None,
             })
-            .collect::<Vec<_>>()
-            .join(" ");
-        let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        (!collapsed.is_empty()).then_some(collapsed)
+            .flat_map(str::split_whitespace)
+        {
+            if !prompt.is_empty() && count < SESSION_TITLE_PROMPT_CHARS {
+                prompt.push(' ');
+                count += 1;
+            }
+            for character in word.chars() {
+                if count == SESSION_TITLE_PROMPT_CHARS {
+                    return Some(prompt);
+                }
+                prompt.push(character);
+                count += 1;
+            }
+        }
+        (!prompt.is_empty()).then_some(prompt)
     })
 }
 
-fn has_successful_assistant_text(conversation: &[Turn]) -> bool {
+pub(in crate::engine) fn has_successful_assistant_text(conversation: &[Turn]) -> bool {
     conversation.iter().rev().any(|turn| {
         turn.role == Role::Assistant
             && turn
@@ -204,10 +217,10 @@ pub(super) fn start_session_title_generation(
     if state.session_title.is_some() || state.title_generation_started {
         return;
     }
-    let Some(prompt) = first_meaningful_user_prompt(&state.conversation) else {
+    let Some(prompt) = state.title_prompt.clone() else {
         return;
     };
-    if !has_successful_assistant_text(&state.conversation) {
+    if !state.has_assistant_text {
         return;
     }
     state.title_generation_started = true;

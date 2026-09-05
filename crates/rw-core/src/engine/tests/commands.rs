@@ -10,7 +10,6 @@ use crate::engine::commands::FolderTrustOperation;
 use crate::engine::commands::builtin_command_registry;
 use crate::engine::mutation_checkpoints::MutationCheckpointOutcome;
 use crate::engine::pending_event::PendingEvent;
-use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::checkpoints::InitRecordingCheckpoints;
 use crate::engine::tests::fixtures::controllers::EchoCommand;
 use crate::engine::tests::fixtures::controllers::FixedSessionExtensionController;
@@ -70,7 +69,9 @@ async fn commands_share_the_public_registry_and_events_round_trip() {
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.commands = Arc::new(commands);
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     assert_eq!(
         handle.send_message("/echo hello").await.expect("command"),
@@ -138,7 +139,9 @@ async fn initialization_acks_before_scan_and_checkpoints_every_generated_path() 
     );
     actor_config.commands = Arc::new(commands);
     actor_config.checkpoints = checkpoints.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     assert_eq!(
         timeout(Duration::from_millis(16), handle.send_message("/deep-init"))
@@ -196,7 +199,9 @@ async fn failed_initialization_reports_failed_checkpoint_without_partial_writes(
     );
     actor_config.commands = Arc::new(commands);
     actor_config.checkpoints = checkpoints.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     assert_eq!(
         handle.send_message("/init").await.expect("init ack"),
@@ -254,7 +259,9 @@ async fn custom_prompt_model_and_tool_overrides_are_turn_scoped() {
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.commands = Arc::new(commands);
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
 
     assert_eq!(
@@ -308,7 +315,9 @@ async fn trust_slash_command_dispatches_status_grant_and_revoke_to_host_boundary
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.folder_trust = trust.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     for (command, expected) in [
         ("/trust", FolderTrustOperation::Status),
@@ -369,7 +378,9 @@ async fn add_dir_commit_failure_aborts_generation_and_preserves_live_runtime() {
     );
     actor_config.permissions = permissions;
     actor_config.workspace_roots = controller.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     let failure = handle
         .send_message(format!("/add-dir {}", added.display()))
@@ -415,7 +426,9 @@ async fn add_dir_commit_failure_aborts_generation_and_preserves_live_runtime() {
     failing_config.permissions = failing_permissions;
     failing_config.workspace_roots = failing_controller.clone();
     failing_config.event_sink = Arc::new(WorkspaceChangeFailingSink::default());
-    let failing = SessionActor::spawn(failing_config).expect("failing actor");
+    let failing = crate::engine::tests::fixtures::history::spawn(failing_config)
+        .await
+        .expect("failing actor");
     let failure = failing
         .send_message(format!("/add-dir {}", added.display()))
         .await
@@ -455,7 +468,9 @@ async fn add_dir_commit_refreshes_the_nonblocking_command_catalog() {
     );
     actor_config.permissions = permissions;
     actor_config.workspace_roots = controller.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     assert!(
         handle
             .command_descriptors()
@@ -505,7 +520,9 @@ async fn live_plugin_reload_swaps_only_successful_generations_and_detach_restore
     actor_config.permissions = permissions;
     actor_config.workspace_roots = workspace_controller;
     actor_config.extension_development = extension_controller.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let session_id = handle.session_id().clone();
     assert_eq!(
         handle
@@ -623,7 +640,9 @@ async fn permissions_slash_command_edits_rules_and_revokes_opaque_approvals() {
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.permissions = permissions.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle
         .send_message("/permissions mode yolo")

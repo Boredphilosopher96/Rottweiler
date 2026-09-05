@@ -9,7 +9,6 @@ use crate::engine::pending_event::PendingEvent;
 use crate::engine::projection::SessionProjectionError;
 use crate::engine::projection::project_session_events;
 use crate::engine::projection::project_session_events_with_modes;
-use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::hooks::PermissionAllowHook;
 use crate::engine::tests::fixtures::models::ScriptedModel;
 use crate::engine::tests::fixtures::sinks::RecordingSink;
@@ -65,13 +64,14 @@ async fn discuss_and_plan_tool_sequences_cannot_mutate_the_workspace() {
         tools
             .register(Arc::new(WriteTool::new(ToolLimits::default())))
             .expect("write tool");
-        let handle = SessionActor::spawn(config(
+        let handle = crate::engine::tests::fixtures::history::spawn(config(
             root.path(),
             model,
             Arc::new(tools),
             PermissionDecision::Allow,
             HookDispatcher::new(),
         ))
+        .await
         .expect("actor");
         let mut events = handle.subscribe().expect("subscription");
         handle
@@ -173,7 +173,9 @@ prompt = "Execute approved work."
     actor_config.modes = Arc::new(mode_registry);
     let sink = Arc::new(RecordingSink::default());
     actor_config.event_sink = sink.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.ensure_local_driver().await.expect("local driver");
     assert_eq!(
@@ -484,7 +486,9 @@ async fn seeded_plan_mode_property_keeps_complete_workspace_byte_identical() {
             } else {
                 PermissionGate::for_headless_mode(rw_types::PermissionModeDescriptor::Yolo)
             });
-            let handle = SessionActor::spawn(actor_config).expect("actor");
+            let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+                .await
+                .expect("actor");
             let mut events = handle.subscribe().expect("subscription");
             handle
                 .dispatch(ClientCommand::AttachSession {

@@ -5,8 +5,8 @@ use super::{
     state::{
         ACCOUNTING, ACTIVE_ASSISTANT, ACTIVE_TOOL_LIFECYCLE, ACTIVE_TOOL_RESULTS, AcceptedSource,
         ActiveSource, ActiveTurn, BOUNDARIES, Boundary, CONVERSATION, ConversationCut,
-        ConversationSource, MAX_QUESTIONS, MAX_QUEUED, Maintenance, PRUNED_OUTPUTS, QuestionSource,
-        QueuedSource, RecoveryHead, RewindPhase, SOURCE_ORDINAL, SourceTotals, ToolLifecycleSource,
+        ConversationSource, MAX_QUESTIONS, MAX_QUEUED, Maintenance, QuestionSource, QueuedSource,
+        RecoveryHead, RewindPhase, SOURCE_ORDINAL, SourceTotals, ToolLifecycleSource,
         ToolStartIdentity, TurnSourceKind,
     },
 };
@@ -128,8 +128,8 @@ pub(super) fn reduce(
         }
         PendingEvent::TurnStarted { turn } => {
             head.control.active = Some(ActiveTurn {
-                announced_citations: Default::default(),
-                committed_citations: Default::default(),
+                announced_citations: rw_types::citation_admission::CitationAdmission::default(),
+                committed_citations: rw_types::citation_admission::CitationAdmission::default(),
                 turn,
                 started: sequence,
                 first_conversation_ordinal: head.conversation.turns,
@@ -240,7 +240,6 @@ pub(super) fn reduce(
                 sequence,
             });
         }
-        PendingEvent::ToolApprovalResolved { .. } => {}
         PendingEvent::QuestionAnswered { question_id, .. } => head
             .control
             .questions
@@ -408,9 +407,12 @@ pub(super) fn reduce(
             tool_call_id,
             reclaimed_tokens,
         } => {
-            rows.put(
-                key(PRUNED_OUTPUTS, head.conversation.generation, sequence.0),
-                &(tool_call_id, reclaimed_tokens),
+            super::pruning::apply(
+                rows,
+                head.conversation.generation,
+                sequence,
+                &tool_call_id,
+                reclaimed_tokens,
             )?;
             head.context_cut = sequence.0;
         }
@@ -485,7 +487,8 @@ pub(super) fn reduce(
         } => {
             super::extension::apply(head, rows, sequence, &plugin_id, &transaction)?;
         }
-        PendingEvent::ToolOutput { .. }
+        PendingEvent::ToolApprovalResolved { .. }
+        | PendingEvent::ToolOutput { .. }
         | PendingEvent::PermissionRequested { .. }
         | PendingEvent::ToolDiffReady { .. }
         | PendingEvent::HookFailure { .. }

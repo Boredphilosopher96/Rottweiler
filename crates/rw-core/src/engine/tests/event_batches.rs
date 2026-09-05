@@ -6,7 +6,6 @@ use crate::engine::MessageDisposition;
 use crate::engine::builtin_hook_dispatcher;
 use crate::engine::durability::NoopSessionEventSink;
 use crate::engine::pending_event::PendingEvent;
-use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::hooks::RewriteUserPromptHook;
 use crate::engine::tests::fixtures::models::ContinuousDeltaModel;
 use crate::engine::tests::fixtures::models::DelayedFinishModel;
@@ -59,7 +58,9 @@ async fn opening_batch_is_fully_persisted_before_any_event_is_broadcast() {
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.event_sink = sink.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     handle.ensure_local_driver().await.expect("local driver");
     let mut events = handle
         .subscribe_client(ClientId("local".to_owned()), Some(0.into()))
@@ -128,7 +129,9 @@ async fn malformed_batch_payload_or_sequence_is_rejected_before_broadcast_or_mod
             mode,
             inner: Arc::new(NoopSessionEventSink::default()),
         });
-        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+            .await
+            .expect("actor");
         handle.ensure_local_driver().await.expect("local driver");
         let mut events = handle
             .subscribe_client(ClientId("local".to_owned()), Some(0.into()))
@@ -178,7 +181,9 @@ async fn successful_single_delta_batches_delta_commit_and_finish() {
     );
     actor_config.recovered.title = Some("batch fixture".to_owned());
     actor_config.event_sink = sink.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
 
     handle.send_message("run").await.expect("message");
@@ -260,7 +265,9 @@ async fn no_hook_multi_message_opening_batch_preserves_accept_and_commit_order()
     actor_config.event_sink = sink.clone();
     actor_config.recovered.queued_messages =
         vec!["first queued".to_owned(), "second queued".to_owned()];
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
 
     timeout(Duration::from_secs(3), async {
         loop {
@@ -348,7 +355,9 @@ async fn registered_user_prompt_hook_keeps_rewrite_on_the_separate_commit_path()
     );
     actor_config.recovered.title = Some("batch fixture".to_owned());
     actor_config.event_sink = sink.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
 
     handle.send_message("raw input").await.expect("message");
@@ -405,7 +414,9 @@ async fn multiple_immediate_deltas_coalesce_without_losing_order() {
     );
     actor_config.recovered.title = Some("batch fixture".to_owned());
     actor_config.event_sink = sink.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
 
     handle.send_message("run").await.expect("message");
@@ -432,7 +443,7 @@ async fn multiple_immediate_deltas_coalesce_without_losing_order() {
 #[tokio::test]
 async fn delayed_finish_never_holds_a_lone_delta_beyond_the_coalescing_window() {
     let root = TempDir::new().expect("tempdir");
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         Arc::new(DelayedFinishModel {
             delay: Duration::from_millis(50),
@@ -441,6 +452,7 @@ async fn delayed_finish_never_holds_a_lone_delta_beyond_the_coalescing_window() 
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
 
@@ -474,7 +486,7 @@ async fn delayed_finish_never_holds_a_lone_delta_beyond_the_coalescing_window() 
 #[tokio::test]
 async fn continuous_deltas_flush_on_the_anchored_coalescing_deadline() {
     let root = TempDir::new().expect("tempdir");
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         Arc::new(ContinuousDeltaModel {
             count: 50,
@@ -484,6 +496,7 @@ async fn continuous_deltas_flush_on_the_anchored_coalescing_deadline() {
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
 

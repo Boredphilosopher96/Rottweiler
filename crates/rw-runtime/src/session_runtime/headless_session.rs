@@ -1147,6 +1147,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
         commands: runtime_commands,
         modes: runtime_modes,
         event_sink: actor_event_sink,
+        history: durable_sink.clone(),
         event_clock: Arc::new(SystemEventClock),
         provider_admission: provider_admission.clone(),
         secret_redactor,

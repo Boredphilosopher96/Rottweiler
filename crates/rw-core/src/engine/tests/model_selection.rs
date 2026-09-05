@@ -6,7 +6,6 @@ use crate::engine::model_context_transfer_value;
 use crate::engine::model_switch_question;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::projection::project_session_events;
-use crate::engine::session::SessionActor;
 use crate::engine::session::SessionHandle;
 use crate::engine::tests::fixtures::models::M3Model;
 use crate::engine::tests::fixtures::support::TestEventSinkExt;
@@ -139,7 +138,9 @@ async fn model_switch_context_choices_are_explicit_and_reach_the_provider_bounda
         builtin_hook_dispatcher().expect("hooks"),
     );
     summary_config.recovered.conversation = original.clone();
-    let summary_handle = SessionActor::spawn(summary_config).expect("summary actor");
+    let summary_handle = crate::engine::tests::fixtures::history::spawn(summary_config)
+        .await
+        .expect("summary actor");
     attach(&summary_handle, "attach-summary").await;
     let summary_question = request_switch(&summary_handle, "switch-summary").await;
     assert_eq!(summary_model.operations(), Vec::<String>::new());
@@ -215,7 +216,9 @@ async fn model_switch_context_choices_are_explicit_and_reach_the_provider_bounda
         builtin_hook_dispatcher().expect("hooks"),
     );
     full_config.recovered.conversation = original.clone();
-    let full_handle = SessionActor::spawn(full_config).expect("full actor");
+    let full_handle = crate::engine::tests::fixtures::history::spawn(full_config)
+        .await
+        .expect("full actor");
     attach(&full_handle, "attach-full").await;
     let full_question = request_switch(&full_handle, "switch-full").await;
     assert_eq!(full_model.operations(), Vec::<String>::new());
@@ -264,7 +267,9 @@ async fn model_switch_context_choices_are_explicit_and_reach_the_provider_bounda
         builtin_hook_dispatcher().expect("hooks"),
     );
     fresh_config.recovered.conversation = original.clone();
-    let fresh_handle = SessionActor::spawn(fresh_config).expect("fresh actor");
+    let fresh_handle = crate::engine::tests::fixtures::history::spawn(fresh_config)
+        .await
+        .expect("fresh actor");
     attach(&fresh_handle, "attach-fresh").await;
     let fresh_question = request_switch(&fresh_handle, "switch-fresh").await;
     assert_eq!(fresh_model.operations(), Vec::<String>::new());
@@ -358,7 +363,9 @@ async fn pending_model_switch_question_recovers_and_can_be_answered() {
     );
     actor_config.recovered = recovered;
     actor_config.event_sink = sink;
-    let handle = SessionActor::spawn(actor_config).expect("recovered actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("recovered actor");
     assert_eq!(
         handle
             .dispatch(ClientCommand::AttachSession {

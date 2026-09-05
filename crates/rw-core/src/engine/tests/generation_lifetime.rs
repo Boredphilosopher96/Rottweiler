@@ -7,7 +7,7 @@ use crate::{
     SessionExtensionSnapshot,
     engine::{
         builtin_hook_dispatcher,
-        session::{PluginSessionCapability, SessionActor, SessionHandle},
+        session::{PluginSessionCapability, SessionHandle},
     },
 };
 use async_trait::async_trait;
@@ -86,7 +86,9 @@ async fn fixture(controller: &Arc<CallbackGeneration>, root: &Path) -> SessionHa
         builtin_hook_dispatcher().expect("hooks"),
     );
     configuration.extension_development = controller.clone();
-    let handle = SessionActor::spawn(configuration).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(configuration)
+        .await
+        .expect("actor");
     controller
         .capability
         .set(

@@ -4,7 +4,6 @@ use crate::engine::MAX_APPROVAL_DIFF_BYTES;
 use crate::engine::builtin_hook_dispatcher;
 use crate::engine::diff_binding;
 use crate::engine::pending_event::PendingEvent;
-use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::models::ScriptedModel;
 use crate::engine::tests::fixtures::support::collect_turn;
 use crate::engine::tests::fixtures::support::config;
@@ -42,13 +41,14 @@ async fn diff_approval_rejects_tampered_binding_without_consuming_the_prompt() {
     tools
         .register(Arc::new(WriteTool::new(ToolLimits::default())))
         .expect("register write");
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model,
         Arc::new(tools),
         PermissionDecision::Ask,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("write").await.expect("message");
@@ -156,13 +156,14 @@ async fn mutation_diff_is_retained_when_policy_does_not_open_an_approval_dialog(
     tools
         .register(Arc::new(WriteTool::new(ToolLimits::default())))
         .expect("register write");
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model,
         Arc::new(tools),
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("write").await.expect("message");
@@ -209,13 +210,14 @@ async fn truncated_diff_cannot_be_approved_by_any_client() {
     tools
         .register(Arc::new(WriteTool::new(ToolLimits::default())))
         .expect("register write");
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model,
         Arc::new(tools),
         PermissionDecision::Ask,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("write").await.expect("message");
@@ -288,13 +290,14 @@ async fn diff_approval_revalidates_current_base_before_mutation() {
     tools
         .register(Arc::new(WriteTool::new(ToolLimits::default())))
         .expect("register write");
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model,
         Arc::new(tools),
         PermissionDecision::Ask,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("write").await.expect("message");

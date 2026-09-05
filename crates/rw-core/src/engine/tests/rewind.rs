@@ -4,7 +4,6 @@ use crate::engine::AgentLoopError;
 use crate::engine::MessageDisposition;
 use crate::engine::builtin_hook_dispatcher;
 use crate::engine::pending_event::PendingEvent;
-use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::checkpoints::OrderedRewindCoordinator;
 use crate::engine::tests::fixtures::models::ScriptedModel;
 use crate::engine::tests::fixtures::sinks::OrderedRewindSink;
@@ -59,7 +58,9 @@ async fn rewind_applies_then_persists_then_acknowledges_and_never_acks_failed_ap
         fail_ack: fail_ack.clone(),
         unrestorable_paths: Vec::new(),
     });
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("first").await.expect("first");
     collect_turn(&mut events).await;
@@ -154,7 +155,9 @@ async fn slash_rewind_reports_unrestorable_paths_in_command_event() {
             reason: "deleted outside the checkpoint scope".to_owned(),
         }],
     });
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("first").await.expect("first");
     collect_turn(&mut events).await;
@@ -182,13 +185,14 @@ async fn slash_rewind_reports_unrestorable_paths_in_command_event() {
 #[tokio::test]
 async fn invalid_protocol_rewind_is_rejected_without_poisoning_the_session() {
     let root = TempDir::new().expect("tempdir");
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         Arc::new(ScriptedModel::new([stop_script("healthy", &[])])),
         Arc::new(ToolRegistry::new()),
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let session_id = SessionId("fixture-session".to_owned());
     handle

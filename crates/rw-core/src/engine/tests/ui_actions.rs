@@ -76,7 +76,9 @@ async fn driver_ui_action_uses_bound_arguments_and_observer_never_resolves() {
         owner: owner.clone(),
         resolved: resolved.clone(),
     });
-    let handle = SessionActor::spawn(configuration).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(configuration)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("events");
     let session = SessionId("fixture-session".into());
     let request = UiActionRequest {

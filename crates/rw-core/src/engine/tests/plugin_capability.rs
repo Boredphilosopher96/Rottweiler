@@ -8,7 +8,6 @@ use crate::engine::MAX_PLUGIN_STATUS_BYTES;
 use crate::engine::MessageDisposition;
 use crate::engine::builtin_hook_dispatcher;
 use crate::engine::projection::project_session_events;
-use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::models::PendingModel;
 use crate::engine::tests::fixtures::sinks::RecordingSink;
 use crate::engine::tests::fixtures::support::CanarySecretRedactor;
@@ -41,7 +40,9 @@ async fn plugin_machine_capability_preserves_driver_queue_and_durable_order() {
     );
     actor_config.event_sink = sink.clone();
     actor_config.secret_redactor = Arc::new(CanarySecretRedactor);
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let session_id = SessionId("fixture-session".to_owned());
     assert_eq!(
         handle
@@ -271,7 +272,9 @@ async fn typed_controls_preserve_policy_and_page_context_without_prompt_payloads
     config.recovered.conversation = (0..260)
         .map(|i| text_turn(rw_types::Role::User, format!("PROMPT_CANARY_{i}")))
         .collect();
-    let handle = SessionActor::spawn(config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(config)
+        .await
+        .expect("actor");
     let plugin = handle
         .plugin_session_capability("inventory")
         .expect("capability");

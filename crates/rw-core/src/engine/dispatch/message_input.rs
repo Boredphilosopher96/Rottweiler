@@ -71,12 +71,10 @@ fn prepare_with_vision(
                 let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
                 (content.len(), hash)
             }
-            (AttachmentData::InlineBase64 { data }, media_type)
-                if matches!(
-                    media_type,
-                    "image/png" | "image/jpeg" | "image/gif" | "image/webp"
-                ) =>
-            {
+            (
+                AttachmentData::InlineBase64 { data },
+                "image/png" | "image/jpeg" | "image/gif" | "image/webp",
+            ) => {
                 if !supports_vision {
                     return Err("selected model does not support image attachments".to_owned());
                 }

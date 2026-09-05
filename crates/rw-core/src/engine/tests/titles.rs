@@ -4,7 +4,6 @@ use crate::engine::SESSION_TITLE_MAX_CHARS;
 use crate::engine::builtin_hook_dispatcher;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::projection::project_session_events;
-use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::models::DelayedFinishModel;
 use crate::engine::tests::fixtures::models::PendingModel;
 use crate::engine::tests::fixtures::models::ScriptedModel;
@@ -54,7 +53,9 @@ async fn first_successful_turn_generates_and_replays_a_bounded_fast_model_title(
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.event_sink = sink.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle
         .send_message("explain the project structure")
@@ -108,7 +109,9 @@ async fn manual_rename_before_first_turn_completion_prevents_auto_title_overwrit
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.event_sink = sink.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle
         .send_message("explain the project structure")
@@ -170,13 +173,14 @@ async fn manual_rename_before_first_turn_completion_prevents_auto_title_overwrit
 #[tokio::test]
 async fn manual_session_title_validation_rejects_empty_long_and_control_text() {
     let root = TempDir::new().expect("tempdir");
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         Arc::new(PendingModel),
         Arc::new(ToolRegistry::new()),
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     for (request, title) in [
         ("empty-title", "   ".to_owned()),
@@ -209,13 +213,14 @@ async fn manual_session_title_validation_rejects_empty_long_and_control_text() {
 async fn unavailable_title_model_persists_first_prompt_fallback_after_success_only() {
     let root = TempDir::new().expect("tempdir");
     let model = Arc::new(ScriptedModel::new([stop_script("Done.", &[])]));
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model.clone(),
         Arc::new(ToolRegistry::new()),
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle

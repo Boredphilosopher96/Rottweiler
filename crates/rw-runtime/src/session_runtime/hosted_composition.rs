@@ -930,6 +930,7 @@ pub(crate) async fn compose_hosted_actor(
         commands: runtime_commands,
         modes: runtime_modes,
         event_sink: actor_event_sink,
+        history: durable_sink.clone(),
         event_clock: Arc::new(SystemEventClock),
         provider_admission: options.provider_admission.clone(),
         secret_redactor,

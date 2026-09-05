@@ -1,9 +1,7 @@
 #![cfg(test)]
 use super::fixtures::support::{config, protocol_meta};
 use crate::PluginSessionCapability;
-use crate::engine::{
-    AgentLoopError, ModelDriver, SessionActor, SessionHandle, builtin_hook_dispatcher,
-};
+use crate::engine::{AgentLoopError, ModelDriver, SessionHandle, builtin_hook_dispatcher};
 use async_trait::async_trait;
 use rw_providers::{BoxEventStream, ProviderRequest};
 use rw_tools::ToolRegistry;
@@ -65,13 +63,14 @@ impl ModelDriver for CallbackModel {
 }
 
 async fn actor(root: &std::path::Path, model: &Arc<CallbackModel>) -> SessionHandle {
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root,
         model.clone(),
         Arc::new(ToolRegistry::new()),
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     model
         .session

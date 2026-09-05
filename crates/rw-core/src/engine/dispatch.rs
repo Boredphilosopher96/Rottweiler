@@ -426,7 +426,7 @@ pub(super) async fn handle_actor_command(
         }
         ActorCommand::Snapshot { respond } => {
             let _ = respond.send(SessionSnapshot {
-                conversation_turns: state.conversation.len() as u64,
+                conversation_turns: state.conversation_turns,
                 resolved_model: state.resolved_model.clone(),
                 queued_messages: state.queued.iter().cloned().collect(),
                 running: state.running.is_some(),

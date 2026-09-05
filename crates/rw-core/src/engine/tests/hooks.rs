@@ -3,7 +3,6 @@
 use crate::engine::AgentTurnStatus;
 use crate::engine::builtin_hook_dispatcher;
 use crate::engine::pending_event::PendingEvent;
-use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::hooks::FixedHook;
 use crate::engine::tests::fixtures::hooks::NeverHook;
 use crate::engine::tests::fixtures::hooks::RewriteArgumentsHook;
@@ -60,13 +59,14 @@ async fn pre_tool_rewrite_is_the_exact_invocation_presented_for_approval() {
             RewriteArgumentsHook(json!({"path": "rewritten"})),
         )
         .expect("rewrite hook");
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model,
         Arc::new(tools),
         PermissionDecision::Ask,
         hooks,
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("run").await.expect("message");
@@ -174,13 +174,14 @@ async fn hook_order_and_fail_open_closed_are_enforced_by_the_turn_loop() {
             },
         )
         .expect("closed hook");
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model,
         Arc::new(tools),
         PermissionDecision::Allow,
         hooks,
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("run").await.expect("message");
@@ -228,13 +229,14 @@ async fn session_lifecycle_hooks_run_on_start_and_actor_shutdown() {
             )
             .expect("lifecycle hook");
     }
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         Arc::new(ScriptedModel::default()),
         Arc::new(ToolRegistry::new()),
         PermissionDecision::Allow,
         hooks,
     ))
+    .await
     .expect("actor");
     handle.send_message("/status").await.expect("status");
     assert_eq!(
@@ -278,7 +280,9 @@ async fn interrupt_cancels_a_hung_session_hook_without_waiting_for_its_deadline(
         hooks,
     );
     actor_config.event_sink = sink.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("hang").await.expect("message");
     assert!(handle.interrupt().await.expect("interrupt"));

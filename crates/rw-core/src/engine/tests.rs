@@ -17,7 +17,7 @@ mod deferred_children;
 mod diff_approval;
 mod doom_loop;
 mod event_batches;
-mod fixtures;
+pub(crate) mod fixtures;
 mod generation_lifetime;
 mod hooks;
 mod model_preparation;

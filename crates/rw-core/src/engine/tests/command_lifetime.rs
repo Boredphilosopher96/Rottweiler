@@ -6,7 +6,7 @@ use crate::engine::{
     builtin_hook_dispatcher,
     commands::{SessionCommandAction, SessionCommandContext, SessionCommandOutput},
     pending_event::PendingEvent,
-    session::{PluginSessionCapability, SessionActor, SessionHandle},
+    session::{PluginSessionCapability, SessionHandle},
 };
 use async_trait::async_trait;
 use rw_ext::{
@@ -92,7 +92,7 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for CallbackCom
     }
 }
 
-fn actor(root: &std::path::Path, callback: &Arc<CallbackCommand>) -> SessionHandle {
+async fn actor(root: &std::path::Path, callback: &Arc<CallbackCommand>) -> SessionHandle {
     let mut configuration = config(
         root,
         Arc::new(ScriptedModel::default()),
@@ -108,7 +108,9 @@ fn actor(root: &std::path::Path, callback: &Arc<CallbackCommand>) -> SessionHand
         )
         .expect("command");
     configuration.commands = Arc::new(commands);
-    let handle = SessionActor::spawn(configuration).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(configuration)
+        .await
+        .expect("actor");
     callback
         .session
         .set(
@@ -124,7 +126,7 @@ fn actor(root: &std::path::Path, callback: &Arc<CallbackCommand>) -> SessionHand
 async fn command_callback_is_duplex_and_caller_drop_preserves_owned_execution() {
     let root = tempfile::TempDir::new().expect("root");
     let callback = Arc::new(CallbackCommand::default());
-    let handle = actor(root.path(), &callback);
+    let handle = actor(root.path(), &callback).await;
     let mut events = handle.subscribe().expect("events");
     let caller = tokio::spawn({
         let handle = handle.clone();
@@ -184,7 +186,7 @@ async fn command_callback_is_duplex_and_caller_drop_preserves_owned_execution() 
 async fn driver_takeover_revokes_command_completion_without_dropping_handler() {
     let root = tempfile::TempDir::new().expect("root");
     let callback = Arc::new(CallbackCommand::default());
-    let handle = actor(root.path(), &callback);
+    let handle = actor(root.path(), &callback).await;
     let caller = tokio::spawn({
         let handle = handle.clone();
         async move { handle.send_message("/callback").await }
@@ -215,7 +217,7 @@ async fn driver_takeover_revokes_command_completion_without_dropping_handler() {
 async fn close_waits_for_command_and_final_host_callback_before_proof() {
     let root = tempfile::TempDir::new().expect("root");
     let callback = Arc::new(CallbackCommand::default());
-    let handle = actor(root.path(), &callback);
+    let handle = actor(root.path(), &callback).await;
     let caller = tokio::spawn({
         let handle = handle.clone();
         async move { handle.send_message("/callback").await }

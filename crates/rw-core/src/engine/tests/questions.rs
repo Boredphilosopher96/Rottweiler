@@ -2,7 +2,6 @@
 
 use crate::engine::builtin_hook_dispatcher;
 use crate::engine::projection::project_session_events;
-use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::controllers::PanicQuestionAsker;
 use crate::engine::tests::fixtures::models::ScriptedModel;
 use crate::engine::tests::fixtures::sinks::RecordingSink;
@@ -64,7 +63,9 @@ async fn ask_user_is_persisted_and_answered_only_through_client_command() {
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.event_sink = sink.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle
         .subscribe_client(ClientId("driver".to_owned()), None)
         .expect("subscription");
@@ -236,7 +237,9 @@ async fn question_answer_persistence_failure_rejects_ack_and_stops_tool_continua
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.event_sink = sink.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let session_id = SessionId("fixture-session".to_owned());
     let mut events = handle
         .subscribe_client(ClientId("driver".to_owned()), None)

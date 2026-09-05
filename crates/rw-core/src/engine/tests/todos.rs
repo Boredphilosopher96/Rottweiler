@@ -6,7 +6,7 @@ use super::fixtures::{
     support::{collect_turn, config, stop_script, tool_script},
 };
 use crate::engine::pending_event::PendingEvent;
-use crate::engine::{SessionActor, SessionEventSink, builtin_hook_dispatcher};
+use crate::engine::{SessionEventSink, builtin_hook_dispatcher};
 use rw_ext::{HookEvent, HookRegistration};
 use rw_tools::{TodoTool, ToolLimits, ToolRegistry};
 use rw_types::{config::PermissionDecision, hook_contract::HookClass};
@@ -51,7 +51,9 @@ async fn task_commit_precedes_failed_result_transform_and_remains_authoritative(
         hooks,
     );
     options.event_sink = sink.clone();
-    let actor = SessionActor::spawn(options).expect("actor");
+    let actor = crate::engine::tests::fixtures::history::spawn(options)
+        .await
+        .expect("actor");
     let mut events = actor.subscribe().expect("subscribe");
     actor.send_message("make a task").await.expect("message");
     let events = tokio::time::timeout(Duration::from_secs(3), collect_turn(&mut events))

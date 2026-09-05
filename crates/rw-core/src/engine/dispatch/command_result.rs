@@ -223,7 +223,8 @@ pub(super) async fn apply(
                         instructions,
                         None,
                         None,
-                    );
+                    )
+                    .await;
                 }
                 SessionCommandAction::SwitchMode { mode } => {
                     let base = config

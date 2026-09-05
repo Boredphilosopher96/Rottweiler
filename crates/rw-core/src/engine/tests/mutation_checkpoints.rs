@@ -3,7 +3,6 @@
 use crate::engine::AgentTurnStatus;
 use crate::engine::builtin_hook_dispatcher;
 use crate::engine::pending_event::PendingEvent;
-use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::checkpoints::RecordingCheckpoints;
 use crate::engine::tests::fixtures::checkpoints::RecordingFileCheckpoints;
 use crate::engine::tests::fixtures::checkpoints::SingleFileCheckpoints;
@@ -69,7 +68,9 @@ async fn mutating_calls_are_sequential_and_checkpointed_before_and_after_each() 
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.checkpoints = checkpoints.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("write").await.expect("message");
     collect_turn(&mut events).await;
@@ -125,7 +126,9 @@ async fn mutating_post_hook_widens_scope_and_failed_result_finishes_failed_check
         hooks,
     );
     actor_config.checkpoints = checkpoints.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("read").await.expect("message");
     collect_turn(&mut events).await;
@@ -186,7 +189,9 @@ async fn mutating_formatter_post_hook_sibling_change_is_byte_restored_by_rewind(
         hooks,
     );
     actor_config.checkpoints = checkpoints;
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("baseline").await.expect("baseline");
     collect_turn(&mut events).await;
@@ -249,7 +254,9 @@ async fn workspace_mutating_pre_hook_runs_only_after_opaque_checkpoint_begin() {
         hooks,
     );
     actor_config.checkpoints = checkpoints.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("baseline").await.expect("baseline");
     collect_turn(&mut events).await;
@@ -305,7 +312,9 @@ async fn interrupt_during_mutating_tool_finishes_checkpoint_and_commits_cancelle
     );
     actor_config.checkpoints = checkpoints.clone();
     actor_config.event_sink = sink.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("run").await.expect("message");
     next_matching(&mut events, |kind| {
@@ -368,13 +377,14 @@ async fn interrupt_never_starts_later_tools_in_a_sequential_mutating_batch() {
         }))
         .expect("first tool");
     tools.register(second.clone()).expect("second tool");
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model,
         Arc::new(tools),
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("run").await.expect("message");

@@ -55,6 +55,11 @@ impl CanonicalRecovery {
                             super::context_state::revision_key(&row)?,
                         ));
                     }
+                    if namespace == PRUNED_OUTPUTS {
+                        mutations.push(RecoveryMutation::Delete(super::pruning::revision_key(
+                            &row,
+                        )?));
+                    }
                     mutations.push(RecoveryMutation::Delete(row.key));
                 }
                 if page.has_more {

@@ -173,50 +173,7 @@ impl CanonicalHistory {
             .transpose()?;
         reader.selection(control, &mut result)?;
         reader.workspace_and_plans(control, &mut result)?;
-        for queued in &control.queued {
-            let PendingEvent::MessageQueued {
-                position,
-                content,
-                attachments,
-            } = reader.event(queued.sequence)?
-            else {
-                return Err(RecoveryError::Invalid("queue source selector"));
-            };
-            if position != queued.position
-                || blake3::hash(content.as_bytes()).as_bytes() != &queued.content_digest
-            {
-                return Err(RecoveryError::Invalid("queue source identity"));
-            }
-            result.queued_messages.push((
-                position,
-                RecoveredMessage {
-                    content,
-                    attachments,
-                },
-            ));
-        }
-        for accepted in &control.accepted {
-            let PendingEvent::UserMessageAccepted {
-                turn,
-                content,
-                attachments,
-            } = reader.event(accepted.sequence)?
-            else {
-                return Err(RecoveryError::Invalid("accepted message source selector"));
-            };
-            crate::engine::dispatch::recover_user_message(&content, &attachments)
-                .map_err(crate::engine::SessionProjectionError::InvalidAttachment)?;
-            if turn != accepted.agent_turn {
-                return Err(RecoveryError::Invalid("accepted message source identity"));
-            }
-            result.accepted_messages.push((
-                turn,
-                RecoveredMessage {
-                    content,
-                    attachments,
-                },
-            ));
-        }
+        reader.messages(control, &mut result)?;
         for question in &control.questions {
             let PendingEvent::QuestionAsked {
                 turn,
@@ -269,6 +226,58 @@ struct ControlReader<'a> {
     limit: u64,
 }
 impl ControlReader<'_> {
+    fn messages(
+        &mut self,
+        control: &super::RecoveryControl,
+        result: &mut RecoveryControlPayloads,
+    ) -> Result<(), RecoveryError> {
+        for queued in &control.queued {
+            let PendingEvent::MessageQueued {
+                position,
+                content,
+                attachments,
+            } = self.event(queued.sequence)?
+            else {
+                return Err(RecoveryError::Invalid("queue source selector"));
+            };
+            if position != queued.position
+                || blake3::hash(content.as_bytes()).as_bytes() != &queued.content_digest
+            {
+                return Err(RecoveryError::Invalid("queue source identity"));
+            }
+            result.queued_messages.push((
+                position,
+                RecoveredMessage {
+                    content,
+                    attachments,
+                },
+            ));
+        }
+        for accepted in &control.accepted {
+            let PendingEvent::UserMessageAccepted {
+                turn,
+                content,
+                attachments,
+            } = self.event(accepted.sequence)?
+            else {
+                return Err(RecoveryError::Invalid("accepted message source selector"));
+            };
+            crate::engine::dispatch::recover_user_message(&content, &attachments)
+                .map_err(crate::engine::SessionProjectionError::InvalidAttachment)?;
+            if turn != accepted.agent_turn {
+                return Err(RecoveryError::Invalid("accepted message source identity"));
+            }
+            result.accepted_messages.push((
+                turn,
+                RecoveredMessage {
+                    content,
+                    attachments,
+                },
+            ));
+        }
+        Ok(())
+    }
+
     fn selection(
         &mut self,
         control: &super::RecoveryControl,

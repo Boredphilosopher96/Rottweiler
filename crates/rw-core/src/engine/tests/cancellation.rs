@@ -5,7 +5,6 @@ use crate::engine::MessageDisposition;
 use crate::engine::builtin_hook_dispatcher;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::session::ActorCommand;
-use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::checkpoints::RecordingCheckpoints;
 use crate::engine::tests::fixtures::controllers::SessionResourceFixture;
 use crate::engine::tests::fixtures::models::CleanupModel;
@@ -50,13 +49,14 @@ async fn actor_shutdown_runs_registered_tool_session_cleanup() {
             ended: Arc::clone(&ended),
         }))
         .expect("resource tool");
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         Arc::new(ScriptedModel::default()),
         Arc::new(tools),
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     assert_eq!(
         handle
@@ -112,7 +112,9 @@ async fn cancelled_provider_start_cannot_finish_turn_before_local_effect_settlem
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     );
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("run").await.expect("message");
     timeout(Duration::from_secs(2), provider.invoked.notified())
@@ -154,7 +156,9 @@ async fn cancellation_waits_for_tool_cleanup_before_result_checkpoint_and_termin
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.checkpoints = checkpoints.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut receiver = handle.subscribe().expect("subscription");
     handle.send_message("run").await.expect("message");
     next_matching(&mut receiver, |kind| {
@@ -216,7 +220,9 @@ async fn dropped_tool_future_keeps_checkpoint_open_until_external_effects_settle
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.checkpoints = checkpoints.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("run").await.expect("message");
     timeout(Duration::from_secs(3), tool.started.notified())
@@ -267,7 +273,9 @@ async fn panicking_mutating_tool_is_failed_checkpointed_and_actor_remains_usable
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.checkpoints = checkpoints.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut receiver = handle.subscribe().expect("subscription");
     handle
         .send_message("panic once")
@@ -310,13 +318,14 @@ async fn panicking_mutating_tool_is_failed_checkpointed_and_actor_remains_usable
 #[tokio::test]
 async fn queued_message_starts_after_a_well_formed_interrupted_turn() {
     let root = TempDir::new().expect("tempdir");
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         Arc::new(PendingModel),
         Arc::new(ToolRegistry::new()),
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     assert_eq!(

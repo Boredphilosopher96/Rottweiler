@@ -5,7 +5,6 @@ use crate::engine::SessionSnapshot;
 use crate::engine::event_clock::EventClock;
 use crate::engine::mode_permission_base;
 use crate::engine::mutation_checkpoints::RewindCheckpoint;
-use crate::engine::projection::ContextSurgeryAction;
 use crate::engine::projection::RecoveredUserShell;
 use crate::engine::projection::SessionRecoveredState;
 use crate::engine::session_mode_name;
@@ -170,7 +169,12 @@ pub(in crate::engine) struct ActorState {
     pub(in crate::engine) session_title: Option<String>,
     pub(in crate::engine) title_generation_started: bool,
     pub(in crate::engine) event_clock: Arc<dyn EventClock>,
-    pub(in crate::engine) conversation: Vec<Turn>,
+    pub(in crate::engine) conversation_turns: u64,
+    system_turns: u64,
+    system_resolved_model: Option<String>,
+    pub(in crate::engine) title_prompt: Option<String>,
+    pub(in crate::engine) has_assistant_text: bool,
+    pub(in crate::engine) approved_plan_item: Option<rw_types::ContextItemId>,
     pub(in crate::engine) resolved_model: Option<String>,
     pub(in crate::engine) queued: VecDeque<String>,
     pub(in crate::engine) queued_positions: VecDeque<u64>,
@@ -190,8 +194,6 @@ pub(in crate::engine) struct ActorState {
     pub(in crate::engine) pending_questions: BTreeMap<String, PendingQuestion>,
     pub(in crate::engine) pending_model_switches: BTreeMap<String, PendingModelSwitch>,
     pub(in crate::engine) next_question: u64,
-    pub(in crate::engine) context_surgery: Vec<ContextSurgeryAction>,
-    pub(in crate::engine) pruned_tool_outputs: BTreeMap<String, u64>,
     pub(in crate::engine) accounting: crate::engine::SessionAccountingState,
     pub(in crate::engine) budgeter: Budgeter,
     pub(in crate::engine) model_alias: String,
@@ -299,7 +301,33 @@ impl ActorState {
             session_title: recovered.title,
             event_clock,
             resolved_model: resolved_model(&recovered.conversation),
-            conversation: recovered.conversation,
+            conversation_turns: recovered.conversation.len() as u64,
+            system_turns: recovered
+                .conversation
+                .iter()
+                .filter(|turn| turn.role == rw_types::Role::System)
+                .count() as u64,
+            system_resolved_model: recovered
+                .conversation
+                .iter()
+                .filter(|turn| turn.role == rw_types::Role::System)
+                .rev()
+                .find_map(|turn| {
+                    turn.meta
+                        .model
+                        .as_ref()
+                        .filter(|model| model.contains('/'))
+                        .cloned()
+                }),
+            title_prompt: crate::engine::turn::title::first_meaningful_user_prompt(
+                &recovered.conversation,
+            ),
+            has_assistant_text: crate::engine::turn::title::has_successful_assistant_text(
+                &recovered.conversation,
+            ),
+            approved_plan_item: crate::engine::projection::approved_plan_context_item(
+                &recovered.conversation,
+            ),
             queued: recovered.queued_messages.into_iter().collect(),
             queued_positions,
             running: None,
@@ -324,8 +352,6 @@ impl ActorState {
             pending_questions: BTreeMap::new(),
             pending_model_switches,
             next_question: 0,
-            context_surgery: recovered.context_surgery,
-            pruned_tool_outputs: recovered.pruned_tool_outputs,
             accounting: recovered.accounting,
             budgeter: recovered.budgeter,
             model_alias: recovered
@@ -365,19 +391,58 @@ fn resolved_model(conversation: &[Turn]) -> Option<String> {
     })
 }
 impl ActorState {
-    pub(in crate::engine) fn replace_conversation(&mut self, conversation: Vec<Turn>) {
-        self.resolved_model = resolved_model(&conversation);
-        self.conversation = conversation;
+    pub(in crate::engine) fn conversation_summary(&self) -> super::ConversationSummary {
+        super::ConversationSummary {
+            turns: self.conversation_turns,
+            system_turns: self.system_turns,
+            resolved_model: self.resolved_model.clone(),
+            system_resolved_model: self.system_resolved_model.clone(),
+            title_prompt: self.title_prompt.clone(),
+            has_assistant_text: self.has_assistant_text,
+            approved_plan_item: self.approved_plan_item.clone(),
+        }
+    }
+    pub(in crate::engine) fn replace_conversation(&mut self, summary: super::ConversationSummary) {
+        self.conversation_turns = summary.turns;
+        self.system_turns = summary.system_turns;
+        self.resolved_model = summary.resolved_model;
+        self.system_resolved_model = summary.system_resolved_model;
+        self.title_prompt = summary.title_prompt;
+        self.has_assistant_text = summary.has_assistant_text;
+        self.approved_plan_item = summary.approved_plan_item;
     }
     pub(in crate::engine) fn append_conversation(&mut self, turn: Turn) {
         if let Some(model) = turn.meta.model.as_ref().filter(|model| model.contains('/')) {
             self.resolved_model = Some(model.clone());
+            if turn.role == rw_types::Role::System {
+                self.system_resolved_model = Some(model.clone());
+            }
         }
-        self.conversation.push(turn);
+        if turn.role == rw_types::Role::System {
+            self.system_turns = self.system_turns.saturating_add(1);
+        }
+        if self.title_prompt.is_none() {
+            self.title_prompt = crate::engine::turn::title::first_meaningful_user_prompt(
+                std::slice::from_ref(&turn),
+            );
+        }
+        self.has_assistant_text |=
+            crate::engine::turn::title::has_successful_assistant_text(std::slice::from_ref(&turn));
+        if crate::engine::projection::approved_plan_context_item(std::slice::from_ref(&turn))
+            .is_some()
+        {
+            self.approved_plan_item = Some(rw_types::ContextItemId(format!(
+                "conversation:{}",
+                self.conversation_turns
+            )));
+        }
+        self.conversation_turns = self.conversation_turns.saturating_add(1);
     }
     pub(in crate::engine) fn clear_conversation_except_system(&mut self) {
-        self.conversation
-            .retain(|turn| turn.role == rw_types::Role::System);
-        self.resolved_model = resolved_model(&self.conversation);
+        self.conversation_turns = self.system_turns;
+        self.resolved_model.clone_from(&self.system_resolved_model);
+        self.title_prompt = None;
+        self.has_assistant_text = false;
+        self.approved_plan_item = None;
     }
 }

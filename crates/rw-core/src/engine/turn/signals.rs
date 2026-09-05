@@ -5,7 +5,6 @@ use crate::engine::RoutedEvent;
 use crate::engine::SessionUsage;
 use crate::engine::diff_binding;
 use crate::engine::pending_event::PendingEvent;
-use crate::engine::projection::ContextSurgeryAction;
 use crate::engine::session::ActorState;
 use crate::engine::session::PendingApproval;
 use crate::engine::session::PendingQuestion;
@@ -34,7 +33,6 @@ use rw_types::ToolCallId;
 use rw_types::Turn;
 use rw_types::TurnAccounting;
 use rw_types::TurnId;
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -357,8 +355,6 @@ pub(in crate::engine) async fn handle_turn_signal(
                 let _ = pending.respond.send(Err(rw_tools::ToolError::Cancelled));
             }
             state.replace_conversation(outcome.conversation);
-            state.context_surgery = outcome.context_surgery;
-            state.pruned_tool_outputs = outcome.pruned_tool_outputs;
             state.budgeter = outcome.budgeter;
             state.accounting.record(&TurnAccounting {
                 turn_id: wire_turn_id(outcome.turn),
@@ -394,7 +390,6 @@ pub(in crate::engine) async fn handle_turn_signal(
         TurnSignal::ManualCompactionComplete {
             turn,
             conversation,
-            context_surgery,
             mut result,
             model_switch,
             completion,
@@ -408,7 +403,6 @@ pub(in crate::engine) async fn handle_turn_signal(
                 active_turn.store(0, Ordering::Release);
                 if result.is_ok() {
                     state.replace_conversation(conversation);
-                    state.context_surgery = context_surgery;
                     if let Some(model_switch) = model_switch {
                         crate::engine::dispatch::model_job::start(
                             state,
@@ -478,8 +472,7 @@ pub(in crate::engine) enum TurnSignal {
     Complete(TurnOutcome),
     ManualCompactionComplete {
         turn: u64,
-        conversation: Vec<Turn>,
-        context_surgery: Vec<ContextSurgeryAction>,
+        conversation: crate::engine::session::ConversationSummary,
         result: Result<(), AgentLoopError>,
         model_switch: Option<PreparedModelSwitch>,
         completion: Option<oneshot::Sender<Result<ProtocolCompletion, AgentLoopError>>>,
@@ -497,13 +490,11 @@ pub(in crate::engine) enum TurnSignal {
 
 pub(in crate::engine) struct TurnOutcome {
     pub(super) turn: u64,
-    pub(super) conversation: Vec<Turn>,
+    pub(super) conversation: crate::engine::session::ConversationSummary,
     pub(super) status: AgentTurnStatus,
     pub(super) usage: SessionUsage,
     pub(super) cost: Cost,
     pub(super) deferred_terminal_delta: Option<String>,
     pub(super) deferred_terminal_turn: Option<Turn>,
-    pub(super) context_surgery: Vec<ContextSurgeryAction>,
-    pub(super) pruned_tool_outputs: BTreeMap<String, u64>,
     pub(super) budgeter: Budgeter,
 }

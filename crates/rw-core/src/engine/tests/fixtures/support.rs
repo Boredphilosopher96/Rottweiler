@@ -5,7 +5,6 @@ use crate::engine::AgentLoopError;
 use crate::engine::commands::NoopFolderTrustController;
 use crate::engine::commands::NoopWorkspaceRootController;
 use crate::engine::commands::builtin_command_registry;
-use crate::engine::durability::NoopSessionEventSink;
 use crate::engine::durability::SessionEventSink;
 use crate::engine::event_clock::EventClock;
 use crate::engine::model::ModelDriver;
@@ -251,7 +250,8 @@ pub(in crate::engine::tests) fn config(
         hooks: Arc::new(hooks),
         commands: Arc::new(builtin_command_registry().expect("built-in commands")),
         modes: Arc::new(ModeRegistry::builtins().expect("built-in modes")),
-        event_sink: Arc::new(NoopSessionEventSink::default()),
+        event_sink: Arc::new(super::sinks::RecordingSink::default()),
+        history: Arc::new(super::history::UnboundHistory),
         event_clock: Arc::new(FixedClock),
         provider_admission: crate::provider_admission::testing::admission(),
         secret_redactor: Arc::new(NoopSecretRedactor),

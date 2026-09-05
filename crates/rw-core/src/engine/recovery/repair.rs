@@ -31,7 +31,7 @@ impl InterruptedTurnInputs {
                 .ok_or(RecoveryError::Invalid("interrupted fragment kind"))?;
             match pending {
                 PendingEvent::TextDelta { turn, text } if turn == self.turn => {
-                    append_text(&mut assistant, &text)
+                    append_text(&mut assistant, &text);
                 }
                 PendingEvent::ThinkingDelta {
                     turn,

@@ -14,7 +14,7 @@ impl LiveState {
     pub(in crate::engine) fn observe(&mut self, event: &EngineEvent, running: Option<u64>) {
         match event {
             EngineEvent::TurnStarted { meta, turn_id } => {
-                self.turn_source = Some((turn_id.clone(), meta.sequence_id))
+                self.turn_source = Some((turn_id.clone(), meta.sequence_id));
             }
             EngineEvent::TurnFinished { turn_id, .. } => {
                 if self

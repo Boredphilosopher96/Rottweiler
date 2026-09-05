@@ -8,7 +8,7 @@ pub(in crate::engine) struct InterruptedRepair {
     pub(in crate::engine) tool_turn: Option<Turn>,
 }
 
-/// Only a committed provider call permits a model ToolResult. A tool-only
+/// Only a committed provider call permits a model `ToolResult`. A tool-only
 /// invocation still receives its durable terminal event, without inventing IR.
 pub(in crate::engine) fn repair_tools<'a>(
     agent_turn: u64,

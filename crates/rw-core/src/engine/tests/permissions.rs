@@ -5,7 +5,6 @@ use crate::engine::MessageDisposition;
 use crate::engine::builtin_hook_dispatcher;
 use crate::engine::commands::builtin_command_registry;
 use crate::engine::pending_event::PendingEvent;
-use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::checkpoints::SingleFileCheckpoints;
 use crate::engine::tests::fixtures::controllers::PreludePromptCommand;
 use crate::engine::tests::fixtures::hooks::FixedHook;
@@ -54,13 +53,14 @@ async fn ask_permission_allows_or_denies_without_bypassing_the_gate() {
         ));
         let mut tools = ToolRegistry::new();
         tools.register(tool.clone()).expect("register tool");
-        let handle = SessionActor::spawn(config(
+        let handle = crate::engine::tests::fixtures::history::spawn(config(
             root.path(),
             model,
             Arc::new(tools),
             PermissionDecision::Ask,
             builtin_hook_dispatcher().expect("hooks"),
         ))
+        .await
         .expect("actor");
         let mut events = handle.subscribe().expect("subscription");
         handle.send_message("run").await.expect("message");
@@ -133,13 +133,14 @@ async fn matching_hook_execute_capability_is_authorized_before_tool_or_hook_runs
                 },
             )
             .expect("hook");
-        let handle = SessionActor::spawn(config(
+        let handle = crate::engine::tests::fixtures::history::spawn(config(
             root.path(),
             model,
             Arc::new(tools),
             PermissionDecision::Ask,
             hooks,
         ))
+        .await
         .expect("actor");
         let mut events = handle.subscribe().expect("subscription");
         handle.send_message("write").await.expect("message");
@@ -201,7 +202,9 @@ async fn command_tool_prelude_uses_interactive_approval_and_denial_aborts_prompt
             builtin_hook_dispatcher().expect("hooks"),
         );
         actor_config.commands = Arc::new(commands);
-        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+            .await
+            .expect("actor");
         let mut events = handle.subscribe().expect("subscription");
         assert_eq!(
             handle.send_message("/prelude").await.expect("command"),
@@ -282,7 +285,9 @@ async fn mutating_command_prelude_is_byte_restored_by_rewind() {
     );
     actor_config.commands = Arc::new(commands);
     actor_config.checkpoints = checkpoints;
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("baseline").await.expect("baseline");
     collect_turn(&mut events).await;
@@ -325,13 +330,14 @@ async fn destructive_bash_default_ask_prompts_once_and_denial_never_executes() {
     );
     let mut tools = ToolRegistry::new();
     tools.register(tool.clone()).expect("register bash fixture");
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model,
         Arc::new(tools),
         PermissionDecision::Ask,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("delete it").await.expect("message");
@@ -405,13 +411,14 @@ async fn unsandboxed_bash_denial_is_conspicuous_and_never_reaches_the_executor()
     );
     let mut tools = ToolRegistry::new();
     tools.register(tool.clone()).expect("register bash fixture");
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model,
         Arc::new(tools),
         PermissionDecision::Ask,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("escape").await.expect("message");
@@ -513,7 +520,9 @@ async fn user_safe_list_cargo_test_fixture_runs_without_an_approval_event() {
                 .expect("user safe-list"),
         )),
     );
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("test").await.expect("message");
     let turn = collect_turn(&mut events).await;
@@ -580,13 +589,14 @@ async fn fetched_prompt_injection_corpus_cannot_inherit_tool_approval() {
             .register(fetch.clone())
             .expect("register fetch fixture");
         tools.register(bash.clone()).expect("register bash fixture");
-        let handle = SessionActor::spawn(config(
+        let handle = crate::engine::tests::fixtures::history::spawn(config(
             root.path(),
             model.clone(),
             Arc::new(tools),
             PermissionDecision::Ask,
             builtin_hook_dispatcher().expect("hooks"),
         ))
+        .await
         .expect("actor");
         let mut events = handle.subscribe().expect("subscription");
         handle
@@ -670,13 +680,14 @@ async fn changed_bash_executable_is_revalidated_after_approval_before_tool_execu
     );
     let mut tools = ToolRegistry::new();
     tools.register(tool.clone()).expect("register bash fixture");
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model,
         Arc::new(tools),
         PermissionDecision::Ask,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("run").await.expect("message");
@@ -748,13 +759,14 @@ async fn unrememberable_project_approval_executes_the_displayed_bash_once() {
     );
     let mut tools = ToolRegistry::new();
     tools.register(tool.clone()).expect("register bash fixture");
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model,
         Arc::new(tools),
         PermissionDecision::Ask,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("run").await.expect("message");

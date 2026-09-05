@@ -353,6 +353,7 @@ impl RuntimeWorkspaceRootController {
             hooks: Arc::new(hooks),
             commands: Arc::new(commands),
             modes: mode_registry,
+            history: event_sink.clone(),
             event_sink,
             event_clock: Arc::new(SystemEventClock),
             provider_admission,

@@ -13,6 +13,8 @@ use rw_types::config::ThinkingLevel;
 /// Resolves the provider generation admitted for a new operation. Existing
 /// operations retain their captured driver until their effects settle.
 pub trait ModelSource: Send + Sync {
+    /// # Errors
+    /// Returns an error if the active model generation cannot be resolved.
     fn resolve(&self) -> Result<std::sync::Arc<dyn ModelDriver>, AgentLoopError>;
 }
 

@@ -3,7 +3,6 @@
 use crate::engine::builtin_hook_dispatcher;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::projection::project_session_events;
-use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::models::ScriptedModel;
 use crate::engine::tests::fixtures::sinks::RecordingSink;
 use crate::engine::tests::fixtures::support::collect_turn;
@@ -67,7 +66,9 @@ async fn final_reasoning_signature_is_durable_and_recovers_with_partial_content(
     );
     actor_config.recovered.title = Some("reasoning fixture".to_owned());
     actor_config.event_sink = sink.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
 
     handle.send_message("run").await.expect("message");

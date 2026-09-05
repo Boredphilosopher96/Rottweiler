@@ -3,7 +3,6 @@
 use crate::engine::AgentLoopError;
 use crate::engine::model::ModelDriver;
 use crate::engine::pending_event::PendingEvent;
-use crate::engine::session::SessionActor;
 use crate::engine::session::SessionHandle;
 use crate::engine::tests::fixtures::checkpoints::RecordingCheckpoints;
 use crate::engine::tests::fixtures::models::ScriptedModel;
@@ -94,13 +93,14 @@ async fn dropped_close_caller_does_not_release_cleanup_or_block_internal_acknowl
     let tool = Arc::new(CleanupTool::default());
     let mut tools = ToolRegistry::new();
     tools.register(tool.clone()).expect("registered");
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         Arc::new(ScriptedModel::new(Vec::new())),
         Arc::new(tools),
         PermissionDecision::Allow,
         HookDispatcher::new(),
     ))
+    .await
     .expect("actor");
     *tool.callback.lock().expect("callback") = Some(handle.clone());
     let closing = tokio::spawn({
@@ -163,7 +163,9 @@ async fn failed_or_panicked_model_cleanup_has_no_terminal_and_retains_owner_afte
             HookDispatcher::new(),
         );
         configuration.event_sink = sink.clone();
-        let handle = SessionActor::spawn(configuration).expect("actor");
+        let handle = crate::engine::tests::fixtures::history::spawn(configuration)
+            .await
+            .expect("actor");
         handle
             .send_message("trigger invocation")
             .await
@@ -225,7 +227,9 @@ async fn actor_acknowledges_runtime_resources_only_after_success_and_retains_fai
             HookDispatcher::new(),
         );
         configuration.resources = resources.clone();
-        let handle = SessionActor::spawn(configuration).expect("actor");
+        let handle = crate::engine::tests::fixtures::history::spawn(configuration)
+            .await
+            .expect("actor");
         let closing = tokio::spawn({
             let handle = handle.clone();
             async move { handle.close().await }
@@ -311,7 +315,9 @@ async fn failed_hook_proof_never_finishes_tool_or_checkpoint() {
         );
         configuration.checkpoints = checkpoints.clone();
         configuration.event_sink = sink.clone();
-        let handle = SessionActor::spawn(configuration).expect("actor");
+        let handle = crate::engine::tests::fixtures::history::spawn(configuration)
+            .await
+            .expect("actor");
         handle
             .send_message("run hook proof")
             .await
@@ -433,7 +439,9 @@ async fn actor_close_waits_for_journal_ownership_and_propagates_failed_proof() {
             HookDispatcher::new(),
         );
         configuration.event_sink = sink.clone();
-        let handle = SessionActor::spawn(configuration).expect("actor");
+        let handle = crate::engine::tests::fixtures::history::spawn(configuration)
+            .await
+            .expect("actor");
         let closing = tokio::spawn(async move { handle.close().await });
         tokio::time::timeout(Duration::from_secs(1), sink.entered.notified())
             .await

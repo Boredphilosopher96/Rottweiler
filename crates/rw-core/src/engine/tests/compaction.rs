@@ -8,7 +8,6 @@ use crate::engine::model::ModelContextMetadata;
 use crate::engine::model::ModelDriver;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::projection::project_session_events;
-use crate::engine::session::SessionActor;
 use crate::engine::session::SessionHandle;
 use crate::engine::tests::fixtures::models::DelayedSummaryModel;
 use crate::engine::tests::fixtures::models::GatedCompactionModel;
@@ -101,7 +100,9 @@ async fn one_hundred_fifty_turn_overflow_compacts_and_continues_through_actor() 
         .collect();
     let sink = Arc::new(NoopSessionEventSink::default());
     actor_config.event_sink = sink.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     let mut wire_events = handle.subscribe().expect("subscription");
     handle
@@ -191,7 +192,9 @@ async fn post_summary_compaction_failure_emits_correlated_terminal() {
         .collect();
     let sink = Arc::new(FailCompactionLedgerSink::default());
     actor_config.event_sink = sink.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("continue").await.expect("message");
     let events = collect_turn(&mut events).await;
@@ -248,7 +251,9 @@ async fn one_hundred_fifty_turn_compaction_quality_replays_from_recorded_provide
                 )
             })
             .collect();
-        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+            .await
+            .expect("actor");
         let mut events = handle.subscribe().expect("subscription");
         handle
             .send_message("What is the src/lib.rs checksum?")
@@ -333,13 +338,14 @@ async fn typed_provider_overflow_compacts_then_replays_last_real_user() {
         ),
         stop_script("recovered answer", &[]),
     ]));
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model.clone(),
         Arc::new(ToolRegistry::new()),
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle
@@ -378,7 +384,9 @@ async fn manual_compaction_keeps_queries_and_interrupt_responsive() {
     );
     actor_config.event_sink = sink.clone();
     actor_config.recovered.conversation = vec![text_turn(Role::User, "compact me")];
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     handle.ensure_local_driver().await.expect("driver");
     let compact_handle = handle.clone();
     let compact = tokio::spawn(async move { compact_handle.compact(None).await });
@@ -437,7 +445,9 @@ async fn messages_queued_during_manual_compaction_resume_in_fifo_order() {
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.recovered.conversation = vec![text_turn(Role::User, "compact me")];
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     let compact_handle = handle.clone();
     let compact = tokio::spawn(async move { compact_handle.compact(None).await });
@@ -527,7 +537,9 @@ async fn failed_compaction_alias_usage_is_accounted_before_successful_fallback()
     );
     actor_config.event_sink = sink.clone();
     actor_config.recovered.conversation = vec![text_turn(Role::User, "retain this")];
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     handle.compact(None).await.expect("fallback compaction");
 
     let snapshot = handle

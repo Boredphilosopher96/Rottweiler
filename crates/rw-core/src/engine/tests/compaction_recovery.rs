@@ -5,7 +5,6 @@ use crate::engine::SessionUsage;
 use crate::engine::builtin_hook_dispatcher;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::projection::project_session_events;
-use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::models::ScriptedModel;
 use crate::engine::tests::fixtures::sinks::RecordingSink;
 use crate::engine::tests::fixtures::support::collect_turn;
@@ -228,7 +227,9 @@ async fn actor_durably_aborts_interrupted_compaction_before_accepting_new_work()
         actor_config.event_sink = sink.clone();
         actor_config.recovered = recovered;
 
-        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+            .await
+            .expect("actor");
         timeout(Duration::from_secs(3), async {
             loop {
                 let abort_persisted = sink.events.lock().expect("sink lock").iter().any(|event| {

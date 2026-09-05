@@ -158,3 +158,74 @@ fn captured_context_pages_keep_exact_sources_across_rewind_and_reused_ordinals()
         current.head().conversation.decoded_bytes
     );
 }
+
+#[test]
+fn output_pruning_pages_follow_captured_revisions_and_rewind() {
+    let root = tempfile::tempdir().expect("root");
+    let modes = ModeRegistry::builtins().expect("modes");
+    let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
+    let mut recovery =
+        CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("recovery");
+    let tool = rw_types::Turn {
+        role: Role::Tool,
+        blocks: vec![rw_types::Block::ToolResult {
+            id: rw_types::ToolCallId("output".into()),
+            output: rw_types::ToolOutput::Text {
+                text: "authoritative result".into(),
+            },
+            is_error: false,
+        }],
+        meta: rw_types::TurnMeta::default(),
+    };
+    append(
+        &mut journal,
+        vec![
+            PendingEvent::TurnStarted { turn: 1 },
+            PendingEvent::ConversationTurnCommitted {
+                agent_turn: 1,
+                turn: tool.clone(),
+            },
+            finish(1),
+            PendingEvent::ToolOutputPruned {
+                tool_call_id: "output".into(),
+                reclaimed_tokens: 12,
+            },
+        ],
+    );
+    catch_up(&mut recovery, &journal.read_view(), &modes);
+    let captured = recovery
+        .snapshot()
+        .expect("snapshot")
+        .bind_source(&journal.read_view())
+        .expect("bind");
+    let pruned = captured
+        .conversation_page(0..1, HistoryMaterializationLimits::default())
+        .expect("page");
+    assert_eq!(pruned.pruned_tool_outputs.get("output"), Some(&12));
+    assert_eq!(pruned.turns, vec![tool.clone()]);
+    append(
+        &mut journal,
+        vec![PendingEvent::ConversationRewound {
+            to_turn: 1,
+            operation_id: "rewind-pruning".into(),
+            unrestorable_paths: vec![],
+        }],
+    );
+    catch_up(&mut recovery, &journal.read_view(), &modes);
+    let current = recovery
+        .snapshot()
+        .expect("snapshot")
+        .bind_source(&journal.read_view())
+        .expect("bind");
+    assert!(
+        current
+            .conversation_page(0..1, HistoryMaterializationLimits::default())
+            .expect("page")
+            .pruned_tool_outputs
+            .is_empty()
+    );
+    assert_eq!(
+        captured.pruned_output("output").expect("captured"),
+        Some(12)
+    );
+}

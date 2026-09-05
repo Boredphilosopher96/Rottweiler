@@ -4,7 +4,6 @@ use crate::engine::pending_event::PendingEvent;
 use crate::engine::projection::ContextSurgeryAction;
 use crate::engine::projection::plan_review_context_turn;
 use crate::engine::projection::project_session_events;
-use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::models::ScriptedModel;
 use crate::engine::tests::fixtures::support::collect_turn;
 use crate::engine::tests::fixtures::support::config;
@@ -77,13 +76,14 @@ async fn plan_submission_requires_review_and_pins_approved_artifact() {
     tools
         .register(Arc::new(SubmitPlanTool))
         .expect("submit plan tool");
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model,
         Arc::new(tools),
         PermissionDecision::Allow,
         HookDispatcher::new(),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle
@@ -343,7 +343,9 @@ async fn permission_mode_projects_and_is_reapplied_when_a_session_resumes() {
         HookDispatcher::new(),
     );
     actor_config.recovered = recovered;
-    let handle = SessionActor::spawn(actor_config).expect("resume actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("resume actor");
     assert_eq!(
         handle.snapshot().await.expect("snapshot").permission_mode,
         Some(rw_types::PermissionModeDescriptor::Yolo)

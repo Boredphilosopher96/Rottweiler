@@ -6,7 +6,6 @@ use crate::engine::MAX_LIVE_TOOL_OUTPUT_CHUNKS;
 use crate::engine::MAX_TOOL_EXECUTION_WINDOW;
 use crate::engine::builtin_hook_dispatcher;
 use crate::engine::pending_event::PendingEvent;
-use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::models::ScriptedModel;
 use crate::engine::tests::fixtures::sinks::RecordingSink;
 use crate::engine::tests::fixtures::support::collect_turn;
@@ -74,7 +73,9 @@ async fn parallel_tools_finish_reverse_but_emit_results_in_call_index_order() {
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.event_sink = sink.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("run").await.expect("message");
     let events = collect_turn(&mut events).await;
@@ -114,13 +115,14 @@ async fn ordered_tool_window_bounds_completed_tail_and_cancels_unstarted_calls()
     });
     let mut tools = ToolRegistry::new();
     tools.register(probe.clone()).expect("probe tool");
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model,
         Arc::new(tools),
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("fill window").await.expect("message");
@@ -188,13 +190,14 @@ async fn mixed_tools_parallelize_read_runs_between_mutation_barriers() {
             }))
             .expect("register mixed tool");
     }
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model,
         Arc::new(tools),
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle
@@ -252,7 +255,9 @@ async fn parallel_tool_output_makes_progress_when_later_tool_saturates_buffer() 
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.event_sink = sink.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle
         .send_message("stream both tools")
@@ -339,7 +344,9 @@ async fn empty_manifest_stateful_calls_never_run_in_parallel() {
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.event_sink = sink.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("run").await.expect("message");
     timeout(Duration::from_secs(3), first_started.notified())
@@ -373,7 +380,9 @@ async fn tool_contexts_keep_stateful_data_isolated_by_session_id() {
             builtin_hook_dispatcher().expect("hooks"),
         );
         actor_config.session_id = SessionId(session_id.to_owned());
-        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+            .await
+            .expect("actor");
         let mut events = handle.subscribe().expect("subscription");
         handle.send_message("capture").await.expect("message");
         collect_turn(&mut events).await;
@@ -401,13 +410,14 @@ async fn earliest_running_tool_streams_before_it_completes() {
             completed: completed.clone(),
         }))
         .expect("register tool");
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model,
         Arc::new(tools),
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("run").await.expect("message");
@@ -439,13 +449,14 @@ async fn bounded_live_output_drains_excess_chunks_and_finishes() {
     tools
         .register(Arc::new(FloodOutputTool))
         .expect("flood tool");
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model,
         Arc::new(tools),
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("flood").await.expect("message");

@@ -2,7 +2,6 @@
 
 use crate::engine::builtin_hook_dispatcher;
 use crate::engine::dispatch::prepare_user_message;
-use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::models::AliasVisionModel;
 use crate::engine::tests::fixtures::models::DeferredVisionModel;
 use crate::engine::tests::fixtures::support::CanarySecretRedactor;
@@ -110,13 +109,14 @@ fn attachment_validation_is_bounded_provider_neutral_and_vision_gated() {
 async fn first_image_message_prepares_lazy_model_before_vision_validation() {
     let root = TempDir::new().expect("tempdir");
     let model = Arc::new(DeferredVisionModel::default());
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model.clone(),
         Arc::new(ToolRegistry::new()),
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let session_id = SessionId("fixture-session".to_owned());
     assert_eq!(

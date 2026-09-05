@@ -37,6 +37,37 @@ impl ActorTasks {
         cancellation: CancellationToken,
         work: impl Future<Output = T> + Send + 'static,
     ) -> Result<tokio::task::JoinHandle<T>, AgentLoopError> {
+        let guard = self.admit(owners, cancellation)?;
+        Ok(tokio::spawn(async move {
+            let mut guard = guard;
+            let result = work.await;
+            guard.completed = true;
+            result
+        }))
+    }
+
+    /// Blocking work remains registered until the actual worker exits, even when
+    /// the caller abandons the join handle.
+    pub(super) fn spawn_blocking<T: Send + 'static>(
+        &self,
+        owners: Arc<SessionActorConfig>,
+        cancellation: CancellationToken,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<tokio::task::JoinHandle<T>, AgentLoopError> {
+        let guard = self.admit(owners, cancellation)?;
+        Ok(tokio::task::spawn_blocking(move || {
+            let mut guard = guard;
+            let result = work();
+            guard.completed = true;
+            result
+        }))
+    }
+
+    fn admit(
+        &self,
+        owners: Arc<SessionActorConfig>,
+        cancellation: CancellationToken,
+    ) -> Result<TaskGuard, AgentLoopError> {
         let entry = Arc::new(TaskEntry {
             cancellation,
             complete: AtomicBool::new(false),
@@ -56,17 +87,11 @@ impl ActorTasks {
             }
             entries.push(Arc::clone(&entry));
         }
-        let guard = TaskGuard {
+        Ok(TaskGuard {
             completed: false,
             entry,
             tasks: self.clone(),
-        };
-        Ok(tokio::spawn(async move {
-            let mut guard = guard;
-            let result = work.await;
-            guard.completed = true;
-            result
-        }))
+        })
     }
 
     pub(super) fn cancel(&self) {

@@ -3,7 +3,6 @@
 use crate::engine::AgentTurnStatus;
 use crate::engine::builtin_hook_dispatcher;
 use crate::engine::pending_event::PendingEvent;
-use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::models::M3Model;
 use crate::engine::tests::fixtures::models::RoutedCostModel;
 use crate::engine::tests::fixtures::sinks::AccountingRecordingSink;
@@ -31,13 +30,14 @@ async fn zero_budget_cap_stops_before_any_provider_or_compaction_call() {
     let mut model = M3Model::new([stop_script("must not run", &[])]);
     model.budget.session_cost_cap_micros_usd = Some(0);
     let model = Arc::new(model);
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model.clone(),
         Arc::new(ToolRegistry::new()),
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle
@@ -76,13 +76,14 @@ async fn non_authoritative_sink_accumulates_session_cost_across_turns() {
     ]);
     model.budget.session_cost_cap_micros_usd = Some(1_000_000);
     let model = Arc::new(model);
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model.clone(),
         Arc::new(ToolRegistry::new()),
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
 
@@ -160,7 +161,9 @@ async fn authoritative_sink_does_not_double_count_local_session_cost() {
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.event_sink = Arc::new(AccountingRecordingSink::default());
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
 
     handle.send_message("first").await.expect("first message");
@@ -188,13 +191,14 @@ async fn daily_cap_fails_closed_without_an_authoritative_ledger() {
     let mut model = M3Model::new([stop_script("must remain unused", &[])]);
     model.budget.daily_cost_cap_micros_usd = Some(1_000_000);
     let model = Arc::new(model);
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model.clone(),
         Arc::new(ToolRegistry::new()),
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
 
@@ -248,7 +252,9 @@ async fn incomplete_dollar_accounting_blocks_every_later_turn_before_provider_wo
             builtin_hook_dispatcher().expect("hooks"),
         );
         actor_config.event_sink = sink;
-        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+            .await
+            .expect("actor");
         let mut events = handle.subscribe().expect("subscription");
 
         handle.send_message("first").await.expect("first message");
@@ -304,7 +310,9 @@ async fn unavailable_credit_cost_preserves_response_and_blocks_later_dispatch() 
         if authoritative {
             actor_config.event_sink = Arc::new(AccountingRecordingSink::default());
         }
-        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+            .await
+            .expect("actor");
         let mut events = handle.subscribe().expect("subscription");
 
         handle.send_message("first").await.expect("first message");
@@ -356,13 +364,14 @@ async fn opaque_route_cost_controls_post_response_hard_cap_with_shared_model_ids
     async fn run(route: &'static str) -> (Vec<SessionEvent>, usize) {
         let root = TempDir::new().expect("tempdir");
         let model = Arc::new(RoutedCostModel::new(route));
-        let handle = SessionActor::spawn(config(
+        let handle = crate::engine::tests::fixtures::history::spawn(config(
             root.path(),
             model.clone(),
             Arc::new(ToolRegistry::new()),
             PermissionDecision::Allow,
             builtin_hook_dispatcher().expect("hooks"),
         ))
+        .await
         .expect("actor");
         let mut events = handle.subscribe().expect("subscription");
         handle.send_message("route me").await.expect("message");

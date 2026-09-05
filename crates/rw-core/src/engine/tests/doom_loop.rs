@@ -3,7 +3,6 @@
 use crate::engine::AgentTurnStatus;
 use crate::engine::builtin_hook_dispatcher;
 use crate::engine::pending_event::PendingEvent;
-use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::models::ScriptedModel;
 use crate::engine::tests::fixtures::support::collect_turn;
 use crate::engine::tests::fixtures::support::config;
@@ -38,13 +37,14 @@ async fn identical_failures_and_max_turns_stop_deterministically() {
     ));
     let mut tools = ToolRegistry::new();
     tools.register(failing).expect("register tool");
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         doom_model.clone(),
         Arc::new(tools),
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("run").await.expect("message");
@@ -86,7 +86,9 @@ async fn identical_failures_and_max_turns_stop_deterministically() {
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.max_turns = 2;
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("run").await.expect("message");
     let events = collect_turn(&mut events).await;
@@ -131,13 +133,14 @@ async fn alternating_failures_trigger_the_doom_loop_guard() {
             )))
             .expect("register tool");
     }
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model.clone(),
         Arc::new(tools),
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("run").await.expect("message");
@@ -180,13 +183,14 @@ async fn successful_calls_do_not_clear_repeated_failure_history() {
             StubOutcome::Success(ToolResult::new("ok", Value::Null)),
         )))
         .expect("register successful tool");
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model.clone(),
         Arc::new(tools),
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("run").await.expect("message");
@@ -238,7 +242,9 @@ async fn repeated_failures_decay_outside_the_doom_loop_window() {
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.max_turns = 22;
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("run").await.expect("message");
     let events = collect_turn(&mut events).await;

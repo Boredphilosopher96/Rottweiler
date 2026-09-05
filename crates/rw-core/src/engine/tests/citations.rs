@@ -1,8 +1,7 @@
 #![cfg(test)]
 use super::fixtures::support::{collect_turn, config};
 use crate::engine::{
-    AgentLoopError, AgentTurnStatus, ModelDriver, PendingEvent, SessionActor,
-    builtin_hook_dispatcher,
+    AgentLoopError, AgentTurnStatus, ModelDriver, PendingEvent, builtin_hook_dispatcher,
 };
 use async_trait::async_trait;
 use rw_providers::{BoxEventStream, ProviderEvent, ProviderRequest};
@@ -56,13 +55,14 @@ impl ModelDriver for CitationModel {
 async fn citation_overflow_stops_announcements_and_waits_for_provider_effects() {
     let root = tempfile::tempdir().expect("root");
     let model = Arc::new(CitationModel::default());
-    let actor = SessionActor::spawn(config(
+    let actor = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model.clone(),
         Arc::new(ToolRegistry::new()),
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut subscription = actor.subscribe().expect("subscription");
     actor.send_message("cite sources").await.expect("message");

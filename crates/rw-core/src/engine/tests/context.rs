@@ -5,7 +5,6 @@ use crate::engine::durability::NoopSessionEventSink;
 use crate::engine::model::ModelContextMetadata;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::projection::ContextSurgeryAction;
-use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::models::M3Model;
 use crate::engine::tests::fixtures::models::PendingModel;
 use crate::engine::tests::fixtures::models::ScriptedModel;
@@ -58,7 +57,9 @@ async fn context_queries_and_surgery_are_offline_and_actor_consistent() {
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.recovered.conversation = vec![text_turn(Role::User, "inspect me")];
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let snapshot = handle.context_snapshot().await.expect("context snapshot");
     assert_eq!(snapshot.items.len(), 1);
     assert!(!snapshot.context_window_known);
@@ -155,7 +156,9 @@ async fn context_inventory_exposes_tools_and_rejects_protected_item_surgery() {
         .recovered
         .pruned_tool_outputs
         .insert("call-inspect".to_owned(), 100);
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
 
     let snapshot = handle.context_snapshot().await.expect("context snapshot");
     let system = snapshot
@@ -230,13 +233,14 @@ async fn structured_tool_output_is_toon_only_at_provider_boundary() {
             )),
         )))
         .expect("register tool");
-    let handle = SessionActor::spawn(config(
+    let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         model.clone(),
         Arc::new(tools),
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     ))
+    .await
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("run").await.expect("message");
@@ -326,7 +330,9 @@ async fn pruning_uses_provider_visible_toon_size_and_persists_that_reclamation()
         recent,
         text_turn(Role::User, "newer user boundary"),
     ];
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("run pruning").await.expect("message");
     let events = collect_turn(&mut events).await;
@@ -361,7 +367,9 @@ async fn stable_prefix_hash_and_hint_remain_identical_across_twenty_turns() {
     );
     actor_config.initial_session_context = vec![text_turn(Role::System, "stable policy")];
     actor_config.event_sink = sink.clone();
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut subscription = handle.subscribe().expect("subscription");
     for index in 0..20 {
         handle
@@ -404,7 +412,9 @@ async fn running_turn_rejects_context_surgery_without_losing_durable_state() {
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.recovered.conversation = vec![text_turn(Role::User, "stable item")];
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     handle.ensure_local_driver().await.expect("driver");
     let mut subscription = handle.subscribe().expect("subscription");
     handle.send_message("run").await.expect("message");

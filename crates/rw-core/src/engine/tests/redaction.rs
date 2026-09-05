@@ -4,7 +4,6 @@ use crate::engine::builtin_hook_dispatcher;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::redaction::NoopSecretRedactor;
 use crate::engine::redaction::StreamingSecretRedactor;
-use crate::engine::session::SessionActor;
 use crate::engine::tests::fixtures::hooks::FixedHook;
 use crate::engine::tests::fixtures::hooks::PayloadCaptureHook;
 use crate::engine::tests::fixtures::models::ScriptedModel;
@@ -135,7 +134,9 @@ async fn secrets_never_reach_durable_tool_events_or_hook_payloads() {
     );
     actor_config.event_sink = sink.clone();
     actor_config.secret_redactor = Arc::new(CanarySecretRedactor);
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("run").await.expect("message");
     let event = next_matching(&mut events, |kind| {
@@ -252,7 +253,9 @@ async fn hook_failure_and_block_messages_are_redacted_before_events() {
     );
     actor_config.event_sink = sink.clone();
     actor_config.secret_redactor = Arc::new(CanarySecretRedactor);
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("run").await.expect("message");
     let event = next_matching(&mut events, |kind| {
@@ -317,7 +320,9 @@ async fn user_secrets_are_redacted_before_hooks_events_and_provider_context() {
     );
     actor_config.event_sink = sink.clone();
     actor_config.secret_redactor = Arc::new(CanarySecretRedactor);
-    let handle = SessionActor::spawn(actor_config).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle
         .send_message("safe KNOWN_CANARY tail")

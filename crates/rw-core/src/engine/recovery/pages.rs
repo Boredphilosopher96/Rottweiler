@@ -16,6 +16,7 @@ pub struct ConversationPage {
     pub sources: Vec<ConversationSource>,
     /// Latest mutations only for returned rows; aligned with `turns` and `sources`.
     pub context_actions: Vec<Option<crate::engine::projection::ContextSurgeryAction>>,
+    pub pruned_tool_outputs: std::collections::BTreeMap<String, u64>,
     pub serialized_bytes: u64,
     pub decoded_bytes: u64,
     pub has_more: bool,
@@ -101,7 +102,18 @@ impl CanonicalHistory {
                 self.context_action(&rw_types::ContextItemId(format!("conversation:{ordinal}")))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let mut pruned_tool_outputs = std::collections::BTreeMap::new();
+        for turn in &turns {
+            for block in &turn.blocks {
+                if let rw_types::Block::ToolResult { id, .. } = block {
+                    if let Some(tokens) = self.pruned_output(&id.0)? {
+                        pruned_tool_outputs.insert(id.0.clone(), tokens);
+                    }
+                }
+            }
+        }
         Ok(ConversationPage {
+            pruned_tool_outputs,
             serialized_bytes: self.window_bytes(selected.clone())?,
             decoded_bytes: self.window_decoded_bytes(selected.clone())?,
             has_more: selected.end < range.end,

@@ -167,7 +167,7 @@ impl SessionExtensionController for FixedSessionExtensionController {
 }
 
 impl FixedSessionExtensionController {
-    pub(in crate::engine::tests) async fn rebase(
+    pub(in crate::engine::tests) fn rebase(
         &self,
         current: SessionExtensionSnapshot,
     ) -> Result<(SessionExtensionSnapshot, bool), AgentLoopError> {
@@ -236,19 +236,17 @@ impl WorkspaceRootController for FixedWorkspaceRootController {
             supplemental_context: Vec::new(),
         };
         if let Some(extensions) = &self.extensions {
-            let (snapshot, _) = extensions
-                .rebase(SessionExtensionSnapshot {
-                    publication: generation.publication.clone(),
-                    model: generation.model.clone(),
-                    model_alias: request.model_alias.to_owned(),
-                    ui: generation.ui.clone(),
-                    revision: generation.generation,
-                    workspace_roots: Arc::from(generation.roots.clone()),
-                    tools: generation.tools.clone(),
-                    hooks: generation.hooks.clone(),
-                    commands: generation.commands.clone(),
-                })
-                .await?;
+            let (snapshot, _) = extensions.rebase(SessionExtensionSnapshot {
+                publication: generation.publication.clone(),
+                model: generation.model.clone(),
+                model_alias: request.model_alias.to_owned(),
+                ui: generation.ui.clone(),
+                revision: generation.generation,
+                workspace_roots: Arc::from(generation.roots.clone()),
+                tools: generation.tools.clone(),
+                hooks: generation.hooks.clone(),
+                commands: generation.commands.clone(),
+            })?;
             generation.tools = snapshot.tools;
             generation.hooks = snapshot.hooks;
             generation.commands = snapshot.commands;

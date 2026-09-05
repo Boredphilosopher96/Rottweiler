@@ -7,7 +7,7 @@ use super::fixtures::{
 use crate::engine::{
     builtin_hook_dispatcher,
     commands::{SessionCommandAction, SessionCommandContext, SessionCommandOutput},
-    session::{PluginSessionCapability, SessionActor},
+    session::PluginSessionCapability,
 };
 use async_trait::async_trait;
 use rw_ext::{
@@ -95,7 +95,9 @@ async fn command_host_tool_uses_canonical_turn_without_provider_ir_and_retires_o
         )
         .expect("command");
     cfg.commands = Arc::new(commands);
-    let handle = SessionActor::spawn(cfg).expect("actor");
+    let handle = crate::engine::tests::fixtures::history::spawn(cfg)
+        .await
+        .expect("actor");
     command
         .session
         .set(

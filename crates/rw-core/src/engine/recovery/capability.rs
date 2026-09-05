@@ -57,6 +57,19 @@ impl<T> HistoryRead<T> {
         }
     }
 
+    /// Keep the source allowance through an asynchronous transformation and its result.
+    /// The transformation must fit the admitted allocation just like `map`.
+    pub async fn map_async<U, F: std::future::Future<Output = U>>(
+        self,
+        transform: impl FnOnce(T) -> F,
+    ) -> HistoryRead<U> {
+        let value = transform(self.value).await;
+        HistoryRead {
+            value,
+            owner: self.owner,
+        }
+    }
+
     /// Transform an admitted result without releasing the original allowance.
     /// The transformation must fit that allowance; this does not grant new memory.
     #[must_use]
