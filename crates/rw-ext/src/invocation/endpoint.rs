@@ -75,6 +75,18 @@ impl ManagedClient {
 }
 #[async_trait]
 impl PluginRpcClient for ManagedClient {
+    async fn call_command(
+        &self,
+        params: rw_plugin_protocol::CommandExecuteParams,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, PluginRpcError> {
+        let lease = self.admit()?;
+        tokio::select! {
+            ()=cancellation.cancelled()=>Err(error("cancelled","extension command was cancelled")),
+            result=self.inner.call_command(params,&lease.cancellation)=>result,
+        }
+    }
+
     async fn settle_effects(&self) -> Result<(), PluginRpcError> {
         let proof = self.inner.settle_effects().await;
         proof?;

@@ -8,8 +8,16 @@ operation values and limits belong to the leaf `rw-operation-contract` crate.
 
 `tool/call` requires a host-owned `lifetime` containing `total_ms` and `idle_ms`.
 Both must be positive, idle cannot exceed total, and total cannot exceed 300000.
-The host currently grants 300000 total and 90000 idle by default. Total time never
-renews. Other unary methods retain their ordinary five-second deadline.
+The host grants 300000 total and 90000 idle by default. Total time never
+renews. Hooks, catalog requests and ordinary controls use a five-second deadline.
+
+`command/execute` also requires `lifetime`; its total and idle clocks are fixed
+at admission, including queued output time. Commands have no progress renewal
+channel. The host grants 300000ms for both clocks so a command can await a
+permission-gated host tool. Timeout requests cancellation; the actual handler
+and accepted host operations remain owned until their effects settle. Native
+generation preparation has a separate thirty-second proof deadline, beginning
+after the command handler returns.
 
 Tool handlers receive `context.progress({ message, amount? })`. The SDK replaces
 pending observations and sends at most four updates per second as `tool/progress`

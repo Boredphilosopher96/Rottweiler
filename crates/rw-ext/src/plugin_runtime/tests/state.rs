@@ -93,7 +93,7 @@ async fn control_origin_is_bound_to_active_outbound_command_in_this_process() {
     request
         .bind_command(
             METHOD_COMMAND_EXECUTE,
-            &json!({"name":"command", "arguments":"", "invocation_id":origin}),
+            &json!({"name":"command", "arguments":"", "invocation_id":origin,"lifetime":{"total_ms":300000,"idle_ms":300000}}),
         )
         .expect("command admission");
     let params = json!({"origin":origin,"control":{"action":"select_mode","mode":"plan"}});

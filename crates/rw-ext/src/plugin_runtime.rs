@@ -736,6 +736,23 @@ impl Drop for JsonRpcProviderEventStream {
 
 #[async_trait]
 impl PluginRpcClient for JsonRpcPluginClient {
+    async fn call_command(
+        &self,
+        params: CommandExecuteParams,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, PluginRpcError> {
+        let lifetime = params.lifetime;
+        let params = serde_json::to_value(params)
+            .map_err(|_| rpc_error("invalid_params", "invalid command operation"))?;
+        self.request_cancellable_inner(
+            METHOD_COMMAND_EXECUTE,
+            params,
+            cancellation,
+            RequestPolicy::Command { lifetime },
+        )
+        .await
+    }
+
     async fn settle_effects(&self) -> std::result::Result<(), crate::PluginRpcError> {
         self.termination.wait().await
     }

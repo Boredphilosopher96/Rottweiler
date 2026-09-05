@@ -529,16 +529,43 @@ test("concurrent command contexts carry their exact host origin through duplex c
   const { frames, send, serving } = harness(definition)
   const origins = ["01".repeat(16), "02".repeat(16)]
   for (const [index, origin] of origins.entries()) {
-    send({ jsonrpc: "2.0", id: 10 + index, method: "command/execute", params: { name: "control", arguments: "", invocation_id: origin } })
+    send({ jsonrpc: "2.0", id: 10 + index, method: "command/execute", params: { name: "control", arguments: "", invocation_id: origin, lifetime:{total_ms:300000,idle_ms:300000} } })
   }
   await until(() => frames.filter(frame => frame.method === "session/control").length === 2)
   const requests = frames.filter(frame => frame.method === "session/control")
   expect(requests.map(frame => frame.params)).toEqual(origins.map(origin => ({ origin, control: { action: "select_mode", mode: "plan" } })))
   for (const request of requests.toReversed()) send({ jsonrpc: "2.0", id: request.id!, result: { outcome: "applied" } })
   await until(() => frames.some(frame => frame.id === 10) && frames.some(frame => frame.id === 11))
-  send({ jsonrpc: "2.0", id: 12, method: "command/execute", params: { name: "control", arguments: "" } })
+  send({ jsonrpc: "2.0", id: 12, method: "command/execute", params: { name: "control", arguments: "", lifetime:{total_ms:300000,idle_ms:300000} } })
   await until(() => frames.some(frame => frame.id === 12))
   expect(frames.find(frame => frame.id === 12)?.error).toMatchObject({ code: -32602 })
+  send(stop)
+  await serving
+})
+
+test("command lifetime owns the actual handler beyond the ordinary control timer", async () => {
+  let release!: () => void
+  let signal: AbortSignal | undefined
+  const definition: PluginDefinition = {
+    manifest: { name: "command-lifetime", version: "1", protocol: 3, capabilities: {
+      commands: [{ name: "wait", description: "wait for owned effect" }],
+    } },
+    handlers: { commands: { wait: async (_params, context) => {
+      signal = context.signal
+      await new Promise<void>(resolve => { release = resolve })
+      return { settled: true }
+    } } },
+  }
+  const { frames, send, serving } = harness(definition, 1)
+  send({jsonrpc:"2.0",id:10,method:"command/execute",params:{name:"wait",arguments:"",invocation_id:"01".repeat(16),lifetime:{total_ms:150,idle_ms:150}}})
+  await until(() => signal !== undefined)
+  await new Promise(resolve => setTimeout(resolve, 20))
+  expect(signal?.aborted).toBe(false)
+  await until(() => signal?.aborted === true)
+  expect(frames.some(frame => frame.id === 10)).toBe(false)
+  release()
+  await until(() => frames.some(frame => frame.id === 10))
+  expect(frames.find(frame => frame.id === 10)?.error).toMatchObject({code:-32004})
   send(stop)
   await serving
 })

@@ -955,6 +955,13 @@ pub trait PluginRpcClient: Send + Sync {
         self.request(method, params).await
     }
 
+    /// Executes a command under an immutable host-selected deadline.
+    async fn call_command(
+        &self,
+        params: rw_plugin_protocol::CommandExecuteParams,
+        cancellation: &rw_tools::CancellationToken,
+    ) -> Result<Value, PluginRpcError>;
+
     /// Calls a tool under host-owned total and idle deadlines.
     async fn call_tool(
         &self,
@@ -1365,6 +1372,17 @@ mod tests {
 
     #[async_trait]
     impl PluginRpcClient for DenyClient {
+        async fn call_command(
+            &self,
+            _: rw_plugin_protocol::CommandExecuteParams,
+            _: &rw_tools::CancellationToken,
+        ) -> Result<Value, PluginRpcError> {
+            Err(PluginRpcError {
+                code: "fixture_capability".into(),
+                message: "fixture does not implement commands".into(),
+            })
+        }
+
         async fn settle_effects(&self) -> Result<(), PluginRpcError> {
             Ok(())
         }

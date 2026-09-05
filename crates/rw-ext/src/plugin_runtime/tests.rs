@@ -63,6 +63,17 @@ struct CatalogClient(Value);
 
 #[async_trait]
 impl PluginRpcClient for CatalogClient {
+    async fn call_command(
+        &self,
+        _: rw_plugin_protocol::CommandExecuteParams,
+        _: &rw_tools::CancellationToken,
+    ) -> Result<Value, PluginRpcError> {
+        Err(PluginRpcError {
+            code: "fixture_capability".into(),
+            message: "fixture does not implement commands".into(),
+        })
+    }
+
     async fn settle_effects(&self) -> Result<(), PluginRpcError> {
         Ok(())
     }

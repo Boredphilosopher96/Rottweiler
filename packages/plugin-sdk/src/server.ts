@@ -745,7 +745,7 @@ export class PluginServer {
         this.#debug("shutdown timed out")
         this.#writer.abort(new SafeRpcError(-32800, "plugin shutdown timed out"))
         resolve()
-      }, this.#handlerTimeoutMs)
+      }, deadlineMs)
     })
     try {
       const handler = this.definition.handlers.shutdown
@@ -815,7 +815,7 @@ export class PluginServer {
       const params = this.#commandParams(rawParams)
       const handler = this.definition.handlers.commands?.[params.name]
       if (handler === undefined) throw new SafeRpcError(-32601, "command is not declared")
-      return this.#runHandler((context) => handler(params, context), undefined, params.invocation_id)
+      return this.#runHandler((context) => handler(params, context), undefined, params.invocation_id, Math.min(params.lifetime.total_ms, params.lifetime.idle_ms))
     }
     if (method === RPC_METHODS.hookInvoke) {
       const params = this.#hookParams(rawParams)
@@ -993,14 +993,7 @@ export class PluginServer {
   #toolParams(raw: unknown): ToolCallParams {
     const value = object(raw)
     requireRpcKeys(value, "tool/call params", ["name", "input", "lifetime"])
-    const lifetime = object(value.lifetime, "tool lifetime")
-    requireRpcKeys(lifetime, "tool lifetime", ["total_ms", "idle_ms"])
-    if (typeof lifetime.total_ms !== "number" || typeof lifetime.idle_ms !== "number"
-      || !Number.isInteger(lifetime.total_ms) || !Number.isInteger(lifetime.idle_ms)
-      || lifetime.idle_ms < 1 || lifetime.total_ms < lifetime.idle_ms
-      || lifetime.total_ms > PROTOCOL_LIMITS.maxOperationDurationMs) {
-      throw new SafeRpcError(-32602, "invalid tool lifetime")
-    }
+    const lifetime = this.#operationLifetime(value.lifetime, "tool")
     return {
       lifetime: { total_ms: lifetime.total_ms, idle_ms: lifetime.idle_ms },
       name: string(value.name, "tool name"),
@@ -1008,12 +1001,26 @@ export class PluginServer {
     }
   }
 
+  #operationLifetime(raw: unknown, label: string): ToolCallParams["lifetime"] {
+    const lifetime = object(raw, `${label} lifetime`)
+    requireRpcKeys(lifetime, `${label} lifetime`, ["total_ms", "idle_ms"])
+    if (typeof lifetime.total_ms !== "number" || typeof lifetime.idle_ms !== "number"
+      || !Number.isInteger(lifetime.total_ms) || !Number.isInteger(lifetime.idle_ms)
+      || lifetime.idle_ms < 1 || lifetime.total_ms < lifetime.idle_ms
+      || lifetime.total_ms > PROTOCOL_LIMITS.maxOperationDurationMs) {
+      throw new SafeRpcError(-32602, `invalid ${label} lifetime`)
+    }
+    return { total_ms: lifetime.total_ms, idle_ms: lifetime.idle_ms }
+  }
+
   #commandParams(raw: unknown): CommandExecuteParams {
     const value = object(raw)
-    requireRpcKeys(value, "command/execute params", ["name", "arguments", "invocation_id"])
+    requireRpcKeys(value, "command/execute params", ["name", "arguments", "invocation_id", "lifetime"])
+    const lifetime = this.#operationLifetime(value.lifetime, "command")
     if (value.invocation_id !== null && !validateInvocationId(value.invocation_id)) throw new SafeRpcError(-32602, "invalid command invocation identity")
     if (typeof value.arguments !== "string") throw new SafeRpcError(-32602, "invalid command arguments")
     return {
+      lifetime,
       invocation_id: value.invocation_id,
       name: string(value.name, "command name"),
       arguments: value.arguments,
@@ -1314,6 +1321,7 @@ export class PluginServer {
     invoke: (context: HandlerContext) => T | Promise<T>,
     providerAlias?: string,
     origin: ExtensionInvocationId | null = null,
+    deadlineMs: number = this.#handlerTimeoutMs,
   ): Promise<T> {
     if (this.#lifetime.signal.aborted) throw new SafeRpcError(-32800, "plugin request cancelled")
     const call = new AbortController()
@@ -1325,7 +1333,7 @@ export class PluginServer {
     timer = setTimeout(() => {
       timedOut = true
       call.abort()
-    }, this.#handlerTimeoutMs)
+    }, deadlineMs)
     try {
       const result = await this.#invoke(() => invoke(this.#context(call.signal, providerAlias, origin)))
       call.signal.throwIfAborted()

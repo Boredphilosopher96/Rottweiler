@@ -921,6 +921,7 @@ pub struct ToolProgressParams {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandExecuteParams {
+    pub lifetime: OperationLifetime,
     #[serde(deserialize_with = "Option::deserialize")]
     pub invocation_id: Option<rw_types::extension_invocation::ExtensionInvocationId>,
     pub name: String,

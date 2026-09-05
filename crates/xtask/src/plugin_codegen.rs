@@ -162,6 +162,7 @@ export interface ToolProgressParams {
 export type { ToolResponse } from "./tool-contract"
 
 export interface CommandExecuteParams {
+  readonly lifetime: OperationLifetime
   readonly invocation_id: import("./extension-contract").ExtensionInvocationId | null
   readonly name: string
   readonly arguments: string

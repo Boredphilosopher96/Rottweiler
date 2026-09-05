@@ -9,6 +9,9 @@ use tokio::sync::{oneshot, watch};
 use tokio::time::Instant;
 
 pub(super) enum RequestPolicy {
+    Command {
+        lifetime: OperationLifetime,
+    },
     Ordinary {
         allow_closed: bool,
     },
@@ -29,6 +32,20 @@ impl RequestPolicy {
         timeout: Duration,
     ) -> (PendingRequest, RequestObserver) {
         match self {
+            Self::Command { lifetime } => {
+                // Commands have no idle-renewal channel. Both clocks are fixed
+                // at admission, including time spent in the bounded writer.
+                let deadline =
+                    Instant::now() + Duration::from_millis(u64::from(lifetime.idle_ms()));
+                (
+                    PendingRequest::Command {
+                        response,
+                        origin: None,
+                        deadline,
+                    },
+                    RequestObserver::Deadline(deadline),
+                )
+            }
             Self::Ordinary { .. } => (
                 PendingRequest::Ordinary {
                     response,
@@ -66,6 +83,11 @@ impl RequestPolicy {
 }
 
 pub(super) enum PendingRequest {
+    Command {
+        response: oneshot::Sender<Result<Value, PluginRpcError>>,
+        origin: Option<rw_types::extension_invocation::ExtensionInvocationId>,
+        deadline: Instant,
+    },
     Ordinary {
         response: oneshot::Sender<Result<Value, PluginRpcError>>,
         origin: Option<rw_types::extension_invocation::ExtensionInvocationId>,
@@ -88,7 +110,7 @@ impl PendingRequest {
         let command: rw_plugin_protocol::CommandExecuteParams =
             serde_json::from_value(params.clone())
                 .map_err(|_| rpc_error("invalid_params", "invalid command invocation"))?;
-        let Self::Ordinary { origin, .. } = self else {
+        let (Self::Ordinary { origin, .. } | Self::Command { origin, .. }) = self else {
             return Err(rpc_error(
                 "invalid_method",
                 "command requires ordinary request admission",
@@ -102,11 +124,24 @@ impl PendingRequest {
         &self,
         expected: &rw_types::extension_invocation::ExtensionInvocationId,
     ) -> bool {
-        matches!(self, Self::Ordinary { origin: Some(origin), .. } if origin == expected)
+        matches!(self, Self::Ordinary { origin: Some(origin), .. } | Self::Command {origin:Some(origin),..} if origin == expected)
     }
 
     pub(super) fn respond(self, result: Result<Value, PluginRpcError>) {
         match self {
+            Self::Command {
+                response, deadline, ..
+            } => {
+                let result = if Instant::now() >= deadline {
+                    Err(rpc_error(
+                        "timeout",
+                        "plugin command exceeded its immutable deadline",
+                    ))
+                } else {
+                    result
+                };
+                let _ = response.send(result);
+            }
             Self::Ordinary { response, .. } => {
                 let _ = response.send(result);
             }
@@ -206,6 +241,7 @@ impl ProgressRate {
 }
 
 pub(super) enum RequestObserver {
+    Deadline(Instant),
     Ordinary(Duration),
     Tool {
         total: Instant,
@@ -222,6 +258,12 @@ impl RequestObserver {
         cancellation: &CancellationToken,
     ) -> Result<Value, PluginRpcError> {
         match self {
+            Self::Deadline(deadline) => tokio::select! {
+                biased;
+                ()=cancellation.cancelled()=>Err(rpc_error("cancelled","plugin command was cancelled")),
+                ()=tokio::time::sleep_until(deadline)=>Err(rpc_error("timeout","plugin command exceeded its immutable deadline")),
+                result=&mut response=>result.map_err(|_|rpc_error("connection_closed","plugin RPC connection closed"))?,
+            },
             Self::Ordinary(timeout) => tokio::select! {
                 biased;
                 () = cancellation.cancelled() => Err(rpc_error("cancelled", "plugin RPC request was cancelled")),
@@ -260,6 +302,38 @@ mod tests {
     use super::*;
     use rw_tools::ToolError;
     use std::sync::Mutex;
+
+    #[tokio::test(start_paused = true)]
+    async fn command_deadline_starts_at_admission_and_rejects_progress_renewal() {
+        let (send, receive) = oneshot::channel();
+        let (mut pending, observer) = RequestPolicy::Command {
+            lifetime: OperationLifetime::new(100, 100).unwrap(),
+        }
+        .begin(send, Duration::from_millis(5));
+        assert!(
+            !pending.progress(update(1)),
+            "tool progress cannot renew a command"
+        );
+        tokio::time::advance(Duration::from_millis(101)).await;
+        let result = observer.wait(receive, &CancellationToken::default()).await;
+        assert_eq!(
+            result.unwrap_err().code,
+            "timeout",
+            "writer delay cannot restart the deadline"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn command_response_after_deadline_is_never_success() {
+        let (send, receive) = oneshot::channel();
+        let (pending, _observer) = RequestPolicy::Command {
+            lifetime: OperationLifetime::new(100, 100).unwrap(),
+        }
+        .begin(send, Duration::from_millis(5));
+        tokio::time::advance(Duration::from_millis(101)).await;
+        pending.respond(Ok(Value::Null));
+        assert_eq!(receive.await.unwrap().unwrap_err().code, "timeout");
+    }
 
     #[derive(Default)]
     struct Updates(Mutex<Vec<String>>);

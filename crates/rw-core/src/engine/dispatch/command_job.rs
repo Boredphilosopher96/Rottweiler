@@ -92,10 +92,12 @@ pub(super) async fn start(
     let mut snapshot = super::command_snapshot::capture(context.state, context.config);
     let owner = Arc::clone(context.config);
     let next_turn = context.state.next_turn;
+    let (prepare_started, preparation) = oneshot::channel();
     let operation = async move {
         let result = bound.execute(&mut snapshot).await.map_err(command_error);
         let result = match result {
             Ok(output) => {
+                let _ = prepare_started.send(());
                 super::command_generation::prepare_output(output, &owner, next_turn).await
             }
             Err(error) => Err(error),
@@ -109,6 +111,7 @@ pub(super) async fn start(
         name,
         origin,
         host_tools,
+        preparation,
         operation,
         context,
     );
@@ -137,7 +140,9 @@ pub(super) fn start_development(
         }
     };
     let owner = Arc::clone(context.config);
+    let (prepare_started, preparation) = oneshot::channel();
     let operation = async move {
+        let _ = prepare_started.send(());
         (
             super::command_generation::prepare_development(source.as_deref(), &owner).await,
             None,
@@ -150,6 +155,7 @@ pub(super) fn start_development(
         "plugin-development".into(),
         origin,
         Arc::from([]),
+        preparation,
         operation,
         context,
     );
@@ -163,6 +169,7 @@ fn admit(
     name: String,
     origin: rw_types::extension_invocation::ExtensionInvocationId,
     host_tools: Arc<[String]>,
+    preparation: oneshot::Receiver<()>,
     operation: impl std::future::Future<Output = (Execution, Option<BoundUiCommand>)> + Send + 'static,
     context: DispatchContext<'_>,
 ) {
@@ -181,7 +188,7 @@ fn admit(
             tokio::pin!(operation);
             let (result, bound) = tokio::select! {
                 result = &mut operation => result,
-                () = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
+                () = preparation_deadline(preparation) => {
                     let _ = send.send(Err(AgentLoopError::EffectsUnsettled(
                         "command generation preparation exceeded its proof deadline".into(),
                     )));
@@ -320,6 +327,13 @@ pub(in crate::engine) async fn finish(mut result: Execution, context: DispatchCo
     state.transient_cause = previous_cause;
 }
 
+async fn preparation_deadline(started: oneshot::Receiver<()>) {
+    if started.await.is_err() {
+        std::future::pending::<()>().await;
+    }
+    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+}
+
 fn unproven(result: &Execution) -> bool {
     matches!(result, Err(AgentLoopError::EffectsUnsettled(_)))
 }
@@ -383,5 +397,26 @@ impl PendingCommand {
     }
     pub(super) fn update_mode(&mut self, mode: ModeId) {
         self.mode = mode;
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    #[tokio::test(start_paused = true)]
+    async fn preparation_clock_begins_after_the_callback_phase() {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(super::preparation_deadline(receive));
+        tokio::time::advance(std::time::Duration::from_secs(31)).await;
+        assert!(
+            !task.is_finished(),
+            "callback time is not generation preparation"
+        );
+        send.send(()).expect("begin preparation");
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(29)).await;
+        assert!(!task.is_finished());
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        task.await.expect("preparation deadline");
     }
 }

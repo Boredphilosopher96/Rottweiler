@@ -148,16 +148,20 @@ where
                 })?;
             connection
                 .client()
-                .request(
-                    METHOD_COMMAND_EXECUTE,
-                    serde_json::to_value(CommandExecuteParams {
+                .call_command(
+                    CommandExecuteParams {
+                        lifetime: rw_plugin_protocol::OperationLifetime::new(
+                            rw_operation_contract::MAX_OPERATION_DURATION_MS,
+                            rw_operation_contract::MAX_OPERATION_DURATION_MS,
+                        )
+                        .map_err(|error| {
+                            CommandExecutionError::new("invalid_lifetime", error.to_string())
+                        })?,
                         invocation_id: invocation.origin().cloned(),
                         name: self.name.clone(),
                         arguments: invocation.arguments().to_owned(),
-                    })
-                    .map_err(|error| {
-                        CommandExecutionError::new("invalid_request", error.to_string())
-                    })?,
+                    },
+                    &CancellationToken::default(),
                 )
                 .await
                 .map_err(|error| CommandExecutionError::new(error.code, error.message))
