@@ -72,8 +72,10 @@ impl crate::server::ServerEngine for ProviderMutationProbe {
         &self,
         _bound_client: rw_core::ClientId,
         _command: rw_core::ClientCommand,
-    ) -> std::result::Result<rw_core::CommandOutcome, String> {
-        Ok(rw_core::CommandOutcome::Accepted)
+    ) -> std::result::Result<rw_core::HostReply, String> {
+        Ok(rw_core::HostReply::command(
+            rw_core::CommandOutcome::Accepted,
+        ))
     }
 
     async fn subscribe(

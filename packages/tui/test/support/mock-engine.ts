@@ -79,7 +79,7 @@ export class AuthenticatedMockEngine {
 
     if (url.pathname === "/v1/command" && request.method === "POST") {
       this.commands.push(JSON.parse(body) as ClientCommand)
-      return Response.json({ type: "accepted" }, { status: 202 })
+      return Response.json({ type: "command", outcome: { type: "accepted" } }, { status: 202 })
     }
     if (url.pathname === "/v1/events" && request.method === "GET") {
       server.timeout(request, 0)

@@ -9,6 +9,54 @@
         "meta": {
           "$ref": "#/$defs/CommandMeta"
         },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "read": {
+          "$ref": "#/$defs/TranscriptRead"
+        },
+        "type": {
+          "type": "string",
+          "const": "read_transcript"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "read"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "read": {
+          "$ref": "#/$defs/TranscriptContentRead"
+        },
+        "type": {
+          "type": "string",
+          "const": "read_transcript_content"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "read"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
         "cwd": {
           "type": "string"
         },
@@ -1657,16 +1705,375 @@
       "description": "Client-generated identifier used to correlate a command.",
       "type": "string"
     },
-    "ModelAlias": {
-      "description": "Provider-blind model alias resolved by the engine router.",
-      "type": "string"
-    },
     "SessionId": {
       "description": "Stable identifier of an engine session.",
       "type": "string"
     },
+    "TranscriptRead": {
+      "type": "object",
+      "properties": {
+        "known_view": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TranscriptView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "position": {
+          "$ref": "#/$defs/TranscriptPosition"
+        },
+        "max_items": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_bytes": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "position",
+        "max_items",
+        "max_bytes"
+      ]
+    },
+    "TranscriptView": {
+      "description": "Exact canonical prefix interpreted by a complete semantic view.",
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "projection_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "generation": {
+          "$ref": "#/$defs/TranscriptGeneration"
+        },
+        "through": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "digest": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "minItems": 32,
+          "maxItems": 32
+        }
+      },
+      "required": [
+        "session_id",
+        "projection_version",
+        "generation",
+        "digest"
+      ]
+    },
+    "TranscriptGeneration": {
+      "description": "Current semantic ordering generation, changed by rewind.",
+      "type": "string"
+    },
     "SequenceId": {
       "description": "Monotonic per-session sequence encoded as a decimal string on the wire.",
+      "type": "string"
+    },
+    "TranscriptPosition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "first"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "latest"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "item": {
+              "$ref": "#/$defs/TranscriptItemId"
+            },
+            "type": {
+              "type": "string",
+              "const": "before"
+            }
+          },
+          "required": [
+            "type",
+            "item"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "item": {
+              "$ref": "#/$defs/TranscriptItemId"
+            },
+            "type": {
+              "type": "string",
+              "const": "after"
+            }
+          },
+          "required": [
+            "type",
+            "item"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "item": {
+              "$ref": "#/$defs/TranscriptItemId"
+            },
+            "type": {
+              "type": "string",
+              "const": "around"
+            }
+          },
+          "required": [
+            "type",
+            "item"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ordinal": {
+              "$ref": "#/$defs/TranscriptOrdinal"
+            },
+            "generation": {
+              "$ref": "#/$defs/TranscriptGeneration"
+            },
+            "type": {
+              "type": "string",
+              "const": "at_ordinal"
+            }
+          },
+          "required": [
+            "type",
+            "ordinal",
+            "generation"
+          ]
+        }
+      ]
+    },
+    "TranscriptItemId": {
+      "description": "Stable item identity, independent of its current logical ordinal.",
+      "$ref": "#/$defs/SequenceId"
+    },
+    "TranscriptOrdinal": {
+      "description": "Logical row position, distinct from a canonical event sequence.",
+      "type": "string"
+    },
+    "TranscriptContentRead": {
+      "type": "object",
+      "properties": {
+        "view": {
+          "$ref": "#/$defs/TranscriptView"
+        },
+        "source": {
+          "$ref": "#/$defs/TranscriptContentSource"
+        },
+        "offset": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_bytes": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "view",
+        "source",
+        "offset",
+        "max_bytes"
+      ]
+    },
+    "TranscriptContentSource": {
+      "description": "Body location within the exact journal prefix carried by its enclosing view.",
+      "type": "object",
+      "properties": {
+        "sequence": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "selector": {
+          "$ref": "#/$defs/TranscriptContentSelector"
+        }
+      },
+      "required": [
+        "sequence",
+        "selector"
+      ]
+    },
+    "TranscriptContentSelector": {
+      "description": "A closed selector into one canonical event. It never names a filesystem path.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "conversation"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "index": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "conversation_block"
+            }
+          },
+          "required": [
+            "type",
+            "index"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "tool_arguments"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "tool_output"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "tool_diff"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "command_message"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "shell_command"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "shell_output"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "subagent_task"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "subagent_result"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "ModelAlias": {
+      "description": "Provider-blind model alias resolved by the engine router.",
       "type": "string"
     },
     "ClientRole": {

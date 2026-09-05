@@ -1,4 +1,7 @@
-import type { ClientCommand, CommandOutcome } from "../protocol"
+import validateCommandReply from "../../../../protocol/command-reply-validator.js"
+import { ENGINE_EVENT_DELIVERY, MAX_COMMAND_REPLY_BYTES, PROTOCOL_VERSION } from "../protocol"
+import { boundedJson } from "./json"
+import type { ClientCommand, CommandReply } from "../protocol"
 import {
   DEFAULT_BACKOFF_POLICY,
   backoffDelay,
@@ -94,7 +97,7 @@ export class EngineHttpSseClient {
   async postCommand(
     command: ClientCommand,
     signal?: AbortSignal,
-  ): Promise<CommandOutcome | null> {
+  ): Promise<CommandReply | null> {
     const auth = await this.#ensureClientAuth(signal)
     const authenticatedCommand: ClientCommand = {
       ...command,
@@ -120,11 +123,18 @@ export class EngineHttpSseClient {
     if (!contentType.toLowerCase().includes("application/json")) {
       return null
     }
-    const outcome: unknown = await response.json()
-    if (!isCommandOutcome(outcome)) {
-      throw new EngineTransportError("engine returned an invalid command outcome")
+    const reply: unknown = await boundedJson(response, MAX_COMMAND_REPLY_BYTES)
+    if (!validateCommandReply(reply)) {
+      throw new EngineTransportError("engine returned an invalid command reply")
     }
-    return outcome
+    if (reply.type === "read" && reply.events.some(event =>
+      ENGINE_EVENT_DELIVERY[event.type] !== "connection" || !("meta" in event) || event.meta.protocol_version !== PROTOCOL_VERSION
+      || !("client_id" in event.meta) || event.meta.client_id !== auth.clientId
+      || !("request_id" in event.meta) || event.meta.request_id !== command.meta.request_id
+      || ("session_id" in command && "session_id" in event && event.session_id !== command.session_id))) {
+      throw new EngineTransportError("engine read reply contains non-query events")
+    }
+    return reply
   }
 
   async submitProviderApiKey(
@@ -218,7 +228,8 @@ export class EngineHttpSseClient {
           },
           ...(lastSeen === null ? { last_seen_sequence: null } : { last_seen_sequence: lastSeen }),
         }
-        const outcome = await this.postCommand(attach, options.signal)
+        const reply = await this.postCommand(attach, options.signal)
+        const outcome = reply?.outcome
         if (outcome?.type === "rejected") {
           throw new EngineTransportError(`engine rejected session attach: ${outcome.error.message}`)
         }
@@ -434,23 +445,6 @@ function defaultEventsPath(sessionId: string, lastSeenSequence: string | null): 
     query.set("last_seen_sequence", lastSeenSequence)
   }
   return `/v1/events?${query.toString()}`
-}
-
-function isCommandOutcome(value: unknown): value is CommandOutcome {
-  if (!isRecord(value) || typeof value.type !== "string") {
-    return false
-  }
-  if (value.type === "accepted") {
-    return true
-  }
-  return (
-    value.type === "rejected" &&
-    isRecord(value.error) &&
-    typeof value.error.category === "string" &&
-    typeof value.error.code === "string" &&
-    typeof value.error.message === "string" &&
-    typeof value.error.retryable === "boolean"
-  )
 }
 
 async function isReplayCursorAheadResponse(response: Response): Promise<boolean> {

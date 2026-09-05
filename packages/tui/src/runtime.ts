@@ -1,7 +1,7 @@
 import { chmod, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises"
 import { basename, dirname, isAbsolute, join } from "node:path"
 
-import type { ClientCommand, CommandOutcome } from "./protocol"
+import type { ClientCommand, CommandOutcome, CommandReply } from "./protocol"
 import { PROTOCOL_VERSION } from "./protocol"
 import {
   createInitialState,
@@ -65,7 +65,7 @@ export interface RuntimeApp {
 }
 
 export interface RuntimeEngineClient {
-  postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandOutcome | null>
+  postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandReply | null>
   submitProviderApiKey?(
     sessionId: string,
     provider: string,
@@ -271,7 +271,7 @@ export class TuiEngineRuntime {
         dispatched = command
         this.#forkRequests.set(command.meta.request_id, command.session_id)
       }
-      const outcome = await this.#client.postCommand(
+      const outcome = await this.#postCommand(
         dispatched,
         fork ? this.#controller.signal : this.#subscriptionController.signal,
       )
@@ -369,7 +369,7 @@ export class TuiEngineRuntime {
       timeoutMs,
     )
     try {
-      const outcome = await this.#client.postCommand(
+      const outcome = await this.#postCommand(
         { type: "shutdown_host", meta: this.#meta() },
         controller.signal,
       )
@@ -511,7 +511,7 @@ export class TuiEngineRuntime {
             if (this.#config.replayMode) {
               return
             }
-            const takeover = await this.#client.postCommand(
+            const takeover = await this.#postCommand(
               {
                 type: "take_driver",
                 meta: this.#meta(),
@@ -650,7 +650,7 @@ export class TuiEngineRuntime {
     let delay = SESSION_PREPARE_INITIAL_DELAY_MS
     let attempt = 0
     while (!signal.aborted) {
-      const resume = await this.#client.postCommand(
+      const resume = await this.#postCommand(
         {
           type: "resume_session",
           meta: this.#meta(),
@@ -664,7 +664,7 @@ export class TuiEngineRuntime {
         if (this.#config.replayMode) {
           return
         }
-        const takeover = await this.#client.postCommand(
+        const takeover = await this.#postCommand(
           {
             type: "take_driver",
             meta: this.#meta(),
@@ -713,7 +713,7 @@ export class TuiEngineRuntime {
         return
       }
       try {
-        await this.#client.postCommand(command, signal)
+        await this.#postCommand(command, signal)
       } catch (error) {
         if (signal.aborted || isAbortError(error)) {
           return
@@ -723,6 +723,15 @@ export class TuiEngineRuntime {
         // a missing panel must not discard the composer draft or driver lease.
       }
     }
+  }
+
+  async #postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandOutcome | null> {
+    const generation = this.#sessionGeneration
+    const reply = await this.#client.postCommand(command, signal)
+    if (reply?.type === "read" && generation === this.#sessionGeneration && !signal?.aborted) {
+      for (const event of reply.events) this.#requiredApp().handleEvent(event)
+    }
+    return reply?.outcome ?? null
   }
 
   #meta() {

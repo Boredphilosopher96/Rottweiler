@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { PROTOCOL_VERSION, type ClientCommand, type CommandOutcome } from "../src/protocol"
+import { PROTOCOL_VERSION, type ClientCommand, type CommandOutcome, type CommandReply } from "../src/protocol"
 import {
   EngineRuntimeError,
   TuiEngineRuntime,
@@ -87,9 +87,9 @@ class ScriptedClient implements RuntimeEngineClient {
     return false
   }
 
-  async postCommand(command: ClientCommand): Promise<CommandOutcome> {
+  async postCommand(command: ClientCommand): Promise<CommandReply> {
     this.commands.push(command)
-    return this.outcomes.shift() ?? { type: "accepted" }
+    return { type: "command", outcome: this.outcomes.shift() ?? { type: "accepted" } }
   }
 
   async subscribe(options: EngineSubscriptionOptions): Promise<void> {
@@ -137,13 +137,13 @@ class BlockingPreparationClient implements RuntimeEngineClient {
     return false
   }
 
-  async postCommand(command: ClientCommand): Promise<CommandOutcome> {
+  async postCommand(command: ClientCommand): Promise<CommandReply> {
     this.commands.push(command)
     if (command.type === "resume_session") {
       this.#markResumeStarted()
       await this.#resumeGate
     }
-    return { type: "accepted" }
+    return { type: "command", outcome: { type: "accepted" } }
   }
 
   async subscribe(options: EngineSubscriptionOptions): Promise<void> {
@@ -161,10 +161,10 @@ class SwitchingClient implements RuntimeEngineClient {
     return false
   }
 
-  async postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandOutcome> {
+  async postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandReply> {
     this.commands.push(command)
     if (command.type === "resume_session" && this.rejectedSessions.has(command.session_id)) {
-      return {
+      return { type: "command", outcome: {
         type: "rejected",
         error: {
           category: "protocol",
@@ -172,7 +172,7 @@ class SwitchingClient implements RuntimeEngineClient {
           message: "the selected session does not exist",
           retryable: false,
         },
-      }
+      } }
     }
     if (command.type === "resume_session" && this.blockedResumes.has(command.session_id)) {
       await new Promise<void>((resolve, reject) => {
@@ -184,7 +184,7 @@ class SwitchingClient implements RuntimeEngineClient {
         )
       })
     }
-    return { type: "accepted" }
+    return { type: "command", outcome: { type: "accepted" } }
   }
 
   async subscribe(options: EngineSubscriptionOptions): Promise<void> {
@@ -224,9 +224,9 @@ class DelayedConnectionClient implements RuntimeEngineClient {
     return false
   }
 
-  async postCommand(command: ClientCommand): Promise<CommandOutcome> {
+  async postCommand(command: ClientCommand): Promise<CommandReply> {
     this.commands.push(command)
-    return { type: "accepted" }
+    return { type: "command", outcome: { type: "accepted" } }
   }
 
   async subscribe(options: EngineSubscriptionOptions): Promise<void> {
@@ -255,9 +255,9 @@ class ReconnectingProjectionClient implements RuntimeEngineClient {
     return false
   }
 
-  async postCommand(command: ClientCommand): Promise<CommandOutcome> {
+  async postCommand(command: ClientCommand): Promise<CommandReply> {
     this.commands.push(command)
-    return { type: "accepted" }
+    return { type: "command", outcome: { type: "accepted" } }
   }
 
   async subscribe(options: EngineSubscriptionOptions): Promise<void> {
@@ -282,9 +282,9 @@ class CursorAheadClient implements RuntimeEngineClient {
     return false
   }
 
-  async postCommand(command: ClientCommand): Promise<CommandOutcome> {
+  async postCommand(command: ClientCommand): Promise<CommandReply> {
     this.commands.push(command)
-    return { type: "accepted" }
+    return { type: "command", outcome: { type: "accepted" } }
   }
 
   async subscribe(options: EngineSubscriptionOptions): Promise<void> {
@@ -317,7 +317,7 @@ class BlockingShutdownClient implements RuntimeEngineClient {
     return false
   }
 
-  async postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandOutcome> {
+  async postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandReply> {
     this.commands.push(command)
     await new Promise<void>((resolve) => {
       if (signal?.aborted) resolve()
@@ -339,7 +339,7 @@ class CorrelatedForkClient implements RuntimeEngineClient {
     return false
   }
 
-  async postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandOutcome> {
+  async postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandReply> {
     this.commands.push(command)
     if (command.type === "fork") {
       const current = this.subscriptions.at(-1)
@@ -364,7 +364,7 @@ class CorrelatedForkClient implements RuntimeEngineClient {
       await Bun.sleep(0)
       this.forkSignalAborted = signal?.aborted ?? false
     }
-    return { type: "accepted" }
+    return { type: "command", outcome: { type: "accepted" } }
   }
 
   async subscribe(options: EngineSubscriptionOptions): Promise<void> {
@@ -385,9 +385,9 @@ class RestartRecordingClient implements RuntimeEngineClient {
   readonly restarts: EngineStreamRestartMode[] = []
   subscription: EngineSubscriptionOptions | null = null
 
-  async postCommand(command: ClientCommand): Promise<CommandOutcome> {
+  async postCommand(command: ClientCommand): Promise<CommandReply> {
     this.commands.push(command)
-    return { type: "accepted" }
+    return { type: "command", outcome: { type: "accepted" } }
   }
 
   restartStream(mode: EngineStreamRestartMode = "immediate"): boolean {
@@ -1046,7 +1046,7 @@ describe("OpenTUI engine runtime", () => {
       },
       async postCommand(command) {
         commands.push(command)
-        return {
+        return { type: "command", outcome: {
           type: "rejected",
           error: {
             category: "protocol",
@@ -1054,7 +1054,7 @@ describe("OpenTUI engine runtime", () => {
             message: "session is still opening",
             retryable: true,
           },
-        }
+        } }
       },
       async subscribe() {
         throw new Error("subscription must not start before preparation")

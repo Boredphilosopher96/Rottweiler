@@ -120,7 +120,10 @@ impl DevelopmentClient {
                 "the local engine rejected the plugin development command"
             ));
         }
-        match collect_json(response.into_body()).await? {
+        match collect_json::<rw_core::CommandReply>(response.into_body())
+            .await?
+            .outcome()
+        {
             CommandOutcome::Accepted => Ok(()),
             CommandOutcome::Rejected { error } => Err(miette!(
                 "plugin development was rejected ({}): {}",

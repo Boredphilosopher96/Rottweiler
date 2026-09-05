@@ -29,16 +29,16 @@ impl ServerEngine for StubEngine {
         &self,
         bound_client: ClientId,
         command: ClientCommand,
-    ) -> std::result::Result<CommandOutcome, String> {
+    ) -> std::result::Result<rw_core::HostReply, String> {
         self.dispatches.fetch_add(1, Ordering::Relaxed);
         self.received
             .lock()
             .expect("received commands")
             .push((bound_client, command.clone()));
         if matches!(command, ClientCommand::ShutdownHost { .. }) {
-            return Ok(CommandOutcome::Accepted);
+            return Ok(rw_core::HostReply::command(CommandOutcome::Accepted));
         }
-        Ok(CommandOutcome::Rejected {
+        Ok(rw_core::HostReply::command(CommandOutcome::Rejected {
             error: EngineError {
                 category: EngineErrorCategory::Protocol,
                 code: "fixture".to_owned(),
@@ -46,7 +46,7 @@ impl ServerEngine for StubEngine {
                 retryable: false,
                 details: None,
             },
-        })
+        }))
     }
 
     async fn subscribe(

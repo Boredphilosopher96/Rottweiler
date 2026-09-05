@@ -61,7 +61,7 @@ pub use engine::{
 pub use host::{
     BoundClient, CompletedForkOperation, CreateSessionRequest, EngineHost, EngineHostConfig,
     ForkOperationKey, ForkOperationState, ForkSessionRequest, HostError, HostMcpService,
-    HostQueryService, HostRuntimeService, HostSubagentService, HostedSession,
+    HostQueryService, HostReply, HostRuntimeService, HostSubagentService, HostedSession,
     PreparedForkOperation, ProviderApiKeySubmission, ProviderAuthAttempt, ProviderAuthCompletion,
     SessionFactory, SubagentReplay,
 };
@@ -110,11 +110,11 @@ pub use rw_providers::{
 };
 pub use rw_types::PROTOCOL_VERSION;
 pub use rw_types::{
-    Answer, ClientCommand, ClientId, ClientRole, CommandAckMeta, CommandMeta, CommandOutcome, Cost,
-    EngineError, EngineErrorCategory, EngineEvent, EventMeta, QuestionId, RequestId, SequenceId,
-    SessionDescriptor, SessionId, ShellId, SubagentActivity, SubagentDescriptor, SubagentId,
-    SubagentIsolation, SubagentResult, ToolOutputStream, TranscriptFormat, TurnId, TurnStatus,
-    UnrestorablePath, Usage,
+    Answer, ClientCommand, ClientId, ClientRole, CommandAckMeta, CommandMeta, CommandOutcome,
+    CommandReply, Cost, EngineError, EngineErrorCategory, EngineEvent, EventMeta, QuestionId,
+    RequestId, SequenceId, SessionDescriptor, SessionId, ShellId, SubagentActivity,
+    SubagentDescriptor, SubagentId, SubagentIsolation, SubagentResult, ToolOutputStream,
+    TranscriptFormat, TurnId, TurnStatus, UnrestorablePath, Usage,
 };
 pub use update::{
     EMBEDDED_ROOT_KEYS_JSON, EMBEDDED_ROOT_THRESHOLD, EMBEDDED_ROOT_VERSION, TrustedRoot,

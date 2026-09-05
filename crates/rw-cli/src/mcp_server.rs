@@ -80,10 +80,23 @@ impl CliMcpBridge {
             .subscribe(self.bound.clone(), None, None)
             .await
             .map_err(|_| BridgeError::safe("engine session query is unavailable"))?;
-        require_accepted(
-            &self.host.dispatch(self.bound.clone(), command).await,
-            "engine session request was rejected",
-        )?;
+        let response = self.host.dispatch(self.bound.clone(), command).await;
+        require_accepted(&response.outcome, "engine session request was rejected")?;
+        let reply: rw_core::CommandReply = serde_json::from_slice(&response.bytes)
+            .map_err(|_| BridgeError::safe("engine session reply is invalid"))?;
+        if let rw_core::CommandReply::Read { events, .. } = reply {
+            return events
+                .into_iter()
+                .find_map(|event| match event {
+                    EngineEvent::SessionsListed { meta, sessions }
+                        if meta.request_id == request_id =>
+                    {
+                        Some(sessions)
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| BridgeError::safe("engine session reply has no session list"));
+        }
         tokio::time::timeout(HOST_RESULT_TIMEOUT, async {
             while let Some(event) = events.recv().await {
                 match event {
@@ -230,7 +243,7 @@ impl EngineMcpBridge for CliMcpBridge {
                 },
             )
             .await;
-        require_accepted(&outcome, "engine rejected the session message")?;
+        require_accepted(&outcome.outcome, "engine rejected the session message")?;
         Ok(json!({"accepted": true, "session_id": session_id}))
     }
 }

@@ -9,6 +9,7 @@ export const MAX_TEXT_ATTACHMENT_BYTES = 1048576 as const;
 export const MAX_IMAGE_ATTACHMENT_BYTES = 5242880 as const;
 export const MAX_TOTAL_ATTACHMENT_BYTES = 10485760 as const;
 export const MAX_MCP_SERVER_ID_BYTES = 96 as const;
+export const MAX_COMMAND_REPLY_BYTES = 8388608 as const;
 export const MCP_SERVER_ID_PATTERN = "^[A-Za-z0-9._-]{1,96}$" as const;
 
 export type ToolCallId = string;
@@ -265,7 +266,7 @@ project_rules: Array<PermissionRuleDescriptor>,
  */
 session_rules: Array<PermissionRuleDescriptor>, approvals: Array<PermissionApprovalDescriptor>, truncated: boolean, };
 
-export type ClientCommand = { "type": "create_session", meta: CommandMeta, cwd: string, model?: ModelAlias | null, } | { "type": "resume_session", meta: CommandMeta, session_id: SessionId, last_seen_sequence?: SequenceId | null, role: ClientRole, } | { "type": "attach_session", meta: CommandMeta, session_id: SessionId, last_seen_sequence?: SequenceId | null, role: ClientRole, } | { "type": "send_message", meta: CommandMeta, session_id: SessionId, content: string, attachments: Array<Attachment>, } | { "type": "interrupt", meta: CommandMeta, session_id: SessionId, } | { "type": "approve_tool", meta: CommandMeta, session_id: SessionId, tool_call_id: ToolCallId, invocation_id: ToolInvocationId, decision: ApprovalDecision,
+export type ClientCommand = { "type": "read_transcript", meta: CommandMeta, session_id: SessionId, read: TranscriptRead, } | { "type": "read_transcript_content", meta: CommandMeta, session_id: SessionId, read: TranscriptContentRead, } | { "type": "create_session", meta: CommandMeta, cwd: string, model?: ModelAlias | null, } | { "type": "resume_session", meta: CommandMeta, session_id: SessionId, last_seen_sequence?: SequenceId | null, role: ClientRole, } | { "type": "attach_session", meta: CommandMeta, session_id: SessionId, last_seen_sequence?: SequenceId | null, role: ClientRole, } | { "type": "send_message", meta: CommandMeta, session_id: SessionId, content: string, attachments: Array<Attachment>, } | { "type": "interrupt", meta: CommandMeta, session_id: SessionId, } | { "type": "approve_tool", meta: CommandMeta, session_id: SessionId, tool_call_id: ToolCallId, invocation_id: ToolInvocationId, decision: ApprovalDecision,
 /**
  * Required when the pending approval displayed a unified diff. The
  * actor rejects missing or stale bindings without consuming the ask.
@@ -311,7 +312,7 @@ export type EngineError = { category: EngineErrorCategory, code: string, message
 
 export type CommandOutcome = { "type": "accepted" } | { "type": "rejected", error: EngineError, };
 
-export type EngineEvent = { "type": "command_acknowledged", meta: CommandAckMeta, session_id?: SessionId | null, outcome: CommandOutcome, } | { "type": "context_snapshot_ready", meta: CommandAckMeta, session_id: SessionId, snapshot: ContextSnapshot, } | { "type": "cost_snapshot_ready", meta: CommandAckMeta, session_id: SessionId, snapshot: CostSnapshot, } | { "type": "session_review_ready", meta: CommandAckMeta, session_id: SessionId, review: SessionReview, } | { "type": "session_review_updated", meta: CommandAckMeta, session_id: SessionId, path: string, decision: ReviewFileDecision, review: SessionReview, } | { "type": "prompt_dump_ready", meta: CommandAckMeta, session_id: SessionId, dump: PromptDump, } | { "type": "session_replay_completed", meta: CommandAckMeta, session_id: SessionId, through_sequence?: SequenceId | null, } | { "type": "session_forked", meta: CommandAckMeta, parent_session_id: SessionId, child: SessionDescriptor, at_turn: TurnId, } | { "type": "session_exported", meta: CommandAckMeta, session_id: SessionId, output_path: string, } | { "type": "sessions_listed", meta: CommandAckMeta, sessions: Array<SessionDescriptor>, } | { "type": "subagents_listed", meta: CommandAckMeta, session_id: SessionId, subagents: Array<SubagentDescriptor>, } | { "type": "subagent_replay_batch", meta: CommandAckMeta, session_id: SessionId, subagent_id: SubagentId, child_session_id: SessionId, events: Array<SubagentReplayItem>, } | { "type": "subagent_replay_completed", meta: CommandAckMeta, session_id: SessionId, subagent_id: SubagentId,
+export type EngineEvent = { "type": "transcript_page_ready", meta: CommandAckMeta, session_id: SessionId, result: TranscriptReadResult, } | { "type": "transcript_content_ready", meta: CommandAckMeta, session_id: SessionId, page: TranscriptContentPage, } | { "type": "command_acknowledged", meta: CommandAckMeta, session_id?: SessionId | null, outcome: CommandOutcome, } | { "type": "context_snapshot_ready", meta: CommandAckMeta, session_id: SessionId, snapshot: ContextSnapshot, } | { "type": "cost_snapshot_ready", meta: CommandAckMeta, session_id: SessionId, snapshot: CostSnapshot, } | { "type": "session_review_ready", meta: CommandAckMeta, session_id: SessionId, review: SessionReview, } | { "type": "session_review_updated", meta: CommandAckMeta, session_id: SessionId, path: string, decision: ReviewFileDecision, review: SessionReview, } | { "type": "prompt_dump_ready", meta: CommandAckMeta, session_id: SessionId, dump: PromptDump, } | { "type": "session_replay_completed", meta: CommandAckMeta, session_id: SessionId, through_sequence?: SequenceId | null, } | { "type": "session_forked", meta: CommandAckMeta, parent_session_id: SessionId, child: SessionDescriptor, at_turn: TurnId, } | { "type": "session_exported", meta: CommandAckMeta, session_id: SessionId, output_path: string, } | { "type": "sessions_listed", meta: CommandAckMeta, sessions: Array<SessionDescriptor>, } | { "type": "subagents_listed", meta: CommandAckMeta, session_id: SessionId, subagents: Array<SubagentDescriptor>, } | { "type": "subagent_replay_batch", meta: CommandAckMeta, session_id: SessionId, subagent_id: SubagentId, child_session_id: SessionId, events: Array<SubagentReplayItem>, } | { "type": "subagent_replay_completed", meta: CommandAckMeta, session_id: SessionId, subagent_id: SubagentId,
 /**
  * Last child sequence included in this page, if the page is non-empty.
  */
@@ -358,6 +359,50 @@ provider?: string | null,
  * concrete provider/model routes.
  */
 thinking?: ThinkingLevel, } | { "type": "model_context_cleared", meta: EventMeta, strategy: ModelContextTransfer, } | { "type": "context_item_pinned", meta: EventMeta, item_id: ContextItemId, effective_after_agent_turn: string, } | { "type": "context_item_evicted", meta: EventMeta, item_id: ContextItemId, effective_after_agent_turn: string, } | { "type": "user_shell_state_changed", meta: EventMeta, shell_id: ShellId, command?: string | null, active: boolean, status?: number | null, captured_output?: string | null, } | { "type": "hook_failed", meta: EventMeta, event: string, hook_id: string, fail_closed: boolean, message: string, } | { "type": "command_finished", meta: EventMeta, name: string, message: string, unrestorable_paths: Array<UnrestorablePath>, } | { "type": "guard_triggered", meta: EventMeta, turn_id: TurnId, guard: string, message: string, } | { "type": "error", meta: EventMeta, error: EngineError, };
+
+export type CommandReply = { "type": "command", outcome: CommandOutcome, } | { "type": "read", outcome: CommandOutcome, events: Array<EngineEvent>, };
+
+export type TranscriptOrdinal = string;
+
+export type TranscriptGeneration = string;
+
+export type TranscriptView = { session_id: SessionId, projection_version: number, generation: TranscriptGeneration, through: SequenceId | null, digest: [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number], };
+
+export type TranscriptPosition = { "type": "first" } | { "type": "latest" } | { "type": "before", item: TranscriptItemId, } | { "type": "after", item: TranscriptItemId, } | { "type": "around", item: TranscriptItemId, } | { "type": "at_ordinal", ordinal: TranscriptOrdinal, generation: TranscriptGeneration, };
+
+export type TranscriptRead = { known_view: TranscriptView | null, position: TranscriptPosition, max_items: number, max_bytes: number, };
+
+export type TranscriptItem = { id: TranscriptItemId, ordinal: TranscriptOrdinal, revision: SequenceId, agent_turn: TurnId | null, content: TranscriptContent, };
+
+export type TranscriptInvalidation = { "type": "none" } | { "type": "all" } | { "type": "items", items: Array<TranscriptItemId>, };
+
+export type TranscriptAnchor = { "type": "unspecified" } | { "type": "exact", item: TranscriptItemId, } | { "type": "replaced", requested: TranscriptItemId, replacement: TranscriptItemId | null, };
+
+export type TranscriptPage = { view: TranscriptView, first_ordinal: TranscriptOrdinal, total_items: TranscriptOrdinal, items: Array<TranscriptItem>, anchor: TranscriptAnchor, invalidation: TranscriptInvalidation, };
+
+export type TranscriptReadResult = { "type": "ready", page: TranscriptPage, } | { "type": "catching_up", through: SequenceId | null, target: SequenceId | null, } | { "type": "ordering_changed", view: TranscriptView, };
+
+export type TranscriptContentRead = { view: TranscriptView, source: TranscriptContentSource, offset: number, max_bytes: number, };
+
+export type TranscriptContentPage = { view: TranscriptView, source: TranscriptContentSource, offset: number, next_offset: number | null, total_bytes: number, format: TranscriptPreviewFormat, text: string, };
+
+export type TranscriptItemId = SequenceId;
+
+export type TranscriptContentSelector = { "type": "conversation" } | { "type": "conversation_block", index: number, } | { "type": "tool_arguments" } | { "type": "tool_output" } | { "type": "tool_diff" } | { "type": "command_message" } | { "type": "shell_command" } | { "type": "shell_output" } | { "type": "subagent_task" } | { "type": "subagent_result" };
+
+export type TranscriptContentSource = { sequence: SequenceId, selector: TranscriptContentSelector, };
+
+export type TranscriptPreviewFormat = "text" | "json";
+
+export type TranscriptBodyPreview = { text: string, format: TranscriptPreviewFormat, complete: boolean, source: TranscriptContentSource, };
+
+export type TranscriptConversationBlock = { "type": "text", body: TranscriptBodyPreview, } | { "type": "reasoning", body: TranscriptBodyPreview, } | { "type": "image", source: TranscriptContentSource, } | { "type": "citation", body: TranscriptBodyPreview, };
+
+export type TranscriptToolStatus = { "type": "running" } | { "type": "finished", is_error: boolean, output: TranscriptBodyPreview, };
+
+export type TranscriptSubagentStatus = { "type": "running" } | { "type": "finished", status: SubagentStatus, result: TranscriptBodyPreview, };
+
+export type TranscriptContent = { "type": "conversation", role: Role, blocks: Array<TranscriptConversationBlock>, omitted_blocks: boolean, source: TranscriptContentSource, } | { "type": "tool", invocation_id: ToolInvocationId, name: string, call_index: number, arguments: TranscriptBodyPreview, diff: TranscriptBodyPreview | null, status: TranscriptToolStatus, } | { "type": "command", name: string, message: TranscriptBodyPreview, } | { "type": "shell", command: TranscriptBodyPreview | null, output: TranscriptBodyPreview | null, active: boolean, status: number | null, } | { "type": "subagent", subagent_id: SubagentId, session_id: SessionId, task: TranscriptBodyPreview, status: TranscriptSubagentStatus, };
 
 export type EngineEventDelivery = "connection" | "durable" | "transient";
 
@@ -435,6 +480,8 @@ export const ENGINE_EVENT_DELIVERY = {
   tool_output_delta: "durable",
   tool_output_pruned: "durable",
   tool_progress: "transient",
+  transcript_content_ready: "connection",
+  transcript_page_ready: "connection",
   turn_finished: "durable",
   turn_started: "durable",
   ui_notification: "durable",

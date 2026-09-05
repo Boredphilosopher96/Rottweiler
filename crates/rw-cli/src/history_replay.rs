@@ -62,14 +62,16 @@ impl server::ServerEngine for HistoricalReplayEngine {
         &self,
         _bound_client: ClientId,
         command: ClientCommand,
-    ) -> std::result::Result<CommandOutcome, String> {
+    ) -> std::result::Result<rw_core::HostReply, String> {
         match command {
             ClientCommand::AttachSession {
                 session_id,
                 role: rw_core::ClientRole::Observer,
                 ..
-            } if session_id == self.session_id => Ok(CommandOutcome::Accepted),
-            _ => Ok(CommandOutcome::Rejected {
+            } if session_id == self.session_id => {
+                Ok(rw_core::HostReply::command(CommandOutcome::Accepted))
+            }
+            _ => Ok(rw_core::HostReply::command(CommandOutcome::Rejected {
                 error: rw_core::EngineError {
                     category: rw_core::EngineErrorCategory::Protocol,
                     code: "historical_replay_read_only".to_owned(),
@@ -77,7 +79,7 @@ impl server::ServerEngine for HistoricalReplayEngine {
                     retryable: false,
                     details: None,
                 },
-            }),
+            })),
         }
     }
 
@@ -411,7 +413,9 @@ mod historical_replay_tests {
             role: ClientRole::Observer,
         };
         assert_eq!(
-            server::ServerEngine::dispatch(&engine, ClientId("bound".to_owned()), observer).await,
+            server::ServerEngine::dispatch(&engine, ClientId("bound".to_owned()), observer)
+                .await
+                .map(|reply| reply.outcome),
             Ok(CommandOutcome::Accepted)
         );
         let driver = ClientCommand::AttachSession {
@@ -421,7 +425,9 @@ mod historical_replay_tests {
             role: ClientRole::Driver,
         };
         assert!(matches!(
-            server::ServerEngine::dispatch(&engine, ClientId("bound".to_owned()), driver).await,
+            server::ServerEngine::dispatch(&engine, ClientId("bound".to_owned()), driver)
+                .await
+                .map(|reply| reply.outcome),
             Ok(CommandOutcome::Rejected { .. })
         ));
         assert!(matches!(
@@ -433,7 +439,8 @@ mod historical_replay_tests {
                     session_id: SessionId("history".to_owned()),
                 },
             )
-            .await,
+            .await
+            .map(|reply| reply.outcome),
             Ok(CommandOutcome::Rejected { .. })
         ));
         assert!(

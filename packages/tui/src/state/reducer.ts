@@ -338,6 +338,9 @@ function applyKnownEvent(
   activeSessionId: string | null,
 ): RottweilerState {
   switch (event.type) {
+    case "transcript_page_ready":
+    case "transcript_content_ready":
+      return state
     case "command_acknowledged":
       return {
         ...state,

@@ -311,8 +311,8 @@ impl BrokerClient {
                 "engine rejected shell completion transport",
             ));
         }
-        let outcome: CommandOutcome = collect_json(response.into_body()).await?;
-        match outcome {
+        let reply: rw_core::CommandReply = collect_json(response.into_body()).await?;
+        match reply.outcome() {
             CommandOutcome::Accepted => Ok(()),
             CommandOutcome::Rejected { error } => Err(ShellBrokerError::Protocol(format!(
                 "shell completion was rejected: {}",
@@ -699,7 +699,7 @@ mod tests {
             &self,
             _bound_client: ClientId,
             _command: ClientCommand,
-        ) -> Result<CommandOutcome, String> {
+        ) -> Result<rw_core::HostReply, String> {
             Err("interactive dispatch is unused by this fixture".to_owned())
         }
 

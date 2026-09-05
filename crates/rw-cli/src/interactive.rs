@@ -169,7 +169,7 @@ impl server::ServerEngine for DeferredHostedEngine {
         &self,
         bound_client: ClientId,
         command: ClientCommand,
-    ) -> std::result::Result<CommandOutcome, String> {
+    ) -> std::result::Result<rw_core::HostReply, String> {
         self.loaded()?.dispatch(bound_client, command).await
     }
 

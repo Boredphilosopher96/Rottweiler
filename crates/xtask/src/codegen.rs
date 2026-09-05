@@ -109,6 +109,10 @@ fn generated_artifacts() -> Result<Vec<(PathBuf, String)>, XtaskError> {
             generate_schema::<EngineEvent>()?,
         ),
         (
+            PathBuf::from("schema/command-reply.schema.json"),
+            generate_schema::<rw_types::CommandReply>()?,
+        ),
+        (
             PathBuf::from("fixtures/contract.json"),
             serde_json::to_string_pretty(&fixture)? + "\n",
         ),
@@ -142,6 +146,7 @@ fn generate_typescript() -> Result<String, XtaskError> {
         ("MAX_IMAGE_ATTACHMENT_BYTES", MAX_IMAGE_ATTACHMENT_BYTES),
         ("MAX_TOTAL_ATTACHMENT_BYTES", MAX_TOTAL_ATTACHMENT_BYTES),
         ("MAX_MCP_SERVER_ID_BYTES", MAX_MCP_SERVER_ID_BYTES),
+        ("MAX_COMMAND_REPLY_BYTES", rw_types::MAX_COMMAND_REPLY_BYTES),
     ] {
         output.push_str("export const ");
         output.push_str(name);
@@ -277,6 +282,29 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(EngineError);
     declaration!(CommandOutcome);
     declaration!(EngineEvent);
+    declaration!(rw_types::CommandReply);
+    declaration!(rw_types::transcript::TranscriptOrdinal);
+    declaration!(rw_types::transcript::TranscriptGeneration);
+    declaration!(rw_types::transcript::TranscriptView);
+    declaration!(rw_types::transcript::TranscriptPosition);
+    declaration!(rw_types::transcript::TranscriptRead);
+    declaration!(rw_types::transcript::TranscriptItem);
+    declaration!(rw_types::transcript::TranscriptInvalidation);
+    declaration!(rw_types::transcript::TranscriptAnchor);
+    declaration!(rw_types::transcript::TranscriptPage);
+    declaration!(rw_types::transcript::TranscriptReadResult);
+    declaration!(rw_types::transcript::TranscriptContentRead);
+    declaration!(rw_types::transcript::TranscriptContentPage);
+    declaration!(rw_types::transcript::TranscriptItemId);
+    declaration!(rw_types::transcript::TranscriptContentSelector);
+    declaration!(rw_types::transcript::TranscriptContentSource);
+    declaration!(rw_types::transcript::TranscriptPreviewFormat);
+    declaration!(rw_types::transcript::TranscriptBodyPreview);
+    declaration!(rw_types::transcript::TranscriptConversationBlock);
+    declaration!(rw_types::transcript::TranscriptToolStatus);
+    declaration!(rw_types::transcript::TranscriptSubagentStatus);
+    declaration!(rw_types::transcript::TranscriptContent);
+
     output.push_str(&generate_engine_event_delivery()?);
     Ok(output
         .trim_end()

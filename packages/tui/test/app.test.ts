@@ -9007,7 +9007,7 @@ describe("Rottweiler OpenTUI shell", () => {
     })
     const client: RuntimeEngineClient = {
       async postCommand() {
-        return { type: "accepted" }
+        return { type: "command", outcome: { type: "accepted" } }
       },
       restartStream() {
         return false

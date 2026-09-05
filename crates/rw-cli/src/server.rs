@@ -402,7 +402,7 @@ pub trait ServerEngine: Send + Sync + 'static {
         &self,
         bound_client: ClientId,
         command: ClientCommand,
-    ) -> std::result::Result<CommandOutcome, String>;
+    ) -> std::result::Result<rw_core::HostReply, String>;
 
     async fn subscribe(
         &self,
@@ -471,7 +471,7 @@ impl ServerEngine for HostedEngine {
         &self,
         bound_client: ClientId,
         command: ClientCommand,
-    ) -> std::result::Result<CommandOutcome, String> {
+    ) -> std::result::Result<rw_core::HostReply, String> {
         Ok(self
             .host
             .dispatch(
@@ -780,19 +780,16 @@ async fn handle_request(
                                     dispatch_plugin_development(&*state.engine, command).await
                                 }
                                 ClientCapability::ShellBroker => {
-                                    dispatch_shell_broker(&*state.engine, command).await
+                                    dispatch_shell_broker(&*state.engine, command)
+                                        .await
+                                        .map(rw_core::HostReply::command)
                                 }
                             };
                             match outcome {
                                 Ok(outcome) => {
-                                    let accepted = outcome == CommandOutcome::Accepted;
-                                    let mut response = match serde_json::to_vec(&outcome) {
-                                        Ok(bytes) => json_response(StatusCode::ACCEPTED, bytes),
-                                        Err(_) => error_response(
-                                            StatusCode::INTERNAL_SERVER_ERROR,
-                                            "command outcome could not serialize",
-                                        ),
-                                    };
+                                    let accepted = outcome.outcome == CommandOutcome::Accepted;
+                                    let mut response =
+                                        json_response(StatusCode::ACCEPTED, outcome.bytes);
                                     if shutdown_requested && accepted {
                                         connection_shutdown.store(true, Ordering::Release);
                                         response
@@ -1081,13 +1078,13 @@ fn requested_capability<B>(
 async fn dispatch_plugin_development(
     engine: &dyn ServerEngine,
     command: ClientCommand,
-) -> std::result::Result<CommandOutcome, String> {
+) -> std::result::Result<rw_core::HostReply, String> {
     if !matches!(
         command,
         ClientCommand::AttachDevelopmentPlugin { .. }
             | ClientCommand::DetachDevelopmentPlugin { .. }
     ) {
-        return Ok(CommandOutcome::Rejected {
+        return Ok(rw_core::HostReply::command(CommandOutcome::Rejected {
             error: EngineError {
                 category: EngineErrorCategory::Protocol,
                 code: "plugin_development_capability".to_owned(),
@@ -1096,7 +1093,7 @@ async fn dispatch_plugin_development(
                 retryable: false,
                 details: None,
             },
-        });
+        }));
     }
     engine
         .dispatch(command.meta().client_id.clone(), command)
@@ -1183,8 +1180,8 @@ fn sse_response(
     response
 }
 
-fn json_response(status: StatusCode, bytes: Vec<u8>) -> Response<HttpBody> {
-    let mut response = Response::new(Full::new(Bytes::from(bytes)).boxed_unsync());
+fn json_response(status: StatusCode, bytes: impl Into<Bytes>) -> Response<HttpBody> {
+    let mut response = Response::new(Full::new(bytes.into()).boxed_unsync());
     *response.status_mut() = status;
     response.headers_mut().insert(
         CONTENT_TYPE,

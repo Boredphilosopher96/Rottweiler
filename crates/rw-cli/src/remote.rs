@@ -586,7 +586,10 @@ async fn shutdown_authenticated_host_inner(
     if response.status() != StatusCode::ACCEPTED {
         return Err("remote engine rejected host shutdown".to_owned());
     }
-    match collect_control_json::<CommandOutcome>(response.into_body()).await? {
+    match collect_control_json::<rw_core::CommandReply>(response.into_body())
+        .await?
+        .outcome()
+    {
         CommandOutcome::Accepted => Ok(()),
         CommandOutcome::Rejected { error } => Err(format!(
             "remote engine rejected host shutdown: {}",

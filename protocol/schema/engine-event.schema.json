@@ -10,6 +10,54 @@
           "$ref": "#/$defs/CommandAckMeta"
         },
         "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "result": {
+          "$ref": "#/$defs/TranscriptReadResult"
+        },
+        "type": {
+          "type": "string",
+          "const": "transcript_page_ready"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "result"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "page": {
+          "$ref": "#/$defs/TranscriptContentPage"
+        },
+        "type": {
+          "type": "string",
+          "const": "transcript_content_ready"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "page"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
           "anyOf": [
             {
               "$ref": "#/$defs/SessionId"
@@ -2547,6 +2595,875 @@
       "description": "Stable identifier of an engine session.",
       "type": "string"
     },
+    "TranscriptReadResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "page": {
+              "$ref": "#/$defs/TranscriptPage"
+            },
+            "type": {
+              "type": "string",
+              "const": "ready"
+            }
+          },
+          "required": [
+            "type",
+            "page"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "through": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SequenceId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SequenceId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "catching_up"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "view": {
+              "$ref": "#/$defs/TranscriptView"
+            },
+            "type": {
+              "type": "string",
+              "const": "ordering_changed"
+            }
+          },
+          "required": [
+            "type",
+            "view"
+          ]
+        }
+      ]
+    },
+    "TranscriptPage": {
+      "type": "object",
+      "properties": {
+        "view": {
+          "$ref": "#/$defs/TranscriptView"
+        },
+        "first_ordinal": {
+          "$ref": "#/$defs/TranscriptOrdinal"
+        },
+        "total_items": {
+          "$ref": "#/$defs/TranscriptOrdinal"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TranscriptItem"
+          }
+        },
+        "anchor": {
+          "$ref": "#/$defs/TranscriptAnchor"
+        },
+        "invalidation": {
+          "$ref": "#/$defs/TranscriptInvalidation"
+        }
+      },
+      "required": [
+        "view",
+        "first_ordinal",
+        "total_items",
+        "items",
+        "anchor",
+        "invalidation"
+      ]
+    },
+    "TranscriptView": {
+      "description": "Exact canonical prefix interpreted by a complete semantic view.",
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "projection_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "generation": {
+          "$ref": "#/$defs/TranscriptGeneration"
+        },
+        "through": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "digest": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "minItems": 32,
+          "maxItems": 32
+        }
+      },
+      "required": [
+        "session_id",
+        "projection_version",
+        "generation",
+        "digest"
+      ]
+    },
+    "TranscriptGeneration": {
+      "description": "Current semantic ordering generation, changed by rewind.",
+      "type": "string"
+    },
+    "SequenceId": {
+      "description": "Monotonic per-session sequence encoded as a decimal string on the wire.",
+      "type": "string"
+    },
+    "TranscriptOrdinal": {
+      "description": "Logical row position, distinct from a canonical event sequence.",
+      "type": "string"
+    },
+    "TranscriptItem": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/TranscriptItemId"
+        },
+        "ordinal": {
+          "$ref": "#/$defs/TranscriptOrdinal"
+        },
+        "revision": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "agent_turn": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurnId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "content": {
+          "$ref": "#/$defs/TranscriptContent"
+        }
+      },
+      "required": [
+        "id",
+        "ordinal",
+        "revision",
+        "content"
+      ]
+    },
+    "TranscriptItemId": {
+      "description": "Stable item identity, independent of its current logical ordinal.",
+      "$ref": "#/$defs/SequenceId"
+    },
+    "TurnId": {
+      "description": "Stable identifier of a conversation turn.",
+      "type": "string"
+    },
+    "TranscriptContent": {
+      "description": "Bounded, renderer-independent content of one stable logical transcript row.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "role": {
+              "$ref": "#/$defs/Role"
+            },
+            "blocks": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/TranscriptConversationBlock"
+              }
+            },
+            "omitted_blocks": {
+              "type": "boolean"
+            },
+            "source": {
+              "$ref": "#/$defs/TranscriptContentSource"
+            },
+            "type": {
+              "type": "string",
+              "const": "conversation"
+            }
+          },
+          "required": [
+            "type",
+            "role",
+            "blocks",
+            "omitted_blocks",
+            "source"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "invocation_id": {
+              "$ref": "#/$defs/ToolInvocationId"
+            },
+            "name": {
+              "type": "string"
+            },
+            "call_index": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "arguments": {
+              "$ref": "#/$defs/TranscriptBodyPreview"
+            },
+            "diff": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TranscriptBodyPreview"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "$ref": "#/$defs/TranscriptToolStatus"
+            },
+            "type": {
+              "type": "string",
+              "const": "tool"
+            }
+          },
+          "required": [
+            "type",
+            "invocation_id",
+            "name",
+            "call_index",
+            "arguments",
+            "status"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "message": {
+              "$ref": "#/$defs/TranscriptBodyPreview"
+            },
+            "type": {
+              "type": "string",
+              "const": "command"
+            }
+          },
+          "required": [
+            "type",
+            "name",
+            "message"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TranscriptBodyPreview"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "output": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TranscriptBodyPreview"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "active": {
+              "type": "boolean"
+            },
+            "status": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            },
+            "type": {
+              "type": "string",
+              "const": "shell"
+            }
+          },
+          "required": [
+            "type",
+            "active"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "subagent_id": {
+              "$ref": "#/$defs/SubagentId"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "task": {
+              "$ref": "#/$defs/TranscriptBodyPreview"
+            },
+            "status": {
+              "$ref": "#/$defs/TranscriptSubagentStatus"
+            },
+            "type": {
+              "type": "string",
+              "const": "subagent"
+            }
+          },
+          "required": [
+            "type",
+            "subagent_id",
+            "session_id",
+            "task",
+            "status"
+          ]
+        }
+      ]
+    },
+    "Role": {
+      "description": "A provider-neutral role in the conversation IR.",
+      "type": "string",
+      "enum": [
+        "system",
+        "user",
+        "assistant",
+        "tool"
+      ]
+    },
+    "TranscriptConversationBlock": {
+      "description": "Displayable conversation content; provider continuation signatures stay in IR.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "body": {
+              "$ref": "#/$defs/TranscriptBodyPreview"
+            },
+            "type": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "required": [
+            "type",
+            "body"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "body": {
+              "$ref": "#/$defs/TranscriptBodyPreview"
+            },
+            "type": {
+              "type": "string",
+              "const": "reasoning"
+            }
+          },
+          "required": [
+            "type",
+            "body"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/TranscriptContentSource"
+            },
+            "type": {
+              "type": "string",
+              "const": "image"
+            }
+          },
+          "required": [
+            "type",
+            "source"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "body": {
+              "$ref": "#/$defs/TranscriptBodyPreview"
+            },
+            "type": {
+              "type": "string",
+              "const": "citation"
+            }
+          },
+          "required": [
+            "type",
+            "body"
+          ]
+        }
+      ]
+    },
+    "TranscriptBodyPreview": {
+      "description": "A bounded prefix with an authoritative source for the complete body.",
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "format": {
+          "$ref": "#/$defs/TranscriptPreviewFormat"
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "source": {
+          "$ref": "#/$defs/TranscriptContentSource"
+        }
+      },
+      "required": [
+        "text",
+        "format",
+        "complete",
+        "source"
+      ]
+    },
+    "TranscriptPreviewFormat": {
+      "description": "Preview syntax. Incomplete JSON is display text and must not be parsed as JSON.",
+      "type": "string",
+      "enum": [
+        "text",
+        "json"
+      ]
+    },
+    "TranscriptContentSource": {
+      "description": "Body location within the exact journal prefix carried by its enclosing view.",
+      "type": "object",
+      "properties": {
+        "sequence": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "selector": {
+          "$ref": "#/$defs/TranscriptContentSelector"
+        }
+      },
+      "required": [
+        "sequence",
+        "selector"
+      ]
+    },
+    "TranscriptContentSelector": {
+      "description": "A closed selector into one canonical event. It never names a filesystem path.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "conversation"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "index": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "conversation_block"
+            }
+          },
+          "required": [
+            "type",
+            "index"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "tool_arguments"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "tool_output"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "tool_diff"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "command_message"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "shell_command"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "shell_output"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "subagent_task"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "subagent_result"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "ToolInvocationId": {
+      "description": "Host-owned identity of one tool execution, independent of provider call IDs.",
+      "type": "string"
+    },
+    "TranscriptToolStatus": {
+      "description": "Tool invocation lifecycle independent of provider call/result IR placement.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "running"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "is_error": {
+              "type": "boolean"
+            },
+            "output": {
+              "$ref": "#/$defs/TranscriptBodyPreview"
+            },
+            "type": {
+              "type": "string",
+              "const": "finished"
+            }
+          },
+          "required": [
+            "type",
+            "is_error",
+            "output"
+          ]
+        }
+      ]
+    },
+    "SubagentId": {
+      "description": "Stable identifier of a child agent session.",
+      "type": "string"
+    },
+    "TranscriptSubagentStatus": {
+      "description": "Child lifecycle without retaining its full historical event projection.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "running"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "$ref": "#/$defs/SubagentStatus"
+            },
+            "result": {
+              "$ref": "#/$defs/TranscriptBodyPreview"
+            },
+            "type": {
+              "type": "string",
+              "const": "finished"
+            }
+          },
+          "required": [
+            "type",
+            "status",
+            "result"
+          ]
+        }
+      ]
+    },
+    "SubagentStatus": {
+      "description": "Terminal disposition of one child-agent invocation.",
+      "type": "string",
+      "enum": [
+        "completed",
+        "failed",
+        "cancelled",
+        "timed_out",
+        "max_turns"
+      ]
+    },
+    "TranscriptAnchor": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "unspecified"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "item": {
+              "$ref": "#/$defs/TranscriptItemId"
+            },
+            "type": {
+              "type": "string",
+              "const": "exact"
+            }
+          },
+          "required": [
+            "type",
+            "item"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "requested": {
+              "$ref": "#/$defs/TranscriptItemId"
+            },
+            "replacement": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TranscriptItemId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "replaced"
+            }
+          },
+          "required": [
+            "type",
+            "requested"
+          ]
+        }
+      ]
+    },
+    "TranscriptInvalidation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "all"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/TranscriptItemId"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "items"
+            }
+          },
+          "required": [
+            "type",
+            "items"
+          ]
+        }
+      ]
+    },
+    "TranscriptContentPage": {
+      "type": "object",
+      "properties": {
+        "view": {
+          "$ref": "#/$defs/TranscriptView"
+        },
+        "source": {
+          "$ref": "#/$defs/TranscriptContentSource"
+        },
+        "offset": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "next_offset": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "total_bytes": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "format": {
+          "$ref": "#/$defs/TranscriptPreviewFormat"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "view",
+        "source",
+        "offset",
+        "total_bytes",
+        "format",
+        "text"
+      ]
+    },
     "CommandOutcome": {
       "description": "Immediate disposition of a client command, delivered on the event channel.",
       "oneOf": [
@@ -2677,10 +3594,6 @@
         "cache_breakpoints",
         "items"
       ]
-    },
-    "TurnId": {
-      "description": "Stable identifier of a conversation turn.",
-      "type": "string"
     },
     "CacheBreakpoint": {
       "description": "One explicit cache boundary after an assembled item.",
@@ -3250,16 +4163,6 @@
         "meta"
       ]
     },
-    "Role": {
-      "description": "A provider-neutral role in the conversation IR.",
-      "type": "string",
-      "enum": [
-        "system",
-        "user",
-        "assistant",
-        "tool"
-      ]
-    },
     "Block": {
       "description": "A provider-neutral content block.",
       "oneOf": [
@@ -3593,10 +4496,6 @@
         "input_schema"
       ]
     },
-    "SequenceId": {
-      "description": "Monotonic per-session sequence encoded as a decimal string on the wire.",
-      "type": "string"
-    },
     "SessionDescriptor": {
       "description": "One active or resumable session returned by the engine host.",
       "type": "object",
@@ -3671,10 +4570,6 @@
         "isolation",
         "activity"
       ]
-    },
-    "SubagentId": {
-      "description": "Stable identifier of a child agent session.",
-      "type": "string"
     },
     "SubagentIsolation": {
       "description": "Filesystem isolation selected for one child agent.",
@@ -4604,10 +5499,6 @@
         "reason"
       ]
     },
-    "ToolInvocationId": {
-      "description": "Host-owned identity of one tool execution, independent of provider call IDs.",
-      "type": "string"
-    },
     "ToolProgress": {
       "description": "Replaceable display state; never authoritative tool output or a durable record.",
       "type": "object",
@@ -4954,17 +5845,6 @@
         "cost",
         "turns",
         "duration_millis"
-      ]
-    },
-    "SubagentStatus": {
-      "description": "Terminal disposition of one child-agent invocation.",
-      "type": "string",
-      "enum": [
-        "completed",
-        "failed",
-        "cancelled",
-        "timed_out",
-        "max_turns"
       ]
     },
     "DiffArtifact": {

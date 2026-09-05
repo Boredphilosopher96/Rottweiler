@@ -73,7 +73,7 @@ function createPlannedFetch(
     }
     if (url.pathname === "/v1/command") {
       harness.commands.push(JSON.parse(String(init?.body)) as ClientCommand)
-      return Response.json({ type: "accepted" }, { status: 202 })
+      return Response.json({ type: "command", outcome: { type: "accepted" } }, { status: 202 })
     }
     const plan = remaining.shift() ?? { chunks: [] }
     return new Response(
@@ -173,14 +173,14 @@ describe("authenticated UDS engine transport", () => {
         if (commandCount === 1) {
           return new Response("engine restarted", { status: 401 })
         }
-        return Response.json({ type: "accepted" }, { status: 202 })
+        return Response.json({ type: "command", outcome: { type: "accepted" } }, { status: 202 })
       }) as typeof fetch,
     })
 
     await expect(client.postCommand(attach)).rejects.toEqual(
       new EngineTransportError("engine command rejected", 401),
     )
-    expect(await client.postCommand(attach)).toEqual({ type: "accepted" })
+    expect(await client.postCommand(attach)).toEqual({ type: "command", outcome: { type: "accepted" } })
     expect(bootstrapHeaders).toEqual([
       "Bearer bootstrap-before-restart",
       "Bearer bootstrap-after-restart",
@@ -294,7 +294,7 @@ describe("authenticated UDS engine transport", () => {
           return Response.json({ client_id: "mock-client", token: "mock-token" }, { status: 201 })
         }
         if (url.pathname === "/v1/command") {
-          return Response.json({ type: "accepted" }, { status: 202 })
+          return Response.json({ type: "command", outcome: { type: "accepted" } }, { status: 202 })
         }
         eventPaths.push(`${url.pathname}${url.search}`)
         eventRequests += 1
@@ -638,7 +638,7 @@ describe("authenticated UDS engine transport", () => {
           return Response.json({ client_id: "mock-client", token: "mock-token" }, { status: 201 })
         }
         if (url.endsWith("/v1/command")) {
-          return Response.json({ type: "accepted" }, { status: 202 })
+          return Response.json({ type: "command", outcome: { type: "accepted" } }, { status: 202 })
         }
         controller.abort()
         return new Response(new ReadableStream<Uint8Array>(), {

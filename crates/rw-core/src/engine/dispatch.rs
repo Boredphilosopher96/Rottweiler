@@ -2424,7 +2424,9 @@ pub(super) async fn handle_actor_command(
                         completion,
                     );
                 }
-                ClientCommand::CreateSession { .. }
+                ClientCommand::ReadTranscript { .. }
+                | ClientCommand::ReadTranscriptContent { .. }
+                | ClientCommand::CreateSession { .. }
                 | ClientCommand::ResumeSession { .. }
                 | ClientCommand::Fork { .. }
                 | ClientCommand::GetSessionReview { .. }

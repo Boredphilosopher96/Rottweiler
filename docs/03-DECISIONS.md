@@ -754,3 +754,45 @@ authority. Resource-limited symbol results are explicitly partial.
 worktree isolation, shared index identity, external edit/add/delete reconciliation,
 unchanged generations, bounded ranked queries and production tool composition are
 covered by tests. Performance qualification remains separate from these invariants.
+
+---
+
+## ADR-033: Host reads return directly under byte-owned admission
+
+**Status:** accepted 2026-09-04.
+
+**Decision.** The authenticated command channel carries a source-owned read or
+control operation. `CommandReply::Read` contains its outcome and typed query
+results directly. A read never puts its payload into mutation deduplication or
+SSE. The request ledger retains only its authenticated identity and payload hash:
+an identical retry reads the current view, and a conflicting reuse is rejected.
+Control operations retain their acknowledgement and mutation settlement rules.
+
+The host admits at most eight reads globally and two per client, independently
+of 64 admitted control executions. Reads reserve the general 8 MiB encoded reply
+ceiling from a 32 MiB aggregate byte budget before executing. Encoding shrinks
+the reservation to the retained buffer capacity. The encoded bytes own admission
+until the last transport/body clone drops; the function returning does not free
+its budget. The general ceiling accommodates existing 5 MiB image previews;
+transcript pages and content chunks retain their smaller domain limits.
+
+Rust owns the command class, reply union, limits, event lifetimes and schema.
+The TUI validates a reply once at ingress using generated discriminated
+validators, checks authenticated request correlation, and forbids durable or
+transient events inside a read. Its decoder uses one amortized bounded byte
+buffer, so adversarial fragmentation cannot retain a lifetime chunk array.
+Direct results cannot advance the durable replay cursor. A session-generation
+change or cancelled request discards its late reply.
+
+**Alternatives.** Returning pages through command acknowledgement/SSE retains
+large values in unrelated lifetime caches and serializes them more than once.
+A second unauthenticated or method-specific history endpoint duplicates identity
+and admission rules. Count-only response admission does not account for live
+transport buffers after the query function returns.
+
+**Consequences.** Existing host query consumers move directly to typed replies;
+there is no old response adapter. Query services remain responsible for bounded
+work and decoded data before serialization. The reply reservation bounds encoded
+buffers, not arbitrary query implementations or client caches. Mutation cache
+ownership, historical projection catch-up, and viewport/cache limits are
+separate obligations; direct replies alone do not close A04 or A09.
