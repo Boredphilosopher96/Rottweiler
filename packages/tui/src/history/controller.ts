@@ -59,6 +59,7 @@ export class HistoryController {
   #following = true
   #disposed = false
   #revision = 0
+  readonly #cacheNamespace = crypto.randomUUID()
 
   constructor(reader: HistoryReader, changed: () => void, cache = new ClientCache<HistoryCacheValue>(), readonly diagnostics?: ClientDiagnostics) {
     this.#reader = reader
@@ -160,7 +161,7 @@ export class HistoryController {
         }
         if (session.view !== null && (page.view.generation !== session.view.generation
           || page.invalidation.type !== "none")) this.#invalidate(session)
-        const key = `${sessionId}:page:${++this.#revision}`
+        const key = `${this.#cacheNamespace}:${sessionId}:page:${++this.#revision}`
         if (!this.cache.insert(key, { kind: "page", page })) throw new Error("history cache is full with active readers")
         const lease = this.cache.lease(key)
         if (lease === null) throw new Error("admitted history page is unavailable")
@@ -239,8 +240,8 @@ export class HistoryController {
     this.#request?.abort()
     this.#active?.release()
     this.#active = null
+    for (const session of this.#sessions.values()) this.#invalidate(session)
     this.#sessions.clear()
-    this.cache.clear()
   }
 
   #current(request: AbortController, session: string): boolean {

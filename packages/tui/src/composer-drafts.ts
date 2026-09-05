@@ -24,6 +24,12 @@ function draftBytes(contentLength: number, attachments: readonly Attachment[]): 
 
 interface Entry { readonly draft: ComposerDraft; readonly bytes: number }
 interface Submission { readonly scope: string; readonly entry: Entry; active: boolean }
+export interface DraftTextReservation {
+  /** Transfer a completely read body into the submission/recovery owner. */
+  finish(text: string): DraftSubmission
+  cancel(): void
+}
+interface TextRead { readonly scope: string; readonly maximumTextBytes: number; readonly bytes: number; active: boolean }
 export interface DraftSubmission {
   readonly draft: ComposerDraft
   /** Settlement consumes this reservation exactly once, independently of the active scope. */
@@ -34,13 +40,14 @@ export interface DraftSubmission {
 export class ComposerDraftStore {
   readonly #drafts = new Map<string, Entry>()
   readonly #pending = new Set<Submission>()
+  readonly #reads = new Set<TextRead>()
   #bytes = 0
   constructor(readonly maximumBytes = MAX_CLIENT_DRAFT_BYTES, readonly maximumDrafts = MAX_CLIENT_DRAFTS) {
     if (!Number.isSafeInteger(maximumBytes) || maximumBytes <= 0 || !Number.isSafeInteger(maximumDrafts) || maximumDrafts <= 0) {
       throw new RangeError("invalid draft limits")
     }
   }
-  get usage() { return { bytes: this.#bytes, drafts: this.#drafts.size, pending: this.#pending.size } }
+  get usage() { return { bytes: this.#bytes, drafts: this.#drafts.size, pending: this.#pending.size + this.#reads.size } }
   get(scope: string): ComposerDraft { return this.#drafts.get(scope)?.draft ?? EMPTY }
   entries(): readonly { readonly scope: string; readonly draft: ComposerDraft }[] {
     return [...this.#drafts].map(([scope, entry]) => ({ scope, draft: entry.draft }))
@@ -51,14 +58,14 @@ export class ComposerDraftStore {
     const bytes = payload === 0 ? 0 : payload + scope.length * 2
     const previous = this.#drafts.get(scope)
     return this.#bytes - (previous?.bytes ?? 0) + bytes <= this.maximumBytes
-      && (bytes === 0 || previous !== undefined || this.#drafts.size + this.#pending.size < this.maximumDrafts)
+      && (bytes === 0 || previous !== undefined || this.#drafts.size + this.#pending.size + this.#reads.size < this.maximumDrafts)
   }
   set(scope: string, draft: ComposerDraft): boolean {
     if (!this.#attachmentsFit(scope, draft.attachments.length)) return false
     const old = this.#drafts.get(scope)
     const bytes = composerDraftBytes(draft) + (draft.content === "" && draft.attachments.length === 0 ? 0 : scope.length * 2)
     if (this.#bytes - (old?.bytes ?? 0) + bytes > this.maximumBytes
-      || (bytes > 0 && old === undefined && this.#drafts.size + this.#pending.size >= this.maximumDrafts)) return false
+      || (bytes > 0 && old === undefined && this.#drafts.size + this.#pending.size + this.#reads.size >= this.maximumDrafts)) return false
     this.#bytes += bytes - (old?.bytes ?? 0)
     if (bytes === 0) this.#drafts.delete(scope)
     else this.#drafts.set(scope, { draft: snapshot(draft), bytes })
@@ -71,6 +78,7 @@ export class ComposerDraftStore {
     return count <= MAX_ATTACHMENTS_PER_DRAFT
   }
   remove(scope: string): void {
+    for (const read of this.#reads) if (read.scope === scope) read.active = false
     for (const pending of this.#pending) if (pending.scope === scope) pending.active = false
     const entry = this.#drafts.get(scope)
     if (entry !== undefined) { this.#bytes -= entry.bytes; this.#drafts.delete(scope) }
@@ -79,11 +87,12 @@ export class ComposerDraftStore {
     for (const entry of this.#drafts.values()) this.#bytes -= entry.bytes
     this.#drafts.clear()
     // Accepted asynchronous work keeps its allocation charge until settlement.
+    for (const read of this.#reads) read.active = false
     for (const pending of this.#pending) pending.active = false
   }
 
   replace(drafts: readonly { readonly scope: string; readonly draft: ComposerDraft }[]): boolean {
-    if (this.#pending.size > 0) return false
+    if (this.#pending.size > 0 || this.#reads.size > 0) return false
     const candidate = new ComposerDraftStore(this.maximumBytes, this.maximumDrafts)
     for (const { scope, draft } of drafts) if (!candidate.set(scope, draft)) return false
     this.clear()
@@ -92,13 +101,51 @@ export class ComposerDraftStore {
     return true
   }
 
+  /** Reserve chunk storage, final joining and editable copies before reading source bodies. */
+  reserveText(scope: string, maximumTextBytes: number): DraftTextReservation | null {
+    if (!Number.isSafeInteger(maximumTextBytes) || maximumTextBytes < 0) return null
+    const bytes = 512 + scope.length * 2 + maximumTextBytes * 10
+    if (!Number.isSafeInteger(bytes) || this.#bytes + bytes > this.maximumBytes
+      || this.#drafts.size + this.#pending.size + this.#reads.size >= this.maximumDrafts
+      || this.#reads.size > 0 || this.#pending.size > 0) return null
+    const read: TextRead = { scope, maximumTextBytes, bytes, active: true }
+    this.#reads.add(read)
+    this.#bytes += bytes
+    let live = true
+    return {
+      cancel: () => {
+        if (!live) return
+        live = false
+        this.#reads.delete(read)
+        this.#bytes -= bytes
+      },
+      finish: text => {
+        if (!live) throw new Error("text read reservation has settled")
+        if (Buffer.byteLength(text) > maximumTextBytes) throw new Error("source text exceeds its reservation")
+        live = false
+        this.#reads.delete(read)
+        this.#bytes -= bytes
+        const draft = { content: text, attachments: [] }
+        const submission: Submission = { scope, active: read.active,
+          entry: { draft, bytes: ENTRY_BYTES + scope.length * 2 + text.length * 6 } }
+        this.#pending.add(submission)
+        this.#bytes += submission.entry.bytes
+        return this.#submission(submission)
+      },
+    }
+  }
+
   /** Transfer rather than duplicate the draft's capacity before asynchronous submission. */
   submit(scope: string): DraftSubmission | null {
     const entry = this.#drafts.get(scope)
-    if (entry === undefined || entry.draft.attachments.length > MAX_ATTACHMENTS_PER_MESSAGE || this.#pending.size > 0) return null
+    if (entry === undefined || entry.draft.attachments.length > MAX_ATTACHMENTS_PER_MESSAGE || this.#pending.size > 0 || this.#reads.size > 0) return null
     const submission = { scope, entry, active: true }
     this.#drafts.delete(scope)
     this.#pending.add(submission)
+    return this.#submission(submission)
+  }
+
+  #submission(submission: Submission): DraftSubmission {
     let live: Submission | null = submission
     return {
       get draft() { if (live === null) throw new Error("draft submission has settled"); return live.entry.draft },

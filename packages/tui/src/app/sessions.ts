@@ -9,7 +9,11 @@ import type { PickerController } from "../picker-controller"
 import type { ProjectionRequestBroker, ProjectionKind } from "../projection-requests"
 import type { Attachment, CommandOutcome, EngineEvent } from "../protocol"
 import { presentError } from "../render"
-import { isU64 } from "../session-commands"
+import type { ComposerDraftStore, DraftSubmission } from "../composer-drafts"
+import type { ClientCache } from "../history/cache"
+import type { HistoryCacheValue } from "../history/controller"
+import type { HistoryReader } from "../history/reader"
+import { TimelineController, readTimelineDraft, type TimelineChoice } from "../history/timeline"
 import type { RottweilerState } from "../state"
 import type { RottweilerTheme } from "../theme"
 import { isRecord } from "../transport"
@@ -17,6 +21,10 @@ import { boundedUiText, queuedMessageLabel, timelineTurnLabel } from "../ui-pres
 
 type SessionPickerKind = "timeline" | "timelineActions" | "queuedMessages" | "exportFormat" | "exportOverwrite" | "exportPath" | "sessions" | "sessionActions" | "sessionRename"
 interface SessionUiHost {
+  readonly historyReader: HistoryReader
+  readonly historyCache: ClientCache<HistoryCacheValue>
+  readonly drafts: ComposerDraftStore
+  readonly draftScope: string
   readonly state: RottweilerState
   readonly sessionId: string
   readonly picker: FuzzyPickerRenderable<unknown>
@@ -31,33 +39,21 @@ interface SessionUiHost {
   refresh(): void
   closePicker(): void
   selectSession(sessionId: string): void | Promise<void>
-  sendMessage(content: string, attachments: readonly Attachment[], preserveRewindIntent?: boolean): Promise<boolean>
+  sendMessage(content: string, attachments: readonly Attachment[]): Promise<boolean>
   projectError(code: string, message: string, retryable?: boolean): void
   projectRejection(outcome: Extract<CommandOutcome, { type: "rejected" }>): void
 }
 function safeErrorMessage(error: unknown): string {
   return error instanceof Error && error.message.length > 0 ? error.message : "the request could not be delivered to the engine"
 }
-interface TimelineTurnChoice {
-  readonly sequenceId: string
-  readonly agentTurn: string
-  readonly rewindTarget: string
-  readonly content: string
-  readonly hadAttachments: boolean
-}
-
-
 type TimelineAction = "edit" | "retry" | "rewind"
-
-
 interface PendingRewindIntent {
   readonly action: TimelineAction
-  readonly target: string
-  readonly content: string
+  readonly draft: DraftSubmission | null
+  readonly scope: string
   readonly hadAttachments: boolean
-  requestId: string | null
+  readonly requestId: string | null
 }
-
 
 type QueuedMessagePickerAction =
   | { readonly kind: "remove"; readonly position: string }
@@ -96,22 +92,6 @@ const EXPORT_FORMAT_CHOICES: readonly {
 ]
 
 
-function timelineUserMessage(turn: RottweilerState["transcript"][number]["turn"]): {
-  readonly content: string
-  readonly hadAttachments: boolean
-} {
-  const first = turn.blocks[0]
-  if (first?.type !== "text") {
-    return { content: "", hadAttachments: turn.blocks.length > 0 }
-  }
-  const firstIsTextAttachment = /^Attached file .+ \([^\n]+\):\n/.test(first.text)
-  return {
-    content: firstIsTextAttachment ? "" : first.text,
-    hadAttachments: firstIsTextAttachment || turn.blocks.length > 1,
-  }
-}
-
-
 function expandLeadingHome(path: string): string {
   if (path === "~") return homedir()
   return path.startsWith("~/") ? `${homedir()}${path.slice(1)}` : path
@@ -124,15 +104,26 @@ export class SessionUiController {
   #sessionSearchTimer: ReturnType<typeof setTimeout> | null = null
   #exportNoticeTimer: ReturnType<typeof setTimeout> | null = null
   #sessionActionId: string | null = null
-  #timelineTurn: TimelineTurnChoice | null = null
+  #timelineTurn: TimelineChoice | null = null
   #pendingRewindIntent: PendingRewindIntent | null = null
   #pendingExport: PendingExport | null = null
+  #timeline: TimelineController | null = null
+  #rewindRead: AbortController | null = null
+  #retrying = false
   constructor(host: SessionUiHost) { this.#host = host }
-  get pending(): boolean { return this.#pendingRewindIntent !== null || this.#pendingExport !== null || this.#pendingSessionCreateRequestId !== null }
-  clearRewind(): boolean { const pending = this.#pendingRewindIntent !== null; this.#pendingRewindIntent = null; return pending }
-  bindRewindRequest(requestId: string): void { if (this.#pendingRewindIntent !== null) this.#pendingRewindIntent.requestId = requestId }
-  pickerClosed(): void { this.#sessionActionId = null; this.clearSessionSearchTimer() }
-  reset(): void { this.#timelineTurn = null; this.#pendingRewindIntent = null; this.#pendingExport = null; this.#pendingSessionCreateRequestId = null; this.pickerClosed(); this.clearExportNotice() }
+  get pending(): boolean { return this.#retrying || this.#rewindRead !== null || this.#pendingRewindIntent !== null || this.#pendingExport !== null || this.#pendingSessionCreateRequestId !== null }
+  clearRewind(): boolean {
+    const pending = this.#pendingRewindIntent !== null || this.#rewindRead !== null
+    this.#rewindRead?.abort(); this.#rewindRead = null
+    this.#pendingRewindIntent?.draft?.settle(true)
+    this.#pendingRewindIntent = null
+    return pending
+  }
+  pickerClosed(): void {
+    this.#sessionActionId = null; this.clearSessionSearchTimer()
+    this.#timeline?.dispose(); this.#timeline = null; this.#timelineTurn = null
+  }
+  reset(): void { this.#timelineTurn = null; this.clearRewind(); this.#pendingExport = null; this.#pendingSessionCreateRequestId = null; this.pickerClosed(); this.clearExportNotice() }
   afterEvent(event: EngineEvent, eventRecord: Record<string, unknown>, commandRequestId: string | null, next: RottweilerState): void {
     const pendingRewind = this.#pendingRewindIntent
     const causedBy = isRecord(eventRecord.meta) && typeof eventRecord.meta.caused_by === "string"
@@ -170,32 +161,20 @@ export class SessionUiController {
       commandRequestId === pendingRewind.requestId &&
       rewindAckOutcome?.type === "rejected"
     ) {
-      this.#pendingRewindIntent = null
+      this.clearRewind()
       this.#host.projectRejection(rewindAckOutcome)
     } else if (
-      pendingRewind !== null &&
-      event.type === "error" &&
-      (causedBy === null || causedBy === pendingRewind.requestId)
+      pendingRewind !== null && event.type === "error" && causedBy === pendingRewind.requestId
     ) {
-      this.#pendingRewindIntent = null
+      this.clearRewind()
     } else if (
-      pendingRewind !== null &&
-      event.type === "conversation_rewound" &&
-      event.to_agent_turn === pendingRewind.target &&
-      (causedBy === null || causedBy === pendingRewind.requestId)
+      pendingRewind !== null && event.type === "conversation_rewound"
+      && pendingRewind.requestId !== null && causedBy === pendingRewind.requestId
     ) {
-      // Clear before applying the follow-up so a duplicate durable event cannot fire it twice.
+      // Matching durable causation consumes the follow-up exactly once.
       this.#pendingRewindIntent = null
-      if (pendingRewind.action === "edit") {
-        this.#host.composer.value = pendingRewind.content
-        this.#host.composerNotice = pendingRewind.hadAttachments
-          ? "attachments from the original message are not restored"
-          : null
-        this.#host.composer.focus()
-        this.#host.refresh()
-      } else if (pendingRewind.action === "retry") {
-        void this.#host.sendMessage(pendingRewind.content, [])
-      }
+      if (pendingRewind.action === "edit") this.#restoreTimelineDraft(pendingRewind)
+      else if (pendingRewind.action === "retry") void this.#retryTimelineDraft(pendingRewind)
     }
     const pendingExport = this.#pendingExport
     if (
@@ -222,9 +201,20 @@ export class SessionUiController {
       )
     }
   }
-  openTimelinePicker(): void {
+  get timelineRestorable(): boolean {
+    const snapshot = this.#timeline?.history.snapshot
+    const selected = this.#host.picker.select.getSelectedOption()?.value
+    return snapshot !== undefined && !snapshot.loading && snapshot.error === null
+      && (snapshot.total === 0n || (typeof selected === "string" && /^timeline\.turn\.[0-9]+$/.test(selected)))
+  }
+  openTimelinePicker(anchor?: string): void {
     this.#timelineTurn = null
     this.#host.pickerController.begin("timeline")
+    this.#timeline?.dispose()
+    this.#timeline = new TimelineController(this.#host.historyReader, this.#host.historyCache, () => {
+      if (this.#host.pickerController.kind === "timeline") this.#host.pickerController.refresh()
+    })
+    void this.#timeline.open(this.#host.sessionId, anchor)
     this.#host.pickerController.refresh()
   }
 
@@ -405,27 +395,6 @@ export class SessionUiController {
     this.#exportNoticeTimer = null
   }
 
-  #timelineTurns(): readonly TimelineTurnChoice[] {
-    return this.#host.state.transcript
-      .filter(
-        (entry) =>
-          entry.turn.role === "user" &&
-          this.#host.state.turns[entry.agentTurn]?.status !== "running" &&
-          isU64(entry.agentTurn),
-      )
-      .map((entry) => {
-        const message = timelineUserMessage(entry.turn)
-        return {
-          sequenceId: entry.sequenceId,
-          agentTurn: entry.agentTurn,
-          rewindTarget: (BigInt(entry.agentTurn) - 1n).toString(),
-          content: message.content,
-          hadAttachments: message.hadAttachments,
-        }
-      })
-      .reverse()
-  }
-
   #timelineTurnDescription(agentTurn: string, readOnly: boolean): string {
     const tools = Object.values(this.#host.state.tools).filter((tool) => tool.turnId === agentTurn)
     const edits = tools.filter((tool) => tool.diff !== null).length
@@ -436,32 +405,61 @@ export class SessionUiController {
     return detail.join(" · ")
   }
 
-  async #startRewindIntent(turn: TimelineTurnChoice, action: TimelineAction): Promise<void> {
-    const target = action === "rewind" ? turn.agentTurn : turn.rewindTarget
-    const intent: PendingRewindIntent = {
-      action,
-      target,
-      content: turn.content,
-      hadAttachments: turn.hadAttachments,
-      requestId: null,
-    }
-    this.#pendingRewindIntent = intent
+  async #startRewindIntent(turn: TimelineChoice, action: TimelineAction): Promise<void> {
+    if (this.#host.state.replay.active || this.#host.draftScope !== "parent" || this.#retrying) return
+    this.clearRewind()
+    const request = new AbortController()
+    this.#rewindRead = request
+    const scope = this.#host.draftScope
+    let draft: DraftSubmission | null = null
     try {
-      const accepted = await this.#host.sendMessage(`/rewind ${target}`, [], true)
-      if (!accepted && this.#pendingRewindIntent === intent) this.#pendingRewindIntent = null
-    } catch (error) {
+      if (turn.view.through === null) throw new Error("The selected source has no committed history prefix.")
+      if (action !== "rewind") draft = await readTimelineDraft(this.#host.historyReader, turn, this.#host.drafts, scope, request.signal)
+      request.signal.throwIfAborted()
+      if (this.#host.destroyed || this.#host.sessionId !== turn.view.session_id || this.#host.draftScope !== scope) {
+        draft?.settle(true); return
+      }
+      const meta = this.#host.requests.meta()
+      const intent: PendingRewindIntent = { action, draft, scope, hadAttachments: turn.hadAttachments, requestId: meta.request_id }
+      this.#pendingRewindIntent = intent
+      this.#rewindRead = null
+      const outcome = await this.#host.requests.emit({ type: "rewind", meta, session_id: turn.view.session_id,
+        target: { type: "source", expected_through: turn.view.through, source: turn.sequenceId,
+          turn_id: turn.agentTurn, position: action === "rewind" ? "through" : "before" } })
       if (this.#pendingRewindIntent !== intent) return
+      if (outcome?.type !== "accepted") {
+        this.clearRewind()
+        if (outcome?.type === "rejected") this.#host.projectRejection(outcome)
+        else throw new Error("The engine connection is unavailable.")
+      }
+    } catch (error) {
+      draft?.settle(true)
+      if (request.signal.aborted) return
       this.#pendingRewindIntent = null
-      this.#host.projectError(
-        "rewind_failed",
-        presentError({
-          category: "protocol",
-          code: "rewind_failed",
-          message: safeErrorMessage(error),
-        }).text,
-        true,
-      )
+      this.#host.projectError("rewind_failed", safeErrorMessage(error), true)
+    } finally {
+      if (this.#rewindRead === request) this.#rewindRead = null
     }
+  }
+
+  #restoreTimelineDraft(intent: PendingRewindIntent): void {
+    const restored = intent.draft?.settle(false)
+    if (restored == null || this.#host.destroyed || this.#host.draftScope !== intent.scope) return
+    this.#host.composer.restoreDraft(restored.content, restored.attachments)
+    this.#host.composerNotice = intent.hadAttachments ? "attachments from the original message are not restored" : null
+    this.#host.composer.focus()
+    this.#host.refresh()
+  }
+
+  async #retryTimelineDraft(intent: PendingRewindIntent): Promise<void> {
+    if (intent.draft === null) return
+    this.#retrying = true
+    try {
+      const accepted = await this.#host.sendMessage(intent.draft.draft.content, [])
+      if (accepted) intent.draft.settle(true)
+      else this.#restoreTimelineDraft(intent)
+    } catch { this.#restoreTimelineDraft(intent) }
+    finally { this.#retrying = false }
   }
 
   scheduleSessionSearch(query: string): void {
@@ -488,17 +486,18 @@ export class SessionUiController {
   render(kind: SessionPickerKind): void {
     switch (kind) {
       case "timeline": {
-        const turns = this.#timelineTurns()
-        if (turns.length === 0) {
+        const timeline = this.#timeline
+        const turns = timeline?.choices ?? []
+        if (turns.length === 0 && !timeline?.older && !timeline?.newer) {
           this.#host.pickerController.showStatus(
             "Conversation timeline",
-            "No completed user turns",
+            timeline?.history.snapshot.loading ? "Loading conversation history" : timeline?.history.snapshot.error ?? "No user turns",
             this.#host.state.replay.active ? "read-only session" : "Send a message to create a checkpoint.",
           )
           break
         }
         const readOnly = this.#host.state.replay.active
-        const items: PickerItem<TimelineTurnChoice | null>[] = [
+        const items: PickerItem<TimelineChoice | "older" | "newer" | null>[] = [
           ...(readOnly
             ? [{
                 id: "timeline.read-only",
@@ -508,15 +507,19 @@ export class SessionUiController {
                 selectable: false,
               }]
             : []),
+          ...(timeline?.newer ? [{ id: "timeline.newer", label: "Newer history", description: "Read the next page", value: "newer" as const }] : []),
+          ...(timeline?.older ? [{ id: "timeline.older", label: "Older history", description: "Read the previous page", value: "older" as const }] : []),
           ...turns.map((turn) => ({
             id: `timeline.turn.${turn.sequenceId}`,
-            label: timelineTurnLabel(turn.content),
+            label: timelineTurnLabel(turn.preview),
             description: this.#timelineTurnDescription(turn.agentTurn, readOnly),
             value: turn,
             selectable: !readOnly,
           })),
         ]
         this.#host.pickerController.show("Conversation timeline", items, (item) => {
+          if (item.value === "older") { void timeline?.previous(); return }
+          if (item.value === "newer") { void timeline?.next(); return }
           if (item.value === null || readOnly) return
           this.#timelineTurn = item.value
           this.#host.pickerController.kind = "timelineActions"

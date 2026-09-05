@@ -1160,6 +1160,7 @@ function applyKnownEvent(
       }
     case "session_title_updated":
       return projectSessionTitleUpdate(state, event)
+    case "extension_state_committed":
     case "provider_call_accounted":
     case "compaction_attempt_finished":
     case "tool_output_pruned":

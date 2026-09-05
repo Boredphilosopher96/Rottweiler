@@ -33,6 +33,7 @@ test("provider receipts advance the durable cursor without duplicating turn disp
     meta: meta("1"),
     call: {
       session_id: "session-accounting",
+      budget_session_id: "session-accounting",
       turn_id: "turn-accounting",
       attribution: "main",
       call_id: "provider-call-accounting",

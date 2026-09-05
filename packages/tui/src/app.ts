@@ -341,6 +341,9 @@ export class RottweilerApp extends BoxRenderable {
       projectRejection: outcome => this.#projectRejection(outcome),
     })
     this.#sessions = new SessionUiController({
+      historyReader: options.historyReader, historyCache: this.#history.controller.cache,
+      drafts: this.#children.draftStore,
+      get draftScope() { return app.#children.composerScope() },
       get state() { return app.#state }, get sessionId() { return app.#sessionId },
       get picker() { return app.picker }, get composer() { return app.composer },
       get banner() { return app.banner }, get theme() { return app.#theme },
@@ -349,7 +352,7 @@ export class RottweilerApp extends BoxRenderable {
       pickerController: this.#pickerController, requests: this.#projectionRequests,
       refresh: () => this.setState(this.#state), closePicker: () => this.closePicker(),
       selectSession: id => this.#options.onSessionSelect?.(id),
-      sendMessage: (content, attachments, preserve) => this.#submission.sendMessage(content, attachments, preserve),
+      sendMessage: (content, attachments) => this.#submission.sendMessage(content, attachments),
       projectError: (code, message, retryable) => this.#projectClientError(code, message, retryable),
       projectRejection: outcome => this.#projectRejection(outcome),
     })

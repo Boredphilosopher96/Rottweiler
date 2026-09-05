@@ -107,6 +107,7 @@ export class ClientRestoreController {
       || this.host.providers.hasPendingAction
       || this.host.ui.state.providerAuth.pending !== null || this.host.mcp.hasDraft
       || this.host.sessions.pending
+      || (kind === "timeline" && !this.host.sessions.timelineRestorable)
       || this.host.reviewOpen || this.host.ui.outputViewer.visible || this.host.ui.interactionPanel.visible
       || (kind !== null && !isRestorablePicker(kind))) return null
     const history = this.host.ui.transcript.captureHistoryViewport()
@@ -170,7 +171,7 @@ export class ClientRestoreController {
         case "sessions": this.host.ui.openSessionPicker(); break
         case "settings": this.host.ui.openSettingsPicker(); break
         case "agents": this.host.ui.openSubagentPicker(); break
-        case "timeline": this.host.ui.openTimelinePicker(); break
+        case "timeline": this.host.sessions.openTimelinePicker(picker.selectedId?.match(/^timeline\.turn\.([0-9]+)$/)?.[1]); break
         case "themes": this.host.ui.openThemePicker(); break
       }
       this.host.pickerController.begin(picker.kind, picker.anchored, picker.query)

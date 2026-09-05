@@ -72,13 +72,10 @@ export class SubmissionController {
   async sendMessage(
     content: string,
     attachments: readonly Attachment[],
-    preserveRewindIntent = false,
   ): Promise<boolean> {
     const scope = this.#scope
-    if (!preserveRewindIntent) {
-      this.host.sessions.clearRewind()
-      this.clearComposerNotice()
-    }
+    this.host.sessions.clearRewind()
+    this.clearComposerNotice()
     if (this.host.ui.state.replay.active) {
       return false
     }
@@ -266,7 +263,6 @@ export class SubmissionController {
       return await this.requestFork(sessionAction.atTurn)
     }
     const meta = this.host.requests.meta()
-    if (preserveRewindIntent) this.host.sessions.bindRewindRequest(meta.request_id)
     const outcome = await this.host.requests.emit({
       type: "send_message",
       meta,
@@ -474,10 +470,9 @@ export class SubmissionController {
     }
     this.host.onComposerInput?.(value)
     this.host.ui.transcript.clearBlockSelection()
-    const hadPendingIntent = this.host.sessions.clearRewind()
     const hadNotice = this.#composerNotice !== null
     this.#composerNotice = null
-    if ((hadPendingIntent || hadNotice) && !this.host.destroyed) this.host.ui.setState(this.host.ui.state)
+    if (hadNotice && !this.host.destroyed) this.host.ui.setState(this.host.ui.state)
     this.host.pickerContent.updateComposerAutocomplete(value)
   }
 

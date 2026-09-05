@@ -62,3 +62,13 @@ The HTTP transport owns one FIFO for every direct read, including history, catal
 Active and waiting requests share a 32-entry, 1 MiB retained-request allowance. Admission measures a bounded JSON traversal before cloning the request; the charge covers the immutable snapshot and worst-case JSON escaping and encoding. Caller mutation cannot change an admitted request. Queue overflow rejects the request without dispatch. Aborting a waiting request removes it immediately; an active request retains admission until its HTTP operation settles. Runtime stop and session changes abort their owned reads.
 
 Opt-in local diagnostics record `read_queue_age` in fixed counters and histogram buckets. Measurements contain no command names, session IDs, or payloads.
+
+## Timeline actions
+
+The conversation timeline reads semantic pages through the same charged cache as the transcript. Each page exposes older/newer navigation. Selecting a committed user source retains its exact view prefix and source identity; a source can be browsed even when the actor cannot currently rewind it.
+
+Edit and retry read the complete first message-text block through its typed content selector. The draft owner reserves chunk, join and editable-text capacity before continuation reads. Capacity refusal or a changed content source stops the operation before a history mutation is dispatched. Original attachments are explicitly excluded from these text actions. A failed retry or edit completion merges the retained source text with any newly typed draft instead of overwriting it.
+
+A source rewind includes the expected committed prefix, committed user source sequence, turn identity and a before/through boundary position. The actor checks these inputs inside serialized mutation admission. Reused turn numbers and stale client pages cannot select another effective source. The client applies edit/retry follow-up only after the corresponding durable rewind event carries the exact request identity. A before action without an earlier completed workspace boundary is unavailable.
+
+Timeline handoff restores the selected source through an around read. Unresolved reads and navigation controls without a selected source defer renderer replacement. Independent history readers have distinct cache key namespaces; disposing one releases only its pages and leases.
