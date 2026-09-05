@@ -28,6 +28,7 @@ pub(super) type ActorResumeBuilder = dyn Fn(&SessionId, &Path, &SubagentRecovery
 pub struct ActorSubagentSessionFactory {
     builder: Arc<ActorConfigBuilder>,
     rebuilder: Option<Arc<ActorResumeBuilder>>,
+    recovery_policies: Arc<tokio::sync::Semaphore>,
 }
 
 /// Isolation wrapper for the production actor factory. A lease remains bound
@@ -86,7 +87,7 @@ impl SubagentSessionFactory for WorktreeSubagentSessionFactory {
         session_id: &SessionId,
         workspace_root: Option<&Path>,
         worktree: Option<&WorktreeLeaseRecord>,
-        allowed_tools: Option<&ToolRegistry>,
+        allowed_tools: Option<Arc<ToolRegistry>>,
         policy: &SubagentRecoveryPolicy,
     ) -> Result<Option<Arc<dyn SubagentSession>>, OrchestrationError> {
         let Some(record) = worktree else {
@@ -204,6 +205,9 @@ impl ActorSubagentSessionFactory {
         Self {
             builder: Arc::new(builder),
             rebuilder: None,
+            recovery_policies: Arc::new(tokio::sync::Semaphore::new(
+                super::deferred_actor::POLICY_BUDGET,
+            )),
         }
     }
 
@@ -256,19 +260,26 @@ impl SubagentSessionFactory for ActorSubagentSessionFactory {
         session_id: &SessionId,
         workspace_root: Option<&Path>,
         _worktree: Option<&WorktreeLeaseRecord>,
-        allowed_tools: Option<&ToolRegistry>,
+        allowed_tools: Option<Arc<ToolRegistry>>,
         policy: &SubagentRecoveryPolicy,
     ) -> Result<Option<Arc<dyn SubagentSession>>, OrchestrationError> {
         let (Some(rebuilder), Some(workspace_root)) = (&self.rebuilder, workspace_root) else {
             return Ok(None);
         };
+        let policy_permit = super::deferred_actor::admit_policy(
+            &self.recovery_policies,
+            session_id,
+            workspace_root,
+            policy,
+        )?;
         Ok(Some(Arc::new(
             super::deferred_actor::DeferredActorSession::new(
                 Arc::clone(rebuilder),
                 session_id.clone(),
                 workspace_root.to_path_buf(),
-                allowed_tools.map(|tools| Arc::new(tools.clone())),
+                allowed_tools,
                 policy.clone(),
+                policy_permit,
             ),
         )))
     }

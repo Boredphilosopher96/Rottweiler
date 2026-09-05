@@ -8,9 +8,9 @@ use std::{
 
 use async_trait::async_trait;
 use rw_tools::{
-    CancellationToken, CapabilityManifest, DiffArtifactAuthority, SubagentEventSink,
-    SubagentLifecycleEvent, SubagentProgressEvent, Tool, ToolContext, ToolDescriptor, ToolError,
-    ToolRegistry, ToolResult, WorkspaceBinding, WorktreeIsolation, WorktreeLeaseRecord,
+    CancellationToken, CapabilityManifest, SubagentEventSink, SubagentLifecycleEvent,
+    SubagentProgressEvent, Tool, ToolContext, ToolDescriptor, ToolError, ToolRegistry, ToolResult,
+    WorkspaceBinding, WorktreeIsolation, WorktreeLeaseRecord,
 };
 #[cfg(test)]
 use rw_types::config::PermissionDecision;
@@ -142,7 +142,7 @@ impl SubagentSessionFactory for FakeFactory {
         session_id: &SessionId,
         _workspace_root: Option<&Path>,
         _worktree: Option<&WorktreeLeaseRecord>,
-        _allowed_tools: Option<&ToolRegistry>,
+        _allowed_tools: Option<Arc<ToolRegistry>>,
         _policy: &SubagentRecoveryPolicy,
     ) -> Result<Option<Arc<dyn SubagentSession>>, OrchestrationError> {
         Ok(Some(Arc::new(FakeSession {

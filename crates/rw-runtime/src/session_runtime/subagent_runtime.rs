@@ -62,7 +62,7 @@ impl SubagentSessionFactory for RuntimeSubagentSessionFactory {
         session_id: &SessionId,
         workspace_root: Option<&Path>,
         worktree: Option<&WorktreeLeaseRecord>,
-        allowed_tools: Option<&ToolRegistry>,
+        allowed_tools: Option<Arc<ToolRegistry>>,
         policy: &rw_core::SubagentRecoveryPolicy,
     ) -> std::result::Result<Option<Arc<dyn rw_core::SubagentSession>>, rw_core::OrchestrationError>
     {

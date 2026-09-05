@@ -44,7 +44,7 @@ async fn rebind(
             &SessionId("child".into()),
             Some(root),
             None,
-            Some(&ToolRegistry::new()),
+            Some(Arc::new(ToolRegistry::new())),
             &policy(),
         )
         .await
@@ -164,4 +164,56 @@ async fn dropped_activation_retains_preparation_and_close_waits_for_it() {
         .expect("close timeout")
         .expect("close task")
         .expect("proven close");
+}
+
+#[tokio::test]
+async fn dormant_policy_admission_is_shared_and_released_only_on_close() {
+    let factory = ActorSubagentSessionFactory::new(|_| unreachable!())
+        .with_rebuilder(|_, _, _| unreachable!("dormant builder"));
+    let root = tempfile::tempdir().expect("root");
+    let mut policy = policy();
+    policy.system_prompt = Some("x".repeat(512 * 1024));
+    let tools = Arc::new(ToolRegistry::new());
+    let mut children = Vec::new();
+    for index in 0..256 {
+        match factory
+            .rebind(
+                &SessionId(format!("child-{index}")),
+                Some(root.path()),
+                None,
+                Some(tools.clone()),
+                &policy,
+            )
+            .await
+        {
+            Ok(Some(child)) => children.push(child),
+            Err(error) => {
+                assert!(error.to_string().contains("policy allocation budget"));
+                break;
+            }
+            Ok(None) => panic!("factory must support recovery"),
+        }
+    }
+    assert!(!children.is_empty() && children.len() < 256);
+    children
+        .pop()
+        .expect("admitted child")
+        .close(None)
+        .await
+        .expect("close releases policy");
+    let replacement = factory
+        .rebind(
+            &SessionId("replacement".into()),
+            Some(root.path()),
+            None,
+            Some(tools),
+            &policy,
+        )
+        .await
+        .expect("released admission")
+        .expect("replacement");
+    replacement.close(None).await.expect("close");
+    for child in children {
+        child.close(None).await.expect("close");
+    }
 }

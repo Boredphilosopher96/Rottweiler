@@ -8,10 +8,7 @@ use rw_tools::{
     CancellationToken, CapabilityManifest, McpToolPolicy, ToolRegistry, WorktreeLeaseRecord,
     validate_mcp_virtual_tool,
 };
-use rw_types::{
-    Cost, SessionId, SubagentDescriptor, SubagentId, SubagentIsolation, SubagentResult,
-    SubagentStatus,
-};
+use rw_types::{Cost, SessionId, SubagentDescriptor, SubagentId, SubagentResult, SubagentStatus};
 use tokio::sync::{Semaphore, watch};
 
 use super::{
@@ -741,7 +738,7 @@ impl SubagentOrchestrator {
                 &record.handle.session_id,
                 Some(&record.workspace_root),
                 record.worktree.as_ref(),
-                Some(&allowed_tools),
+                Some(allowed_tools),
                 &record.policy,
             )
             .await?

@@ -701,7 +701,7 @@ impl rw_core::SubagentSessionFactory for RecoveryProbeFactory {
         session_id: &SessionId,
         _workspace_root: Option<&Path>,
         _worktree: Option<&WorktreeLeaseRecord>,
-        _allowed_tools: Option<&ToolRegistry>,
+        _allowed_tools: Option<Arc<ToolRegistry>>,
         _policy: &rw_core::SubagentRecoveryPolicy,
     ) -> std::result::Result<Option<Arc<dyn rw_core::SubagentSession>>, rw_core::OrchestrationError>
     {

@@ -202,11 +202,6 @@ pub(super) async fn recover_subagent_tree(
                 .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
             after = page.next;
             for (mut record, _) in page.records {
-                if records.len() == rw_core::MAX_RETAINED_SUBAGENTS {
-                    return Err(AgentLoopError::Persistence(
-                        "subagent recovery child capacity exceeded".into(),
-                    ));
-                }
                 if record.depth != expected_depth || record.depth > max_depth {
                     return Err(AgentLoopError::Persistence(format!(
                         "persisted child depth {} does not match expected depth {expected_depth} or configured maximum {max_depth}",
@@ -240,6 +235,11 @@ pub(super) async fn recover_subagent_tree(
                     .await?
                 {
                     continue;
+                }
+                if records.len() == rw_core::MAX_RETAINED_SUBAGENTS {
+                    return Err(AgentLoopError::Persistence(
+                        "subagent recovery child capacity exceeded".into(),
+                    ));
                 }
                 let child_root = if let Some(lease) = record.worktree.as_ref() {
                     let manager = worktree_manager.ok_or_else(|| {

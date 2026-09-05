@@ -1,5 +1,5 @@
 #[cfg(not(unix))]
-use std::fs;
+use std::fs::{self, OpenOptions};
 #[cfg(unix)]
 use std::os::fd::OwnedFd;
 #[cfg(not(unix))]

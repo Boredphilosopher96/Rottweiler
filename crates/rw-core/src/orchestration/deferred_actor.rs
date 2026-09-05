@@ -13,7 +13,32 @@ use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
 };
-use tokio::sync::watch;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
+
+pub(super) const POLICY_BUDGET: usize = 32 * 1024 * 1024;
+pub(super) fn admit_policy(
+    budget: &Arc<Semaphore>,
+    session: &SessionId,
+    workspace: &std::path::Path,
+    policy: &SubagentRecoveryPolicy,
+) -> Result<OwnedSemaphorePermit, OrchestrationError> {
+    // The recipe's strings are cloned only after admission. Reserve both the
+    // recipe and the policy copies used while its blocking builder runs.
+    let bytes = std::mem::size_of::<Recipe>()
+        .saturating_add(session.0.len())
+        .saturating_add(workspace.as_os_str().len())
+        .saturating_add(policy.model_alias.len())
+        .saturating_add(policy.system_prompt.as_ref().map_or(0, String::len))
+        .saturating_mul(3);
+    let charge = u32::try_from(bytes).map_err(|_| policy_exhausted())?;
+    budget
+        .clone()
+        .try_acquire_many_owned(charge)
+        .map_err(|_| policy_exhausted())
+}
+fn policy_exhausted() -> OrchestrationError {
+    OrchestrationError::Session("child recovery policy allocation budget exhausted".into())
+}
 
 pub(super) struct DeferredActorSession {
     id: SessionId,
@@ -42,6 +67,7 @@ struct Recipe {
     workspace: PathBuf,
     tools: Option<Arc<ToolRegistry>>,
     policy: SubagentRecoveryPolicy,
+    _policy_permit: OwnedSemaphorePermit,
 }
 impl Recipe {
     fn prepare(&self) -> Result<crate::SessionActorConfig, OrchestrationError> {
@@ -70,6 +96,7 @@ impl DeferredActorSession {
         workspace: PathBuf,
         tools: Option<Arc<ToolRegistry>>,
         policy: SubagentRecoveryPolicy,
+        policy_permit: OwnedSemaphorePermit,
     ) -> Self {
         Self {
             id: session.clone(),
@@ -81,6 +108,7 @@ impl DeferredActorSession {
                     workspace,
                     tools,
                     policy,
+                    _policy_permit: policy_permit,
                 })),
             })),
         }
