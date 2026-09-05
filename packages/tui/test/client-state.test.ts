@@ -136,7 +136,9 @@ describe("client-owned renderer handoff", () => {
     let finish!: () => void
     const pending = new Promise<void>(resolve => { finish = resolve })
     const app = createRottweilerApp(renderer, { sessionReader: {
-      todos: async () => ({ type: "ready", todos: { through: "1000", snapshot: { items: [] } } }),
+      uiCatalog: async () => ({ entries: [] }),
+  uiPanels: async () => ({ panels: [] }),
+  todos: async () => ({ type: "ready", todos: { through: "1000", snapshot: { items: [] } } }),
       page: async (session, read) => {
         if (read.position.type === "first") await pending
         return { type: "ready", page: fixturePage(session, read) }

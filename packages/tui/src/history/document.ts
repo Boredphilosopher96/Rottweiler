@@ -1,3 +1,4 @@
+import type { UiActionLease } from "../ui/actions"
 import { readToolSurface } from "./tool-surface"
 import type { UiSurfaceModel } from "../ui/presentation"
 import type { TranscriptContentPage, TranscriptContentSource, TranscriptView } from "../protocol"
@@ -50,6 +51,24 @@ export class DocumentController {
     this.close()
     this.#selection = { view, source, key: JSON.stringify([view, source]) }
     return this.#load(0, 0)
+  }
+
+  pinAction(): UiActionLease | null {
+    const selection = this.#selection
+    if (selection === null || this.#loading || selection.source.selector.type !== "tool_presentation") return null
+    const lease = this.#cache.lease(`document:${selection.key}:0`)
+    if (lease === null) return null
+    if (lease.value.kind !== "surface") { lease.release(); return null }
+    return {
+      get model() {
+        const value = lease.value
+        if (value.kind !== "surface") throw new Error("surface lease is unavailable")
+        return value.surface
+      },
+      sessionId: selection.view.session_id,
+      target: { surface: "tool", invocation_id: selection.source.selector.invocation_id },
+      release: () => lease.release(),
+    }
   }
 
   next(): Promise<void> {

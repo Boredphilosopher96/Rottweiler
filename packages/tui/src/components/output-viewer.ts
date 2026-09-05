@@ -1,3 +1,6 @@
+import { UiActionsRenderable } from "./ui-actions"
+import type { UiPresentation } from "../protocol"
+import type { KeyEvent } from "@opentui/core"
 import { UiPresentationRenderable } from "./ui-presentation"
 import type { DocumentSnapshot } from "../history/document"
 import {
@@ -13,13 +16,14 @@ import type { RottweilerTheme } from "../theme"
 import { toolDisplayName } from "./transcript"
 import { toolOutputContent } from "./transcript/blocks"
 
-/** Read-only, full-height presentation for one tool's complete output. */
+/** Source-backed document or declarative surface with engine-mediated actions. */
 export class OutputViewerRenderable extends BoxRenderable {
   readonly header: TextRenderable
   readonly scroller: ScrollBoxRenderable
   readonly body: TextRenderable
   readonly surface: UiPresentationRenderable
   readonly hint: TextRenderable
+  readonly actions: UiActionsRenderable
   #invocationId: string | null = null
   #documentPage: DocumentSnapshot["page"] = null
 
@@ -76,11 +80,13 @@ export class OutputViewerRenderable extends BoxRenderable {
       height: 1,
       flexShrink: 0,
     })
+    this.actions = new UiActionsRenderable(ctx, theme)
     this.surface = new UiPresentationRenderable(ctx, theme)
     this.scroller.add(this.body)
     this.scroller.add(this.surface)
     this.add(this.header)
     this.add(this.scroller)
+    this.add(this.actions)
     this.add(this.hint)
     this.resizeForTerminal(ctx.height)
   }
@@ -110,6 +116,7 @@ export class OutputViewerRenderable extends BoxRenderable {
   open(tool: ToolProjection): void {
     this.#documentPage = null
     this.surface.setSurface(null)
+    this.setActions(null, false, null)
     this.body.visible = true
     this.#invocationId = tool.invocationId
     this.update(tool)
@@ -133,7 +140,37 @@ export class OutputViewerRenderable extends BoxRenderable {
     this.visible = false
     this.body.content = ""
     this.surface.setSurface(null)
+    this.setActions(null, false, null)
     this.header.content = ""
+  }
+
+  setActions(actions: UiPresentation["descriptor"]["actions"] | null, enabled: boolean, activate: ((id: string) => void) | null): void {
+    this.actions.update(actions, enabled, activate)
+    this.resizeForTerminal(this.ctx.height)
+  }
+
+  handleKey(key: KeyEvent): boolean {
+    if (!this.visible) return false
+    if (key.name === "tab" && !key.ctrl && !key.meta && this.actions.visible) {
+      if (this.actions.focused) this.scroller.focus()
+      else this.actions.focus()
+      return true
+    }
+    return this.actions.handleKey(key)
+  }
+
+  captureInteraction(): { scrollTop: number; action: unknown; actionsFocused: boolean } | null {
+    return this.visible ? { scrollTop: this.scroller.scrollTop, action: this.actions.getSelectedOption()?.value,
+      actionsFocused: this.actions.focused } : null
+  }
+
+  restoreInteraction(state: NonNullable<ReturnType<OutputViewerRenderable["captureInteraction"]>>): void {
+    if (!this.visible) return
+    const index = this.actions.options.findIndex(action => action.value === state.action)
+    if (index >= 0) this.actions.setSelectedIndex(index)
+    this.scroller.scrollTo(state.scrollTop)
+    if (state.actionsFocused && this.actions.visible) this.actions.focus()
+    else this.scroller.focus()
   }
 
   focusPresentation(): void {
@@ -147,8 +184,15 @@ export class OutputViewerRenderable extends BoxRenderable {
     const contentRows = Math.max(1, panelHeight - 2)
     this.header.height = 1
     this.header.visible = true
-    this.hint.height = contentRows >= 2 ? 1 : 0
-    this.hint.visible = contentRows >= 2
-    this.scroller.height = Math.max(1, contentRows - this.header.height - this.hint.height)
+    const actionCount = this.actions.options.length
+    const hintRows = contentRows >= (actionCount > 0 ? 4 : 2) ? 1 : 0
+    this.hint.height = hintRows
+    this.hint.visible = hintRows > 0
+    const available = contentRows - 1 - hintRows
+    const actionRows = Math.min(actionCount, Math.max(0, available - (available > 1 ? 1 : 0)))
+    this.actions.height = actionRows
+    this.actions.visible = actionRows > 0
+    this.scroller.height = Math.max(actionCount > 0 ? 0 : 1, available - actionRows)
+    this.scroller.visible = actionCount === 0 || available > actionRows
   }
 }

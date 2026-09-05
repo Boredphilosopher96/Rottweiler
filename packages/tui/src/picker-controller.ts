@@ -14,7 +14,7 @@ export type PickerKind =
   | "sessions" | "sessionActions" | "sessionRename" | "settings" | "settingChoices"
   | "agents" | "agentActions"
   | "timeline" | "timelineActions"
-  | "themes"
+  | "themes" | "uiPanels"
 
 export type PickerCloseReason = "dismiss" | "scope_change"
 

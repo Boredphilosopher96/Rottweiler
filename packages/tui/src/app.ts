@@ -1,3 +1,4 @@
+import { UiContributionController } from "./app/ui-contributions"
 import { TodoController } from "./todo-controller"
 import { notifyTransition } from "./app/notifications"
 import { ClientRestoreController } from "./app/client-restore"
@@ -142,6 +143,7 @@ export class RottweilerApp extends BoxRenderable {
   #systemThemeMode: ThemeMode | null
   #systemTheme: RottweilerTheme
   #todos: TodoController
+  #contributions: UiContributionController
   #projectionRequests: ProjectionRequestBroker
   #pickerController: PickerController
   #activeSubagentReadOnly = false
@@ -232,6 +234,7 @@ export class RottweilerApp extends BoxRenderable {
         if (!this.#destroyed && this.outputViewer !== undefined) {
           if (snapshot.open) this.outputViewer.showDocument(snapshot)
           else this.outputViewer.closePresentation()
+          this.#contributions?.documentChanged(snapshot)
         }
       })
     this.#projectionRequests = new ProjectionRequestBroker({
@@ -424,12 +427,18 @@ export class RottweilerApp extends BoxRenderable {
       modalOpened: () => this.#modalOpened(),
       projectError: (code, message, retryable) => this.#projectClientError(code, message, retryable),
     })
+    this.#contributions = new UiContributionController({
+      get sessionId() { return app.#sessionId }, get viewer() { return app.outputViewer },
+      get destroyed() { return app.#destroyed }, get writable() { return !app.#state.replay.active && app.#children.activeId === null },
+      document: this.#document, picker: this.#pickerController, requests: this.#projectionRequests,
+      closePicker: () => this.closePicker(), refresh: () => this.setState(this.#state),
+    }, options.sessionReader, this.#history.controller.cache)
     this.#pickerContent = new PickerContentController({
       get terminalWidth() { return app.width || app.ctx.width }, get terminalHeight() { return app.height || app.ctx.height },
       ui: this, pickerController: this.#pickerController, input: this.#input,
       requests: this.#projectionRequests, children: this.#children, sessions: this.#sessions,
       providers: this.#providers, permissions: this.#permissions, settings: this.#settings,
-      mcp: this.#mcp, themes: this.#themes,
+      mcp: this.#mcp, themes: this.#themes, contributions: this.#contributions,
       get projectionErrors() { return app.#projectionErrors }, get sessionId() { return app.#sessionId },
       onExit: () => this.#options.onExit?.(), modalOpened: () => this.#modalOpened(),
       clearProjectionError: kind => this.#clearProjectionError(kind),
@@ -488,6 +497,7 @@ export class RottweilerApp extends BoxRenderable {
     const composerState = rebuilding ? this.#clientRestore.captureComposerState() : null
     const transcriptClientState = rebuilding ? this.transcript.captureClientState() : null
     const toolsClientState = rebuilding ? this.toolsWorkspace.captureClientState() : null
+    const outputInteraction = rebuilding ? this.outputViewer.captureInteraction() : null
     const toolsScrollTop = rebuilding ? this.toolsWorkspace.activityScroller.scrollTop : 0
     const scrollTop = rebuilding ? this.transcript.scroller.scrollTop : 0
     const pickerWasVisible = rebuilding && this.#input.pickerVisible()
@@ -567,6 +577,8 @@ export class RottweilerApp extends BoxRenderable {
     }, theme)
     this.setState(this.#state)
     if (this.#document.snapshot.open) this.outputViewer.showDocument(this.#document.snapshot)
+    this.#contributions.rebind()
+    if (outputInteraction !== null) this.outputViewer.restoreInteraction(outputInteraction)
     if (composerState !== null) this.#clientRestore.restoreComposerState(composerState)
     if (transcriptClientState !== null) this.transcript.restoreClientState(transcriptClientState)
     if (toolsClientState !== null) {
@@ -650,6 +662,7 @@ export class RottweilerApp extends BoxRenderable {
     if (sessionId !== this.#sessionId) {
       this.closePicker("scope_change")
       this.#projectionRequests.clearForSessionChange()
+      this.#contributions.close()
       this.#todos.reset()
       this.#children.reset()
       this.#pickerContent.resetCommands()
@@ -672,6 +685,7 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   resetConnectionProjections(): void {
+    this.#contributions.close()
     this.#projectionRequests.clearForReconnect()
     this.#todos.reset()
     this.#pickerContent.resetCommands()
@@ -920,7 +934,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#bindStateToComponents(state)
   }
 
-  recycleState(): AppClientState | null { return this.#clientRestore.recycleState() }
+  recycleState(): AppClientState | null { return this.#contributions.pending ? null : this.#clientRestore.recycleState() }
   restoreRecycleState(state: AppClientState): void { this.#clientRestore.restoreRecycleState(state) }
   applyPendingRecycleScroll(): void { this.#clientRestore.applyPendingRecycleScroll() }
 
@@ -1228,6 +1242,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#mcp.pickerClosed()
     this.#settings.pickerClosed()
     this.#children.pickerClosed()
+    this.#contributions.pickerClosed()
     this.#sessions.pickerClosed()
     if (restoreMcpBrowser) {
       this.#pickerController.kind = "mcp"
@@ -1269,6 +1284,7 @@ export class RottweilerApp extends BoxRenderable {
   override destroy(): void {
     if (this.#destroyed) return
     this.#destroyed = true
+    this.#contributions.close()
     this.#todos.dispose()
     this.#sessions.reset()
     this.#children.reset()
@@ -1363,6 +1379,7 @@ export class RottweilerApp extends BoxRenderable {
 
   #closeOutputViewer(): void {
     if (!this.outputViewer.visible) return
+    this.#contributions.close()
     this.#document?.close()
     this.#outputViewerInvocationId = null
     this.outputViewer.closePresentation()

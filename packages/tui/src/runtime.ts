@@ -150,6 +150,22 @@ export class EngineRuntimeError extends Error {
  */
 export class TuiEngineRuntime {
   readonly sessionReader: SessionReader = {
+    uiCatalog: async (sessionId, signal) => {
+      const reply = await this.#readSession({ type: "get_ui_catalog", meta: this.#meta(), session_id: sessionId }, signal)
+      const event = reply.events[0]
+      if (reply.events.length !== 1 || event?.type !== "ui_catalog_ready" || event.session_id !== sessionId) {
+        throw new EngineRuntimeError("UI catalog reply is missing its session-bound result")
+      }
+      return event.catalog
+    },
+    uiPanels: async (sessionId, signal) => {
+      const reply = await this.#readSession({ type: "get_ui_panels", meta: this.#meta(), session_id: sessionId }, signal)
+      const event = reply.events[0]
+      if (reply.events.length !== 1 || event?.type !== "ui_panels_ready" || event.session_id !== sessionId) {
+        throw new EngineRuntimeError("UI panels reply is missing its session-bound result")
+      }
+      return event.panels
+    },
     todos: async (sessionId, signal) => {
       const reply = await this.#readSession({ type: "get_todos", meta: this.#meta(), session_id: sessionId }, signal)
       const event = reply.events[0]
@@ -759,7 +775,7 @@ export class TuiEngineRuntime {
   }
 
   async #readSession(
-    command: Extract<ClientCommand, { type: "read_transcript" | "read_transcript_content" | "get_todos" }>,
+    command: Extract<ClientCommand, { type: "read_transcript" | "read_transcript_content" | "get_todos" | "get_ui_catalog" | "get_ui_panels" }>,
     signal: AbortSignal,
   ): Promise<Extract<CommandReply, { type: "read" }>> {
     await this.#ready

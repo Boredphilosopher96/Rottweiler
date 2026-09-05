@@ -24,6 +24,8 @@ export function fixturePage(session: string, read: TranscriptRead): TranscriptPa
 
 /** Explicit read capability for interaction tests that have no historical content. */
 export const emptySessionReader: import("../../src/session-reader").SessionReader = {
+  uiCatalog: async () => ({ entries: [] }),
+  uiPanels: async () => ({ panels: [] }),
   todos: async () => ({ type: "ready", todos: { through: "1000", snapshot: { items: [] } } }),
   page: async (session, read) => {
     const page = fixturePage(session, read)
@@ -61,6 +63,8 @@ export function conversationItem(id: number, role: "user" | "assistant", text: s
 export function sessionReaderFor(items: readonly import("../../src/protocol").TranscriptItem[], head?: () => Pick<import("../../src/protocol").TranscriptView, "generation" | "through">): import("../../src/session-reader").SessionReader {
   return {
     todos: emptySessionReader.todos,
+    uiCatalog: emptySessionReader.uiCatalog,
+    uiPanels: emptySessionReader.uiPanels,
     page: async (session, read) => {
       const position = read.position
       const limit = Math.min(read.max_items, items.length)

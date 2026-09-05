@@ -1,6 +1,6 @@
-import type { UiSurfaceModel } from "../ui/presentation"
+import type { UiSurfaceModel, UiPanelModel } from "../ui/presentation"
 import type { ClientDiagnostics } from "../client-diagnostics"
-import type { TranscriptContentPage, TranscriptItemId, TranscriptPage, TranscriptPosition, TranscriptView } from "../protocol"
+import type { UiCatalog, TranscriptContentPage, TranscriptItemId, TranscriptPage, TranscriptPosition, TranscriptView } from "../protocol"
 import { TRANSCRIPT_PROJECTION_VERSION } from "../protocol"
 import { parseU64 } from "../transport/types"
 import { ClientCache, type CacheLease } from "./cache"
@@ -10,6 +10,8 @@ export type HistoryCacheValue =
   | { readonly kind: "page"; readonly page: TranscriptPage }
   | { readonly kind: "document"; readonly page: TranscriptContentPage }
   | { readonly kind: "surface"; readonly surface: UiSurfaceModel }
+  | { readonly kind: "ui_catalog"; readonly catalog: UiCatalog }
+  | { readonly kind: "ui_panels"; readonly panels: readonly UiPanelModel[] }
 
 export interface HistoryAnchor {
   readonly id: TranscriptItemId

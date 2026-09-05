@@ -28,3 +28,29 @@ test("session task capability reads a child without changing the driver and reje
     await expect(runtime.sessionReader.todos("child", new AbortController().signal)).rejects.toThrow("session-bound result")
   } finally { await runtime.stop(); await running }
 })
+
+
+test.each(["uiCatalog", "uiPanels"] as const)("%s reads remain session-bound direct replies", async method => {
+  const client = new SwitchingClient()
+  const post = client.postCommand.bind(client)
+  let foreign = false
+  client.postCommand = async (command: ClientCommand): Promise<CommandReply> => {
+    if (command.type !== "get_ui_catalog" && command.type !== "get_ui_panels") return post(command)
+    client.commands.push(command)
+    const base = { meta: { ...command.meta, emitted_at: "2026-01-01T00:00:00Z" }, session_id: foreign ? "foreign" : command.session_id }
+    return { type: "read", outcome: { type: "accepted" }, events: [command.type === "get_ui_catalog"
+      ? { ...base, type: "ui_catalog_ready", catalog: { entries: [] } }
+      : { ...base, type: "ui_panels_ready", panels: { panels: [] } }] }
+  }
+  const runtime = new TuiEngineRuntime({ socketPath: "/private/engine.sock", bootstrapToken: "secret", sessionId: "parent", lastSeenSequence: null, lastSeenFile: null, replayMode: false }, client, new MemoryFiles())
+  const app = new TestApp()
+  runtime.bind(app)
+  const running = runtime.start()
+  try {
+    await waitFor(() => client.commands.some(command => command.type === "list_commands"))
+    expect(await runtime.sessionReader[method]("parent", new AbortController().signal)).toEqual(method === "uiCatalog" ? { entries: [] } : { panels: [] })
+    expect(app.sessionId).toBe("parent")
+    foreign = true
+    await expect(runtime.sessionReader[method]("parent", new AbortController().signal)).rejects.toThrow("session-bound result")
+  } finally { await runtime.stop(); await running }
+})

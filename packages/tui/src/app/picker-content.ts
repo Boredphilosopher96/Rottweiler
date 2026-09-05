@@ -1,3 +1,4 @@
+import type { UiContributionController } from "./ui-contributions"
 import type { RottweilerApp } from "../app"
 import {
   createCommandPaletteModel,
@@ -71,6 +72,7 @@ interface PickerContentHost {
   readonly settings: SettingsUiController
   readonly mcp: McpUiController
   readonly themes: ThemeUiController
+  readonly contributions: UiContributionController
   onExit(): void
   modalOpened(): void
   clearProjectionError(kind: ProjectionKind): void
@@ -129,6 +131,7 @@ export class PickerContentController {
   resetCommands(): void { this.#commandsRequested = false }
   renderPicker(): void {
     switch (this.host.pickerController.kind) {
+      case "uiPanels": this.host.contributions.renderPicker(); break;
       case "palette": {
         const paletteActions = this.paletteActions()
         const entries: readonly CommandPaletteEntry<PaletteAction>[] = paletteActions.map((action) => ({
@@ -598,6 +601,9 @@ export class PickerContentController {
 
       { id: "view.conversation", title: "View conversation", section: "Workspace", description: "Return to the conversation transcript", run: open(() => this.host.ui.showConversationView()) },
       { id: "view.tools", title: "View tools", section: "Workspace", description: "Inspect retained tool activity and output", run: open(() => this.host.ui.showToolsView()) },
+      ...(this.host.ui.state.replay.active || this.host.children.activeId !== null ? [] : [
+        { id: "ui.panels", title: "Extension panels", section: "Workspace", description: "Open approved extension views and actions", run: open(() => this.host.contributions.openPanels()) } satisfies PaletteAction,
+      ]),
       { id: "workspace.add", title: "Add workspace directory", section: "Workspace", description: "Prefills /add-dir · give a directory path", run: prefill("/add-dir") },
       { id: "workspace.roots", title: "Workspace roots", section: "Workspace", description: "See every live workspace root", run: open(() => this.openWorkspaceRootsPicker()) },
       { id: "trust.manage", title: "Folder trust", section: "Workspace", description: "Show, grant, or revoke folder trust", run: open(() => this.host.ui.openTrustPicker()) },

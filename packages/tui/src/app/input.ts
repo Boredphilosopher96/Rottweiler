@@ -108,6 +108,9 @@ export class InputUiController {
     if (this.#keybindings.preset === "vim") this.#vimFocus = restoring ? "picker" : this.#vimFocusBeforePicker
   }
   onGlobalKey = (key: KeyEvent) => {
+    if (this.#host.outputViewer.handleKey(key)) {
+      key.preventDefault(); key.stopPropagation(); return
+    }
     if (this.#host.outputViewer.visible && this.#host.document?.snapshot.open
       && !key.ctrl && !key.meta && !key.shift && (key.name === "left" || key.name === "right")) {
       if (key.name === "left") void this.#host.document.previous()

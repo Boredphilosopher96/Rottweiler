@@ -10,7 +10,9 @@ test("production app reads native semantic rows and navigates beyond its mounted
   const harness = await createTestRenderer({ width: 100, height: 30 })
   const reads: TranscriptRead[] = []
   const reader: SessionReader = {
-      todos: async () => ({ type: "ready", todos: { through: "1000", snapshot: { items: [] } } }),
+      uiCatalog: async () => ({ entries: [] }),
+  uiPanels: async () => ({ panels: [] }),
+  todos: async () => ({ type: "ready", todos: { through: "1000", snapshot: { items: [] } } }),
     page: async (session, read) => { reads.push(read); return { type: "ready", page: fixturePage(session, read) } },
     content: async () => { throw new Error("unused") },
   }
@@ -57,7 +59,9 @@ test("complete-content interaction pages bounded bodies and releases the overlay
   const app = createRottweilerApp(harness.renderer, {
     sessionId: "history", treeSitterClient: new MockTreeSitterClient(),
     sessionReader: {
-      todos: async () => ({ type: "ready", todos: { through: "1000", snapshot: { items: [] } } }),
+      uiCatalog: async () => ({ entries: [] }),
+  uiPanels: async () => ({ panels: [] }),
+  todos: async () => ({ type: "ready", todos: { through: "1000", snapshot: { items: [] } } }),
       page: async (session, read) => {
         const page = fixturePage(session, read)
         for (const item of page.items) if (item.content.type === "command") item.content.message.complete = false
