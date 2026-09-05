@@ -312,7 +312,12 @@ resolve(alias) → [candidate models] → adapter → provider
   offline journal. Normal tail reads verify only referenced segments.
 - The old lifetime-file journal layout is rejected explicitly; it is not opened
   as an empty segmented session or migrated implicitly.
-- `index.sqlite` — session list, titles, costs, full-text search over transcripts.
+- `index.sqlite` — session listing/search tables and reconciled durable accounting.
+  Normal opens admit only current table definitions. Unsupported accounting schemas
+  are rejected without inferred defaults or row migration. Explicit search rebuild
+  replaces only its derived tables in one transaction; accounting and independent
+  authoritative tables survive. An unreadable database is never deleted as a
+  search-repair shortcut.
 - `checkpoints/` — content-addressed blobs (BLAKE3) + per-turn manifests of touched files. Rewind = restore manifest.
 - Config precedence: built-in defaults ← `~/.rottweiler/config.toml` ← `.rottweiler/config.toml` ← env ← CLI flags. **Exception**: security-sensitive keys (`[permissions]`, safe-list, `[network]`/proxy, telemetry opt-in, update channel) are ignored at project level with a warning (05 Layer 0). Schema in `rw-types`, `rw config check` validates and prints effective config with provenance per key.
 

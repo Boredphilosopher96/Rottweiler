@@ -972,9 +972,8 @@ mod tests {
         assert!(json.contains("\"subscription_quota_entries\":1"));
         assert!(json.contains("\"attribution\":\"subagent\""));
 
-        AccountingLedger::open(root.path())
-            .and_then(|ledger| ledger.replace_all(&[]))
-            .expect("make projection stale");
+        std::fs::remove_file(root.path().join("index.sqlite")).expect("remove fixture index");
+        AccountingLedger::open(root.path()).expect("create an empty stale fixture index");
         assert!(
             collect(
                 root.path(),

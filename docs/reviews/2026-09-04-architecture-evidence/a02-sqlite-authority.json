@@ -1,0 +1,59 @@
+{
+  "scope": "Current SQLite schema admission, authority-preserving search rebuild, and semantic store module split. Bounded cold actor recovery and writer responsiveness remain separate ongoing work.",
+  "runtime": {
+    "rust": "1.97.1",
+    "platform": "macOS aarch64",
+    "target": "/tmp/rw-storage-target"
+  },
+  "checks": [
+    {
+      "command": "CARGO_TARGET_DIR=/tmp/rw-storage-target cargo test -p rw-store --lib",
+      "result": "175 passed, 2 ignored; subprocess fixture passed",
+      "log": "/tmp/rw-schema-split-final-tests.log"
+    },
+    {
+      "command": "CARGO_TARGET_DIR=/tmp/rw-storage-target cargo clippy -p rw-store -p rw-cli --all-targets -- -D warnings",
+      "result": "pass",
+      "log": "/tmp/rw-schema-clippy-final.log"
+    },
+    {
+      "command": "CARGO_TARGET_DIR=/tmp/rw-storage-target cargo test -p rw-cli historical_stats_attribute_child_sessions_without_double_counting -- --exact stats::tests::historical_stats_attribute_child_sessions_without_double_counting",
+      "result": "affected CLI stats regression passed",
+      "log": "/tmp/rw-schema-cli-test.log"
+    }
+  ],
+  "invariants": [
+    "Old columns, inferred accounting defaults, old turn uniqueness and missing turn-count fallback are rejected; no migration/backfill remains.",
+    "Unsupported accounting schema rejected before write pragmas; tests verify old rows and complete database bytes remain unchanged.",
+    "Search rebuild transaction only replaces sessions/FTS; ledger and independently created reservation table survive.",
+    "Accounting identity conflict rolls back derived table rebuild and leaves charges unchanged.",
+    "Corrupt database is not deleted as search repair.",
+    "Destructive AccountingLedger::replace_all removed; production rebuild uses conflict-checked insert, affected test caller explicitly recreates its temporary fixture."
+  ],
+  "module_lines": {
+    "crates/rw-store/src/session.rs": 113,
+    "crates/rw-store/src/session/error.rs": 133,
+    "crates/rw-store/src/session/event_log.rs": 420,
+    "crates/rw-store/src/session/journal.rs": 1457,
+    "crates/rw-store/src/session/accounting.rs": 766,
+    "crates/rw-store/src/session/index.rs": 418,
+    "crates/rw-store/src/session/sqlite_schema_tests.rs": 150,
+    "crates/rw-store/src/session/journal_io.rs": 374,
+    "crates/rw-store/src/session/derived_database.rs": 208,
+    "crates/rw-store/src/session/tests.rs": 87,
+    "crates/rw-store/src/session/sqlite_snapshot.rs": 292,
+    "crates/rw-store/src/session/sqlite_schema.rs": 109,
+    "crates/rw-store/src/session/transcript_index.rs": 861,
+    "crates/rw-store/src/session/journal/tests.rs": 567,
+    "crates/rw-store/src/session/journal/proof_tests.rs": 189,
+    "crates/rw-store/src/session/journal/proof.rs": 295,
+    "crates/rw-store/src/session/tests/journal_history.rs": 523,
+    "crates/rw-store/src/session/tests/journal_append.rs": 535,
+    "crates/rw-store/src/session/tests/accounting.rs": 499,
+    "crates/rw-store/src/session/tests/index.rs": 381,
+    "crates/rw-store/src/session/transcript_index/tests.rs": 900
+  },
+  "limits": [
+    "No Linux, release-performance, eight-hour soak or bounded full-engine cold-recovery claim."
+  ]
+}

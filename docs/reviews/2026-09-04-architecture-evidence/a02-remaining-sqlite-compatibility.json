@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "scope": "Inventory only; existing SQLite compatibility code is unchanged by the raw journal migration.",
+  "scope": "Historical baseline inventory from the raw journal migration. All listed compatibility behaviors are now removed; original symbols/lines below identify the reviewed baseline, not current source.",
   "source": "crates/rw-store/src/session.rs",
   "items": [
     {
@@ -55,5 +55,12 @@
     }
   ],
   "next_contract": "Admit the current schema explicitly. Reject unsupported accounting state without deleting or silently replacing rows. Rebuild derived listing/search projections only through an explicit authority-preserving procedure; do not retain migration adapters.",
-  "raw_journal_contract": "No compatibility reader or migration remains. Any events.jsonl entry is explicitly rejected before creating journal/. Existing old data is not mutated."
+  "raw_journal_contract": "No compatibility reader or migration remains. Any events.jsonl entry is explicitly rejected before creating journal/. Existing old data is not mutated.",
+  "resolution": {
+    "current_schema_owner": "crates/rw-store/src/session/sqlite_schema.rs",
+    "accounting_owner": "crates/rw-store/src/session/accounting.rs",
+    "search_owner": "crates/rw-store/src/session/index.rs",
+    "behavior": "Current-schema admission before write pragmas. No inferred defaults, turn-count backfill, old-column fallback or table-copy migration. Unsupported accounting layouts fail closed. Explicit search rebuild changes only sessions/FTS in a transaction and reconciles charges without deletion, preserving independent authority tables. Destructive AccountingLedger::replace_all removed and every caller migrated.",
+    "regressions": "crates/rw-store/src/session/sqlite_schema_tests.rs plus named accounting/index test suites"
+  }
 }

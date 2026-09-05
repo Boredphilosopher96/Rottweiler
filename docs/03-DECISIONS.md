@@ -530,6 +530,16 @@ inspection use journal cursors and paged projections (A04); the live snapshot ow
 only the bounded state needed to resume safely. Measure ordinary checkpoint-based
 open separately from an explicit rebuild after missing/corrupt metadata.
 
+**SQLite authority and schema admission.** The shared database admits only the
+current accounting and search table definitions. No column backfill, inferred
+accounting defaults or legacy uniqueness migration runs on open. Unsupported
+accounting layouts fail before write pragmas; explicit search rebuild may recreate
+unsupported derived sessions/FTS tables, but it preserves charged entries and
+independent authoritative tables. Accounting reconciliation inserts missing
+journal facts by identity and rejects conflicts. The rebuild transaction rolls
+back search changes on a conflict, and an unreadable database is never replaced
+with a partial reconstruction that could discard unknown authority.
+
 **Durability and performance.** Appended events are synchronized before acknowledgement.
 Segment seal, index and catalog publication have tested crash ordering; derived
 index publication must not add one extra fsync per token. A reader's blocking I/O
