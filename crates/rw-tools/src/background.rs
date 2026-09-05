@@ -748,6 +748,10 @@ impl BackgroundStatusTool {
 
 #[async_trait]
 impl Tool for BackgroundStatusTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "background_status".to_owned(),
@@ -795,6 +799,10 @@ impl BackgroundOutputTool {
 
 #[async_trait]
 impl Tool for BackgroundOutputTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "background_output".to_owned(),
@@ -853,6 +861,10 @@ impl BackgroundKillTool {
 
 #[async_trait]
 impl Tool for BackgroundKillTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "background_kill".to_owned(),
@@ -909,7 +921,9 @@ mod tests {
 
     #[async_trait]
     impl CommandExecutor for BlockingFixture {
-        async fn settle_effects(&self) {}
+        async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+            Ok(())
+        }
         fn supports_background(&self) -> bool {
             true
         }
@@ -950,7 +964,9 @@ mod tests {
 
     #[async_trait]
     impl CommandExecutor for SplitSecretFixture {
-        async fn settle_effects(&self) {}
+        async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+            Ok(())
+        }
         fn supports_background(&self) -> bool {
             true
         }
@@ -1210,7 +1226,9 @@ mod tests {
 
     #[async_trait]
     impl CommandExecutor for CompletingFixture {
-        async fn settle_effects(&self) {}
+        async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+            Ok(())
+        }
         fn supports_background(&self) -> bool {
             true
         }

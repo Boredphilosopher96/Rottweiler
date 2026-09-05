@@ -49,6 +49,10 @@ impl ReadTool {
 
 #[async_trait]
 impl Tool for ReadTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         descriptor::<ReadInput>(
             "read",
@@ -130,6 +134,10 @@ impl WriteTool {
 
 #[async_trait]
 impl Tool for WriteTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         descriptor::<WriteInput>(
             "write",
@@ -242,6 +250,10 @@ impl EditTool {
 
 #[async_trait]
 impl Tool for EditTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         descriptor::<EditInput>(
             "edit",
@@ -329,6 +341,10 @@ impl MultiEditTool {
 
 #[async_trait]
 impl Tool for MultiEditTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         descriptor::<MultiEditInput>(
             "multi_edit",

@@ -11,7 +11,8 @@ async fn panicked_foreground_task_does_not_leave_an_immortal_registration() {
     assert!(matches!(result, Err(ToolError::Command(_))));
     tokio::time::timeout(Duration::from_millis(100), tool.settle_effects())
         .await
-        .expect("panic settlement must terminate");
+        .expect("panic settlement must terminate")
+        .expect("effects settled");
     assert!(tool.foreground.calls.lock().expect("calls").is_empty());
     tokio::time::timeout(
         Duration::from_millis(100),
@@ -60,7 +61,8 @@ async fn foreground_panic_waits_for_native_settlement_before_next_mutation() {
     executor.release.notify_one();
     tokio::time::timeout(Duration::from_secs(3), tool.settle_effects())
         .await
-        .expect("native cleanup settles after caller drop");
+        .expect("native cleanup settles after caller drop")
+        .expect("effects settled");
     assert!(!premature, "task panic was treated as physical completion");
     assert!(
         !premature_barrier,
@@ -128,7 +130,8 @@ async fn foreground_cleanup_and_recording_survive_caller_drop() {
     cleanup.release.notify_one();
     tokio::time::timeout(Duration::from_secs(3), tool.settle_effects())
         .await
-        .expect("settlement");
+        .expect("settlement")
+        .expect("effects settled");
     assert!(
         !premature,
         "Bash released its settlement barrier while native cleanup was still pending"
@@ -179,7 +182,8 @@ async fn dropped_foreground_call_cancels_native_parent_and_descendant_before_set
     assert!(task.await.expect_err("caller dropped").is_cancelled());
     tokio::time::timeout(Duration::from_secs(3), tool.settle_effects())
         .await
-        .expect("native settlement");
+        .expect("native settlement")
+        .expect("effects settled");
     for file in ["parent-writes", "child-writes"] {
         std::fs::write(root.path().join(file), b"next mutation").expect("conflicting write");
     }

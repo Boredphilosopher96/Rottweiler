@@ -135,8 +135,9 @@ impl TokioCommandExecutor {
 
 #[async_trait]
 impl CommandExecutor for TokioCommandExecutor {
-    async fn settle_effects(&self) {
-        self.native_cleanup.settle().await;
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        self.native_cleanup.settle().await?;
+        Ok(())
     }
     fn supports_background(&self) -> bool {
         self.sandbox.is_some()
@@ -153,6 +154,10 @@ impl CommandExecutor for TokioCommandExecutor {
         // command and its watchdog are spawned.
         let _execution_lease = self.execution_lease.as_ref();
         cancellation.check()?;
+        let admission = tokio::select! {
+            () = cancellation.cancelled() => return Err(ToolError::Cancelled),
+            permit = Arc::clone(&self.native_cleanup.admission).acquire_owned() => permit.map_err(|_| ToolError::EffectsUnsettled("native executor is quarantined".to_owned()))?,
+        };
         let safe = request.sandbox != BashSandboxMode::Unsandboxed
             && request.network_domains.is_empty()
             && self.safety.classify(&request.command) == CommandSafety::SafeListed;
@@ -193,6 +198,7 @@ impl CommandExecutor for TokioCommandExecutor {
         drop(guarded.helper_pin.take());
         let mut owner = NativeCommandOwner {
             state: Some(NativeCommandState {
+                _admission: admission,
                 child_id: child.id(),
                 child,
                 watchdog: None,
@@ -288,57 +294,127 @@ impl TokioCommandExecutor {
     }
 }
 
-#[derive(Debug, Default)]
+type NativeProof = Option<Result<(), Arc<str>>>;
+
 pub(super) struct NativeCleanup {
-    pending: Mutex<Vec<tokio::sync::watch::Receiver<bool>>>,
+    admission: Arc<tokio::sync::Semaphore>,
+    pending: Mutex<Vec<Arc<NativeJob>>>,
+}
+
+struct NativeJob {
+    state: tokio::sync::Mutex<Option<NativeCommandState>>,
+    completion: tokio::sync::watch::Receiver<NativeProof>,
+}
+
+struct NativeProofOwner {
+    completed: bool,
+    proof: tokio::sync::watch::Sender<NativeProof>,
+    admission: Arc<tokio::sync::Semaphore>,
+}
+
+impl Drop for NativeProofOwner {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.admission.close();
+            self.proof.send_replace(Some(Err(Arc::from(
+                "native cleanup owner exited without settlement proof",
+            ))));
+        }
+    }
+}
+
+impl Default for NativeCleanup {
+    fn default() -> Self {
+        Self {
+            admission: Arc::new(tokio::sync::Semaphore::new(64)),
+            pending: Mutex::default(),
+        }
+    }
+}
+
+impl std::fmt::Debug for NativeCleanup {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeCleanup")
+            .finish_non_exhaustive()
+    }
 }
 
 impl NativeCleanup {
     fn schedule(
         &self,
-        mut state: NativeCommandState,
+        state: NativeCommandState,
     ) -> tokio::sync::oneshot::Receiver<Result<(), ToolError>> {
-        let (completed, completion) = tokio::sync::watch::channel(false);
+        let (proof, completion) = tokio::sync::watch::channel(None);
         let (respond, result) = tokio::sync::oneshot::channel();
+        let job = Arc::new(NativeJob {
+            state: tokio::sync::Mutex::new(Some(state)),
+            completion,
+        });
         {
             let mut pending = self
                 .pending
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            pending.retain(|completion| !*completion.borrow());
-            pending.push(completion);
+            pending.retain(|job| !matches!(*job.completion.borrow(), Some(Ok(()))));
+            pending.push(Arc::clone(&job));
         }
+        let owner = NativeProofOwner {
+            completed: false,
+            proof,
+            admission: Arc::clone(&self.admission),
+        };
         tokio::spawn(async move {
-            let result = state.settle().await;
-            drop(state);
-            completed.send_replace(true);
+            let mut owner = owner;
+            let mut state = job.state.lock().await;
+            let result = match state.as_mut() {
+                Some(state) => state.settle().await,
+                None => Err(ToolError::EffectsUnsettled(
+                    "native command state is missing".to_owned(),
+                )),
+            };
+            if result.is_ok() {
+                state.take();
+            } else {
+                owner.admission.close();
+            }
+            owner.proof.send_replace(Some(
+                result
+                    .as_ref()
+                    .copied()
+                    .map_err(|error| Arc::<str>::from(error.to_string())),
+            ));
+            owner.completed = true;
             let _ = respond.send(result);
         });
         result
     }
 
-    async fn settle(&self) {
-        loop {
-            let pending = {
-                let mut pending = self
-                    .pending
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                pending.retain(|completion| !*completion.borrow());
-                pending.clone()
-            };
-            if pending.is_empty() {
-                return;
-            }
-            for mut completion in pending {
-                while !*completion.borrow_and_update() {
-                    if completion.changed().await.is_err() {
-                        tracing::error!("native cleanup worker exited without proving settlement");
-                        std::future::pending::<()>().await;
-                    }
+    async fn settle(&self) -> Result<(), ToolError> {
+        let pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        for job in pending {
+            let mut completion = job.completion.clone();
+            loop {
+                if let Some(result) = completion.borrow_and_update().clone() {
+                    result.map_err(|error| ToolError::EffectsUnsettled(error.to_string()))?;
+                    break;
+                }
+                if completion.changed().await.is_err() {
+                    return Err(ToolError::EffectsUnsettled(
+                        "native cleanup owner exited without settlement proof".to_owned(),
+                    ));
                 }
             }
         }
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|job| !matches!(*job.completion.borrow(), Some(Ok(()))));
+        Ok(())
     }
 }
 
@@ -348,6 +424,7 @@ pub(super) type CommandOutputTasks = (
 );
 
 pub(super) struct NativeCommandState {
+    _admission: tokio::sync::OwnedSemaphorePermit,
     child: Child,
     child_id: Option<u32>,
     watchdog: Option<ParentDeathWatchdog>,
@@ -358,7 +435,7 @@ pub(super) struct NativeCommandState {
 
 impl NativeCommandState {
     async fn settle(&mut self) -> Result<(), ToolError> {
-        settle_command_child(&mut self.child, self.child_id).await;
+        settle_command_child(&mut self.child, self.child_id).await?;
         self.child_id = None;
         let watchdog_result = match self.watchdog.as_mut() {
             Some(watchdog) => watchdog.disarm().await,
@@ -368,7 +445,9 @@ impl NativeCommandState {
             Some((stdout, stderr)) => finish_command_output(stdout, stderr).await,
             None => Ok(()),
         };
-        watchdog_result.and(output_result)
+        watchdog_result
+            .and(output_result)
+            .map_err(|error| ToolError::EffectsUnsettled(error.to_string()))
     }
 }
 
@@ -384,7 +463,7 @@ impl NativeCommandOwner {
             .take()
             .ok_or_else(|| ToolError::Command("native command owner is missing".to_owned()))?;
         self.cleanup.schedule(state).await.map_err(|error| {
-            ToolError::Command(format!("native command cleanup worker failed: {error}"))
+            ToolError::EffectsUnsettled(format!("native command cleanup worker failed: {error}"))
         })?
     }
 }
@@ -397,17 +476,23 @@ impl Drop for NativeCommandOwner {
     }
 }
 
-pub(super) async fn settle_command_child(child: &mut Child, child_id: Option<u32>) {
+pub(super) async fn settle_command_child(
+    child: &mut Child,
+    child_id: Option<u32>,
+) -> Result<(), ToolError> {
     terminate_process_group(child_id);
     let _ = child.start_kill();
-    if let Err(error) = child.wait().await {
-        tracing::error!(%error, "command child could not be reaped; effect settlement remains blocked");
-        std::future::pending::<()>().await;
-    }
-    if let Err(error) = terminate_and_wait_process_group(child_id).await {
-        tracing::error!(%error, "command group exit could not be proven; effect settlement remains blocked");
-        std::future::pending::<()>().await;
-    }
+    tokio::time::timeout(std::time::Duration::from_secs(2), child.wait())
+        .await
+        .map_err(|_| {
+            ToolError::EffectsUnsettled("command child reap proof exceeded its deadline".to_owned())
+        })?
+        .map_err(|error| {
+            ToolError::EffectsUnsettled(format!("command child reap failed: {error}"))
+        })?;
+    terminate_and_wait_process_group(child_id)
+        .await
+        .map_err(|error| ToolError::EffectsUnsettled(error.to_string()))
 }
 
 pub(super) fn command_egress_proxy(

@@ -364,6 +364,10 @@ constructor!(RenameTool);
 
 #[async_trait]
 impl Tool for DiagnosticsTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         descriptor::<DiagnosticsInput>(
             "diagnostics",
@@ -407,6 +411,10 @@ impl Tool for DiagnosticsTool {
 
 #[async_trait]
 impl Tool for DefinitionTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         descriptor::<PositionInput>(
             "definition",
@@ -433,6 +441,10 @@ impl Tool for DefinitionTool {
 
 #[async_trait]
 impl Tool for ReferencesTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         descriptor::<PositionInput>(
             "references",
@@ -459,6 +471,10 @@ impl Tool for ReferencesTool {
 
 #[async_trait]
 impl Tool for RenameTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         descriptor::<RenameInput>(
             "rename",

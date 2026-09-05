@@ -47,6 +47,10 @@ struct GrepMatch {
 
 #[async_trait]
 impl Tool for GrepTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         descriptor::<GrepInput>(
             "grep",
@@ -174,6 +178,10 @@ impl GlobTool {
 
 #[async_trait]
 impl Tool for GlobTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         descriptor::<GlobInput>("glob", "List non-ignored workspace paths matching a glob.")
     }
@@ -265,6 +273,10 @@ struct LsEntry {
 
 #[async_trait]
 impl Tool for LsTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         descriptor::<LsInput>("ls", "List workspace directory entries and basic metadata.")
     }

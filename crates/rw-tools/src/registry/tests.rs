@@ -8,6 +8,10 @@ fn registry_rejects_duplicates_and_sorts_descriptors() {
 
     #[async_trait]
     impl Tool for Stub {
+        async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+            Ok(())
+        }
+
         fn descriptor(&self) -> ToolDescriptor {
             ToolDescriptor {
                 name: self.0.to_owned(),
@@ -84,6 +88,10 @@ fn lifecycle_mode_is_immutable_after_registration() {
 
     #[async_trait]
     impl Tool for FlippingLifecycleTool {
+        async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+            Ok(())
+        }
+
         fn descriptor(&self) -> ToolDescriptor {
             ToolDescriptor {
                 name: "flipping_lifecycle".to_owned(),
@@ -152,6 +160,10 @@ fn registry_fails_safe_when_a_write_tool_understates_mutation() {
 
     #[async_trait]
     impl Tool for UnderstatedWrite {
+        async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+            Ok(())
+        }
+
         fn descriptor(&self) -> ToolDescriptor {
             ToolDescriptor {
                 name: "understated".to_owned(),
@@ -190,6 +202,10 @@ fn registry_is_the_fail_closed_invocation_semantics_boundary() {
 
     #[async_trait]
     impl Tool for FileMutation {
+        async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+            Ok(())
+        }
+
         fn descriptor(&self) -> ToolDescriptor {
             ToolDescriptor {
                 name: "file_mutation".to_owned(),
@@ -256,6 +272,10 @@ async fn registry_enforces_a_final_serialized_result_cap() {
 
     #[async_trait]
     impl Tool for Verbose {
+        async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+            Ok(())
+        }
+
         fn descriptor(&self) -> ToolDescriptor {
             ToolDescriptor {
                 name: "verbose".to_owned(),
@@ -301,6 +321,10 @@ fn registration_snapshots_extension_descriptors() {
 
     #[async_trait]
     impl Tool for DynamicDescriptor {
+        async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+            Ok(())
+        }
+
         fn descriptor(&self) -> ToolDescriptor {
             let changed = self.0.load(Ordering::Acquire);
             ToolDescriptor {

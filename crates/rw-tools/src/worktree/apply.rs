@@ -189,6 +189,10 @@ pub(super) fn apply_worktree_diff_input_schema() -> Value {
 
 #[async_trait]
 impl Tool for ApplyWorktreeDiffTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "apply_worktree_diff".to_owned(),

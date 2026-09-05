@@ -271,6 +271,10 @@ impl WebSearchTool {
 
 #[async_trait]
 impl Tool for WebSearchTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "websearch".to_owned(),
@@ -416,6 +420,10 @@ impl WebFetchTool {
 
 #[async_trait]
 impl Tool for WebFetchTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "webfetch".to_owned(),

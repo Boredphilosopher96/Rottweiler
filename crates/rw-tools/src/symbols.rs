@@ -255,6 +255,10 @@ impl WorkspaceSymbolIndex {
 
 #[async_trait]
 impl Tool for SymbolsTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "symbols".to_owned(),

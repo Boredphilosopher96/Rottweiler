@@ -1021,8 +1021,8 @@ struct GuardedTool {
 
 #[async_trait]
 impl Tool for GuardedTool {
-    async fn settle_effects(&self) {
-        self.inner.settle_effects().await;
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        self.inner.settle_effects().await
     }
     fn descriptor(&self) -> ToolDescriptor {
         self.descriptor.clone()

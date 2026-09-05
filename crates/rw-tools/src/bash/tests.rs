@@ -39,7 +39,9 @@ impl CommandFixtureRedactor for SecretRedactor {
 
 #[async_trait]
 impl CommandExecutor for StreamingExecutor {
-    async fn settle_effects(&self) {}
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
     async fn run(
         &self,
         _request: CommandRequest,
@@ -80,7 +82,9 @@ struct PanickingExecutor;
 
 #[async_trait]
 impl CommandExecutor for PanickingExecutor {
-    async fn settle_effects(&self) {}
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
     async fn run(
         &self,
         _request: CommandRequest,
@@ -101,10 +105,11 @@ struct PanicDuringNative {
 
 #[async_trait]
 impl CommandExecutor for PanicDuringNative {
-    async fn settle_effects(&self) {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
         self.settling.notify_one();
         self.release.notified().await;
-        self.executor.settle_effects().await;
+        self.executor.settle_effects().await?;
+        Ok(())
     }
 
     async fn run(
@@ -130,8 +135,9 @@ struct DelayedNativeCleanup {
 
 #[async_trait]
 impl CommandExecutor for DelayedNativeCleanup {
-    async fn settle_effects(&self) {
-        self.executor.settle_effects().await;
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        self.executor.settle_effects().await?;
+        Ok(())
     }
     async fn run(
         &self,
@@ -162,7 +168,9 @@ struct BlockingExecutor;
 
 #[async_trait]
 impl CommandExecutor for BlockingExecutor {
-    async fn settle_effects(&self) {}
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
     async fn run(
         &self,
         _request: CommandRequest,

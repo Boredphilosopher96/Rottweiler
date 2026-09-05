@@ -150,8 +150,8 @@ impl RecordingCommandExecutor {
 
 #[async_trait]
 impl CommandExecutor for RecordingCommandExecutor {
-    async fn settle_effects(&self) {
-        self.inner.settle_effects().await;
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        self.inner.settle_effects().await
     }
     fn supports_background(&self) -> bool {
         false
@@ -251,7 +251,9 @@ impl ReplayCommandExecutor {
 
 #[async_trait]
 impl CommandExecutor for ReplayCommandExecutor {
-    async fn settle_effects(&self) {}
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
     fn supports_background(&self) -> bool {
         false
     }

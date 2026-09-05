@@ -72,7 +72,7 @@ pub trait CommandExecutor: Send + Sync {
     /// Waits for native cleanup transferred out of a dropped or panicked invocation.
     /// Implementations that own native effects must retain cleanup independently
     /// of `run`; pure replay implementations explicitly have no effects to settle.
-    async fn settle_effects(&self);
+    async fn settle_effects(&self) -> Result<(), ToolError>;
 
     /// Whether this executor can safely supervise a command after the
     /// initiating tool call returns.
@@ -96,6 +96,7 @@ struct ForegroundCommands {
 }
 
 struct ForegroundCommand {
+    _executor: Arc<dyn CommandExecutor>,
     cancellation: CancellationToken,
     abandoned: std::sync::atomic::AtomicBool,
     completion: tokio::sync::watch::Receiver<bool>,
@@ -118,7 +119,7 @@ impl Drop for ForegroundCaller {
 }
 
 impl ForegroundCommands {
-    async fn settle_abandoned(&self) {
+    async fn settle_abandoned(&self) -> Result<(), ToolError> {
         loop {
             let abandoned = {
                 let calls = self
@@ -132,16 +133,16 @@ impl ForegroundCommands {
                     .collect::<Vec<_>>()
             };
             if abandoned.is_empty() {
-                return;
+                return Ok(());
             }
             for command in abandoned {
                 let mut completion = command.completion.clone();
                 while !*completion.borrow_and_update() {
                     if completion.changed().await.is_err() {
-                        tracing::error!(
-                            "foreground command task exited without proving effect settlement"
-                        );
-                        std::future::pending::<()>().await;
+                        return Err(ToolError::EffectsUnsettled(
+                            "foreground command cleanup owner exited without settlement proof"
+                                .to_owned(),
+                        ));
                     }
                 }
             }
@@ -188,10 +189,11 @@ impl BashTool {
         cancellation: CancellationToken,
         output: Arc<dyn ToolOutputSink>,
     ) -> Result<CommandOutcome, ToolError> {
-        self.foreground.settle_abandoned().await;
+        self.foreground.settle_abandoned().await?;
         cancellation.check()?;
         let (completed, completion) = tokio::sync::watch::channel(false);
         let command = Arc::new(ForegroundCommand {
+            _executor: Arc::clone(&self.executor),
             cancellation: cancellation.clone(),
             abandoned: std::sync::atomic::AtomicBool::new(false),
             completion,
@@ -220,7 +222,7 @@ impl BashTool {
                     ToolError::Command(format!("foreground command task failed: {error}"))
                 })
                 .and_then(std::convert::identity);
-            executor.settle_effects().await;
+            executor.settle_effects().await?;
             foreground
                 .calls
                 .lock()
@@ -230,17 +232,18 @@ impl BashTool {
             result
         });
         let result = task.await.map_err(|error| {
-            ToolError::Command(format!("foreground command task failed: {error}"))
+            ToolError::EffectsUnsettled(format!("foreground command cleanup owner failed: {error}"))
         })?;
-        caller.armed = false;
+        caller.armed = matches!(&result, Err(ToolError::EffectsUnsettled(_)));
         result
     }
 }
 
 #[async_trait]
 impl Tool for BashTool {
-    async fn settle_effects(&self) {
-        self.foreground.settle_abandoned().await;
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        self.foreground.settle_abandoned().await?;
+        Ok(())
     }
 
     fn descriptor(&self) -> ToolDescriptor {

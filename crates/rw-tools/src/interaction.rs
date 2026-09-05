@@ -35,6 +35,10 @@ pub struct SubmitPlanTool;
 
 #[async_trait]
 impl Tool for SubmitPlanTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "submit_plan".to_owned(),
@@ -98,6 +102,10 @@ impl AskUserTool {
 
 #[async_trait]
 impl Tool for AskUserTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "ask_user".to_owned(),
@@ -198,6 +206,10 @@ impl TodoTool {
 
 #[async_trait]
 impl Tool for TodoTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "todo".to_owned(),
