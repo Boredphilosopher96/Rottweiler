@@ -1979,6 +1979,10 @@ pub struct RewindCheckpoint {
 /// Storage-neutral boundary used around every mutating tool execution.
 #[async_trait]
 pub trait MutationCheckpointCoordinator: Send + Sync {
+    /// Waits for retained checkpoint workers and reports an unacknowledged workspace outcome.
+    /// The caller must settle tool effects and finish active checkpoint handles first.
+    async fn settle_effects(&self) -> Result<(), AgentLoopError>;
+
     async fn begin(
         &self,
         session_id: &SessionId,
@@ -2033,6 +2037,10 @@ pub struct NoopMutationCheckpointCoordinator;
 
 #[async_trait]
 impl MutationCheckpointCoordinator for NoopMutationCheckpointCoordinator {
+    async fn settle_effects(&self) -> Result<(), AgentLoopError> {
+        Ok(())
+    }
+
     async fn begin(
         &self,
         _session_id: &SessionId,
@@ -3905,6 +3913,10 @@ mod tests {
 
     #[async_trait]
     impl MutationCheckpointCoordinator for RecordingCheckpoints {
+        async fn settle_effects(&self) -> Result<(), AgentLoopError> {
+            Ok(())
+        }
+
         async fn begin(
             &self,
             session_id: &SessionId,
@@ -3973,6 +3985,10 @@ mod tests {
 
     #[async_trait]
     impl MutationCheckpointCoordinator for SingleFileCheckpoints {
+        async fn settle_effects(&self) -> Result<(), AgentLoopError> {
+            Ok(())
+        }
+
         async fn begin(
             &self,
             _session_id: &SessionId,
@@ -4043,6 +4059,10 @@ mod tests {
 
     #[async_trait]
     impl MutationCheckpointCoordinator for RecordingFileCheckpoints {
+        async fn settle_effects(&self) -> Result<(), AgentLoopError> {
+            Ok(())
+        }
+
         async fn begin(
             &self,
             session_id: &SessionId,
@@ -4205,6 +4225,10 @@ mod tests {
 
     #[async_trait]
     impl MutationCheckpointCoordinator for OrderedRewindCoordinator {
+        async fn settle_effects(&self) -> Result<(), AgentLoopError> {
+            Ok(())
+        }
+
         async fn begin(
             &self,
             _session_id: &SessionId,
@@ -4416,6 +4440,10 @@ mod tests {
 
     #[async_trait]
     impl MutationCheckpointCoordinator for InitRecordingCheckpoints {
+        async fn settle_effects(&self) -> Result<(), AgentLoopError> {
+            Ok(())
+        }
+
         async fn begin(
             &self,
             _session_id: &SessionId,
