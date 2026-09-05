@@ -1,3 +1,4 @@
+export type { SessionStateSnapshot, SessionActiveTurn, TranscriptTailIdentity, TranscriptTailRead, TranscriptTailResult, TranscriptTailPage, TranscriptTailText, TranscriptTailContent, TranscriptTailTool, TranscriptTailCitation, TranscriptTailPart } from "../../../protocol/types"
 export { MAX_SESSION_READ_ANCESTORS } from "../../../protocol/types"
 export type { SessionReadScope, SessionReadAncestor } from "../../../protocol/types"
 export {

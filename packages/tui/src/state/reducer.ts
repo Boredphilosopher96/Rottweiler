@@ -1,3 +1,4 @@
+import { readSessionState, preserveMetadata } from "./recovery"
 import { childProgressSource } from "../child-source"
 import { readControls, resolvedApproval, isControlEvent, coveredByControlSnapshot, preserveSnapshotControls } from "./controls"
 import { assertLiveAdmission, citationBytes } from "./live-admission"
@@ -145,7 +146,7 @@ export function reduceWireEvent(
     }
     : withCursor
 
-  const projected = applyKnownEvent(ready, event, sequenceText, activeSessionId)
+  const projected = preserveMetadata(state, applyKnownEvent(ready, event, sequenceText, activeSessionId), event, sequenceText)
   if (coveredControl) return preserveSnapshotControls(state, projected, event)
   return isControlEvent(event) ? { ...projected, controls: { ...projected.controls, observedThrough: sequenceText } } : projected
 }
@@ -174,9 +175,12 @@ function applyKnownEvent(
     case "session_navigation_requested":
     case "ui_catalog_ready":
     case "ui_panels_ready":
+    case "transcript_tail_ready":
     case "transcript_page_ready":
     case "transcript_content_ready":
       return state
+    case "session_state_ready":
+      return activeSessionId !== null && event.session_id !== activeSessionId ? state : readSessionState(state, event.session_id, event.snapshot)
     case "session_controls_ready":
       return activeSessionId !== null && event.session_id !== activeSessionId ? state : readControls(state, event.snapshot)
     case "tool_approval_resolved": {
