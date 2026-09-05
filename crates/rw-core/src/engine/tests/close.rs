@@ -355,6 +355,12 @@ struct ClosingJournal {
 }
 #[async_trait]
 impl crate::SessionEventSink for ClosingJournal {
+    async fn extension_state(
+        &self,
+        plugin_id: &str,
+    ) -> Result<crate::ExtensionStateView, AgentLoopError> {
+        self.inner.extension_state(plugin_id).await
+    }
     async fn reserve(
         &self,
         plan: &crate::EventBatchPlan,
