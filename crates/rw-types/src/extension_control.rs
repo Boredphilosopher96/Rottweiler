@@ -96,6 +96,9 @@ pub enum ExtensionControlOutcome {
     ContextChoiceRequired { question_id: QuestionId },
 }
 
+/// Validate one bounded model, mode or context identity.
+/// # Errors
+/// Rejects empty, oversized or control-bearing identities.
 pub fn validate_name(name: &str) -> Result<(), &'static str> {
     if name.is_empty() || name.len() > MAX_CONTROL_NAME_BYTES || name.chars().any(char::is_control)
     {
@@ -105,6 +108,9 @@ pub fn validate_name(name: &str) -> Result<(), &'static str> {
     }
 }
 impl ExtensionControl {
+    /// Validate this explicit operation before actor admission.
+    /// # Errors
+    /// Rejects empty, oversized or control-bearing identities.
     pub fn validate(&self) -> Result<(), &'static str> {
         match self {
             Self::PinContext { item_id } | Self::EvictContext { item_id } => {

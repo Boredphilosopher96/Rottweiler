@@ -97,7 +97,7 @@ mod tests {
         assert!(
             serde_json::from_value::<TodoSnapshot>(serde_json::json!({"items":items})).is_err()
         );
-        let items = (0..MAX_TODO_ITEMS + 1)
+        let items = (0..=MAX_TODO_ITEMS)
             .map(|i| serde_json::json!({"id":i.to_string(),"content":"x","status":"pending"}))
             .collect::<Vec<_>>();
         assert!(

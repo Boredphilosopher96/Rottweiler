@@ -286,7 +286,7 @@ mod tests;
 /// canonical result source and do not consume this ephemeral registry.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema, TS, PrepareAllocation)]
 #[serde(deny_unknown_fields)]
-#[schemars(extend("x-rw-max-json-bytes"=524288))]
+#[schemars(extend("x-rw-max-json-bytes"=524_288))]
 pub struct UiPanels {
     #[schemars(length(max = 8))]
     pub panels: Vec<UiPanelSnapshot>,

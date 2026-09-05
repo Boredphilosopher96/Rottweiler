@@ -7,7 +7,7 @@ use std::{collections::BTreeMap, mem::size_of};
 /// Implementations cover normal serde deserialization: vector capacity growth,
 /// map nodes, boxes and the largest nested element. Custom deserializers must not
 /// allocate unrepresented payloads. Source-derived profiles traverse every field.
-/// String payloads and serde intermediates are charged separately by JsonStructure.
+/// String payloads and serde intermediates are charged separately by `JsonStructure`.
 pub trait DecodeAllocation {
     fn decode_node_bytes() -> Option<usize>;
 }
