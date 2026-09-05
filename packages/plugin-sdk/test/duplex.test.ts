@@ -139,20 +139,52 @@ describe("production SDK duplex serve", () => {
     expect(frames.find((frame) => frame.id === 74)?.error).toMatchObject({ code: -32005 })
   })
 
-  test("shutdown reports cancellation when a provider iterator ignores abort", async () => {
-    let entered = false
+  test("provider cancellation retains ownership through ignored abort and iterator cleanup", async () => {
+    const handlerGate = Promise.withResolvers<void>()
+    const cleanupGate = Promise.withResolvers<void>()
+    let started = false
+    let cancelled = false
+    let cleaning = false
+    let cleaned = false
+    let stopped = false
     const definition = fixture()
-    const { frames, send, serving } = harness({ ...definition, handlers: {
-      ...definition.handlers,
-      providers: { "probe/": async function* () { entered = true; await new Promise<never>(() => {}) } },
-    } })
-    send({ jsonrpc: "2.0", id: 3, method: "provider/complete", params: { alias: "probe/model", request: {} } })
-    send({ jsonrpc: "2.0", method: "provider/credit", params: { request_id: 3,
-      events: PROTOCOL_LIMITS.providerWindowEvents, bytes: PROTOCOL_LIMITS.providerWindowBytes } })
-    await until(() => entered)
-    send(stop)
-    await serving
-    expect(frames.find((frame) => frame.id === 3)?.error).toMatchObject({ code: -32800 })
+    const { frames, send, serving } = harness({ ...definition, handlers: { ...definition.handlers,
+      providers: { "probe/": async function* (_params, context) {
+        context.signal.addEventListener("abort", () => { cancelled = true }, { once: true })
+        started = true
+        try {
+          await handlerGate.promise
+          yield { type: "finished", reason: "stop" }
+        } finally {
+          cleaning = true
+          await cleanupGate.promise
+          cleaned = true
+        }
+      } },
+    } }, 1000)
+    void serving.then(() => { stopped = true })
+    send({ jsonrpc: "2.0", id: 2, method: "provider/complete", params: { alias: "probe/model", request: {} } })
+    try {
+      await until(() => started)
+      send(stop)
+      await until(() => cancelled)
+      await Bun.sleep(20)
+      expect(frames.some(frame => frame.id === 2)).toBe(false)
+      expect(stopped).toBe(false)
+      handlerGate.resolve()
+      await until(() => cleaning)
+      await Bun.sleep(20)
+      expect(frames.some(frame => frame.id === 2)).toBe(false)
+      expect(stopped).toBe(false)
+      cleanupGate.resolve()
+      await serving
+      expect(cleaned).toBe(true)
+      expect(frames.find(frame => frame.id === 2)?.error).toMatchObject({ code: -32800 })
+    } finally {
+      handlerGate.resolve()
+      cleanupGate.resolve()
+      await serving
+    }
   })
 
   test("shutdown settles HTTP requests awaiting the response head", async () => {

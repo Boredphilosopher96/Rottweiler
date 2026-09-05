@@ -886,47 +886,40 @@ export class PluginServer {
     const credit = new StreamCredit(call.signal)
     this.#providerCredits.set(id, credit)
     const deadline = setTimeout(cancel, PROTOCOL_LIMITS.maxOperationDurationMs)
-    let rejectCancelled!: (error: Error) => void
-    const cancelled = new Promise<never>((_resolve, reject) => { rejectCancelled = reject })
-    const abort = () => rejectCancelled(new SafeRpcError(-32800, "plugin request cancelled"))
-    call.signal.addEventListener("abort", abort, { once: true })
-    if (call.signal.aborted) abort()
     const providerHandler = handler
     try {
-      await Promise.race([
-        this.#invoke(async () => {
+      await this.#invoke(async () => {
+        if (call.signal.aborted) throw new SafeRpcError(-32800, "plugin request cancelled")
+        const events = await providerHandler(params, this.#context(call.signal, params.alias))
+        if (events === null || typeof events !== "object" || !(Symbol.asyncIterator in events)) {
+          throw new SafeRpcError(-32603, "provider must return an async event stream")
+        }
+        let sawFinished = false
+        for await (const event of events) {
           if (call.signal.aborted) throw new SafeRpcError(-32800, "plugin request cancelled")
-          const events = await providerHandler(params, this.#context(call.signal, params.alias))
-          if (events === null || typeof events !== "object" || !(Symbol.asyncIterator in events)) {
-            throw new SafeRpcError(-32603, "provider must return an async event stream")
+          this.#validateProviderEvent(event, sawFinished)
+          if (event.type === "finished") sawFinished = true
+          const frame: JsonValue = {
+            jsonrpc: "2.0",
+            method: RPC_METHODS.providerEvent,
+            params: { request_id: id, event } as unknown as JsonValue,
           }
-          let sawFinished = false
-          for await (const event of events) {
-            if (call.signal.aborted) throw new SafeRpcError(-32800, "plugin request cancelled")
-            this.#validateProviderEvent(event, sawFinished)
-            if (event.type === "finished") sawFinished = true
-            const frame: JsonValue = {
-              jsonrpc: "2.0",
-              method: RPC_METHODS.providerEvent,
-              params: { request_id: id, event } as unknown as JsonValue,
-            }
-            if (event.type !== "finished") await credit.take(byteLength(JSON.stringify(frame)))
-            await this.#writer.write(frame, "data")
-          }
-          if (!sawFinished) throw new SafeRpcError(-32603, "provider stream ended before finished")
-        }),
-        cancelled,
-      ])
+          if (event.type !== "finished") await credit.take(byteLength(JSON.stringify(frame)))
+          await this.#writer.write(frame, "data")
+        }
+        if (!sawFinished) throw new SafeRpcError(-32603, "provider stream ended before finished")
+      })
+      if (call.signal.aborted) throw new SafeRpcError(-32800, "plugin request cancelled")
       await this.#success(id, null)
     } catch (error) {
-      if (error instanceof SafeRpcError) await this.#failure(id, error.code, error.safeMessage, error.safeData)
+      if (call.signal.aborted) await this.#failure(id, -32800, "plugin request cancelled")
+      else if (error instanceof SafeRpcError) await this.#failure(id, error.code, error.safeMessage, error.safeData)
       else await this.#failure(id, -32603, "plugin provider failed")
     } finally {
       this.#providerCalls.delete(id)
       this.#providerCredits.delete(id)
       clearTimeout(deadline)
       credit.close()
-      call.signal.removeEventListener("abort", abort)
       this.#lifetime.signal.removeEventListener("abort", cancel)
     }
   }

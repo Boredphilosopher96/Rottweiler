@@ -91,3 +91,18 @@ compilation, and ownership checks passed. Pinned Bun passed 67 SDK tests and fou
 plugin-host tests, both typechecks, and the SDK build. Five documentation-site
 projection tests passed. After the final Arc ownership simplification, the three
 provider settlement regressions were rerun.
+
+## Review correction: cancellation ownership
+
+The SDK provider handler no longer races its invocation against cancellation.
+An ignored abort retains its invocation and provider admission until the handler
+and asynchronous iterator cleanup actually settle. The host's immutable deadline
+and owned process teardown remain authoritative for an uncooperative plugin.
+Cancellation errors are emitted only after that local invocation has exited.
+
+The production duplex regression holds both the handler and its `finally` cleanup
+behind independent gates. Neither cancellation nor shutdown may complete before
+both gates release. It fails against the preceding implementation because the
+cancelled RPC response appears before the first gate opens. After the fix all 71
+SDK tests, typecheck, clean-package validation and build pass. Credit-starved
+provider cancellation still settles and preserves the cancellation error code.
