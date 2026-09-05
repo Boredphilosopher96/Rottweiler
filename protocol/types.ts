@@ -200,7 +200,9 @@ export type PlanArtifact = { title: string, summary_md: string, steps: Array<Pla
 
 export type PlanDecision = "approve" | "reject";
 
-export type RewindTarget = { "type": "turn", turn_id: TurnId, } | { "type": "checkpoint", checkpoint_id: string, };
+export type RewindSourcePosition = "before" | "through";
+
+export type RewindTarget = { "type": "turn", turn_id: TurnId, } | { "type": "source", expected_through: SequenceId, source: SequenceId, turn_id: TurnId, position: RewindSourcePosition, };
 
 export type ReviewFileDecision = "accept" | "revert";
 

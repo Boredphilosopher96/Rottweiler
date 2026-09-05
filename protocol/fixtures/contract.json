@@ -260,8 +260,11 @@
       },
       "session_id": "session-fixture",
       "target": {
-        "type": "checkpoint",
-        "checkpoint_id": "checkpoint-1"
+        "type": "source",
+        "expected_through": "42",
+        "source": "3",
+        "turn_id": "2",
+        "position": "before"
       }
     },
     {

@@ -2320,20 +2320,40 @@
         {
           "type": "object",
           "properties": {
-            "checkpoint_id": {
-              "type": "string"
+            "expected_through": {
+              "$ref": "#/$defs/SequenceId"
+            },
+            "source": {
+              "$ref": "#/$defs/SequenceId"
+            },
+            "turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "position": {
+              "$ref": "#/$defs/RewindSourcePosition"
             },
             "type": {
               "type": "string",
-              "const": "checkpoint"
+              "const": "source"
             }
           },
           "additionalProperties": false,
           "required": [
             "type",
-            "checkpoint_id"
+            "expected_through",
+            "source",
+            "turn_id",
+            "position"
           ]
         }
+      ]
+    },
+    "RewindSourcePosition": {
+      "description": "Completed boundary relative to an effective committed user source.",
+      "type": "string",
+      "enum": [
+        "before",
+        "through"
       ]
     },
     "ShellId": {
