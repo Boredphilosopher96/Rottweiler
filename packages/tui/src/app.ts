@@ -1,3 +1,4 @@
+import { PickerContentController, type PaletteAction } from "./app/picker-content"
 import { InputUiController } from "./app/input"
 import { ChildUiController } from "./app/children"
 import { SessionUiController } from "./app/sessions"
@@ -163,52 +164,7 @@ interface PendingPresentationEvent {
 
 export type { AppClientState } from "./recycle-state"
 
-interface PaletteAction {
-  readonly id: string
-  readonly title: string
-  readonly description: string
-  readonly section: PaletteSection
-  readonly catalogSource?: "builtin" | "extension"
-  readonly sourceLabel?: string
-  readonly detailDescription?: string
-  readonly run: () => void
-}
-
-type PaletteSection =
-  | "Conversation"
-  | "Agents & models"
-  | "Workspace"
-  | "Safety"
-  | "Appearance & settings"
-  | "Help & system"
-  | "Commands"
-
 export type PrimaryView = "conversation" | "tools"
-
-const PALETTE_SECTIONS: readonly PaletteSection[] = [
-  "Conversation",
-  "Agents & models",
-  "Workspace",
-  "Safety",
-  "Appearance & settings",
-  "Help & system",
-  "Commands",
-]
-
-const KEYBOARD_HELP_CONTEXT_NAMES: Record<KeybindingContext, string> = {
-  global: "Global",
-  standard: "Editing",
-  vim_normal: "Normal mode",
-  vim_insert: "Insert mode",
-  picker_normal: "Picker normal mode",
-  picker_insert: "Picker insert mode",
-  review: "Review",
-}
-
-const KEYBOARD_HELP_CONTEXTS: Record<KeybindingPreset, readonly KeybindingContext[]> = {
-  standard: ["global", "standard", "review"],
-  vim: ["global", "vim_normal", "vim_insert", "picker_normal", "picker_insert", "review"],
-}
 
 export class RottweilerApp extends BoxRenderable {
   transcript!: TranscriptRenderable
@@ -228,6 +184,7 @@ export class RottweilerApp extends BoxRenderable {
   banner!: StateBannerRenderable
   main!: BoxRenderable
 
+  readonly #pickerContent: PickerContentController
   readonly #input: InputUiController
   readonly #children: ChildUiController
   readonly #sessions: SessionUiController
@@ -268,7 +225,6 @@ export class RottweilerApp extends BoxRenderable {
   #projectionRequests: ProjectionRequestBroker
   #pickerController: PickerController
   #activeSubagentReadOnly = false
-  #commandsRequested = false
   #commandCatalogTruncationNotified = false
   #projectionErrors: Partial<Record<ProjectionKind, string>> = {}
   #outputViewerToolCallId: string | null = null
@@ -451,7 +407,7 @@ export class RottweilerApp extends BoxRenderable {
       statusHeight: () => Math.max(1, this.statusLine.height || 1),
       composerDockHeight: () => this.composer.dockHeight,
       focusComposer: () => this.composer.focus(),
-      renderPicker: () => this.#renderPicker(),
+      renderPicker: () => this.#pickerContent.renderPicker(),
       withRefreshGuard: (kind, refresh) => {
         if (kind === "themes") this.#suppressThemePreview(refresh)
         else refresh()
@@ -469,7 +425,7 @@ export class RottweilerApp extends BoxRenderable {
       pickerController: this.#pickerController, requests: this.#projectionRequests,
       focus: () => this.#input.focusForInputMode(), refresh: () => this.setState(this.#state),
       presentEvent: event => this.#presentation.markDirty(deferPresentationForEvent(event)),
-      closePicker: () => this.closePicker(), binding: action => this.#paletteBinding(action),
+      closePicker: () => this.closePicker(), binding: action => this.#pickerContent.paletteBinding(action),
       projectError: (code, message, retryable) => this.#projectClientError(code, message, retryable),
       projectRejection: outcome => this.#projectRejection(outcome),
     })
@@ -529,7 +485,7 @@ export class RottweilerApp extends BoxRenderable {
       get state() { return app.#state }, get picker() { return app.picker },
       pickerController: this.#pickerController, requests: this.#projectionRequests,
       get projectionErrors() { return app.#projectionErrors },
-      closePicker: () => this.closePicker(), submitPaletteCommand: content => this.#submitPaletteCommand(content),
+      closePicker: () => this.closePicker(), submitPaletteCommand: content => this.#pickerContent.submitPaletteCommand(content),
     })
     this.#mcp = new McpUiController({
       get state() { return app.#state },
@@ -546,6 +502,17 @@ export class RottweilerApp extends BoxRenderable {
       closePicker: () => this.closePicker(),
       modalOpened: () => this.#modalOpened(),
       projectError: (code, message, retryable) => this.#projectClientError(code, message, retryable),
+    })
+    this.#pickerContent = new PickerContentController({
+      get terminalWidth() { return app.width || app.ctx.width }, get terminalHeight() { return app.height || app.ctx.height },
+      ui: this, pickerController: this.#pickerController, input: this.#input,
+      requests: this.#projectionRequests, children: this.#children, sessions: this.#sessions,
+      providers: this.#providers, permissions: this.#permissions, settings: this.#settings,
+      mcp: this.#mcp, themes: this.#themes,
+      get projectionErrors() { return app.#projectionErrors }, get sessionId() { return app.#sessionId },
+      onExit: () => this.#options.onExit?.(), modalOpened: () => this.#modalOpened(),
+      clearProjectionError: kind => this.#clearProjectionError(kind),
+      requestFork: turn => this.#requestFork(turn), sendMessage: (content, attachments) => this.#sendMessage(content, attachments),
     })
     this.#createThemedSurface(theme)
     ctx.on(CliRenderEvents.FOCUS, this.#onTerminalFocus)
@@ -765,8 +732,8 @@ export class RottweilerApp extends BoxRenderable {
         themeBrowserRow(row, selected, availableWidth, theme),
       renderDetail: (row) => themeBrowserDetail(row.action),
     })
-    const pasteImageKeycap = this.#bindingHint("paste_image", ["global", this.#composerKeybindingContext()])
-    const externalEditorKeycap = this.#bindingHint("open_external_editor", ["global", this.#composerKeybindingContext()])
+    const pasteImageKeycap = this.#pickerContent.bindingHint("paste_image", ["global", this.#pickerContent.composerKeybindingContext()])
+    const externalEditorKeycap = this.#pickerContent.bindingHint("open_external_editor", ["global", this.#pickerContent.composerKeybindingContext()])
     this.composer = new ComposerRenderable(this.ctx, theme, {
       editor: this.#options.editor,
       imagePaste: this.#options.imagePaste,
@@ -813,7 +780,7 @@ export class RottweilerApp extends BoxRenderable {
       },
     })
     this.statusLine = new StatusLineRenderable(this.ctx, theme, {
-      modelPickerKeycap: this.#bindingHint("open_model_picker", ["global"]),
+      modelPickerKeycap: this.#pickerContent.bindingHint("open_model_picker", ["global"]),
     })
     this.add(this.banner)
     this.add(this.main)
@@ -925,7 +892,7 @@ export class RottweilerApp extends BoxRenderable {
       this.closePicker("scope_change")
       this.#projectionRequests.clearForSessionChange()
       this.#children.reset()
-      this.#commandsRequested = false
+      this.#pickerContent.resetCommands()
       this.#commandCatalogTruncationNotified = false
       this.#providers.catalogSettled()
       this.#projectionErrors = {}
@@ -946,7 +913,7 @@ export class RottweilerApp extends BoxRenderable {
 
   resetConnectionProjections(): void {
     this.#projectionRequests.clearForReconnect()
-    this.#commandsRequested = false
+    this.#pickerContent.resetCommands()
     this.#providers.catalogSettled()
     this.#projectionErrors = {}
   }
@@ -1003,7 +970,7 @@ export class RottweilerApp extends BoxRenderable {
     }
     if (!this.#projectionRequests.acceptsEvent(event)) return
     const completedProjection = this.#projectionRequests.completeEvent(event)
-    if (completedProjection === "commands") this.#commandsRequested = false
+    if (completedProjection === "commands") this.#pickerContent.resetCommands()
     if (completedProjection === "models") this.#providers.catalogSettled()
     if (completedProjection !== null) this.#clearProjectionError(completedProjection)
     const previous = this.#state
@@ -1148,8 +1115,8 @@ export class RottweilerApp extends BoxRenderable {
       )
     }
     if (event.type === "command_finished" && event.name === "add-dir" && !next.replay.active) {
-      this.#requestCommands()
-      this.#requestModes()
+      this.#pickerContent.requestCommands()
+      this.#pickerContent.requestModes()
     }
     if (event.type === "subagent_spawned" || event.type === "subagent_finished") {
       this.#children.requestSubagents()
@@ -1269,7 +1236,7 @@ export class RottweilerApp extends BoxRenderable {
       switch (picker.kind) {
         case "palette": this.openCommandPicker(); break
         case "keyboardHelp": this.openKeyboardHelpPicker(); break
-        case "commands": this.#requestCommands(); break
+        case "commands": this.#pickerContent.requestCommands(); break
         case "attachments": this.openAttachmentPicker(); break
         case "mcp": this.openMcpPicker(); break
         case "modes": this.openModePicker(); break
@@ -1452,35 +1419,12 @@ export class RottweilerApp extends BoxRenderable {
 
   }
 
-  openCommandPicker(): void {
-    if (this.picker.visible) this.picker.close()
-    this.#pickerController.begin("palette")
-    this.commandPalette.resizeForTerminal(
-      this.width === 0 ? this.ctx.width : this.width,
-      this.height === 0 ? this.ctx.height : this.height,
-    )
-    if (!this.#commandsRequested) {
-      this.#requestCommands()
-    }
-    this.#pickerController.refresh()
-  }
-
-  openKeyboardHelpPicker(): void {
-    this.#pickerController.begin("keyboardHelp")
-    this.#pickerController.refresh()
-  }
-
-  openFilePicker(query = "", anchored = false): void {
-    this.#pickerController.begin("files", anchored, query)
-    this.#projectionRequests.command({ type: "search_workspace_files", query, limit: 100 })
-    this.#pickerController.refresh()
-    if (!anchored) this.picker.input.value = query
-  }
-
-  openAttachmentPicker(): void {
-    this.#pickerController.begin("attachments")
-    this.#pickerController.refresh()
-  }
+  openCommandPicker(): void { this.#pickerContent.openCommandPicker() }
+  openKeyboardHelpPicker(): void { this.#pickerContent.openKeyboardHelpPicker() }
+  openFilePicker(query = "", anchored = false): void { this.#pickerContent.openFilePicker(query, anchored) }
+  openAttachmentPicker(): void { this.#pickerContent.openAttachmentPicker() }
+  openWorkspaceRootsPicker(): void { this.#pickerContent.openWorkspaceRootsPicker() }
+  openModePicker(): void { this.#pickerContent.openModePicker() }
 
   openModelPicker(provider: string | null = null): void { this.#providers.openModelPicker(provider) }
 
@@ -1507,10 +1451,6 @@ export class RottweilerApp extends BoxRenderable {
 
   openExportSessionPicker(): void { this.#sessions.openExportSessionPicker() }
 
-  openWorkspaceRootsPicker(): void {
-    this.#pickerController.begin("workspaceRoots")
-    this.#pickerController.refresh()
-  }
   openMcpPicker(): void { this.#mcp.openMcpPicker() }
   openThemePicker(): void { this.#themes.openThemePicker() }
 
@@ -1520,12 +1460,6 @@ export class RottweilerApp extends BoxRenderable {
       height - this.statusLine.height - this.composer.dockHeight,
     )
     this.reviewPanel.resizeForTerminal(width, height, primaryHeight)
-  }
-
-  openModePicker(): void {
-    this.#pickerController.begin("modes")
-    this.#requestModes()
-    this.#pickerController.refresh()
   }
 
   openSessionPicker(): void { this.#sessions.openSessionPicker() }
@@ -1757,523 +1691,16 @@ export class RottweilerApp extends BoxRenderable {
     this.#clipboardNoticeTimer = null
   }
 
-  #renderPicker(): void {
-    switch (this.#pickerController.kind) {
-      case "palette": {
-        const paletteActions = this.#paletteActions()
-        const entries: readonly CommandPaletteEntry<PaletteAction>[] = paletteActions.map((action) => ({
-            id: action.id,
-            title: action.title,
-            description: action.description,
-            section: action.section,
-            source: action.catalogSource ?? "builtin",
-            action,
-          }))
-        const catalog: CommandPaletteCatalog = this.#projectionErrors.commands !== undefined
-          ? {
-              kind: "error",
-              message: this.#projectionErrors.commands,
-              retryable: true,
-            }
-          : this.#commandsRequested && this.#state.commands.length === 0
-            ? { kind: "loading" }
-            : { kind: "ready", truncated: this.#state.commandsTruncated }
-        const query = this.commandPalette.visible
-          ? this.commandPalette.input.value
-          : this.#pickerController.query
-        const preserveSelection = query === this.#pickerController.query
-        this.#pickerController.query = query
-        const model = createCommandPaletteModel({
-          entries,
-          sections: PALETTE_SECTIONS,
-          query,
-          selectedId: this.commandPalette.visible && preserveSelection
-            ? this.commandPalette.selectedId
-            : null,
-          catalog,
-        })
-        const presentation: ListDetailPresentation<PaletteAction> = {
-          title: "COMMAND PALETTE",
-          query,
-          selectedId: model.selectedId,
-          rows: model.rows.map((row) => row.kind === "section"
-            ? row
-            : {
-                kind: "item",
-                id: row.id,
-                label: row.title,
-                matchSpans: row.titleMatches,
-                detail: {
-                  title: row.title,
-                  description: row.action.detailDescription ?? row.description,
-                  meta: `${row.section} · ${row.action.sourceLabel ?? (row.source === "builtin" ? "built-in" : "extension")}`,
-                },
-                action: row.action,
-              }),
-          status: model.status,
-          notice: model.notice === null
-            ? null
-            : {
-                message: model.notice.kind === "error" && model.notice.retryable
-                  ? `${model.notice.message} · Ctrl+R retry`
-                  : model.notice.message,
-                tone: model.notice.kind === "error"
-                  ? "error"
-                  : model.notice.kind === "truncated"
-                    ? "warning"
-                    : "muted",
-              },
-        }
-        if (this.commandPalette.visible) {
-          this.commandPalette.refresh(presentation)
-        } else {
-          this.commandPalette.open(presentation, (action) => action.run(), {
-            onQuery: () => {
-              this.#renderPicker()
-            },
-            onRetry: () => {
-              this.#requestCommands()
-              this.#renderPicker()
-            },
-          })
-          this.#modalOpened()
-        }
-        break
-      }
-      case "keyboardHelp": {
-        const items: PickerItem<null>[] = []
-        for (const context of KEYBOARD_HELP_CONTEXTS[this.#input.bindings.preset]) {
-          const bindings = this.#input.bindings.bindings(context)
-          if (bindings.size === 0) continue
-          items.push({
-            id: `keyboard-help.section.${context}`,
-            label: KEYBOARD_HELP_CONTEXT_NAMES[context],
-            description: "",
-            value: null,
-            selectable: false,
-            sectionHeader: true,
-          })
-          for (const [stroke, action] of bindings) {
-            const keycap = formatKeycap(stroke)
-            const label = KEYBINDING_ACTION_LABELS[action]
-            items.push({
-              id: `keyboard-help.${context}.${stroke}`,
-              label: keycap,
-              description: label,
-              searchText: `${keycap} ${label}`,
-              value: null,
-            })
-          }
-        }
-        this.#pickerController.show("Keyboard shortcuts", items, () => this.closePicker())
-        break
-      }
-      case "commands":
-        const commandError = this.#projectionErrors.commands
-        const commandItems: PickerItem<CommandChoice | null>[] = [
-          ...(commandError === undefined
-            ? []
-            : [{
-                id: "commands.error",
-                label: "Couldn't load live commands",
-                description: `${commandError} · select to retry`,
-                value: null,
-              }]),
-          ...mergeSlashCommandChoices(this.#state.commands).map((command) => ({
-            id: command.name,
-            label: `/${command.name}`,
-            description: `${commandSourceLabel(command.source)} · ${command.description}`,
-            searchText: command.usage,
-            value: command,
-          })),
-        ]
-        this.#pickerController.show(
-          this.#state.commandsTruncated ? "Commands · results truncated" : "Commands",
-          commandItems,
-          (item) => {
-            const command = item.value as CommandChoice | null
-            if (command === null) {
-              this.#requestCommands()
-              return
-            }
-            const clearAnchoredTrigger = () => {
-              if (this.#pickerController.anchored) this.composer.value = ""
-            }
-            if (command.name === "review") {
-              clearAnchoredTrigger()
-              this.openReview()
-              this.closePicker()
-              return
-            }
-            if (command.name === "fork") {
-              clearAnchoredTrigger()
-              void this.#requestFork(null)
-              this.closePicker()
-              return
-            }
-            if (command.name === "rewind") {
-              clearAnchoredTrigger()
-              this.closePicker()
-              this.openTimelinePicker()
-              return
-            }
-            if (command.name === "models") {
-              clearAnchoredTrigger()
-              this.closePicker()
-              this.openModelPicker()
-              return
-            }
-            if (command.name === "providers") {
-              clearAnchoredTrigger()
-              this.closePicker()
-              this.openProviderPicker()
-              return
-            }
-            if (command.name === "agents") {
-              clearAnchoredTrigger()
-              this.closePicker()
-              this.openSubagentPicker()
-              return
-            }
-            if (command.name === "theme") {
-              clearAnchoredTrigger()
-              this.closePicker()
-              this.openThemePicker()
-              return
-            }
-            if (command.name === "settings") {
-              clearAnchoredTrigger()
-              this.closePicker()
-              this.openSettingsPicker()
-              return
-            }
-            if (command.name === "mode") {
-              clearAnchoredTrigger()
-              this.closePicker()
-              this.openModePicker()
-              return
-            }
-            const content = `/${command.name}`
-            const requiresArgument = /<[^>]+>/.test(command.usage)
-            if (this.#pickerController.anchored && !requiresArgument) {
-              this.composer.value = content
-              this.closePicker()
-              void this.composer.submit()
-              return
-            }
-            this.composer.value = `${content} `
-            this.closePicker()
-          },
-        )
-        break
-      case "timeline": this.#sessions.render("timeline"); break
-      case "timelineActions": this.#sessions.render("timelineActions"); break
-      case "queuedMessages": this.#sessions.render("queuedMessages"); break
-      case "exportFormat": this.#sessions.render("exportFormat"); break
-      case "exportOverwrite": this.#sessions.render("exportOverwrite"); break
-      case "exportPath": this.#sessions.render("exportPath"); break
-      case "workspaceRoots": {
-        const workspaceRoots = this.#state.workspaceRoots
-        if (workspaceRoots === null) {
-          this.#pickerController.showLoading("Workspace roots", "Loading workspace roots")
-          break
-        }
-        this.#pickerController.show(
-          "Workspace roots",
-          workspaceRoots.roots.map((root, index) => ({
-            id: `workspace.root.${index}`,
-            label: root,
-            description: index === 0 ? "primary" : "additional",
-            value: root,
-          })),
-          () => this.closePicker(),
-        )
-        break
-      }
-      case "files":
-        const fileError = this.#projectionErrors.files
-        if (
-          fileError === undefined &&
-          this.#projectionRequests.current("files") !== null &&
-          this.#state.workspaceFiles.length === 0
-        ) {
-          this.#pickerController.showLoading("Workspace files", "Searching workspace files")
-          break
-        }
-        if (fileError === undefined && this.#state.workspaceFiles.length === 0) {
-          this.#pickerController.showStatus(
-            "Workspace files",
-            "No matching files",
-            "Try a different search.",
-          )
-          break
-        }
-        const fileItems: PickerItem<RottweilerState["workspaceFiles"][number] | null>[] = [
-          ...(fileError === undefined
-            ? []
-            : [{
-                id: "files.error",
-                label: "Couldn't search workspace files",
-                description: `${fileError} · select to retry`,
-                value: null,
-              }]),
-          ...this.#state.workspaceFiles.map((file) => ({
-            id: file.path,
-            label: file.isDirectory ? `▸ ${file.path}` : file.path,
-            description: file.isDirectory ? "directory" : "attach file",
-            value: file,
-          })),
-        ]
-        this.#pickerController.show(
-          "Workspace files",
-          fileItems,
-          (item) => {
-            const file = item.value as RottweilerState["workspaceFiles"][number] | null
-            if (file === null) {
-              this.openFilePicker(this.#pickerController.query, this.#pickerController.anchored)
-              return
-            }
-            if (file.isDirectory) {
-              const query = `${file.path.replace(/\/$/, "")}/`
-              if (this.#pickerController.anchored) {
-                const mention = this.composer.currentFileMention()
-                if (mention !== null) {
-                  this.composer.replaceRange(mention.start, mention.end, `@${query}`)
-                }
-              } else {
-                this.openFilePicker(query)
-              }
-              return
-            }
-            const draft = this.composer.value
-            const mention = this.#pickerController.anchored ? this.composer.currentFileMention() : null
-            const requestId = this.#projectionRequests.command({
-              type: "preview_workspace_file",
-              path: file.path,
-              max_bytes: 5_242_880,
-            })
-            if (requestId !== null) {
-              this.#projectionRequests.setFilePreview({
-                path: file.path,
-                requestId,
-                draft,
-                mention: mention === null ? null : { start: mention.start, end: mention.end },
-              })
-            }
-          }
-        )
-        break
-      case "attachments": {
-        const attachments = this.composer.attachments
-        const items: PickerItem<number>[] = attachments.map((attachment, index) => ({
-          id: `attachment:${index}`,
-          label: `Remove ${attachment.source_path ?? attachment.name}`,
-          description: `${attachment.media_type} · remove only this attachment`,
-          value: index,
-        }))
-        if (items.length === 0) {
-          this.#pickerController.showStatus(
-            "Attachments",
-            "No attachments in this draft",
-            "Paste an image or select a file with @ to attach it.",
-          )
-          break
-        }
-        this.#pickerController.show("Attachments", items, (item) => {
-          this.composer.removeAttachment(item.value as number)
-          if (this.composer.attachments.length === 0) this.closePicker()
-          else this.#pickerController.refresh()
-        })
-        break
-      }
-      case "models":
-      case "providers":
-      case "providerRecovery":
-      case "providerAuth":
-      case "providerApiKey":
-        this.#providers.render(this.#pickerController.kind)
-        break
-      case "permissionInput":
-      case "trust":
-      case "permissionMode":
-      case "permissionYoloConfirm":
-      case "permissions":
-        this.#permissions.render(this.#pickerController.kind)
-        break
-
-      case "mcp":
-      case "mcpInput":
-      case "mcpActions":
-      case "mcpRemoveConfirm":
-        this.#mcp.render(this.#pickerController.kind)
-        break
-      case "budgets":
-      case "budgetPresets":
-      case "settings":
-      case "settingChoices":
-        this.#settings.render(this.#pickerController.kind)
-        break
-      case "themes": this.#themes.render(); break
-
-      case "modes": {
-        const presentation = modePickerPresentation(
-          this.#state,
-          this.#projectionErrors.modes,
-          this.#projectionRequests.current("modes") !== null,
-        )
-        this.#pickerController.show(
-          presentation.title,
-          presentation.items,
-          (item) => {
-            if (item.value.kind === "retry") {
-              this.#requestModes()
-              this.#pickerController.refresh()
-              return
-            }
-            this.#projectionRequests.emit({
-              type: "switch_mode",
-              meta: this.#projectionRequests.meta(),
-              session_id: this.#sessionId,
-              mode: item.value.id,
-            })
-            this.closePicker()
-          },
-        )
-        break
-      }
-      case "agents": this.#children.render("agents"); break
-      case "agentActions": this.#children.render("agentActions"); break
-      case "sessions": this.#sessions.render("sessions"); break
-      case "sessionActions": this.#sessions.render("sessionActions"); break
-      case "sessionRename": this.#sessions.render("sessionRename"); break
-      case null:
-        break
-    }
-  }
-
   #resolvedTheme(theme: RottweilerTheme): RottweilerTheme {
     if (theme.name === "system") return this.#systemTheme
     return themeByName(theme.name, this.#systemThemeMode ?? theme.mode) ?? theme
-  }
-
-  #submitPaletteCommand(content: string): void {
-    this.closePicker()
-    if (
-      this.#state.connection.phase === "connected" ||
-      this.#state.connection.phase === "replaying"
-    ) {
-      void this.#sendMessage(content, [])
-    } else {
-      this.composer.value = content
-      this.composer.focus()
-    }
-  }
-
-  #paletteBinding(action: KeybindingAction): string | null {
-    return this.#bindingHint(action, ["global"])
-  }
-
-  #bindingHint(action: KeybindingAction, contexts: readonly KeybindingContext[]): string | null {
-    for (const context of contexts) {
-      for (const [stroke, boundAction] of this.#input.bindings.bindings(context)) {
-        if (boundAction === action) return formatKeycap(stroke)
-      }
-    }
-    return null
-  }
-
-  #composerKeybindingContext(): Extract<KeybindingContext, "standard" | "vim_insert"> {
-    return this.#input.bindings.preset === "vim" ? "vim_insert" : "standard"
-  }
-
-  #paletteDescription(description: string, binding?: KeybindingAction): string {
-    if (binding === undefined) return description
-    const hint = this.#paletteBinding(binding)
-    return hint === null ? description : `${description} · ${hint}`
-  }
-
-  #paletteActions(): readonly PaletteAction[] {
-    const open = (action: () => void) => () => {
-      this.closePicker()
-      action()
-    }
-    const submit = (content: string) => () => this.#submitPaletteCommand(content)
-    const prefill = (content: string) => () => {
-      this.closePicker()
-      this.composer.value = `${content} `
-      this.composer.focus()
-    }
-    const actions: PaletteAction[] = [
-      ...(Object.values(this.#children.presentedState().turns).some((turn) => turn.status === "running")
-        ? [{ id: "interrupt.run", title: "Interrupt turn", section: "Conversation", description: "Stop the active turn", run: submit("/interrupt") } satisfies PaletteAction]
-        : []),
-      { id: "compact.run", title: "Compact context", section: "Conversation", description: "Compact the conversation context", run: submit("/compact") },
-      { id: "rewind.run", title: "Rewind to a turn", section: "Conversation", description: "Choose from completed user turns", run: open(() => this.openTimelinePicker()) },
-      { id: "fork.run", title: "Fork session", section: "Conversation", description: "Fork at the latest completed turn", run: open(() => void this.#requestFork(null)) },
-      { id: "session.new", title: "New session", section: "Conversation", description: this.#paletteDescription("Start a clean conversation", "new_session"), run: open(() => void this.#sessions.createSession()) },
-      { id: "session.list", title: "Switch session", section: "Conversation", description: this.#paletteDescription("Resume another durable session", "open_session_picker"), run: open(() => this.openSessionPicker()) },
-      { id: "review.open", title: "Review changes", section: "Conversation", description: this.#paletteDescription("Open the cumulative session diff", "open_review"), run: open(() => this.openReview()) },
-      { id: "session.export", title: "Export session", section: "Conversation", description: "Save this session's transcript to a file", run: open(() => this.openExportSessionPicker()) },
-      { id: "plan.show", title: "Show plan", section: "Conversation", description: "Display the pending or approved plan", run: submit("/plan") },
-      { id: "queue.manage", title: "Manage queued messages", section: "Conversation", description: "Review, remove, or clear queued messages", run: open(() => this.openQueuedMessagesPicker()) },
-      { id: "cost.show", title: "Show usage & cost", section: "Conversation", description: "Display tokens, cost, and budget", run: submit("/cost") },
-
-      { id: "model.list", title: "Switch model", section: "Agents & models", description: this.#paletteDescription("Choose the active model alias", "open_model_picker"), run: open(() => this.openModelPicker()) },
-      { id: "provider.list", title: "Switch provider route", section: "Agents & models", description: "Choose a configured provider and model route", run: open(() => this.openProviderPicker()) },
-      { id: "mode.list", title: "Switch mode", section: "Agents & models", description: this.#paletteDescription("Choose discuss, plan, or execute", "open_mode_picker"), run: open(() => this.openModePicker()) },
-      { id: "agent.children", title: "Child agents", section: "Agents & models", description: this.#paletteDescription("Inspect, resume, interrupt, or close child agents", "open_subagent_picker"), run: open(() => this.openSubagentPicker()) },
-      ...(this.#children.activeId === null ? [] : [{
-        id: "agent.current.actions",
-        title: "Current child actions",
-        section: "Agents & models",
-        description: "Inspect, continue, interrupt, or close the visible child",
-        run: open(() => this.openSubagentActionPicker(this.#children.activeId)),
-      } satisfies PaletteAction]),
-      { id: "status.show", title: "Show agent status", section: "Agents & models", description: "Display running and queue state", run: submit("/status") },
-
-      { id: "view.conversation", title: "View conversation", section: "Workspace", description: "Return to the conversation transcript", run: open(() => this.showConversationView()) },
-      { id: "view.tools", title: "View tools", section: "Workspace", description: "Inspect retained tool activity and output", run: open(() => this.showToolsView()) },
-      { id: "workspace.add", title: "Add workspace directory", section: "Workspace", description: "Prefills /add-dir · give a directory path", run: prefill("/add-dir") },
-      { id: "workspace.roots", title: "Workspace roots", section: "Workspace", description: "See every live workspace root", run: open(() => this.openWorkspaceRootsPicker()) },
-      { id: "trust.manage", title: "Folder trust", section: "Workspace", description: "Show, grant, or revoke folder trust", run: open(() => this.openTrustPicker()) },
-      { id: "context.manage", title: "Manage context", section: "Workspace", description: "Inspect, pin, or evict context items", run: submit("/context") },
-
-      { id: "permissions.mode", title: "Permission mode", section: "Safety", description: "Choose when tool use needs confirmation", run: open(() => this.openPermissionModePicker()) },
-      { id: "permissions.manage", title: "Permission rules", section: "Safety", description: "Inspect, add, and remove session rules", run: open(() => this.openPermissionPicker()) },
-      { id: "budget.manage", title: "Budget limits", section: "Safety", description: "Set spend and subscription-token limits", run: open(() => this.openBudgetPicker()) },
-
-      { id: "theme.list", title: "Switch theme", section: "Appearance & settings", description: "Preview and choose an interface theme", run: open(() => this.openThemePicker()) },
-      { id: "settings.open", title: "Settings", section: "Appearance & settings", description: "Change safe persisted user settings", run: open(() => this.openSettingsPicker()) },
-      { id: "mcp.manage", title: "MCP connections", section: "Appearance & settings", description: "Add, review, enable, disable, or remove MCP servers", run: open(() => this.openMcpPicker()) },
-
-      { id: "keyboard.help", title: "Keyboard shortcuts", section: "Help & system", description: "Every binding for the active preset", run: open(() => this.openKeyboardHelpPicker()) },
-      { id: "help.show", title: "Command help", section: "Help & system", description: "List every available slash command", run: submit("/help") },
-      { id: "app.exit", title: "Exit Rottweiler", section: "Help & system", description: "Close the TUI and its supervised engine", run: open(() => this.#options.onExit?.()) },
-    ]
-    for (const command of this.#state.commands) {
-      if (isTuiHandledSlashCommand(command.name)) continue
-      const requiresArgument = /<[^>]+>/.test(command.usage)
-      actions.push({
-        id: `slash.${command.name}`,
-        title: `/${command.name}`,
-        section: "Commands",
-        description: `${commandSourceLabel(command.source)} · ${command.description}`,
-        catalogSource: command.source === undefined || command.source === "builtin"
-          ? "builtin"
-          : "extension",
-        sourceLabel: commandSourceLabel(command.source).toLocaleLowerCase(),
-        detailDescription: command.description,
-        run: requiresArgument ? prefill(`/${command.name}`) : submit(`/${command.name}`),
-      })
-    }
-    return actions
   }
 
   #composerInputChanged(value: string): void {
     const changed = value !== this.#lastComposerValue
     this.#lastComposerValue = value
     if (!changed) {
-      this.#updateComposerAutocomplete(value)
+      this.#pickerContent.updateComposerAutocomplete(value)
       return
     }
     this.#options.onComposerInput?.(value)
@@ -2282,41 +1709,13 @@ export class RottweilerApp extends BoxRenderable {
     const hadNotice = this.#composerNotice !== null
     this.#composerNotice = null
     if ((hadPendingIntent || hadNotice) && !this.#destroyed) this.setState(this.#state)
-    this.#updateComposerAutocomplete(value)
+    this.#pickerContent.updateComposerAutocomplete(value)
   }
 
   #clearComposerNotice(): void {
     if (this.#composerNotice === null) return
     this.#composerNotice = null
     if (!this.#destroyed) this.setState(this.#state)
-  }
-
-  #updateComposerAutocomplete(value: string): void {
-    const slash = /^\/([^\s]*)$/.exec(value)
-    if (slash !== null) {
-      this.#pickerController.anchored = true
-      this.#pickerController.query = slash[1] ?? ""
-      this.#pickerController.position(true)
-      this.#pickerController.kind = "commands"
-      if (this.#state.commands.length === 0 && !this.#commandsRequested) {
-        this.#requestCommands()
-      }
-      this.#pickerController.refresh()
-      return
-    }
-    const mention = /(?:^|\s)@([^\n]*)$/.exec(value)
-    if (mention === null && this.#pickerController.anchored) this.closePicker()
-  }
-
-  #requestCommands(): void {
-    this.#commandsRequested = true
-    this.#clearProjectionError("commands")
-    this.#projectionRequests.command({ type: "list_commands" })
-  }
-
-  #requestModes(): void {
-    this.#clearProjectionError("modes")
-    this.#projectionRequests.command({ type: "list_modes" })
   }
 
   #openChangedFileDiff(path: string): void {
@@ -2726,7 +2125,7 @@ export class RottweilerApp extends BoxRenderable {
 
   #recordProjectionFailure(kind: ProjectionKind, message: string): void {
     if (kind === "commands") {
-      this.#commandsRequested = false
+      this.#pickerContent.resetCommands()
     } else if (kind === "models") {
       this.#providers.catalogSettled()
     } else if (kind === "runtime_services" && this.#state.runtimeServices.length > 0) {
