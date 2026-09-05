@@ -158,11 +158,13 @@ pub enum UiProjectedField {
     Text {
         id: String,
         #[serde(deserialize_with = "Option::deserialize")]
+        #[schemars(schema_with = "crate::schema::required_nullable::<String>")]
         value: Option<String>,
     },
     Badge {
         id: String,
         #[serde(deserialize_with = "Option::deserialize")]
+        #[schemars(schema_with = "crate::schema::required_nullable::<String>")]
         value: Option<String>,
     },
     List {

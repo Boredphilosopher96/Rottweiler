@@ -49,9 +49,11 @@ impl ExtensionStateMutation {
 #[serde(deny_unknown_fields)]
 pub struct ExtensionStateTransaction {
     #[serde(deserialize_with = "Option::deserialize")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<SequenceId>")]
     pub expected_revision: Option<SequenceId>,
     pub mutations: Vec<ExtensionStateMutation>,
     #[serde(deserialize_with = "Option::deserialize")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<ExtensionDeliveryCursor>")]
     pub acknowledged: Option<ExtensionDeliveryCursor>,
 }
 
@@ -67,13 +69,16 @@ pub struct ExtensionStateEntry {
 #[serde(deny_unknown_fields)]
 pub struct ExtensionStateSnapshot {
     #[serde(deserialize_with = "Option::deserialize")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<SequenceId>")]
     pub revision: Option<SequenceId>,
     pub entries: Vec<ExtensionStateEntry>,
     #[serde(deserialize_with = "Option::deserialize")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<ExtensionDeliveryCursor>")]
     pub acknowledged: Option<ExtensionDeliveryCursor>,
     /// Host-selected lower bound of this session's delivery stream. A fork
     /// starts after its inherited prefix instead of redelivering parent effects.
     #[serde(deserialize_with = "Option::deserialize")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<ExtensionDeliveryCursor>")]
     pub delivery_start: Option<ExtensionDeliveryCursor>,
 }
 
@@ -85,6 +90,7 @@ pub enum ExtensionStateCommitOutcome {
     },
     Conflict {
         #[serde(deserialize_with = "Option::deserialize")]
+        #[schemars(schema_with = "crate::schema::required_nullable::<SequenceId>")]
         actual_revision: Option<SequenceId>,
     },
 }
@@ -96,13 +102,16 @@ pub enum ExtensionStateCommitOutcome {
 pub struct ExtensionSessionSnapshot {
     pub session_id: SessionId,
     #[serde(deserialize_with = "Option::deserialize")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<String>")]
     pub title: Option<String>,
     pub mode_id: ModeId,
     pub model_alias: String,
     #[serde(deserialize_with = "Option::deserialize")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<TurnId>")]
     pub active_turn: Option<TurnId>,
     pub queued_messages: usize,
     #[serde(deserialize_with = "Option::deserialize")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<SequenceId>")]
     pub last_sequence: Option<SequenceId>,
 }
 
