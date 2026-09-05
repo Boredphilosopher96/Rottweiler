@@ -28,7 +28,7 @@ API dollars, AI credits and unpriced subscription usage are separate quantities.
 
 `McpUiController` owns the server browser and its multi-step command drafts. Text prompts explicitly declare whether empty input submits and carry a UTF-8 byte limit. Native character limits permit any value within that byte budget. MCP environment drafts replace repeated keys, admit at most 128 entries and 64 KiB of key/value bytes, and transfer ownership into the submitted command. Closing the workflow clears its draft.
 
-Composer text and attachments are editable client state. Failed submission retains recoverable input. Secret prompts and process-bound interactions are excluded from renderer handoff; they do not enter persisted conversation history merely because a component captures its view state.
+Composer text and attachments are editable client state. Asynchronous clipboard, pasted-path and external-editor results are bound to the initiating draft generation and session scope. Replacing or submitting the draft retires those input operations; destroying the component prevents their results and errors from mutating another surface. One external editor invocation is admitted per composer. Failed submission retains recoverable input. Secret prompts and process-bound interactions are excluded from renderer handoff; they do not enter persisted conversation history merely because a component captures its view state.
 
 ## Session and request boundaries
 

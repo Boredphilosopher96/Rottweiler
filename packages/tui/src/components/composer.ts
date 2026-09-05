@@ -61,6 +61,8 @@ export class ComposerRenderable extends BoxRenderable {
   #imagePreview: ImageAttachmentRenderable | null = null
   #options: ComposerOptions
   #theme: RottweilerTheme
+  #inputGeneration: object = {}
+  #editorRequest: object | null = null
   #submitting = false
   #shellMode = false
   #imagePasteAvailable = false
@@ -164,6 +166,7 @@ export class ComposerRenderable extends BoxRenderable {
   }
 
   set value(value: string) {
+    this.#inputGeneration = {}
     this.editor.setText(value)
     this.setShellMode(value.startsWith("!"))
     this.#refreshHeight()
@@ -218,6 +221,7 @@ export class ComposerRenderable extends BoxRenderable {
 
   /** Replace the visible draft when switching between parent and child sessions. */
   restoreDraft(content: string, attachments: readonly Attachment[]): void {
+    this.#inputGeneration = {}
     this.editor.setText(content)
     this.#attachments = [...attachments]
     this.setShellMode(content.startsWith("!"))
@@ -303,6 +307,7 @@ export class ComposerRenderable extends BoxRenderable {
     const submittedAttachments = this.#attachments
     const submissionScope = this.#options.submissionScope?.() ?? "default"
     this.#submitting = true
+    this.#inputGeneration = {}
     this.editor.clear()
     this.setShellMode(false)
     this.#attachments = []
@@ -413,8 +418,11 @@ export class ComposerRenderable extends BoxRenderable {
 
   async pasteImage(): Promise<boolean> {
     if (!this.#imagePasteAvailable) return false
-    const image = await this.#options.imagePaste.readImage()
-    if (image === null) {
+    const current = this.#inputOwner()
+    let image: ClipboardImage | null
+    try { image = await this.#options.imagePaste.readImage() }
+    catch (error) { if (current()) throw error; return false }
+    if (!current() || image === null) {
       return false
     }
     return this.addImage(image)
@@ -422,6 +430,7 @@ export class ComposerRenderable extends BoxRenderable {
 
   async #paste(event: PasteEvent): Promise<void> {
     if (!this.editor.focused) return
+    const current = this.#inputOwner()
     let text: string
     try {
       text = new TextDecoder("utf-8", { fatal: true }).decode(event.bytes)
@@ -434,7 +443,9 @@ export class ComposerRenderable extends BoxRenderable {
     const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n")
     const trimmed = normalized.trim()
     if (trimmed.length === 0) {
-      if (!(await this.pasteImage())) {
+      const pasted = await this.pasteImage()
+      if (!current()) return
+      if (!pasted) {
         this.#options.onAttachmentError?.("The clipboard does not contain a supported image.")
       }
       return
@@ -443,11 +454,13 @@ export class ComposerRenderable extends BoxRenderable {
     try {
       localImage = await this.#options.imagePaste.readPath(trimmed)
     } catch (error) {
+      if (!current()) return
       this.#options.onAttachmentError?.(
         error instanceof Error ? error.message : "That image path could not be attached safely.",
       )
       return
     }
+    if (!current()) return
     if (localImage !== null) {
       this.addImage(localImage)
       return
@@ -470,8 +483,24 @@ export class ComposerRenderable extends BoxRenderable {
     this.editor.insertText(normalized)
   }
 
+  #inputOwner(): () => boolean {
+    const generation = this.#inputGeneration
+    const scope = this.#options.submissionScope?.()
+    return () => !this.isDestroyed && generation === this.#inputGeneration
+      && scope === this.#options.submissionScope?.()
+  }
+
   async openExternalEditor(): Promise<void> {
-    const result = await this.#options.editor.compose(this.editor.plainText)
+    if (this.#editorRequest !== null) return
+    const current = this.#inputOwner()
+    const request = {}
+    this.#editorRequest = request
+    const content = this.editor.plainText
+    let result: string | null
+    try { result = await this.#options.editor.compose(content) }
+    catch (error) { if (current()) throw error; return }
+    finally { if (this.#editorRequest === request) this.#editorRequest = null }
+    if (!current()) return
     if (result !== null) {
       this.editor.replaceText(result)
       this.setShellMode(result.startsWith("!"))
