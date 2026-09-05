@@ -1,3 +1,4 @@
+import validateToolResponse from "./generated/tool-response-validator.js"
 import validateInvocationId from "./generated/extension-invocation-id-validator.js"
 import type { ExtensionInvocationId } from "./generated/extension-contract"
 import validateUiPanelUpdate from "./generated/ui-panel-update-validator.js"
@@ -894,6 +895,7 @@ export class PluginServer {
         })
       await reporter.finish()
       call.signal.throwIfAborted()
+      if (!validateToolResponse(result)) throw new SafeRpcError(-32603, "invalid tool response")
       await this.#success(id, result as unknown as JsonValue)
     } catch (error) {
       await reporter?.finish()

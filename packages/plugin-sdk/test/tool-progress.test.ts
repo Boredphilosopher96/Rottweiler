@@ -47,13 +47,13 @@ test("typed progress renews idle only and leaves control responsive until total 
       hooks: [{ name: "pre_tool", class: "policy", failure_policy: "fail-closed" }],
     } },
     handlers: {
-      tools: { work: (_params, context) => new Promise<{ content: string; data: null }>(resolve => {
+      tools: { work: (_params, context) => new Promise<{ content: string; data: null; truncated: boolean }>(resolve => {
         context.progress({ message: "started" })
         reporter = setInterval(() => context.progress({ message: "working" }), 100)
         context.signal.addEventListener("abort", () => {
           observedAbort = true
           clearInterval(reporter)
-          resolve({ content: "settled", data: null })
+          resolve({ content: "settled", data: null, truncated: false })
         }, { once: true })
       }) },
       hooks: { pre_tool: () => ({ decision: "continue" }) },

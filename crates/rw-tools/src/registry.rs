@@ -676,14 +676,14 @@ impl ToolContext {
 }
 
 /// Structured result passed back to the model and UI.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, schemars::JsonSchema, ts_rs::TS)]
 #[serde(deny_unknown_fields)]
+#[ts(rename = "ToolResponse")]
 pub struct ToolResult {
     #[serde(skip)]
     presentation: Option<crate::ToolPresentationPlan>,
     pub content: String,
     pub data: Value,
-    #[serde(default)]
     pub truncated: bool,
     #[serde(skip)]
     protected_framing: Option<ProtectedFraming>,

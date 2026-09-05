@@ -18,6 +18,7 @@ export const plugin = definePlugin({
   handlers: {
     tools: { fixture_echo: ({ input }) => ({
       content: String(input.text ?? ""),
+      truncated: false,
       data: { text: String(input.text ?? "") },
     }) },
     hooks: {

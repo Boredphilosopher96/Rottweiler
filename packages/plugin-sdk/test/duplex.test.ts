@@ -40,8 +40,8 @@ function fixture(): PluginDefinition {
       },
     },
     handlers: {
-      tools: { hang: (_params, context) => new Promise<{ content: string; data: null }>(resolve => {
-        context.signal.addEventListener("abort", () => resolve({ content: "settled", data: null }), { once: true })
+      tools: { hang: (_params, context) => new Promise<{ content: string; data: null; truncated: boolean }>(resolve => {
+        context.signal.addEventListener("abort", () => resolve({ content: "settled", data: null, truncated: false }), { once: true })
       }) },
       providers: { "probe/": async function* () { yield { type: "finished", reason: "stop" } } },
       providerModels: { "probe/": async (_params, context) => {
@@ -134,7 +134,7 @@ describe("production SDK duplex serve", () => {
   test("timed-out uncooperative handlers keep occupying admission slots without reporting completion", async () => {
     let invoked = 0
     let cancelled = 0
-    const release = Promise.withResolvers<{ content: string; data: null }>()
+    const release = Promise.withResolvers<{ content: string; data: null; truncated: boolean }>()
     const definition = fixture()
     const { frames, send, serving } = harness({ ...definition, handlers: {
       ...definition.handlers,
@@ -152,12 +152,12 @@ describe("production SDK duplex serve", () => {
       await until(() => frames.some(frame => frame.id === 74))
       expect(invoked).toBe(64)
       expect(frames.find(frame => frame.id === 74)?.error).toMatchObject({ code: -32005 })
-      release.resolve({ content: "settled", data: null })
+      release.resolve({ content: "settled", data: null, truncated: false })
       await until(() => frames.filter(frame => typeof frame.id === "number" && frame.id >= 10).length === 65)
       send(stop)
       await serving
     } finally {
-      release.resolve({ content: "settled", data: null })
+      release.resolve({ content: "settled", data: null, truncated: false })
     }
   })
 
@@ -261,7 +261,7 @@ describe("production SDK duplex serve", () => {
       ...definition.handlers,
       tools: { hang: async (_params, context) => {
         await context.providerHttp.request("probe-key", httpRequest)
-        return { content: "unreachable", data: null }
+        return { content: "unreachable", data: null, truncated: false }
       } },
     } })
     send({ jsonrpc: "2.0", id: 3, method: "tool/call", params: { name: "hang", input: {}, lifetime: { total_ms: 300000, idle_ms: 90000 } } })
@@ -342,7 +342,7 @@ describe("correlated host command outcomes", () => {
       } },
       handlers: { ...base.handlers, tools: { hang: async (_params, context) => {
         const result = await context.push.injectMessage("session", "next")
-        return { content: result.disposition, data: null }
+        return { content: result.disposition, data: null, truncated: false }
       } } },
     }
   }
@@ -358,7 +358,7 @@ describe("correlated host command outcomes", () => {
     await until(() => frames.some(frame => frame.id === 3))
     send({ jsonrpc: "2.0", id: command.id, result: { disposition: "queued" } })
     await until(() => frames.some(frame => frame.id === 2))
-    expect(frames.find(frame => frame.id === 2)?.result).toEqual({ content: "queued", data: null })
+    expect(frames.find(frame => frame.id === 2)?.result).toEqual({ content: "queued", data: null, truncated: false })
     send(stop)
     await serving
   })

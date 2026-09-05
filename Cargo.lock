@@ -3058,6 +3058,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "ts-rs",
  "url",
 ]
 
@@ -4880,6 +4881,7 @@ dependencies = [
  "rw-plugin-protocol",
  "rw-providers",
  "rw-store",
+ "rw-tools",
  "rw-types",
  "schemars",
  "semver",

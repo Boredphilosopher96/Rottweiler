@@ -48,6 +48,12 @@ pub(super) fn generate(root: &Path, check: bool) -> Result<(), String> {
     types.visit::<HookEvent>();
     types.visit::<HookFailurePolicy>();
     write_types(root, "hook-contract", types, check)?;
+    let mut tool = Types {
+        seen: HashSet::new(),
+        declarations: BTreeMap::new(),
+    };
+    tool.visit::<rw_tools::ToolResult>();
+    write_types(root, "tool-contract", tool, check)?;
     let mut ir = Types {
         seen: HashSet::new(),
         declarations: BTreeMap::new(),
@@ -87,6 +93,7 @@ pub(super) fn generate(root: &Path, check: bool) -> Result<(), String> {
 
 fn generate_schemas(root: &Path, check: bool) -> Result<(), String> {
     for (name, schema) in [
+        ("tool-response", schema::<rw_tools::ToolResult>()),
         (
             "ui-panel-update",
             schema::<rw_types::extension_ui::UiPanelUpdate>(),

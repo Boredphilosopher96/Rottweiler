@@ -362,3 +362,37 @@ fn registration_snapshots_extension_descriptors() {
             .contains(&ToolCapability::WriteFilesystem)
     );
 }
+
+#[test]
+fn tool_wire_result_requires_every_field_and_rejects_private_runtime_fields() {
+    let result = ToolResult::new("complete", serde_json::json!({"count":1}));
+    let value = serde_json::to_value(&result).expect("tool wire result");
+    assert_eq!(
+        serde_json::from_value::<ToolResult>(value.clone()).expect("exact result"),
+        result
+    );
+    for field in ["content", "data", "truncated"] {
+        let mut missing = value.clone();
+        missing.as_object_mut().expect("object").remove(field);
+        assert!(
+            serde_json::from_value::<ToolResult>(missing).is_err(),
+            "missing {field}"
+        );
+    }
+    for field in ["presentation", "protected_framing", "unknown"] {
+        let mut extra = value.clone();
+        extra
+            .as_object_mut()
+            .expect("object")
+            .insert(field.into(), serde_json::Value::Null);
+        assert!(
+            serde_json::from_value::<ToolResult>(extra).is_err(),
+            "private or unknown {field}"
+        );
+    }
+    let schema = serde_json::to_value(schemars::schema_for!(ToolResult)).expect("schema");
+    assert_eq!(
+        schema["required"],
+        serde_json::json!(["content", "data", "truncated"])
+    );
+}

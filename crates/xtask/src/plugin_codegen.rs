@@ -158,12 +158,7 @@ export interface ToolProgressParams {
   readonly progress: ToolProgress
 }
 
-/** Exact wire result consumed by rw-tools::ToolResult. */
-export interface ToolResponse {
-  readonly content: string
-  readonly data: JsonValue
-  readonly truncated?: boolean
-}
+export type { ToolResponse } from "./tool-contract"
 
 export interface CommandExecuteParams {
   readonly invocation_id: import("./extension-contract").ExtensionInvocationId | null

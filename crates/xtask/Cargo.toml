@@ -11,6 +11,7 @@ publish = false
 base64.workspace = true
 ed25519-dalek.workspace = true
 rw-types.workspace = true
+rw-tools.workspace = true
 rw-providers.workspace = true
 rw-plugin-protocol.workspace = true
 rw-operation-contract.workspace = true

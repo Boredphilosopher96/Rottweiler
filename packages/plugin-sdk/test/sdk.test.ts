@@ -62,7 +62,7 @@ function fixtureDefinition(secret = "handler-secret"): PluginDefinition {
         echo: async ({ input }, { push }) => {
           await push.notify("fixture", "called")
           if (input.fail === true) throw new Error(secret)
-          return { content: JSON.stringify(input), data: input }
+          return { content: JSON.stringify(input), data: input, truncated: false }
         },
       },
       commands: { fixture: ({ arguments: args }) => ({ arguments: args }) },
@@ -216,7 +216,7 @@ describe("wire protocol", () => {
       jsonrpc: "2.0", id: "plugin-push-1", method: "ui/notify", params: { title: "fixture", message: "called" },
     })
     expect(messages[2]).toEqual({
-      jsonrpc: "2.0", id: 2, result: { content: '{"value":7}', data: { value: 7 } },
+      jsonrpc: "2.0", id: 2, result: { content: '{"value":7}', data: { value: 7 }, truncated: false },
     })
     expect(messages.slice(5, 8)).toEqual([
       { jsonrpc: "2.0", method: "provider/event", params: { request_id: 5, event: { type: "message_start", model: "fixture/model" } } },
@@ -249,7 +249,7 @@ describe("wire protocol", () => {
       child.stdin.end()
       expect(await child.exited).toBe(0)
       expect(await new Response(child.stderr).text()).toBe("")
-      expect(responses[1]).toEqual({ jsonrpc: "2.0", id: 2, result: { content: "hello", data: { text: "hello" } } })
+      expect(responses[1]).toEqual({ jsonrpc: "2.0", id: 2, result: { content: "hello", data: { text: "hello" }, truncated: false } })
       expect(responses[2]).toEqual({ jsonrpc: "2.0", id: 3, result: { decision: "block", message: "conformance policy denies bash" } })
     } finally {
       child.kill()
@@ -496,7 +496,7 @@ describe("wire protocol", () => {
 
   test("tool cancellation retains ownership until an uncooperative handler settles", async () => {
     let observedAbort = false
-    const completion = Promise.withResolvers<{ content: string; data: null }>()
+    const completion = Promise.withResolvers<{ content: string; data: null; truncated: boolean }>()
     const definition = definePlugin({
       manifest: { name: "retained-tool", version: "1", protocol: 3, capabilities: {
         tools: [{ name: "hang", description: "hang", schema: {}, caps: [] }],
@@ -515,7 +515,7 @@ describe("wire protocol", () => {
     await waitFor(() => observedAbort)
     expect(finished).toBe(false)
     expect(messages).toHaveLength(1)
-    completion.resolve({ content: "settled", data: null })
+    completion.resolve({ content: "settled", data: null, truncated: false })
     await pending
     expect(messages.at(-1)).toEqual({ jsonrpc: "2.0", id: 2,
       error: { code: -32004, message: "plugin tool deadline exceeded" },
@@ -554,8 +554,8 @@ describe("wire protocol", () => {
         name: "abort-handler", version: "1", protocol: 3,
         capabilities: { tools: [{ name: "hang", description: "hang", schema: {}, caps: [] }] },
       },
-      handlers: { tools: { hang: (_params, { signal }) => new Promise<{ content: string; data: null }>(resolve => {
-        signal.addEventListener("abort", () => { observedAbort = true; resolve({ content: "settled", data: null }) }, { once: true })
+      handlers: { tools: { hang: (_params, { signal }) => new Promise<{ content: string; data: null; truncated: boolean }>(resolve => {
+        signal.addEventListener("abort", () => { observedAbort = true; resolve({ content: "settled", data: null, truncated: false }) }, { once: true })
       }) } },
     })
     const { server, messages } = harness(definition)
@@ -578,7 +578,7 @@ describe("wire protocol", () => {
       },
       handlers: { tools: { attempt: async (_params, { push }) => {
         await push.notify("x", "y")
-        return { content: "unreachable", data: null }
+        return { content: "unreachable", data: null, truncated: false }
       } } },
     })
     const { server, messages } = harness(definition)
@@ -621,7 +621,7 @@ describe("bounded transport and manifests", () => {
   test("rejects undeclared handlers and unbounded manifests before startup", () => {
     expect(() => definePlugin({
       manifest: { name: "bad", version: "1", protocol: 3, capabilities: {} },
-      handlers: { tools: { escaped: () => ({ content: "escaped", data: null }) } },
+      handlers: { tools: { escaped: () => ({ content: "escaped", data: null, truncated: false }) } },
     })).toThrow("exceeds the manifest")
     expect(() => definePlugin({
       manifest: {
@@ -678,7 +678,7 @@ describe("bounded transport and manifests", () => {
           tools: [{ name: "deep", description: "deep", schema: schema as never, caps: [] }],
         },
       },
-      handlers: { tools: { deep: () => ({ content: "deep", data: null }) } },
+      handlers: { tools: { deep: () => ({ content: "deep", data: null, truncated: false }) } },
     })).toThrow("size or depth")
   })
 

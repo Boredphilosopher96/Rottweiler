@@ -7,6 +7,7 @@ export const plugin = definePlugin({
     tools: {
       hello: ({ input }) => ({
         content: `Hello, ${String(input.name ?? "world")}!`,
+        truncated: false,
         data: { text: `Hello, ${String(input.name ?? "world")}!` },
       }),
     },
