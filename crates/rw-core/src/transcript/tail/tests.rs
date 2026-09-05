@@ -7,20 +7,22 @@ use crate::transcript::{
 use rw_store::session::journal::SegmentedJournal;
 use rw_types::{SequenceId, ToolOutputStream, TurnId};
 
-fn begin(sequence: u64, turn: u64) -> EngineEvent {
+pub(super) fn begin(sequence: u64, turn: u64) -> EngineEvent {
     EngineEvent::TurnStarted {
         meta: meta(sequence),
         turn_id: TurnId(turn.to_string()),
     }
 }
-fn text(sequence: u64, body: &str) -> EngineEvent {
+pub(super) fn text(sequence: u64, body: &str) -> EngineEvent {
     EngineEvent::TextDelta {
         meta: meta(sequence),
         turn_id: TurnId("1".into()),
         text: body.into(),
     }
 }
-fn project(events: &[EngineEvent]) -> (tempfile::TempDir, SegmentedJournal, TranscriptProjector) {
+pub(super) fn project(
+    events: &[EngineEvent],
+) -> (tempfile::TempDir, SegmentedJournal, TranscriptProjector) {
     let root = tempfile::tempdir().expect("root");
     let mut journal = SegmentedJournal::open(root.path(), "semantic").expect("journal");
     journal.append_batch(events).expect("source");

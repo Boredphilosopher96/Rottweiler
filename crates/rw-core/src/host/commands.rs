@@ -102,6 +102,26 @@ impl EngineHost {
                     }],
                 ))
             }
+            ClientCommand::ReadTranscriptTail {
+                meta,
+                session_id,
+                scope,
+                read,
+            } => {
+                let result = self
+                    .queries
+                    .read_transcript_tail(&session_id, scope, read)
+                    .await?;
+                Ok((
+                    CommandOutcome::Accepted {},
+                    Some(session_id.clone()),
+                    vec![EngineEvent::TranscriptTailReady {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        result,
+                    }],
+                ))
+            }
             ClientCommand::ReadTranscript {
                 meta,
                 session_id,

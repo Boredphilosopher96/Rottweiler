@@ -79,6 +79,11 @@ pub enum EngineEvent {
         session_id: SessionId,
         result: crate::todo::TodoReadResult,
     },
+    TranscriptTailReady {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        result: crate::transcript_tail::TranscriptTailResult,
+    },
     TranscriptPageReady {
         meta: CommandAckMeta,
         session_id: SessionId,
@@ -707,6 +712,7 @@ impl EngineEvent {
             | Self::UiCatalogReady { meta, .. }
             | Self::UiPanelsReady { meta, .. }
             | Self::TodosRead { meta, .. }
+            | Self::TranscriptTailReady { meta, .. }
             | Self::TranscriptPageReady { meta, .. }
             | Self::TranscriptContentReady { meta, .. }
             | Self::CommandAcknowledged { meta, .. }
@@ -817,6 +823,7 @@ impl EngineEvent {
     pub fn meta(&self) -> Option<&EventMeta> {
         match self {
             Self::SessionNavigationRequested { .. }
+            | Self::TranscriptTailReady { .. }
             | Self::TranscriptPageReady { .. }
             | Self::TranscriptContentReady { .. }
             | Self::SessionStateReady { .. }
@@ -919,6 +926,7 @@ impl EngineEvent {
     pub fn meta_mut(&mut self) -> Option<&mut EventMeta> {
         match self {
             Self::SessionNavigationRequested { .. }
+            | Self::TranscriptTailReady { .. }
             | Self::TranscriptPageReady { .. }
             | Self::TranscriptContentReady { .. }
             | Self::SessionStateReady { .. }

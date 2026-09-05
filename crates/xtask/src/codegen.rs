@@ -174,6 +174,18 @@ fn generate_typescript() -> Result<String, XtaskError> {
     output.push_str(" as const;\n\n");
     for (name, value) in [
         (
+            "TRANSCRIPT_TAIL_PAGE_BYTES",
+            rw_types::transcript_tail::TRANSCRIPT_TAIL_PAGE_BYTES,
+        ),
+        (
+            "TRANSCRIPT_TAIL_MIN_PAGE_BYTES",
+            rw_types::transcript_tail::TRANSCRIPT_TAIL_MIN_PAGE_BYTES,
+        ),
+        (
+            "TRANSCRIPT_TAIL_PAGE_ITEMS",
+            rw_types::transcript_tail::TRANSCRIPT_TAIL_PAGE_ITEMS,
+        ),
+        (
             "TRANSCRIPT_TAIL_TEXT_BYTES",
             rw_types::transcript_tail::TRANSCRIPT_TAIL_TEXT_BYTES,
         ),
@@ -519,6 +531,15 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(rw_types::CommandReply);
     declaration!(rw_types::session_read::SessionReadAncestor);
     declaration!(rw_types::session_read::SessionReadScope);
+    declaration!(rw_types::transcript_tail::TranscriptTailIdentity);
+    declaration!(rw_types::transcript_tail::TranscriptTailPart);
+    declaration!(rw_types::transcript_tail::TranscriptTailRead);
+    declaration!(rw_types::transcript_tail::TranscriptTailText);
+    declaration!(rw_types::transcript_tail::TranscriptTailCitation);
+    declaration!(rw_types::transcript_tail::TranscriptTailTool);
+    declaration!(rw_types::transcript_tail::TranscriptTailContent);
+    declaration!(rw_types::transcript_tail::TranscriptTailPage);
+    declaration!(rw_types::transcript_tail::TranscriptTailResult);
     declaration!(rw_types::transcript::TranscriptOrdinal);
     declaration!(rw_types::transcript::TranscriptGeneration);
     declaration!(rw_types::transcript::TranscriptView);

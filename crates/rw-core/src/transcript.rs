@@ -18,7 +18,7 @@ use thiserror::Error;
 mod projector;
 mod tail;
 pub use projector::{TranscriptProjectionProgress, TranscriptProjector};
-pub use tail::TailState;
+pub use tail::{TailState, read_transcript_tail, validate_tail_read};
 mod content;
 pub use content::{TranscriptDocument, TranscriptDocumentChunk};
 

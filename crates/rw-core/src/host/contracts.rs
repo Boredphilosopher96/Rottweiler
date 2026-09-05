@@ -337,6 +337,13 @@ pub trait HostQueryService: Send + Sync + 'static {
         scope: rw_types::session_read::SessionReadScope,
     ) -> Result<rw_types::todo::TodoReadResult, HostError>;
 
+    async fn read_transcript_tail(
+        &self,
+        session: &SessionId,
+        scope: rw_types::session_read::SessionReadScope,
+        read: rw_types::transcript_tail::TranscriptTailRead,
+    ) -> Result<rw_types::transcript_tail::TranscriptTailResult, HostError>;
+
     async fn read_transcript(
         &self,
         _session: &SessionId,

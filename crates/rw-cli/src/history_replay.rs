@@ -41,6 +41,11 @@ impl HistoricalReplayEngine {
             scope,
             ..
         }
+        | ClientCommand::ReadTranscriptTail {
+            session_id: session,
+            scope,
+            ..
+        }
         | ClientCommand::ReadTranscriptContent {
             session_id: session,
             scope,
@@ -76,6 +81,19 @@ impl HistoricalReplayEngine {
                 result: self.reader.todos(session_id.clone(), scope).await?,
                 session_id,
             },
+            ClientCommand::ReadTranscriptTail {
+                session_id,
+                scope,
+                read,
+                ..
+            } => {
+                let result = self.reader.tail(session_id.clone(), scope, read).await?;
+                EngineEvent::TranscriptTailReady {
+                    meta,
+                    session_id,
+                    result,
+                }
+            }
             ClientCommand::ReadTranscript {
                 session_id,
                 scope,

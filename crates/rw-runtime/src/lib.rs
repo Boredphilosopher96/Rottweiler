@@ -208,6 +208,17 @@ mod tests {
 
     #[async_trait]
     impl HostQueryService for EmptyFactory {
+        async fn read_transcript_tail(
+            &self,
+            _session: &rw_types::SessionId,
+            _scope: rw_types::session_read::SessionReadScope,
+            _read: rw_types::transcript_tail::TranscriptTailRead,
+        ) -> Result<rw_types::transcript_tail::TranscriptTailResult, HostError> {
+            Err(HostError::Query(
+                "transcript tail is not provided by this fixture".into(),
+            ))
+        }
+
         async fn todos(
             &self,
             _session: &rw_types::SessionId,

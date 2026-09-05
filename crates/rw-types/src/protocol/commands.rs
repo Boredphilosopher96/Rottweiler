@@ -42,6 +42,12 @@ pub enum ClientCommand {
         session_id: SessionId,
         scope: crate::session_read::SessionReadScope,
     },
+    ReadTranscriptTail {
+        meta: CommandMeta,
+        session_id: SessionId,
+        scope: crate::session_read::SessionReadScope,
+        read: crate::transcript_tail::TranscriptTailRead,
+    },
     ReadTranscript {
         meta: CommandMeta,
         session_id: SessionId,
@@ -388,7 +394,8 @@ impl ClientCommand {
     #[must_use]
     pub fn meta(&self) -> &CommandMeta {
         match self {
-            Self::ReadTranscript { meta, .. }
+            Self::ReadTranscriptTail { meta, .. }
+            | Self::ReadTranscript { meta, .. }
             | Self::ReadTranscriptContent { meta, .. }
             | Self::GetSessionState { meta, .. }
             | Self::GetSessionControls { meta, .. }
@@ -469,7 +476,8 @@ impl ClientCommand {
             | Self::SearchSessions { .. }
             | Self::ListModels { .. }
             | Self::ShutdownHost { .. } => None,
-            Self::ReadTranscript { session_id, .. }
+            Self::ReadTranscriptTail { session_id, .. }
+            | Self::ReadTranscript { session_id, .. }
             | Self::ReadTranscriptContent { session_id, .. }
             | Self::GetSessionState { session_id, .. }
             | Self::GetSessionControls { session_id, .. }
@@ -541,7 +549,8 @@ impl ClientCommand {
     #[must_use]
     pub fn meta_mut(&mut self) -> &mut CommandMeta {
         match self {
-            Self::ReadTranscript { meta, .. }
+            Self::ReadTranscriptTail { meta, .. }
+            | Self::ReadTranscript { meta, .. }
             | Self::ReadTranscriptContent { meta, .. }
             | Self::GetSessionState { meta, .. }
             | Self::GetSessionControls { meta, .. }
@@ -649,6 +658,7 @@ read_commands!(
     GetUiCatalog,
     GetUiPanels,
     GetTodos,
+    ReadTranscriptTail,
     ReadTranscript,
     ReadTranscriptContent,
     ListSessions,

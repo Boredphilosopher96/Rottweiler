@@ -1,6 +1,7 @@
 use super::{
-    TOOL_CELLS, TOOL_DATA_FIRST, TOOL_INDEX, TailState, TranscriptIndexMutation,
-    TranscriptProjectionError, TranscriptRowLookup, chunks, index_cell, read_u32, read_u64,
+    TOOL_CELLS, TOOL_DATA_FIRST, TOOL_INDEX, TOOL_PROVIDER_FIRST, TailState,
+    TranscriptIndexMutation, TranscriptProjectionError, TranscriptRowLookup, chunks, index_cell,
+    read_u32, read_u64,
 };
 use rw_types::tool_admission::MAX_PENDING_TOOL_INVOCATIONS;
 use rw_types::transcript_tail::TRANSCRIPT_TAIL_TOOL_BYTES;
@@ -18,7 +19,15 @@ pub(super) fn project(
         state.tools_epoch,
         MAX_PENDING_TOOL_INVOCATIONS,
     )?;
-    if let EngineEvent::ToolCallStarted { meta, .. } = event {
+    if let EngineEvent::ToolCallStarted {
+        meta, tool_call_id, ..
+    } = event
+    {
+        if tool_call_id.0.len() > rw_types::tool_admission::MAX_TOOL_CALL_ID_BYTES {
+            return Err(TranscriptProjectionError::Invalid(
+                "tail provider identifier bound",
+            ));
+        }
         let slot = (0..MAX_PENDING_TOOL_INVOCATIONS)
             .find(|slot| cell[8 + slot * 16 + 12] & 1 == 0)
             .ok_or(TranscriptProjectionError::Invalid(
@@ -29,10 +38,16 @@ pub(super) fn project(
         cell[entry..entry + 8].copy_from_slice(&meta.sequence_id.0.to_le_bytes());
         cell[entry + 12] = 1;
         state.tools_count += 1;
-        return Ok(vec![TranscriptIndexMutation::PutAuxiliary {
-            key: TOOL_INDEX,
-            payload: cell,
-        }]);
+        return Ok(vec![
+            TranscriptIndexMutation::PutAuxiliary {
+                key: TOOL_INDEX,
+                payload: cell,
+            },
+            TranscriptIndexMutation::PutAuxiliary {
+                key: TOOL_PROVIDER_FIRST + slot as u16,
+                payload: tool_call_id.0.as_bytes().to_vec(),
+            },
+        ]);
     }
     let invocation = match event {
         EngineEvent::ToolCallFinished { invocation_id, .. }

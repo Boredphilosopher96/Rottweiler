@@ -81,7 +81,12 @@ impl TranscriptProjector {
     /// # Errors
     /// Rejects incomplete rewinds or corrupt checkpoint metadata.
     pub fn tail_state(&self) -> Result<super::TailState, TranscriptProjectionError> {
-        let checkpoint = self.checkpoint()?;
+        Self::tail_for(&self.index)
+    }
+    pub(super) fn tail_for(
+        index: &TranscriptIndex,
+    ) -> Result<super::TailState, TranscriptProjectionError> {
+        let checkpoint = Self::checkpoint_for(index)?;
         if checkpoint.rewind.is_some() {
             return Err(TranscriptIndexError::Rebuilding.into());
         }
@@ -229,7 +234,10 @@ impl TranscriptProjector {
     }
 
     fn checkpoint(&self) -> Result<Checkpoint, TranscriptProjectionError> {
-        let head = self.index.head()?;
+        Self::checkpoint_for(&self.index)
+    }
+    fn checkpoint_for(index: &TranscriptIndex) -> Result<Checkpoint, TranscriptProjectionError> {
+        let head = index.head()?;
         let checkpoint: Checkpoint = if head.state.is_empty() {
             Checkpoint::default()
         } else {
@@ -378,6 +386,12 @@ struct BatchRows<'a> {
 }
 impl BatchRows<'_> {
     fn apply(&mut self, change: TranscriptIndexMutation) {
+        if let TranscriptIndexMutation::PutAuxiliary { key, .. } = &change {
+            if let Some(position) = self.cells.get(key) {
+                self.mutations[*position] = change;
+                return;
+            }
+        }
         let position = self.mutations.len();
         match &change {
             TranscriptIndexMutation::Put(row) => {

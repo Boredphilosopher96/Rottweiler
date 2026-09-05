@@ -19,6 +19,7 @@ mod content;
 use crate::projection_budget::ProjectionBudget;
 mod page;
 pub(crate) mod reader;
+mod tail;
 mod tool_presentation;
 
 const MAX_OPEN_PROJECTORS: usize = 8;

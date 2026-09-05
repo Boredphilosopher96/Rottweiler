@@ -418,3 +418,43 @@ async fn historical_child_reads_require_effective_source_ancestry_and_reject_rew
     }
     assert!(removed, "rewind must revoke the effective child source");
 }
+
+#[tokio::test]
+async fn tail_reads_are_direct_and_reject_a_foreign_root() {
+    use rw_types::transcript_tail::*;
+    let (_root, engine) = fixture(1);
+    let command = ClientCommand::ReadTranscriptTail {
+        meta: meta("tail"),
+        session_id: SessionId("history".into()),
+        scope: SessionReadScope::Session {},
+        read: TranscriptTailRead {
+            expected: None,
+            part: TranscriptTailPart::Text {},
+            max_items: 1,
+            max_bytes: TRANSCRIPT_TAIL_MIN_PAGE_BYTES as u32,
+        },
+    };
+    let reply = engine
+        .dispatch(ClientId("bound".into()), command.clone())
+        .await
+        .expect("reply");
+    let decoded: CommandReply = serde_json::from_slice(&reply.bytes).expect("typed reply");
+    assert!(
+        matches!(decoded, CommandReply::Read { events, outcome: CommandOutcome::Accepted {} } if matches!(&events[..], [EngineEvent::TranscriptTailReady { session_id, result: TranscriptTailResult::Ready { page }, .. }] if session_id.0 == "history" && page.view.through == Some(SequenceId(0))))
+    );
+    drop(reply);
+    let ClientCommand::ReadTranscriptTail { meta, read, .. } = command else {
+        panic!("tail");
+    };
+    assert!(
+        engine
+            .query(ClientCommand::ReadTranscriptTail {
+                meta,
+                session_id: SessionId("foreign".into()),
+                scope: SessionReadScope::Session {},
+                read
+            })
+            .await
+            .is_err()
+    );
+}

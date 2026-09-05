@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use std::io::Write as _;
 mod chunks;
 mod citations;
+mod read;
 mod tools;
+pub use read::{read_transcript_tail, validate_tail_read};
 
 const TEXT_FIRST: u16 = 0;
 const THINKING_FIRST: u16 = (TRANSCRIPT_TAIL_TEXT_BYTES / MAX_AUXILIARY_CELL_BYTES) as u16;
@@ -22,9 +24,9 @@ const TOOL_INDEX: u16 =
     CITATION_DATA_FIRST + CITATION_ENCODED_LIMIT.div_ceil(MAX_AUXILIARY_CELL_BYTES) as u16;
 const TOOL_DATA_FIRST: u16 = TOOL_INDEX + 1;
 const TOOL_CELLS: u16 = (TRANSCRIPT_TAIL_TOOL_BYTES / MAX_AUXILIARY_CELL_BYTES) as u16;
+const TOOL_PROVIDER_FIRST: u16 = TOOL_DATA_FIRST + TOOL_CELLS * MAX_PENDING_TOOL_INVOCATIONS as u16;
 const _: () = assert!(
-    TOOL_DATA_FIRST as usize + TOOL_CELLS as usize * MAX_PENDING_TOOL_INVOCATIONS
-        <= MAX_AUXILIARY_CELLS as usize
+    TOOL_PROVIDER_FIRST as usize + MAX_PENDING_TOOL_INVOCATIONS <= MAX_AUXILIARY_CELLS as usize
 );
 
 /// Scalar progress only; byte chunks and fixed-size entity indexes live in auxiliary cells.
@@ -215,3 +217,9 @@ fn read_u32(bytes: &[u8]) -> u32 {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod read_tests;
+
+#[cfg(test)]
+mod chunk_tests;

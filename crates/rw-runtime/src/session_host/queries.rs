@@ -40,6 +40,31 @@ impl HostQueryService for RuntimeSessionFactory {
         .await
     }
 
+    async fn read_transcript_tail(
+        &self,
+        session: &rw_types::SessionId,
+        scope: rw_types::session_read::SessionReadScope,
+        read: rw_types::transcript_tail::TranscriptTailRead,
+    ) -> Result<rw_types::transcript_tail::TranscriptTailResult, HostError> {
+        let factory = self.clone();
+        let session = session.clone();
+        let root = scope
+            .root(&session)
+            .map_err(|message| HostError::Protocol(message.into()))?
+            .clone();
+        self.transcripts
+            .blocking(move |transcripts| {
+                let metadata =
+                    super::load_session_metadata_any(&factory.options.storage_root, &root.0)
+                        .map_err(|_| {
+                            HostError::Persistence("session metadata is unavailable".into())
+                        })?;
+                factory.authorize_workspace_path(&metadata.workspace)?;
+                transcripts.read_tail(&session, &scope, &read)
+            })
+            .await
+    }
+
     async fn read_transcript(
         &self,
         session: &rw_types::SessionId,
