@@ -91,7 +91,7 @@ fn decoded_surface_and_catalog_reject_retention_overflow_and_duplicate_fields() 
         .unwrap_or_else(|| panic!("fields"))
         .push(json!({"kind":"text","id":"text","label":"Duplicate"}));
     assert!(serde_json::from_value::<UiPresentation>(value).is_err());
-    let entry = json!({"owner":presentation.owner,"descriptors":[presentation.descriptor]});
+    let entry = json!({"owner":presentation.owner,"descriptor":presentation.descriptor});
     assert!(
         serde_json::from_value::<super::UiCatalog>(json!({"entries":[entry.clone(),entry]}))
             .is_err()

@@ -66,7 +66,17 @@ pub(super) fn generate(root: &Path, check: bool) -> Result<(), String> {
     extension.visit::<ExtensionEventRead>();
     extension.visit::<ExtensionEventChunk>();
     write_types(root, "extension-contract", extension, check)?;
+    let mut ui = Types {
+        seen: HashSet::new(),
+        declarations: BTreeMap::new(),
+    };
+    ui.visit::<rw_types::extension_ui::UiContribution>();
+    write_types(root, "ui-contract", ui, check)?;
     for (name, schema) in [
+        (
+            "ui-contribution",
+            schema::<rw_types::extension_ui::UiContribution>(),
+        ),
         ("extension-event-kind", schema::<ExtensionEventKind>()),
         ("extension-event-notice", schema::<ExtensionEventNotice>()),
         ("extension-event-outcome", schema::<ExtensionEventOutcome>()),

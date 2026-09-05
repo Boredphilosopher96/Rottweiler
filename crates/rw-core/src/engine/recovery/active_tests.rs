@@ -43,6 +43,7 @@ fn interrupted_inputs_keep_only_uncommitted_fragments_and_unresolved_host_invoca
             },
             start("first"),
             PendingEvent::ToolCallFinished {
+                presentation: None,
                 turn: 1,
                 id: "reused-provider-id".into(),
                 invocation_id: ToolInvocationId("first".into()),

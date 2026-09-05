@@ -677,7 +677,10 @@ impl ToolContext {
 
 /// Structured result passed back to the model and UI.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolResult {
+    #[serde(skip)]
+    presentation: Option<crate::ToolPresentationPlan>,
     pub content: String,
     pub data: Value,
     #[serde(default)]
@@ -694,12 +697,22 @@ struct ProtectedFraming {
 
 impl ToolResult {
     #[must_use]
+    pub fn with_presentation(mut self, presentation: crate::ToolPresentationPlan) -> Self {
+        self.presentation = Some(presentation);
+        self
+    }
+    pub fn take_presentation(&mut self) -> Option<crate::ToolPresentationPlan> {
+        self.presentation.take()
+    }
+
+    #[must_use]
     pub fn new(content: impl Into<String>, data: Value) -> Self {
         Self {
             content: content.into(),
             data,
             truncated: false,
             protected_framing: None,
+            presentation: None,
         }
     }
 

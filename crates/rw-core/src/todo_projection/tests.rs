@@ -147,6 +147,7 @@ fn catch_up_is_bounded_and_failed_or_presentation_only_tool_results_do_not_repla
     assert!(projector.snapshot(&journal.read_view()).is_err());
     catch_up(&mut projector, &journal);
     append(&mut journal, |meta| EngineEvent::ToolCallFinished {
+        presentation: None,
         meta,
         turn_id: TurnId("1".into()),
         tool_call_id: rw_types::ToolCallId("todo".into()),

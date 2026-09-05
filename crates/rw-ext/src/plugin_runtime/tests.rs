@@ -30,6 +30,7 @@ fn manifest() -> PluginManifest {
         version: "1.0.0".to_owned(),
         protocol: rw_plugin_protocol::PROTOCOL_VERSION,
         capabilities: PluginCapabilities {
+            ui: Vec::new(),
             tools: vec![PluginToolCapability {
                 name: "fixture_tool".to_owned(),
                 description: "fixture tool".to_owned(),

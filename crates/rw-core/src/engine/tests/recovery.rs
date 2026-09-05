@@ -245,6 +245,7 @@ fn projector_kill_boundaries_never_duplicate_committed_tool_calls_or_results() {
             index: 0,
         },
         PendingEvent::ToolCallFinished {
+            presentation: None,
             invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             turn: 1,
             id: "call".to_owned(),
@@ -473,6 +474,7 @@ fn interrupted_reused_provider_id_finishes_only_its_active_invocation() {
                 text: "first result".to_owned(),
             };
             events.push(PendingEvent::ToolCallFinished {
+                presentation: None,
                 turn: 1,
                 id: "reused".to_owned(),
                 invocation_id,

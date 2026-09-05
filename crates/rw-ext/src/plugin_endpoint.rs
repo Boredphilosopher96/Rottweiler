@@ -21,6 +21,7 @@ use crate::{CapabilityEnforcer, PluginHost, PluginRpcClient, PluginRpcError};
 pub struct PluginEndpointMetadata {
     manifest: Arc<PluginManifest>,
     process_effects: BTreeSet<PluginToolEffect>,
+    ui_generation: rw_types::extension_ui::UiGenerationId,
 }
 
 impl PluginEndpointMetadata {
@@ -34,10 +35,25 @@ impl PluginEndpointMetadata {
             message: error.to_string(),
         })?;
         let process_effects = declared_process_effects(&manifest.capabilities);
+        let mut bytes = [0; 16];
+        getrandom::fill(&mut bytes).map_err(|_| PluginRpcError {
+            code: "generation_unavailable".into(),
+            message: "plugin generation entropy unavailable".into(),
+        })?;
+        let ui_generation = rw_types::extension_ui::UiGenerationId::from_bytes(bytes);
         Ok(Self {
             manifest: Arc::new(manifest),
             process_effects,
+            ui_generation,
         })
+    }
+
+    #[must_use]
+    pub fn ui_owner(&self) -> rw_types::extension_ui::UiContributionOwner {
+        rw_types::extension_ui::UiContributionOwner {
+            extension: self.manifest.name.clone(),
+            generation: self.ui_generation.clone(),
+        }
     }
 
     #[must_use]

@@ -146,6 +146,7 @@ pub(super) enum PendingEvent {
         chunk: String,
     },
     ToolCallFinished {
+        presentation: Option<rw_types::extension_ui::UiPresentation>,
         turn: u64,
         id: String,
         invocation_id: rw_types::ToolInvocationId,
@@ -503,6 +504,7 @@ impl PendingEvent {
                 chunk,
             },
             Self::ToolCallFinished {
+                presentation,
                 turn,
                 id,
                 invocation_id,
@@ -510,6 +512,7 @@ impl PendingEvent {
                 is_error,
                 index,
             } => EngineEvent::ToolCallFinished {
+                presentation,
                 meta,
                 turn_id: wire_turn_id(turn),
                 tool_call_id: ToolCallId(id),

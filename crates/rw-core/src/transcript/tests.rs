@@ -38,6 +38,7 @@ fn start(sequence: u64, call_index: u32) -> EngineEvent {
 }
 fn finish(sequence: u64, call_index: u32, text: &str) -> EngineEvent {
     EngineEvent::ToolCallFinished {
+        presentation: None,
         meta: meta(sequence),
         turn_id: TurnId("1".into()),
         tool_call_id: ToolCallId("reused-provider-id".into()),

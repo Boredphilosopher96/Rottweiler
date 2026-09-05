@@ -39,8 +39,13 @@ pub const MAX_UI_ACTION_ARGUMENT_BYTES: usize = 4096;
 )]
 #[serde(tag = "step", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UiSelectorStep {
-    Field { name: String },
-    Index { index: u32 },
+    Field {
+        #[schemars(length(min=1,max=128),regex(pattern=r"^[^\u0000-\u001f\u007f-\u009f]+$"),extend("x-rw-max-utf8-bytes"=128))]
+        name: String,
+    },
+    Index {
+        index: u32,
+    },
 }
 
 #[derive(
@@ -48,7 +53,9 @@ pub enum UiSelectorStep {
 )]
 #[serde(deny_unknown_fields)]
 pub struct UiTableColumn {
+    #[schemars(length(min=1,max=128),regex(pattern=r"^[^\u0000-\u001f\u007f-\u009f]+$"),extend("x-rw-max-utf8-bytes"=128))]
     pub label: String,
+    #[schemars(length(max = 16))]
     pub path: Vec<UiSelectorStep>,
 }
 
@@ -58,26 +65,41 @@ pub struct UiTableColumn {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UiField {
     Text {
+        #[schemars(length(min=1,max=128),regex(pattern="^[A-Za-z0-9_.-]+$"),extend("x-rw-max-utf8-bytes"=128))]
         id: String,
+        #[schemars(length(min=1,max=128),regex(pattern=r"^[^\u0000-\u001f\u007f-\u009f]+$"),extend("x-rw-max-utf8-bytes"=128))]
         label: String,
+        #[schemars(length(max = 16))]
         path: Vec<UiSelectorStep>,
     },
     Badge {
+        #[schemars(length(min=1,max=128),regex(pattern="^[A-Za-z0-9_.-]+$"),extend("x-rw-max-utf8-bytes"=128))]
         id: String,
+        #[schemars(length(min=1,max=128),regex(pattern=r"^[^\u0000-\u001f\u007f-\u009f]+$"),extend("x-rw-max-utf8-bytes"=128))]
         label: String,
+        #[schemars(length(max = 16))]
         path: Vec<UiSelectorStep>,
     },
     List {
+        #[schemars(length(min=1,max=128),regex(pattern="^[A-Za-z0-9_.-]+$"),extend("x-rw-max-utf8-bytes"=128))]
         id: String,
+        #[schemars(length(min=1,max=128),regex(pattern=r"^[^\u0000-\u001f\u007f-\u009f]+$"),extend("x-rw-max-utf8-bytes"=128))]
         label: String,
+        #[schemars(length(max = 16))]
         path: Vec<UiSelectorStep>,
+        #[schemars(range(min = 1, max = 32))]
         max_items: u32,
     },
     Table {
+        #[schemars(length(min=1,max=128),regex(pattern="^[A-Za-z0-9_.-]+$"),extend("x-rw-max-utf8-bytes"=128))]
         id: String,
+        #[schemars(length(min=1,max=128),regex(pattern=r"^[^\u0000-\u001f\u007f-\u009f]+$"),extend("x-rw-max-utf8-bytes"=128))]
         label: String,
+        #[schemars(length(max = 16))]
         path: Vec<UiSelectorStep>,
+        #[schemars(length(min = 1, max = 8))]
         columns: Vec<UiTableColumn>,
+        #[schemars(range(min = 1, max = 32))]
         max_rows: u32,
     },
 }
@@ -118,9 +140,13 @@ impl UiField {
 )]
 #[serde(deny_unknown_fields)]
 pub struct UiAction {
+    #[schemars(length(min=1,max=128),regex(pattern="^[A-Za-z0-9_.-]+$"),extend("x-rw-max-utf8-bytes"=128))]
     pub id: String,
+    #[schemars(length(min=1,max=128),regex(pattern=r"^[^\u0000-\u001f\u007f-\u009f]+$"),extend("x-rw-max-utf8-bytes"=128))]
     pub label: String,
+    #[schemars(length(min=1,max=128),regex(pattern="^[A-Za-z0-9_.-]+$"),extend("x-rw-max-utf8-bytes"=128))]
     pub command: String,
+    #[schemars(extend("x-rw-max-json-bytes"=4096))]
     pub arguments: Value,
 }
 
@@ -130,16 +156,25 @@ pub struct UiAction {
 #[serde(tag = "surface", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UiContribution {
     Tool {
+        #[schemars(length(min=1,max=128),regex(pattern="^[A-Za-z0-9_.-]+$"),extend("x-rw-max-utf8-bytes"=128))]
         id: String,
+        #[schemars(length(min=1,max=128),regex(pattern="^[A-Za-z0-9_.-]+$"),extend("x-rw-max-utf8-bytes"=128))]
         tool_name: String,
+        #[schemars(length(min=1,max=128),regex(pattern=r"^[^\u0000-\u001f\u007f-\u009f]+$"),extend("x-rw-max-utf8-bytes"=128))]
         title: String,
+        #[schemars(length(max = 32))]
         fields: Vec<UiField>,
+        #[schemars(length(max = 4))]
         actions: Vec<UiAction>,
     },
     Panel {
+        #[schemars(length(min=1,max=128),regex(pattern="^[A-Za-z0-9_.-]+$"),extend("x-rw-max-utf8-bytes"=128))]
         id: String,
+        #[schemars(length(min=1,max=128),regex(pattern=r"^[^\u0000-\u001f\u007f-\u009f]+$"),extend("x-rw-max-utf8-bytes"=128))]
         title: String,
+        #[schemars(length(max = 32))]
         fields: Vec<UiField>,
+        #[schemars(length(max = 4))]
         actions: Vec<UiAction>,
     },
 }
@@ -179,23 +214,27 @@ impl UiContribution {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UiProjectedField {
     Text {
+        #[schemars(length(min=1,max=128),regex(pattern="^[A-Za-z0-9_.-]+$"),extend("x-rw-max-utf8-bytes"=128))]
         id: String,
         #[serde(deserialize_with = "Option::deserialize")]
         #[schemars(schema_with = "nullable_display_value")]
         value: Option<String>,
     },
     Badge {
+        #[schemars(length(min=1,max=128),regex(pattern="^[A-Za-z0-9_.-]+$"),extend("x-rw-max-utf8-bytes"=128))]
         id: String,
         #[serde(deserialize_with = "Option::deserialize")]
         #[schemars(schema_with = "nullable_display_value")]
         value: Option<String>,
     },
     List {
+        #[schemars(length(min=1,max=128),regex(pattern="^[A-Za-z0-9_.-]+$"),extend("x-rw-max-utf8-bytes"=128))]
         id: String,
         #[schemars(schema_with = "bounded_display_list")]
         values: Vec<String>,
     },
     Table {
+        #[schemars(length(min=1,max=128),regex(pattern="^[A-Za-z0-9_.-]+$"),extend("x-rw-max-utf8-bytes"=128))]
         id: String,
         #[schemars(schema_with = "bounded_display_table")]
         rows: Vec<Vec<String>>,

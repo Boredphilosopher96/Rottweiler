@@ -111,6 +111,7 @@ pub(super) struct PendingToolCall {
 }
 
 pub(super) struct ToolExecution {
+    pub(super) presentation: Option<rw_tools::ToolPresentationPlan>,
     pub(super) unsettled: bool,
     pub(super) call: PendingToolCall,
     pub(super) output: ToolOutput,
@@ -147,6 +148,7 @@ impl PreparedToolCall {
 
 pub(super) fn failed_execution(call: PendingToolCall, message: impl Into<String>) -> ToolExecution {
     ToolExecution {
+        presentation: None,
         unsettled: false,
         call,
         output: ToolOutput::Text {

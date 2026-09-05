@@ -409,6 +409,11 @@ pub enum EngineEvent {
         chunk: String,
     },
     ToolCallFinished {
+        #[serde(deserialize_with = "Option::deserialize")]
+        #[schemars(
+            schema_with = "crate::schema::required_nullable::<crate::extension_ui::UiPresentation>"
+        )]
+        presentation: Option<crate::extension_ui::UiPresentation>,
         meta: EventMeta,
         turn_id: TurnId,
         tool_call_id: ToolCallId,

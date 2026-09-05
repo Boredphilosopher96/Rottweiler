@@ -971,6 +971,7 @@ fn contract_fixture() -> ContractFixture {
                 chunk: "running tests".to_owned(),
             },
             EngineEvent::ToolCallFinished {
+                presentation: None,
                 meta: event_meta(),
                 turn_id: TurnId("turn-fixture".to_owned()),
                 tool_call_id: ToolCallId("tool-1".to_owned()),

@@ -4,6 +4,7 @@ use crate::PluginEndpoint;
 pub struct RpcToolAdapter {
     declaration: rw_plugin_protocol::PluginToolCapability,
     endpoint: Arc<dyn PluginEndpoint>,
+    presentation: Option<Arc<rw_types::extension_ui::UiContribution>>,
 }
 
 impl RpcToolAdapter {
@@ -21,9 +22,11 @@ impl RpcToolAdapter {
                 "tool adapter declaration differs from endpoint manifest".to_owned(),
             ));
         }
+        let presentation=endpoint.metadata().manifest().capabilities.ui.iter().find(|contribution|matches!(contribution,rw_types::extension_ui::UiContribution::Tool{tool_name,..} if tool_name==&declaration.name)).map(|declaration|Arc::new(declaration.clone()));
         Ok(Self {
             declaration,
             endpoint,
+            presentation,
         })
     }
 }
@@ -82,9 +85,18 @@ impl Tool for RpcToolAdapter {
             )
             .await
             .map_err(|error| ToolError::Output(error.to_string()))?;
-        serde_json::from_value(result).map_err(|error| {
+        let result: ToolResult = serde_json::from_value(result).map_err(|error| {
             ToolError::Output(format!("plugin returned invalid tool result: {error}"))
-        })
+        })?;
+        let metadata = self.endpoint.metadata();
+        if let Some(declaration) = &self.presentation {
+            let presentation =
+                rw_tools::ToolPresentationPlan::new(metadata.ui_owner(), Arc::clone(declaration))
+                    .map_err(|error| ToolError::Output(error.to_string()))?;
+            Ok(result.with_presentation(presentation))
+        } else {
+            Ok(result)
+        }
     }
 }
 

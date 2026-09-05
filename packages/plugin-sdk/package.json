@@ -36,7 +36,8 @@
     "./extension-event-kind.schema.json": "./fixtures/wire/extension-event-kind.schema.json",
     "./extension-event-notice.schema.json": "./fixtures/wire/extension-event-notice.schema.json",
     "./extension-event-outcome.schema.json": "./fixtures/wire/extension-event-outcome.schema.json",
-    "./extension-event-chunk.schema.json": "./fixtures/wire/extension-event-chunk.schema.json"
+    "./extension-event-chunk.schema.json": "./fixtures/wire/extension-event-chunk.schema.json",
+    "./ui-contribution.schema.json": "./fixtures/wire/ui-contribution.schema.json"
   },
   "bin": {
     "rottweiler-plugin-scaffold": "./dist/bin/scaffold.js"
@@ -59,7 +60,8 @@
     "fixtures/wire/extension-event-kind.schema.json",
     "fixtures/wire/extension-event-notice.schema.json",
     "fixtures/wire/extension-event-outcome.schema.json",
-    "fixtures/wire/extension-event-chunk.schema.json"
+    "fixtures/wire/extension-event-chunk.schema.json",
+    "fixtures/wire/ui-contribution.schema.json"
   ],
   "scripts": {
     "build": "bun run build.ts",

@@ -111,28 +111,15 @@ impl UiCatalog {
     /// Rejects aggregate descriptor bytes/counts and duplicate generation identities.
     pub fn validate(&self) -> Result<(), UiContractError> {
         validation::encoded_bytes(self, MAX_UI_DESCRIPTOR_BYTES)?;
-        if self.entries.len() > 64 {
-            return Err(UiContractError("catalog owner count"));
+        if self.entries.len() > MAX_UI_CONTRIBUTIONS {
+            return Err(UiContractError("catalog descriptor count"));
         }
-        let mut owners = BTreeSet::new();
-        let mut count = 0_usize;
+        let mut identities = BTreeSet::new();
         for entry in &self.entries {
             validation::identifier(&entry.owner.extension)?;
-            if !owners.insert((&entry.owner.extension, &entry.owner.generation)) {
-                return Err(UiContractError("duplicate catalog owner"));
-            }
-            count = count
-                .checked_add(entry.descriptors.len())
-                .ok_or(UiContractError("catalog count overflow"))?;
-            if count > MAX_UI_CONTRIBUTIONS {
-                return Err(UiContractError("catalog descriptor count"));
-            }
-            let mut ids = BTreeSet::new();
-            for descriptor in &entry.descriptors {
-                descriptor.validate()?;
-                if !ids.insert(&descriptor.id) {
-                    return Err(UiContractError("duplicate catalog descriptor"));
-                }
+            entry.descriptor.validate()?;
+            if !identities.insert((&entry.owner.generation, &entry.descriptor.id)) {
+                return Err(UiContractError("duplicate catalog descriptor"));
             }
         }
         Ok(())

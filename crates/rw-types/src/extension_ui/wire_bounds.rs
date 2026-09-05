@@ -2,7 +2,7 @@
 use schemars::{Schema, SchemaGenerator, json_schema};
 use serde_json::{Value, json};
 fn display_text(limit: usize) -> Value {
-    json!({"type":"string","maxLength":limit,"x-rw-max-utf8-bytes":limit})
+    json!({"type":"string","maxLength":limit,"x-rw-max-utf8-bytes":limit,"pattern":r"^[^\u0000-\u0008\u000b-\u001f\u007f-\u009f]*$"})
 }
 pub(super) fn nullable_display_value(_generator: &mut SchemaGenerator) -> Schema {
     json_schema!({"anyOf":[{"type":"null"},display_text(super::MAX_UI_VALUE_BYTES)]})

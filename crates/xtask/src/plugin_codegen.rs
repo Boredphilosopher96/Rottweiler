@@ -77,7 +77,11 @@ export type PluginPushMethod =
   | "session/set_status"
   | "ui/notify"
 
+import type { UiContribution } from "./ui-contract"
+export type { UiContribution } from "./ui-contract"
+
 export interface PluginCapabilities {
+  readonly ui?: readonly UiContribution[]
   readonly tools?: readonly ToolDeclaration[]
   readonly commands?: readonly CommandDeclaration[]
   readonly hooks?: readonly HookDeclaration[]

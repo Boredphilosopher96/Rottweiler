@@ -239,14 +239,13 @@ impl UiPresentation {
 #[serde(deny_unknown_fields)]
 pub struct UiCatalogEntry {
     pub owner: UiContributionOwner,
-    #[schemars(length(max = 128))]
-    pub descriptors: Vec<UiDisplayDescriptor>,
+    pub descriptor: UiDisplayDescriptor,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema, TS, PrepareAllocation)]
 #[schemars(extend("x-rw-max-json-bytes" = MAX_UI_DESCRIPTOR_BYTES))]
 #[serde(deny_unknown_fields)]
 pub struct UiCatalog {
-    #[schemars(length(max = 64))]
+    #[schemars(length(max = 128))]
     pub entries: Vec<UiCatalogEntry>,
 }
 

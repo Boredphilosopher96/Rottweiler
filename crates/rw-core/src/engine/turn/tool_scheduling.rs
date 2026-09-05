@@ -223,6 +223,15 @@ pub(super) async fn execute_tool_calls(
             continue;
         }
         redact_tool_output(&mut execution.output, config.secret_redactor.as_ref());
+        let presentation = execution.presentation.as_ref().and_then(|plan| {
+            plan.project(&execution.output, |text| {
+                config.secret_redactor.redact(text)
+            })
+            .map_err(
+                |error| tracing::warn!(reason = %error, "tool presentation could not be produced"),
+            )
+            .ok()
+        });
         emit_plan_submission(
             &execution,
             mode,
@@ -233,6 +242,7 @@ pub(super) async fn execute_tool_calls(
         send_event(
             signals,
             PendingEvent::ToolCallFinished {
+                presentation,
                 turn,
                 id: execution.call.id.clone(),
                 invocation_id: execution.call.invocation_id.clone(),

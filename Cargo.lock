@@ -2824,6 +2824,7 @@ dependencies = [
  "blake3",
  "ed25519-dalek",
  "futures-util",
+ "getrandom 0.4.3",
  "rustix",
  "rw-operation-contract",
  "rw-plugin-protocol",

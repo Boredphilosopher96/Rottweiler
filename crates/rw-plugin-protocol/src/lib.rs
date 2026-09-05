@@ -310,6 +310,8 @@ pub struct PluginManifest {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginCapabilities {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ui: Vec<rw_types::extension_ui::UiContribution>,
     #[serde(default)]
     pub tools: Vec<PluginToolCapability>,
     #[serde(default)]
@@ -530,6 +532,34 @@ impl PluginCapabilities {
     }
 
     fn validate(&self) -> Result<(), ManifestError> {
+        rw_types::extension_ui::validate_contributions(&self.ui).map_err(|_| {
+            ManifestError::InvalidField {
+                field: "ui",
+                reason: "invalid presentation declarations",
+            }
+        })?;
+        for contribution in &self.ui {
+            if let rw_types::extension_ui::UiContribution::Tool { tool_name, .. } = contribution
+                && !self.tools.iter().any(|tool| &tool.name == tool_name)
+            {
+                return Err(ManifestError::InvalidField {
+                    field: "ui.tool_name",
+                    reason: "tool presenter requires its declared tool",
+                });
+            }
+            for action in contribution.actions() {
+                if !self
+                    .commands
+                    .iter()
+                    .any(|command| command.name == action.command)
+                {
+                    return Err(ManifestError::InvalidField {
+                        field: "ui.actions",
+                        reason: "action requires its declared command",
+                    });
+                }
+            }
+        }
         validate_count("tools", self.tools.len())?;
         validate_count("commands", self.commands.len())?;
         self.validate_hooks()?;
@@ -770,6 +800,7 @@ fn normalize_capability_arrays(value: &mut Value) {
         "hooks",
         "providers",
         "event_subscriptions",
+        "ui",
         "push",
     ] {
         if let Some(values) = capabilities.get_mut(key).and_then(Value::as_array_mut) {

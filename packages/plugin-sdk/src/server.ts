@@ -1,3 +1,4 @@
+import validateUiContribution from "./generated/ui-contribution-validator.js"
 import { eventSourceReader, type EventHandlerContext } from "./host-events"
 import validateEventNotice from "./generated/extension-event-notice-validator.js"
 import validateEventOutcome from "./generated/extension-event-outcome-validator.js"
@@ -257,7 +258,7 @@ function string(value: JsonValue | undefined, label: string): string {
 function validateManifest(manifest: PluginManifest): void {
   requireKeys(manifest, "manifest", ["name", "version", "protocol", "capabilities"])
   requireKeys(manifest.capabilities, "capabilities", [
-    "tools", "commands", "hooks", "providers", "event_subscriptions", "push",
+    "tools", "commands", "hooks", "providers", "event_subscriptions", "push", "ui",
   ])
   if (manifest.protocol !== PLUGIN_PROTOCOL_VERSION) {
     throw new Error(`plugin manifest protocol must be ${PLUGIN_PROTOCOL_VERSION}`)
@@ -287,6 +288,26 @@ function validateManifest(manifest: PluginManifest): void {
     }
     requireUnique(declared, kind)
   }
+  const ui = manifest.capabilities.ui ?? []
+  if (ui.length > 128 || byteLength(JSON.stringify(ui)) > 256 * 1024) throw new Error("UI contribution admission limit")
+  requireUnique(ui.map(item => item.id), "UI contribution")
+  const uiTools: string[] = []
+  for (const contribution of ui) {
+    if (!validateUiContribution(contribution)) throw new Error("invalid UI contribution")
+    requireText(contribution.title, "UI title", 128)
+    if (contribution.fields.length > 32 || contribution.actions.length > 4) throw new Error("UI field/action limit")
+    requireUnique(contribution.fields.map(field => field.id), "UI field")
+    requireUnique(contribution.actions.map(action => action.id), "UI action")
+    if (contribution.surface === "tool") {
+      uiTools.push(contribution.tool_name)
+      if (!manifest.capabilities.tools?.some(tool => tool.name === contribution.tool_name)) throw new Error("UI presenter requires its declared tool")
+    }
+    for (const action of contribution.actions) {
+      if (!manifest.capabilities.commands?.some(command => command.name === action.command)) throw new Error("UI action requires its declared command")
+      if (byteLength(JSON.stringify(action.arguments)) > 4096) throw new Error("UI action argument limit")
+    }
+  }
+  requireUnique(uiTools, "UI tool presenter")
   const push = manifest.capabilities.push ?? []
   if (push.length > PROTOCOL_LIMITS.maxCapabilitiesPerKind) throw new Error("too many push capabilities")
   requireUnique(push, "push")

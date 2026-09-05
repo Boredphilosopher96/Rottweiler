@@ -3,6 +3,7 @@ import { standaloneValidator } from "../tui/scripts/standalone-validator"
 
 const check = process.argv.includes("--check")
 const schemas: readonly (readonly [string, string, string])[] = [
+  ["ui-contribution", "UiContribution", "ui-contract"],
   ["extension-event-kind", "ExtensionEventKind", "extension-contract"],
   ["extension-event-notice", "ExtensionEventNotice", "extension-contract"],
   ["extension-event-outcome", "ExtensionEventOutcome", "extension-contract"],

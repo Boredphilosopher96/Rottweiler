@@ -365,16 +365,21 @@ pub(super) async fn execute_prepared_tool(
     output_open.store(false, Ordering::Release);
     drop(progress);
     let tool_cancelled = matches!(&result, Err(ToolError::Cancelled));
-    let (output, is_error) = match result {
-        Ok(result) => (tool_result_output(result), false),
+    let (output, is_error, presentation) = match result {
+        Ok(mut result) => {
+            let presentation = result.take_presentation();
+            (tool_result_output(result), false, presentation)
+        }
         Err(error) => (
             ToolOutput::Text {
                 text: error.to_string(),
             },
             true,
+            None,
         ),
     };
     let mut execution = ToolExecution {
+        presentation,
         unsettled: false,
         call,
         output,
