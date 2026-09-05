@@ -341,6 +341,32 @@ async fn captured_semantic_history_preserves_pages_and_charges_its_read_lifetime
             .await
             .is_err()
     );
+    // A delivered page retains its own charge even after its source view drops.
+    let mut pages = vec![page];
+    for _ in 2..8 {
+        pages.push(
+            captured
+                .conversation_page(0..1, HistoryMaterializationLimits::default())
+                .await
+                .expect("admitted page"),
+        );
+    }
+    assert!(
+        captured
+            .conversation_page(0..1, HistoryMaterializationLimits::default())
+            .await
+            .is_err()
+    );
+    assert!(current.capture_history().await.is_err());
+    drop(captured);
+    let replacement = current
+        .capture_history()
+        .await
+        .expect("released snapshot allowance");
+    assert!(current.capture_history().await.is_err());
+    drop(replacement);
+    drop(pages);
+    let captured = current.capture_history().await.expect("released pages");
     let mut views = vec![captured];
     for _ in 1..8 {
         let view = current.capture_history().await.expect("admitted view");

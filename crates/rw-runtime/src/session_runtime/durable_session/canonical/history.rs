@@ -6,7 +6,7 @@ use rw_core::{
     AgentLoopError,
     recovery::{
         CanonicalHistory, ConversationCut, ConversationPage, HistoryMaterializationLimits,
-        RecoveryBootstrap, SessionHistory, SessionHistoryView,
+        HistoryRead, RecoveryBootstrap, SessionHistory, SessionHistoryView,
     },
 };
 use rw_types::SequenceId;
@@ -19,6 +19,7 @@ struct CapturedHistory {
     history: Arc<Mutex<CanonicalHistory>>,
     lease: JournalReadLease,
     reads: Arc<super::super::reads::ReadOperations>,
+    journal: Arc<crate::journal_service::JournalService>,
     cut: ConversationCut,
     through: Option<SequenceId>,
 }
@@ -31,21 +32,26 @@ impl SessionHistory for DurableEventSink {
                 .get()
                 .ok_or_else(|| persistence("canonical owner is not bound to this session"))?,
         );
-        let lease = self
-            .journal_service
-            .capture(&self.session_id)
-            .map_err(persistence)?;
+        let admission = self.journal_service.admit_read().map_err(persistence)?;
+        let session = self.session_id.clone();
+        let journal = Arc::clone(&self.journal_service);
         let publication = Arc::clone(&self.registration.publisher);
         let reads = Arc::clone(&self.reads);
         self.reads
-            .run(lease, move |lease| {
-                let history = owner.snapshot(lease, &publication)?;
+            .run(Some(admission), move |admission| {
+                let lease = admission
+                    .take()
+                    .ok_or_else(|| persistence("history capture already started"))?
+                    .capture(&session)
+                    .map_err(persistence)?;
+                let history = owner.snapshot(&lease, &publication)?;
                 let cut = history.head().conversation;
                 let through = history.head().next_sequence.checked_sub(1).map(SequenceId);
                 Ok(Arc::new(CapturedHistory {
                     history: Arc::new(Mutex::new(history)),
-                    lease: lease.clone(),
+                    lease,
                     reads,
+                    journal,
                     cut,
                     through,
                 }) as Arc<dyn SessionHistoryView>)
@@ -64,14 +70,14 @@ impl SessionHistoryView for CapturedHistory {
     fn conversation(&self) -> ConversationCut {
         self.cut
     }
-    async fn bootstrap(&self) -> Result<RecoveryBootstrap, AgentLoopError> {
+    async fn bootstrap(&self) -> Result<HistoryRead<RecoveryBootstrap>, AgentLoopError> {
         self.query(CanonicalHistory::bootstrap).await
     }
     async fn conversation_page(
         &self,
         range: Range<u64>,
         limits: HistoryMaterializationLimits,
-    ) -> Result<ConversationPage, AgentLoopError> {
+    ) -> Result<HistoryRead<ConversationPage>, AgentLoopError> {
         self.query(move |history| history.conversation_page(range, limits))
             .await
     }
@@ -82,17 +88,25 @@ impl CapturedHistory {
         query: impl FnOnce(&CanonicalHistory) -> Result<T, rw_core::recovery::RecoveryError>
         + Send
         + 'static,
-    ) -> Result<T, AgentLoopError> {
+    ) -> Result<HistoryRead<T>, AgentLoopError> {
+        let admission = self.journal.admit_read().map_err(persistence)?;
         let lease = self.lease.clone();
         // The transaction must remain owned by the worker if its waiter drops.
         let history = Arc::clone(&self.history);
         self.reads
-            .run((history, lease), move |(history, _lease)| {
-                let history = history
-                    .lock()
-                    .map_err(|_| persistence("history reader poisoned"))?;
-                query(&history).map_err(persistence)
-            })
+            .run(
+                (history, lease, Some(admission)),
+                move |(history, _lease, admission)| {
+                    let history = history
+                        .lock()
+                        .map_err(|_| persistence("history reader poisoned"))?;
+                    let value = query(&history).map_err(persistence)?;
+                    let admission = admission
+                        .take()
+                        .ok_or_else(|| persistence("history query already completed"))?;
+                    Ok(HistoryRead::new(value, admission))
+                },
+            )
             .await
     }
 }
