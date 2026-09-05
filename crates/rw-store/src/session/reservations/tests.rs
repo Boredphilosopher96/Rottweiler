@@ -387,7 +387,7 @@ fn parent_and_child_connections_share_one_session_cap() {
     assert_eq!(
         results
             .iter()
-            .filter(|result| matches!(result, Err(Error::CapExceeded { .. })))
+            .filter(|result| matches!(result, Err(BudgetReservationError::CapExceeded { .. })))
             .count(),
         1
     );
