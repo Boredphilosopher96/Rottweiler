@@ -197,7 +197,7 @@ export type Attachment = { name: string,
  */
 source_path?: string, media_type: string, data: AttachmentData, };
 
-export type StoredAttachment = { name: string, source_path?: string, media_type: string, content_hash: string, byte_len: string, };
+export type StoredAttachment = { data: AttachmentData, name: string, source_path?: string, media_type: string, content_hash: string, byte_len: string, };
 
 export type SessionDescriptor = { session_id: SessionId,
 /**

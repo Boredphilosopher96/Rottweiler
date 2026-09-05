@@ -6985,9 +6985,12 @@
       ]
     },
     "StoredAttachment": {
-      "description": "Durable content-addressed attachment metadata persisted in the event log.",
+      "description": "Durable attachment content and its identity, independent of mutable local paths.",
       "type": "object",
       "properties": {
+        "data": {
+          "$ref": "#/$defs/AttachmentData"
+        },
         "name": {
           "type": "string"
         },
@@ -7009,6 +7012,7 @@
       },
       "additionalProperties": false,
       "required": [
+        "data",
         "name",
         "media_type",
         "content_hash",
