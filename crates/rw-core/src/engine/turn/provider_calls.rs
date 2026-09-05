@@ -20,23 +20,33 @@ pub(super) fn invocation(
     attribution: AccountingAttribution,
     request: &ProviderRequest,
 ) -> Result<ProviderInvocation, AgentLoopError> {
-    let mut id = [0_u8; 16];
-    getrandom::fill(&mut id).map_err(|error| {
-        AgentLoopError::InvalidConfiguration(format!("provider call identity: {error}"))
-    })?;
     let input = request
         .turns
         .iter()
         .fold(LocalTokenEstimator::tools(&request.tools), |total, turn| {
             total.saturating_add(LocalTokenEstimator::turn(turn))
         });
+    binding(config, signals, turn, attribution, input)
+}
+
+pub(super) fn binding(
+    config: &SessionActorConfig,
+    signals: &mpsc::UnboundedSender<TurnSignal>,
+    turn: u64,
+    attribution: AccountingAttribution,
+    estimated_input: u64,
+) -> Result<ProviderInvocation, AgentLoopError> {
+    let mut id = [0_u8; 16];
+    getrandom::fill(&mut id).map_err(|error| {
+        AgentLoopError::InvalidConfiguration(format!("provider call identity: {error}"))
+    })?;
     Ok(ProviderInvocation {
         budget_session_id: config.budget_session_id.clone(),
         session_id: config.session_id.clone(),
         turn_id: wire_turn_id(turn),
         attribution,
         call_id: u128::from_be_bytes(id).to_string(),
-        input: ProviderInputBudget::Estimated(input),
+        input: ProviderInputBudget::Estimated(estimated_input),
         budget: config.model.budget_config(),
         clock: Arc::clone(&config.event_clock),
         admission: Arc::clone(&config.provider_admission),

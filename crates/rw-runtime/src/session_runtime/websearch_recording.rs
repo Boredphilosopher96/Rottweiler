@@ -331,6 +331,10 @@ impl RecordingConfiguredWebSearcher {
 
 #[async_trait]
 impl WebSearcher for RecordingConfiguredWebSearcher {
+    async fn settle_effects(&self) -> std::result::Result<(), ToolError> {
+        self.inner.settle_effects().await
+    }
+
     async fn search(
         &self,
         request: WebSearchRequest,
@@ -389,6 +393,10 @@ impl ReplayingConfiguredWebSearcher {
 
 #[async_trait]
 impl WebSearcher for ReplayingConfiguredWebSearcher {
+    async fn settle_effects(&self) -> std::result::Result<(), ToolError> {
+        Ok(())
+    }
+
     async fn search(
         &self,
         request: WebSearchRequest,

@@ -586,7 +586,7 @@ where
                 .map(|(name, provider)| (name.clone(), Arc::clone(provider))),
         );
         Ok(ProviderRuntime {
-            router,
+            router: Arc::new(router),
             providers,
             models,
             dynamic_providers: std::sync::RwLock::new(BTreeMap::new()),

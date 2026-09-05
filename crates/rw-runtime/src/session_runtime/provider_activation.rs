@@ -182,7 +182,7 @@ pub(super) fn live_provider_activator(
             if let Some(searcher) = &post_searcher {
                 let runtime = Arc::clone(&post_runtime);
                 searcher.bind_native_resolver(Some(Arc::new(move |alias| {
-                    runtime.native_web_searcher(alias)
+                    runtime.native_web_search_factory(alias)
                 })));
             }
         });
@@ -253,7 +253,7 @@ pub(super) fn lazy_live_provider_model(
             if let Some(searcher) = &post_searcher {
                 let runtime = Arc::clone(&post_runtime);
                 searcher.bind_native_resolver(Some(Arc::new(move |alias| {
-                    runtime.native_web_searcher(alias)
+                    runtime.native_web_search_factory(alias)
                 })));
             }
         });

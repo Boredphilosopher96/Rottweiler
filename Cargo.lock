@@ -3037,6 +3037,7 @@ version = "0.1.4"
 dependencies = [
  "async-trait",
  "blake3",
+ "futures-util",
  "globset",
  "grep-matcher",
  "grep-regex",

@@ -51,6 +51,15 @@ pub trait ModelDriver: Send + Sync {
         }
     }
 
+    /// Binds an optional native search capability to the active turn's accounting owner.
+    fn native_web_searcher(
+        &self,
+        _alias: &str,
+        _invocation: crate::provider_admission::ProviderInvocation,
+    ) -> Option<std::sync::Arc<dyn rw_tools::WebSearcher>> {
+        None
+    }
+
     /// Context/cache metadata known without a network call. Unknown context
     /// windows conservatively disable estimate-triggered auto-compaction.
     fn context_metadata(&self, _alias: &str) -> ModelContextMetadata {
@@ -176,6 +185,15 @@ pub struct ModelContextMetadata {
 
 #[async_trait]
 impl ModelDriver for ProviderRuntime {
+    fn native_web_searcher(
+        &self,
+        alias: &str,
+        invocation: crate::provider_admission::ProviderInvocation,
+    ) -> Option<std::sync::Arc<dyn rw_tools::WebSearcher>> {
+        self.native_web_search_factory(alias)
+            .map(|factory| factory.bind(invocation))
+    }
+
     async fn settle_effects(&self) -> std::result::Result<(), crate::AgentLoopError> {
         self.settle_provider_effects()
             .await

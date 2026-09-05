@@ -296,6 +296,7 @@ pub struct ToolContext {
     workspace_fds: Arc<Vec<OwnedFd>>,
     session_id: Option<SessionId>,
     model_alias: Option<String>,
+    native_searcher: Option<Arc<dyn crate::WebSearcher>>,
     result_limit_bytes: usize,
     pub cancellation: CancellationToken,
     pub output: Arc<dyn ToolOutputSink>,
@@ -376,6 +377,7 @@ impl ToolContext {
             workspace_fds: Arc::new(workspace_fds),
             session_id: None,
             model_alias: None,
+            native_searcher: None,
             result_limit_bytes: ToolLimits::default().max_result_bytes,
             cancellation: CancellationToken::default(),
             output: Arc::new(NoopOutputSink),
@@ -420,6 +422,18 @@ impl ToolContext {
     #[must_use]
     pub fn model_alias(&self) -> Option<&str> {
         self.model_alias.as_deref()
+    }
+
+    /// Bind the admitted native backend for this turn; callbacks never enter tool JSON.
+    #[must_use]
+    pub fn with_native_searcher(mut self, searcher: Option<Arc<dyn crate::WebSearcher>>) -> Self {
+        self.native_searcher = searcher;
+        self
+    }
+
+    #[must_use]
+    pub fn native_searcher(&self) -> Option<&Arc<dyn crate::WebSearcher>> {
+        self.native_searcher.as_ref()
     }
 
     #[must_use]

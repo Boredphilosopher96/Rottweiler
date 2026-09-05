@@ -189,6 +189,17 @@ pub(in crate::engine) async fn start_turn_with_overrides(
         tool_calls,
     } = prepare_turn_start(state, runtime.config, messages, overrides)?;
     let turn = state.next_turn;
+    let native_search = config.model.native_web_searcher(
+        &config.model_alias,
+        super::provider_calls::binding(
+            &config,
+            runtime.signals,
+            turn,
+            rw_types::AccountingAttribution::Main,
+            0,
+        )?,
+    );
+
     state.next_turn = state.next_turn.saturating_add(1);
     let cancellation = CancellationToken::default();
     state.running = Some(RunningTurn {
@@ -240,7 +251,8 @@ pub(in crate::engine) async fn start_turn_with_overrides(
         .clone()
         .with_cancellation(cancellation.clone())
         .with_question_asker(protocol_asker)
-        .with_model_alias(config.model_alias.clone());
+        .with_model_alias(config.model_alias.clone())
+        .with_native_searcher(native_search);
     let signals = runtime.signals.clone();
     let state_context_surgery = state.context_surgery.clone();
     let state_pruned_tool_outputs = state.pruned_tool_outputs.clone();

@@ -763,6 +763,10 @@ struct SequencedWebSearcher(std::sync::atomic::AtomicUsize);
 
 #[async_trait]
 impl WebSearcher for FixtureWebSearcher {
+    async fn settle_effects(&self) -> std::result::Result<(), ToolError> {
+        Ok(())
+    }
+
     async fn search(
         &self,
         _request: WebSearchRequest,
@@ -774,6 +778,10 @@ impl WebSearcher for FixtureWebSearcher {
 
 #[async_trait]
 impl WebSearcher for SequencedWebSearcher {
+    async fn settle_effects(&self) -> std::result::Result<(), ToolError> {
+        Ok(())
+    }
+
     async fn search(
         &self,
         _request: WebSearchRequest,

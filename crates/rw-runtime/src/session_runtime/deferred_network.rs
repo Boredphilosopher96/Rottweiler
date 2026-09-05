@@ -1,3 +1,6 @@
+mod search_startup;
+use search_startup::SearchStartup;
+
 use super::command_execution::CommandFixtureMode;
 use super::credential_resolution::DeferredToolProxy;
 use super::credential_resolution::DeferredWebSearchHeaders;
@@ -68,7 +71,7 @@ pub(super) struct DeferredConfiguredWebSearcher {
     pub(super) web_fetcher: Arc<dyn WebFetcher>,
     pub(super) limits: ToolLimits,
     pub(super) fixture_mode: CommandFixtureMode,
-    pub(super) inner: OnceCell<Arc<dyn WebSearcher>>,
+    startup: SearchStartup,
 }
 
 impl DeferredConfiguredWebSearcher {
@@ -99,27 +102,32 @@ impl DeferredConfiguredWebSearcher {
             web_fetcher,
             limits,
             fixture_mode,
-            inner: OnceCell::new(),
+            startup: SearchStartup::default(),
         })
     }
 }
 
 #[async_trait]
 impl WebSearcher for DeferredConfiguredWebSearcher {
+    async fn settle_effects(&self) -> std::result::Result<(), ToolError> {
+        self.startup.settle().await
+    }
+
     async fn search(
         &self,
         request: WebSearchRequest,
         cancellation: CancellationToken,
     ) -> std::result::Result<WebSearchResponse, ToolError> {
-        let inner = self
-            .inner
-            .get_or_try_init(|| async {
-                let headers = self.headers.resolve().await.map_err(ToolError::Network)?;
-                let config = self.config.clone();
-                let web_fetcher = Arc::clone(&self.web_fetcher);
-                let limits = self.limits;
-                let fixture_mode = self.fixture_mode.clone();
-                tokio::task::spawn_blocking(move || {
+        let inner = if let Some(startup) = self.startup.current() {
+            startup.wait().await?
+        } else {
+            let headers = self.headers.resolve().await.map_err(ToolError::Network)?;
+            let config = self.config.clone();
+            let web_fetcher = Arc::clone(&self.web_fetcher);
+            let limits = self.limits;
+            let fixture_mode = self.fixture_mode.clone();
+            self.startup
+                .start(move || {
                     configured_web_searcher(
                         false,
                         &config,
@@ -128,19 +136,12 @@ impl WebSearcher for DeferredConfiguredWebSearcher {
                         limits,
                         &fixture_mode,
                     )
-                    .map_err(|error| ToolError::Network(error.to_string()))?
-                    .ok_or_else(|| {
-                        ToolError::Network(
-                            "configured web-search endpoint is unavailable".to_owned(),
-                        )
-                    })
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "configured web-search endpoint is unavailable".to_owned())
                 })
-                .await
-                .map_err(|error| {
-                    ToolError::Network(format!("web-search startup worker failed: {error}"))
-                })?
-            })
-            .await?;
+                .wait()
+                .await?
+        };
         inner.search(request, cancellation).await
     }
 }

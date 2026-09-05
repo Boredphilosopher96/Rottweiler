@@ -34,13 +34,12 @@ async fn runtime_websearch_resolves_native_backend_for_each_turn_alias() {
         seen.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(alias.to_owned());
-        Some(Arc::new(FixtureWebSearcher(WebSearchResponse {
-            source: WebSearchSource::ProviderNative,
-            results: Vec::new(),
-        })))
+        Some(native_factory())
     })));
     for alias in ["fast", "slow", "command-override"] {
         searcher
+            .bind(alias, test_provider_invocation())
+            .expect("accounted binding")
             .search(
                 WebSearchRequest {
                     model_alias: Some(alias.to_owned()),
@@ -88,12 +87,7 @@ async fn mixed_alias_websearch_schema_is_reachable_for_the_selected_model() {
 
     let native = Arc::new(RuntimeWebSearcher::new(None));
     native.bind_native_resolver(Some(Arc::new(|alias| {
-        (alias == "cloud").then(|| {
-            Arc::new(FixtureWebSearcher(WebSearchResponse {
-                source: WebSearchSource::ProviderNative,
-                results: Vec::new(),
-            })) as Arc<dyn WebSearcher>
-        })
+        (alias == "cloud").then(native_factory)
     })));
     let captured = Arc::new(Mutex::new(None));
     let model = AliasAwareWebSearchModel::wrap(
@@ -282,4 +276,41 @@ fn replay_native_search_resolves_recorded_provider_model_not_alias() {
         provider_model_for_alias(&config, "fast", "recorded").as_deref(),
         Some("gpt-actual")
     );
+}
+
+fn native_factory() -> rw_core::ProviderNativeWebSearchFactory {
+    rw_core::ProviderNativeWebSearchFactory::single(Arc::new(NativeProvider), "fixture".into())
+        .expect("route")
+        .expect("capability")
+}
+struct NativeProvider;
+#[async_trait::async_trait]
+impl rw_providers::Provider for NativeProvider {
+    fn name(&self) -> &'static str {
+        "native-fixture"
+    }
+    fn capabilities(&self) -> rw_providers::Capabilities {
+        rw_providers::Capabilities {
+            tool_calling: true,
+            vision: false,
+            thinking: false,
+            cache_breakpoints: rw_providers::CacheBreakpointSupport::None,
+            max_context_tokens: None,
+            max_output_tokens: None,
+            wire_mode: rw_providers::WireMode::OpenAiResponses,
+        }
+    }
+    fn native_web_search_capability(&self) -> rw_providers::NativeWebSearchCapability {
+        rw_providers::NativeWebSearchCapability::Supported
+    }
+    async fn stream(
+        &self,
+        _request: ProviderRequest,
+    ) -> Result<rw_providers::BoxEventStream, rw_providers::ProviderError> {
+        Ok(Box::pin(futures_util::stream::iter([Ok(
+            rw_providers::ProviderEvent::Finished {
+                reason: rw_providers::FinishReason::Stop,
+            },
+        )])))
+    }
 }

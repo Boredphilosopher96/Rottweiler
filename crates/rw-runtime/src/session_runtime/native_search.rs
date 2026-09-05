@@ -61,7 +61,7 @@ pub(super) fn openai_native_endpoint(endpoint: &str) -> bool {
 }
 
 pub(super) type NativeWebSearchResolver =
-    dyn Fn(&str) -> Option<Arc<dyn WebSearcher>> + Send + Sync + 'static;
+    dyn Fn(&str) -> Option<rw_core::ProviderNativeWebSearchFactory> + Send + Sync + 'static;
 
 pub(super) struct RuntimeWebSearcher {
     pub(super) native: RwLock<Option<Arc<NativeWebSearchResolver>>>,
@@ -88,6 +88,21 @@ impl RuntimeWebSearcher {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    pub(super) fn bind(
+        &self,
+        alias: &str,
+        invocation: rw_core::provider_admission::ProviderInvocation,
+    ) -> Option<Arc<dyn WebSearcher>> {
+        let native = self
+            .native_resolver()
+            .and_then(|resolve| resolve(alias))?
+            .bind(invocation);
+        Some(Arc::new(BoundWebSearcher {
+            native,
+            configured: self.configured.clone(),
+        }))
     }
 
     pub(super) fn is_available_for_alias(&self, alias: &str) -> bool {
@@ -121,6 +136,14 @@ impl AliasAwareWebSearchModel {
 
 #[async_trait]
 impl ModelDriver for AliasAwareWebSearchModel {
+    fn native_web_searcher(
+        &self,
+        alias: &str,
+        invocation: rw_core::provider_admission::ProviderInvocation,
+    ) -> Option<Arc<dyn WebSearcher>> {
+        self.searcher.bind(alias, invocation)
+    }
+
     async fn settle_effects(&self) -> std::result::Result<(), rw_core::AgentLoopError> {
         self.inner.settle_effects().await
     }
@@ -239,32 +262,75 @@ impl ModelDriver for AliasAwareWebSearchModel {
 
 #[async_trait]
 impl WebSearcher for RuntimeWebSearcher {
+    async fn settle_effects(&self) -> Result<(), ToolError> {
+        if let Some(configured) = &self.configured {
+            configured.settle_effects().await?;
+        }
+        Ok(())
+    }
     async fn search(
         &self,
         request: WebSearchRequest,
         cancellation: CancellationToken,
-    ) -> std::result::Result<WebSearchResponse, ToolError> {
-        let native = self
-            .native
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        if let (Some(resolve), Some(alias)) = (native, request.model_alias.as_deref())
-            && let Some(searcher) = resolve(alias)
-        {
-            match searcher.search(request.clone(), cancellation.clone()).await {
-                Ok(response) => return Ok(response),
-                Err(ToolError::Cancelled) => return Err(ToolError::Cancelled),
-                Err(_) if self.configured.is_some() => {}
-                Err(error) => return Err(error),
-            }
-        }
+    ) -> Result<WebSearchResponse, ToolError> {
         if let Some(configured) = &self.configured {
             return configured.search(request, cancellation).await;
         }
         Err(ToolError::Network(
-            "selected model did not provide native web search and no configured API is available"
-                .to_owned(),
+            "web search requires an accounted native binding or configured API".into(),
         ))
+    }
+}
+
+struct BoundWebSearcher {
+    native: Arc<dyn WebSearcher>,
+    configured: Option<Arc<dyn WebSearcher>>,
+}
+#[async_trait]
+impl WebSearcher for BoundWebSearcher {
+    async fn settle_effects(&self) -> Result<(), ToolError> {
+        // Both services retain their work independently. One failed proof cannot skip the other.
+        let native = std::panic::AssertUnwindSafe(self.native.settle_effects());
+        use futures_util::FutureExt as _;
+        let native = native.catch_unwind().await.unwrap_or_else(|_| {
+            Err(ToolError::EffectsUnsettled(
+                "native search settlement panicked".into(),
+            ))
+        });
+        let configured = if let Some(configured) = &self.configured {
+            std::panic::AssertUnwindSafe(configured.settle_effects())
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| {
+                    Err(ToolError::EffectsUnsettled(
+                        "configured search settlement panicked".into(),
+                    ))
+                })
+        } else {
+            Ok(())
+        };
+        native.and(configured)
+    }
+    async fn search(
+        &self,
+        request: WebSearchRequest,
+        cancellation: CancellationToken,
+    ) -> Result<WebSearchResponse, ToolError> {
+        match self
+            .native
+            .search(request.clone(), cancellation.clone())
+            .await
+        {
+            Ok(response) => Ok(response),
+            Err(error @ (ToolError::Cancelled | ToolError::EffectsUnsettled(_))) => Err(error),
+            Err(error) => {
+                self.native.settle_effects().await?;
+                if let Some(configured) = &self.configured {
+                    configured.search(request, cancellation).await
+                } else {
+                    Err(error)
+                }
+            }
+        }
     }
 }

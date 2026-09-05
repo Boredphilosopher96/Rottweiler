@@ -109,7 +109,7 @@ pub use permission::{
 pub use provider_factory::{
     AdapterKind, BUILTIN_PROVIDER_PROFILES, BuiltinProviderId, BuiltinProviderProfile,
     ModelPricingSource, ProviderFactory, ProviderFactoryError, ProviderModelCatalogSource,
-    ProviderNativeWebSearcher, ProviderRuntime, ResolvedModel, cost_from_model_metadata,
+    ProviderNativeWebSearchFactory, ProviderRuntime, ResolvedModel, cost_from_model_metadata,
 };
 pub use rw_providers::{
     ProviderModelMetadata, TokenUsage as ModelTokenUsage, UsageAccounting as ModelAccounting,

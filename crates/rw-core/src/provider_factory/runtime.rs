@@ -2,7 +2,7 @@ use super::*;
 
 /// Fully composed provider registry and provider-blind model router.
 pub struct ProviderRuntime {
-    pub(super) router: ProviderRouter,
+    pub(super) router: Arc<ProviderRouter>,
     pub(super) providers: BTreeMap<String, Arc<dyn Provider>>,
     pub(super) models: BTreeMap<String, ResolvedModel>,
     pub(super) dynamic_providers: std::sync::RwLock<BTreeMap<String, Arc<dyn Provider>>>,
@@ -162,23 +162,42 @@ impl ProviderRuntime {
             })
     }
 
-    /// Provider-native search bound to the first configured candidate for an
-    /// alias. Unsupported/fallback aliases return `None`.
+    /// Inert native search routes; execution requires a session accounting binding.
     #[must_use]
-    pub fn native_web_searcher(&self, alias: &str) -> Option<Arc<dyn WebSearcher>> {
+    pub fn native_web_search_factory(&self, alias: &str) -> Option<ProviderNativeWebSearchFactory> {
         let candidates = self
-            .alias_candidates
-            .get(alias)?
+            .router
+            .resolve(alias)
+            .ok()?
             .iter()
-            .filter_map(|candidate| {
-                let model = self.models.get(candidate)?;
-                let provider = self.providers.get(candidate)?.clone();
-                ProviderNativeWebSearcher::new(provider, model.model.clone())
-                    .map(|searcher| Arc::new(searcher) as Arc<dyn WebSearcher>)
+            .cloned()
+            .filter(|route| {
+                self.route_candidates
+                    .get(&route.provider)
+                    .and_then(|candidate| self.providers.get(candidate))
+                    .is_some_and(|provider| {
+                        provider.native_web_search_capability()
+                            == NativeWebSearchCapability::Supported
+                    })
             })
             .collect::<Vec<_>>();
-        (!candidates.is_empty())
-            .then(|| Arc::new(ProviderNativeWebSearchRouter { candidates }) as Arc<dyn WebSearcher>)
+        if candidates.is_empty() || candidates.len() > 64 {
+            return None;
+        }
+        let metadata = candidates
+            .iter()
+            .filter_map(|route| {
+                let candidate = self.route_candidates.get(&route.provider)?;
+                self.accounting_metadata(candidate)
+                    .map(|metadata| (route.clone(), metadata))
+            })
+            .collect();
+        Some(ProviderNativeWebSearchFactory {
+            router: Arc::clone(&self.router),
+            alias: alias.to_owned(),
+            candidates,
+            metadata,
+        })
     }
 
     /// Runtime compaction settings captured from validated user config.

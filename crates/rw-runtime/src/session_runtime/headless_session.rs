@@ -78,7 +78,7 @@ use rw_core::ActorSubagentSessionFactory;
 use rw_core::ModelDriver;
 use rw_core::PermissionGate;
 use rw_core::ProviderFactory;
-use rw_core::ProviderNativeWebSearcher;
+use rw_core::ProviderNativeWebSearchFactory;
 use rw_core::SessionActor;
 use rw_core::SessionActorConfig;
 use rw_core::SessionEventSink;
@@ -104,7 +104,6 @@ use rw_tools::CancellationToken;
 use rw_tools::CommandFixtureRedactor;
 use rw_tools::CommandSafetyClassifier;
 use rw_tools::QuestionAsker;
-use rw_tools::WebSearcher;
 use rw_tools::WorktreeIsolation;
 use rw_tools::WorktreeLimits;
 use rw_types::PermissionModeDescriptor as PermissionMode;
@@ -731,8 +730,9 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
             let provider_name = options.replay_provider.clone();
             searcher.bind_native_resolver(Some(Arc::new(move |alias| {
                 let model = provider_model_for_alias(&config, alias, &provider_name)?;
-                ProviderNativeWebSearcher::new(Arc::clone(&provider), model)
-                    .map(|native| Arc::new(native) as Arc<dyn WebSearcher>)
+                ProviderNativeWebSearchFactory::single(Arc::clone(&provider), model)
+                    .ok()
+                    .flatten()
             })));
         }
         (

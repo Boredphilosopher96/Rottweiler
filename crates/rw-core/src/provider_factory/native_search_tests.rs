@@ -442,62 +442,139 @@ struct Candidate {
 }
 
 #[async_trait]
-impl WebSearcher for Candidate {
-    async fn search(
-        &self,
-        _request: WebSearchRequest,
-        _cancellation: CancellationToken,
-    ) -> Result<WebSearchResponse, ToolError> {
-        self.calls
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(self.name);
-        if self.fail {
-            Err(ToolError::Network("candidate failed".to_owned()))
-        } else {
-            Ok(WebSearchResponse {
-                source: WebSearchSource::ProviderNative,
-                results: Vec::new(),
-            })
+impl Provider for Candidate {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            tool_calling: true,
+            vision: false,
+            thinking: false,
+            cache_breakpoints: CacheBreakpointSupport::None,
+            max_context_tokens: None,
+            max_output_tokens: None,
+            wire_mode: WireMode::OpenAiResponses,
         }
+    }
+    fn native_web_search_capability(&self) -> NativeWebSearchCapability {
+        NativeWebSearchCapability::Supported
+    }
+    async fn stream(&self, _request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
+        self.calls.lock().expect("calls").push(self.name);
+        if self.fail {
+            return Err(ProviderError::new(
+                ProviderErrorKind::RateLimited,
+                "candidate failed",
+            ));
+        }
+        Ok(Box::pin(futures_util::stream::iter([Ok(
+            rw_providers::ProviderEvent::Finished {
+                reason: rw_providers::FinishReason::Stop,
+            },
+        )])))
+    }
+}
+
+#[derive(Default)]
+struct SearchAccounting(Mutex<Vec<crate::provider_admission::ProviderCallIdentity>>);
+#[async_trait]
+impl crate::provider_admission::ProviderAccountingSink for SearchAccounting {
+    async fn append_accounted(
+        &self,
+        identity: crate::provider_admission::ProviderCallIdentity,
+        actuals: crate::provider_admission::ProviderCallActuals,
+    ) -> Result<
+        crate::provider_admission::ProviderCallReceipt,
+        crate::provider_admission::BudgetReservationError,
+    > {
+        let mut calls = self.0.lock().expect("receipts");
+        calls.push(identity.clone());
+        Ok(crate::provider_admission::ProviderCallReceipt {
+            identity,
+            actuals,
+            sequence_id: rw_types::SequenceId(calls.len() as u64),
+            accounted_at: rw_store::session::UtcTimestamp::from_unix_millis(0)?,
+        })
     }
 }
 
 #[tokio::test]
-async fn native_search_candidates_fail_over_in_alias_order() {
+async fn native_search_candidates_fail_over_in_alias_order_with_distinct_accounted_attempts() {
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let router = ProviderNativeWebSearchRouter {
-        candidates: vec![
-            Arc::new(Candidate {
-                name: "primary",
-                fail: true,
-                calls: Arc::clone(&calls),
-            }),
-            Arc::new(Candidate {
-                name: "fallback",
-                fail: false,
-                calls: Arc::clone(&calls),
-            }),
-        ],
-    };
-    router
-        .search(
-            WebSearchRequest {
-                model_alias: Some("fast".to_owned()),
-                query: "query".to_owned(),
-                max_results: 5,
-                recency_days: None,
-                allowed_domains: Vec::new(),
+    let providers: Vec<Arc<dyn Provider>> = vec![
+        Arc::new(Candidate {
+            name: "primary",
+            fail: true,
+            calls: Arc::clone(&calls),
+        }),
+        Arc::new(Candidate {
+            name: "fallback",
+            fail: false,
+            calls: Arc::clone(&calls),
+        }),
+    ];
+    let router = Arc::new(
+        ProviderRouter::new(
+            BTreeMap::from([(
+                "fast".into(),
+                vec!["primary/fixture".into(), "fallback/fixture".into()],
+            )]),
+            providers,
+            RetryPolicy {
+                max_attempts: 1,
+                ..RetryPolicy::default()
             },
-            CancellationToken::default(),
         )
+        .expect("router"),
+    );
+    let factory = ProviderNativeWebSearchFactory {
+        candidates: router.resolve("fast").expect("routes").to_vec(),
+        router,
+        alias: "fast".into(),
+        metadata: BTreeMap::new(),
+    };
+    let accounting = Arc::new(SearchAccounting::default());
+    let searcher = factory.bind(crate::provider_admission::ProviderInvocation {
+        session_id: rw_types::SessionId("child".into()),
+        budget_session_id: rw_types::SessionId("root".into()),
+        turn_id: rw_types::TurnId("1".into()),
+        attribution: rw_types::AccountingAttribution::Main,
+        call_id: "binding".into(),
+        input: crate::provider_admission::ProviderInputBudget::Estimated(0),
+        budget: BudgetConfig::default(),
+        clock: Arc::new(crate::SystemEventClock),
+        admission: crate::provider_admission::testing::admission(),
+        accounting: accounting.clone(),
+    });
+    let request = || WebSearchRequest {
+        model_alias: Some("fast".into()),
+        query: "query".into(),
+        max_results: 5,
+        recency_days: None,
+        allowed_domains: Vec::new(),
+    };
+    searcher
+        .search(request(), CancellationToken::default())
         .await
         .expect("fallback search");
     assert_eq!(
-        calls
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_slice(),
+        calls.lock().expect("calls").as_slice(),
         ["primary", "fallback"]
+    );
+    searcher
+        .search(request(), CancellationToken::default())
+        .await
+        .expect("second search");
+    let receipts = accounting.0.lock().expect("receipts");
+    assert_eq!(receipts.len(), 3);
+    assert_eq!(receipts[0].attempt, 0);
+    assert_eq!(receipts[1].attempt, 1);
+    assert_eq!(receipts[0].call_id, receipts[1].call_id);
+    assert_ne!(receipts[1].call_id, receipts[2].call_id);
+    assert!(
+        receipts
+            .iter()
+            .all(|call| call.session_id.0 == "child" && call.budget_session_id.0 == "root")
     );
 }
