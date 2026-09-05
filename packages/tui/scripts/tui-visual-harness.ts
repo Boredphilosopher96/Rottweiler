@@ -20,7 +20,7 @@ import type { RottweilerState, ToolProjection } from "../src/state"
 import { createInitialState } from "../src/state"
 import { kennelTheme } from "../src/theme"
 
-type VisualScenario = "conversation" | "command-palette" | "approval" | "tools" | "theme-browser" | "settings-browser" | "mcp-browser" | "session-review"
+type VisualScenario = "conversation" | "command-palette" | "approval" | "tools" | "theme-browser" | "settings-browser" | "sessions-browser" | "mcp-browser" | "session-review"
 
 const TOOLS_FIXTURE_NOW_MS = Date.parse("2026-01-01T12:00:41.000Z")
 const scenarioInput = process.argv[2] ?? "conversation"
@@ -75,6 +75,16 @@ try {
     actions.push("pressed Enter to activate the /settings slash completion")
     setup.mockInput.pressEnter()
     await Bun.sleep(0)
+    await setup.flush()
+  } else if (scenarioInput === "sessions-browser") {
+    actions.push("pressed Ctrl+P and selected Switch session through production input")
+    setup.mockInput.pressKey("p", { ctrl: true })
+    await setup.mockInput.typeText("switch session")
+    setup.mockInput.pressEnter()
+    await Bun.sleep(0)
+    await setup.flush()
+    actions.push("pressed Down to inspect the first retained session")
+    setup.mockInput.pressArrow("down")
     await setup.flush()
   } else if (scenarioInput === "mcp-browser") {
     actions.push("typed /mc into the production composer input")
@@ -183,7 +193,7 @@ try {
 }
 
 function isVisualScenario(value: string): value is VisualScenario {
-  return value === "conversation" || value === "command-palette" || value === "approval" || value === "tools" || value === "theme-browser" || value === "settings-browser" || value === "mcp-browser" || value === "session-review"
+  return value === "conversation" || value === "command-palette" || value === "approval" || value === "tools" || value === "theme-browser" || value === "settings-browser" || value === "sessions-browser" || value === "mcp-browser" || value === "session-review"
 }
 
 function scenarioAssertions(scenario: VisualScenario): readonly string[] {
@@ -222,6 +232,16 @@ function scenarioAssertions(scenario: VisualScenario): readonly string[] {
         "current    medium",
         "choices    low · medium · high",
         "Enter choose · Esc close",
+      ]
+    case "sessions-browser":
+      return [
+        "SESSIONS   /sessions",
+        "Search sessions…",
+        "New session",
+        "Reconnect transport",
+        "workspace   rottweiler",
+        "model       sonnet-4.5",
+        "shell       idle",
       ]
     case "mcp-browser":
       return [
@@ -1011,6 +1031,7 @@ async function settleHighlights(
 function scenarioState(scenario: VisualScenario): RottweilerState {
   if (scenario === "tools") return toolsState()
   if (scenario === "settings-browser") return settingsState()
+  if (scenario === "sessions-browser") return sessionsState()
   if (scenario === "mcp-browser") return mcpState()
   if (scenario === "session-review") return sessionReviewState()
   const state = conversationState()
@@ -1037,6 +1058,16 @@ function scenarioState(scenario: VisualScenario): RottweilerState {
       finished: null,
     }),
     tools: { [approval.toolCallId]: approval },
+  }
+}
+
+function sessionsState(): RottweilerState {
+  return {
+    ...conversationState(),
+    sessions: [
+      { sessionId: "session-reconnect", title: "Reconnect transport", workspaceName: "rottweiler", model: "sonnet-4.5", driverClientId: null, shellActive: false },
+      { sessionId: "session-auth", title: "Auth refactor", workspaceName: "payments", model: "gpt-5", driverClientId: null, shellActive: true },
+    ],
   }
 }
 

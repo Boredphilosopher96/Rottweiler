@@ -50,6 +50,11 @@ import {
   type McpCatalog,
 } from "./mcp-browser"
 import {
+  createSessionsBrowserModel,
+  type SessionsBrowserAction,
+  type SessionsCatalog,
+} from "./sessions-browser"
+import {
   compileKeybindings,
   formatKeycap,
   keyStrokeFromEvent,
@@ -296,10 +301,6 @@ type QueuedMessagePickerAction =
   | { readonly kind: "remove"; readonly position: string }
   | { readonly kind: "clear" }
 type SessionProjection = RottweilerState["sessions"][number]
-type SessionListAction =
-  | { readonly kind: "new" }
-  | { readonly kind: "session"; readonly session: SessionProjection }
-  | { readonly kind: "retry" }
 type SessionPickerAction =
   | { readonly kind: "resume"; readonly session: SessionProjection }
   | { readonly kind: "rename"; readonly session: SessionProjection }
@@ -407,6 +408,7 @@ export class RottweilerApp extends BoxRenderable {
   commandPalette!: ListDetailRenderable<PaletteAction>
   mcpBrowser!: ListDetailRenderable<McpBrowserAction>
   settingsBrowser!: ListDetailRenderable<SettingsBrowserAction>
+  sessionsBrowser!: ListDetailRenderable<SessionsBrowserAction>
   themeBrowser!: ListDetailRenderable<RottweilerTheme>
   composer!: ComposerRenderable
   statusLine!: StatusLineRenderable
@@ -826,6 +828,7 @@ export class RottweilerApp extends BoxRenderable {
     const paletteWasVisible = pickerWasVisible && pickerKind === "palette"
     const mcpBrowserWasVisible = pickerWasVisible && pickerKind === "mcp"
     const settingsBrowserWasVisible = pickerWasVisible && pickerKind === "settings"
+    const sessionsBrowserWasVisible = pickerWasVisible && pickerKind === "sessions"
     const themeBrowserWasVisible = pickerWasVisible && pickerKind === "themes"
     const pickerQuery = rebuilding
       ? paletteWasVisible
@@ -834,6 +837,8 @@ export class RottweilerApp extends BoxRenderable {
           ? this.mcpBrowser.input.value
         : settingsBrowserWasVisible
           ? this.settingsBrowser.input.value
+        : sessionsBrowserWasVisible
+          ? this.sessionsBrowser.input.value
         : themeBrowserWasVisible
           ? this.themeBrowser.input.value
           : this.picker.input.value
@@ -845,6 +850,8 @@ export class RottweilerApp extends BoxRenderable {
           ? this.mcpBrowser.selectedId
         : settingsBrowserWasVisible
           ? this.settingsBrowser.selectedId
+        : sessionsBrowserWasVisible
+          ? this.sessionsBrowser.selectedId
         : themeBrowserWasVisible
           ? this.themeBrowser.selectedId
           : this.picker.select.getSelectedOption()?.value
@@ -856,6 +863,8 @@ export class RottweilerApp extends BoxRenderable {
           ? this.mcpBrowser.scrollOffset
         : settingsBrowserWasVisible
           ? this.settingsBrowser.scrollOffset
+        : sessionsBrowserWasVisible
+          ? this.sessionsBrowser.scrollOffset
         : themeBrowserWasVisible
           ? this.themeBrowser.scrollOffset
           : 0
@@ -984,6 +993,14 @@ export class RottweilerApp extends BoxRenderable {
       emptyCopy: "No matching settings",
       surfaceBackground: theme.background,
     })
+    this.sessionsBrowser = new ListDetailRenderable<SessionsBrowserAction>(this.ctx, theme, {
+      surfaceLayout: "primary",
+      splitListWidth: 39,
+      splitMinWidth: 90,
+      inputPlaceholder: "Search sessions…",
+      emptyCopy: "No matching sessions",
+      surfaceBackground: theme.background,
+    })
     this.themeBrowser = new ListDetailRenderable<RottweilerTheme>(this.ctx, theme, {
       surfaceLayout: "primary",
       splitListWidth: 33,
@@ -1058,6 +1075,7 @@ export class RottweilerApp extends BoxRenderable {
     this.add(this.commandPalette)
     this.add(this.mcpBrowser)
     this.add(this.settingsBrowser)
+    this.add(this.sessionsBrowser)
     this.add(this.themeBrowser)
     this.setState(this.#state)
     if (composerState !== null) this.#restoreComposerState(composerState)
@@ -1081,6 +1099,9 @@ export class RottweilerApp extends BoxRenderable {
       } else if (pickerKind === "settings") {
         if (typeof pickerSelection === "string") this.settingsBrowser.selectById(pickerSelection)
         this.settingsBrowser.restoreViewport(pickerScrollOffset)
+      } else if (pickerKind === "sessions") {
+        if (typeof pickerSelection === "string") this.sessionsBrowser.selectById(pickerSelection)
+        this.sessionsBrowser.restoreViewport(pickerScrollOffset)
       } else if (pickerKind === "themes") {
         if (typeof pickerSelection === "string") this.themeBrowser.selectById(pickerSelection)
         this.themeBrowser.restoreViewport(pickerScrollOffset)
@@ -1095,6 +1116,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#rethemeInProgress = false
     if (this.mcpBrowser.visible) this.mcpBrowser.input.focus()
     else if (this.settingsBrowser.visible) this.settingsBrowser.input.focus()
+    else if (this.sessionsBrowser.visible) this.sessionsBrowser.input.focus()
     else if (this.themeBrowser.visible) this.themeBrowser.input.focus()
     else if (this.commandPalette.visible) this.commandPalette.input.focus()
     else if (this.picker.visible && !this.#pickerController.anchored) this.picker.input.focus()
@@ -2457,6 +2479,14 @@ export class RottweilerApp extends BoxRenderable {
     this.settingsBrowser.resizeForTerminal(width, height, primaryHeight)
   }
 
+  #resizeSessionsBrowser(width: number, height: number): void {
+    const primaryHeight = Math.max(
+      6,
+      height - this.statusLine.height - this.composer.dockHeight,
+    )
+    this.sessionsBrowser.resizeForTerminal(width, height, primaryHeight)
+  }
+
   #resizeMcpBrowser(width: number, height: number): void {
     const primaryHeight = Math.max(
       6,
@@ -2501,8 +2531,13 @@ export class RottweilerApp extends BoxRenderable {
   openSessionPicker(): void {
     this.#sessionActionId = null
     this.#pickerController.begin("sessions")
+    this.#resizeSessionsBrowser(
+      this.width === 0 ? this.ctx.width : this.width,
+      this.height === 0 ? this.ctx.height : this.height,
+    )
     this.#projectionRequests.command({ type: "list_sessions" })
     this.#pickerController.refresh()
+    this.sessionsBrowser.input.focus()
   }
 
   async #createSession(): Promise<void> {
@@ -2560,6 +2595,8 @@ export class RottweilerApp extends BoxRenderable {
 
   #openSessionActionPicker(session: SessionProjection): void {
     this.#sessionActionId = session.sessionId
+    this.sessionsBrowser.visible = false
+    this.sessionsBrowser.input.blur()
     this.#pickerController.kind = "sessionActions"
     this.#pickerController.refresh()
   }
@@ -2721,6 +2758,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#pendingClientState = null
     if (this.mcpBrowser.visible) this.mcpBrowser.close()
     if (this.settingsBrowser.visible) this.settingsBrowser.close()
+    if (this.sessionsBrowser.visible) this.sessionsBrowser.close()
     if (this.themeBrowser.visible) this.themeBrowser.close()
     if (this.commandPalette.visible) this.commandPalette.close()
     this.#pickerController.close()
@@ -2728,6 +2766,7 @@ export class RottweilerApp extends BoxRenderable {
 
   #afterPickerClosed(kind: PickerKind | null): void {
     const restoreSettingsBrowser = kind === "settingChoices"
+    const restoreSessionsBrowser = kind === "sessionActions" || kind === "sessionRename"
     const restoreMcpBrowser = kind === "mcpActions" || kind === "mcpInput" || kind === "mcpRemoveConfirm"
     const capturedTheme =
       kind === "themes"
@@ -2763,6 +2802,10 @@ export class RottweilerApp extends BoxRenderable {
       this.#pickerController.kind = "settings"
       this.settingsBrowser.visible = true
       if (this.#keybindings.preset === "vim") this.#vimFocus = "picker"
+    } else if (restoreSessionsBrowser) {
+      this.#pickerController.kind = "sessions"
+      this.sessionsBrowser.visible = true
+      if (this.#keybindings.preset === "vim") this.#vimFocus = "picker"
     } else if (this.#keybindings.preset === "vim") {
       this.#vimFocus = this.#vimFocusBeforePicker
     }
@@ -2790,6 +2833,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#resizeReviewPanel(width, height)
     if (this.mcpBrowser.visible) this.#resizeMcpBrowser(width, height)
     else if (this.settingsBrowser.visible) this.#resizeSettingsBrowser(width, height)
+    else if (this.sessionsBrowser.visible) this.#resizeSessionsBrowser(width, height)
     else if (this.themeBrowser.visible) this.#resizeThemeBrowser(width, height)
     else if (this.commandPalette.visible) this.commandPalette.resizeForTerminal(width, height)
     else if (this.picker.visible) this.#pickerController.position(this.#pickerController.anchored)
@@ -3009,6 +3053,9 @@ export class RottweilerApp extends BoxRenderable {
       case "select_current":
         if (!this.#pickerVisible()) return false
         if (this.themeBrowser.visible) this.themeBrowser.activateSelected()
+        else if (this.sessionsBrowser.visible) this.sessionsBrowser.activateSelected()
+        else if (this.settingsBrowser.visible) this.settingsBrowser.activateSelected()
+        else if (this.mcpBrowser.visible) this.mcpBrowser.activateSelected()
         else if (this.commandPalette.visible) this.commandPalette.activateSelected()
         else this.picker.select.selectCurrent()
         return true
@@ -3076,6 +3123,10 @@ export class RottweilerApp extends BoxRenderable {
       this.settingsBrowser.input.focus()
       return
     }
+    if (this.sessionsBrowser.visible) {
+      this.sessionsBrowser.input.focus()
+      return
+    }
     if (this.themeBrowser.visible) {
       this.themeBrowser.input.focus()
       return
@@ -3122,6 +3173,8 @@ export class RottweilerApp extends BoxRenderable {
       this.mcpBrowser.moveSelection(direction)
     } else if (this.settingsBrowser.visible) {
       this.settingsBrowser.moveSelection(direction)
+    } else if (this.sessionsBrowser.visible) {
+      this.sessionsBrowser.moveSelection(direction)
     } else if (this.themeBrowser.visible) {
       this.themeBrowser.moveSelection(direction)
     } else if (this.commandPalette.visible) {
@@ -3147,6 +3200,8 @@ export class RottweilerApp extends BoxRenderable {
   #moveToBoundary(end: boolean): void {
     if (this.mcpBrowser.visible) {
       this.mcpBrowser.moveToBoundary(end)
+    } else if (this.sessionsBrowser.visible) {
+      this.sessionsBrowser.moveToBoundary(end)
     } else if (this.themeBrowser.visible) {
       this.themeBrowser.moveToBoundary(end)
     } else if (this.commandPalette.visible) {
@@ -3197,11 +3252,11 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #pickerVisible(): boolean {
-    return this.mcpBrowser.visible || this.settingsBrowser.visible || this.themeBrowser.visible || this.commandPalette.visible || this.picker.visible
+    return this.mcpBrowser.visible || this.settingsBrowser.visible || this.sessionsBrowser.visible || this.themeBrowser.visible || this.commandPalette.visible || this.picker.visible
   }
 
   #modalPickerVisible(): boolean {
-    return this.mcpBrowser.visible || this.settingsBrowser.visible || this.themeBrowser.visible || this.commandPalette.visible || (this.picker.visible && !this.#pickerController.anchored)
+    return this.mcpBrowser.visible || this.settingsBrowser.visible || this.sessionsBrowser.visible || this.themeBrowser.visible || this.commandPalette.visible || (this.picker.visible && !this.#pickerController.anchored)
   }
 
   #statusFocusOwner(): VimFocus | "interaction" | "review" {
@@ -4731,59 +4786,45 @@ export class RottweilerApp extends BoxRenderable {
       }
       case "sessions":
         const sessionError = this.#projectionErrors.sessions
-        if (
-          sessionError === undefined &&
-          this.#projectionRequests.current("sessions") !== null &&
-          this.#state.sessions.length === 0
-        ) {
-          this.#pickerController.showLoading("Sessions", "Loading sessions")
-          break
-        }
-        const sessionItems: PickerItem<SessionListAction>[] = [
-          {
-            id: "sessions.new",
-            label: "New session",
-            description: "Start a clean conversation in this workspace",
-            value: { kind: "new" },
-          },
-          ...(sessionError === undefined
-            ? []
-            : [{
-                id: "sessions.error",
-                label: "Couldn't load sessions",
-                description: `${sessionError} · select to retry`,
-                value: { kind: "retry" } as const,
-              }]),
-          ...this.#state.sessions.map((session) => ({
-            id: session.sessionId,
-            label: session.title || session.workspaceName,
-            description: `${session.workspaceName} · ${session.model}${session.shellActive ? " · shell active" : ""}`,
-            searchText: `${session.sessionId} ${session.title ?? ""} ${session.workspaceName} ${session.model}`,
-            value: { kind: "session", session } as const,
-          })),
-        ]
-        this.#pickerController.show(
-          this.#state.sessionSearch?.truncated === true
-            ? "Sessions · results truncated"
-            : "Sessions",
-          sessionItems,
-          (item) => {
-            if (item.value.kind === "new") {
-              void this.#createSession()
-              return
-            }
-            if (item.value.kind === "retry") {
-              const query = this.picker.input.value.trim()
-              if (query.length === 0) {
-                this.#projectionRequests.command({ type: "list_sessions" })
-              } else {
-                this.#projectionRequests.command({ type: "search_sessions", query, limit: 100 })
-              }
-              return
-            }
-            this.#openSessionActionPicker(item.value.session)
-          },
+        this.picker.visible = false
+        this.picker.input.blur()
+        this.#resizeSessionsBrowser(
+          this.width === 0 ? this.ctx.width : this.width,
+          this.height === 0 ? this.ctx.height : this.height,
         )
+        const sessionCatalog: SessionsCatalog = sessionError === undefined
+          ? this.#projectionRequests.current("sessions") !== null && this.#state.sessions.length === 0
+            ? { kind: "loading" }
+            : { kind: "ready", sessions: this.#state.sessions, truncated: this.#state.sessionSearch?.truncated === true }
+          : { kind: "error", message: sessionError, stale: this.#state.sessions }
+        const query = this.sessionsBrowser.visible ? this.sessionsBrowser.input.value : this.#pickerController.query
+        const model = createSessionsBrowserModel({
+          catalog: sessionCatalog,
+          query,
+          selectedId: this.sessionsBrowser.visible ? this.sessionsBrowser.selectedId : null,
+        })
+        const presentation = this.#keybindings.preset === "vim"
+          ? { ...model, status: model.status.replace("Esc close", "Esc×2 close") }
+          : model
+        const activateSession = (action: SessionsBrowserAction) => {
+          if (action.kind === "new") void this.#createSession()
+          else if (action.kind === "retry") {
+            const currentQuery = this.sessionsBrowser.input.value.trim()
+            this.#projectionRequests.command(currentQuery.length === 0
+              ? { type: "list_sessions" }
+              : { type: "search_sessions", query: currentQuery, limit: 100 })
+          } else this.#openSessionActionPicker(action.session)
+        }
+        if (this.sessionsBrowser.visible) this.sessionsBrowser.refresh(presentation)
+        else this.sessionsBrowser.open(presentation, activateSession, {
+          onQuery: (nextQuery) => {
+            this.#pickerController.query = nextQuery
+            this.#scheduleSessionSearch(nextQuery)
+            this.#renderPicker()
+          },
+          onSelection: () => this.#renderPicker(),
+          onRetry: () => activateSession({ kind: "retry" }),
+        })
         break
       case "sessionActions": {
         const session = this.#state.sessions.find(
@@ -4812,6 +4853,7 @@ export class RottweilerApp extends BoxRenderable {
           items,
           (item) => {
             if (item.value.kind === "resume") {
+              this.#pickerController.kind = null
               this.closePicker()
               void this.#options.onSessionSelect?.(item.value.session.sessionId)
             } else {
@@ -5529,7 +5571,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#clearSessionSearchTimer()
     this.#sessionSearchTimer = setTimeout(() => {
       this.#sessionSearchTimer = null
-      if (this.#pickerController.kind === "sessions" && this.picker.input.value === query) {
+      if (this.#pickerController.kind === "sessions" && this.sessionsBrowser.input.value === query) {
         if (query.trim().length === 0) {
           this.#projectionRequests.command({ type: "list_sessions" })
         } else {
