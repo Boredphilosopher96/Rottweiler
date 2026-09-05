@@ -39,6 +39,7 @@ use tokio::{
 // A legal message may carry two 5 MiB images. Inline base64 expands that to
 // roughly 13.4 MiB before the bounded JSON envelope, so the command transport
 // must be at least as large as the protocol's already-bounded SSE envelope.
+const REQUEST_BODY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const COMMAND_BODY_LIMIT: usize = 16 * 1024 * 1024;
 const PROVIDER_API_KEY_BODY_LIMIT: usize = 16 * 1024;
 const PROVIDER_API_KEY_LIMIT: usize = 8 * 1024;
@@ -733,7 +734,7 @@ async fn handle_request(
             };
             let body = request.into_body();
             match tokio::time::timeout(
-                command_input::BODY_TIMEOUT,
+                REQUEST_BODY_TIMEOUT,
                 Limited::new(body, input.limit).collect(),
             )
             .await
@@ -817,11 +818,13 @@ async fn handle_request(
                     "credential body exceeds the transport limit",
                 ));
             }
-            match Limited::new(request.into_body(), PROVIDER_API_KEY_BODY_LIMIT)
-                .collect()
-                .await
+            match tokio::time::timeout(
+                REQUEST_BODY_TIMEOUT,
+                Limited::new(request.into_body(), PROVIDER_API_KEY_BODY_LIMIT).collect(),
+            )
+            .await
             {
-                Ok(collected) => {
+                Ok(Ok(collected)) => {
                     match serde_json::from_slice::<ProviderApiKeyRequest>(&collected.to_bytes()) {
                         Ok(secret_request) => {
                             let ProviderApiKeyRequest {
@@ -901,9 +904,13 @@ async fn handle_request(
                         }
                     }
                 }
-                Err(_) => error_response(
+                Ok(Err(_)) => error_response(
                     StatusCode::PAYLOAD_TOO_LARGE,
                     "credential body exceeds the transport limit",
+                ),
+                Err(_) => error_response(
+                    StatusCode::REQUEST_TIMEOUT,
+                    "credential body deadline expired",
                 ),
             }
         }
@@ -917,8 +924,13 @@ async fn handle_request(
                     "interactive client required",
                 ));
             }
-            match Limited::new(request.into_body(), 1_024).collect().await {
-                Ok(collected) => {
+            match tokio::time::timeout(
+                REQUEST_BODY_TIMEOUT,
+                Limited::new(request.into_body(), 1_024).collect(),
+            )
+            .await
+            {
+                Ok(Ok(collected)) => {
                     match serde_json::from_slice::<ActivateProviderRequest>(&collected.to_bytes()) {
                         Ok(ActivateProviderRequest {
                             session_id,
@@ -954,9 +966,13 @@ async fn handle_request(
                         ),
                     }
                 }
-                Err(_) => error_response(
+                Ok(Err(_)) => error_response(
                     StatusCode::PAYLOAD_TOO_LARGE,
                     "provider activation request is too large",
+                ),
+                Err(_) => error_response(
+                    StatusCode::REQUEST_TIMEOUT,
+                    "provider activation body deadline expired",
                 ),
             }
         }

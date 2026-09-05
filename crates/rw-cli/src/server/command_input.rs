@@ -3,7 +3,6 @@ use super::{COMMAND_BODY_LIMIT, ClientCommand, ClientId};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, Weak},
-    time::Duration,
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -11,7 +10,6 @@ pub(crate) const LANE_HEADER: &str = "x-rottweiler-command-lane";
 const UNIT: usize = 1024;
 const URGENT_BODY_LIMIT: usize = 64 * 1024;
 const MAX_JSON_NODES: usize = 16 * 1024;
-pub(super) const BODY_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug)]
 pub(super) struct CommandIngress {
