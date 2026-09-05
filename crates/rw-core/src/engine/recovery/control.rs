@@ -267,6 +267,7 @@ impl ControlReader<'_> {
             let PendingEvent::PlanSubmitted { artifact } = self.event(sequence)? else {
                 return Err(RecoveryError::Invalid("pending plan source selector"));
             };
+            rw_types::session_controls::validate_plan(&artifact).map_err(RecoveryError::Limit)?;
             result.pending_plan = Some(artifact);
         }
         if let Some(sequence) = control.approved_plan {

@@ -50,6 +50,11 @@ pub enum EngineEvent {
         session_id: SessionId,
         target: crate::extension_control::SessionNavigationTarget,
     },
+    SessionControlsReady {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        snapshot: crate::session_controls::SessionControlsSnapshot,
+    },
     UiCatalogReady {
         meta: CommandAckMeta,
         session_id: SessionId,
@@ -393,6 +398,13 @@ pub enum EngineEvent {
         args: Value,
         call_index: u32,
     },
+    ToolApprovalResolved {
+        meta: EventMeta,
+        turn_id: TurnId,
+        tool_call_id: ToolCallId,
+        invocation_id: ToolInvocationId,
+        decision: super::ApprovalDecision,
+    },
     ToolApprovalNeeded {
         meta: EventMeta,
         turn_id: TurnId,
@@ -683,6 +695,7 @@ impl EngineEvent {
     pub fn command_meta_mut(&mut self) -> Option<&mut CommandAckMeta> {
         match self {
             Self::SessionNavigationRequested { meta, .. }
+            | Self::SessionControlsReady { meta, .. }
             | Self::UiCatalogReady { meta, .. }
             | Self::UiPanelsReady { meta, .. }
             | Self::TodosRead { meta, .. }
@@ -739,6 +752,7 @@ impl EngineEvent {
             | Self::CitationDelta { .. }
             | Self::ToolProgress { .. }
             | Self::ToolCallStarted { .. }
+            | Self::ToolApprovalResolved { .. }
             | Self::ToolApprovalNeeded { .. }
             | Self::ToolDiffReady { .. }
             | Self::ToolOutputDelta { .. }
@@ -797,6 +811,7 @@ impl EngineEvent {
             Self::SessionNavigationRequested { .. }
             | Self::TranscriptPageReady { .. }
             | Self::TranscriptContentReady { .. }
+            | Self::SessionControlsReady { .. }
             | Self::UiCatalogReady { .. }
             | Self::UiPanelsReady { .. }
             | Self::TodosRead { .. }
@@ -855,6 +870,7 @@ impl EngineEvent {
             | Self::ThinkingDelta { meta, .. }
             | Self::CitationDelta { meta, .. }
             | Self::ToolCallStarted { meta, .. }
+            | Self::ToolApprovalResolved { meta, .. }
             | Self::ToolApprovalNeeded { meta, .. }
             | Self::ToolDiffReady { meta, .. }
             | Self::ToolOutputDelta { meta, .. }
@@ -896,6 +912,7 @@ impl EngineEvent {
             Self::SessionNavigationRequested { .. }
             | Self::TranscriptPageReady { .. }
             | Self::TranscriptContentReady { .. }
+            | Self::SessionControlsReady { .. }
             | Self::UiCatalogReady { .. }
             | Self::UiPanelsReady { .. }
             | Self::TodosRead { .. }
@@ -954,6 +971,7 @@ impl EngineEvent {
             | Self::ThinkingDelta { meta, .. }
             | Self::CitationDelta { meta, .. }
             | Self::ToolCallStarted { meta, .. }
+            | Self::ToolApprovalResolved { meta, .. }
             | Self::ToolApprovalNeeded { meta, .. }
             | Self::ToolDiffReady { meta, .. }
             | Self::ToolOutputDelta { meta, .. }

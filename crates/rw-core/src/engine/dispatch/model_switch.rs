@@ -88,7 +88,7 @@ pub(super) async fn request_model_selection(
             PendingEvent::QuestionAsked {
                 turn: state.completed_turns,
                 question_id: question_id.clone(),
-                questions,
+                questions: questions.clone(),
             },
         )
         .await
@@ -97,6 +97,7 @@ pub(super) async fn request_model_selection(
             state.pending_model_switches.insert(
                 question_id.0.clone(),
                 PendingModelSwitch {
+                    questions,
                     turn: state.completed_turns,
                     model,
                     provider,

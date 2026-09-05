@@ -100,6 +100,17 @@ async fn ask_user_is_persisted_and_answered_only_through_client_command() {
             break question_id;
         }
     };
+    let controls = handle
+        .controls()
+        .await
+        .expect("live controls without replay");
+    assert_eq!(controls.controls.questions.len(), 1);
+    assert_eq!(controls.controls.questions[0].question_id, question_id);
+    assert_eq!(
+        controls.controls.questions[0].questions[0].prompt,
+        "Continue?"
+    );
+    assert!(controls.through.is_some());
     let asked_prefix = sink
         .events
         .lock()
@@ -127,6 +138,15 @@ async fn ask_user_is_persisted_and_answered_only_through_client_command() {
             .await
             .expect("answer"),
         CommandOutcome::Accepted {}
+    );
+    assert!(
+        handle
+            .controls()
+            .await
+            .expect("answered controls")
+            .controls
+            .questions
+            .is_empty()
     );
     let mut durable_answer = false;
     loop {

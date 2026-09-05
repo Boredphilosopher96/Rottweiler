@@ -128,6 +128,12 @@ pub(super) enum PendingEvent {
         arguments: Value,
         index: usize,
     },
+    ToolApprovalResolved {
+        turn: u64,
+        tool_call_id: rw_types::ToolCallId,
+        invocation_id: rw_types::ToolInvocationId,
+        decision: rw_types::ApprovalDecision,
+    },
     PermissionRequested {
         turn: u64,
         request: PermissionRequest,
@@ -292,6 +298,7 @@ impl PendingEvent {
             | Self::ThinkingDelta { turn, .. }
             | Self::CitationDelta { turn, .. }
             | Self::ToolCallStarted { turn, .. }
+            | Self::ToolApprovalResolved { turn, .. }
             | Self::PermissionRequested { turn, .. }
             | Self::ToolDiffReady { turn, .. }
             | Self::ToolOutput { turn, .. }
@@ -455,24 +462,32 @@ impl PendingEvent {
                 args: arguments,
                 call_index: u32::try_from(index).unwrap_or(u32::MAX),
             },
-            Self::PermissionRequested { turn, request } => EngineEvent::ToolApprovalNeeded {
+            Self::ToolApprovalResolved {
+                turn,
+                tool_call_id,
+                invocation_id,
+                decision,
+            } => EngineEvent::ToolApprovalResolved {
                 meta,
                 turn_id: wire_turn_id(turn),
-                tool_call_id: ToolCallId(request.id),
-                invocation_id: request.invocation_id,
-                name: request.tool_name.clone(),
-                rationale: if request.arguments.get("sandbox").and_then(Value::as_str)
-                    == Some("unsandboxed")
-                {
-                    "UNSANDBOXED EXECUTION: this command will bypass native filesystem and network isolation"
-                        .to_owned()
-                } else {
-                    format!("permission required for tool `{}`", request.tool_name)
-                },
-                args: request.arguments,
-                capabilities: request.capabilities,
-                diff: request.approval_diff,
+                tool_call_id,
+                invocation_id,
+                decision,
             },
+            Self::PermissionRequested { turn, request } => {
+                let rationale = request.rationale();
+                EngineEvent::ToolApprovalNeeded {
+                    meta,
+                    turn_id: wire_turn_id(turn),
+                    tool_call_id: ToolCallId(request.id),
+                    invocation_id: request.invocation_id,
+                    name: request.tool_name,
+                    rationale,
+                    args: request.arguments,
+                    capabilities: request.capabilities,
+                    diff: request.approval_diff,
+                }
+            }
             Self::ToolDiffReady {
                 turn,
                 id,

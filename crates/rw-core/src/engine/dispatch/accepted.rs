@@ -624,6 +624,7 @@ pub(super) async fn apply_accepted(
         | ClientCommand::ReviewFile { .. }
         | ClientCommand::ListSessions { .. }
         | ClientCommand::SearchSessions { .. }
+        | ClientCommand::GetSessionControls { .. }
         | ClientCommand::GetUiCatalog { .. }
         | ClientCommand::GetUiPanels { .. }
         | ClientCommand::ListCommands { .. }

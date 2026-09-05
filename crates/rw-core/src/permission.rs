@@ -29,6 +29,16 @@ pub struct PermissionRequest {
     pub approval_diff: Option<UnifiedDiff>,
 }
 
+impl PermissionRequest {
+    pub(crate) fn rationale(&self) -> String {
+        if self.arguments.get("sandbox").and_then(Value::as_str) == Some("unsandboxed") {
+            "UNSANDBOXED EXECUTION: this command will bypass native filesystem and network isolation".to_owned()
+        } else {
+            format!("permission required for tool `{}`", self.tool_name)
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PermissionOutcome {
     Allowed,

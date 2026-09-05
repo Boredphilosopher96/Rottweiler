@@ -57,6 +57,8 @@ impl Tool for SubmitPlanTool {
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {
         context.cancellation.check()?;
         let artifact: PlanArtifact = parse_input(input)?;
+        rw_types::session_controls::validate_plan(&artifact)
+            .map_err(|error| ToolError::InvalidInput(error.into()))?;
         if artifact.title.trim().is_empty()
             || artifact.summary_md.trim().is_empty()
             || artifact.steps.is_empty()

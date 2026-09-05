@@ -249,6 +249,7 @@ pub(super) fn reduce(
                 sequence,
             });
         }
+        PendingEvent::ToolApprovalResolved { .. } => {}
         PendingEvent::QuestionAnswered { question_id, .. } => head
             .control
             .questions
@@ -286,7 +287,10 @@ pub(super) fn reduce(
             }
         }
         PendingEvent::PermissionModeChanged { .. } => head.control.permission_mode = Some(sequence),
-        PendingEvent::PlanSubmitted { .. } => head.control.pending_plan = Some(sequence),
+        PendingEvent::PlanSubmitted { artifact } => {
+            rw_types::session_controls::validate_plan(&artifact).map_err(RecoveryError::Limit)?;
+            head.control.pending_plan = Some(sequence);
+        }
         PendingEvent::PlanReviewed { decision, .. } => {
             head.control.pending_plan = None;
             if decision == rw_types::PlanDecision::Approve {

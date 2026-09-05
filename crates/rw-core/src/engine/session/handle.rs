@@ -710,3 +710,17 @@ impl SessionHandle {
         receive.await.map_err(|_| AgentLoopError::Closed)?
     }
 }
+
+impl SessionHandle {
+    /// Snapshot admitted by the host's bounded direct-read owner. This never replays history.
+    pub(crate) async fn controls(
+        &self,
+    ) -> Result<rw_types::session_controls::SessionControlsSnapshot, AgentLoopError> {
+        let (respond, receive) = oneshot::channel();
+        self.commands
+            .send(ActorCommand::Controls { respond })
+            .await
+            .map_err(|_| AgentLoopError::Closed)?;
+        receive.await.map_err(|_| AgentLoopError::Closed)?
+    }
+}

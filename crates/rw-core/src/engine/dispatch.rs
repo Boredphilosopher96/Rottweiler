@@ -7,6 +7,7 @@ mod command_snapshot;
 mod compaction;
 mod completed_turns;
 mod context_surgery;
+mod controls;
 mod initialization;
 mod message_input;
 mod messages;
@@ -77,6 +78,9 @@ pub(super) async fn handle_actor_command(
     mode_registry: &Arc<RwLock<Arc<ModeRegistry>>>,
 ) {
     match command {
+        ActorCommand::Controls { respond } => {
+            let _ = respond.send(controls::snapshot(state));
+        }
         ActorCommand::Protocol {
             command,
             respond,

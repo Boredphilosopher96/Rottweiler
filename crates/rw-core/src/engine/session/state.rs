@@ -42,6 +42,11 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 
 pub(in crate::engine) enum ActorCommand {
+    Controls {
+        respond: oneshot::Sender<
+            Result<rw_types::session_controls::SessionControlsSnapshot, AgentLoopError>,
+        >,
+    },
     UiCatalog {
         respond: oneshot::Sender<Result<rw_types::extension_ui::UiCatalog, AgentLoopError>>,
     },
@@ -193,6 +198,7 @@ pub(in crate::engine) struct ActorState {
 }
 
 pub(in crate::engine) struct PendingQuestion {
+    pub(in crate::engine) questions: Vec<rw_types::Question>,
     pub(in crate::engine) _admission: tokio::sync::OwnedSemaphorePermit,
     pub(in crate::engine) turn: u64,
     pub(in crate::engine) respond: oneshot::Sender<Result<String, rw_tools::ToolError>>,
@@ -205,6 +211,7 @@ pub(in crate::engine) enum PrecommittedAnswer {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(in crate::engine) struct PendingModelSwitch {
+    pub(in crate::engine) questions: Vec<rw_types::Question>,
     pub(in crate::engine) turn: u64,
     pub(in crate::engine) model: ModelAlias,
     pub(in crate::engine) provider: Option<String>,
@@ -246,6 +253,7 @@ impl ActorState {
                         (
                             question_id.clone(),
                             PendingModelSwitch {
+                                questions: recovered.questions.clone(),
                                 turn: recovered.agent_turn,
                                 model: target.model.clone(),
                                 provider: target.provider.clone(),

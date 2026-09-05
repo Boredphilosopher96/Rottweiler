@@ -428,6 +428,17 @@ async fn unsandboxed_bash_denial_is_conspicuous_and_never_reaches_the_executor()
     let PendingEvent::PermissionRequested { request, .. } = approval.kind else {
         unreachable!("matching event")
     };
+    let controls = handle.controls().await.expect("live approval snapshot");
+    assert_eq!(controls.controls.approvals.len(), 1);
+    assert_eq!(
+        controls.controls.approvals[0].invocation_id,
+        request.invocation_id
+    );
+    assert!(
+        controls.controls.approvals[0]
+            .rationale
+            .contains("UNSANDBOXED EXECUTION")
+    );
     assert!(
         handle
             .approve(
@@ -437,6 +448,23 @@ async fn unsandboxed_bash_denial_is_conspicuous_and_never_reaches_the_executor()
             )
             .await
             .expect("deny")
+    );
+    let resolved = next_matching(&mut events, |kind| {
+        matches!(kind, PendingEvent::ToolApprovalResolved { .. })
+    })
+    .await;
+    assert!(
+        resolved.wire.meta().expect("resolution meta").sequence_id
+            > controls.through.expect("snapshot prefix")
+    );
+    assert!(
+        handle
+            .controls()
+            .await
+            .expect("resolved controls")
+            .controls
+            .approvals
+            .is_empty()
     );
     collect_turn(&mut events).await;
     assert_eq!(tool.calls.load(Ordering::SeqCst), 0);

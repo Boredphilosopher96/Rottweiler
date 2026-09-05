@@ -92,6 +92,8 @@ struct ActiveToolStart {
 /// A persisted event log cannot be projected safely.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum SessionProjectionError {
+    #[error("invalid plan: {0}")]
+    InvalidPlan(&'static str),
     #[error("invalid durable question payload: {0}")]
     InvalidQuestion(&'static str),
     #[error("unsupported session event version {0}")]
@@ -737,6 +739,7 @@ impl SessionProjector {
                         },
                     );
                 }
+                PendingEvent::ToolApprovalResolved { .. } => {}
                 PendingEvent::QuestionAnswered { question_id, .. } => {
                     pending_questions.remove(&question_id.0);
                 }
@@ -808,6 +811,8 @@ impl SessionProjector {
                     permission_mode = *changed;
                 }
                 PendingEvent::PlanSubmitted { artifact } => {
+                    rw_types::session_controls::validate_plan(artifact)
+                        .map_err(SessionProjectionError::InvalidPlan)?;
                     pending_plan = Some(artifact.clone());
                 }
                 PendingEvent::PlanReviewed {

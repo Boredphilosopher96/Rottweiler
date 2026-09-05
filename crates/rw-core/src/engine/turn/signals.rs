@@ -66,7 +66,11 @@ pub(in crate::engine) async fn handle_turn_signal(
                 return Ok(());
             }
             let submitted_plan = match &event {
-                PendingEvent::PlanSubmitted { artifact } => Some(artifact.clone()),
+                PendingEvent::PlanSubmitted { artifact } => {
+                    rw_types::session_controls::validate_plan(artifact)
+                        .map_err(|error| AgentLoopError::InvalidConfiguration(error.into()))?;
+                    Some(artifact.clone())
+                }
                 _ => None,
             };
             emit(state, events, &config.event_sink, event).await?;
@@ -235,6 +239,7 @@ pub(in crate::engine) async fn handle_turn_signal(
             state.pending_questions.insert(
                 question_id.0.clone(),
                 PendingQuestion {
+                    questions: questions.clone(),
                     turn,
                     respond,
                     _admission: admission,

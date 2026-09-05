@@ -197,6 +197,18 @@ pub(in crate::engine) fn recovered_pending_event(
             is_error: *is_error,
             index: usize::try_from(*call_index).unwrap_or(usize::MAX),
         },
+        EngineEvent::ToolApprovalResolved {
+            turn_id,
+            tool_call_id,
+            invocation_id,
+            decision,
+            ..
+        } => PendingEvent::ToolApprovalResolved {
+            turn: parse_turn_id(turn_id)?,
+            tool_call_id: tool_call_id.clone(),
+            invocation_id: invocation_id.clone(),
+            decision: decision.clone(),
+        },
         EngineEvent::ToolApprovalNeeded {
             turn_id,
             tool_call_id,
@@ -446,7 +458,7 @@ pub(in crate::engine) fn recovered_pending_event(
             ..
         } => PendingEvent::PlanReviewed {
             artifact: artifact.clone(),
-            decision: *decision,
+            decision: decision.clone(),
             revisions: revisions.clone(),
         },
         EngineEvent::UserShellStateChanged {

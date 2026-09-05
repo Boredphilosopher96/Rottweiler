@@ -19,6 +19,9 @@ use rw_types::extension_ui::{
     UiField, UiGenerationId, UiPanelSnapshot, UiPanels, UiPresentation, UiProjectedField,
     UiProjectedFields, UiSelectorStep, UiTableColumn,
 };
+use rw_types::session_controls::{
+    SessionApproval, SessionControls, SessionControlsSnapshot, SessionQuestion,
+};
 use rw_types::todo::{TodoItem, TodoReadResult, TodoReadSnapshot, TodoSnapshot, TodoStatus};
 use rw_types::{
     AccountingAttribution, Answer, ApprovalBinding, ApprovalDecision, Attachment, AttachmentData,
@@ -269,6 +272,22 @@ fn generate_typescript() -> Result<String, XtaskError> {
             rw_types::question_admission::MAX_PENDING_QUESTION_PREPARED_BYTES,
         ),
         (
+            "MAX_SESSION_CONTROLS_BYTES",
+            rw_types::session_controls::MAX_SESSION_CONTROLS_BYTES,
+        ),
+        (
+            "MAX_SESSION_CONTROLS_PREPARED_BYTES",
+            rw_types::session_controls::MAX_SESSION_CONTROLS_PREPARED_BYTES,
+        ),
+        (
+            "MAX_PENDING_PLAN_BYTES",
+            rw_types::session_controls::MAX_PENDING_PLAN_BYTES,
+        ),
+        (
+            "MAX_PENDING_PLAN_PREPARED_BYTES",
+            rw_types::session_controls::MAX_PENDING_PLAN_PREPARED_BYTES,
+        ),
+        (
             "MAX_TURN_CITATIONS",
             rw_types::citation_admission::MAX_TURN_CITATIONS,
         ),
@@ -340,6 +359,10 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(UiTableColumn);
     declaration!(TodoItem);
     declaration!(TodoStatus);
+    declaration!(SessionControls);
+    declaration!(SessionControlsSnapshot);
+    declaration!(SessionApproval);
+    declaration!(SessionQuestion);
     declaration!(TodoSnapshot);
     declaration!(TodoReadSnapshot);
     declaration!(TodoReadResult);

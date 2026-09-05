@@ -59,6 +59,7 @@ pub(super) fn is_host_command(command: &ClientCommand) -> bool {
             | ClientCommand::ResumeSession { .. }
             | ClientCommand::Fork { .. }
             | ClientCommand::ListSessions { .. }
+            | ClientCommand::GetSessionControls { .. }
             | ClientCommand::GetUiCatalog { .. }
             | ClientCommand::GetUiPanels { .. }
             | ClientCommand::ListCommands { .. }
@@ -675,8 +676,28 @@ pub(super) async fn dispatch_protocol(
                         let _ = respond.send(outcome);
                         return false;
                     }
-                } else if let Some(pending) = state.pending_approvals.remove(&tool_call_id.0) {
-                    let _ = pending.respond.send(ApprovalDecision::Deny);
+                } else {
+                    if let Err(error) = super::controls::resolve_approval(
+                        state,
+                        config,
+                        events,
+                        tool_call_id,
+                        ApprovalDecision::Deny,
+                    )
+                    .await
+                    {
+                        state.poisoned = true;
+                        let outcome = protocol_rejection(
+                            "session_persistence_failure",
+                            format!("could not persist stale approval resolution: {error}"),
+                        );
+                        send_ack(state, events, &meta, session, outcome.clone());
+                        let _ = respond.send(outcome);
+                        return false;
+                    }
+                    if let Some(pending) = state.pending_approvals.remove(&tool_call_id.0) {
+                        let _ = pending.respond.send(ApprovalDecision::Deny);
+                    }
                 }
                 let outcome = protocol_rejection(
                     "approval_stale",
@@ -948,6 +969,32 @@ pub(super) async fn dispatch_protocol(
         let outcome = protocol_rejection(
             "session_persistence_failure",
             format!("could not persist the driver lease: {error}"),
+        );
+        send_ack(state, events, &meta, session, outcome.clone());
+        let _ = respond.send(outcome);
+        if let Some(complete) = completion.take() {
+            let _ = complete.send(Err(error));
+        }
+        return false;
+    }
+    if let ClientCommand::ApproveTool {
+        tool_call_id,
+        decision,
+        ..
+    } = &command
+        && let Err(error) =
+            super::controls::resolve_approval(state, config, events, tool_call_id, decision.clone())
+                .await
+    {
+        if recover_actor_from_journal(state, config, events, active_turn)
+            .await
+            .is_err()
+        {
+            state.poisoned = true;
+        }
+        let outcome = protocol_rejection(
+            "session_persistence_failure",
+            format!("could not persist approval resolution: {error}"),
         );
         send_ack(state, events, &meta, session, outcome.clone());
         let _ = respond.send(outcome);
