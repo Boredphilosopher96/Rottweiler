@@ -486,6 +486,9 @@ async fn failed_resource_binding_prevents_actor_startup() {
     );
     configuration.event_sink = sink.clone();
     configuration.resources = Arc::new(RejectBinding);
+    let configuration = crate::engine::tests::fixtures::history::bind(configuration)
+        .await
+        .expect("canonical fixture");
     let error = match crate::engine::SessionActor::spawn(configuration) {
         Ok(_) => panic!("unbound actor must not start"),
         Err(error) => error,

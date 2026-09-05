@@ -10,7 +10,6 @@ use crate::engine::event_clock::EventClock;
 use crate::engine::model::ModelDriver;
 use crate::engine::mutation_checkpoints::NoopMutationCheckpointCoordinator;
 use crate::engine::pending_event::PendingEvent;
-use crate::engine::projection::SessionRecoveredState;
 use crate::engine::projection::recovered_pending_event;
 use crate::engine::redaction::NoopSecretRedactor;
 use crate::engine::redaction::SecretRedactor;

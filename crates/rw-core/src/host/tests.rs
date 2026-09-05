@@ -27,8 +27,8 @@ use crate as rw_core_batch;
 use crate::{
     ModelDriver, NoopFolderTrustController, NoopMutationCheckpointCoordinator, NoopSecretRedactor,
     NoopSessionEventSink, PermissionGate, SessionActorConfig, SessionCommandAction,
-    SessionCommandContext, SessionCommandOutput, SessionEventSink, SessionRecoveredState,
-    builtin_command_registry, builtin_hook_dispatcher,
+    SessionCommandContext, SessionCommandOutput, SessionEventSink, builtin_command_registry,
+    builtin_hook_dispatcher,
 };
 
 struct IdleModel;

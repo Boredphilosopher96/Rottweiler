@@ -188,7 +188,6 @@ use rw_core::WorktreeSubagentSessionFactory;
 use rw_core::base_agent_system_turn;
 use rw_core::builtin_command_registry;
 use rw_core::builtin_hook_dispatcher;
-use rw_core::project_session_events;
 use rw_ext::ExtensionCatalog;
 use rw_ext::ExtensionDiscoveryConfig;
 use rw_ext::HookDispatcher;

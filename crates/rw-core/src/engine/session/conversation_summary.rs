@@ -1,5 +1,5 @@
 //! Small actor metadata derived while a worker owns the conversation materialization.
-use rw_types::{ContextItemId, Role, Turn};
+use rw_types::{Role, Turn};
 
 pub(in crate::engine) use crate::engine::recovery::ConversationMetadata as ConversationSummary;
 

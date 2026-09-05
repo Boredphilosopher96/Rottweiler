@@ -354,6 +354,7 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
             4,
             test_provider_admission(),
         )
+        .await
         .expect("rebuild parent runtime after restart");
     let resumed_parent_permissions = Arc::clone(&resumed_parent.permissions);
     let resumed_parent_actor = SessionActor::spawn(resumed_parent).expect("resume parent actor");
@@ -382,6 +383,7 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
             4,
             test_provider_admission(),
         )
+        .await
         .expect("lease-root child runtime");
     assert_eq!(child.workspace_root, added);
     assert_eq!(
@@ -451,6 +453,7 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
             4,
             test_provider_admission(),
         )
+        .await
         .expect("trusted child runtime");
     assert!(
         trusted_child

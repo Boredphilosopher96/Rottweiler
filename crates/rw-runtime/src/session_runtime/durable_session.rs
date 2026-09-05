@@ -158,14 +158,6 @@ impl DurableEventSink {
                 "session search projection will retry from its persisted source cursor");
         }
     }
-
-    pub(super) fn load(&self) -> Result<Vec<EngineEvent>> {
-        let log = self
-            .log
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        load_session_events(&log)
-    }
 }
 
 #[async_trait]
@@ -318,13 +310,6 @@ impl SessionEventSink for DurableEventSink {
             daily_non_usd_monetary_entries: totals.day_non_usd_monetary_turns,
         })
     }
-}
-
-pub(super) fn load_session_events(log: &SessionEventLog) -> Result<Vec<EngineEvent>> {
-    let envelopes = log
-        .load::<EngineEvent>()
-        .map_err(|error| miette!("session events could not load: {error}"))?;
-    validate_session_event_envelopes(envelopes)
 }
 
 pub(super) fn validate_session_event_envelopes(
