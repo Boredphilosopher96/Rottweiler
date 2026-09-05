@@ -174,7 +174,8 @@ async fn acceptance_harness(executable: &Path, directory: &Path) -> AcceptanceHa
     let launcher = SandboxedProtocolLauncher::new(
         std::slice::from_ref(&workspace),
         scratch.path(),
-        std::env::current_exe().expect("sandbox helper identity"),
+        std::fs::canonicalize(std::env::current_exe().expect("sandbox helper identity"))
+            .expect("canonical sandbox helper identity"),
         allowed_environment,
     )
     .expect("production launcher");
@@ -254,7 +255,8 @@ async fn five_distinct_production_sandboxed_servers_remain_deferred_and_bounded(
     if rw_tools::probe_sandbox().support != rw_tools::SandboxSupport::Enforced {
         return;
     }
-    let executable = PathBuf::from(env!("CARGO_BIN_EXE_rw-mcp-fixture"));
+    let executable = std::fs::canonicalize(env!("CARGO_BIN_EXE_rw-mcp-fixture"))
+        .expect("canonical fixture executable");
     let directory = tempfile::tempdir().expect("temp");
     let harness = acceptance_harness(&executable, directory.path()).await;
     let manager = &harness.manager;

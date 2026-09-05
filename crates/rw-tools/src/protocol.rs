@@ -501,7 +501,8 @@ mod tests {
     async fn protocol_launcher_rejects_environment_outside_allowlist_before_spawn() {
         let workspace = tempfile::tempdir().expect("workspace");
         let scratch = tempfile::tempdir().expect("scratch");
-        let helper = std::env::current_exe().expect("test executable");
+        let helper = std::fs::canonicalize(std::env::current_exe().expect("test executable"))
+            .expect("canonical helper executable");
         let launcher = SandboxedProtocolLauncher::new(
             &[workspace.path().to_path_buf()],
             scratch.path(),
@@ -528,7 +529,8 @@ mod tests {
     async fn protocol_launcher_rejects_an_unavailable_sandbox_before_spawn() {
         let workspace = tempfile::tempdir().expect("workspace");
         let scratch = tempfile::tempdir().expect("scratch");
-        let helper = std::env::current_exe().expect("test executable");
+        let helper = std::fs::canonicalize(std::env::current_exe().expect("test executable"))
+            .expect("canonical helper executable");
         let mut launcher = SandboxedProtocolLauncher::new(
             &[workspace.path().to_path_buf()],
             scratch.path(),
@@ -555,7 +557,8 @@ mod tests {
     fn protocol_authority_is_workspace_bounded_and_defaults_fail_closed() {
         let workspace = tempfile::tempdir().expect("workspace");
         let scratch = tempfile::tempdir().expect("scratch");
-        let helper = std::env::current_exe().expect("test executable");
+        let helper = std::fs::canonicalize(std::env::current_exe().expect("test executable"))
+            .expect("canonical helper executable");
         let allowed = workspace.path().join("allowed");
         std::fs::create_dir(&allowed).expect("allowed root");
         let launcher = SandboxedProtocolLauncher::new(

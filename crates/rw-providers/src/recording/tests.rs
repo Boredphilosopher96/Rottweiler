@@ -1194,11 +1194,14 @@ async fn concurrent_start_completion_order_does_not_renumber_occurrences() {
 }
 
 fn unique_temp_directory(label: &str) -> std::path::PathBuf {
+    static NEXT_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
+    let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+    let process = std::process::id();
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    std::env::temp_dir().join(format!("rw-provider-{label}-{nonce}"))
+    std::env::temp_dir().join(format!("rw-provider-{label}-{process}-{nonce}-{sequence}"))
 }
 
 async fn collect(provider: &dyn Provider) -> Vec<Result<ProviderEvent, ProviderError>> {

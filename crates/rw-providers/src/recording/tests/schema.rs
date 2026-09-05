@@ -12,7 +12,11 @@ async fn recording() -> (std::path::PathBuf, std::path::PathBuf, serde_json::Val
         &directory,
         FixtureRedactor::default(),
     );
-    assert!(collect(&recorder).await.iter().all(Result::is_ok));
+    let events = collect(&recorder).await;
+    assert!(
+        events.iter().all(Result::is_ok),
+        "recording events: {events:?}"
+    );
     recorder
         .flush()
         .await
