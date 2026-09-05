@@ -81,6 +81,10 @@ pub(super) fn generate(root: &Path, check: bool) -> Result<(), String> {
     ui.visit::<rw_types::extension_ui::UiPanelUpdate>();
     ui.visit::<rw_types::extension_ui::UiPanelUpdated>();
     write_types(root, "ui-contract", ui, check)?;
+    generate_schemas(root, check)
+}
+
+fn generate_schemas(root: &Path, check: bool) -> Result<(), String> {
     for (name, schema) in [
         (
             "ui-panel-update",
