@@ -346,6 +346,7 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(ProviderCallActuals);
     declaration!(TurnAccounting);
     declaration!(CostSnapshot);
+    declaration!(rw_types::billing::SubscriptionQuotaSummary);
     declaration!(PromptTool);
     declaration!(PromptDump);
     declaration!(PermissionDecision);

@@ -133,7 +133,10 @@ pub(super) fn reduce(
             });
             head.control.next_turn = head.control.next_turn.max(turn.saturating_add(1));
         }
-        PendingEvent::TurnFinished { turn, .. } => {
+        PendingEvent::TurnFinished {
+            turn, usage, cost, ..
+        } => {
+            head.accounting.record_actuals(&usage.into(), &cost);
             if head
                 .control
                 .active
@@ -222,7 +225,8 @@ pub(super) fn reduce(
             .retain(|question| question.id != question_id.0),
         PendingEvent::SessionTitleUpdated { usage, cost, .. } => {
             head.control.title = Some(sequence);
-            if usage.is_some() && cost.is_some() {
+            if let (Some(usage), Some(cost)) = (usage, cost) {
+                head.accounting.record_actuals(&usage.into(), &cost);
                 rows.put(key(ACCOUNTING, 0, sequence.0), &sequence)?;
             }
         }
@@ -325,7 +329,8 @@ pub(super) fn reduce(
                     active.replace_conversation(sequence);
                 }
             }
-            if usage.is_some() && cost.is_some() {
+            if let (Some(usage), Some(cost)) = (usage, cost) {
+                head.accounting.record_actuals(&usage.into(), &cost);
                 rows.put(key(ACCOUNTING, 0, sequence.0), &sequence)?;
             }
         }
@@ -333,7 +338,8 @@ pub(super) fn reduce(
             super::receipts::index(head, meta, call, actuals, rows)?;
             rows.put(key(ACCOUNTING, 0, sequence.0), &sequence)?;
         }
-        PendingEvent::CompactionAttemptFinished { .. } => {
+        PendingEvent::CompactionAttemptFinished { usage, cost, .. } => {
+            head.accounting.record_actuals(&usage.into(), &cost);
             rows.put(key(ACCOUNTING, 0, sequence.0), &sequence)?;
         }
         PendingEvent::Error { .. } | PendingEvent::CompactionFailed { .. } => {

@@ -422,7 +422,7 @@ async fn manual_compaction_keeps_queries_and_interrupt_responsive() {
     let first = project_session_events(&durable).expect("first cancellation resume");
     let second = project_session_events(&durable).expect("second cancellation resume");
     assert_eq!(first.accounting, second.accounting);
-    assert_eq!(first.accounting.len(), 1);
+    assert_eq!(first.accounting.entries, 1);
     assert!(!first.interrupted_compaction);
 }
 
@@ -570,5 +570,5 @@ async fn failed_compaction_alias_usage_is_accounted_before_successful_fallback()
         1
     );
     let resumed = project_session_events(&durable).expect("fallback resume");
-    assert_eq!(resumed.accounting.len(), 2);
+    assert_eq!(resumed.accounting.entries, 2);
 }

@@ -286,7 +286,7 @@ pub(super) async fn run_actor(
                 state.unsettled = Some("session startup failed before completion".to_owned());
                 break 'startup;
             }
-            state.accounting.push(TurnAccounting {
+            state.accounting.record(TurnAccounting {
                 turn_id: wire_turn_id(turn),
                 attribution: AccountingAttribution::Main,
                 usage: SessionUsage::default().into(),

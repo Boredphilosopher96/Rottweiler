@@ -11,6 +11,7 @@ mod accounting;
 pub use accounting::{ProviderCallActuals, ProviderCallIdentity};
 
 pub mod attachment_contract;
+pub mod billing;
 pub mod config;
 mod error;
 pub mod extension_contract;

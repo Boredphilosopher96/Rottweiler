@@ -22,7 +22,7 @@ pub struct SessionRecoveredState {
     pub pending_questions: BTreeMap<String, RecoveredQuestion>,
     pub context_surgery: Vec<ContextSurgeryAction>,
     pub pruned_tool_outputs: BTreeMap<String, u64>,
-    pub accounting: Vec<TurnAccounting>,
+    pub accounting: crate::engine::SessionAccountingState,
     pub budgeter: Budgeter,
     pub interrupted_compaction: bool,
     pub model_alias: Option<String>,
@@ -220,7 +220,7 @@ pub struct SessionProjector {
     pending_questions: BTreeMap<String, RecoveredQuestion>,
     context_surgery: Vec<ContextSurgeryAction>,
     pruned_tool_outputs: BTreeMap<String, u64>,
-    accounting: Vec<TurnAccounting>,
+    accounting: crate::engine::SessionAccountingState,
     model_alias: Option<String>,
     selected_provider: Option<String>,
     selected_thinking: Option<ThinkingLevel>,
@@ -263,7 +263,7 @@ impl Default for SessionProjector {
             pending_questions: BTreeMap::new(),
             context_surgery: Vec::new(),
             pruned_tool_outputs: BTreeMap::new(),
-            accounting: Vec::new(),
+            accounting: crate::engine::SessionAccountingState::default(),
             model_alias: None,
             selected_provider: None,
             selected_thinking: None,
@@ -425,7 +425,7 @@ impl SessionProjector {
                 } => {
                     title = Some(updated.clone());
                     if let (Some(usage), Some(cost)) = (usage, cost) {
-                        accounting.push(TurnAccounting {
+                        accounting.record(TurnAccounting {
                             turn_id: TurnId("title".to_owned()),
                             attribution: AccountingAttribution::Title,
                             usage: (*usage).into(),
@@ -531,7 +531,7 @@ impl SessionProjector {
                     turn_ends.insert(*turn, conversation.len());
                     pending_questions
                         .retain(|_, question: &mut RecoveredQuestion| question.agent_turn != *turn);
-                    accounting.push(TurnAccounting {
+                    accounting.record(TurnAccounting {
                         turn_id: wire_turn_id(*turn),
                         attribution: AccountingAttribution::Main,
                         usage: (*usage).into(),
@@ -647,7 +647,7 @@ impl SessionProjector {
                     usage,
                     cost,
                 } => {
-                    accounting.push(TurnAccounting {
+                    accounting.record(TurnAccounting {
                         turn_id: wire_turn_id(*summary_turn),
                         attribution: AccountingAttribution::Compaction,
                         usage: (*usage).into(),
@@ -670,7 +670,7 @@ impl SessionProjector {
                     if let Some(start) = compaction_surgery_start.take() {
                         context_surgery.drain(..start);
                     }
-                    accounting.push(TurnAccounting {
+                    accounting.record(TurnAccounting {
                         turn_id: wire_turn_id(*summary_turn),
                         attribution: AccountingAttribution::Compaction,
                         usage: (*usage).into(),

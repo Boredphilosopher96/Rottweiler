@@ -1,3 +1,5 @@
+mod accounting_state;
+pub use accounting_state::SessionAccountingState;
 use rw_types::hook_contract::{HookClass, HookInput};
 mod redaction;
 pub use redaction::NoopSecretRedactor;

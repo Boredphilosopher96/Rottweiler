@@ -34,7 +34,6 @@ use rw_types::SessionMode;
 use rw_types::ShellId;
 use rw_types::SubagentId;
 use rw_types::Turn;
-use rw_types::TurnAccounting;
 use rw_types::UnrestorablePath;
 use rw_types::config::ThinkingLevel;
 use std::collections::BTreeMap;
@@ -167,7 +166,7 @@ pub(in crate::engine) struct ActorState {
     pub(in crate::engine) next_question: u64,
     pub(in crate::engine) context_surgery: Vec<ContextSurgeryAction>,
     pub(in crate::engine) pruned_tool_outputs: BTreeMap<String, u64>,
-    pub(in crate::engine) accounting: Vec<TurnAccounting>,
+    pub(in crate::engine) accounting: crate::engine::SessionAccountingState,
     pub(in crate::engine) budgeter: Budgeter,
     pub(in crate::engine) model_alias: String,
     pub(in crate::engine) provider: Option<String>,

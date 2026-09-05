@@ -15,7 +15,6 @@ use crate::engine::tests::fixtures::support::stop_script;
 use rw_providers::TokenUsage;
 use rw_providers::ToolChoice;
 use rw_tools::ToolRegistry;
-use rw_types::AccountingAttribution;
 use rw_types::ClientCommand;
 use rw_types::ClientId;
 use rw_types::CommandMeta;
@@ -23,7 +22,6 @@ use rw_types::CommandOutcome;
 use rw_types::EngineEvent;
 use rw_types::PROTOCOL_VERSION;
 use rw_types::RequestId;
-use rw_types::TurnId;
 use rw_types::config::PermissionDecision;
 use std::sync::Arc;
 use std::time::Duration;
@@ -90,11 +88,10 @@ async fn first_successful_turn_generates_and_replays_a_bounded_fast_model_title(
         .collect::<Vec<_>>();
     let recovered = project_session_events(&durable).expect("replay title");
     assert_eq!(recovered.title.as_deref(), Some("Rust Workspace Structure"));
-    assert!(recovered.accounting.iter().any(|entry| {
-        entry.attribution == AccountingAttribution::Title
-            && entry.turn_id == TurnId("title".to_owned())
-            && entry.usage.output_tokens > 0
-    }));
+    assert!(recovered.accounting.usage.output_tokens > 0);
+    assert!(durable.iter().any(|event| matches!(event,
+        EngineEvent::SessionTitleUpdated { usage: Some(usage), .. } if usage.output_tokens > 0
+    )));
 }
 
 #[tokio::test]

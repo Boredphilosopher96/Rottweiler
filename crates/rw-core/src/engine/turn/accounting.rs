@@ -14,13 +14,12 @@ use rw_types::BudgetUnit;
 use rw_types::Cost;
 use rw_types::CostSnapshot;
 use rw_types::SubscriptionTokenAccounting;
-use rw_types::TurnAccounting;
 use rw_types::Usage;
 use rw_types::config::BudgetConfig;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-pub(super) fn add_usage(total: &mut Usage, usage: &Usage) {
+pub(in crate::engine) fn add_usage(total: &mut Usage, usage: &Usage) {
     total.input_tokens = total.input_tokens.saturating_add(usage.input_tokens);
     total.output_tokens = total.output_tokens.saturating_add(usage.output_tokens);
     total.cache_read_tokens = total
@@ -247,48 +246,17 @@ pub(in crate::engine) struct SessionAccountingFallback {
 }
 
 pub(in crate::engine) fn session_accounting_fallback(
-    accounting: &[TurnAccounting],
+    accounting: &crate::engine::SessionAccountingState,
 ) -> SessionAccountingFallback {
-    let mut fallback = SessionAccountingFallback::default();
-    for turn in accounting {
-        match &turn.cost {
-            Cost::Monetary {
-                amount_micros,
-                currency,
-            } if currency.eq_ignore_ascii_case("USD") => {
-                fallback.cost_micros_usd = fallback.cost_micros_usd.saturating_add(*amount_micros);
-            }
-            Cost::AiCredits { credits_micros, .. } => {
-                fallback.ai_credit_micros =
-                    fallback.ai_credit_micros.saturating_add(*credits_micros);
-            }
-            Cost::SubscriptionQuota { .. } => {
-                fallback.subscription_quota_entries =
-                    fallback.subscription_quota_entries.saturating_add(1);
-                match turn.cost.subscription_token_accounting() {
-                    SubscriptionTokenAccounting::Metered(tokens) => {
-                        fallback.subscription_tokens =
-                            fallback.subscription_tokens.saturating_add(tokens);
-                    }
-                    SubscriptionTokenAccounting::Unavailable => {
-                        fallback.unmetered_subscription_quota_entries = fallback
-                            .unmetered_subscription_quota_entries
-                            .saturating_add(1);
-                    }
-                    SubscriptionTokenAccounting::NotApplicable => {}
-                }
-            }
-            Cost::Unavailable { .. } => {
-                fallback.cost_unavailable_entries =
-                    fallback.cost_unavailable_entries.saturating_add(1);
-            }
-            Cost::Monetary { .. } => {
-                fallback.non_usd_monetary_entries =
-                    fallback.non_usd_monetary_entries.saturating_add(1);
-            }
-        }
+    SessionAccountingFallback {
+        cost_micros_usd: accounting.cost_micros_usd,
+        ai_credit_micros: accounting.ai_credit_micros,
+        subscription_tokens: accounting.subscription_tokens,
+        unmetered_subscription_quota_entries: accounting.unmetered_subscription_quota_entries,
+        subscription_quota_entries: accounting.subscription_quota_entries,
+        cost_unavailable_entries: accounting.cost_unavailable_entries,
+        non_usd_monetary_entries: accounting.non_usd_monetary_entries,
     }
-    fallback
 }
 
 pub(super) fn push_cap_event(
@@ -650,52 +618,15 @@ pub(in crate::engine) async fn build_cost_snapshot(
             trailing_minute_start_unix_ms: now.saturating_sub(60_000),
         })
         .await?;
-    let mut usage = Usage {
-        input_tokens: 0,
-        output_tokens: 0,
-        cache_read_tokens: 0,
-        cache_write_tokens: 0,
-        reasoning_tokens: 0,
-    };
-    let mut local_cost = 0_u64;
-    let mut local_credits = 0_u64;
-    let mut local_subscription = 0_u64;
-    let mut local_subscription_tokens = 0_u64;
-    let mut local_unmetered_subscription = 0_u64;
-    let mut local_unavailable = 0_u64;
-    let mut local_non_usd = 0_u64;
-    for turn in &state.accounting {
-        add_usage(&mut usage, &turn.usage);
-        match &turn.cost {
-            Cost::Monetary {
-                amount_micros,
-                currency,
-            } if currency.eq_ignore_ascii_case("USD") => {
-                local_cost = local_cost.saturating_add(*amount_micros);
-            }
-            Cost::AiCredits { credits_micros, .. } => {
-                local_credits = local_credits.saturating_add(*credits_micros);
-            }
-            Cost::Monetary { .. } => local_non_usd = local_non_usd.saturating_add(1),
-            Cost::SubscriptionQuota { .. } => {
-                local_subscription = local_subscription.saturating_add(1);
-                match turn.cost.subscription_token_accounting() {
-                    SubscriptionTokenAccounting::Metered(tokens) => {
-                        local_subscription_tokens =
-                            local_subscription_tokens.saturating_add(tokens);
-                    }
-                    SubscriptionTokenAccounting::Unavailable => {
-                        local_unmetered_subscription =
-                            local_unmetered_subscription.saturating_add(1);
-                    }
-                    SubscriptionTokenAccounting::NotApplicable => {}
-                }
-            }
-            Cost::Unavailable { .. } => {
-                local_unavailable = local_unavailable.saturating_add(1);
-            }
-        }
-    }
+    let local = &state.accounting;
+    let usage = local.usage.clone();
+    let local_cost = local.cost_micros_usd;
+    let local_credits = local.ai_credit_micros;
+    let local_subscription = local.subscription_quota_entries;
+    let local_subscription_tokens = local.subscription_tokens;
+    let local_unmetered_subscription = local.unmetered_subscription_quota_entries;
+    let local_unavailable = local.cost_unavailable_entries;
+    let local_non_usd = local.non_usd_monetary_entries;
     let session_cost = ledger.session_cost_micros_usd.max(local_cost);
     let session_credits = ledger.session_ai_credit_micros.max(local_credits);
     let session_tokens = ledger
@@ -750,7 +681,7 @@ pub(in crate::engine) async fn build_cost_snapshot(
     let date = format_unix_rfc3339(now / 1_000, 0);
     Ok(CostSnapshot {
         utc_day: date.get(..10).unwrap_or("1970-01-01").to_owned(),
-        turns: state.accounting.clone(),
+        subscription_quota: local.subscription_quota(),
         session_usage: usage,
         session_cost_micros_usd: session_cost,
         session_ai_credit_micros: session_credits,

@@ -733,13 +733,7 @@ fn m3_context_cost_compaction_and_prompt_dump_use_the_headless_protocol() {
             _ => None,
         })
         .expect("cost snapshot");
-    assert_eq!(costs.turns.len(), 2);
-    assert!(
-        costs
-            .turns
-            .iter()
-            .all(|turn| matches!(&turn.cost, rw_core::Cost::Unavailable { .. }))
-    );
+    assert!(costs.subscription_quota.is_none());
     assert!(!costs.session_monetary_accounting_complete);
     assert!(!costs.daily_monetary_accounting_complete);
     assert_eq!(costs.session_cost_unavailable_entries, 2);

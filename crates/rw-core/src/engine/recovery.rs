@@ -71,3 +71,6 @@ mod workspace_tests;
 
 #[cfg(test)]
 mod source_lookup_tests;
+
+#[cfg(test)]
+mod accounting_tests;

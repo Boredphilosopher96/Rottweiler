@@ -1,4 +1,4 @@
-mod accounting;
+pub(in crate::engine) mod accounting;
 mod command_tools;
 mod compaction;
 mod completion_hooks;

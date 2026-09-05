@@ -989,7 +989,8 @@ pub enum AccountingAttribution {
 #[serde(deny_unknown_fields)]
 pub struct CostSnapshot {
     pub utc_day: String,
-    pub turns: Vec<TurnAccounting>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub subscription_quota: Option<crate::billing::SubscriptionQuotaSummary>,
     pub session_usage: Usage,
     #[serde(with = "decimal_u64")]
     #[schemars(with = "String")]
