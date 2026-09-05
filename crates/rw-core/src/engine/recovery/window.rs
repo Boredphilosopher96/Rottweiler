@@ -22,6 +22,42 @@ impl CanonicalHistory {
     /// # Errors
     /// Rejects malformed rows or storage errors. `None` means no currently valid boundary.
     pub fn completed_boundary(&self, turn: u64) -> Result<Option<RecoveryBoundary>, RecoveryError> {
+        let Some(boundary) = self.boundary(turn)? else {
+            return Ok(None);
+        };
+        Ok(Some(RecoveryBoundary {
+            source_sequence: boundary.source_sequence,
+            agent_turn: turn,
+            conversation: boundary.conversation,
+            control: boundary.control,
+            budget: boundary.budget,
+        }))
+    }
+
+    /// Resolve the controls that a rewind will make effective, without reading
+    /// historical conversation bodies. Accounting and physical source identity
+    /// remain attached to the captured present; only rewindable state changes.
+    ///
+    /// # Errors
+    /// Rejects absent completed boundaries, invalid selectors or live-payload overflow.
+    pub fn recovery_at_completed_turn(
+        &self,
+        turn: u64,
+    ) -> Result<super::RecoveryBootstrap, RecoveryError> {
+        let boundary = self
+            .boundary(turn)?
+            .ok_or(RecoveryError::Invalid("unknown rewind boundary"))?;
+        let mut head = self.head.clone();
+        head.apply_rewind_boundary(&boundary, turn);
+        let controls = self.control_payloads_at(&head, super::MAX_CONTROL_SOURCE_BYTES)?;
+        Ok(super::RecoveryBootstrap {
+            head,
+            controls,
+            interrupted: None,
+        })
+    }
+
+    fn boundary(&self, turn: u64) -> Result<Option<Boundary>, RecoveryError> {
         let Some(row) = self.read.get(key(BOUNDARIES, 0, turn))? else {
             return Ok(None);
         };
@@ -32,13 +68,7 @@ impl CanonicalHistory {
         if boundary.source_sequence.0 >= self.head.next_sequence {
             return Err(RecoveryError::Invalid("boundary source sequence"));
         }
-        Ok(Some(RecoveryBoundary {
-            source_sequence: boundary.source_sequence,
-            agent_turn: turn,
-            conversation: boundary.conversation,
-            control: boundary.control,
-            budget: boundary.budget,
-        }))
+        Ok(Some(boundary))
     }
 
     /// Resolve a source-qualified rewind against this exact effective prefix.
@@ -137,5 +167,30 @@ impl CanonicalHistory {
             .cumulative_tokens
             .checked_sub(before)
             .ok_or(RecoveryError::Invalid("cumulative conversation tokens"))
+    }
+}
+
+impl super::RecoveryHead {
+    pub(super) fn apply_rewind_boundary(&mut self, boundary: &Boundary, turn: u64) {
+        self.conversation = boundary.conversation;
+        self.control.completed_turns = boundary.control.completed_turns;
+        self.control.todos = boundary.control.todos;
+        self.control.mode = boundary.control.mode;
+        self.control.mode_id.clone_from(&boundary.control.mode_id);
+        self.control.pending_plan = boundary.control.pending_plan;
+        self.control.approved_plan = boundary.control.approved_plan;
+        self.control.plan_gate_active = boundary.control.plan_gate_active;
+        self.control.queued.clear();
+        self.control
+            .accepted
+            .retain(|accepted| accepted.agent_turn <= turn);
+        self.control
+            .questions
+            .retain(|question| question.agent_turn <= turn);
+        self.control.active = None;
+        self.context_cut = boundary.context_cut;
+        self.budget = boundary.budget;
+        self.extension_root = boundary.extension_root;
+        self.compacting = None;
     }
 }

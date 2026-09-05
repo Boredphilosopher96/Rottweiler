@@ -118,26 +118,7 @@ pub(super) fn reduce(
             let boundary: Boundary = rows
                 .get(key(BOUNDARIES, 0, to_turn))?
                 .ok_or(RecoveryError::Invalid("unknown rewind boundary"))?;
-            head.conversation = boundary.conversation;
-            head.control.completed_turns = boundary.control.completed_turns;
-            head.control.todos = boundary.control.todos;
-            head.control.mode = boundary.control.mode;
-            head.control.mode_id = boundary.control.mode_id;
-            head.control.pending_plan = boundary.control.pending_plan;
-            head.control.approved_plan = boundary.control.approved_plan;
-            head.control.plan_gate_active = boundary.control.plan_gate_active;
-            head.control.queued.clear();
-            head.control
-                .accepted
-                .retain(|accepted| accepted.agent_turn <= to_turn);
-            head.control
-                .questions
-                .retain(|question| question.agent_turn <= to_turn);
-            head.control.active = None;
-            head.context_cut = boundary.context_cut;
-            head.budget = boundary.budget;
-            head.extension_root = boundary.extension_root;
-            head.compacting = None;
+            head.apply_rewind_boundary(&boundary, to_turn);
             head.maintenance = Some(Maintenance::Rewind {
                 sequence,
                 target: to_turn,

@@ -73,6 +73,13 @@ impl SessionHistoryView for CapturedHistory {
     async fn bootstrap(&self) -> Result<HistoryRead<RecoveryBootstrap>, AgentLoopError> {
         self.query(CanonicalHistory::bootstrap).await
     }
+    async fn recovery_at_completed_turn(
+        &self,
+        turn: u64,
+    ) -> Result<HistoryRead<RecoveryBootstrap>, AgentLoopError> {
+        self.query(move |history| history.recovery_at_completed_turn(turn))
+            .await
+    }
     async fn conversation_page(
         &self,
         range: Range<u64>,

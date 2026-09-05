@@ -200,3 +200,96 @@ fn latest_budget_is_physical_state_after_conversation_rewind() {
     let projected = crate::engine::project_session_events(&events).expect("audit projection");
     assert_eq!(projected.latest_budget, Some(budget));
 }
+
+#[test]
+fn completed_boundary_bootstrap_matches_rewind_without_materializing_history() {
+    let root = tempfile::tempdir().expect("root");
+    let modes = ModeRegistry::builtins().expect("modes");
+    let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
+    let mut recovery =
+        CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("recovery");
+    append(
+        &mut journal,
+        vec![
+            PendingEvent::ModeChanged {
+                mode: rw_types::SessionMode::Plan,
+                mode_id: rw_types::ModeId("plan".into()),
+            },
+            PendingEvent::TurnStarted { turn: 1 },
+            PendingEvent::ConversationTurnCommitted {
+                agent_turn: 1,
+                turn: text(Role::User, "first"),
+            },
+            PendingEvent::ConversationTurnCommitted {
+                agent_turn: 1,
+                turn: text(Role::Assistant, &"history".repeat(100_000)),
+            },
+            super::tests::terminal(1),
+            PendingEvent::ModeChanged {
+                mode: rw_types::SessionMode::Execute,
+                mode_id: rw_types::ModeId("execute".into()),
+            },
+            PendingEvent::SessionTitleUpdated {
+                title: "Present title".into(),
+                usage: None,
+                cost: None,
+            },
+            PendingEvent::TurnStarted { turn: 2 },
+            PendingEvent::ConversationTurnCommitted {
+                agent_turn: 2,
+                turn: text(Role::User, "second"),
+            },
+            super::tests::terminal(2),
+        ],
+    );
+    catch_up(&mut recovery, &journal.read_view(), &modes);
+    let history = recovery
+        .snapshot()
+        .expect("snapshot")
+        .bind_source(&journal.read_view())
+        .expect("source");
+    let expected = history
+        .recovery_at_completed_turn(1)
+        .expect("boundary bootstrap");
+    assert_eq!(expected.head.next_sequence, history.head().next_sequence);
+    assert_eq!(expected.head.accounting, history.head().accounting);
+    assert_eq!(
+        expected.head.control.next_turn,
+        history.head().control.next_turn
+    );
+    assert_eq!(expected.head.conversation.turns, 2);
+    assert_eq!(expected.head.control.mode, rw_types::SessionMode::Plan);
+    assert_eq!(expected.controls.title.as_deref(), Some("Present title"));
+    assert!(
+        expected.controls.source_bytes < 4096,
+        "historical bodies stay in the journal"
+    );
+    assert!(expected.interrupted.is_none());
+    assert!(history.recovery_at_completed_turn(99).is_err());
+    append(
+        &mut journal,
+        vec![PendingEvent::ConversationRewound {
+            to_turn: 1,
+            operation_id: "rewind-source".into(),
+            unrestorable_paths: vec![],
+        }],
+    );
+    catch_up(&mut recovery, &journal.read_view(), &modes);
+    let actual = recovery
+        .snapshot()
+        .expect("rewound snapshot")
+        .bind_source(&journal.read_view())
+        .expect("source");
+    let actual_bootstrap = actual.bootstrap().expect("rewound bootstrap");
+    assert_eq!(
+        actual_bootstrap.head.conversation,
+        expected.head.conversation
+    );
+    assert_eq!(actual_bootstrap.head.control, expected.head.control);
+    assert_eq!(actual_bootstrap.head.budget, expected.head.budget);
+    assert_eq!(actual_bootstrap.controls, expected.controls);
+    assert!(
+        actual.recovery_at_completed_turn(2).is_err(),
+        "removed boundary cannot be reused"
+    );
+}

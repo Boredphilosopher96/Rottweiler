@@ -26,6 +26,12 @@ pub trait SessionHistoryView: Send + Sync {
     /// Resolve live controls and interrupted input at this exact prefix.
     async fn bootstrap(&self) -> Result<HistoryRead<RecoveryBootstrap>, AgentLoopError>;
 
+    /// Resolve a completed rewind boundary without materializing its conversation.
+    async fn recovery_at_completed_turn(
+        &self,
+        turn: u64,
+    ) -> Result<HistoryRead<RecoveryBootstrap>, AgentLoopError>;
+
     /// Read a bounded contiguous context interval. The implementation may cut the
     /// requested interval at admission, and must return its exact resume ordinal.
     async fn conversation_page(

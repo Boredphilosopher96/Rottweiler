@@ -112,6 +112,14 @@ impl CanonicalHistory {
         &self,
         max_source_bytes: u64,
     ) -> Result<RecoveryControlPayloads, RecoveryError> {
+        self.control_payloads_at(&self.head, max_source_bytes)
+    }
+
+    pub(super) fn control_payloads_at(
+        &self,
+        head: &super::RecoveryHead,
+        max_source_bytes: u64,
+    ) -> Result<RecoveryControlPayloads, RecoveryError> {
         if max_source_bytes > MAX_CONTROL_SOURCE_BYTES {
             return Err(RecoveryError::Limit(
                 "control source limit exceeds hard bound",
@@ -126,7 +134,7 @@ impl CanonicalHistory {
             decoded_bytes: 0,
             limit: max_source_bytes,
         };
-        let control = &self.head.control;
+        let control = &head.control;
         let mut result = RecoveryControlPayloads::default();
         if let Some(sequence) = control.todos {
             let PendingEvent::TodoStateCommitted { snapshot } = reader.event(sequence)? else {
@@ -137,7 +145,7 @@ impl CanonicalHistory {
                 .map_err(|_| RecoveryError::Invalid("task snapshot"))?;
             result.todos = snapshot;
         }
-        if let Some(sequence) = self.head.latest_budget {
+        if let Some(sequence) = head.latest_budget {
             let PendingEvent::BudgetStatus {
                 turn,
                 level,
@@ -158,8 +166,7 @@ impl CanonicalHistory {
                 limit,
             });
         }
-        result.resolved_model = self
-            .head
+        result.resolved_model = head
             .conversation
             .resolved_model_source
             .map(|sequence| self.resolved_model(&mut reader, sequence))
