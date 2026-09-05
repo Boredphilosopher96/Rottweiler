@@ -44,6 +44,8 @@ pub struct RecoveryControlPayloads {
     pub pending_questions: Vec<RecoveredQuestion>,
     /// Charged serialized bytes of the authoritative events supplying these payloads.
     pub source_bytes: u64,
+    /// Conservative retained typed allocation of selected source payloads.
+    pub decoded_bytes: u64,
 }
 
 /// Cold actor input contains live controls and the interrupted turn only.
@@ -69,6 +71,7 @@ impl CanonicalHistory {
                 events: VecDeque::new(),
             },
             bytes: 0,
+            decoded_bytes: 0,
             limit: MAX_CONTROL_SOURCE_BYTES,
         };
         let PendingEvent::TodoStateCommitted { snapshot } = reader.event(sequence)? else {
@@ -85,13 +88,18 @@ impl CanonicalHistory {
     /// # Errors
     /// Rejects invalid selectors or control/interrupted-turn admission overflow.
     pub fn bootstrap(&self) -> Result<RecoveryBootstrap, RecoveryError> {
+        let controls = self.control_payloads(MAX_CONTROL_SOURCE_BYTES)?;
+        let remaining = super::MAX_MATERIALIZED_HISTORY_DECODE_BYTES
+            .checked_sub(controls.decoded_bytes)
+            .ok_or(RecoveryError::Limit("bootstrap retained decoded bytes"))?;
+        let interrupted = self
+            .interrupted_inputs_with_allowance(remaining)?
+            .map(super::InterruptedTurnInputs::repair)
+            .transpose()?;
         Ok(RecoveryBootstrap {
             head: self.head.clone(),
-            controls: self.control_payloads(MAX_CONTROL_SOURCE_BYTES)?,
-            interrupted: self
-                .interrupted_inputs()?
-                .map(super::InterruptedTurnInputs::repair)
-                .transpose()?,
+            controls,
+            interrupted,
         })
     }
 
@@ -115,6 +123,7 @@ impl CanonicalHistory {
                 events: VecDeque::new(),
             },
             bytes: 0,
+            decoded_bytes: 0,
             limit: max_source_bytes,
         };
         let control = &self.head.control;
@@ -222,6 +231,7 @@ impl CanonicalHistory {
             });
         }
         result.source_bytes = reader.bytes;
+        result.decoded_bytes = reader.decoded_bytes;
         Ok(result)
     }
     fn resolved_model(
@@ -248,6 +258,7 @@ impl CanonicalHistory {
 struct ControlReader<'a> {
     source: SourceReader<'a>,
     bytes: u64,
+    decoded_bytes: u64,
     limit: u64,
 }
 impl ControlReader<'_> {
@@ -348,6 +359,13 @@ impl ControlReader<'_> {
             .ok_or(RecoveryError::Limit("control source byte counter"))?;
         if self.bytes > self.limit {
             return Err(RecoveryError::Limit("live control materialization"));
+        }
+        self.decoded_bytes = self
+            .decoded_bytes
+            .checked_add(super::encoding::decode_bytes(&event)?)
+            .ok_or(RecoveryError::Limit("control decoded counter"))?;
+        if self.decoded_bytes > super::MAX_MATERIALIZED_HISTORY_DECODE_BYTES {
+            return Err(RecoveryError::Limit("control decoded materialization"));
         }
         crate::engine::projection::recovered_pending_event(&event)?
             .ok_or(RecoveryError::Invalid("unrecognized control source"))

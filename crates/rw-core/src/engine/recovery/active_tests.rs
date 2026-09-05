@@ -201,3 +201,49 @@ fn oversized_active_materialization_is_rejected_from_admission_metadata() {
         Err(RecoveryError::Limit("interrupted turn materialization"))
     ));
 }
+
+#[test]
+fn interrupted_fragment_decode_allowance_is_checked_before_source_materialization() {
+    let root = tempdir().expect("root");
+    let modes = ModeRegistry::builtins().expect("modes");
+    let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
+    append(
+        &mut journal,
+        vec![
+            PendingEvent::TurnStarted { turn: 1 },
+            PendingEvent::TextDelta {
+                turn: 1,
+                text: "retained fragment".repeat(1000),
+            },
+        ],
+    );
+    let mut recovery =
+        CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("recovery");
+    catch_up(&mut recovery, &journal.read_view(), &modes);
+    let history = recovery
+        .snapshot()
+        .expect("snapshot")
+        .bind_source(&journal.read_view())
+        .expect("source");
+    let charge = history
+        .head()
+        .control
+        .active
+        .as_ref()
+        .expect("active")
+        .assistant_parts
+        .decoded_bytes;
+    assert!(charge > 0);
+    assert!(matches!(
+        history.interrupted_inputs_with_allowance(charge - 1),
+        Err(RecoveryError::Limit("interrupted turn materialization"))
+    ));
+    let inputs = history
+        .interrupted_inputs_with_allowance(charge)
+        .expect("exact allowance")
+        .expect("active");
+    assert_eq!(inputs.fragments.len(), 1);
+    let decoded = rw_types::allocation::PrepareAllocation::prepared_bytes(&inputs.fragments[0])
+        .expect("allocation");
+    assert!(decoded as u64 <= charge);
+}

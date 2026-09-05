@@ -623,6 +623,7 @@ fn active_source(
             .ok_or(RecoveryError::Invalid("non-durable active source"))?
             .sequence_id,
         serialized_bytes: serialized_size(event)?,
+        decoded_bytes: super::encoding::decode_bytes(event)?,
     };
     totals.records = totals
         .records
@@ -632,6 +633,10 @@ fn active_source(
         .serialized_bytes
         .checked_add(source.serialized_bytes)
         .ok_or(RecoveryError::Limit("active source bytes"))?;
+    totals.decoded_bytes = totals
+        .decoded_bytes
+        .checked_add(source.decoded_bytes)
+        .ok_or(RecoveryError::Limit("active decoded bytes"))?;
     rows.put(key(namespace, turn, source.sequence.0), &source)
 }
 
@@ -660,5 +665,10 @@ fn tool_lifecycle(
         .serialized_bytes
         .checked_add(serialized_size(source)?)
         .ok_or(RecoveryError::Limit("tool lifecycle bytes"))?;
+    active.tool_lifecycle.decoded_bytes = active
+        .tool_lifecycle
+        .decoded_bytes
+        .checked_add(super::encoding::decode_bytes(source)?)
+        .ok_or(RecoveryError::Limit("tool lifecycle decoded bytes"))?;
     rows.put(key(ACTIVE_TOOL_LIFECYCLE, turn, sequence.0), source)
 }

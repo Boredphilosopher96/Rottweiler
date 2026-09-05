@@ -25,6 +25,13 @@ impl CanonicalHistory {
     /// # Errors
     /// Rejects resource overflow, missing/mismatched source records or corrupt counters.
     pub fn interrupted_inputs(&self) -> Result<Option<InterruptedTurnInputs>, RecoveryError> {
+        self.interrupted_inputs_with_allowance(super::MAX_MATERIALIZED_HISTORY_DECODE_BYTES)
+    }
+
+    pub(super) fn interrupted_inputs_with_allowance(
+        &self,
+        max_decoded_bytes: u64,
+    ) -> Result<Option<InterruptedTurnInputs>, RecoveryError> {
         let Some(active) = &self.head.control.active else {
             return Ok(None);
         };
@@ -48,7 +55,16 @@ impl CanonicalHistory {
                 count.checked_add(totals.serialized_bytes)
             })
             .ok_or(RecoveryError::Limit("interrupted source bytes"))?;
-        if records > limits.max_turns as u64 || bytes > limits.max_serialized_bytes {
+        let decoded_bytes = totals
+            .iter()
+            .try_fold(self.window_decoded_bytes(range.clone())?, |bytes, total| {
+                bytes.checked_add(total.decoded_bytes)
+            })
+            .ok_or(RecoveryError::Limit("interrupted decoded counter"))?;
+        if records > limits.max_turns as u64
+            || bytes > limits.max_serialized_bytes
+            || decoded_bytes > max_decoded_bytes
+        {
             return Err(RecoveryError::Limit("interrupted turn materialization"));
         }
         let mut sources = self.active_sources(
@@ -83,7 +99,12 @@ impl CanonicalHistory {
             ) {
                 return Err(RecoveryError::Invalid("active source event kind"));
             }
-            fragments.push(event);
+            let plan = rw_types::allocation::AllocationPlan::new(event)
+                .map_err(|_| RecoveryError::Limit("active fragment allocation"))?;
+            if plan.bytes() as u64 > source.decoded_bytes {
+                return Err(RecoveryError::Invalid("active source decoded allowance"));
+            }
+            fragments.push(plan.prepare().into_inner());
         }
         Ok(Some(InterruptedTurnInputs {
             turn: active.turn,
@@ -113,12 +134,18 @@ impl CanonicalHistory {
                     return Err(RecoveryError::Invalid("active source sequence"));
                 }
                 observed.records += 1;
+                observed.decoded_bytes =
+                    observed
+                        .decoded_bytes
+                        .checked_add(source.decoded_bytes)
+                        .ok_or(RecoveryError::Limit("active decoded source bytes"))?;
                 observed.serialized_bytes = observed
                     .serialized_bytes
                     .checked_add(source.serialized_bytes)
                     .ok_or(RecoveryError::Limit("active source bytes"))?;
                 if observed.records > expected.records
                     || observed.serialized_bytes > expected.serialized_bytes
+                    || observed.decoded_bytes > expected.decoded_bytes
                 {
                     return Err(RecoveryError::Invalid("active source admission metadata"));
                 }
@@ -158,7 +185,15 @@ impl CanonicalHistory {
                 {
                     return Err(RecoveryError::Invalid("tool lifecycle admission metadata"));
                 }
-                match serde_json::from_slice::<ToolLifecycleSource>(&row.payload)? {
+                let lifecycle: ToolLifecycleSource = serde_json::from_slice(&row.payload)?;
+                observed.decoded_bytes = observed
+                    .decoded_bytes
+                    .checked_add(super::encoding::decode_bytes(&lifecycle)?)
+                    .ok_or(RecoveryError::Limit("tool lifecycle decoded counter"))?;
+                if observed.decoded_bytes > expected.decoded_bytes {
+                    return Err(RecoveryError::Invalid("tool lifecycle decoded allowance"));
+                }
+                match lifecycle {
                     ToolLifecycleSource::Started(start) => {
                         if pending.insert(start.invocation_id.clone(), start).is_some() {
                             return Err(RecoveryError::Invalid("duplicate active tool invocation"));

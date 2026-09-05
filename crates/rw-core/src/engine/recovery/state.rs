@@ -94,12 +94,14 @@ impl ActiveTurn {
 pub struct SourceTotals {
     pub records: u64,
     pub serialized_bytes: u64,
+    pub decoded_bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(super) struct ActiveSource {
     pub sequence: SequenceId,
     pub serialized_bytes: u64,
+    pub decoded_bytes: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -248,5 +250,17 @@ impl RecoveryHead {
             return Err(RecoveryError::Invalid("control counters"));
         }
         Ok(())
+    }
+}
+
+impl rw_types::allocation::DecodeAllocation for ToolLifecycleSource {
+    fn decode_node_bytes() -> Option<usize> {
+        Some(
+            std::mem::size_of::<Self>()
+                .max(std::mem::size_of::<ToolStartIdentity>())
+                .max(<rw_types::ToolInvocationId as rw_types::allocation::DecodeAllocation>::decode_node_bytes()?)
+                .max(<rw_types::ToolCallId as rw_types::allocation::DecodeAllocation>::decode_node_bytes()?)
+                .max(<usize as rw_types::allocation::DecodeAllocation>::decode_node_bytes()?),
+        )
     }
 }

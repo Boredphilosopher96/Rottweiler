@@ -56,8 +56,14 @@ impl Write for Counter {
 /// Source-derived decode allowance is persisted with each IR selector. This scratch
 /// buffer is bounded independently of the raw reader and retained context window.
 pub(super) fn turn_decode_bytes(turn: &rw_types::Turn) -> Result<u64, RecoveryError> {
+    decode_bytes(turn)
+}
+
+pub(super) fn decode_bytes<T: Serialize + rw_types::allocation::DecodeAllocation>(
+    value: &T,
+) -> Result<u64, RecoveryError> {
     let limit = rw_store::session::SessionEventPageLimits::default().max_line_bytes;
-    let bytes = encode(turn, limit)?;
+    let bytes = encode(value, limit)?;
     let shape = rw_types::json_structure::preflight_json(
         &bytes,
         rw_types::json_structure::JsonStructureLimits {
@@ -68,7 +74,7 @@ pub(super) fn turn_decode_bytes(turn: &rw_types::Turn) -> Result<u64, RecoveryEr
         },
     )?;
     shape
-        .decode_bytes::<rw_types::Turn>()
+        .decode_bytes::<T>()
         .and_then(|bytes| u64::try_from(bytes).ok())
         .ok_or(RecoveryError::Limit("conversation decoded allocation"))
 }
