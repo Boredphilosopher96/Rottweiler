@@ -123,7 +123,7 @@ impl CanonicalSession {
     }
 }
 impl DurableEventSink {
-    pub(super) fn configure_canonical(
+    pub(in crate::session_runtime) fn configure_canonical(
         &self,
         modes: Arc<ModeRegistry>,
         inherited_journal_through: Option<rw_types::SequenceId>,
@@ -138,7 +138,7 @@ impl DurableEventSink {
             }))
             .map_err(|_| persistence("canonical owner is already bound"))
     }
-    pub(super) async fn bind_canonical(
+    pub(in crate::session_runtime) async fn bind_canonical(
         self: &Arc<Self>,
         modes: Arc<ModeRegistry>,
     ) -> Result<(), AgentLoopError> {

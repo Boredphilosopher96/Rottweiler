@@ -88,7 +88,6 @@ use rw_core::SubagentOrchestrator;
 use rw_core::SubagentSessionFactory;
 use rw_core::SystemEventClock;
 use rw_core::WorktreeSubagentSessionFactory;
-use rw_core::project_session_events;
 use rw_ext::compose_agent_registry;
 use rw_providers::CacheBreakpointSupport;
 use rw_providers::FixtureRedactor;
