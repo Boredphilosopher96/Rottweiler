@@ -1,3 +1,4 @@
+import { childProgressSource } from "../child-source"
 import { readControls, resolvedApproval, isControlEvent, coveredByControlSnapshot, preserveSnapshotControls } from "./controls"
 import { assertLiveAdmission, citationBytes } from "./live-admission"
 import { retainedCompletedDiff } from "./tool-display"
@@ -703,7 +704,7 @@ function applyKnownEvent(
       if (existing === undefined || existing.childSessionId !== event.child_session_id) {
         return recordInvalid(state)
       }
-      const childSequence = event.child_sequence ?? null
+      const childSequence = childProgressSource(event)
       const sequence = parseU64(childSequence)
       if (childSequence !== null && sequence === null) {
         return recordInvalid(state)
@@ -712,7 +713,7 @@ function applyKnownEvent(
       if (sequence !== null && lastSequence !== null && sequence <= lastSequence) {
         return state
       }
-      const activity = subagentActivity(event.event)
+      const activity = event.event === null ? "updating history" : subagentActivity(event.event)
       return {
         ...state,
         subagents: {

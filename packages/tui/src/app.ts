@@ -66,7 +66,7 @@ import {
   reduceRottweilerState,
   type RottweilerState,
 } from "./state"
-import { childEngineEvent, childPassiveInteractionState } from "./subagent-state"
+import { childPassiveInteractionState } from "./subagent-state"
 import { createSyntaxStyle, kennelTheme, systemThemeFor, themeByName, type RottweilerTheme } from "./theme"
 import { durableSequenceId, isRecord } from "./transport"
 import { stabilizeTreeSitterClient } from "./tree-sitter-client"
@@ -718,19 +718,7 @@ export class RottweilerApp extends BoxRenderable {
       this.#children.acceptCatalog(listed.subagents)
       return
     }
-    if (event.type === "subagent_progress") {
-      const progress = event as Extract<EngineEvent, { type: "subagent_progress" }>
-      if (progress.parent_session_id !== this.#sessionId) return
-      const descriptor = this.#children.subagentDescriptor(progress.subagent_id)
-      if (descriptor === undefined || descriptor.child_session_id !== progress.child_session_id) return
-      const childEvent = childEngineEvent(progress.event, progress.child_session_id)
-      if (childEvent !== null) {
-        this.#history?.invalidate(progress.child_session_id)
-        if (this.#children.activeId === progress.subagent_id) this.#children.applySubagentEvent(progress.subagent_id, childEvent)
-      }
-      const existing = this.#state.subagents[progress.subagent_id]
-      if (existing === undefined || existing.childSessionId !== progress.child_session_id) return
-    }
+    if (event.type === "subagent_progress" && !this.#children.acceptProgress(event)) return
     if (event.type === "session_forked") {
       if (
         event.type !== "session_forked" ||

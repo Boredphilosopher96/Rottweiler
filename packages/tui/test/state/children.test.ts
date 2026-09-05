@@ -378,3 +378,14 @@ describe("state children", () => {
     expect(replay()).toEqual(state)
   })
 })
+
+test("body-free child progress advances only its canonical source cursor", () => {
+  const state = reduce(createInitialState(), { type: "subagent_spawned", meta: meta("1"),
+    subagent_id: "child", child_session_id: "child-session", task: "Inspect" })
+  const event = { type: "subagent_progress" as const, parent_session_id: "session-state", subagent_id: "child", child_session_id: "child-session", child_sequence: "7", event: null }
+  const next = reduce(state, event)
+  expect(next.lastSequence).toBe("1")
+  expect(next.subagents.child).toMatchObject({ lastChildSequence: "7", activity: "updating history", status: "running" })
+  expect(reduce(next, event)).toBe(next)
+  expect(() => reduce(state, { ...event, child_sequence: null })).toThrow("canonical sequence")
+})

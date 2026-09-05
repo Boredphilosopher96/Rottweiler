@@ -1,3 +1,4 @@
+import { childProgressSource } from "../child-source"
 import { TodoController } from "../todo-controller"
 import { emptyTodos } from "../state/todos"
 import { directSessionRead, descendantSessionRead, type SessionReader, type SessionReadTarget } from "../session-reader"
@@ -19,6 +20,7 @@ import { presentError } from "../render"
 import { createInitialState, engineEvent, reduceRottweilerState, type RottweilerState } from "../state"
 import {
   boundSubagentState,
+  childEngineEvent,
   initialSubagentState,
   sanitizeSubagentDescriptor,
   type ComposerDraft,
@@ -256,6 +258,34 @@ export class ChildUiController {
   restoreComposerDraft(subagentId: string | null): void {
     const draft = this.draftStore.get(subagentId === null ? "parent" : `child:${subagentId}`)
     this.#host.composer.restoreDraft(draft.content, draft.attachments)
+  }
+
+  acceptProgress(event: Extract<EngineEvent, { type: "subagent_progress" }>): boolean {
+    if (event.parent_session_id !== this.#host.sessionId) return false
+    const descriptor = this.subagentDescriptor(event.subagent_id)
+    if (descriptor === undefined || descriptor.child_session_id !== event.child_session_id) return false
+    const source = childProgressSource(event)
+    if (event.event === null && source !== null) {
+      this.#host.history.invalidate(event.child_session_id)
+      this.invalidateSubagentSource(event.subagent_id, source)
+    }
+    const childEvent = childEngineEvent(event.event, event.child_session_id)
+    if (childEvent !== null) {
+      this.#host.history.invalidate(event.child_session_id)
+      if (this.#activeSubagentId === event.subagent_id) this.applySubagentEvent(event.subagent_id, childEvent)
+    }
+    return this.#host.state.subagents[event.subagent_id]?.childSessionId === event.child_session_id
+  }
+
+  invalidateSubagentSource(subagentId: string, sequence: string): void {
+    if (subagentId !== this.#activeSubagentId) return
+    const descriptor = this.subagentDescriptor(subagentId)
+    if (descriptor === undefined) return
+    const previous = this.#activeChildState?.lastSequence
+    if (previous !== null && previous !== undefined && BigInt(sequence) <= BigInt(previous)) return
+    this.#activeChildState = { ...initialSubagentState(this.#host.state, descriptor), lastSequence: sequence }
+    this.#todos.open(this.readTarget, sequence)
+    this.#host.refresh()
   }
 
   applySubagentEvent(subagentId: string, event: EngineEvent): void {
