@@ -4,9 +4,9 @@ use super::{
     workspace_roots::RuntimeWorkspaceRootController,
 };
 use crate::extension_runtime::{McpSessionRuntime, RuntimeSessionExtensionController};
-use rw_core::{AgentLoopError, ApplyWorktreeDiffTool, SpawnAgentTool, SubagentOrchestrator};
+use rw_core::{AgentLoopError, SpawnAgentTool, SubagentOrchestrator};
 use rw_ext::{ExtensionCatalog, compose_agent_registry};
-use rw_tools::ToolRegistry;
+use rw_tools::{ApplyWorktreeDiffTool, ToolRegistry};
 use std::{
     path::PathBuf,
     sync::{Arc, OnceLock, Weak},
