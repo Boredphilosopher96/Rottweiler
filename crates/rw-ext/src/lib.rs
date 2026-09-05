@@ -6,6 +6,7 @@ mod agent;
 mod command;
 mod discovery;
 mod hook;
+pub mod invocation;
 mod mode;
 mod plugin;
 mod plugin_endpoint;

@@ -86,6 +86,11 @@ pub struct PluginConnection {
 }
 
 impl PluginConnection {
+    pub(crate) fn with_client(mut self, client: Arc<dyn PluginRpcClient>) -> Self {
+        self.client = client;
+        self
+    }
+
     #[must_use]
     pub fn from_host(host: &PluginHost) -> Self {
         Self {
