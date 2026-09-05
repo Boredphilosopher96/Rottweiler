@@ -102,6 +102,7 @@ def main() -> int:
         total += size
         print(f'{size / (1024 ** 3):8.2f} GiB  {artifact.path}', flush=True)
     print(f'{total / (1024 ** 3):.2f} GiB estimated disposable output.', flush=True)
+    print(f'{shutil.disk_usage(ROOT).free / (1024 ** 3):.2f} GiB filesystem space available.', flush=True)
     if not args.apply:
         print('Preview only. Stop builds/tests, then repeat with --apply to clean.')
         return 0

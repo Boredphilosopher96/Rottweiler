@@ -225,7 +225,8 @@ struct HookEntry {
     event: String,
     matcher: String,
     run: String,
-    failure_policy: String,
+    class: rw_types::hook_contract::HookClass,
+    failure_policy: rw_types::hook_contract::HookFailurePolicy,
 }
 
 pub(super) fn render_claude_hooks(
@@ -240,16 +241,12 @@ pub(super) fn render_claude_hooks(
         let event = match source_event.as_str() {
             "PreToolUse" => "pre_tool",
             "PostToolUse" => "post_tool",
-            "SessionStart" => "session_start",
-            "SessionEnd" => "session_end",
-            "UserPromptSubmit" => "user_prompt_submit",
-            "PreCompact" => "pre_compact",
             _ => {
                 diagnostics.push(item(
                     "hook",
                     source_event,
                     ImportStatus::Unsupported,
-                    "unsupported Claude hook event",
+                    "only PreToolUse and PostToolUse command hooks have checkpoint-owned workspace effects",
                 ));
                 continue;
             }
@@ -295,12 +292,16 @@ pub(super) fn render_claude_hooks(
                         event: event.to_owned(),
                         matcher,
                         run: format!("{{ {command}; }}; s=$?; [ \"$s\" -eq 2 ] && exit 1; exit 0"),
-                        failure_policy: if event.starts_with("pre_") {
-                            "fail-closed"
+                        class: if event == "pre_tool" {
+                            rw_types::hook_contract::HookClass::Policy
                         } else {
-                            "fail-open"
-                        }
-                        .to_owned(),
+                            rw_types::hook_contract::HookClass::Transform
+                        },
+                        failure_policy: if event == "pre_tool" {
+                            rw_types::hook_contract::HookFailurePolicy::FailClosed
+                        } else {
+                            rw_types::hook_contract::HookFailurePolicy::FailOpen
+                        },
                     });
                 }
             }

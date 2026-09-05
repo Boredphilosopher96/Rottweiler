@@ -14,7 +14,8 @@ Keep communication concise and direct. A question alone is not authorization to 
 
 - Use `python3 scripts/build-native-candidate.py` for native products. Pass its verified candidate directory to acceptance gates; do not hide compilation inside measurement scripts. The builder reuses an unchanged source/toolchain/target/profile and owns strict product size checks.
 - Give each concurrent worktree its own Cargo target directory. Never share a target directory between different source trees.
-- Reuse that worktree's target directory across checks. Avoid creating a fresh multi-gigabyte build cache for each command.
+- Reuse that worktree's target directory, build profile, and feature selection across checks. Avoid creating a fresh multi-gigabyte cache or dependency variant for each command.
+- Inspect free disk space and the cleanup inventory before large builds. After a disk-space failure, stop builds and clean inactive task output before retrying.
 - Keep source stable while an integrated build/test run is executing. Integrate changes before starting the run; do other work in an isolated worktree.
 - Keep operational logs and verification results outside the product source tree. Run the checks needed to establish behavior before delivering changes.
 - Then run `python3 scripts/clean-build-artifacts.py` to inspect this workspace's build output. Repeat with `--apply` after its builds and tests have stopped. `--worktrees` includes every registered worktree: use it for preview, and only apply when all affected work is finished.

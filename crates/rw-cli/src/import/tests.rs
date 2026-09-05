@@ -50,6 +50,8 @@ fn claude_import_is_dry_run_apply_idempotent_and_secret_free() {
     let hooks = fs::read_to_string(apply.target_root.join(".agents/hooks.toml")).expect("hooks");
     assert!(hooks.contains("event = \"pre_tool\""));
     assert!(hooks.contains("check-policy"));
+    assert!(hooks.contains("class = \"policy\""));
+    assert!(hooks.contains("failure_policy = \"fail-closed\""));
 
     let user = tempdir().expect("user home");
     let catalog = rw_ext::ExtensionCatalog::discover(
@@ -194,6 +196,18 @@ fn claude_hook_alternation_maps_every_exact_tool() {
     assert!(rendered.contains("matcher = \"bash(*)\""));
     assert!(rendered.contains("matcher = \"write(*)\""));
     assert!(diagnostics.is_empty());
+}
+
+#[test]
+fn claude_lifecycle_commands_are_reported_without_assigning_read_only_authority() {
+    let mut diagnostics = Vec::new();
+    let rendered = render_claude_hooks(
+        &serde_json::json!({"hooks": {"SessionStart": [{"matcher": "*", "hooks": [{"type": "command", "command": "touch file"}]}]}}),
+        &mut diagnostics,
+    ).expect("render");
+    assert!(rendered.is_none());
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].status, ImportStatus::Unsupported);
 }
 
 #[cfg(unix)]
