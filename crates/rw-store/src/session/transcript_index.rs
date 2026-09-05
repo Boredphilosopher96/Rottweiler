@@ -120,6 +120,19 @@ pub enum TranscriptIndexMutation {
     Move { key: String, ordinal: u64 },
 }
 
+impl TranscriptIndexMutation {
+    /// Conservative retained-byte charge used by the atomic batch admission limit.
+    #[must_use]
+    pub fn charged_bytes(&self) -> usize {
+        match self {
+            Self::Put(row) => row.payload.len() + row.key.len() + 48,
+            Self::Delete(key) => key.len() + 48,
+            Self::Bind { binding, key } => binding.len() + key.len() + 48,
+            Self::Move { .. } => MAX_ROW_BYTES + MAX_KEY_BYTES + 48,
+        }
+    }
+}
+
 /// A page and the precise complete view from which it was read.
 #[derive(Debug)]
 pub struct TranscriptIndexPage {
@@ -355,12 +368,7 @@ impl TranscriptIndex {
         let mut charged_bytes = 0;
         for mutation in mutations {
             validate_mutation(mutation, next.prefix_identity().next_sequence)?;
-            charged_bytes += match mutation {
-                TranscriptIndexMutation::Put(row) => row.payload.len() + row.key.len() + 48,
-                TranscriptIndexMutation::Delete(key) => key.len() + 48,
-                TranscriptIndexMutation::Bind { binding, key } => binding.len() + key.len() + 48,
-                TranscriptIndexMutation::Move { .. } => MAX_ROW_BYTES + MAX_KEY_BYTES + 48,
-            };
+            charged_bytes += mutation.charged_bytes();
             if charged_bytes > MAX_BATCH_BYTES {
                 return Err(TranscriptIndexError::Limit("batch bytes"));
             }

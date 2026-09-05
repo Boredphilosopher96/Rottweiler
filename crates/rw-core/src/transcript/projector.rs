@@ -3,7 +3,8 @@ use super::{
     TranscriptRowLookup, project_transcript_event,
 };
 use rw_store::session::transcript_index::{
-    TranscriptIndex, TranscriptIndexError, TranscriptIndexMutation, TranscriptIndexRow,
+    MAX_BATCH_BYTES, MAX_BATCH_ROWS, TranscriptIndex, TranscriptIndexError,
+    TranscriptIndexMutation, TranscriptIndexRow,
 };
 use rw_store::session::{SessionEventPageLimits, journal::JournalReadView};
 use rw_types::transcript::TRANSCRIPT_PROJECTION_VERSION;
@@ -11,7 +12,8 @@ use rw_types::{EngineEvent, SequenceId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-const EVENTS_PER_BATCH: usize = 16;
+const EVENTS_PER_BATCH: usize = 64;
+const REPAIR_ROWS_PER_BATCH: usize = 16;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct Checkpoint {
@@ -88,8 +90,6 @@ impl TranscriptProjector {
             return self.advance_rewind(view, checkpoint);
         }
         let before = self.index.head()?;
-        view.at_prefix(before.prefix)
-            .map_err(TranscriptIndexError::from)?;
         let limits = SessionEventPageLimits::default();
         let limits = SessionEventPageLimits {
             max_page_events: EVENTS_PER_BATCH,
@@ -112,6 +112,7 @@ impl TranscriptProjector {
         };
         let mut mutations = Vec::with_capacity(EVENTS_PER_BATCH * 2);
         let mut interpreted = 0;
+        let mut charged_bytes = 0;
         for envelope in &page.events {
             if envelope
                 .event
@@ -127,6 +128,21 @@ impl TranscriptProjector {
                     state,
                     mutations: changes,
                 } => {
+                    let change_bytes = changes
+                        .iter()
+                        .map(TranscriptIndexMutation::charged_bytes)
+                        .sum::<usize>();
+                    if mutations.len() + changes.len() > MAX_BATCH_ROWS
+                        || charged_bytes + change_bytes > MAX_BATCH_BYTES
+                    {
+                        if interpreted == 0 {
+                            return Err(TranscriptProjectionError::Invalid(
+                                "event exceeds projection batch",
+                            ));
+                        }
+                        break;
+                    }
+                    charged_bytes += change_bytes;
                     for change in &changes {
                         overlay.apply(change);
                     }
@@ -148,14 +164,13 @@ impl TranscriptProjector {
             }
         }
         if interpreted > 0 {
+            let applied_cursor = checkpoint
+                .state
+                .next_sequence
+                .checked_sub(1)
+                .map(SequenceId);
             let applied = view
-                .prefix_through(
-                    checkpoint
-                        .state
-                        .next_sequence
-                        .checked_sub(1)
-                        .map(SequenceId),
-                )
+                .prefix_through(applied_cursor)
                 .map_err(TranscriptIndexError::from)?;
             self.index.apply(
                 before.prefix,
@@ -165,6 +180,9 @@ impl TranscriptProjector {
                 false,
                 &mutations,
             )?;
+        } else {
+            view.at_prefix(before.prefix)
+                .map_err(TranscriptIndexError::from)?;
         }
         self.progress(view, interpreted)
     }
@@ -245,12 +263,12 @@ impl TranscriptProjector {
                 "missing rewind checkpoint",
             ))?;
         let before = self.index.head()?;
-        let mut mutations = Vec::with_capacity(EVENTS_PER_BATCH);
+        let mut mutations = Vec::with_capacity(REPAIR_ROWS_PER_BATCH);
         let complete = match pending.phase {
             RewindPhase::Delete => {
                 let rows = self
                     .index
-                    .rows_after_turn(pending.target, EVENTS_PER_BATCH)?;
+                    .rows_after_turn(pending.target, REPAIR_ROWS_PER_BATCH)?;
                 for row in &rows {
                     pending.first_removed = Some(
                         pending
@@ -279,7 +297,7 @@ impl TranscriptProjector {
             } => {
                 let page = self.index.maintenance_page(
                     read_from,
-                    EVENTS_PER_BATCH,
+                    REPAIR_ROWS_PER_BATCH,
                     rw_store::session::transcript_index::MAX_PAGE_BYTES,
                 )?;
                 let mut next_read = read_from;

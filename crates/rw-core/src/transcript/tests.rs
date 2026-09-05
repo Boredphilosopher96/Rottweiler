@@ -332,7 +332,7 @@ fn shell_completion_updates_original_row_and_commands_are_not_rewind_owned() {
 }
 
 #[test]
-fn bounded_projector_resumes_cross_page_tool_and_hidden_rewind_after_every_transaction() {
+fn bounded_projector_resumes_hidden_rewind_after_every_transaction() {
     let root = tempdir().expect("root");
     let mut journal = SegmentedJournal::open(root.path(), "semantic").expect("journal");
     let events = mixed_rewind_events();
@@ -344,7 +344,7 @@ fn bounded_projector_resumes_cross_page_tool_and_hidden_rewind_after_every_trans
         let mut projector = TranscriptProjector::open(&view).expect("reopen projector checkpoint");
         let io = projector.index().io_metrics();
         let progress = projector.advance(&view).expect("one bounded transaction");
-        assert!(progress.interpreted_events <= 16);
+        assert!(progress.interpreted_events <= 64);
         assert!(projector.index().io_metrics().bytes_written - io.bytes_written < 4 * 1024 * 1024);
         if progress.rebuilding {
             assert_eq!(progress.applied_next_sequence, 136);
@@ -500,4 +500,150 @@ fn mixed_rewind_events() -> Vec<EngineEvent> {
         }],
     ));
     events
+}
+
+#[test]
+#[ignore = "explicit source/index work qualification; record profile and batch size with timings"]
+fn qualify_semantic_projection_10k() {
+    use std::time::Instant;
+    let root = tempdir().expect("root");
+    let mut journal = SegmentedJournal::open(root.path(), "semantic").expect("journal");
+    for first in (0..10_000).step_by(256) {
+        journal
+            .append_batch((first..10_000.min(first + 256)).map(|sequence| {
+                EngineEvent::CommandFinished {
+                    meta: meta(sequence),
+                    name: "status".into(),
+                    message: format!("item {sequence}: {}", "x".repeat(512)),
+                    unrestorable_paths: vec![],
+                }
+            }))
+            .expect("canonical batch");
+    }
+    let view = journal.read_view();
+    let canonical_bytes = view
+        .page::<EngineEvent>(
+            view.last_sequence(),
+            rw_store::session::SessionEventPageLimits::default(),
+        )
+        .expect("tail metadata")
+        .total_bytes;
+    assert!(canonical_bytes > 7_000_000);
+    let mut projector = TranscriptProjector::open(&view).expect("projector");
+    let started = Instant::now();
+    let mut batches = 0;
+    loop {
+        let io = projector.index().io_metrics();
+        let progress = projector.advance(&view).expect("bounded catch-up");
+        assert!(projector.index().io_metrics().bytes_written - io.bytes_written <= 4 * 1024 * 1024);
+        batches += 1;
+        if !progress.has_more {
+            break;
+        }
+    }
+    assert_eq!(projector.index().head().expect("head").total_rows, 10_000);
+    for first in [0, 5_000, 9_936] {
+        let page = projector
+            .index()
+            .page(first, 64, 1024 * 1024)
+            .expect("indexed window");
+        assert_eq!(page.rows.len(), 64);
+        assert_eq!(page.rows[0].source, SequenceId(first));
+    }
+    let io = projector.index().io_metrics();
+    println!(
+        "{}",
+        serde_json::json!({"profile":if cfg!(debug_assertions) {"debug"} else {"release"}, "events":10_000,"canonical_bytes":canonical_bytes,"batches":batches,"build_ms":started.elapsed().as_secs_f64()*1_000.0,"index_bytes_read":io.bytes_read,"index_bytes_written":io.bytes_written,"index_syncs":io.syncs})
+    );
+}
+
+#[test]
+fn encoded_row_budget_can_stop_mid_page_without_skipping_canonical_events() {
+    let root = tempdir().expect("root");
+    let mut journal = SegmentedJournal::open(root.path(), "semantic").expect("journal");
+    for first in (0..160).step_by(16) {
+        journal
+            .append_batch((first..first + 16).map(|sequence| {
+                turn(
+                    sequence,
+                    1,
+                    Role::User,
+                    vec![Block::Text {
+                        text: "\u{0}".repeat(20_000),
+                    }],
+                )
+            }))
+            .expect("bounded raw batch");
+    }
+    let view = journal.read_view();
+    let mut projector = TranscriptProjector::open(&view).expect("projector");
+    let first = projector
+        .advance(&view)
+        .expect("admitted prefix of raw page");
+    assert!(first.interpreted_events > 0 && first.interpreted_events < 64);
+    assert_eq!(first.applied_next_sequence, first.interpreted_events as u64);
+    while projector
+        .advance(&view)
+        .expect("continued bounded prefix")
+        .has_more
+    {}
+    let mut ordinal = 0;
+    loop {
+        let page = projector
+            .index()
+            .page(ordinal, 64, 1024 * 1024)
+            .expect("bounded preview page");
+        if page.rows.is_empty() {
+            break;
+        }
+        for row in page.rows {
+            assert_eq!(row.source, SequenceId(ordinal));
+            assert_eq!(row.ordinal, ordinal);
+            ordinal += 1;
+        }
+    }
+    assert_eq!(ordinal, 160);
+    assert_eq!(
+        projector.index().head().expect("complete head").prefix,
+        view.prefix_identity()
+    );
+}
+
+#[test]
+fn projector_finishes_a_tool_from_an_earlier_raw_page_after_reopen() {
+    let root = tempdir().expect("root");
+    let mut journal = SegmentedJournal::open(root.path(), "semantic").expect("journal");
+    let mut events = vec![start(0, 0)];
+    events.extend((1..65).map(|sequence| EngineEvent::PluginStatusChanged {
+        meta: meta(sequence),
+        plugin_id: "probe".into(),
+        status: "ready".into(),
+    }));
+    events.push(finish(65, 0, "complete body from a later page"));
+    journal.append_batch(&events).expect("canonical events");
+    let view = journal.read_view();
+    let mut projector = TranscriptProjector::open(&view).expect("projector");
+    let first = projector.advance(&view).expect("first page");
+    assert_eq!(first.applied_next_sequence, 64);
+    assert!(first.has_more);
+    drop(projector);
+    let mut projector = TranscriptProjector::open(&view).expect("reopen at page boundary");
+    assert!(!projector.advance(&view).expect("later completion").has_more);
+    let page = projector
+        .index()
+        .page(0, 64, 1024 * 1024)
+        .expect("one semantic tool");
+    assert_eq!(page.rows.len(), 1);
+    assert_eq!(
+        (page.rows[0].source, page.rows[0].revision),
+        (SequenceId(0), SequenceId(65))
+    );
+    let TranscriptContent::Tool {
+        output: Some(output),
+        ..
+    } = decode(&page.rows[0]).expect("tool")
+    else {
+        panic!("missing complete output");
+    };
+    assert_eq!(output.text, "complete body from a later page");
 }
