@@ -6,7 +6,6 @@ use super::accounting_projection::project_accounting;
 use super::accounting_projection::session_projection_updated_at;
 use super::accounting_projection::upsert_session_projection;
 use super::prompt_shapes::PromptShapeJournal;
-use super::restore_todo_state;
 use crate::journal_service::JournalReadLease;
 use crate::journal_service::JournalRegistration;
 use crate::journal_service::JournalService;
@@ -21,7 +20,6 @@ use rw_core::SequenceId;
 use rw_core::SessionEventReadView;
 use rw_core::SessionEventSink;
 use rw_core::SessionReplayLimits;
-use rw_core::project_session_events;
 use rw_core::{AdmittedEventBatch, EventBatchPlan, EventBatchReservation};
 use rw_store::session::AccountingLedger;
 use rw_store::session::SessionEventLog;
@@ -29,7 +27,6 @@ use rw_store::session::SessionEventPageLimits;
 use rw_store::session::SessionProjection;
 use rw_store::session::SessionSummary;
 use rw_store::session::UtcTimestamp;
-use rw_tools::TodoTool;
 use rw_types::SessionId;
 use rw_types::ToolOutput;
 use std::path::Path;
@@ -102,7 +99,6 @@ pub(super) struct DurableEventSink {
     pub(super) hosted_projection: Option<Mutex<HostedSessionProjection>>,
     pub(super) prompt_shapes: Arc<PromptShapeJournal>,
     pub(super) accounting_dirty: AtomicBool,
-    pub(super) todo_restore: Mutex<Option<TodoRestoreBinding>>,
 }
 
 pub(super) struct HostedSessionProjection {
@@ -220,7 +216,6 @@ impl DurableEventSink {
             hosted_projection: hosted_projection.map(Mutex::new),
             prompt_shapes,
             accounting_dirty: AtomicBool::new(false),
-            todo_restore: Mutex::new(None),
         }))
     }
 
@@ -253,13 +248,6 @@ impl DurableEventSink {
         }
     }
 
-    pub(super) fn bind_todo(&self, binding: TodoRestoreBinding) {
-        *self
-            .todo_restore
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(binding);
-    }
-
     pub(super) fn load(&self) -> Result<Vec<EngineEvent>> {
         let log = self
             .log
@@ -271,6 +259,11 @@ impl DurableEventSink {
 
 #[async_trait]
 impl SessionEventSink for DurableEventSink {
+    async fn todo_state(
+        &self,
+    ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
+        self.read_canonical(|history| history.todo_state()).await
+    }
     async fn source_rewind_target(
         &self,
         expected_through: rw_types::SequenceId,
@@ -410,13 +403,6 @@ impl DurableEventSink {
     }
 }
 
-#[derive(Clone)]
-pub(super) struct TodoRestoreBinding {
-    pub(super) todo: Arc<TodoTool>,
-    pub(super) workspace: PathBuf,
-    pub(super) session_id: SessionId,
-}
-
 pub(super) fn load_session_events(log: &SessionEventLog) -> Result<Vec<EngineEvent>> {
     let envelopes = log
         .load::<EngineEvent>()
@@ -493,42 +479,11 @@ impl DurableEventSink {
         self: Arc<Self>,
         batch: Arc<AdmittedEventBatch>,
     ) -> std::result::Result<Arc<AdmittedEventBatch>, AgentLoopError> {
-        let events = batch.events();
-        let rewound = events
-            .iter()
-            .any(|event| matches!(event, EngineEvent::ConversationRewound { .. }));
         let owner = Arc::clone(&self);
         let submitted = Arc::clone(&batch);
         tokio::task::spawn_blocking(move || owner.append_and_publish(submitted.events()))
             .await
             .map_err(|error| AgentLoopError::Persistence(error.to_string()))??;
-        if rewound {
-            let binding = self
-                .todo_restore
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            if let Some(binding) = binding {
-                let recovery_owner = Arc::clone(&self);
-                let recovered = tokio::task::spawn_blocking(move || {
-                    let events = recovery_owner
-                        .load()
-                        .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-                    project_session_events(&events)
-                        .map_err(|error| AgentLoopError::Persistence(error.to_string()))
-                })
-                .await
-                .map_err(|error| AgentLoopError::Persistence(error.to_string()))??;
-                restore_todo_state(
-                    &recovered.conversation,
-                    &binding.workspace,
-                    &binding.session_id,
-                    &binding.todo,
-                )
-                .await
-                .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-            }
-        }
         let batch = tokio::task::spawn_blocking(move || {
             let persisted = batch.events();
             for event in persisted {

@@ -58,6 +58,7 @@ pub(in crate::engine) async fn handle_turn_signal(
     active_turn: &Arc<AtomicU64>,
 ) -> Result<(), AgentLoopError> {
     match signal {
+        TurnSignal::Todo(request) => super::todos::handle(request, state, config, events).await?,
         TurnSignal::Event(event) | TurnSignal::ToolOutput { event, .. } => {
             let Some(running_turn) = state.running.as_ref().map(|running| running.id) else {
                 return Ok(());
@@ -455,6 +456,7 @@ pub(in crate::engine) struct CompactionProgress {
 }
 
 pub(in crate::engine) enum TurnSignal {
+    Todo(super::todos::TodoRequest),
     EffectsUnsettled {
         message: String,
     },

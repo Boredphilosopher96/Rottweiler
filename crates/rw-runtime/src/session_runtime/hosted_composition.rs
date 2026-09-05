@@ -10,7 +10,6 @@ use super::credential_resolution::DeferredWebSearchHeaders;
 use super::custom_commands::RuntimeCommandRegistry;
 use super::custom_commands::compose_runtime_commands;
 use super::durable_session::DurableEventSink;
-use super::durable_session::TodoRestoreBinding;
 use super::durable_session::load_session_events;
 use super::extension_discovery::discover_runtime_extensions;
 use super::extension_discovery::extension_startup_notifications;
@@ -52,7 +51,6 @@ use super::subagent_recovery::recover_subagent_tree;
 use super::subagent_runtime::ChildActorTemplate;
 use super::subagent_runtime::HostedSubagentController;
 use super::subagent_runtime::RuntimeSubagentSessionFactory;
-use super::todo_restore::restore_todo_state;
 use super::tool_composition::BuildToolsInput;
 use super::tool_composition::build_tools;
 use super::tool_composition::trusted_lsp_roots;
@@ -382,18 +380,6 @@ pub(crate) async fn compose_hosted_actor(
     })
     .await
     .map_err(|error| miette!("tool startup worker failed: {error}"))??;
-    restore_todo_state(
-        &recovered.conversation,
-        &workspace,
-        &options.session_id,
-        &built_tools.todo,
-    )
-    .await?;
-    durable_sink.bind_todo(TodoRestoreBinding {
-        todo: Arc::clone(&built_tools.todo),
-        workspace: workspace.clone(),
-        session_id: options.session_id.clone(),
-    });
 
     let executable_catalog = if offline {
         crate::extension_config::ExecutableConfigCatalog::default()

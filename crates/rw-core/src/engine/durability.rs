@@ -26,6 +26,9 @@ pub struct ExtensionStateView {
 /// actor invokes this boundary before making the event visible to subscribers.
 #[async_trait]
 pub trait SessionEventSink: Send + Sync {
+    /// Read the authoritative task snapshot at the acknowledged committed prefix.
+    async fn todo_state(&self) -> Result<rw_types::todo::TodoSnapshot, AgentLoopError>;
+
     /// Resolve an effective committed user source against an exact durable prefix.
     async fn source_rewind_target(
         &self,
@@ -96,6 +99,13 @@ impl NoopSessionEventSink {
 
 #[async_trait]
 impl SessionEventSink for NoopSessionEventSink {
+    async fn todo_state(
+        &self,
+    ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no authoritative task state".into(),
+        ))
+    }
     async fn source_rewind_target(
         &self,
         _expected_through: rw_types::SequenceId,

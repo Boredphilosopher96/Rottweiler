@@ -34,6 +34,24 @@ pub(in crate::engine::tests) struct RecordingSink {
 
 #[async_trait]
 impl SessionEventSink for RecordingSink {
+    async fn todo_state(&self) -> Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
+        let mut current = rw_types::todo::TodoSnapshot::default();
+        let mut boundaries = std::collections::BTreeMap::new();
+        for event in self.events.lock().expect("fixture events").iter() {
+            match &event.kind {
+                PendingEvent::TodoStateCommitted { snapshot } => current = snapshot.clone(),
+                PendingEvent::TurnFinished { turn, .. } => {
+                    boundaries.insert(*turn, current.clone());
+                }
+                PendingEvent::ConversationRewound { to_turn, .. } => {
+                    current = boundaries.get(to_turn).cloned().unwrap_or_default();
+                    boundaries.retain(|turn, _| turn <= to_turn);
+                }
+                _ => {}
+            }
+        }
+        Ok(current)
+    }
     async fn source_rewind_target(
         &self,
         _expected_through: rw_types::SequenceId,
@@ -130,6 +148,13 @@ pub(in crate::engine::tests) struct AccountingRecordingSink {
 
 #[async_trait]
 impl SessionEventSink for AccountingRecordingSink {
+    async fn todo_state(
+        &self,
+    ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no authoritative task state".into(),
+        ))
+    }
     async fn source_rewind_target(
         &self,
         _expected_through: rw_types::SequenceId,
@@ -252,6 +277,13 @@ pub(in crate::engine::tests) struct FailingSink;
 
 #[async_trait]
 impl SessionEventSink for FailingSink {
+    async fn todo_state(
+        &self,
+    ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no authoritative task state".into(),
+        ))
+    }
     async fn source_rewind_target(
         &self,
         _expected_through: rw_types::SequenceId,
@@ -302,6 +334,13 @@ pub(in crate::engine::tests) struct FailCompactionLedgerSink {
 
 #[async_trait]
 impl SessionEventSink for FailCompactionLedgerSink {
+    async fn todo_state(
+        &self,
+    ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no authoritative task state".into(),
+        ))
+    }
     async fn source_rewind_target(
         &self,
         _expected_through: rw_types::SequenceId,
@@ -380,6 +419,13 @@ pub(in crate::engine::tests) struct FailNextBatchSink {
 
 #[async_trait]
 impl SessionEventSink for FailNextBatchSink {
+    async fn todo_state(
+        &self,
+    ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no authoritative task state".into(),
+        ))
+    }
     async fn source_rewind_target(
         &self,
         _expected_through: rw_types::SequenceId,
@@ -439,6 +485,13 @@ pub(in crate::engine::tests) struct FailFirstTextDeltaSink {
 
 #[async_trait]
 impl SessionEventSink for FailFirstTextDeltaSink {
+    async fn todo_state(
+        &self,
+    ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no authoritative task state".into(),
+        ))
+    }
     async fn source_rewind_target(
         &self,
         _expected_through: rw_types::SequenceId,
@@ -504,6 +557,13 @@ pub(in crate::engine::tests) struct WorkspaceChangeFailingSink {
 
 #[async_trait]
 impl SessionEventSink for WorkspaceChangeFailingSink {
+    async fn todo_state(
+        &self,
+    ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no authoritative task state".into(),
+        ))
+    }
     async fn source_rewind_target(
         &self,
         _expected_through: rw_types::SequenceId,
@@ -573,6 +633,13 @@ pub(in crate::engine::tests) struct MalformedBatchSink {
 
 #[async_trait]
 impl SessionEventSink for MalformedBatchSink {
+    async fn todo_state(
+        &self,
+    ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no authoritative task state".into(),
+        ))
+    }
     async fn source_rewind_target(
         &self,
         _expected_through: rw_types::SequenceId,
@@ -661,6 +728,13 @@ impl BlockingBatchSink {
 
 #[async_trait]
 impl SessionEventSink for BlockingBatchSink {
+    async fn todo_state(
+        &self,
+    ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no authoritative task state".into(),
+        ))
+    }
     async fn source_rewind_target(
         &self,
         _expected_through: rw_types::SequenceId,
@@ -735,6 +809,13 @@ pub(in crate::engine::tests) struct OrderedRewindSink {
 
 #[async_trait]
 impl SessionEventSink for OrderedRewindSink {
+    async fn todo_state(
+        &self,
+    ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no authoritative task state".into(),
+        ))
+    }
     async fn source_rewind_target(
         &self,
         _expected_through: rw_types::SequenceId,
@@ -821,6 +902,13 @@ pub(in crate::engine::tests) struct CorruptGapSink {
 
 #[async_trait]
 impl SessionEventSink for CorruptGapSink {
+    async fn todo_state(
+        &self,
+    ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no authoritative task state".into(),
+        ))
+    }
     async fn source_rewind_target(
         &self,
         _expected_through: rw_types::SequenceId,
@@ -873,6 +961,13 @@ impl SessionEventSink for CorruptGapSink {
 
 #[async_trait]
 impl SessionEventSink for ToggleLeaseSink {
+    async fn todo_state(
+        &self,
+    ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no authoritative task state".into(),
+        ))
+    }
     async fn source_rewind_target(
         &self,
         _expected_through: rw_types::SequenceId,
@@ -979,6 +1074,13 @@ pub(in crate::engine::tests) struct CountedReplaySink {
 
 #[async_trait]
 impl SessionEventSink for CountedReplaySink {
+    async fn todo_state(
+        &self,
+    ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no authoritative task state".into(),
+        ))
+    }
     async fn source_rewind_target(
         &self,
         _expected_through: rw_types::SequenceId,

@@ -11,7 +11,6 @@ use super::credential_resolution::DeferredWebSearchHeaders;
 use super::custom_commands::RuntimeCommandRegistry;
 use super::custom_commands::compose_runtime_commands;
 use super::durable_session::DurableEventSink;
-use super::durable_session::TodoRestoreBinding;
 use super::durable_session::load_session_events;
 use super::extension_discovery::discover_runtime_extensions;
 use super::extension_discovery::extension_startup_notifications;
@@ -59,7 +58,6 @@ use super::session_selection::workspace_execution_lease_path;
 use super::subagent_recovery::recover_subagent_tree;
 use super::subagent_runtime::ChildActorTemplate;
 use super::subagent_runtime::RuntimeSubagentSessionFactory;
-use super::todo_restore::restore_todo_state;
 use super::tool_composition::BuildToolsInput;
 use super::tool_composition::build_tools;
 use super::tool_composition::trusted_lsp_roots;
@@ -467,18 +465,6 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
     })
     .await
     .map_err(|error| miette!("tool startup worker failed: {error}"))??;
-    restore_todo_state(
-        &recovered.conversation,
-        &workspace,
-        &SessionId(session_id.clone()),
-        &built_tools.todo,
-    )
-    .await?;
-    durable_sink.bind_todo(TodoRestoreBinding {
-        todo: Arc::clone(&built_tools.todo),
-        workspace: workspace.clone(),
-        session_id: SessionId(session_id.clone()),
-    });
 
     // The hidden release gate uses an in-memory provider while deliberately
     // exercising production executable discovery. Other offline/replay runs
@@ -1125,7 +1111,6 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
     let final_sink = Arc::clone(&durable_sink);
     let final_root = storage_root.clone();
     let final_session = session_id.clone();
-    let todo = built_tools.todo.clone();
     let lifetime = super::headless_lifetime::own(
         actor.clone(),
         Arc::clone(&plugin_runtime_budget),
@@ -1138,7 +1123,6 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
             } else {
                 Ok(())
             };
-            todo.clear_session(&SessionId(final_session)).await;
             indexed.map_err(|error| Arc::<str>::from(error.to_string()))
         },
     );

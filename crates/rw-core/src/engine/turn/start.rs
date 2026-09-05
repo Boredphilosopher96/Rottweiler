@@ -252,7 +252,11 @@ pub(in crate::engine) async fn start_turn_with_overrides(
         .with_cancellation(cancellation.clone())
         .with_question_asker(protocol_asker)
         .with_model_alias(config.model_alias.clone())
-        .with_native_searcher(native_search);
+        .with_native_searcher(native_search)
+        .with_todo_store(Arc::new(super::todos::ActorTodoStore::new(
+            turn,
+            runtime.signals.clone(),
+        )));
     let signals = runtime.signals.clone();
     let state_context_surgery = state.context_surgery.clone();
     let state_pruned_tool_outputs = state.pruned_tool_outputs.clone();

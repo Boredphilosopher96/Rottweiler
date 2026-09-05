@@ -1,5 +1,11 @@
 //! Retain each invoked backend until its local effects are proven settled.
-use super::{CancellationToken, ToolError, WebSearcher};
+use crate::{CancellationToken, ToolError};
+use async_trait::async_trait;
+
+#[async_trait]
+pub(crate) trait InvocationEffect: Send + Sync {
+    async fn settle_effects(&self) -> Result<(), ToolError>;
+}
 use futures_util::FutureExt as _;
 use std::panic::AssertUnwindSafe;
 use std::{
@@ -12,37 +18,37 @@ use std::{
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-const MAX_SEARCH_OPERATIONS: usize = 16;
+const MAX_INVOCATION_OPERATIONS: usize = 16;
 const SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub(super) struct SearchOperations {
+pub(crate) struct InvocationEffects {
     jobs: Mutex<BTreeMap<u64, Arc<Job>>>,
     next: AtomicU64,
     credits: Arc<Semaphore>,
 }
-impl Default for SearchOperations {
+impl Default for InvocationEffects {
     fn default() -> Self {
         Self {
             jobs: Mutex::new(BTreeMap::new()),
             next: AtomicU64::new(0),
-            credits: Arc::new(Semaphore::new(MAX_SEARCH_OPERATIONS)),
+            credits: Arc::new(Semaphore::new(MAX_INVOCATION_OPERATIONS)),
         }
     }
 }
 struct Job {
-    backend: Arc<dyn WebSearcher>,
+    backend: Arc<dyn InvocationEffect>,
     cancellation: CancellationToken,
     abandoned: AtomicBool,
     failed: AtomicBool,
     _credit: OwnedSemaphorePermit,
 }
-pub(super) struct SearchOperation {
-    owner: Arc<SearchOperations>,
+pub(crate) struct InvocationOperation {
+    owner: Arc<InvocationEffects>,
     id: u64,
     job: Arc<Job>,
     finished: bool,
 }
-impl Drop for SearchOperation {
+impl Drop for InvocationOperation {
     fn drop(&mut self) {
         if !self.finished {
             self.job.cancellation.cancel();
@@ -50,21 +56,19 @@ impl Drop for SearchOperation {
         }
     }
 }
-impl SearchOperations {
-    pub(super) fn begin(
+impl InvocationEffects {
+    pub(crate) fn begin(
         self: &Arc<Self>,
-        backend: Arc<dyn WebSearcher>,
+        backend: Arc<dyn InvocationEffect>,
         cancellation: CancellationToken,
-    ) -> Result<SearchOperation, ToolError> {
+    ) -> Result<InvocationOperation, ToolError> {
         let credit = Arc::clone(&self.credits).try_acquire_owned().map_err(|_| {
-            ToolError::EffectsUnsettled("search operation admission is exhausted".into())
+            ToolError::EffectsUnsettled("tool operation admission is exhausted".into())
         })?;
         let id = self
             .next
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-            .map_err(|_| {
-                ToolError::EffectsUnsettled("search operation identity exhausted".into())
-            })?;
+            .map_err(|_| ToolError::EffectsUnsettled("tool operation identity exhausted".into()))?;
         let job = Arc::new(Job {
             backend,
             cancellation,
@@ -74,20 +78,20 @@ impl SearchOperations {
         });
         self.jobs
             .lock()
-            .map_err(|_| ToolError::EffectsUnsettled("search ownership poisoned".into()))?
+            .map_err(|_| ToolError::EffectsUnsettled("tool ownership poisoned".into()))?
             .insert(id, Arc::clone(&job));
-        Ok(SearchOperation {
+        Ok(InvocationOperation {
             owner: Arc::clone(self),
             id,
             job,
             finished: false,
         })
     }
-    pub(super) async fn settle(&self) -> Result<(), ToolError> {
+    pub(crate) async fn settle(&self) -> Result<(), ToolError> {
         let jobs: Vec<_> = self
             .jobs
             .lock()
-            .map_err(|_| ToolError::EffectsUnsettled("search ownership poisoned".into()))?
+            .map_err(|_| ToolError::EffectsUnsettled("tool ownership poisoned".into()))?
             .iter()
             .filter(|(_, job)| job.abandoned.load(Ordering::Acquire))
             .map(|(id, job)| (*id, Arc::clone(job)))
@@ -98,9 +102,7 @@ impl SearchOperations {
                 Ok(()) => {
                     self.jobs
                         .lock()
-                        .map_err(|_| {
-                            ToolError::EffectsUnsettled("search ownership poisoned".into())
-                        })?
+                        .map_err(|_| ToolError::EffectsUnsettled("tool ownership poisoned".into()))?
                         .remove(&id);
                 }
                 Err(error) => {
@@ -113,13 +115,13 @@ impl SearchOperations {
         failure.map_or(Ok(()), Err)
     }
 }
-impl SearchOperation {
-    pub(super) async fn finish(mut self) -> Result<(), ToolError> {
+impl InvocationOperation {
+    pub(crate) async fn finish(mut self) -> Result<(), ToolError> {
         prove(&self.job).await?;
         self.owner
             .jobs
             .lock()
-            .map_err(|_| ToolError::EffectsUnsettled("search ownership poisoned".into()))?
+            .map_err(|_| ToolError::EffectsUnsettled("tool ownership poisoned".into()))?
             .remove(&self.id);
         self.finished = true;
         Ok(())
@@ -128,7 +130,7 @@ impl SearchOperation {
 async fn prove(job: &Job) -> Result<(), ToolError> {
     if job.failed.load(Ordering::Acquire) {
         return Err(ToolError::EffectsUnsettled(
-            "search backend settlement failed".into(),
+            "tool invocation settlement failed".into(),
         ));
     }
     let result = tokio::time::timeout(
@@ -141,19 +143,19 @@ async fn prove(job: &Job) -> Result<(), ToolError> {
         Ok(Ok(Err(error))) => {
             job.failed.store(true, Ordering::Release);
             Err(ToolError::EffectsUnsettled(format!(
-                "search backend settlement failed: {error}"
+                "tool invocation settlement failed: {error}"
             )))
         }
         Ok(Err(_)) => {
             job.failed.store(true, Ordering::Release);
             Err(ToolError::EffectsUnsettled(
-                "search backend settlement panicked".into(),
+                "tool invocation settlement panicked".into(),
             ))
         }
         Err(_) => {
             job.failed.store(true, Ordering::Release);
             Err(ToolError::EffectsUnsettled(
-                "search backend settlement timed out".into(),
+                "tool invocation settlement timed out".into(),
             ))
         }
     }

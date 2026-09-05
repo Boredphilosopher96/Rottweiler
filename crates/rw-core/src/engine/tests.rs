@@ -36,4 +36,5 @@ mod startup;
 mod subagents;
 mod subscription;
 mod titles;
+mod todos;
 mod tool_order;

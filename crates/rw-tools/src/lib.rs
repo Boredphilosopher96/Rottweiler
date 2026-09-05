@@ -9,10 +9,12 @@ mod bash;
 mod files;
 mod intelligence;
 mod interaction;
+mod invocation_effects;
 mod protocol;
 mod registry;
 mod search;
 mod symbols;
+pub mod todo;
 mod web;
 mod worktree;
 
@@ -45,10 +47,7 @@ pub use intelligence::{
     CodeIntelligenceProvider, DefinitionTool, DiagnosticsInput, DiagnosticsTool, PositionInput,
     ReferencesTool, RenameInput, RenameTool, SandboxedLspSpawner, discover_sandboxed_lsp_servers,
 };
-pub use interaction::{
-    AskUserInput, AskUserTool, QuestionAsker, SubmitPlanTool, TodoAction, TodoInput, TodoItem,
-    TodoStatus, TodoTool,
-};
+pub use interaction::{AskUserInput, AskUserTool, QuestionAsker, SubmitPlanTool};
 pub use protocol::{
     ProtocolChildLauncher, ProtocolChildRequest, ProtocolProcessHandle, ProtocolSandboxPolicy,
     SandboxedProtocolLauncher, SpawnedProtocolChild,
@@ -78,6 +77,10 @@ pub use rw_sandbox::{PreparationExecutable, PreparationFilesystem};
 pub use rw_types::{DiffArtifact, TouchedFile, TouchedFileStatus};
 pub use search::{GlobInput, GlobTool, GrepInput, GrepTool, LsInput, LsTool};
 pub use symbols::{SymbolsInput, SymbolsTool, WorkspaceIndexPool, WorkspaceSymbolIndex};
+pub use todo::{
+    TodoAction, TodoAdmission, TodoInput, TodoItem, TodoStateStore, TodoStatus, TodoTool,
+    prepare_todo_update,
+};
 pub use web::{
     ConfiguredSearchApi, FetchRequest, FetchResponse, WebFetchInput, WebFetchTool, WebFetcher,
     WebSearchInput, WebSearchRequest, WebSearchResponse, WebSearchResult, WebSearchSource,

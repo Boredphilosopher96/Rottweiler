@@ -1,7 +1,7 @@
 #![cfg(test)]
 #![allow(clippy::expect_used)]
-use super::{MAX_SEARCH_OPERATIONS, SearchOperations};
-use crate::{CancellationToken, ToolError, WebSearchRequest, WebSearchResponse, WebSearcher};
+use super::{InvocationEffects, MAX_INVOCATION_OPERATIONS};
+use crate::{CancellationToken, ToolError};
 use async_trait::async_trait;
 use std::sync::{
     Arc,
@@ -15,14 +15,7 @@ struct Backend {
     panic: bool,
 }
 #[async_trait]
-impl WebSearcher for Backend {
-    async fn search(
-        &self,
-        _: WebSearchRequest,
-        _: CancellationToken,
-    ) -> Result<WebSearchResponse, ToolError> {
-        unreachable!("ownership fixture")
-    }
+impl super::InvocationEffect for Backend {
     async fn settle_effects(&self) -> Result<(), ToolError> {
         self.calls.fetch_add(1, Ordering::AcqRel);
         assert!(!self.panic, "injected proof panic");
@@ -38,8 +31,8 @@ fn backend(proof: usize, panic: bool) -> Arc<Backend> {
     })
 }
 #[tokio::test]
-async fn abandoned_search_retains_actual_backend_and_credit_until_settled() {
-    let owner = Arc::new(SearchOperations::default());
+async fn abandoned_invocation_retains_actual_backend_and_credit_until_settled() {
+    let owner = Arc::new(InvocationEffects::default());
     let backend = backend(0, false);
     let retained = Arc::downgrade(&backend);
     let proof = Arc::clone(&backend.proof);
@@ -48,7 +41,10 @@ async fn abandoned_search_retains_actual_backend_and_credit_until_settled() {
     drop(operation);
     assert!(token.is_cancelled());
     assert!(retained.upgrade().is_some());
-    assert_eq!(owner.credits.available_permits(), MAX_SEARCH_OPERATIONS - 1);
+    assert_eq!(
+        owner.credits.available_permits(),
+        MAX_INVOCATION_OPERATIONS - 1
+    );
     let settle_owner = Arc::clone(&owner);
     let settlement = tokio::spawn(async move { settle_owner.settle().await });
     tokio::task::yield_now().await;
@@ -56,11 +52,11 @@ async fn abandoned_search_retains_actual_backend_and_credit_until_settled() {
     proof.add_permits(1);
     settlement.await.expect("join").expect("settlement");
     assert!(retained.upgrade().is_none());
-    assert_eq!(owner.credits.available_permits(), MAX_SEARCH_OPERATIONS);
+    assert_eq!(owner.credits.available_permits(), MAX_INVOCATION_OPERATIONS);
 }
 #[tokio::test]
-async fn search_proof_panic_retains_failed_owner_and_attempts_other_backends() {
-    let owner = Arc::new(SearchOperations::default());
+async fn invocation_proof_panic_retains_failed_owner_and_attempts_other_backends() {
+    let owner = Arc::new(InvocationEffects::default());
     let failed = backend(0, true);
     let other = backend(1, false);
     drop(
@@ -78,7 +74,10 @@ async fn search_proof_panic_retains_failed_owner_and_attempts_other_backends() {
         Err(ToolError::EffectsUnsettled(_))
     ));
     assert_eq!(other.calls.load(Ordering::Acquire), 1);
-    assert_eq!(owner.credits.available_permits(), MAX_SEARCH_OPERATIONS - 1);
+    assert_eq!(
+        owner.credits.available_permits(),
+        MAX_INVOCATION_OPERATIONS - 1
+    );
     assert!(owner.settle().await.is_err());
     assert_eq!(
         failed.calls.load(Ordering::Acquire),
@@ -87,8 +86,8 @@ async fn search_proof_panic_retains_failed_owner_and_attempts_other_backends() {
     );
 }
 #[tokio::test(start_paused = true)]
-async fn search_proof_deadline_keeps_backend_and_admission_charged() {
-    let owner = Arc::new(SearchOperations::default());
+async fn invocation_proof_deadline_keeps_backend_and_admission_charged() {
+    let owner = Arc::new(InvocationEffects::default());
     let backend = backend(0, false);
     let retained = Arc::downgrade(&backend);
     drop(
@@ -101,5 +100,8 @@ async fn search_proof_deadline_keeps_backend_and_admission_charged() {
         Err(ToolError::EffectsUnsettled(_))
     ));
     assert!(retained.upgrade().is_some());
-    assert_eq!(owner.credits.available_permits(), MAX_SEARCH_OPERATIONS - 1);
+    assert_eq!(
+        owner.credits.available_permits(),
+        MAX_INVOCATION_OPERATIONS - 1
+    );
 }

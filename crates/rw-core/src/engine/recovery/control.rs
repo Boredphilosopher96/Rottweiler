@@ -53,6 +53,31 @@ pub struct RecoveryBootstrap {
 }
 
 impl CanonicalHistory {
+    /// Resolve the one currently effective authoritative task snapshot.
+    ///
+    /// # Errors
+    /// Rejects an invalid source selector or malformed task state.
+    pub fn todo_state(&self) -> Result<rw_types::todo::TodoSnapshot, RecoveryError> {
+        let Some(sequence) = self.head.control.todos else {
+            return Ok(Default::default());
+        };
+        let mut reader = ControlReader {
+            source: SourceReader {
+                source: &self.source,
+                events: VecDeque::new(),
+            },
+            bytes: 0,
+            limit: MAX_CONTROL_SOURCE_BYTES,
+        };
+        let PendingEvent::TodoStateCommitted { snapshot } = reader.event(sequence)? else {
+            return Err(RecoveryError::Invalid("task state source selector"));
+        };
+        snapshot
+            .validate()
+            .map_err(|_| RecoveryError::Invalid("task snapshot"))?;
+        Ok(snapshot)
+    }
+
     /// Read the bounded live input required to recover an actor.
     ///
     /// # Errors

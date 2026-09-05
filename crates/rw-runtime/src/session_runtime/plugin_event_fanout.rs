@@ -54,6 +54,11 @@ fn error(error: impl std::fmt::Display) -> AgentLoopError {
 }
 #[async_trait]
 impl SessionEventSink for PluginFanoutEventSink {
+    async fn todo_state(
+        &self,
+    ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
+        self.inner.todo_state().await
+    }
     async fn source_rewind_target(
         &self,
         expected_through: rw_types::SequenceId,

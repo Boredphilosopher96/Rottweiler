@@ -297,6 +297,7 @@ pub struct ToolContext {
     session_id: Option<SessionId>,
     model_alias: Option<String>,
     native_searcher: Option<Arc<dyn crate::WebSearcher>>,
+    todo_store: Option<Arc<dyn crate::TodoStateStore>>,
     result_limit_bytes: usize,
     pub cancellation: CancellationToken,
     pub output: Arc<dyn ToolOutputSink>,
@@ -378,6 +379,7 @@ impl ToolContext {
             session_id: None,
             model_alias: None,
             native_searcher: None,
+            todo_store: None,
             result_limit_bytes: ToolLimits::default().max_result_bytes,
             cancellation: CancellationToken::default(),
             output: Arc::new(NoopOutputSink),
@@ -422,6 +424,17 @@ impl ToolContext {
     #[must_use]
     pub fn model_alias(&self) -> Option<&str> {
         self.model_alias.as_deref()
+    }
+
+    #[must_use]
+    pub fn with_todo_store(mut self, store: Arc<dyn crate::TodoStateStore>) -> Self {
+        self.todo_store = Some(store);
+        self
+    }
+
+    #[must_use]
+    pub fn todo_store(&self) -> Option<&Arc<dyn crate::TodoStateStore>> {
+        self.todo_store.as_ref()
     }
 
     /// Bind the admitted native backend for this turn; callbacks never enter tool JSON.

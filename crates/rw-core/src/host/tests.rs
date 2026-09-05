@@ -444,6 +444,11 @@ impl SessionEventSink for BlockingDescriptorSink {
             "sink has no canonical source index".into(),
         ))
     }
+    async fn todo_state(&self) -> Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no authoritative task state".into(),
+        ))
+    }
     async fn extension_state(
         &self,
         _plugin_id: &str,

@@ -34,7 +34,6 @@ use super::credential_resolution::resolve_websearch_headers_with;
 use super::custom_commands::compose_runtime_commands;
 use super::declarative_hooks::register_declarative_hooks;
 use super::durable_session::DurableEventSink;
-use super::durable_session::TodoRestoreBinding;
 use super::durable_session::append_tool_output;
 use super::durable_session::load_session_events;
 use super::extension_discovery::discover_runtime_extensions;
@@ -107,7 +106,6 @@ use super::subagent_recovery::promote_pending_recovery_record;
 use super::subagent_recovery::recover_subagent_tree;
 use super::subagent_recovery::recovery_workspace_authorized;
 use super::subagent_recovery::repair_incomplete_subagent_lifecycles;
-use super::todo_restore::restore_todo_state;
 use super::tool_composition::BuildToolsInput;
 use super::tool_composition::build_tools;
 use super::tool_composition::command_mode_can_open_proxy;
@@ -254,7 +252,6 @@ use rw_tools::ReadTool;
 use rw_tools::RenameResult;
 use rw_tools::ReplayCommandExecutor;
 use rw_tools::SandboxSupport;
-use rw_tools::TodoTool;
 use rw_tools::Tool;
 use rw_tools::ToolContext;
 use rw_tools::ToolDescriptor;
@@ -596,6 +593,13 @@ struct FailModelChangedSink {
 
 #[async_trait]
 impl SessionEventSink for FailModelChangedSink {
+    async fn todo_state(
+        &self,
+    ) -> std::result::Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no authoritative task state".into(),
+        ))
+    }
     async fn source_rewind_target(
         &self,
         expected_through: rw_types::SequenceId,

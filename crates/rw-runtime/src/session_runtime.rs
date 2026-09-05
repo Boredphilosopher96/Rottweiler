@@ -35,7 +35,6 @@ mod session_metadata;
 mod session_selection;
 mod subagent_recovery;
 mod subagent_runtime;
-mod todo_restore;
 mod tool_composition;
 mod toolchain;
 mod wasm_hooks;
@@ -76,7 +75,6 @@ pub use session_metadata::new_session_id;
 use session_metadata::persist_session_metadata_portable;
 pub(crate) use session_selection::checkpoint_root;
 pub use session_selection::select_interactive_session;
-use todo_restore::restore_todo_state;
 pub use wasm_hooks::locate_wasm_host_executable;
 #[cfg(test)]
 mod tests;

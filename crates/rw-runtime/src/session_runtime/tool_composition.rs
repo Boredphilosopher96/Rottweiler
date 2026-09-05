@@ -225,7 +225,6 @@ pub(super) fn build_tools(input: BuildToolsInput<'_>) -> Result<BuiltTools> {
     }
     Ok(BuiltTools {
         registry: Arc::new(registry),
-        todo,
         command_executor,
         read_only_hook_executor,
         read_only_hook_scratch,
@@ -245,7 +244,6 @@ pub(super) fn command_mode_can_open_proxy(mode: &CommandFixtureMode) -> bool {
 
 pub(super) struct BuiltTools {
     pub(super) registry: Arc<ToolRegistry>,
-    pub(super) todo: Arc<TodoTool>,
     pub(super) command_executor: Arc<dyn CommandExecutor>,
     pub(super) read_only_hook_executor: Arc<dyn CommandExecutor>,
     pub(super) read_only_hook_scratch: PathBuf,

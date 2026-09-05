@@ -1,4 +1,12 @@
-mod search_ownership;
+use crate::invocation_effects::{InvocationEffect, InvocationEffects};
+
+struct SearchEffect(Arc<dyn WebSearcher>);
+#[async_trait]
+impl InvocationEffect for SearchEffect {
+    async fn settle_effects(&self) -> Result<(), ToolError> {
+        self.0.settle_effects().await
+    }
+}
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -266,7 +274,7 @@ impl WebSearcher for ConfiguredSearchApi {
 
 #[derive(Clone)]
 pub struct WebSearchTool {
-    operations: Arc<search_ownership::SearchOperations>,
+    operations: Arc<InvocationEffects>,
     searcher: Arc<dyn WebSearcher>,
     limits: ToolLimits,
 }
@@ -277,7 +285,7 @@ impl WebSearchTool {
         Self {
             searcher,
             limits,
-            operations: Arc::new(search_ownership::SearchOperations::default()),
+            operations: Arc::new(InvocationEffects::default()),
         }
     }
 }
@@ -327,9 +335,10 @@ impl Tool for WebSearchTool {
             .collect::<Vec<_>>();
         let response_domains = allowed_domains.clone();
         let backend = Arc::clone(context.native_searcher().unwrap_or(&self.searcher));
-        let operation = self
-            .operations
-            .begin(Arc::clone(&backend), context.cancellation.clone())?;
+        let operation = self.operations.begin(
+            Arc::new(SearchEffect(Arc::clone(&backend))),
+            context.cancellation.clone(),
+        )?;
         let response = backend
             .search(
                 WebSearchRequest {
