@@ -68,7 +68,7 @@ export interface RuntimeApp {
 }
 
 export interface RuntimeEngineClient {
-  postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandReply | null>
+  postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandReply>
   submitProviderApiKey?(
     sessionId: string,
     provider: string,
@@ -747,13 +747,13 @@ export class TuiEngineRuntime {
     }
   }
 
-  async #postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandOutcome | null> {
+  async #postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandOutcome> {
     const generation = this.#sessionGeneration
     const reply = await this.#client.postCommand(command, signal)
-    if (reply?.type === "read" && generation === this.#sessionGeneration && !signal?.aborted) {
+    if (reply.type === "read" && generation === this.#sessionGeneration && !signal?.aborted) {
       for (const event of reply.events) this.#requiredApp().handleEvent(event)
     }
-    return reply?.outcome ?? null
+    return reply.outcome
   }
 
   async #readHistory(
@@ -770,7 +770,7 @@ export class TuiEngineRuntime {
     const reply = await this.#client.postCommand(command, lifetime)
     lifetime.throwIfAborted()
     if (generation !== this.#sessionGeneration) throw new DOMException("session changed", "AbortError")
-    if (reply?.type !== "read") throw new EngineRuntimeError("history read has no typed reply")
+    if (reply.type !== "read") throw new EngineRuntimeError("history read has no typed reply")
     if (reply.outcome.type === "rejected") throw new EngineRuntimeError(reply.outcome.error.message)
     return reply
   }

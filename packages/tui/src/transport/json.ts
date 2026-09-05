@@ -1,9 +1,13 @@
+import { EngineProtocolError } from "./errors"
 import type { ClientDiagnostics } from "../client-diagnostics"
 /** A response body owns one amortized buffer; fragmented input cannot grow a chunk array. */
 export async function boundedJson(response: Response, maxBytes: number, diagnostics?: ClientDiagnostics): Promise<unknown> {
   const declared = response.headers.get("content-length")
-  if (declared !== null && Number(declared) > maxBytes) throw new Error("reply exceeds its byte limit")
-  if (response.body === null) throw new Error("reply has no body")
+  if (declared !== null && Number(declared) > maxBytes) {
+    await response.body?.cancel()
+    throw new EngineProtocolError("reply exceeds its byte limit")
+  }
+  if (response.body === null) throw new EngineProtocolError("reply has no body")
   const reader = response.body.getReader()
   let buffer = new Uint8Array(Math.min(4096, maxBytes))
   let length = 0
@@ -11,7 +15,7 @@ export async function boundedJson(response: Response, maxBytes: number, diagnost
     for (;;) {
       const result = await reader.read()
       if (result.done) break
-      if (result.value.byteLength > maxBytes - length) throw new Error("reply exceeds its byte limit")
+      if (result.value.byteLength > maxBytes - length) throw new EngineProtocolError("reply exceeds its byte limit")
       const needed = length + result.value.byteLength
       if (needed > buffer.byteLength) {
         const grown = new Uint8Array(Math.min(maxBytes, Math.max(needed, buffer.byteLength * 2)))
@@ -24,6 +28,8 @@ export async function boundedJson(response: Response, maxBytes: number, diagnost
     const startedAt = diagnostics?.start()
     try {
       return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, length)))
+    } catch {
+      throw new EngineProtocolError("reply must contain valid UTF-8 JSON")
     } finally {
       if (startedAt !== undefined) diagnostics?.finish("reply_decode", startedAt, length)
     }

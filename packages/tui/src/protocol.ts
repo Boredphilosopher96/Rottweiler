@@ -27,6 +27,7 @@ export type {
   BudgetUnit,
   ClientRole,
   CommandOutcome,
+  CommandAckMeta,
   CommandReply,
   TranscriptOrdinal,
   TranscriptGeneration,

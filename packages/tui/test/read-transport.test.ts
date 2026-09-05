@@ -76,7 +76,12 @@ describe("byte-owned fragmented JSON decoding", () => {
     expect(cancelled).toBe(true)
   })
   test("rejects declared overflow and malformed UTF-8", async () => {
-    await expect(boundedJson(new Response("{}", { headers: { "content-length": "9999" } }), 64)).rejects.toThrow("byte limit")
+    let cancelled = false
+    const declared = new Response(new ReadableStream<Uint8Array>({
+      cancel() { cancelled = true },
+    }), { headers: { "content-length": "9999" } })
+    await expect(boundedJson(declared, 64)).rejects.toThrow("byte limit")
+    expect(cancelled).toBe(true)
     await expect(boundedJson(new Response(new Uint8Array([34, 0xff, 34])), 64)).rejects.toThrow()
   })
 })

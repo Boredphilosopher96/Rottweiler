@@ -1,3 +1,4 @@
+import { EngineProtocolError, EngineTransportError } from "./errors"
 import type { ClientDiagnostics } from "../client-diagnostics"
 import validateCommandReply from "../../../../protocol/command-reply-validator.js"
 import { CLIENT_COMMAND_EXECUTION, ENGINE_EVENT_DELIVERY, MAX_COMMAND_REPLY_BYTES, PROTOCOL_VERSION } from "../protocol"
@@ -101,7 +102,7 @@ export class EngineHttpSseClient {
   async postCommand(
     command: ClientCommand,
     signal?: AbortSignal,
-  ): Promise<CommandReply | null> {
+  ): Promise<CommandReply> {
     const auth = await this.#ensureClientAuth(signal)
     const authenticatedCommand: ClientCommand = {
       ...command,
@@ -120,29 +121,27 @@ export class EngineHttpSseClient {
       }
       throw new EngineTransportError("engine command rejected", response.status)
     }
-    if (response.status === 204 || response.headers.get("Content-Length") === "0") {
-      return null
-    }
-    const contentType = response.headers.get("Content-Type") ?? ""
-    if (!contentType.toLowerCase().includes("application/json")) {
-      return null
+    const contentType = response.headers.get("Content-Type")?.split(";", 1)[0]?.trim().toLowerCase()
+    if (contentType !== "application/json") {
+      await response.body?.cancel()
+      throw new EngineProtocolError("engine command reply must use application/json")
     }
     const reply: unknown = await boundedJson(response, MAX_COMMAND_REPLY_BYTES, this.#diagnostics)
     const validatedAt = this.#diagnostics?.start()
     try {
       if (!validateCommandReply(reply)) {
-        throw new EngineTransportError("engine returned an invalid command reply")
+        throw new EngineProtocolError("engine returned an invalid command reply")
       }
       const expectedReply = CLIENT_COMMAND_EXECUTION[command.type] === "read" ? "read" : "command"
       if (reply.type !== expectedReply) {
-        throw new EngineTransportError("engine reply class does not match the command")
+        throw new EngineProtocolError("engine reply class does not match the command")
       }
       if (reply.type === "read" && reply.events.some(event =>
         ENGINE_EVENT_DELIVERY[event.type] !== "connection" || !("meta" in event) || event.meta.protocol_version !== PROTOCOL_VERSION
         || !("client_id" in event.meta) || event.meta.client_id !== auth.clientId
         || !("request_id" in event.meta) || event.meta.request_id !== command.meta.request_id
         || ("session_id" in command && "session_id" in event && event.session_id !== command.session_id))) {
-        throw new EngineTransportError("engine read reply contains non-query events")
+        throw new EngineProtocolError("engine read reply contains non-query events")
       }
       return reply
     } finally { if (validatedAt !== undefined) this.#diagnostics?.finish("reply_validation", validatedAt) }
@@ -169,7 +168,7 @@ export class EngineHttpSseClient {
     const value: unknown = await response.json()
     if (!isRecord(value) || value.stored !== true || typeof value.activated !== "boolean" || !Array.isArray(value.warnings)
       || value.warnings.some((warning) => typeof warning !== "string")) {
-      throw new EngineTransportError("engine returned an invalid credential result")
+      throw new EngineProtocolError("engine returned an invalid credential result")
     }
     return { stored: true, activated: value.activated, warnings: value.warnings as string[] }
   }
@@ -240,7 +239,7 @@ export class EngineHttpSseClient {
           ...(lastSeen === null ? { last_seen_sequence: null } : { last_seen_sequence: lastSeen }),
         }
         const reply = await this.postCommand(attach, options.signal)
-        const outcome = reply?.outcome
+        const outcome = reply.outcome
         if (outcome?.type === "rejected") {
           throw new EngineTransportError(`engine rejected session attach: ${outcome.error.message}`)
         }
@@ -269,11 +268,11 @@ export class EngineHttpSseClient {
           throw new EngineTransportError("engine event stream rejected", response.status)
         }
         if (!response.body) {
-          throw new EngineTransportError("engine event stream has no response body")
+          throw new EngineProtocolError("engine event stream has no response body")
         }
         const contentType = response.headers.get("Content-Type")?.toLowerCase() ?? ""
         if (!contentType.startsWith("text/event-stream")) {
-          throw new EngineTransportError("engine event stream has an invalid content type")
+          throw new EngineProtocolError("engine event stream has an invalid content type")
         }
         options.onConnection?.({ phase: "connected", attempt })
 
@@ -410,7 +409,7 @@ export class EngineHttpSseClient {
       typeof value.token !== "string" ||
       value.token.length === 0
     ) {
-      throw new EngineTransportError("engine returned invalid client credentials")
+      throw new EngineProtocolError("engine returned invalid client credentials")
     }
     return { clientId: value.client_id, token: value.token }
   }
@@ -426,23 +425,6 @@ export class EngineHttpSseClient {
     headers.set("Authorization", `Bearer ${auth.token}`)
     headers.set("x-rottweiler-client", auth.clientId)
     return headers
-  }
-}
-
-export class EngineTransportError extends Error {
-  readonly status: number | undefined
-
-  constructor(message: string, status?: number) {
-    super(status === undefined ? message : `${message} (HTTP ${status})`)
-    this.name = "EngineTransportError"
-    this.status = status
-  }
-}
-
-export class EngineProtocolError extends EngineTransportError {
-  constructor(message: string) {
-    super(message)
-    this.name = "EngineProtocolError"
   }
 }
 
