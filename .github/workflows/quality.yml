@@ -33,6 +33,8 @@ jobs:
         run: |
           bun install --cwd packages/plugin-sdk --frozen-lockfile
           bun install --cwd packages/tui --frozen-lockfile
+      - name: Build native sandbox test prerequisite
+        run: python3 scripts/build-test-helper.py --github-env "$GITHUB_ENV"
       - name: Measure workspace coverage
         run: >-
           cargo llvm-cov

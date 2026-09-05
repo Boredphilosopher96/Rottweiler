@@ -151,6 +151,8 @@ jobs:
         run: python3 scripts/ci_evidence.py --gate frozen-install --output ci-results/install.json -- python3 scripts/ci_inventory.py install plugin-host tui --build-dependencies
       - run: python3 scripts/ci_evidence.py --gate fmt --output ci-results/fmt.json -- cargo fmt --all -- --check
       - run: python3 scripts/ci_evidence.py --gate clippy --output ci-results/clippy.json -- cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - name: Build native sandbox test prerequisite
+        run: python3 scripts/ci_evidence.py --gate test-helper-build --output ci-results/test-helper-build.json -- python3 scripts/build-test-helper.py --github-env "$GITHUB_ENV"
       - run: python3 scripts/ci_evidence.py --gate rust-tests --output ci-results/rust-tests.json -- cargo test --locked --workspace --all-features --no-fail-fast
       - run: cargo run --locked --quiet -p xtask -- codegen --check
       - run: python3 scripts/release_contract.py generate-rust --check

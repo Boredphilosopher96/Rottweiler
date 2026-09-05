@@ -40,3 +40,17 @@ class RustPlatformBoundaryTests(unittest.TestCase):
         commands = "\n".join(step.get("run", "") for step in job["steps"])
         self.assertRegex(commands, r"cargo test[^\n]*--workspace")
         self.assertRegex(commands, r"cargo clippy[^\n]*--workspace")
+
+    def test_native_plugin_tests_prepare_the_worker_before_execution(self):
+        for workflow_name, job_name, consumer in [
+            ("ci.yml", "test", "cargo test"),
+            ("quality.yml", "rust-coverage", "cargo llvm-cov"),
+        ]:
+            workflow = yaml.safe_load((ROOT / ".github/workflows" / workflow_name).read_text())
+            commands = [step.get("run", "") for step in workflow["jobs"][job_name]["steps"]]
+            producer = next(index for index, command in enumerate(commands)
+                            if "build-test-helper.py --github-env" in command)
+            consumers = [index for index, command in enumerate(commands) if consumer in command]
+            self.assertTrue(consumers, workflow_name)
+            self.assertTrue(all(producer < index for index in consumers), workflow_name)
+            self.assertIn('"$GITHUB_ENV"', commands[producer])
