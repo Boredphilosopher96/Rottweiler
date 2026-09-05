@@ -266,4 +266,31 @@ mod tests {
             .expect("input");
         assert!(decode(body, lease).await.is_err());
     }
+
+    #[tokio::test]
+    async fn typed_decode_requires_extra_credit_before_constructing_command() {
+        let ingress = CommandIngress::default();
+        let client = ClientId("client".into());
+        let body = hyper::body::Bytes::from_static(br#"{"type":"shutdown_host","meta":{"protocol_version":1,"client_id":"client","request_id":"request"}}"#);
+        let lease = ingress
+            .acquire(&client, "urgent", Some(body.len()))
+            .expect("wire admission");
+        let occupied = ingress
+            .urgent
+            .bytes
+            .clone()
+            .try_acquire_many_owned(
+                u32::try_from(ingress.urgent.bytes.available_permits()).expect("bounded pool"),
+            )
+            .expect("other admitted work");
+        assert!(matches!(
+            decode(body.clone(), lease).await,
+            Err(DecodeError::Busy)
+        ));
+        drop(occupied);
+        let lease = ingress
+            .acquire(&client, "urgent", Some(body.len()))
+            .expect("returned wire credit");
+        assert!(decode(body, lease).await.is_ok());
+    }
 }
