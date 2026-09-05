@@ -98,13 +98,8 @@ fn real_worker_revokes_inherited_bootstrap_effect_authority() {
     let helper = Path::new(env!("CARGO_BIN_EXE_rw-sandbox-helper"))
         .canonicalize()
         .expect("resolve fixture helper");
-    let plan = shell_launch_plan(
-        &policy,
-        &helper,
-        Path::new(interpreter),
-        &child_args,
-    )
-    .expect("worker plan");
+    let plan = shell_launch_plan(&policy, &helper, Path::new(interpreter), &child_args)
+        .expect("worker plan");
     let mut worker = vec![plan.program.to_string_lossy().into_owned()];
     worker.extend(
         plan.args

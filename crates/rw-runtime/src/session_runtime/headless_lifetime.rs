@@ -13,12 +13,14 @@ pub(super) fn own(
     plugins: Arc<PluginActivationBudget>,
     wasm: Arc<rw_ext::WasmWorkerPool>,
     admission: Arc<DurableProviderAdmission>,
+    journal: Arc<crate::journal_service::JournalService>,
 ) -> Arc<RuntimeSessionResources> {
     let retained = (
         actor.clone(),
         plugins.clone(),
         wasm.clone(),
         admission.clone(),
+        journal.clone(),
     );
     RuntimeSessionResources::own_cleanup(retained, async move {
         settle(
@@ -26,6 +28,7 @@ pub(super) fn own(
             async move { plugins.close().map_err(message) },
             async move { wasm.shutdown().await.map_err(message) },
             async move { admission.shutdown().await.map_err(message) },
+            async move { journal.commits.shutdown().await.map_err(message) },
         )
         .await
     })
@@ -36,14 +39,16 @@ async fn settle(
     plugins: impl Future<Output = Proof>,
     wasm: impl Future<Output = Proof>,
     admission: impl Future<Output = Proof>,
+    journal: impl Future<Output = Proof>,
 ) -> Proof {
     let actor = prove("session actor", actor).await;
-    let (plugins, wasm, admission) = tokio::join!(
+    let (plugins, wasm, admission, journal) = tokio::join!(
         prove("plugin activation", plugins),
         prove("WASM workers", wasm),
         prove("provider admission", admission),
+        prove("journal commits", journal),
     );
-    actor.and(plugins).and(wasm).and(admission)
+    actor.and(plugins).and(wasm).and(admission).and(journal)
 }
 
 async fn prove(name: &str, work: impl Future<Output = Proof>) -> Proof {
@@ -76,10 +81,14 @@ mod tests {
                 completed.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
+            async {
+                completed.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
         )
         .await;
         assert_eq!(result, Err(Arc::from("actor proof failed")));
-        assert_eq!(completed.load(Ordering::SeqCst), 2);
+        assert_eq!(completed.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]
@@ -96,6 +105,7 @@ mod tests {
                     finished.store(1, Ordering::SeqCst);
                     Ok(())
                 },
+                check(),
                 check(),
                 check(),
                 check(),

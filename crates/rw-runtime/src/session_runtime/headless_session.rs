@@ -1102,6 +1102,7 @@ pub async fn run(options: RunOptions) -> Result<()> {
         Arc::clone(&plugin_activation),
         Arc::clone(&wasm_workers),
         Arc::clone(&provider_admission),
+        Arc::clone(&journal_service),
     );
     let execution = async {
         if let Some(plugins) = &plugin_runtime {
