@@ -16,6 +16,7 @@ fn m7_parent_spawns_three_parallel_worktree_children_and_keeps_main_clean() {
         first.push(ProviderEvent::ToolCallEnd {
             id,
             arguments: json!({
+                "action": "spawn",
                 "task": format!("inspect isolated branch {index}"),
                 "agent": "explore",
                 "isolation": "worktree"
@@ -98,6 +99,7 @@ fn subagent_control_plane_never_requests_permission_under_strict_policy() {
                 ProviderEvent::ToolCallEnd {
                     id: "spawn-child".to_owned(),
                     arguments: json!({
+                        "action": "spawn",
                         "task": "inspect without invoking tools",
                         "agent": "explore",
                         "isolation": "shared"

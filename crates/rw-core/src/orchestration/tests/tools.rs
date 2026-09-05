@@ -1,7 +1,5 @@
 use super::super::sessions::bind_child_tools;
-use super::super::tools::{
-    NormalizedSpawnAgentAction, SpawnAgentInput, normalize_spawn_agent_input,
-};
+use super::super::tools::SpawnAgentAction;
 use super::*;
 
 #[test]
@@ -146,23 +144,20 @@ async fn spawn_control_never_prompts_and_inherits_selected_live_model_for_builti
 }
 
 #[test]
-fn mixed_action_shapes_are_rejected_by_the_shared_normalizer() {
+fn action_shapes_are_rejected_at_the_input_boundary() {
     for value in [
         json!({"action":"spawn","task":"x","subagent_id":"child"}),
         json!({"action":"follow_up","subagent_id":"child","follow_up":"x","agent":"general"}),
         json!({"action":"cancel","subagent_id":"child","follow_up":"x"}),
         json!({"action":"close","subagent_id":"child","isolation":"worktree"}),
     ] {
-        let input = serde_json::from_value(value).expect("shape parses before normalization");
-        assert!(normalize_spawn_agent_input(input).is_err());
+        assert!(serde_json::from_value::<SpawnAgentAction>(value).is_err());
     }
-    let follow_up: SpawnAgentInput =
-        serde_json::from_value(json!({"subagent_id":"child","follow_up":"continue"}))
-            .expect("legacy follow-up shape");
-    assert!(matches!(
-        normalize_spawn_agent_input(follow_up),
-        Ok(NormalizedSpawnAgentAction::FollowUp { .. })
-    ));
+    let follow_up: SpawnAgentAction = serde_json::from_value(json!({
+        "action":"follow_up", "subagent_id":"child", "follow_up":"continue"
+    }))
+    .expect("explicit follow-up action");
+    assert!(matches!(follow_up, SpawnAgentAction::FollowUp { .. }));
 }
 
 #[tokio::test]
@@ -229,4 +224,46 @@ fn result_schema_round_trips_cost_and_usage() {
     let encoded = serde_json::to_vec(&result).expect("encode");
     let decoded: SubagentResult = serde_json::from_slice(&encoded).expect("decode");
     assert_eq!(decoded, result);
+}
+
+#[test]
+fn missing_subagent_action_is_rejected() {
+    for input in [
+        json!({"task":"inspect","agent":"explore"}),
+        json!({"subagent_id":"child","follow_up":"continue"}),
+    ] {
+        assert!(serde_json::from_value::<SpawnAgentAction>(input).is_err());
+    }
+}
+
+#[test]
+fn every_subagent_schema_variant_requires_its_action_and_own_fields() {
+    let schema =
+        serde_json::to_value(schemars::schema_for!(SpawnAgentAction)).expect("action schema");
+    let variants = schema["oneOf"].as_array().expect("action variants");
+    assert_eq!(variants.len(), 4);
+    for variant in variants {
+        assert!(
+            variant["required"]
+                .as_array()
+                .expect("required fields")
+                .contains(&json!("action"))
+        );
+        assert_eq!(variant["additionalProperties"], json!(false));
+    }
+    let spawn =
+        serde_json::from_value::<SpawnAgentAction>(json!({"action":"spawn","task":"inspect"}))
+            .expect("spawn defaults");
+    assert!(
+        matches!(spawn, SpawnAgentAction::Spawn { agent, isolation: SubagentIsolation::Worktree, .. } if agent == "general")
+    );
+    for action in ["cancel", "close"] {
+        assert!(
+            serde_json::from_value::<SpawnAgentAction>(
+                json!({"action":action,"subagent_id":"child"})
+            )
+            .is_ok()
+        );
+        assert!(serde_json::from_value::<SpawnAgentAction>(json!({"action":action})).is_err());
+    }
 }

@@ -121,7 +121,7 @@ impl SubagentOrchestrator {
     }
 
     /// Rebuilds artifact grants exclusively from committed parent events.
-    /// Legacy text-only child results are ignored.
+    /// A child result without a diff artifact grants no artifact authority.
     ///
     /// # Errors
     ///
