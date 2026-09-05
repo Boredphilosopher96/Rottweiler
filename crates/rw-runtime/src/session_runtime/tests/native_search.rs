@@ -135,7 +135,9 @@ async fn mixed_alias_websearch_schema_is_reachable_for_the_selected_model() {
             .as_ref()
             .is_some_and(|request| request.tools.iter().any(|tool| tool.name == "websearch"))
     );
-    native
+    model
+        .native_web_searcher("cloud", test_provider_invocation())
+        .expect("accounted turn binding")
         .search(
             WebSearchRequest {
                 model_alias: Some("cloud".to_owned()),

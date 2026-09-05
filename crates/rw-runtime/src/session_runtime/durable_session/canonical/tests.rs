@@ -129,7 +129,7 @@ async fn abandoned_canonical_query_retains_worker_until_actual_completion() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn canonical_bootstrap_shares_committed_prefix_and_releases_index_snapshot() {
+async fn canonical_bootstrap_shares_committed_prefix_without_mutating_prior_results() {
     let root = tempfile::tempdir().expect("root");
     let current = sink(root.path());
     commit_session_events(Arc::clone(&current), vec![state_event(0)])
@@ -153,6 +153,6 @@ async fn canonical_bootstrap_shares_committed_prefix_and_releases_index_snapshot
     );
     assert_eq!(
         bootstrap.head.next_sequence, 1,
-        "returned controls do not pin an index transaction"
+        "returned bootstrap remains exact after the next commit"
     );
 }
