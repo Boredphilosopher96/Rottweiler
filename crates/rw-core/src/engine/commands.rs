@@ -4,6 +4,7 @@ use super::*;
 /// Engine-owned slash-command context. Public handlers use this exact type.
 #[derive(Clone, Debug)]
 pub struct SessionCommandContext {
+    pub(super) session_id: SessionId,
     pub(super) running: bool,
     pub(super) queued_messages: usize,
     pub(super) mode: SessionMode,
@@ -17,6 +18,7 @@ pub struct SessionCommandContext {
 impl Default for SessionCommandContext {
     fn default() -> Self {
         Self {
+            session_id: SessionId("command-fixture".to_owned()),
             running: false,
             queued_messages: 0,
             mode: SessionMode::Execute,
@@ -30,6 +32,11 @@ impl Default for SessionCommandContext {
 }
 
 impl SessionCommandContext {
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
     #[must_use]
     pub const fn running(&self) -> bool {
         self.running

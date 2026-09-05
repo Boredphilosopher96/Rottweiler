@@ -2288,6 +2288,7 @@ mod tests {
     async fn built_in_command_copy_is_human_readable_and_contains_no_wire_json() {
         let registry = builtin_command_registry().expect("built-in commands");
         let mut context = SessionCommandContext {
+            session_id: SessionId("command-copy-test".to_owned()),
             running: false,
             queued_messages: 2,
             mode: SessionMode::Execute,

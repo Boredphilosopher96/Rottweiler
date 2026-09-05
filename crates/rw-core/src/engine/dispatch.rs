@@ -2590,6 +2590,7 @@ pub(super) async fn handle_actor_command(
         } => {
             if content.trim_start().starts_with('/') {
                 let mut context = SessionCommandContext {
+                    session_id: config.session_id.clone(),
                     running: state.running.is_some() || state.initialization_running,
                     queued_messages: state.queued.len(),
                     mode: state.mode,

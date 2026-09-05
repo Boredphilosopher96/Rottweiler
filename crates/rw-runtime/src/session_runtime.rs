@@ -1,4 +1,6 @@
 #[cfg(test)]
+use rw_core::MutationCheckpointCoordinator;
+#[cfg(test)]
 use rw_core::MutationCheckpointOutcome;
 #[cfg(test)]
 use rw_tools::MutationScope;
@@ -32,18 +34,16 @@ use rw_core::{
     BudgetLedgerTotals, CachedModelCatalog, ClientId, Config, EngineEvent, EventClock, EventMeta,
     FolderTrustController, FolderTrustOperation, HostError, HostRuntimeService,
     HostSubagentService, MessageDisposition, ModelCatalogError, ModelCatalogSnapshot,
-    ModelCatalogSource, ModelDriver, MutationCheckpointCoordinator,
-    PermissionGate, ProviderFactory, ProviderModelCatalogSource,
-    ProviderNativeWebSearcher, QuestionId, RewindCheckpoint,
-    RuntimeServiceDescriptor, RuntimeServiceKind, SESSION_EVENT_VERSION, SequenceId, SessionActor,
-    SessionActorConfig, SessionCommandAction, SessionCommandContext, SessionCommandOutput,
-    SessionEventReadView, SessionEventSink, SessionReplayLimits, SpawnAgentTool,
-    StartupNotification, SubagentLimits, SubagentMetadataStore, SubagentObserver,
-    SubagentOrchestrator, SubagentReplay, SubagentSessionFactory, SystemEventClock,
-    ToolOutputStream, TurnStatus, Usage, WorktreeSubagentSessionFactory,
-    base_agent_system_turn, builtin_command_registry, builtin_hook_dispatcher,
-    load_instruction_stack, load_nested_instruction_stack, merge_model_catalog_provider,
-    project_session_events, project_session_events_with_modes,
+    ModelCatalogSource, ModelDriver, PermissionGate, ProviderFactory, ProviderModelCatalogSource,
+    ProviderNativeWebSearcher, QuestionId, RuntimeServiceDescriptor, RuntimeServiceKind,
+    SESSION_EVENT_VERSION, SequenceId, SessionActor, SessionActorConfig, SessionCommandAction,
+    SessionCommandContext, SessionCommandOutput, SessionEventReadView, SessionEventSink,
+    SessionReplayLimits, SpawnAgentTool, StartupNotification, SubagentLimits,
+    SubagentMetadataStore, SubagentObserver, SubagentOrchestrator, SubagentReplay,
+    SubagentSessionFactory, SystemEventClock, ToolOutputStream, TurnStatus, Usage,
+    WorktreeSubagentSessionFactory, base_agent_system_turn, builtin_command_registry,
+    builtin_hook_dispatcher, load_instruction_stack, load_nested_instruction_stack,
+    merge_model_catalog_provider, project_session_events, project_session_events_with_modes,
 };
 use rw_ext::{
     CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation, CommandRegistry,
@@ -82,15 +82,15 @@ use rw_tools::{
     CommandSafetyClassifier, ConfiguredSearchApi, DefinitionTool, Diagnostic, DiagnosticsTool,
     EditTool, EgressDecision, EgressPin, EgressPolicy, ExecutionLease, FetchRequest, FetchResponse,
     GlobTool, GrepTool, IntelligenceBackend, IntelligenceResult, Location, LsTool, LspConfig,
-    MultiEditTool, NetworkPolicy as SandboxNetworkPolicy, Position, QuestionAsker,
-    ReadTool, RecordingCommandExecutor, ReferencesTool, RenameResult, RenameTool,
-    ReplayCommandExecutor, SandboxPolicy, SandboxSupport, SandboxedLspSpawner,
-    SubagentProgressEvent, SubmitPlanTool, SupervisedEgressProxy, SymbolsTool, TodoTool,
-    TokioCommandExecutor, Tool, ToolBehavior, ToolContext, ToolDescriptor, ToolError, ToolLimits,
-    ToolOutputChunk, ToolOutputSink, ToolRegistry, ToolResult, UpstreamProxy, WebFetchTool,
-    WebFetcher, WebSearchRequest, WebSearchResponse, WebSearchTool, WebSearcher,
-    WorkspaceSymbolIndex, WorkspaceUriMapper, WorktreeIsolation, WorktreeLeaseRecord,
-    WorktreeLimits, WriteTool, discover_sandboxed_lsp_servers, probe_policy_egress,
+    MultiEditTool, NetworkPolicy as SandboxNetworkPolicy, Position, QuestionAsker, ReadTool,
+    RecordingCommandExecutor, ReferencesTool, RenameResult, RenameTool, ReplayCommandExecutor,
+    SandboxPolicy, SandboxSupport, SandboxedLspSpawner, SubagentProgressEvent, SubmitPlanTool,
+    SupervisedEgressProxy, SymbolsTool, TodoTool, TokioCommandExecutor, Tool, ToolBehavior,
+    ToolContext, ToolDescriptor, ToolError, ToolLimits, ToolOutputChunk, ToolOutputSink,
+    ToolRegistry, ToolResult, UpstreamProxy, WebFetchTool, WebFetcher, WebSearchRequest,
+    WebSearchResponse, WebSearchTool, WebSearcher, WorkspaceSymbolIndex, WorkspaceUriMapper,
+    WorktreeIsolation, WorktreeLeaseRecord, WorktreeLimits, WriteTool,
+    discover_sandboxed_lsp_servers, probe_policy_egress,
 };
 use rw_types::{
     ApprovalBinding, ApprovalDecision, Block, Role, SessionId, ToolCapability, ToolOutput,
@@ -17983,7 +17983,12 @@ mod tests {
         commit_checkpoint_root_generation(&parent_checkpoint_root, 2).expect("commit later root");
         std::fs::write(workspace.join("tracked.txt"), "base\n").expect("baseline file");
         parent_stores[0]
-            .checkpoint_known(&parent.0, 1, [PathBuf::from("tracked.txt")], &mut rw_store::checkpoint::CheckpointOperation::default())
+            .checkpoint_known(
+                &parent.0,
+                1,
+                [PathBuf::from("tracked.txt")],
+                &mut rw_store::checkpoint::CheckpointOperation::default(),
+            )
             .expect("parent checkpoint");
         std::fs::write(workspace.join("tracked.txt"), "parent change\n").expect("parent mutation");
         assert_eq!(
@@ -18158,7 +18163,12 @@ mod tests {
                 .is_empty()
         }));
         child_stores[0]
-            .checkpoint_known(&child.0, 3, [PathBuf::from("tracked.txt")], &mut rw_store::checkpoint::CheckpointOperation::default())
+            .checkpoint_known(
+                &child.0,
+                3,
+                [PathBuf::from("tracked.txt")],
+                &mut rw_store::checkpoint::CheckpointOperation::default(),
+            )
             .expect("child checkpoint");
         std::fs::write(workspace.join("tracked.txt"), "child change\n").expect("child edit");
         assert_eq!(
@@ -18684,6 +18694,26 @@ mod tests {
         ));
     }
 
+    fn checkpoint_two_edits(
+        store: &CheckpointStore,
+        session: &str,
+        workspace: &Path,
+        prefix: &str,
+    ) {
+        std::fs::write(workspace.join("file.txt"), format!("{prefix}-zero")).expect("reset file");
+        for (turn, suffix) in [(10, "one"), (11, "two")] {
+            store
+                .checkpoint_known(
+                    session,
+                    turn,
+                    [PathBuf::from("file.txt")],
+                    &mut rw_store::checkpoint::CheckpointOperation::default(),
+                )
+                .expect("checkpoint");
+            std::fs::write(workspace.join("file.txt"), format!("{prefix}-{suffix}")).expect("edit");
+        }
+    }
+
     #[test]
     fn per_session_checkpoint_namespaces_isolate_pending_recovery() {
         let root = tempdir().expect("root");
@@ -18702,45 +18732,48 @@ mod tests {
         let store_a = CheckpointStore::open(&root_a, &workspace_a).expect("store a");
         let store_b = CheckpointStore::open(&root_b, &workspace_b).expect("store b");
         let pending_a = store_a
-            .begin_opaque_mutation(session_a, 1, &mut rw_store::checkpoint::CheckpointOperation::default())
+            .begin_opaque_mutation(
+                session_a,
+                1,
+                &mut rw_store::checkpoint::CheckpointOperation::default(),
+            )
             .expect("pending a");
         let pending_b = store_b
-            .begin_opaque_mutation(session_b, 1, &mut rw_store::checkpoint::CheckpointOperation::default())
+            .begin_opaque_mutation(
+                session_b,
+                1,
+                &mut rw_store::checkpoint::CheckpointOperation::default(),
+            )
             .expect("pending b");
         std::fs::write(workspace_a.join("file.txt"), "a-after").expect("mutate a");
         std::fs::write(workspace_b.join("file.txt"), "b-after").expect("mutate b");
 
-        let recovered = store_a.recover_opaque_mutations( &mut rw_store::checkpoint::CheckpointOperation::default()).expect("recover a only");
+        let recovered = store_a
+            .recover_opaque_mutations(&mut rw_store::checkpoint::CheckpointOperation::default())
+            .expect("recover a only");
         assert_eq!(recovered, 1);
         assert!(
-            store_a.finish_opaque_mutation(&pending_a, &mut rw_store::checkpoint::CheckpointOperation::default()).is_err(),
+            store_a
+                .finish_opaque_mutation(
+                    &pending_a,
+                    &mut rw_store::checkpoint::CheckpointOperation::default()
+                )
+                .is_err(),
             "a marker was consumed by its recovery"
         );
         store_b
-            .finish_opaque_mutation(&pending_b, &mut rw_store::checkpoint::CheckpointOperation::default())
+            .finish_opaque_mutation(
+                &pending_b,
+                &mut rw_store::checkpoint::CheckpointOperation::default(),
+            )
             .expect("b marker must remain untouched");
         assert_eq!(
             std::fs::read_to_string(workspace_b.join("file.txt")).expect("b file"),
             "b-after"
         );
 
-        for (store, session, workspace, prefix) in [
-            (&store_a, session_a, &workspace_a, "a"),
-            (&store_b, session_b, &workspace_b, "b"),
-        ] {
-            std::fs::write(workspace.join("file.txt"), format!("{prefix}-zero"))
-                .expect("reset file");
-            store
-                .checkpoint_known(session, 10, [PathBuf::from("file.txt")], &mut rw_store::checkpoint::CheckpointOperation::default())
-                .expect("turn one checkpoint");
-            std::fs::write(workspace.join("file.txt"), format!("{prefix}-one"))
-                .expect("turn one edit");
-            store
-                .checkpoint_known(session, 11, [PathBuf::from("file.txt")], &mut rw_store::checkpoint::CheckpointOperation::default())
-                .expect("turn two checkpoint");
-            std::fs::write(workspace.join("file.txt"), format!("{prefix}-two"))
-                .expect("turn two edit");
-        }
+        checkpoint_two_edits(&store_a, session_a, &workspace_a, "a");
+        checkpoint_two_edits(&store_b, session_b, &workspace_b, "b");
         let rewind_a = store_a
             .prepare_rewind(session_a, 9, "rewind-a-zero")
             .expect("stage rewind a");
@@ -19023,7 +19056,12 @@ mod tests {
         for (store, workspace) in stores.iter().zip([&first, &second]) {
             std::fs::write(workspace.join("state.txt"), b"before").expect("initial state");
             store
-                .checkpoint_known(&session.0, 1, [PathBuf::from("state.txt")], &mut rw_store::checkpoint::CheckpointOperation::default())
+                .checkpoint_known(
+                    &session.0,
+                    1,
+                    [PathBuf::from("state.txt")],
+                    &mut rw_store::checkpoint::CheckpointOperation::default(),
+                )
                 .expect("checkpoint");
             std::fs::write(workspace.join("state.txt"), b"after").expect("mutated state");
         }
@@ -19084,7 +19122,12 @@ mod tests {
         for (store, workspace) in stores.iter().zip([&first, &second]) {
             std::fs::write(workspace.join("state.txt"), b"before").expect("initial state");
             store
-                .checkpoint_known(&session.0, 1, [PathBuf::from("state.txt")], &mut rw_store::checkpoint::CheckpointOperation::default())
+                .checkpoint_known(
+                    &session.0,
+                    1,
+                    [PathBuf::from("state.txt")],
+                    &mut rw_store::checkpoint::CheckpointOperation::default(),
+                )
                 .expect("checkpoint");
             std::fs::write(workspace.join("state.txt"), b"after").expect("mutated state");
         }
@@ -19150,7 +19193,12 @@ mod tests {
         for (store, workspace) in stores.iter().zip([&first, &second]) {
             std::fs::write(workspace.join("state.txt"), b"before").expect("initial state");
             store
-                .checkpoint_known(&session.0, 1, [PathBuf::from("state.txt")], &mut rw_store::checkpoint::CheckpointOperation::default())
+                .checkpoint_known(
+                    &session.0,
+                    1,
+                    [PathBuf::from("state.txt")],
+                    &mut rw_store::checkpoint::CheckpointOperation::default(),
+                )
                 .expect("checkpoint");
             std::fs::write(workspace.join("state.txt"), b"after").expect("mutated state");
         }
@@ -19207,7 +19255,12 @@ mod tests {
         for (store, workspace) in stores.iter().zip([&first, &second]) {
             std::fs::write(workspace.join("state.txt"), b"before").expect("initial state");
             store
-                .checkpoint_known(&session.0, 1, [PathBuf::from("state.txt")], &mut rw_store::checkpoint::CheckpointOperation::default())
+                .checkpoint_known(
+                    &session.0,
+                    1,
+                    [PathBuf::from("state.txt")],
+                    &mut rw_store::checkpoint::CheckpointOperation::default(),
+                )
                 .expect("checkpoint");
             std::fs::write(workspace.join("state.txt"), b"after").expect("mutated state");
         }
