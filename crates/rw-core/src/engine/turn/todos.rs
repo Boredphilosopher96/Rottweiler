@@ -134,7 +134,9 @@ impl TodoStateStore for ActorTodoStore {
         admission: TodoAdmission,
         cancellation: CancellationToken,
     ) -> Result<ToolResult, ToolError> {
-        cancellation.check()?;
+        if cancellation.is_cancelled() {
+            return Err(ToolError::Cancelled);
+        }
         let credit = Arc::clone(&self.credits)
             .try_acquire_owned()
             .map_err(|_| ToolError::EffectsUnsettled("task request admission exhausted".into()))?;
@@ -240,8 +242,8 @@ pub(in crate::engine) async fn handle(
         );
         return Ok(());
     }
-    if let Err(error) = request.cancellation.check() {
-        request.finish(Err(error), None);
+    if request.cancellation.is_cancelled() {
+        request.finish(Err(ToolError::Cancelled), None);
         return Ok(());
     }
     let current = match config.event_sink.todo_state().await {
@@ -262,8 +264,8 @@ pub(in crate::engine) async fn handle(
             return Ok(());
         }
     };
-    if let Err(error) = request.cancellation.check() {
-        request.finish(Err(error), None);
+    if request.cancellation.is_cancelled() {
+        request.finish(Err(ToolError::Cancelled), None);
         return Ok(());
     }
     if changed

@@ -355,6 +355,10 @@ struct ClosingJournal {
 }
 #[async_trait]
 impl crate::SessionEventSink for ClosingJournal {
+    async fn todo_state(&self) -> Result<rw_types::todo::TodoSnapshot, crate::AgentLoopError> {
+        self.inner.todo_state().await
+    }
+
     async fn source_rewind_target(
         &self,
         expected_through: rw_types::SequenceId,
