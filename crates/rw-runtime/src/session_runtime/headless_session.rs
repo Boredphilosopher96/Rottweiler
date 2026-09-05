@@ -24,7 +24,6 @@ use super::native_model_generations::{
     NativeModelGeneration, NativeModelGenerations, NativeModelRecipe, NativeProviderRecipe,
 };
 use super::native_search::AliasAwareWebSearchModel;
-use super::native_search::provider_model_for_alias;
 use super::native_search::provider_native_search_available;
 use super::nested_instructions::NestedInstructionsModel;
 use super::nested_instructions::register_nested_instruction_guard;
@@ -79,7 +78,6 @@ use rw_core::ActorSubagentSessionFactory;
 use rw_core::ModelDriver;
 use rw_core::PermissionGate;
 use rw_core::ProviderFactory;
-use rw_core::ProviderNativeWebSearchFactory;
 use rw_core::SessionActor;
 use rw_core::SessionActorConfig;
 use rw_core::SessionEventSink;
@@ -723,17 +721,6 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
                 .await
                 .map_err(|error| miette!("replay provider could not load: {error}"))?,
         );
-        if let Some(searcher) = &built_tools.websearch {
-            let provider = Arc::clone(&replay);
-            let config = loaded_config.config.clone();
-            let provider_name = options.replay_provider.clone();
-            searcher.bind_native_resolver(Some(Arc::new(move |alias| {
-                let model = provider_model_for_alias(&config, alias, &provider_name)?;
-                ProviderNativeWebSearchFactory::single(Arc::clone(&provider), model)
-                    .ok()
-                    .flatten()
-            })));
-        }
         (
             Arc::new(
                 ProviderModel::new(
@@ -741,6 +728,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
                     loaded_config.config.compaction.clone(),
                     loaded_config.config.budget.clone(),
                 )
+                .and_then(|model| model.with_native_search_routes(&loaded_config.config))
                 .map_err(display_agent_error)?,
             ),
             fixture_redactor.clone(),
@@ -773,7 +761,6 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
             workspace.join(".rottweiler/config.toml"),
             persisted_model_alias.clone(),
             redactor.clone(),
-            built_tools.websearch.clone(),
         );
         (model, redactor)
     };
@@ -871,10 +858,6 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
         background_redactor: root_background_redactor,
         background_manager: Arc::clone(&built_tools.background),
         native_websearch_possible,
-        native_websearch_resolver: built_tools
-            .websearch
-            .as_ref()
-            .and_then(|searcher| searcher.native_resolver()),
         trust_store_path: storage_root.join("trust.json"),
         toolchain_config: loaded_config.config.toolchain.clone(),
         toolchain_runtime,

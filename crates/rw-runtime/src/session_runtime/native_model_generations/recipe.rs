@@ -58,7 +58,6 @@ impl NativeModelRecipe {
                         primary.join(".rottweiler/config.toml"),
                         input.alias,
                         self.redactor.clone(),
-                        input.websearch.clone(),
                     );
                     let catalog: Arc<dyn ModelCatalogSource> =
                         Arc::new(PersistingHostedCatalogSource {

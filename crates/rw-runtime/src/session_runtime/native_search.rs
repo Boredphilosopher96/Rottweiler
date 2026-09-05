@@ -12,7 +12,6 @@ use rw_tools::WebSearchResponse;
 use rw_tools::WebSearcher;
 use rw_types::config::ThinkingLevel;
 use std::sync::Arc;
-use std::sync::RwLock;
 use url::Url;
 
 pub(super) fn provider_native_search_available(config: &Config) -> bool {
@@ -61,57 +60,13 @@ pub(super) fn openai_native_endpoint(endpoint: &str) -> bool {
         == Some("api.openai.com")
 }
 
-pub(super) type NativeWebSearchResolver =
-    dyn Fn(&str) -> Option<rw_core::ProviderNativeWebSearchFactory> + Send + Sync + 'static;
-
 pub(crate) struct RuntimeWebSearcher {
-    pub(super) native: RwLock<Option<Arc<NativeWebSearchResolver>>>,
     pub(super) configured: Option<Arc<dyn WebSearcher>>,
 }
 
 impl RuntimeWebSearcher {
     pub(super) fn new(configured: Option<Arc<dyn WebSearcher>>) -> Self {
-        Self {
-            native: RwLock::new(None),
-            configured,
-        }
-    }
-
-    pub(super) fn bind_native_resolver(&self, native: Option<Arc<NativeWebSearchResolver>>) {
-        *self
-            .native
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = native;
-    }
-
-    pub(super) fn native_resolver(&self) -> Option<Arc<NativeWebSearchResolver>> {
-        self.native
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-
-    pub(super) fn bind(
-        &self,
-        alias: &str,
-        invocation: rw_core::provider_admission::ProviderInvocation,
-    ) -> Option<Arc<dyn WebSearcher>> {
-        let native = self
-            .native_resolver()
-            .and_then(|resolve| resolve(alias))?
-            .bind(invocation);
-        Some(Arc::new(BoundWebSearcher {
-            native,
-            configured: self.configured.clone(),
-        }))
-    }
-
-    pub(super) fn is_available_for_alias(&self, alias: &str) -> bool {
-        self.configured.is_some()
-            || self
-                .native_resolver()
-                .and_then(|resolve| resolve(alias))
-                .is_some()
+        Self { configured }
     }
 }
 
@@ -142,7 +97,14 @@ impl ModelDriver for AliasAwareWebSearchModel {
         alias: &str,
         invocation: rw_core::provider_admission::ProviderInvocation,
     ) -> Option<Arc<dyn WebSearcher>> {
-        self.searcher.bind(alias, invocation)
+        self.inner
+            .native_web_searcher(alias, invocation)
+            .map(|native| {
+                Arc::new(BoundWebSearcher {
+                    native,
+                    configured: self.searcher.configured.clone(),
+                }) as Arc<dyn WebSearcher>
+            })
     }
 
     async fn settle_effects(&self) -> std::result::Result<(), rw_core::AgentLoopError> {
@@ -155,7 +117,12 @@ impl ModelDriver for AliasAwareWebSearchModel {
         mut request: ProviderRequest,
         invocation: rw_core::provider_admission::ProviderInvocation,
     ) -> std::result::Result<BoxEventStream, AgentLoopError> {
-        if !self.searcher.is_available_for_alias(alias) {
+        if self.searcher.configured.is_none()
+            && self
+                .inner
+                .native_web_searcher(alias, invocation.clone())
+                .is_none()
+        {
             request.tools.retain(|tool| tool.name != "websearch");
             request.cache_hint = request.cache_hint.and_then(|mut hint| {
                 hint.tools_in_prefix = !request.tools.is_empty();
@@ -172,7 +139,12 @@ impl ModelDriver for AliasAwareWebSearchModel {
         mut request: ProviderRequest,
         invocation: rw_core::provider_admission::ProviderInvocation,
     ) -> std::result::Result<BoxEventStream, AgentLoopError> {
-        if !self.searcher.is_available_for_alias(alias) {
+        if self.searcher.configured.is_none()
+            && self
+                .inner
+                .native_web_searcher(alias, invocation.clone())
+                .is_none()
+        {
             request.tools.retain(|tool| tool.name != "websearch");
             request.cache_hint = request.cache_hint.and_then(|mut hint| {
                 hint.tools_in_prefix = !request.tools.is_empty();

@@ -26,18 +26,13 @@ use super::test_provider_invocation;
 
 #[tokio::test]
 async fn runtime_websearch_resolves_native_backend_for_each_turn_alias() {
-    let aliases = Arc::new(Mutex::new(Vec::new()));
-    let seen = Arc::clone(&aliases);
-    let searcher = RuntimeWebSearcher::new(None);
-    searcher.bind_native_resolver(Some(Arc::new(move |alias| {
-        seen.lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(alias.to_owned());
-        Some(native_factory())
-    })));
+    let model = native_model(
+        &["fast", "slow", "command-override"],
+        Arc::new(Mutex::new(None)),
+    );
     for alias in ["fast", "slow", "command-override"] {
-        searcher
-            .bind(alias, test_provider_invocation())
+        model
+            .native_web_searcher(alias, test_provider_invocation())
             .expect("accounted binding")
             .search(
                 WebSearchRequest {
@@ -52,13 +47,6 @@ async fn runtime_websearch_resolves_native_backend_for_each_turn_alias() {
             .await
             .expect("native search");
     }
-    assert_eq!(
-        aliases
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_slice(),
-        ["fast", "slow", "command-override"]
-    );
 }
 
 #[tokio::test]
@@ -85,14 +73,9 @@ async fn mixed_alias_websearch_schema_is_reachable_for_the_selected_model() {
     assert!(provider_native_search_available(&config));
 
     let native = Arc::new(RuntimeWebSearcher::new(None));
-    native.bind_native_resolver(Some(Arc::new(|alias| {
-        (alias == "cloud").then(native_factory)
-    })));
     let captured = Arc::new(Mutex::new(None));
     let model = AliasAwareWebSearchModel::wrap(
-        Arc::new(CapturingModel {
-            request: Arc::clone(&captured),
-        }),
+        native_model(&["cloud"], Arc::clone(&captured)),
         Some(&native),
     );
     let request = || ProviderRequest {
@@ -211,7 +194,6 @@ fn unsupported_alias_prompt_shape_omits_dead_websearch_schema() {
         journal: Arc::clone(&journal),
     });
     let searcher = Arc::new(RuntimeWebSearcher::new(None));
-    searcher.bind_native_resolver(Some(Arc::new(|_| None)));
     let model = AliasAwareWebSearchModel::wrap(recording, Some(&searcher));
     let request = ProviderRequest {
         model: "local".to_owned(),
@@ -317,5 +299,68 @@ impl rw_providers::Provider for NativeProvider {
                 reason: rw_providers::FinishReason::Stop,
             },
         )])))
+    }
+}
+
+struct NativeCapturingModel {
+    inner: CapturingModel,
+    aliases: Vec<String>,
+}
+fn native_model(
+    aliases: &[&str],
+    captured: Arc<Mutex<Option<ProviderRequest>>>,
+) -> Arc<dyn ModelDriver> {
+    Arc::new(NativeCapturingModel {
+        inner: CapturingModel { request: captured },
+        aliases: aliases.iter().map(|alias| (*alias).to_owned()).collect(),
+    })
+}
+#[async_trait::async_trait]
+impl ModelDriver for NativeCapturingModel {
+    async fn settle_effects(&self) -> Result<(), rw_core::AgentLoopError> {
+        self.inner.settle_effects().await
+    }
+    fn native_web_searcher(
+        &self,
+        alias: &str,
+        invocation: rw_core::provider_admission::ProviderInvocation,
+    ) -> Option<Arc<dyn rw_tools::WebSearcher>> {
+        self.aliases
+            .iter()
+            .any(|candidate| candidate == alias)
+            .then(|| native_factory().bind(invocation))
+    }
+    fn stream(
+        &self,
+        alias: &str,
+        request: ProviderRequest,
+        invocation: rw_core::provider_admission::ProviderInvocation,
+    ) -> Result<rw_providers::BoxEventStream, rw_core::AgentLoopError> {
+        self.inner.stream(alias, request, invocation)
+    }
+}
+
+#[test]
+fn native_search_belongs_to_the_captured_model_generation() {
+    let shared_tools = Arc::new(RuntimeWebSearcher::new(None));
+    let first = AliasAwareWebSearchModel::wrap(
+        native_model(&["first"], Arc::new(Mutex::new(None))),
+        Some(&shared_tools),
+    );
+    let second = AliasAwareWebSearchModel::wrap(
+        native_model(&["second"], Arc::new(Mutex::new(None))),
+        Some(&shared_tools),
+    );
+    for (model, supported, rejected) in [(first, "first", "second"), (second, "second", "first")] {
+        assert!(
+            model
+                .native_web_searcher(supported, test_provider_invocation())
+                .is_some()
+        );
+        assert!(
+            model
+                .native_web_searcher(rejected, test_provider_invocation())
+                .is_none()
+        );
     }
 }

@@ -22,6 +22,7 @@ pub(super) fn configured_session_thinking(config: &Config, model: &str) -> Think
 pub(super) struct ProviderModel {
     pub(super) operations: rw_providers::ProviderRouter,
     pub(super) provider: Arc<dyn Provider>,
+    native_search: BTreeMap<String, rw_core::ProviderNativeWebSearchFactory>,
     pub(super) model_metadata: Option<rw_core::ProviderModelMetadata>,
     pub(super) compaction: rw_core::CompactionConfig,
     pub(super) budget: rw_core::BudgetConfig,
@@ -81,14 +82,44 @@ impl ProviderModel {
             .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?,
             provider,
             model_metadata,
+            native_search: BTreeMap::new(),
             compaction,
             budget,
         })
+    }
+    pub(super) fn with_native_search_routes(
+        mut self,
+        config: &Config,
+    ) -> Result<Self, AgentLoopError> {
+        for alias in config.models.aliases.keys() {
+            let Some(model) =
+                super::native_search::provider_model_for_alias(config, alias, self.provider.name())
+            else {
+                continue;
+            };
+            if let Some(factory) =
+                rw_core::ProviderNativeWebSearchFactory::single(Arc::clone(&self.provider), model)
+                    .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?
+            {
+                self.native_search.insert(alias.clone(), factory);
+            }
+        }
+        Ok(self)
     }
 }
 
 #[async_trait]
 impl ModelDriver for ProviderModel {
+    fn native_web_searcher(
+        &self,
+        alias: &str,
+        invocation: rw_core::provider_admission::ProviderInvocation,
+    ) -> Option<Arc<dyn rw_tools::WebSearcher>> {
+        self.native_search
+            .get(alias)
+            .map(|factory| factory.bind(invocation))
+    }
+
     fn stream(
         &self,
         _alias: &str,

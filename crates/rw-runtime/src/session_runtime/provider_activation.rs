@@ -1,5 +1,4 @@
 use super::model_selection::RecomposableHostedModel;
-use super::native_search::RuntimeWebSearcher;
 use super::provider_adapter::UnavailableHostedModel;
 use super::provider_catalog::ReloadingHostedCatalogSource;
 use super::provider_catalog::merge_reloaded_provider_config;
@@ -150,7 +149,6 @@ pub(super) fn live_provider_activator(
     user_config_path: PathBuf,
     project_config_path: PathBuf,
     redactor: FixtureRedactor,
-    searcher: Option<Arc<RuntimeWebSearcher>>,
 ) -> Arc<HostedProviderActivator> {
     Arc::new(move |provider| {
         let loaded = ConfigLoader::new(user_config_path.clone(), project_config_path.clone())
@@ -176,21 +174,11 @@ pub(super) fn live_provider_activator(
         let pre_commit: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
             pre_redactor.merge_from(&pre_runtime.fixture_redactor());
         });
-        let post_runtime = Arc::clone(&runtime);
-        let post_searcher = searcher.clone();
-        let post_commit: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-            if let Some(searcher) = &post_searcher {
-                let runtime = Arc::clone(&post_runtime);
-                searcher.bind_native_resolver(Some(Arc::new(move |alias| {
-                    runtime.native_web_search_factory(alias)
-                })));
-            }
-        });
         let model: Arc<dyn ModelDriver> = runtime;
         Ok(ActivatedHostedProvider {
             replacement_model: model,
             pre_commit: Some(pre_commit),
-            post_commit: Some(post_commit),
+            post_commit: None,
         })
     })
 }
@@ -202,7 +190,6 @@ pub(super) fn lazy_live_provider_model(
     project_config_path: PathBuf,
     persisted_model_alias: String,
     redactor: FixtureRedactor,
-    searcher: Option<Arc<RuntimeWebSearcher>>,
 ) -> Arc<RecomposableHostedModel> {
     let fallback_catalog: Arc<dyn ModelCatalogSource> = Arc::new(ReloadingHostedCatalogSource {
         factory: factory.clone(),
@@ -222,7 +209,6 @@ pub(super) fn lazy_live_provider_model(
     let initialize_user_config_path = user_config_path.clone();
     let initialize_project_config_path = project_config_path.clone();
     let initialize_redactor = redactor.clone();
-    let initialize_searcher = searcher.clone();
     let initialize: Arc<HostedRuntimeInitializer> = Arc::new(move |alias| {
         let loaded = ConfigLoader::new(
             initialize_user_config_path.clone(),
@@ -247,21 +233,11 @@ pub(super) fn lazy_live_provider_model(
         let pre_commit: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
             pre_redactor.merge_from(&pre_runtime.fixture_redactor());
         });
-        let post_runtime = Arc::clone(&runtime);
-        let post_searcher = initialize_searcher.clone();
-        let post_commit: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-            if let Some(searcher) = &post_searcher {
-                let runtime = Arc::clone(&post_runtime);
-                searcher.bind_native_resolver(Some(Arc::new(move |alias| {
-                    runtime.native_web_search_factory(alias)
-                })));
-            }
-        });
         let model: Arc<dyn ModelDriver> = runtime;
         Ok(ActivatedHostedProvider {
             replacement_model: model,
             pre_commit: Some(pre_commit),
-            post_commit: Some(post_commit),
+            post_commit: None,
         })
     });
 
@@ -271,7 +247,6 @@ pub(super) fn lazy_live_provider_model(
         user_config_path,
         project_config_path,
         redactor,
-        searcher,
     );
 
     Arc::new(RecomposableHostedModel::new_lazy(

@@ -16,7 +16,6 @@ use super::extension_discovery::skill_index_turn;
 use super::folder_trust::RuntimeFolderTrustController;
 use super::initial_memory::fresh_initial_session_context;
 use super::native_model_generations::ChildNativeModel;
-use super::native_search::NativeWebSearchResolver;
 use super::nested_instructions::register_nested_instruction_guard;
 use super::runtime_options::DEFAULT_DOOM_LOOP_LIMIT;
 use super::runtime_options::DEFAULT_EVENT_CAPACITY;
@@ -116,7 +115,6 @@ pub(super) struct RuntimeWorkspaceRootController {
     pub(super) background_redactor: Arc<dyn CommandFixtureRedactor>,
     pub(super) background_manager: Arc<BackgroundProcessManager>,
     pub(super) native_websearch_possible: bool,
-    pub(super) native_websearch_resolver: Option<Arc<NativeWebSearchResolver>>,
     pub(super) trust_store_path: PathBuf,
     pub(super) toolchain_config: ToolchainConfig,
     pub(super) toolchain_runtime: Arc<ToolchainRuntime>,
@@ -205,9 +203,6 @@ impl RuntimeWorkspaceRootController {
             background_manager: Some(Arc::clone(&self.background_manager)),
         })
         .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
-        if let Some(searcher) = &built.websearch {
-            searcher.bind_native_resolver(self.native_websearch_resolver.clone());
-        }
         let toolchain_runtime = Arc::new(ToolchainRuntime::new_with_read_only(
             Arc::clone(&built.command_executor),
             Arc::clone(&built.read_only_hook_executor),
@@ -320,7 +315,6 @@ impl RuntimeWorkspaceRootController {
             background_redactor: Arc::clone(&self.background_redactor),
             background_manager: Arc::clone(&self.background_manager),
             native_websearch_possible: self.native_websearch_possible,
-            native_websearch_resolver: self.native_websearch_resolver.clone(),
             trust_store_path: self.trust_store_path.clone(),
             toolchain_config: self.toolchain_config.clone(),
             toolchain_runtime,
@@ -415,9 +409,6 @@ impl RuntimeWorkspaceRootController {
                 "workspace tool generation could not prepare".to_owned(),
             )
         })?;
-        if let Some(searcher) = &built.websearch {
-            searcher.bind_native_resolver(self.native_websearch_resolver.clone());
-        }
         Ok(built)
     }
 

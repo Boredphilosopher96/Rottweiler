@@ -297,7 +297,6 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
             BackgroundProcessLimits::default(),
         )),
         native_websearch_possible: false,
-        native_websearch_resolver: None,
         trust_store_path: private.join("trust.json"),
         toolchain_config: ToolchainConfig::default(),
         toolchain_runtime: Arc::new(ToolchainRuntime::new(
@@ -661,7 +660,6 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
             BackgroundProcessLimits::default(),
         )),
         native_websearch_possible: false,
-        native_websearch_resolver: None,
         trust_store_path: private.join("trust.json"),
         toolchain_config: ToolchainConfig::default(),
         toolchain_runtime: Arc::new(ToolchainRuntime::new(

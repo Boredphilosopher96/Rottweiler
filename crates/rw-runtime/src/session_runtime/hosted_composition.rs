@@ -530,7 +530,6 @@ pub(crate) async fn compose_hosted_actor(
                 project_config_path,
                 persisted_model_alias.clone(),
                 redactor.clone(),
-                built_tools.websearch.clone(),
             );
             let cache_path = options.storage_root.join("model-catalog.json");
             let initial_catalog = load_model_catalog_cache(&cache_path)
@@ -662,10 +661,6 @@ pub(crate) async fn compose_hosted_actor(
         background_redactor: root_background_redactor,
         background_manager: Arc::clone(&built_tools.background),
         native_websearch_possible,
-        native_websearch_resolver: built_tools
-            .websearch
-            .as_ref()
-            .and_then(|searcher| searcher.native_resolver()),
         trust_store_path: options.storage_root.join("trust.json"),
         toolchain_config: options.config.toolchain.clone(),
         toolchain_runtime: Arc::clone(&toolchain_runtime),
