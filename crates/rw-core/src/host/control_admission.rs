@@ -48,21 +48,25 @@ impl ControlAdmission {
         command: &ClientCommand,
         bytes: usize,
     ) -> Result<ControlLease, &'static str> {
-        let lane = if matches!(
-            command,
-            ClientCommand::Interrupt { .. }
-                | ClientCommand::InterruptSubagent { .. }
-                | ClientCommand::CancelProviderAuth { .. }
-                | ClientCommand::ApproveTool { .. }
-                | ClientCommand::ApprovePlan { .. }
-                | ClientCommand::ShutdownHost { .. }
-        ) {
+        let lane = if is_urgent(command) {
             &self.urgent
         } else {
             &self.normal
         };
         lane.acquire(command, bytes)
     }
+}
+
+pub(super) fn is_urgent(command: &ClientCommand) -> bool {
+    matches!(
+        command,
+        ClientCommand::Interrupt { .. }
+            | ClientCommand::InterruptSubagent { .. }
+            | ClientCommand::CancelProviderAuth { .. }
+            | ClientCommand::ApproveTool { .. }
+            | ClientCommand::ApprovePlan { .. }
+            | ClientCommand::ShutdownHost { .. }
+    )
 }
 
 impl Lane {

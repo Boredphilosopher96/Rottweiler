@@ -10,11 +10,12 @@ use super::{
 struct ControlRejection(&'static str, &'static str);
 
 enum ControlRequest {
-    Complete(Arc<CachedDispatch>),
-    Running(watch::Receiver<Option<Arc<CachedDispatch>>>),
+    Complete(Arc<super::RetainedDispatch>),
+    Running(watch::Receiver<Option<Arc<super::RetainedDispatch>>>),
     Launch {
-        completion: watch::Receiver<Option<Arc<CachedDispatch>>>,
+        completion: watch::Receiver<Option<Arc<super::RetainedDispatch>>>,
         admission: super::control_admission::ControlLease,
+        reply_bytes: tokio::sync::OwnedSemaphorePermit,
     },
 }
 
@@ -39,7 +40,7 @@ impl EngineHost {
             return rejected("command_serialization", "command could not serialize");
         };
         let key = (bound.client_id.clone(), command.meta().request_id.clone());
-        let request = match self.reserve_control(&key, &payload_hash, admission) {
+        let request = match self.reserve_control(&key, &payload_hash, admission, &command) {
             Ok(request) => request,
             Err(ControlRejection(code, message)) => return rejected(code, message),
         };
@@ -56,8 +57,9 @@ impl EngineHost {
             ControlRequest::Launch {
                 completion,
                 admission,
+                reply_bytes,
             } => {
-                self.launch_control(command, key, payload_hash, admission)
+                self.launch_control(command, key, payload_hash, admission, reply_bytes)
                     .await;
                 (completion, true)
             }
@@ -84,6 +86,7 @@ impl EngineHost {
         key: &(ClientId, RequestId),
         payload_hash: &str,
         admission: super::control_admission::ControlLease,
+        command: &ClientCommand,
     ) -> Result<ControlRequest, ControlRejection> {
         let mut dedupe = self
             .dedupe
@@ -125,6 +128,13 @@ impl EngineHost {
                 Ok(ControlRequest::Running(completion.subscribe()))
             }
             None => {
+                let reply_bytes = self
+                    .completion_budget
+                    .acquire(command, &mut dedupe, key)
+                    .ok_or(ControlRejection(
+                        "control_busy",
+                        "host completion bytes exhausted",
+                    ))?;
                 let (completion, wait) = watch::channel(None);
                 dedupe.entries.insert(
                     key.clone(),
@@ -137,6 +147,7 @@ impl EngineHost {
                 Ok(ControlRequest::Launch {
                     completion: wait,
                     admission,
+                    reply_bytes,
                 })
             }
         }
@@ -148,18 +159,39 @@ impl EngineHost {
         key: (ClientId, RequestId),
         payload_hash: String,
         admission: super::control_admission::ControlLease,
+        mut reply_bytes: tokio::sync::OwnedSemaphorePermit,
     ) {
         let shutdown = matches!(command, ClientCommand::ShutdownHost { .. });
         let meta = command.meta().clone();
         let host = self.clone();
         let operation_key = key.clone();
         let operation_hash = payload_hash.clone();
+        let fallback = super::RetainedDispatch::prepare(
+            CachedDispatch {
+                outcome: rejected(
+                    "control_completion_failed",
+                    "control completion failed; effects require host recovery",
+                ),
+                events: Vec::new(),
+                cacheable: true,
+            },
+            reply_bytes.split(2).expect("reserved unwind reply"),
+        );
+        let closed = super::RetainedDispatch::prepare(
+            CachedDispatch {
+                outcome: rejected("host_shutting_down", "host control admission is closed"),
+                events: Vec::new(),
+                cacheable: true,
+            },
+            reply_bytes.split(2).expect("reserved closed reply"),
+        );
         let work = async move {
             let _admission = admission;
             let mut completion_guard = super::control_completion::CompletionGuard::new(
                 &host,
                 &operation_key,
                 &operation_hash,
+                fallback,
             );
             let dispatch = if let Ok(dispatch) =
                 std::panic::AssertUnwindSafe(host.execute(command, operation_hash.clone()))
@@ -183,19 +215,14 @@ impl EngineHost {
             host.complete_request(
                 operation_key,
                 operation_hash,
-                Arc::new(dispatch),
+                super::RetainedDispatch::prepare(dispatch, reply_bytes),
                 &meta.client_id,
             )
             .await;
             completion_guard.complete();
         };
         if self.control_owner.spawn(work, shutdown).is_err() {
-            let dispatch = Arc::new(CachedDispatch {
-                outcome: rejected("host_shutting_down", "host control admission is closed"),
-                events: Vec::new(),
-                cacheable: true,
-            });
-            self.complete_request(key.clone(), payload_hash, dispatch, &key.0)
+            self.complete_request(key.clone(), payload_hash, closed, &key.0)
                 .await;
         }
     }
@@ -204,7 +231,7 @@ impl EngineHost {
         &self,
         key: (ClientId, RequestId),
         payload_hash: String,
-        dispatch: Arc<CachedDispatch>,
+        dispatch: Arc<super::RetainedDispatch>,
         client_id: &ClientId,
     ) {
         let completion = {

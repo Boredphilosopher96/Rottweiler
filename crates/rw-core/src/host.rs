@@ -8,6 +8,8 @@ mod control_owner;
 mod events;
 mod lifecycle;
 mod provider_completion;
+mod retained_control;
+use retained_control::RetainedDispatch;
 mod read;
 pub use read::{HostReadChannel, HostReply};
 
@@ -84,11 +86,11 @@ enum DedupeState {
     },
     Running {
         payload_hash: String,
-        completion: watch::Sender<Option<Arc<CachedDispatch>>>,
+        completion: watch::Sender<Option<Arc<RetainedDispatch>>>,
     },
     Complete {
         payload_hash: String,
-        dispatch: Arc<CachedDispatch>,
+        dispatch: Arc<RetainedDispatch>,
         retry_same_request: bool,
     },
 }
@@ -367,6 +369,7 @@ pub struct EngineHost {
     read_channel: HostReadChannel,
     control_admission: Arc<control_admission::ControlAdmission>,
     control_owner: Arc<control_owner::ControlOwner>,
+    completion_budget: Arc<retained_control::CompletionBudget>,
     client_events: Arc<Mutex<ClientEventRegistry>>,
     provider_auth: Arc<PendingProviderAuths>,
     provider_mutation: Arc<tokio::sync::Mutex<()>>,
@@ -414,6 +417,7 @@ impl EngineHost {
             read_channel,
             control_admission: Arc::new(control_admission::ControlAdmission::default()),
             control_owner: Arc::default(),
+            completion_budget: Arc::default(),
             client_events: Arc::new(Mutex::new(ClientEventRegistry::default())),
             provider_auth: Arc::new(PendingProviderAuths::default()),
             provider_mutation: Arc::new(tokio::sync::Mutex::new(())),
