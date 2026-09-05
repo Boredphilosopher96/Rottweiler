@@ -28,7 +28,6 @@ use rw_store::session::SessionEventPageLimits;
 use rw_store::session::SessionProjection;
 use rw_store::session::SessionSummary;
 use rw_store::session::UtcTimestamp;
-use rw_types::SessionId;
 use rw_types::ToolOutput;
 use std::path::Path;
 use std::path::PathBuf;
