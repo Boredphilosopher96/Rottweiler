@@ -1,20 +1,9 @@
 import type { EngineEvent } from "../protocol"
-import {
-  FuzzyPickerRenderable,
-  type PickerItem
-} from "../components"
+import { FuzzyPickerRenderable, type PickerItem } from "../components"
 import { PickerController } from "../picker-controller"
-import {
-  type ExternalUrlAdapter,
-  type TextClipboardAdapter
-} from "../platform"
-import {
-  ProjectionRequestBroker,
-  type ProjectionKind,
-} from "../projection-requests"
-import {
-  type RottweilerState
-} from "../state"
+import { type ExternalUrlAdapter, type TextClipboardAdapter } from "../platform"
+import { ProjectionRequestBroker, type ProjectionKind } from "../projection-requests"
+import { type RottweilerState } from "../state"
 
 import {
   modelAliasDescription,
@@ -22,7 +11,7 @@ import {
   providerConnectionStatus,
   providerDisplayName,
   providerName,
-  providerStatusDetail
+  providerStatusDetail,
 } from "../ui-presentation"
 import type { RottweilerAppOptions } from "./options"
 type ModelPickerChoice =

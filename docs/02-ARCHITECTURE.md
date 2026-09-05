@@ -505,6 +505,12 @@ Built on OpenTUI (per ADR-001), which supplies the retained component tree and t
 - **SSE client** with reconnect + event-sequence resync (events carry monotonic ids; on reconnect the TUI replays the gap from the engine).
 - **Replay presentation boundary** is the engine's `session_replay_completed` marker. The TUI reduces historical events immediately but suppresses their live-only presentation effects until that marker arrives; stream termination only performs idempotent cleanup for an incomplete replay.
 - Components: markdown/syntax-highlighted blocks, collapsible tool calls, diff accept/reject view, fuzzy pickers, question prompts, nested subagent progress, status line.
+- The application composes controllers for input and focus, session navigation,
+  child drafts, picker catalogs, provider interactions, settings, permissions,
+  themes, submission, and client restoration. Component construction consumes
+  explicit interaction ports. Each controller owns its pending requests and
+  timers; a reply may update only the session scope that issued it. Handwritten
+  files are capped at 1,500 lines, and TUI typechecking rejects unused declarations.
 - `ClientCommand`, `EngineEvent`, and the shared IR are owned by the Rust types in
   `crates/rw-types`. `cargo xtask codegen` generates `protocol/types.ts`, the JSON
   schemas, and the cross-language fixtures from those types. The TUI imports the

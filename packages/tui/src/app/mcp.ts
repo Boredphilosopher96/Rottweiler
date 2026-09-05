@@ -3,28 +3,14 @@ import {
   FuzzyPickerRenderable,
   ListDetailRenderable,
   type TextPromptOptions,
-  type PickerItem
+  type PickerItem,
 } from "../components"
-import {
-  createMcpBrowserModel,
-  type McpBrowserAction,
-  type McpCatalog
-} from "../mcp-browser"
+import { createMcpBrowserModel, type McpBrowserAction, type McpCatalog } from "../mcp-browser"
 import { PickerController } from "../picker-controller"
-import {
-  ProjectionRequestBroker,
-  type ProjectionKind,
-} from "../projection-requests"
-import {
-  MCP_SERVER_ID_PATTERN
-} from "../protocol"
-import {
-  type RottweilerState
-} from "../state"
-import {
-  mcpStateLabel,
-  mcpTransportLabel
-} from "../ui-presentation"
+import { ProjectionRequestBroker, type ProjectionKind } from "../projection-requests"
+import { MCP_SERVER_ID_PATTERN } from "../protocol"
+import { type RottweilerState } from "../state"
+import { mcpStateLabel, mcpTransportLabel } from "../ui-presentation"
 
 
 type McpServerAction =

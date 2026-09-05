@@ -4,7 +4,7 @@ import { PROTOCOL_VERSION } from "../../../../protocol/types"
 import {
   createRottweilerApp
 } from "../../src/app"
-import type { ClientCommand, EngineEvent } from "../../src/protocol"
+import type { ClientCommand, CommandOutcome } from "../../src/protocol"
 import { createInitialState } from "../../src/state"
 import { emptyHistoryReader } from "../fixtures/history"
 
@@ -333,4 +333,70 @@ describe("Rottweiler mutations", () => {
     expect(app.state.errors.at(-1)?.code).toBe("review_unavailable_during_shell")
     expect(app.reviewPanel.visible).toBeFalse()
   })
+
+  test("a settled review request cannot close another session's review", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 20, useThread: false })
+    renderer = setup.renderer
+    const pending = Promise.withResolvers<CommandOutcome>()
+    const app = createRottweilerApp(renderer, {
+      historyReader: emptyHistoryReader,
+      sessionId: "first",
+      onCommand: command => command.type === "get_session_review" && command.session_id === "first"
+        ? pending.promise : { type: "accepted" },
+    })
+    renderer.root.add(app)
+    app.composer.value = "/review"
+    const submission = app.composer.submit()
+    app.setSessionId("second")
+    app.openReview()
+    expect(app.reviewPanel.visible).toBeTrue()
+    pending.resolve({ type: "rejected", error: {
+      category: "protocol", code: "review_denied", message: "request denied", retryable: false,
+    } })
+    expect(await submission).toBeFalse()
+    expect(app.reviewPanel.visible).toBeTrue()
+    expect(app.state.errors).toHaveLength(0)
+  })
+
+  test("review decisions belong to their session until the exact reply settles", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 20, useThread: false })
+    renderer = setup.renderer
+    const replies: ReturnType<typeof Promise.withResolvers<CommandOutcome>>[] = []
+    const state = (sessionId: string) => ({
+      ...createInitialState(),
+      review: { sessionId, files: [{
+        path: "src/lib.rs", unifiedDiff: "", status: "pending" as const, truncated: false,
+        unrestorableReason: null, originalHash: "base", currentHash: sessionId,
+      }] },
+    })
+    const app = createRottweilerApp(renderer, {
+      historyReader: emptyHistoryReader, sessionId: "first", initialState: state("first"),
+      onCommand: command => {
+        if (command.type !== "review_file") return { type: "accepted" }
+        const pending = Promise.withResolvers<CommandOutcome>()
+        replies.push(pending)
+        return pending.promise
+      },
+    })
+    renderer.root.add(app)
+    app.openReview()
+    setup.mockInput.pressKey("a")
+    expect(replies).toHaveLength(1)
+    app.setSessionId("second")
+    app.setState(state("second"))
+    app.openReview()
+    setup.mockInput.pressKey("a")
+    expect(replies).toHaveLength(2)
+    replies[0]!.resolve({ type: "accepted" })
+    await setup.flush()
+    setup.mockInput.pressKey("a")
+    expect(replies).toHaveLength(2)
+    replies[1]!.resolve({ type: "accepted" })
+    await setup.flush()
+    setup.mockInput.pressKey("a")
+    expect(replies).toHaveLength(3)
+    replies[2]!.resolve({ type: "accepted" })
+    await setup.flush()
+  })
+
 })

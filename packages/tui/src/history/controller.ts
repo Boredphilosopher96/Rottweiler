@@ -47,7 +47,6 @@ export class HistoryController {
   readonly #sessions = new Map<string, SessionView>()
   #sessionId: string | null = null
   #active: CacheLease<HistoryCacheValue> | null = null
-  #activeKey: string | null = null
   #request: AbortController | null = null
   #loading = false
   #error: string | null = null
@@ -80,14 +79,12 @@ export class HistoryController {
       this.#request = null
       const previous = this.#active
       this.#active = null
-      this.#activeKey = null
       this.#sessionId = sessionId
       this.#selection = null
       const session = this.#session(sessionId)
       this.#following = session.following
       if (session.activeKey !== null) {
         this.#active = this.cache.lease(session.activeKey)
-        if (this.#active !== null) this.#activeKey = session.activeKey
       }
       this.#changed()
       previous?.release()
@@ -146,7 +143,6 @@ export class HistoryController {
         if (lease === null) throw new Error("admitted history page is unavailable")
         retired = this.#active
         this.#active = lease
-        this.#activeKey = key
         session.activeKey = key
         session.view = page.view
         session.total = requiredU64(page.total_items)
@@ -189,7 +185,6 @@ export class HistoryController {
       this.#loading = false
       const previous = this.#active
       this.#active = lease
-      this.#activeKey = key
       session.activeKey = key
       try { this.#changed() } finally { previous?.release() }
       return
@@ -221,7 +216,6 @@ export class HistoryController {
     this.#request?.abort()
     this.#active?.release()
     this.#active = null
-    this.#activeKey = null
     this.#sessions.clear()
     this.cache.clear()
   }

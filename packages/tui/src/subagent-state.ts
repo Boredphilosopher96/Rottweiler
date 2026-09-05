@@ -8,11 +8,7 @@ import {
   createInitialState,
   type RottweilerState,
 } from "./state"
-import {
-  isRecord,
-  isWireEngineEvent,
-
-} from "./transport"
+import { isWireEngineEvent } from "./transport"
 import { boundedUiText } from "./ui-presentation"
 
 const MAX_SUBAGENT_ID_LENGTH = 256

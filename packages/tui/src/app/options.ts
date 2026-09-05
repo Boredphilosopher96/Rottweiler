@@ -1,33 +1,18 @@
-import {
-  type ThemeMode,
-  type TreeSitterClient
-} from "@opentui/core"
+import { type ThemeMode, type TreeSitterClient } from "@opentui/core"
 import type { ClientDiagnostics } from "../client-diagnostics"
 import type { HistoryReader } from "../history/reader"
-import {
-  type KeybindingConfiguration
-} from "../keybindings"
+import { type KeybindingConfiguration } from "../keybindings"
 import {
   type EditorAdapter,
   type ExternalUrlAdapter,
   type ImagePasteAdapter,
   type NotificationAdapter,
-  type TextClipboardAdapter
+  type TextClipboardAdapter,
 } from "../platform"
-import {
-  type PresentationFrameScheduler
-} from "../presentation"
-import {
-  type ClientCommand,
-  type CommandOutcome,
-  type EngineEvent
-} from "../protocol"
-import {
-  type RottweilerState
-} from "../state"
-import {
-  type RottweilerTheme
-} from "../theme"
+import { type PresentationFrameScheduler } from "../presentation"
+import { type ClientCommand, type CommandOutcome, type EngineEvent } from "../protocol"
+import { type RottweilerState } from "../state"
+import { type RottweilerTheme } from "../theme"
 
 export interface RottweilerAppOptions {
   readonly diagnostics?: ClientDiagnostics | undefined

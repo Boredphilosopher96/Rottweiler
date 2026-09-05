@@ -1,5 +1,10 @@
 import { homedir } from "node:os"
-import type { ComposerRenderable, FuzzyPickerRenderable, StateBannerRenderable, PickerItem } from "../components"
+import type {
+  ComposerRenderable,
+  FuzzyPickerRenderable,
+  StateBannerRenderable,
+  PickerItem,
+} from "../components"
 import type { PickerController } from "../picker-controller"
 import type { ProjectionRequestBroker, ProjectionKind } from "../projection-requests"
 import type { Attachment, CommandOutcome, EngineEvent } from "../protocol"

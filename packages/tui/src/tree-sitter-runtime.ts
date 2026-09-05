@@ -47,7 +47,7 @@ import zigWasm from "../node_modules/@opentui/core/assets/zig/tree-sitter-zig.wa
 import webTreeSitterModule from "../node_modules/web-tree-sitter/tree-sitter.js" with { type: "file" }
 import webTreeSitterWasm from "../node_modules/web-tree-sitter/tree-sitter.wasm" with { type: "file" }
 
-import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
+import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { randomUUID } from "node:crypto"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"

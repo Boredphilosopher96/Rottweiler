@@ -1,5 +1,10 @@
 import { fg, t } from "@opentui/core"
-import { formatSubagentElapsed, type ComposerRenderable, type StateBannerRenderable, type PickerItem } from "../components"
+import {
+  formatSubagentElapsed,
+  type ComposerRenderable,
+  type StateBannerRenderable,
+  type PickerItem,
+} from "../components"
 import type { ClientDiagnostics } from "../client-diagnostics"
 import type { HistoryPresentation } from "../history/presentation"
 import type { KeybindingAction } from "../keybindings"
@@ -8,7 +13,14 @@ import type { ProjectionRequestBroker } from "../projection-requests"
 import type { Attachment, CommandOutcome, EngineEvent } from "../protocol"
 import { presentError } from "../render"
 import { createInitialState, engineEvent, reduceRottweilerState, type RottweilerState } from "../state"
-import { boundSubagentState, initialSubagentState, mergeComposerDraft, sanitizeSubagentDescriptor, type ComposerDraft, type SubagentDescriptor } from "../subagent-state"
+import {
+  boundSubagentState,
+  initialSubagentState,
+  mergeComposerDraft,
+  sanitizeSubagentDescriptor,
+  type ComposerDraft,
+  type SubagentDescriptor,
+} from "../subagent-state"
 import type { RottweilerTheme } from "../theme"
 import { boundedUiText } from "../ui-presentation"
 interface ChildUiHost {

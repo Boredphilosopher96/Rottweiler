@@ -211,7 +211,3 @@ function compactionReasonLabel(reason: string | null): string {
   if (reason === "context_overflow") return "Making room for more context"
   return "Keeping the conversation responsive"
 }
-
-function userFacingError(category: string, code: string, message: string): string {
-  return presentError({ category, code, message }).text
-}

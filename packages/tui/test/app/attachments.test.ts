@@ -5,7 +5,6 @@ import {
   createRottweilerApp
 } from "../../src/app"
 import type { ClientCommand, CommandOutcome, EngineEvent } from "../../src/protocol"
-import { createInitialState } from "../../src/state"
 import {
   kennelTheme,
   systemThemeFor

@@ -2,50 +2,33 @@ import type { ClientDiagnostics } from "../../client-diagnostics"
 import { bindSelectableClick } from "../selectable-click"
 import type { HistoryAnchor } from "../../history/controller"
 import type { TranscriptContent } from "../../protocol"
-import { DISPLAY_TRUNCATION_MARKER } from "../../state/display-buffer"
-import type { TranscriptClientState } from "../../recycle-state"
 import {
-  type BaseRenderable,
   BoxRenderable,
   CodeRenderable,
   DiffRenderable,
-  MarkdownRenderable,
-  ScrollBoxRenderable,
   TextRenderable,
-  bold,
   fg,
   t,
   type RenderContext,
   type SyntaxStyle,
   type TreeSitterClient,
-} from "@opentui/core"
+ } from "@opentui/core"
 
 import {
   commandPreview,
-  commandResultMarkdown,
   COMMAND_PREVIEW_MAX_LINES,
   diffStats,
   displayPath,
-  formatCost,
   filetypeForPath,
-  getScrollAcceleration,
   minimalUnifiedDiff,
   splitDiffVisualRows,
   unifiedDiffVisualRows,
   presentTool,
   presentableUnifiedDiff,
-  terminalMarkdown,
   truncateToCells,
   truncateUnifiedDiff,
-  turnMarkdown,
-  turnReasoningMarkdown,
-} from "../../render"
-import type {
-  RottweilerState,
-  SubagentProjection,
-  ToolProjection,
-  TranscriptEntry,
-} from "../../state"
+ } from "../../render"
+import type { SubagentProjection, ToolProjection } from "../../state"
 import type { RottweilerTheme } from "../../theme"
 
 export interface TranscriptRenderableOptions {

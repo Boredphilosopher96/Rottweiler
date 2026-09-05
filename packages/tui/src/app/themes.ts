@@ -1,21 +1,11 @@
-import { StyledText,bg,bold,fg } from "@opentui/core"
+import { StyledText, bg, bold, fg } from "@opentui/core"
 import type { ListDetailItemRow } from "../components"
-import {
-ListDetailRenderable,
-type ListDetailPresentation
-} from "../components"
+import { ListDetailRenderable, type ListDetailPresentation } from "../components"
 import { PickerController } from "../picker-controller"
-import {
-ProjectionRequestBroker
-} from "../projection-requests"
-import {
-type CommandOutcome
-} from "../protocol"
-import { stringCellWidth,truncateToCells } from "../render"
-import {
-THEME_ROLE_KEYS,themeCatalog,
-type RottweilerTheme
-} from "../theme"
+import { ProjectionRequestBroker } from "../projection-requests"
+import { type CommandOutcome } from "../protocol"
+import { stringCellWidth, truncateToCells } from "../render"
+import { THEME_ROLE_KEYS, themeCatalog, type RottweilerTheme } from "../theme"
 import { createThemeBrowserModel } from "../theme-browser"
 
 interface ThemeUiHost {
@@ -258,4 +248,3 @@ export function themeBrowserDetail(theme: RottweilerTheme): StyledText {
     fg(theme.textMuted)("data only, never executed"),
   ])
 }
-

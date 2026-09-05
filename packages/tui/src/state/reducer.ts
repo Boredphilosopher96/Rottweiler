@@ -2,7 +2,7 @@ import {
   ENGINE_EVENT_DELIVERY,
   type EngineEvent,
 } from "../protocol"
-import { MAX_U64, durableSequenceId, isRecord, parseU64 } from "../transport"
+import { MAX_U64, durableSequenceId, parseU64 } from "../transport"
 import type { RottweilerAction } from "./actions"
 import { boundedCommandAcks, responseAck } from "./command-acks"
 import { projectCommandResult } from "./command-results"

@@ -1,3 +1,4 @@
+import type { EngineEvent } from "./protocol"
 import type { ClientDiagnostics } from "./client-diagnostics"
 export interface PresentationFrameScheduler {
   schedule(callback: () => void, delayMs: number): unknown
@@ -121,4 +122,86 @@ export class PresentationController<T> {
     if (scheduler === undefined) clearTimeout(handle as ReturnType<typeof setTimeout>)
     else scheduler.cancel(handle)
   }
+}
+
+const IMMEDIATE_PRESENTATION_EVENTS = new Set<EngineEvent["type"]>([
+  "command_acknowledged",
+  "context_snapshot_ready",
+  "cost_snapshot_ready",
+  "session_review_ready",
+  "session_review_updated",
+  "prompt_dump_ready",
+  "session_replay_completed",
+  "session_history_ready",
+  "session_forked",
+  "session_exported",
+  "sessions_listed",
+  "subagents_listed",
+  "command_descriptors_listed",
+  "models_listed",
+  "modes_listed",
+  "settings_listed",
+  "permissions_listed",
+  "mcp_servers_listed",
+  "runtime_services_listed",
+  "workspace_files_found",
+  "workspace_roots_changed",
+  "workspace_status_ready",
+  "sessions_search_ready",
+  "workspace_file_preview_ready",
+  "workspace_diff_ready",
+  "host_shutdown",
+  "ui_notification",
+  "conversation_rewound",
+  "conversation_turn_committed",
+  "tool_approval_needed",
+  "question_asked",
+  "question_answered",
+  "tool_call_started",
+  "tool_call_finished",
+  "tool_diff_ready",
+  "tool_output_pruned",
+  "turn_started",
+  "turn_finished",
+  "user_message_accepted",
+  "message_queued",
+  "queued_message_removed",
+  "queued_messages_cleared",
+  "user_shell_state_changed",
+  "command_finished",
+  "mode_changed",
+  "model_changed",
+  "model_context_cleared",
+  "driver_changed",
+  "permission_mode_changed",
+  "budget_status_changed",
+  "context_item_pinned",
+  "context_item_evicted",
+  "compaction_started",
+  "compaction_finished",
+  "compaction_failed",
+  "compaction_attempt_started",
+  "compaction_attempt_finished",
+  "plan_submitted",
+  "plan_reviewed",
+  "subagent_spawned",
+  "subagent_finished",
+  "provider_configured",
+  "provider_activation_finished",
+  "provider_auth_started",
+  "provider_auth_finished",
+  "mcp_server_approval_reviewed",
+  "plugin_message_injected",
+  "plugin_status_changed",
+  "session_created",
+  "session_title_updated",
+  "guard_triggered",
+  "hook_failed",
+  "error",
+])
+
+export function deferPresentationForEvent(
+  event: { readonly type: EngineEvent["type"] },
+): boolean {
+  return !IMMEDIATE_PRESENTATION_EVENTS.has(event.type)
 }

@@ -5,11 +5,8 @@ import { PROTOCOL_VERSION } from "../../../../protocol/types"
 import {
   createRottweilerApp
 } from "../../src/app"
-import { ToolBlockRenderable } from "../../src/components"
-import type { EngineEvent } from "../../src/protocol"
 import { commandResultMarkdown } from "../../src/render"
 import { createInitialState, engineEvent, reduceRottweilerState } from "../../src/state"
-import { toolOutputBuffer } from "../../src/state/display-buffer"
 import {
   kennelTheme
 } from "../../src/theme"

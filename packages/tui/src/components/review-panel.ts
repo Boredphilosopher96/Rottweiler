@@ -252,8 +252,6 @@ export class ReviewPanelRenderable extends BoxRenderable {
     }
     const selectedPath = review.files[this.files.getSelectedIndex()]?.path
     const pending = review.files.filter((file) => file.status === "pending").length
-    const accepted = review.files.filter((file) => file.status === "accepted").length
-    const reverted = review.files.filter((file) => file.status === "reverted").length
     const totals = review.files.reduce(
       (sum, file) => addReviewLineCounts(sum, reviewLineCounts(file.unifiedDiff)),
       { additions: 0, deletions: 0 },
@@ -293,6 +291,11 @@ export class ReviewPanelRenderable extends BoxRenderable {
     this.#review = null
     this.files.blur()
     this.visible = false
+  }
+
+  resetSession(): void {
+    this.#pendingPaths.clear()
+    this.closePresentation()
   }
 
   /** Select and reveal an exact retained review path. */

@@ -1,9 +1,9 @@
+import { deferPresentationForEvent } from "../../src/presentation"
 import { createTestRenderer, type TestRenderer } from "@opentui/core/testing"
 import { afterEach, describe, expect, test } from "bun:test"
 import { PROTOCOL_VERSION } from "../../../../protocol/types"
 import {
-  createRottweilerApp,
-  deferPresentationForEvent
+  createRottweilerApp
 } from "../../src/app"
 import type { ClientCommand, EngineEvent } from "../../src/protocol"
 import { createInitialState } from "../../src/state"

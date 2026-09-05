@@ -4,8 +4,7 @@ import { PROTOCOL_VERSION } from "../../../../protocol/types"
 import {
   createRottweilerApp
 } from "../../src/app"
-import type { ClientCommand, CommandOutcome, EngineEvent } from "../../src/protocol"
-import { createInitialState } from "../../src/state"
+import type { ClientCommand, CommandOutcome } from "../../src/protocol"
 import { emptyHistoryReader } from "../fixtures/history"
 
 describe("Rottweiler children", () => {

@@ -1,11 +1,26 @@
 import type { RottweilerApp } from "../app"
-import { createCommandPaletteModel, type CommandPaletteEntry, type CommandPaletteCatalog } from "../command-palette"
+import {
+  createCommandPaletteModel,
+  type CommandPaletteEntry,
+  type CommandPaletteCatalog,
+} from "../command-palette"
 import type { ListDetailPresentation, PickerItem } from "../components"
-import { KEYBINDING_ACTION_LABELS, formatKeycap, type KeybindingAction, type KeybindingContext, type KeybindingPreset } from "../keybindings"
+import {
+  KEYBINDING_ACTION_LABELS,
+  formatKeycap,
+  type KeybindingAction,
+  type KeybindingContext,
+  type KeybindingPreset,
+} from "../keybindings"
 import type { PickerController } from "../picker-controller"
 import type { ProjectionKind, ProjectionRequestBroker } from "../projection-requests"
 import type { Attachment } from "../protocol"
-import { commandSourceLabel, isTuiHandledSlashCommand, mergeSlashCommandChoices, type CommandChoice } from "../session-commands"
+import {
+  commandSourceLabel,
+  isTuiHandledSlashCommand,
+  mergeSlashCommandChoices,
+  type CommandChoice,
+} from "../session-commands"
 import type { RottweilerState } from "../state"
 import { modePickerPresentation } from "../ui-presentation"
 import type { InputUiController } from "./input"
@@ -17,7 +32,31 @@ import type { SettingsUiController } from "./settings"
 import type { McpUiController } from "./mcp"
 import type { ThemeUiController } from "./themes"
 interface PickerContentHost {
-  readonly ui: Pick<RottweilerApp, "picker" | "closePicker" | "commandPalette" | "composer" | "openBudgetPicker" | "openExportSessionPicker" | "openMcpPicker" | "openModelPicker" | "openPermissionModePicker" | "openPermissionPicker" | "openProviderPicker" | "openQueuedMessagesPicker" | "openReview" | "openSessionPicker" | "openSettingsPicker" | "openSubagentActionPicker" | "openSubagentPicker" | "openThemePicker" | "openTimelinePicker" | "openTrustPicker" | "showConversationView" | "showToolsView" | "state">
+  readonly ui: Pick<RottweilerApp,
+    | "picker"
+    | "closePicker"
+    | "commandPalette"
+    | "composer"
+    | "openBudgetPicker"
+    | "openExportSessionPicker"
+    | "openMcpPicker"
+    | "openModelPicker"
+    | "openPermissionModePicker"
+    | "openPermissionPicker"
+    | "openProviderPicker"
+    | "openQueuedMessagesPicker"
+    | "openReview"
+    | "openSessionPicker"
+    | "openSettingsPicker"
+    | "openSubagentActionPicker"
+    | "openSubagentPicker"
+    | "openThemePicker"
+    | "openTimelinePicker"
+    | "openTrustPicker"
+    | "showConversationView"
+    | "showToolsView"
+    | "state"
+  >
   readonly pickerController: PickerController
   readonly input: InputUiController
   readonly requests: ProjectionRequestBroker

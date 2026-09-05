@@ -1,10 +1,9 @@
 import { createTestRenderer, type TestRenderer } from "@opentui/core/testing"
 import { afterEach, describe, expect, test } from "bun:test"
-import { PROTOCOL_VERSION } from "../../../../protocol/types"
 import {
   createRottweilerApp
 } from "../../src/app"
-import type { ClientCommand, EngineEvent } from "../../src/protocol"
+import type { ClientCommand } from "../../src/protocol"
 import { createInitialState } from "../../src/state"
 import { emptyHistoryReader } from "../fixtures/history"
 

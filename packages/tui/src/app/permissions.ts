@@ -1,25 +1,13 @@
-import {
-  FuzzyPickerRenderable,
-  type PickerItem
-} from "../components"
+import { FuzzyPickerRenderable, type PickerItem } from "../components"
 import { PickerController } from "../picker-controller"
-import {
-  ProjectionRequestBroker,
-  type ProjectionKind,
-} from "../projection-requests"
+import { ProjectionRequestBroker, type ProjectionKind } from "../projection-requests"
 import {
   type PermissionApprovalScope,
   type PermissionDecision,
-  type PermissionModeDescriptor
+  type PermissionModeDescriptor,
 } from "../protocol"
-import {
-  type RottweilerState
-} from "../state"
-import {
-  permissionActionLabel,
-  permissionPatternLabel,
-  permissionRuleActionLabel
-} from "../ui-presentation"
+import { type RottweilerState } from "../state"
+import { permissionActionLabel, permissionPatternLabel, permissionRuleActionLabel } from "../ui-presentation"
 
 type PermissionPickerAction =
   | { readonly kind: "refresh" }

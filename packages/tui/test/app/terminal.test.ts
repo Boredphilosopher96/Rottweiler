@@ -4,12 +4,11 @@ import { PROTOCOL_VERSION } from "../../../../protocol/types"
 import {
   createRottweilerApp
 } from "../../src/app"
-import type { ClientCommand, EngineEvent } from "../../src/protocol"
+import type { ClientCommand } from "../../src/protocol"
 import {
   TuiEngineRuntime,
   type RuntimeEngineClient,
 } from "../../src/runtime"
-import { createInitialState } from "../../src/state"
 import type { EngineSubscriptionOptions } from "../../src/transport"
 import { emptyHistoryReader, historyReaderFor, waitForHistory, shellItem } from "../fixtures/history"
 

@@ -1,156 +1,72 @@
+import { notifyTransition } from "./app/notifications"
+import { ClientRestoreController } from "./app/client-restore"
+import { buildSurface } from "./app/surface"
+import { SubmissionController } from "./app/submission"
 import { PickerContentController, type PaletteAction } from "./app/picker-content"
 import { InputUiController } from "./app/input"
 import { ChildUiController } from "./app/children"
 import { SessionUiController } from "./app/sessions"
 import {
-BoxRenderable,
-CliRenderEvents,
-fg,
-t,
-type KeyEvent,
-type RenderContext,
-type Selection,
-type ThemeMode,
-type TreeSitterClient
+  BoxRenderable,
+  CliRenderEvents,
+  type RenderContext,
+  type Selection,
+  type ThemeMode,
+  type TreeSitterClient,
 } from "@opentui/core"
-import { homedir } from "node:os"
 import { McpUiController } from "./app/mcp"
 import type { RottweilerAppOptions } from "./app/options"
 import { PermissionUiController } from "./app/permissions"
 import { ProviderUiController } from "./app/provider"
 import { SettingsUiController } from "./app/settings"
-import { ThemeUiController,themeBrowserDetail,themeBrowserRow } from "./app/themes"
+import { ThemeUiController } from "./app/themes"
 import { DocumentController } from "./history/document"
 import { HistoryPresentation } from "./history/presentation"
 export type { RottweilerAppOptions,TerminalHandoverAdapter } from "./app/options"
 
 import {
-createCommandPaletteModel,
-type CommandPaletteCatalog,
-type CommandPaletteEntry,
-} from "./command-palette"
-import {
-ComposerRenderable,
-ContextPanelRenderable,
-FuzzyPickerRenderable,
-InteractionPanelRenderable,
-ListDetailRenderable,
-OutputViewerRenderable,
-ReviewPanelRenderable,
-StateBannerRenderable,
-StatusLineRenderable,
-SubagentTrayRenderable,
-ToolsWorkspaceRenderable,
-TranscriptRenderable,
-formatSubagentElapsed,
-type ListDetailPresentation,
-type PickerItem
+  ComposerRenderable,
+  ContextPanelRenderable,
+  FuzzyPickerRenderable,
+  InteractionPanelRenderable,
+  ListDetailRenderable,
+  OutputViewerRenderable,
+  ReviewPanelRenderable,
+  StateBannerRenderable,
+  StatusLineRenderable,
+  SubagentTrayRenderable,
+  ToolsWorkspaceRenderable,
+  TranscriptRenderable,
 } from "./components"
+import { compileKeybindings } from "./keybindings"
+import { type McpBrowserAction } from "./mcp-browser"
+import { PickerController, type PickerCloseReason, type PickerKind } from "./picker-controller"
+import { noExternalEditor, noExternalUrl, noImagePaste, noNotifications, noTextClipboard } from "./platform"
+import { PresentationController, deferPresentationForEvent } from "./presentation"
+import { ProjectionRequestBroker, type ProjectionKind } from "./projection-requests"
+import { type CommandOutcome, type EngineEvent } from "./protocol"
+import type { AppClientState } from "./recycle-state"
 import {
-KEYBINDING_ACTION_LABELS,
-compileKeybindings,
-formatKeycap,
-keyStrokeFromEvent,
-legacyMacNavigationAction,
-type CompiledKeybindings,
-type InputMode,
-type KeybindingAction,
-type KeybindingContext,
-type KeybindingPreset,
-type VimFocus
-} from "./keybindings"
-import {
-mcpBrowserRow,
-type McpBrowserAction
-} from "./mcp-browser"
-import { PickerController,type PickerCloseReason,type PickerKind } from "./picker-controller"
-import {
-noExternalEditor,
-noExternalUrl,
-noImagePaste,
-noNotifications,
-noTextClipboard
-} from "./platform"
-import {
-PresentationController
-} from "./presentation"
-import {
-ProjectionRequestBroker,
-type ProjectionKind,
-} from "./projection-requests"
-import {
-type ApprovalBinding,
-type ApprovalDecision,
-type Attachment,
-type CommandOutcome,
-type EngineEvent,
-type ModeId,
-type PlanDecision
-} from "./protocol"
-import {
-isRestorablePicker,
-parseTuiRecycleState,
-type AppClientState,
-type ClientComposerState,
-} from "./recycle-state"
-import {
-presentError,
-projectToolsWorkspace,
-sanitizeErrorFragment,
-type ToolsWorkspacePresentation
+  presentError,
+  projectToolsWorkspace,
+  sanitizeErrorFragment,
+  type ToolsWorkspacePresentation,
 } from "./render"
 import { setWorkspaceRoots } from "./render/tool-presentation"
+import { type SettingsBrowserAction } from "./settings-browser"
 import {
-commandSourceLabel,
-isTuiHandledSlashCommand,
-isU64,
-mergeSlashCommandChoices,
-parseSessionAction,
-type CommandChoice,
-} from "./session-commands"
-import {
-type SettingsBrowserAction
-} from "./settings-browser"
-import {
-createInitialState,
-engineEvent,
-enterReplayMode,
-projectSessionTitleUpdate,
-reduceRottweilerState,
-type QuestionProjection,
-type RottweilerState,
-type ToolProjection,
+  createInitialState,
+  engineEvent,
+  enterReplayMode,
+  projectSessionTitleUpdate,
+  reduceRottweilerState,
+  type RottweilerState,
 } from "./state"
-import {
-boundSubagentState,
-childEngineEvent,
-childPassiveInteractionState,
-initialSubagentState,
-mergeComposerDraft,
-sanitizeSubagentDescriptor,
-type ComposerDraft,
-type SubagentDescriptor,
-} from "./subagent-state"
-import {
-createSyntaxStyle,
-kennelTheme,
-systemThemeFor,
-themeByName,
-type RottweilerTheme
-} from "./theme"
-import {
-durableSequenceId,
-isRecord,
-} from "./transport"
+import { childEngineEvent, childPassiveInteractionState } from "./subagent-state"
+import { createSyntaxStyle, kennelTheme, systemThemeFor, themeByName, type RottweilerTheme } from "./theme"
+import { durableSequenceId, isRecord } from "./transport"
 import { stabilizeTreeSitterClient } from "./tree-sitter-client"
-import {
-boundedUiText,
-contextPanelHasContent,
-modePickerPresentation,
-nextModeId,
-queuedMessageLabel,
-timelineTurnLabel
-} from "./ui-presentation"
+import { contextPanelHasContent } from "./ui-presentation"
 
 export type { PresentationFrameScheduler } from "./presentation"
 
@@ -185,6 +101,8 @@ export class RottweilerApp extends BoxRenderable {
   main!: BoxRenderable
 
   readonly #pickerContent: PickerContentController
+  readonly #submission: SubmissionController
+  readonly #clientRestore: ClientRestoreController
   readonly #input: InputUiController
   readonly #children: ChildUiController
   readonly #sessions: SessionUiController
@@ -232,16 +150,9 @@ export class RottweilerApp extends BoxRenderable {
   #toolsElapsedTimer: ReturnType<typeof setInterval> | null = null
   #reviewOpen = false
   #pendingReviewSelection: string | null = null
-  #postSubmitPicker: "models" | "providers" | "themes" | "settings" | "permissions" | "mcp" | "agents" | null = null
-  #terminalSuspended = false
-  #pendingShellTimer: ReturnType<typeof setTimeout> | null = null
   #pluginNotificationTimer: ReturnType<typeof setTimeout> | null = null
   #runtimeServicesTimer: ReturnType<typeof setTimeout> | null = null
   #clipboardNoticeTimer: ReturnType<typeof setTimeout> | null = null
-  #pendingReviewPaths = new Set<string>()
-  #composerNotice: string | null = null
-  #lastComposerValue = ""
-  #pendingClientState: AppClientState | null = null
   #destroyed = false
   #presentation: PresentationController<PendingPresentationEvent>
   #onTerminalFocus = () => {
@@ -358,7 +269,7 @@ export class RottweilerApp extends BoxRenderable {
       get picker() { return inputApp.picker }, get mcpBrowser() { return inputApp.mcpBrowser },
       get settingsBrowser() { return inputApp.settingsBrowser }, get themeBrowser() { return inputApp.themeBrowser },
       get commandPalette() { return inputApp.commandPalette },
-      discardPendingRestore: () => { this.#pendingClientState = null },
+      discardPendingRestore: () => { this.#clientRestore.discard() },
       projectRejection: outcome => this.#projectRejection(outcome),
       projectError: (code, message, retryable) => this.#projectClientError(code, message, retryable),
       modelSupportsVision: state => this.#modelSupportsVision(state),
@@ -434,11 +345,11 @@ export class RottweilerApp extends BoxRenderable {
       get picker() { return app.picker }, get composer() { return app.composer },
       get banner() { return app.banner }, get theme() { return app.#theme },
       get projectionErrors() { return app.#projectionErrors }, get destroyed() { return app.#destroyed },
-      get composerNotice() { return app.#composerNotice }, set composerNotice(value) { app.#composerNotice = value },
+      get composerNotice() { return app.#submission.notice }, set composerNotice(value) { app.#submission.notice = value },
       pickerController: this.#pickerController, requests: this.#projectionRequests,
       refresh: () => this.setState(this.#state), closePicker: () => this.closePicker(),
       selectSession: id => this.#options.onSessionSelect?.(id),
-      sendMessage: (content, attachments, preserve) => this.#sendMessage(content, attachments, preserve),
+      sendMessage: (content, attachments, preserve) => this.#submission.sendMessage(content, attachments, preserve),
       projectError: (code, message, retryable) => this.#projectClientError(code, message, retryable),
       projectRejection: outcome => this.#projectRejection(outcome),
     })
@@ -512,7 +423,25 @@ export class RottweilerApp extends BoxRenderable {
       get projectionErrors() { return app.#projectionErrors }, get sessionId() { return app.#sessionId },
       onExit: () => this.#options.onExit?.(), modalOpened: () => this.#modalOpened(),
       clearProjectionError: kind => this.#clearProjectionError(kind),
-      requestFork: turn => this.#requestFork(turn), sendMessage: (content, attachments) => this.#sendMessage(content, attachments),
+      requestFork: turn => this.#submission.requestFork(turn), sendMessage: (content, attachments) => this.#submission.sendMessage(content, attachments),
+    })
+    this.#submission = new SubmissionController({
+      ui: this, children: this.#children, sessions: this.#sessions, pickerContent: this.#pickerContent,
+      requests: this.#projectionRequests, terminalHandover: this.#options.terminalHandover,
+      get sessionId() { return app.#sessionId }, get destroyed() { return app.#destroyed },
+      get reviewOpen() { return app.#reviewOpen }, set reviewOpen(value) { app.#reviewOpen = value },
+      onExit: () => this.#options.onExit?.(), onComposerInput: value => this.#options.onComposerInput?.(value),
+      projectError: (code, message, retryable) => this.#projectClientError(code, message, retryable),
+      projectRejection: outcome => this.#projectRejection(outcome), invalidSlash: message => this.#projectInvalidSlashCommand(message),
+    })
+    this.#clientRestore = new ClientRestoreController({
+      ui: this, pickerController: this.#pickerController, children: this.#children, sessions: this.#sessions,
+      input: this.#input, providers: this.#providers, mcp: this.#mcp, themes: this.#themes,
+      submission: this.#submission, pickerContent: this.#pickerContent,
+      get submissionsInFlight() { return app.#composerSubmissionsInFlight }, get sessionId() { return app.#sessionId },
+      get theme() { return app.#theme }, get reviewOpen() { return app.#reviewOpen },
+      resolveTheme: theme => this.#resolvedTheme(theme), applyTheme: theme => this.#createThemedSurface(theme),
+      setPrimaryView: view => this.#setPrimaryView(view), updateToolsWorkspace: (state, restore) => this.#updateToolsWorkspace(state, restore),
     })
     this.#createThemedSurface(theme)
     ctx.on(CliRenderEvents.FOCUS, this.#onTerminalFocus)
@@ -535,7 +464,7 @@ export class RottweilerApp extends BoxRenderable {
       return
     }
     this.#deferredTheme = null
-    const composerState = rebuilding ? this.#captureComposerState() : null
+    const composerState = rebuilding ? this.#clientRestore.captureComposerState() : null
     const transcriptClientState = rebuilding ? this.transcript.captureClientState() : null
     const toolsClientState = rebuilding ? this.toolsWorkspace.captureClientState() : null
     const toolsScrollTop = rebuilding ? this.toolsWorkspace.activityScroller.scrollTop : 0
@@ -591,167 +520,23 @@ export class RottweilerApp extends BoxRenderable {
     this.#theme = theme
     this.backgroundColor = theme.background
     this.#syntaxStyle = createSyntaxStyle(theme)
-    this.banner = new StateBannerRenderable(this.ctx, theme)
-    this.main = new BoxRenderable(this.ctx, {
-      id: "main-content",
-      width: "100%",
-      flexGrow: 1,
-      minHeight: 1,
-      flexDirection: "row",
-      backgroundColor: theme.background,
-      gap: 0,
-    })
-    this.transcript = new TranscriptRenderable(this.ctx, theme, {
-      diagnostics: this.#options.diagnostics,
-      syntaxStyle: this.#syntaxStyle,
-      ...(this.#treeSitterClient === undefined
-        ? {}
-        : { treeSitterClient: this.#treeSitterClient }),
-      onInteraction: () => this.#input.restoreFocusAfterTranscriptInteraction(),
-      onOpenSubagent: (subagentId) => {
-        void this.#children.enterSubagent(subagentId)
-      },
-      onOpenChild: child => {
-        this.#children.openHistorical({ sessionId: child.session_id, subagentId: child.subagent_id, task: child.task.text })
-      },
-      onOpenContent: source => {
-        const view = this.#history?.controller.snapshot.page?.view
-        if (view === undefined || this.#document === null) return
-        this.#outputViewerToolCallId = null
-        void this.#document.open(view, source)
-        this.setState(this.#state)
-        this.outputViewer.focusPresentation()
-      },
-      onHistoryAnchor: anchor => this.#history.controller.setAnchor(anchor),
-      onHistorySeek: ordinal => { void this.#history?.controller.seek(ordinal) },
-      onHistoryAround: item => { void this.#history?.controller.around(item) },
-      onHistoryBoundary: boundary => { void this.#history?.controller.load({ type: boundary }) },
-      onHistoryFollowing: following => this.#history?.controller.setFollowing(following),
-      onOpenToolOutput: (toolCallId) => this.#openToolOutput(toolCallId),
-    })
-    this.toolsWorkspace = new ToolsWorkspaceRenderable(this.ctx, theme, {
-      onOpenToolOutput: (toolCallId) => this.#openToolOutput(toolCallId),
-    })
-    this.toolsWorkspace.visible = this.#primaryView === "tools"
-    this.contextPanel = new ContextPanelRenderable(this.ctx, theme, {
-      onOpenDiff: (path) => this.#openChangedFileDiff(path),
-      onOpenSubagent: (subagentId) => {
-        void this.#children.enterSubagent(subagentId)
-      },
-    })
-    this.main.add(this.transcript)
-    this.main.add(this.toolsWorkspace)
-    this.main.add(this.contextPanel)
-    this.interactionPanel = new InteractionPanelRenderable(
-      this.ctx,
-      theme,
-      this.#syntaxStyle,
-      {
-        onApproval: (tool, action) => {
-          if (action === "allow_tool_session") {
-            this.#projectionRequests.command({
-              type: "add_session_permission_rule",
-              pattern: `${tool.name}(*)`,
-              action: "allow",
-            })
-            this.#approve(tool, "allow_once")
-          } else if (action === "auto_safe_mode") {
-            void this.#sendMessage("/permissions mode auto-safe", [])
-            this.#approve(tool, "allow_once")
-          } else {
-            this.#approve(tool, action)
-          }
-        },
-        onAnswer: (question, values) => this.#answer(question, values),
-        onPlanReview: (decision) => this.#reviewPlan(decision),
-      },
-      this.#treeSitterClient,
-    )
-    this.reviewPanel = new ReviewPanelRenderable(
-      this.ctx,
-      theme,
-      this.#syntaxStyle,
-      {
-        onDecision: (file, decision) =>
-          void this.#reviewFile(file.path, file.currentHash, decision),
-        onClose: () => this.#closeReview(),
-      },
-      this.#treeSitterClient,
-    )
-    this.outputViewer = new OutputViewerRenderable(this.ctx, theme)
-    this.subagentTray = new SubagentTrayRenderable(
-      this.ctx,
-      theme,
-      (subagentId) => void this.#children.enterSubagent(subagentId),
-      () => {
-        if (this.#children.activeId !== null) this.#children.updateSubagentBanner(this.#children.presentedState())
-      },
-    )
-    const picker = new FuzzyPickerRenderable(this.ctx, theme, (query) => {
-      if (this.picker !== picker) return
-      if (this.#pickerController.kind === "sessions") this.#sessions.scheduleSessionSearch(query)
-    })
-    this.picker = picker
-    this.picker.position = "absolute"
-    this.picker.top = 2
-    this.picker.left = "15%"
-    this.picker.width = "70%"
-    this.commandPalette = new ListDetailRenderable<PaletteAction>(this.ctx, theme)
-    this.mcpBrowser = new ListDetailRenderable<McpBrowserAction>(this.ctx, theme, {
-      surfaceLayout: "primary",
-      splitListWidth: 72,
-      splitMinWidth: 108,
-      inputPlaceholder: "Filter MCP connections…",
-      emptyCopy: "No MCP servers configured",
-      surfaceBackground: theme.background,
-      renderRow: (row, selected) => {
-        const action = row.action
-        const server = action.kind === "manage"
-          ? this.#state.mcpServers.find((candidate) => candidate.name === action.server)
-          : undefined
-        return mcpBrowserRow(row, server, selected, theme)
-      },
-    })
-    this.settingsBrowser = new ListDetailRenderable<SettingsBrowserAction>(this.ctx, theme, {
-      surfaceLayout: "primary",
-      splitListWidth: 29,
-      splitMinWidth: 90,
-      inputPlaceholder: "Filter settings…",
-      emptyCopy: "No matching settings",
-      surfaceBackground: theme.background,
-    })
-    this.themeBrowser = new ListDetailRenderable<RottweilerTheme>(this.ctx, theme, {
-      surfaceLayout: "primary",
-      splitListWidth: 33,
-      splitMinWidth: 100,
-      compactMinHeight: 8,
-      inputPlaceholder: "Filter themes…",
-      emptyCopy: "No matching themes",
-      surfaceBackground: theme.background,
-      renderRow: (row, selected, availableWidth) =>
-        themeBrowserRow(row, selected, availableWidth, theme),
-      renderDetail: (row) => themeBrowserDetail(row.action),
-    })
-    const pasteImageKeycap = this.#pickerContent.bindingHint("paste_image", ["global", this.#pickerContent.composerKeybindingContext()])
-    const externalEditorKeycap = this.#pickerContent.bindingHint("open_external_editor", ["global", this.#pickerContent.composerKeybindingContext()])
-    this.composer = new ComposerRenderable(this.ctx, theme, {
-      editor: this.#options.editor,
-      imagePaste: this.#options.imagePaste,
-      ...(pasteImageKeycap === null ? {} : { pasteImageKeycap }),
-      ...(externalEditorKeycap === null ? {} : { externalEditorKeycap }),
+    const app = this
+    buildSurface({
+      ui: this, context: this.ctx, options: this.#options, syntaxStyle: this.#syntaxStyle,
+      treeSitterClient: this.#treeSitterClient, input: this.#input, children: this.#children,
+      history: this.#history, document: this.#document, requests: this.#projectionRequests,
+      submission: this.#submission, pickerController: this.#pickerController,
+      sessions: this.#sessions, pickerContent: this.#pickerContent,
+      get width() { return app.width || app.ctx.width }, get height() { return app.height || app.ctx.height },
+      get outputViewerToolCallId() { return app.#outputViewerToolCallId },
+      set outputViewerToolCallId(value) { app.#outputViewerToolCallId = value },
+      openToolOutput: id => this.#openToolOutput(id), openChangedFileDiff: path => this.#openChangedFileDiff(path),
+      closeReview: () => this.#closeReview(), resizeReviewPanel: (width, height) => this.#resizeReviewPanel(width, height),
+      projectError: (code, message, retryable) => this.#projectClientError(code, message, retryable),
       onSubmit: async (content, submittedAttachments) => {
         this.#composerSubmissionsInFlight += 1
-        return await this.#sendMessage(content, submittedAttachments)
+        return await this.#submission.sendMessage(content, submittedAttachments)
       },
-      submissionScope: () => this.#children.composerScope(),
-      onDetachedSubmissionRejected: (scope, content, attachments) =>
-        this.#children.restoreDetachedSubmission(scope, content, attachments),
-      onFileMention: (mention) => this.openFilePicker(mention.query, true),
-      onManageAttachments: () => this.openAttachmentPicker(),
-      onAttachmentError: (message) =>
-        this.#projectClientError("attachment_unavailable", message, true),
-      onInput: (value) => this.#composerInputChanged(value),
-      onSubmitted: () => this.#openPostSubmitPicker(),
       onSubmissionSettled: () => {
         this.#composerSubmissionsInFlight = Math.max(0, this.#composerSubmissionsInFlight - 1)
         const deferred = this.#deferredTheme
@@ -766,37 +551,9 @@ export class RottweilerApp extends BoxRenderable {
           }
         })
       },
-      onHeightChange: (height) => {
-        this.interactionPanel.resizeForTerminal(
-          this.height === 0 ? this.ctx.height : this.height,
-          this.interactionPanel.usesComposer ? height : 0,
-        )
-        if (this.reviewPanel.visible && this.statusLine !== undefined) {
-          this.#resizeReviewPanel(
-            this.width === 0 ? this.ctx.width : this.width,
-            this.height === 0 ? this.ctx.height : this.height,
-          )
-        }
-      },
-    })
-    this.statusLine = new StatusLineRenderable(this.ctx, theme, {
-      modelPickerKeycap: this.#pickerContent.bindingHint("open_model_picker", ["global"]),
-    })
-    this.add(this.banner)
-    this.add(this.main)
-    this.add(this.reviewPanel)
-    this.add(this.outputViewer)
-    this.add(this.interactionPanel)
-    this.add(this.subagentTray)
-    this.add(this.composer)
-    this.add(this.statusLine)
-    this.add(this.picker)
-    this.add(this.commandPalette)
-    this.add(this.mcpBrowser)
-    this.add(this.settingsBrowser)
-    this.add(this.themeBrowser)
+    }, theme)
     this.setState(this.#state)
-    if (composerState !== null) this.#restoreComposerState(composerState)
+    if (composerState !== null) this.#clientRestore.restoreComposerState(composerState)
     if (transcriptClientState !== null) this.transcript.restoreClientState(transcriptClientState)
     if (toolsClientState !== null) {
       this.#updateToolsWorkspace(this.#children.presentedState(), true)
@@ -834,18 +591,6 @@ export class RottweilerApp extends BoxRenderable {
     else if (this.themeBrowser.visible) this.themeBrowser.input.focus()
     else if (this.commandPalette.visible) this.commandPalette.input.focus()
     else if (this.picker.visible && !this.#pickerController.anchored) this.picker.input.focus()
-  }
-
-  #openPostSubmitPicker(): void {
-    const picker = this.#postSubmitPicker
-    this.#postSubmitPicker = null
-    if (picker === "models") this.openModelPicker()
-    else if (picker === "providers") this.openProviderPicker()
-    else if (picker === "themes") this.openThemePicker()
-    else if (picker === "settings") this.openSettingsPicker()
-    else if (picker === "permissions") this.openPermissionPicker()
-    else if (picker === "mcp") this.openMcpPicker()
-    else if (picker === "agents") this.openSubagentPicker()
   }
 
   get state(): RottweilerState {
@@ -900,10 +645,10 @@ export class RottweilerApp extends BoxRenderable {
       this.#outputViewerToolCallId = null
       this.#reviewOpen = false
       this.#sessions.reset()
-      this.#composerNotice = null
+      this.#submission.reset()
       this.#providers.resetSession()
       this.outputViewer.closePresentation()
-      this.reviewPanel.closePresentation()
+      this.reviewPanel.resetSession()
     }
     this.#sessionId = sessionId
     if (this.#state.replay.active && this.#state.replay.sessionId !== sessionId) {
@@ -1011,10 +756,10 @@ export class RottweilerApp extends BoxRenderable {
     // engine restart cannot leave OpenTUI reading while a foreground shell
     // still owns the supervisor's broker.
     if (!this.#state.replay.active && this.#state.shell.active) {
-      this.#clearPendingShellTimer()
-      this.#suspendTerminal()
+      this.#submission.clearPendingShellTimer()
+      this.#submission.suspendTerminal()
     } else {
-      this.#resumeTerminal()
+      this.#submission.resumeTerminal()
     }
   }
 
@@ -1058,10 +803,10 @@ export class RottweilerApp extends BoxRenderable {
     }
     if (event.type === "user_shell_state_changed" && !next.replay.active) {
       if (event.active) {
-        this.#clearPendingShellTimer()
-        this.#suspendTerminal()
+        this.#submission.clearPendingShellTimer()
+        this.#submission.suspendTerminal()
       } else {
-        this.#resumeTerminal()
+        this.#submission.resumeTerminal()
       }
     }
     if (
@@ -1157,144 +902,9 @@ export class RottweilerApp extends BoxRenderable {
     this.#bindStateToComponents(state)
   }
 
-  #captureComposerState(): ClientComposerState {
-    return {
-      content: this.composer.value,
-      attachments: [...this.composer.attachments],
-      cursorOffset: this.composer.editor.cursorOffset,
-      selection: this.composer.editor.getSelection(),
-    }
-  }
-
-  #restoreComposerState(state: ClientComposerState): void {
-    this.composer.restoreDraft(state.content, state.attachments)
-    this.composer.editor.cursorOffset = state.cursorOffset
-    if (state.selection !== null) this.composer.editor.setSelection(state.selection.start, state.selection.end)
-  }
-
-  #clientPickerSurface() {
-    switch (this.#pickerController.kind) {
-      case "palette": return this.commandPalette
-      case "mcp": return this.mcpBrowser
-      case "settings": return this.settingsBrowser
-      case "themes": return this.themeBrowser
-      default: return null
-    }
-  }
-
-  /** Return no handoff while an interaction needs its current process or cannot fit the private cap. */
-  recycleState(): AppClientState | null {
-    const kind = this.#pickerController.kind
-    if (this.#children.activeId !== null || this.#composerSubmissionsInFlight > 0
-      || this.#terminalSuspended || this.#state.shell.active || this.#state.replay.active
-      || this.#providers.hasPendingAction
-      || this.#state.providerAuth.pending !== null || this.#mcp.hasDraft
-      || this.#sessions.pending
-      || this.#reviewOpen || this.outputViewer.visible || this.interactionPanel.visible
-      || (kind !== null && !isRestorablePicker(kind))) return null
-    const surface = this.#clientPickerSurface()
-    const selected = surface?.selectedId ?? this.picker.select.getSelectedOption()?.value
-    return parseTuiRecycleState({
-      schemaVersion: 2,
-      sessionId: this.#sessionId,
-      composer: this.#captureComposerState(),
-      subagentDrafts: [...this.#children.drafts],
-      primaryView: this.#primaryView,
-      scrollTop: Math.max(0, this.transcript.scroller.scrollTop),
-      toolsScrollTop: Math.max(0, this.toolsWorkspace.activityScroller.scrollTop),
-      transcript: this.transcript.captureClientState(),
-      tools: this.toolsWorkspace.captureClientState(),
-      inputMode: this.#input.mode,
-      focus: this.#input.focus === "picker" ? this.#input.beforePicker : this.#input.focus,
-      theme: this.#theme.name,
-      picker: kind === null ? null : {
-        kind,
-        anchored: this.#pickerController.anchored,
-        query: surface?.input.value ?? (this.#pickerController.anchored ? this.#pickerController.query : this.picker.input.value),
-        selectedId: typeof selected === "string" ? selected : null,
-        scrollOffset: surface?.scrollOffset ?? 0,
-        modelProviderFilter: this.#providers.modelProviderFilter,
-        onboarding: this.#providers.onboarding,
-        themeBeforePreview: this.#themes.previewBase?.name ?? null,
-      },
-    })
-  }
-
-  /** Rebuild view bindings from client-owned data; projection responses remain engine-owned. */
-  restoreRecycleState(state: AppClientState): void {
-    if (state.sessionId !== this.#sessionId) return
-    this.#providers.suppressOnboarding()
-    const theme = this.#resolvedTheme(themeByName(state.theme) ?? kennelTheme)
-    if (theme.name !== this.#theme.name) this.#createThemedSurface(theme)
-    this.#restoreComposerState(state.composer)
-    this.#children.restoreDrafts({ content: state.composer.content, attachments: state.composer.attachments }, state.subagentDrafts)
-    this.#lastComposerValue = state.composer.content
-    this.#input.restore(state.inputMode, state.focus)
-    this.#setPrimaryView(state.primaryView)
-    const picker = state.picker
-    if (picker !== null) {
-      switch (picker.kind) {
-        case "palette": this.openCommandPicker(); break
-        case "keyboardHelp": this.openKeyboardHelpPicker(); break
-        case "commands": this.#pickerContent.requestCommands(); break
-        case "attachments": this.openAttachmentPicker(); break
-        case "mcp": this.openMcpPicker(); break
-        case "modes": this.openModePicker(); break
-        case "models": this.openModelPicker(picker.modelProviderFilter); break
-        case "providers": this.openProviderPicker(picker.onboarding); break
-        case "permissions": this.openPermissionPicker(); break
-        case "permissionMode": this.openPermissionModePicker(); break
-        case "trust": this.openTrustPicker(); break
-        case "queuedMessages": this.openQueuedMessagesPicker(); break
-        case "workspaceRoots": this.openWorkspaceRootsPicker(); break
-        case "budgets": this.openBudgetPicker(); break
-        case "sessions": this.openSessionPicker(); break
-        case "settings": this.openSettingsPicker(); break
-        case "agents": this.openSubagentPicker(); break
-        case "timeline": this.openTimelinePicker(); break
-        case "themes": this.openThemePicker(); break
-      }
-      this.#pickerController.begin(picker.kind, picker.anchored, picker.query)
-      const surface = this.#clientPickerSurface()
-      if (surface !== null) surface.input.value = picker.query
-      else this.picker.input.value = picker.query
-      this.#themes.restorePreviewBase(picker.themeBeforePreview === null
-        ? null : this.#resolvedTheme(themeByName(picker.themeBeforePreview) ?? kennelTheme))
-      this.#pickerController.refresh()
-    }
-    this.#pendingClientState = state
-    this.setState(this.#state)
-    this.#input.focusForInputMode()
-  }
-
-  /** Apply viewport/selection only after replay and OpenTUI layout have supplied their rows. */
-  applyPendingRecycleScroll(): void {
-    const state = this.#pendingClientState
-    if (state === null) return
-    const transcriptReady = state.scrollTop === 0 || this.transcript.mountedEntryCount > 0
-    if (state.tools.expanded.length > 0 || state.tools.selectedId !== null || state.toolsScrollTop > 0) {
-      this.#updateToolsWorkspace(this.#children.presentedState(), true)
-    }
-    const toolsReady = state.toolsScrollTop === 0 || this.toolsWorkspace.mountedRowCount > 0
-    const transcriptBlocksReady = this.transcript.restoreClientState(state.transcript)
-    const toolsBlocksReady = this.toolsWorkspace.restoreClientState(state.tools)
-    if (transcriptReady) this.transcript.setScrollOffset(state.scrollTop)
-    if (toolsReady) this.toolsWorkspace.activityScroller.scrollTo(state.toolsScrollTop)
-    let pickerReady = true
-    if (state.picker !== null && this.#pickerController.kind === state.picker.kind) {
-      const surface = this.#clientPickerSurface()
-      if (surface !== null) {
-        if (state.picker.selectedId !== null) surface.selectById(state.picker.selectedId)
-        pickerReady = state.picker.selectedId === null || surface.selectedId === state.picker.selectedId
-        surface.restoreViewport(state.picker.scrollOffset)
-      } else {
-        const index = this.picker.select.options.findIndex((item) => item.value === state.picker?.selectedId)
-        if (index >= 0) this.picker.select.setSelectedIndex(index)
-        pickerReady = state.picker.selectedId === null || index >= 0
-      }
-    }
-    if (transcriptReady && toolsReady && transcriptBlocksReady && toolsBlocksReady && pickerReady) this.#pendingClientState = null
-  }
+  recycleState(): AppClientState | null { return this.#clientRestore.recycleState() }
+  restoreRecycleState(state: AppClientState): void { this.#clientRestore.restoreRecycleState(state) }
+  applyPendingRecycleScroll(): void { this.#clientRestore.applyPendingRecycleScroll() }
 
   #modelSupportsVision(state: RottweilerState): boolean {
     const selected = state.models.find((model) => model.current && model.available !== false)
@@ -1396,10 +1006,10 @@ export class RottweilerApp extends BoxRenderable {
     )
     this.statusLine.update(presented)
     this.banner.update(presented)
-    if (this.#composerNotice !== null && this.composer.visible) {
+    if (this.#submission.notice !== null && this.composer.visible) {
       this.banner.visible = true
       this.banner.fg = this.#theme.textMuted
-      this.banner.content = this.#composerNotice
+      this.banner.content = this.#submission.notice
     }
     if (viewingSubagent) this.#children.updateSubagentBanner(presented)
     if (!this.#input.isInterruptible()) this.#input.clearInterruptEscape(false)
@@ -1583,7 +1193,7 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   closePicker(reason: PickerCloseReason = "dismiss"): void {
-    this.#pendingClientState = null
+    this.#clientRestore.discard()
     if (this.mcpBrowser.visible) this.mcpBrowser.close()
     if (this.settingsBrowser.visible) this.settingsBrowser.close()
     if (this.themeBrowser.visible) this.themeBrowser.close()
@@ -1659,7 +1269,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#document?.close()
     this.#history?.dispose()
     this.#presentation.destroy()
-    this.#clearPendingShellTimer()
+    this.#submission.reset()
     this.#clearPluginNotificationTimer()
     this.#clearRuntimeServicesTimer()
     this.#clearToolsElapsedTimer()
@@ -1696,28 +1306,6 @@ export class RottweilerApp extends BoxRenderable {
     return themeByName(theme.name, this.#systemThemeMode ?? theme.mode) ?? theme
   }
 
-  #composerInputChanged(value: string): void {
-    const changed = value !== this.#lastComposerValue
-    this.#lastComposerValue = value
-    if (!changed) {
-      this.#pickerContent.updateComposerAutocomplete(value)
-      return
-    }
-    this.#options.onComposerInput?.(value)
-    this.transcript.clearBlockSelection()
-    const hadPendingIntent = this.#sessions.clearRewind()
-    const hadNotice = this.#composerNotice !== null
-    this.#composerNotice = null
-    if ((hadPendingIntent || hadNotice) && !this.#destroyed) this.setState(this.#state)
-    this.#pickerContent.updateComposerAutocomplete(value)
-  }
-
-  #clearComposerNotice(): void {
-    if (this.#composerNotice === null) return
-    this.#composerNotice = null
-    if (!this.#destroyed) this.setState(this.#state)
-  }
-
   #openChangedFileDiff(path: string): void {
     if (this.#state.replay.active || this.#state.shell.active) return
     this.#reviewOpen = true
@@ -1750,358 +1338,6 @@ export class RottweilerApp extends BoxRenderable {
       clearTimeout(this.#runtimeServicesTimer)
       this.#runtimeServicesTimer = null
     }
-  }
-
-  async #sendMessage(
-    content: string,
-    attachments: readonly Attachment[],
-    preserveRewindIntent = false,
-  ): Promise<boolean> {
-    if (!preserveRewindIntent) {
-      this.#sessions.clearRewind()
-      this.#clearComposerNotice()
-    }
-    if (this.#state.replay.active) {
-      return false
-    }
-    if (content.startsWith("!")) {
-      const originatingSubagentId = this.#children.activeId
-      const accepted = await this.#startForegroundShell(content, attachments)
-      if (accepted && originatingSubagentId !== null && this.#children.activeId === originatingSubagentId) {
-        this.#children.leaveSubagent()
-      }
-      return accepted
-    }
-    if (this.#children.activeId !== null) {
-      const action = attachments.length === 0 ? parseSessionAction(content) : null
-      if (action?.type === "exit") {
-        this.#options.onExit?.()
-        return true
-      }
-      if (action?.type === "agents") {
-        this.#postSubmitPicker = "agents"
-        this.closePicker()
-        return true
-      }
-      if (attachments.length > 0) {
-        this.#projectClientError(
-          "subagent_attachments_unsupported",
-          "Child follow-ups are text-only; remove attachments or return to the parent session.",
-        )
-        return false
-      }
-      const subagentId = this.#children.activeId
-      if (this.#children.subagentDescriptor(subagentId)?.activity === "running") {
-        this.#projectClientError(
-          "subagent_still_running",
-          "This child is still working. Inspect its progress or interrupt it before sending a follow-up.",
-        )
-        return false
-      }
-      let outcome: void | CommandOutcome | null
-      try {
-        outcome = await this.#projectionRequests.emit({
-          type: "continue_subagent",
-          meta: this.#projectionRequests.meta(),
-          session_id: this.#sessionId,
-          subagent_id: subagentId,
-          content,
-        })
-      } catch (error) {
-        this.#projectClientError(
-          "subagent_continue_failed",
-          presentError({
-            category: "protocol",
-            code: "subagent_continue_failed",
-            message: safeErrorMessage(error),
-          }).text,
-          true,
-        )
-        return false
-      }
-      if (outcome?.type !== "accepted") {
-        if (outcome?.type === "rejected") this.#projectRejection(outcome)
-        else {
-          const presentation = presentError({
-            category: "protocol",
-            code: "subagent_continue_unavailable",
-            message: "Couldn't continue the child because the engine connection is unavailable.",
-          })
-          this.#projectClientError("subagent_continue_unavailable", presentation.text, true)
-        }
-        return false
-      }
-      this.#children.responseStarted(subagentId)
-      this.setState(this.#state)
-      return true
-    }
-    const textQuestion = Object.values(this.#state.questions).find(
-      (question) => !question.answered && question.questions[0]?.response_kind === "text",
-    )
-    if (textQuestion !== undefined) {
-      if (attachments.length > 0) {
-        this.#projectClientError(
-          "question_attachments_unsupported",
-          "Answer this question with text only; attachments stay in your draft.",
-        )
-        return false
-      }
-      const outcome = await this.#projectionRequests.emit({
-        type: "answer_question",
-        meta: this.#projectionRequests.meta(),
-        session_id: this.#sessionId,
-        question_id: textQuestion.questionId,
-        answers: [{ question_id: textQuestion.questionId, values: [content] }],
-      })
-      if (outcome?.type !== "accepted") {
-        this.#projectRejection(outcome)
-        return false
-      }
-      return true
-    }
-    const sessionAction = attachments.length === 0 ? parseSessionAction(content) : null
-    if (sessionAction?.type === "invalid") {
-      this.#projectInvalidSlashCommand(sessionAction.message)
-      return false
-    }
-    if (sessionAction?.type === "exit") {
-      this.closePicker()
-      this.#options.onExit?.()
-      return true
-    }
-    if (sessionAction?.type === "new") {
-      this.closePicker()
-      void this.#sessions.createSession()
-      return true
-    }
-    if (sessionAction?.type === "rewindTimeline") {
-      this.closePicker()
-      this.openTimelinePicker()
-      return true
-    }
-    if (sessionAction?.type === "models") {
-      this.#postSubmitPicker = "models"
-      this.closePicker()
-      return true
-    }
-    if (sessionAction?.type === "providers") {
-      this.#postSubmitPicker = "providers"
-      this.closePicker()
-      return true
-    }
-    if (sessionAction?.type === "agents") {
-      this.#postSubmitPicker = "agents"
-      this.closePicker()
-      return true
-    }
-    if (sessionAction?.type === "theme") {
-      this.#postSubmitPicker = "themes"
-      this.closePicker()
-      return true
-    }
-    if (sessionAction?.type === "settings") {
-      this.#postSubmitPicker = "settings"
-      this.closePicker()
-      return true
-    }
-    if (sessionAction?.type === "permissions") {
-      this.#postSubmitPicker = "permissions"
-      this.closePicker()
-      return true
-    }
-    if (sessionAction?.type === "mcp") {
-      this.#postSubmitPicker = "mcp"
-      this.closePicker()
-      return true
-    }
-    if (sessionAction?.type === "review") {
-      if (this.#state.shell.active) {
-        this.#projectClientError(
-          "review_unavailable_during_shell",
-          "exit the foreground shell before opening session review",
-        )
-        return false
-      }
-      this.reviewPanel.showSessionReview()
-      this.#reviewOpen = true
-      this.setState(this.#state)
-      const meta = this.#projectionRequests.issue("review")
-      const outcome = await this.#projectionRequests.emit({
-        type: "get_session_review",
-        meta,
-        session_id: this.#sessionId,
-      })
-      if (outcome?.type !== "accepted") {
-        this.#reviewOpen = false
-        this.reviewPanel.closePresentation()
-        this.setState(this.#state)
-        this.#projectRejection(outcome)
-      }
-      return outcome?.type === "accepted"
-    }
-    if (sessionAction?.type === "fork") {
-      return await this.#requestFork(sessionAction.atTurn)
-    }
-    const meta = this.#projectionRequests.meta()
-    if (preserveRewindIntent) this.#sessions.bindRewindRequest(meta.request_id)
-    const outcome = await this.#projectionRequests.emit({
-      type: "send_message",
-      meta,
-      session_id: this.#sessionId,
-      content,
-      attachments: [...attachments],
-    })
-    if (outcome?.type !== "accepted") {
-      this.#projectRejection(outcome)
-      return false
-    }
-    return true
-  }
-
-  async #startForegroundShell(
-    content: string,
-    attachments: readonly Attachment[],
-  ): Promise<boolean> {
-    const command = content.slice(1).trim()
-    if (command.length === 0 || attachments.length > 0) return false
-    this.#suspendTerminal()
-    this.#clearPendingShellTimer()
-    this.#pendingShellTimer = setTimeout(() => {
-      this.#pendingShellTimer = null
-      if (!this.#state.shell.active) this.#resumeTerminal()
-    }, 5_000)
-    const outcome = await this.#projectionRequests.emit({
-      type: "user_shell_started",
-      meta: this.#projectionRequests.meta(),
-      session_id: this.#sessionId,
-      command,
-    })
-    if (outcome?.type !== "accepted") {
-      this.#clearPendingShellTimer()
-      if (!this.#state.shell.active) this.#resumeTerminal()
-      this.#projectRejection(outcome)
-      return false
-    }
-    return true
-  }
-
-  #approve(tool: ToolProjection, decision: ApprovalDecision): void {
-    void this.#submitApproval(tool, decision)
-  }
-
-  async #submitApproval(tool: ToolProjection, decision: ApprovalDecision): Promise<void> {
-    try {
-      const outcome = await this.#projectionRequests.emit({
-        type: "approve_tool",
-        meta: this.#projectionRequests.meta(),
-        session_id: this.#sessionId,
-        tool_call_id: tool.toolCallId,
-        invocation_id: tool.invocationId,
-        decision,
-        binding: approvalBinding(tool.diff),
-      })
-      if (outcome?.type === "rejected") {
-        this.#projectRejection(outcome)
-      } else if (outcome === null) {
-        this.#projectClientError(
-          "tool_approval_unavailable",
-          `the engine did not acknowledge the ${tool.name} approval decision`,
-          true,
-        )
-      }
-    } catch (error) {
-      this.#projectClientError(
-        "tool_approval_failed",
-        presentError({
-          category: "protocol",
-          code: "tool_approval_failed",
-          message: safeErrorMessage(error),
-        }).text,
-        true,
-      )
-    }
-  }
-
-  #answer(question: QuestionProjection, values: readonly string[]): void {
-    this.#projectionRequests.emit({
-      type: "answer_question",
-      meta: this.#projectionRequests.meta(),
-      session_id: this.#sessionId,
-      question_id: question.questionId,
-      answers: [{ question_id: question.questionId, values: [...values] }],
-    })
-  }
-
-  #reviewPlan(decision: PlanDecision): void {
-    this.#projectionRequests.emit({
-      type: "approve_plan",
-      meta: this.#projectionRequests.meta(),
-      session_id: this.#sessionId,
-      decision,
-      revisions: decision === "reject" ? "Revise the plan using the user's next message as feedback." : null,
-    })
-  }
-
-  async #reviewFile(
-    path: string,
-    currentHash: string,
-    decision: "accept" | "revert",
-  ): Promise<void> {
-    if (this.#state.shell.active) {
-      this.#projectClientError(
-        "review_unavailable_during_shell",
-        "exit the foreground shell before deciding session review files",
-      )
-      return
-    }
-    if (this.#pendingReviewPaths.has(path)) return
-    this.#pendingReviewPaths.add(path)
-    this.reviewPanel.setDecisionPending(path, true)
-    try {
-      const outcome = await this.#projectionRequests.emit({
-        type: "review_file",
-        meta: this.#projectionRequests.meta(),
-        session_id: this.#sessionId,
-        path,
-        decision,
-        current_hash: currentHash,
-      })
-      if (outcome?.type === "rejected") {
-        this.#projectRejection(outcome)
-      } else if (outcome === null) {
-        this.#projectClientError(
-          "review_command_unavailable",
-          "the review decision was not acknowledged by the engine",
-          true,
-        )
-      }
-    } catch {
-      this.#projectClientError(
-        "review_command_failed",
-        "the review decision could not be delivered to the engine",
-        true,
-      )
-    } finally {
-      this.#pendingReviewPaths.delete(path)
-      this.reviewPanel.setDecisionPending(path, false)
-    }
-  }
-
-  async #requestFork(atTurn: string | null): Promise<boolean> {
-    const meta = this.#projectionRequests.meta()
-    this.#projectionRequests.trackFork(meta.request_id)
-    const outcome = await this.#projectionRequests.emit({
-      type: "fork",
-      meta,
-      session_id: this.#sessionId,
-      at_turn: atTurn,
-      operation_id: crypto.randomUUID(),
-    })
-    if (outcome === null || outcome?.type === "rejected") {
-      this.#projectionRequests.discardFork(meta.request_id)
-    }
-    if (outcome?.type === "rejected") this.#projectRejection(outcome)
-    return outcome?.type === "accepted"
   }
 
   #closeReview(): void {
@@ -2149,31 +1385,6 @@ export class RottweilerApp extends BoxRenderable {
     const next = { ...this.#projectionErrors }
     delete next[kind]
     this.#projectionErrors = next
-  }
-
-  #suspendTerminal(): void {
-    if (this.#terminalSuspended) {
-      return
-    }
-    this.#options.terminalHandover?.suspend()
-    this.#terminalSuspended = true
-  }
-
-  #resumeTerminal(): void {
-    this.#clearPendingShellTimer()
-    if (!this.#terminalSuspended) {
-      return
-    }
-    this.#options.terminalHandover?.resume()
-    this.#terminalSuspended = false
-    this.composer.focus()
-  }
-
-  #clearPendingShellTimer(): void {
-    if (this.#pendingShellTimer !== null) {
-      clearTimeout(this.#pendingShellTimer)
-      this.#pendingShellTimer = null
-    }
   }
 
   #schedulePluginNotificationDismissal(
@@ -2244,159 +1455,9 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #notify(previous: RottweilerState, next: RottweilerState): void {
-    if (this.#terminalFocused) {
-      return
-    }
-    const finished = Object.values(next.turns).find(
-      (turn) => turn.status !== "running" && previous.turns[turn.turnId]?.status === "running",
-    )
-    const approval = Object.values(next.tools).find(
-      (tool) =>
-        tool.status === "awaiting_approval" &&
-        previous.tools[tool.toolCallId]?.status !== "awaiting_approval",
-    )
-    const question = Object.values(next.questions).find(
-      (candidate) => !candidate.answered && previous.questions[candidate.questionId] === undefined,
-    )
-    const pluginNotification =
-      next.pluginNotifications.at(-1) !== previous.pluginNotifications.at(-1)
-        ? next.pluginNotifications.at(-1)
-        : undefined
-    if (pluginNotification !== undefined) {
-      void this.#options.notifications.notify({
-        kind: "plugin",
-        title: pluginNotification.title,
-        body: pluginNotification.message,
-      })
-    } else if (approval !== undefined) {
-      void this.#options.notifications.notify({
-        kind: "approval_needed",
-        title: "Rottweiler needs approval",
-        body: approval.name,
-      })
-    } else if (question !== undefined) {
-      void this.#options.notifications.notify({
-        kind: "question_asked",
-        title: "Rottweiler has a question",
-        body: question.questions[0]?.prompt ?? "Input required",
-      })
-    } else if (finished !== undefined) {
-      void this.#options.notifications.notify({
-        kind: "turn_finished",
-        title: "Rottweiler finished",
-        body: `Turn ${finished.turnId} · ${finished.status}`,
-      })
-    }
+    if (!this.#terminalFocused) notifyTransition(this.#options.notifications, previous, next)
   }
-}
 
-function safeErrorMessage(error: unknown): string {
-  return error instanceof Error && error.message.length > 0
-    ? error.message
-    : "the request could not be delivered to the engine"
-}
-
-function approvalBinding(diff: unknown): ApprovalBinding | null {
-  if (typeof diff !== "object" || diff === null) {
-    return null
-  }
-  const value = diff as Record<string, unknown>
-  if (
-    typeof value.proposal_id !== "string" ||
-    typeof value.arguments_hash !== "string" ||
-    typeof value.base_hash !== "string" ||
-    typeof value.diff_hash !== "string"
-  ) {
-    return null
-  }
-  return {
-    proposal_id: value.proposal_id,
-    arguments_hash: value.arguments_hash,
-    base_hash: value.base_hash,
-    diff_hash: value.diff_hash,
-  }
-}
-
-const IMMEDIATE_PRESENTATION_EVENTS = new Set<EngineEvent["type"]>([
-  "command_acknowledged",
-  "context_snapshot_ready",
-  "cost_snapshot_ready",
-  "session_review_ready",
-  "session_review_updated",
-  "prompt_dump_ready",
-  "session_replay_completed",
-  "session_history_ready",
-  "session_forked",
-  "session_exported",
-  "sessions_listed",
-  "subagents_listed",
-  "command_descriptors_listed",
-  "models_listed",
-  "modes_listed",
-  "settings_listed",
-  "permissions_listed",
-  "mcp_servers_listed",
-  "runtime_services_listed",
-  "workspace_files_found",
-  "workspace_roots_changed",
-  "workspace_status_ready",
-  "sessions_search_ready",
-  "workspace_file_preview_ready",
-  "workspace_diff_ready",
-  "host_shutdown",
-  "ui_notification",
-  "conversation_rewound",
-  "conversation_turn_committed",
-  "tool_approval_needed",
-  "question_asked",
-  "question_answered",
-  "tool_call_started",
-  "tool_call_finished",
-  "tool_diff_ready",
-  "tool_output_pruned",
-  "turn_started",
-  "turn_finished",
-  "user_message_accepted",
-  "message_queued",
-  "queued_message_removed",
-  "queued_messages_cleared",
-  "user_shell_state_changed",
-  "command_finished",
-  "mode_changed",
-  "model_changed",
-  "model_context_cleared",
-  "driver_changed",
-  "permission_mode_changed",
-  "budget_status_changed",
-  "context_item_pinned",
-  "context_item_evicted",
-  "compaction_started",
-  "compaction_finished",
-  "compaction_failed",
-  "compaction_attempt_started",
-  "compaction_attempt_finished",
-  "plan_submitted",
-  "plan_reviewed",
-  "subagent_spawned",
-  "subagent_finished",
-  "provider_configured",
-  "provider_activation_finished",
-  "provider_auth_started",
-  "provider_auth_finished",
-  "mcp_server_approval_reviewed",
-  "plugin_message_injected",
-  "plugin_status_changed",
-  "session_created",
-  "session_title_updated",
-  "guard_triggered",
-  "hook_failed",
-  "error",
-])
-
-export function deferPresentationForEvent(
-  event: { readonly type: EngineEvent["type"] },
-): boolean {
-  return !IMMEDIATE_PRESENTATION_EVENTS.has(event.type)
 }
 
 /** Build the retained OpenTUI application tree. */

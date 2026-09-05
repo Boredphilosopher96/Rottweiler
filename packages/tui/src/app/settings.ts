@@ -1,20 +1,12 @@
-import {
-  FuzzyPickerRenderable,
-  ListDetailRenderable
-} from "../components"
+import { FuzzyPickerRenderable, ListDetailRenderable } from "../components"
 import { PickerController } from "../picker-controller"
-import {
-  ProjectionRequestBroker,
-  type ProjectionKind,
-} from "../projection-requests"
+import { ProjectionRequestBroker, type ProjectionKind } from "../projection-requests"
 import {
   createSettingsBrowserModel,
   type SettingsBrowserAction,
   type SettingsCatalog,
 } from "../settings-browser"
-import {
-  type RottweilerState
-} from "../state"
+import { type RottweilerState } from "../state"
 
 type BudgetSettingKey =
   | "budget.session_cost_cap_micros_usd"

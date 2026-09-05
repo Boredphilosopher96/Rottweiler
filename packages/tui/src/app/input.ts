@@ -1,7 +1,25 @@
 import type { KeyEvent } from "@opentui/core"
-import type { ComposerRenderable, TranscriptRenderable, ToolsWorkspaceRenderable, StatusLineRenderable, StateBannerRenderable, ReviewPanelRenderable, OutputViewerRenderable, InteractionPanelRenderable, FuzzyPickerRenderable } from "../components"
+import type {
+  ComposerRenderable,
+  TranscriptRenderable,
+  ToolsWorkspaceRenderable,
+  StatusLineRenderable,
+  StateBannerRenderable,
+  ReviewPanelRenderable,
+  OutputViewerRenderable,
+  InteractionPanelRenderable,
+  FuzzyPickerRenderable,
+} from "../components"
 import type { DocumentController } from "../history/document"
-import { keyStrokeFromEvent, legacyMacNavigationAction, type CompiledKeybindings, type InputMode, type VimFocus, type KeybindingAction, type KeybindingContext } from "../keybindings"
+import {
+  keyStrokeFromEvent,
+  legacyMacNavigationAction,
+  type CompiledKeybindings,
+  type InputMode,
+  type VimFocus,
+  type KeybindingAction,
+  type KeybindingContext,
+} from "../keybindings"
 import type { PickerController } from "../picker-controller"
 import type { ProjectionRequestBroker } from "../projection-requests"
 import type { CommandOutcome, ModeId } from "../protocol"

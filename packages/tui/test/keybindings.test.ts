@@ -5,7 +5,6 @@ import { parseKeypress, type KeyEvent } from "@opentui/core"
 import { createTestRenderer, type TestRenderer } from "@opentui/core/testing"
 
 import { createRottweilerApp } from "../src/app"
-import { ToolBlockRenderable } from "../src/components"
 import type { ClientCommand } from "../src/protocol"
 import {
   KeybindingConfigurationError,

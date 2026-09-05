@@ -1,16 +1,18 @@
 import type { HistorySnapshot } from "../history/controller"
 import { TranscriptRowRenderable } from "./transcript/row"
 import { TranscriptScrollWindow } from "./transcript/scroll-window"
-import { GUTTER_BORDER, ReasoningBlockRenderable, SubagentPanelRenderable, ToolBlockRenderable, type TranscriptRenderableOptions, bashCommand, bashPrompt, boundedToolBody, compactToolPresentation, formatElapsed, isRecord, presentableReasoning, readToolDiff, reasoningTitle, subagentDetail, subagentGlyph, toolOutputContent, toolOutputPreview, toolRationale, visibleBashCommand } from "./transcript/blocks"
+import {
+  ReasoningBlockRenderable,
+  ToolBlockRenderable,
+  type TranscriptRenderableOptions,
+  presentableReasoning,
+ } from "./transcript/blocks"
 import { DISPLAY_TRUNCATION_MARKER } from "../state/display-buffer"
 import type { TranscriptClientState } from "../recycle-state"
 import {
   type BaseRenderable,
   BoxRenderable,
-  CodeRenderable,
-  DiffRenderable,
   MarkdownRenderable,
-  ScrollBoxRenderable,
   ScrollBarRenderable,
   TextRenderable,
   bold,
@@ -19,56 +21,17 @@ import {
   type RenderContext,
   type SyntaxStyle,
   type TreeSitterClient,
-} from "@opentui/core"
+ } from "@opentui/core"
 
-import {
-  commandPreview,
-  commandResultMarkdown,
-  COMMAND_PREVIEW_MAX_LINES,
-  diffStats,
-  displayPath,
-  formatCost,
-  filetypeForPath,
-  getScrollAcceleration,
-  minimalUnifiedDiff,
-  splitDiffVisualRows,
-  unifiedDiffVisualRows,
-  presentTool,
-  presentableUnifiedDiff,
-  terminalMarkdown,
-  truncateToCells,
-  truncateUnifiedDiff,
-  turnMarkdown,
-  turnReasoningMarkdown,
-} from "../render"
-import type {
-  RottweilerState,
-  SubagentProjection,
-  ToolProjection,
-  TranscriptEntry,
-} from "../state"
+import { formatCost, getScrollAcceleration, terminalMarkdown, truncateToCells } from "../render"
+import type { RottweilerState, ToolProjection } from "../state"
 import type { RottweilerTheme } from "../theme"
 
-const MAX_VISIBLE_SUBAGENTS = 8
 // OpenTUI viewport culling skips paint work but retains every mounted renderable.
 // Bound the expensive live card tree independently of the reducer's retained
 // recent history. Long sessions otherwise grow by roughly one pair of Markdown
 // renderables per turn even after context compaction.
 const MAX_MOUNTED_TRANSCRIPT_ENTRIES = 16
-
-const USER_GUTTER_BORDER = {
-  ...GUTTER_BORDER,
-  topLeft: "▌",
-  bottomLeft: "▌",
-  vertical: "▌",
-} as const
-
-function toolBlockExpanded(
-  tool: ToolProjection,
-  expansion?: ReadonlyMap<string, boolean>,
-): boolean {
-  return expansion?.get(tool.toolCallId) ?? tool.status === "awaiting_approval"
-}
 
 export function toolDisplayName(name: string): string {
   return ({
@@ -122,7 +85,6 @@ export class TranscriptRenderable extends BoxRenderable {
   readonly #syntaxStyle: SyntaxStyle
   readonly #treeSitterClient: TreeSitterClient | undefined
   readonly #onInteraction: (() => void) | undefined
-  readonly #onOpenSubagent: ((subagentId: string) => void) | undefined
   readonly #onOpenToolOutput: ((toolCallId: string) => void) | undefined
   readonly #toolExpansion = new Map<string, boolean>()
   readonly #tailToolCards = new Map<string, ToolBlockRenderable>()
@@ -164,7 +126,6 @@ export class TranscriptRenderable extends BoxRenderable {
     this.#syntaxStyle = options.syntaxStyle
     this.#treeSitterClient = options.treeSitterClient
     this.#onInteraction = options.onInteraction
-    this.#onOpenSubagent = options.onOpenSubagent
     this.#onOpenToolOutput = options.onOpenToolOutput
     this.scroller = new TranscriptScrollWindow(ctx, {
       id: "transcript-scroll",
@@ -799,11 +760,6 @@ export class TranscriptRenderable extends BoxRenderable {
     const state = this.#state
     if (state === null) return
     this.#updateTail(state)
-  }
-
-  #rememberReasoningExpansion(key: string, expanded: boolean): void {
-    if ((this.#reasoningExpansion.get(key) ?? false) === expanded) return
-    rememberExpansion(this.#reasoningExpansion, key, expanded)
   }
 
   #blocksInVisualOrder(): Array<ToolBlockRenderable | ReasoningBlockRenderable | TranscriptRowRenderable> {

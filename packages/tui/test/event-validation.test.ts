@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { contractFixture } from "../../../protocol/fixtures/contract"
 import eventSchema from "../../../protocol/schema/engine-event.schema.json"
 import { PROTOCOL_VERSION } from "../src/protocol"
-import { durableSequenceId, isWireEngineEvent, normalizeWireEngineEvent } from "../src/transport"
+import { isWireEngineEvent, normalizeWireEngineEvent } from "../src/transport"
 
 describe("generated engine event validation", () => {
   test("accepts every Rust-authored fixture without coercion or projection changes", () => {

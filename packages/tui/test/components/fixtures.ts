@@ -5,8 +5,6 @@ import {
   type PermissionStateDescriptor
 } from "../../src/protocol"
 import type { ActivityPresentation, ToolsWorkspacePresentation } from "../../src/render"
-import { createInitialState, type RottweilerState } from "../../src/state"
-import { toolOutputBuffer } from "../../src/state/display-buffer"
 
 export function meta(sequence: string) {
   return {

@@ -4,8 +4,8 @@ import { PROTOCOL_VERSION } from "../../../../protocol/types"
 import {
   createRottweilerApp
 } from "../../src/app"
-import type { ClientCommand, EngineEvent } from "../../src/protocol"
-import { createInitialState, engineEvent, reduceRottweilerState, type ToolProjection } from "../../src/state"
+import type { ClientCommand } from "../../src/protocol"
+import { createInitialState, type ToolProjection } from "../../src/state"
 import { toolOutputBuffer } from "../../src/state/display-buffer"
 import { emptyHistoryReader, historyReaderFor, conversationItem } from "../fixtures/history"
 import { toolsAppState } from "./fixtures"
