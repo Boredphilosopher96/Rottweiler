@@ -17,6 +17,7 @@ use std::{
 mod content;
 mod page;
 pub(crate) mod reader;
+mod tool_presentation;
 
 const MAX_OPEN_PROJECTORS: usize = 8;
 const MAX_ADVANCE_BATCHES: usize = 4;

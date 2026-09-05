@@ -1105,3 +1105,35 @@ fn signature_only_conversation_has_no_visible_row() {
     );
     assert!(project_conversation(&event).expect("projection").is_some());
 }
+
+#[test]
+fn finished_invocation_source_uses_effective_binding_and_exact_invocation() {
+    let root = tempdir().expect("root");
+    let mut journal = SegmentedJournal::open(root.path(), "semantic").expect("journal");
+    let mut index = TranscriptIndex::open(&journal.read_view(), 1).expect("index");
+    let mut state = TranscriptProjectionState::default();
+    let first = rw_types::ToolInvocationId("invocation-0".into());
+    let second = rw_types::ToolInvocationId("invocation-1".into());
+    commit(&start(0, 0), &mut journal, &mut index, &mut state);
+    assert_eq!(finished_tool_source(&index, &first).expect("running"), None);
+    commit(
+        &finish(1, 0, "first result"),
+        &mut journal,
+        &mut index,
+        &mut state,
+    );
+    commit(&start(2, 1), &mut journal, &mut index, &mut state);
+    assert_eq!(
+        finished_tool_source(&index, &first).expect("finished"),
+        Some(SequenceId(1))
+    );
+    assert_eq!(
+        finished_tool_source(&index, &second).expect("different invocation"),
+        None
+    );
+    assert_eq!(
+        finished_tool_source(&index, &rw_types::ToolInvocationId("missing".into()))
+            .expect("absent"),
+        None
+    );
+}

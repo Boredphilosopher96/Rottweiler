@@ -67,6 +67,32 @@ impl TranscriptRowLookup for TranscriptIndex {
     }
 }
 
+/// Resolve a completed invocation in the effective transcript without scanning history.
+///
+/// # Errors
+/// Rejects corrupt index payloads or a binding with the wrong semantic identity.
+pub fn finished_tool_source(
+    rows: &impl TranscriptRowLookup,
+    invocation: &rw_types::ToolInvocationId,
+) -> Result<Option<SequenceId>, TranscriptProjectionError> {
+    let Some(row) = rows.bound_row(&entity_binding("tool", &[&invocation.0]))? else {
+        return Ok(None);
+    };
+    match decode(&row)? {
+        TranscriptContent::Tool {
+            invocation_id,
+            status,
+            ..
+        } if invocation_id == *invocation => match status {
+            TranscriptToolStatus::Running {} => Ok(None),
+            TranscriptToolStatus::Finished { output, .. } => Ok(Some(output.source.sequence)),
+        },
+        _ => Err(TranscriptProjectionError::Invalid(
+            "tool source binding identity",
+        )),
+    }
+}
+
 /// Interpret one contiguous durable event without performing I/O mutations.
 /// The caller publishes these changes and the processed raw prefix atomically.
 /// A rewind must complete before its sequence can advance the published prefix.

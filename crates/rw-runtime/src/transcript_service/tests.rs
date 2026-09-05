@@ -458,3 +458,114 @@ fn complete_content_chunks_reuse_one_canonical_document_and_validate_view_bounda
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn tool_action_presentation_requires_exact_prefix_and_effective_invocation() {
+    use rw_types::extension_ui::{
+        UiContribution, UiContributionOwner, UiGenerationId, UiPresentation,
+    };
+    use rw_types::{ToolCallId, ToolInvocationId, ToolOutput, TurnId};
+    let mut fixture = Fixture::new(0, "");
+    let invocation = ToolInvocationId("tool-instance".into());
+    let presentation = UiPresentation::project(
+        UiContributionOwner {
+            extension: "example".into(),
+            generation: UiGenerationId::from_bytes([1; 16]),
+        },
+        &UiContribution::Tool {
+            id: "result".into(),
+            tool_name: "read".into(),
+            title: "Read result".into(),
+            fields: vec![],
+            actions: vec![],
+        },
+        &serde_json::json!({}),
+    )
+    .expect("presentation");
+    fixture
+        .journal
+        .append_batch([
+            EngineEvent::ToolCallStarted {
+                meta: meta(0),
+                turn_id: TurnId("1".into()),
+                tool_call_id: ToolCallId("provider-reused".into()),
+                invocation_id: invocation.clone(),
+                name: "read".into(),
+                args: serde_json::json!({}),
+                call_index: 0,
+            },
+            EngineEvent::ToolCallFinished {
+                meta: meta(1),
+                turn_id: TurnId("1".into()),
+                tool_call_id: ToolCallId("provider-reused".into()),
+                invocation_id: invocation.clone(),
+                output: ToolOutput::Text {
+                    text: "done".into(),
+                },
+                presentation: Some(presentation.clone()),
+                is_error: false,
+                call_index: 0,
+            },
+        ])
+        .expect("tool lifecycle");
+    fixture
+        .registration
+        .publisher
+        .publish(fixture.journal.read_view());
+    let session = SessionId("semantic".into());
+    assert!(
+        fixture
+            .service
+            .tool_presentation(session.clone(), invocation.clone(), None)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        fixture
+            .service
+            .tool_presentation(session.clone(), invocation.clone(), Some(SequenceId(1)))
+            .await
+            .expect("exact source"),
+        Some(presentation)
+    );
+    assert_eq!(
+        fixture
+            .service
+            .tool_presentation(
+                session.clone(),
+                ToolInvocationId("different".into()),
+                Some(SequenceId(1))
+            )
+            .await
+            .expect("missing invocation"),
+        None
+    );
+    fixture
+        .journal
+        .append(&EngineEvent::ConversationRewound {
+            meta: meta(2),
+            to_agent_turn: 0,
+            operation_id: "rewind-source".into(),
+            unrestorable_paths: vec![],
+        })
+        .expect("rewind");
+    fixture
+        .registration
+        .publisher
+        .publish(fixture.journal.read_view());
+    assert!(
+        fixture
+            .service
+            .tool_presentation(session.clone(), invocation.clone(), Some(SequenceId(1)))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        fixture
+            .service
+            .tool_presentation(session, invocation, Some(SequenceId(2)))
+            .await
+            .expect("removed effective source"),
+        None
+    );
+}
