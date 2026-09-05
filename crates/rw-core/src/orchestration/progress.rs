@@ -64,6 +64,7 @@ pub(crate) fn admit(sequence: Option<u64>, event: Value) -> Result<Value, Orches
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     #[test]

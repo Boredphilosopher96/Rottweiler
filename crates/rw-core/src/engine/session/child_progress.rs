@@ -82,6 +82,7 @@ fn invalid(error: impl std::fmt::Display) -> AgentLoopError {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     fn event(sequence: u64) -> SubagentProgressEvent {

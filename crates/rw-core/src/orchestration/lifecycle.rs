@@ -581,9 +581,10 @@ impl SubagentOrchestrator {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get_mut(subagent_id)
             {
-                record.closing_artifact = durable_artifact.clone();
+                record.closing_artifact.clone_from(&durable_artifact);
             }
-            if let Err(error) = tokio::time::timeout(
+            // Failure retains both the child and its source admission.
+            tokio::time::timeout(
                 control_timeout(self.inner.limits),
                 session.close(
                     durable_artifact
@@ -593,11 +594,7 @@ impl SubagentOrchestrator {
             )
             .await
             .map_err(|_| OrchestrationError::EffectsUnsettled("child close timed out".to_owned()))
-            .and_then(std::convert::identity)
-            {
-                // Retain both child and source admission after failed or abandoned close.
-                return Err(error);
-            }
+            .and_then(std::convert::identity)?;
             if let Some(record) = self
                 .inner
                 .sessions

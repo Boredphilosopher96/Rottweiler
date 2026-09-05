@@ -87,13 +87,12 @@ impl ChildProgressSlot {
             let bytes = u32::try_from(bytes).map_err(|_| {
                 ToolError::Output("child progress identity exceeds admission".into())
             })?;
-            match self.budget.clone().try_acquire_many_owned(bytes) {
-                Ok(permit) => permit,
+            if let Ok(permit) = self.budget.clone().try_acquire_many_owned(bytes) {
+                permit
+            } else {
                 // No display allocation is required for durable progress to finish.
-                Err(_) => {
-                    self.missed.store(true, Ordering::Relaxed);
-                    return Ok(());
-                }
+                self.missed.store(true, Ordering::Relaxed);
+                return Ok(());
             }
         };
         *pending = Some(AdmittedProgress {
@@ -119,6 +118,7 @@ impl ChildProgressSlot {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::engine::turn::TurnSignal;
