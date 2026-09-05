@@ -127,6 +127,52 @@
           "type": "object",
           "properties": {
             "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "snapshot": {
+              "$ref": "#/$defs/TodoSnapshot"
+            },
+            "type": {
+              "type": "string",
+              "const": "todo_state_committed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "snapshot"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "result": {
+              "$ref": "#/$defs/TodoReadResult"
+            },
+            "type": {
+              "type": "string",
+              "const": "todos_read"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "result"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
               "$ref": "#/$defs/CommandAckMeta"
             },
             "session_id": {
@@ -2733,6 +2779,106 @@
         }
       ]
     },
+    "EventMeta": {
+      "description": "Metadata common to persisted and streamed events.",
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "sequence_id": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "emitted_at": {
+          "type": "string"
+        },
+        "caused_by": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RequestId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "session_id",
+        "sequence_id",
+        "emitted_at"
+      ]
+    },
+    "SessionId": {
+      "description": "Stable identifier of an engine session.",
+      "type": "string"
+    },
+    "SequenceId": {
+      "description": "Monotonic per-session sequence encoded as a decimal string on the wire.",
+      "type": "string"
+    },
+    "RequestId": {
+      "description": "Client-generated identifier used to correlate a command.",
+      "type": "string"
+    },
+    "TodoSnapshot": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TodoItem"
+          }
+        },
+        "count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "items",
+        "count"
+      ]
+    },
+    "TodoItem": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/TodoStatus"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "content",
+        "status"
+      ]
+    },
+    "TodoStatus": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "in_progress",
+        "completed",
+        "blocked"
+      ]
+    },
     "CommandAckMeta": {
       "description": "Metadata for immediate command acknowledgements before session sequencing.",
       "type": "object",
@@ -2765,13 +2911,83 @@
       "description": "Stable identifier of a connected client.",
       "type": "string"
     },
-    "RequestId": {
-      "description": "Client-generated identifier used to correlate a command.",
-      "type": "string"
+    "TodoReadResult": {
+      "description": "One bounded read either returns an exact snapshot or reports indexed progress.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "todos": {
+              "$ref": "#/$defs/TodoReadSnapshot"
+            },
+            "type": {
+              "type": "string",
+              "const": "ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "todos"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "through": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SequenceId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SequenceId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "catching_up"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        }
+      ]
     },
-    "SessionId": {
-      "description": "Stable identifier of an engine session.",
-      "type": "string"
+    "TodoReadSnapshot": {
+      "description": "Exact source prefix applied to a complete task-list read.",
+      "type": "object",
+      "properties": {
+        "through": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "snapshot": {
+          "$ref": "#/$defs/TodoSnapshot"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "snapshot"
+      ]
     },
     "TranscriptReadResult": {
       "oneOf": [
@@ -2926,10 +3142,6 @@
     },
     "TranscriptGeneration": {
       "description": "Current semantic ordering generation, changed by rewind.",
-      "type": "string"
-    },
-    "SequenceId": {
-      "description": "Monotonic per-session sequence encoded as a decimal string on the wire.",
       "type": "string"
     },
     "TranscriptOrdinal": {
@@ -5653,44 +5865,6 @@
         "unified_diff",
         "truncated",
         "binary"
-      ]
-    },
-    "EventMeta": {
-      "description": "Metadata common to persisted and streamed events.",
-      "type": "object",
-      "properties": {
-        "protocol_version": {
-          "type": "integer",
-          "format": "uint16",
-          "minimum": 0,
-          "maximum": 65535
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "sequence_id": {
-          "$ref": "#/$defs/SequenceId"
-        },
-        "emitted_at": {
-          "type": "string"
-        },
-        "caused_by": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/RequestId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "protocol_version",
-        "session_id",
-        "sequence_id",
-        "emitted_at"
       ]
     },
     "WorkspaceRootDescriptor": {

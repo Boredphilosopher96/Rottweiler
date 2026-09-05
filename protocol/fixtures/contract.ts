@@ -323,6 +323,15 @@ export const contractFixture = {
       "item_id": "context-2"
     },
     {
+      "type": "get_todos",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "request-fixture"
+      },
+      "session_id": "session-fixture"
+    },
+    {
       "type": "get_context",
       "meta": {
         "protocol_version": 1,
@@ -392,6 +401,26 @@ export const contractFixture = {
     }
   ],
   "engine_events": [
+    {
+      "type": "todos_read",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "todo-ready",
+        "emitted_at": "2026-01-01T00:00:00Z"
+      },
+      "session_id": "session-fixture",
+      "result": {
+        "type": "ready",
+        "todos": {
+          "through": null,
+          "snapshot": {
+            "items": [],
+            "count": 0
+          }
+        }
+      }
+    },
     {
       "type": "provider_call_accounted",
       "meta": {

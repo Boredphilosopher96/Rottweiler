@@ -82,6 +82,7 @@
                   "sessions_search_ready",
                   "settings_listed",
                   "subagents_listed",
+                  "todos_read",
                   "transcript_content_ready",
                   "transcript_page_ready",
                   "workspace_diff_ready",
