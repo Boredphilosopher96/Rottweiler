@@ -1,5 +1,6 @@
 //! One replaceable, transient observation per admitted tool invocation.
-use super::{SecretRedactor, TurnSignal};
+use super::TurnSignal;
+use crate::engine::SecretRedactor;
 use rw_tools::{ToolError, ToolProgressSink};
 use rw_types::{ToolInvocationId, ToolProgress};
 use std::sync::{Arc, Mutex};

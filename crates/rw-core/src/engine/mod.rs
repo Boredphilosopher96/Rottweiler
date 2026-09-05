@@ -2,7 +2,6 @@ use rw_types::hook_contract::{HookClass, HookInput};
 mod redaction;
 pub use redaction::NoopSecretRedactor;
 pub use redaction::SecretRedactor;
-use redaction::StreamingSecretRedactor;
 mod model;
 pub use model::ModelContextMetadata;
 pub use model::ModelDriver;
@@ -22,76 +21,58 @@ pub use event_clock::BudgetLedgerQuery;
 pub use event_clock::BudgetLedgerTotals;
 pub use event_clock::EventClock;
 pub use event_clock::SystemEventClock;
-use event_clock::format_unix_rfc3339;
 mod pending_event;
 use pending_event::PendingEvent;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    collections::{BTreeMap, VecDeque},
     fmt,
     panic::AssertUnwindSafe,
     path::{Component, Path, PathBuf},
     sync::{
-        Arc, Mutex, RwLock,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        Arc, RwLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
 
 use async_trait::async_trait;
-use futures_util::{FutureExt, StreamExt};
-use rw_context::{
-    AssembledContext, AssemblyInput, Budgeter, CompactionInput,
-    CompactionReason as ContextCompactionReason, Compactor, ContextAssembler,
-    ContextItem as AssemblyContextItem, ContextItemId as AssemblyContextItemId,
-    ContextItemKind as AssemblyContextItemKind, ContextProvenance, ConversationPin,
-    LocalTokenEstimator, OverflowPolicy, PRUNED_TOOL_OUTPUT_REPLACEMENT, PreCompactHook,
-    PruneConfig, PruneRecord, PruneRecordKind, Pruner, ToonPromptEncoder,
-};
+use futures_util::FutureExt;
+use rw_context::Budgeter;
 use rw_ext::{
     CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation, CommandRegistry,
-    HookDirective, HookDispatchResult, HookDispatchStatus, HookDispatcher, HookEffect, HookEvent,
-    HookFailure, HookFailurePolicy, HookHandler, HookInvocation, HookRegistration, ModeDefinition,
-    ModeRegistry, ModeSource,
+    HookDirective, HookDispatcher, HookEvent, HookFailurePolicy, HookHandler, HookInvocation,
+    HookRegistration, ModeDefinition, ModeRegistry, ModeSource,
 };
-use rw_providers::{
-    CacheBreakpointSupport, CacheHint, FinishReason, ProviderEvent, ProviderRequest, TokenUsage,
-    ToolChoice, ToolDefinition,
-};
+use rw_providers::TokenUsage;
 use rw_tools::{
-    ApprovalPreview, AskUserInput, CancellationToken, MutationScope, QuestionAsker,
-    SubagentEventSink, SubagentLifecycleEvent, SubagentLifecycleMode, SubagentProgressEvent,
-    ToolContext, ToolDescriptor, ToolError, ToolOutputChunk, ToolOutputSink, ToolRegistry,
-    ToolResult,
+    ApprovalPreview, CancellationToken, MutationScope, SubagentProgressEvent, ToolContext,
+    ToolRegistry,
 };
 use rw_types::attachment_contract::{
     MAX_ATTACHMENTS_PER_MESSAGE, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TEXT_ATTACHMENT_BYTES,
     MAX_TOTAL_ATTACHMENT_BYTES,
 };
 use rw_types::config::ThinkingLevel;
-use rw_types::config::{BudgetConfig, CompactionConfig, PermissionDecision, PermissionRule};
+use rw_types::config::{PermissionDecision, PermissionRule};
 use rw_types::{
     AccountingAttribution, Answer, ApprovalBinding, ApprovalDecision, Attachment, AttachmentData,
-    Block, BudgetLevel, BudgetScope, BudgetUnit, CacheBreakpoint, ClientCommand, ClientId,
-    ClientRole, CommandAckMeta, CommandMeta, CommandOutcome, CompactionReason, ContextItemId,
-    ContextItemKind, ContextItemSnapshot, ContextItemState, ContextSnapshot, Cost, CostSnapshot,
-    EngineError, EngineErrorCategory, EngineEvent, EventMeta, ImageRef, ModeId, ModelAlias,
+    Block, ClientCommand, ClientId, ClientRole, CommandAckMeta, CommandMeta, CommandOutcome,
+    CompactionReason, ContextItemId, ContextItemKind, ContextSnapshot, Cost, CostSnapshot,
+    EngineError, EngineErrorCategory, EngineEvent, ImageRef, ModeId, ModelAlias,
     ModelContextTransfer, ModelSwitchQuestion, PROTOCOL_VERSION, PermissionApprovalDescriptor,
     PermissionApprovalScope, PermissionModeDescriptor, PermissionRuleDescriptor,
-    PermissionStateDescriptor, PlanArtifact, PlanDecision, PromptDump, PromptTool, Question,
-    QuestionId, QuestionOption, QuestionResponseKind, RequestId, ReviewFileStatus, RewindTarget,
-    Role, SequenceId, SessionId, SessionMode, SessionReview, ShellId, StoredAttachment, SubagentId,
-    SubscriptionTokenAccounting, ToolCallId, ToolOutput, ToolOutputPart, ToolOutputStream, Turn,
-    TurnAccounting, TurnId, TurnMeta, TurnStatus, UnifiedDiff, UnrestorablePath, Usage,
+    PermissionStateDescriptor, PlanArtifact, PlanDecision, PromptDump, Question, QuestionId,
+    QuestionOption, QuestionResponseKind, RequestId, ReviewFileStatus, RewindTarget, Role,
+    SequenceId, SessionId, SessionMode, SessionReview, ShellId, StoredAttachment, SubagentId,
+    ToolCallId, ToolOutput, ToolOutputStream, Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus,
+    UnifiedDiff, UnrestorablePath, Usage,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use thiserror::Error;
-use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
-use crate::{
-    InitDepth, PermissionApprover, PermissionGate, PermissionOutcome, PermissionRequest,
-    apply_init_plan, plan_init,
-};
+use crate::{InitDepth, PermissionGate, PermissionRequest, apply_init_plan, plan_init};
 
 mod commands;
 mod dispatch;
@@ -118,7 +99,7 @@ use commands::{
     render_context_snapshot, render_cost_snapshot, render_permission_approvals,
     render_permission_snapshot, render_plan, render_session_review,
 };
-use dispatch::{commit_prepared_model_switch, handle_actor_command, prepare_user_message};
+use dispatch::handle_actor_command;
 pub use projection::{
     ContextSurgeryAction, InterruptedToolRepair, RecoveredQuestion, RecoveredUserShell,
     SessionProjectionError, SessionProjector, SessionRecoveredState, project_session_events,
@@ -129,9 +110,9 @@ use projection::{
     project_journal_prefix, review_hash_is_valid, review_path_is_valid, shell_context_turn,
 };
 use session::{
-    ActorCommand, ActorState, PendingApproval, PendingModelSwitch, PendingQuestion,
-    PrecommittedAnswer, PreparedModelSwitch, ProtocolCompletion, recover_actor_from_journal,
-    validate_gap, validate_plugin_id, validate_plugin_text,
+    ActorCommand, ActorState, PendingModelSwitch, PrecommittedAnswer, PreparedModelSwitch,
+    ProtocolCompletion, recover_actor_from_journal, validate_gap, validate_plugin_id,
+    validate_plugin_text,
 };
 pub use session::{
     PluginSessionCapability, SessionActor, SessionActorConfig, SessionHandle, SessionSubscription,
