@@ -92,16 +92,6 @@ impl<T> HistoryRead<T> {
         })
     }
 
-    pub(in crate::engine) fn into_owned_parts(self) -> (T, HistoryRead<()>) {
-        (
-            self.value,
-            HistoryRead {
-                value: (),
-                owner: self.owner,
-            },
-        )
-    }
-
     /// Keep the source allowance through an asynchronous transformation and its result.
     /// The transformation must fit the admitted allocation just like `map`.
     pub async fn map_async<U, F: std::future::Future<Output = U>>(

@@ -72,6 +72,7 @@ pub(super) async fn rewind_state(
     // Transfer bounded controls while retaining their read allowance. Historical
     // conversation and context edits stay in the canonical indexed authority.
     let _applied = historical.map(|historical| {
+        state.replace_conversation(historical.controls.conversation);
         state.budgeter = budgeter;
         state.mode = historical.head.control.mode;
         state.mode_id =

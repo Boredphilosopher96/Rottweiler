@@ -60,7 +60,7 @@ impl SessionActorRecovery {
     pub fn from_bootstrap(
         bootstrap: HistoryRead<RecoveryBootstrap>,
     ) -> Result<Self, AgentLoopError> {
-        let (bootstrap, source) = bootstrap.into_owned_parts();
+        let (bootstrap, source) = bootstrap.into_parts();
         let RecoveryBootstrap {
             head,
             controls,

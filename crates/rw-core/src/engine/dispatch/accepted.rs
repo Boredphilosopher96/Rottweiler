@@ -23,7 +23,6 @@ use rw_types::ClientCommand;
 use rw_types::ClientRole;
 use rw_types::CommandMeta;
 use rw_types::ContextItemId;
-use rw_types::EngineEvent;
 use rw_types::ModeId;
 use rw_types::ModelContextTransfer;
 use rw_types::PlanArtifact;
@@ -525,7 +524,8 @@ pub(super) async fn apply_accepted(
             )
             .await;
         }
-        ClientCommand::ReadTranscriptTail { .. }
+        ClientCommand::ReadSessionChildren { .. }
+        | ClientCommand::ReadTranscriptTail { .. }
         | ClientCommand::ReadTranscript { .. }
         | ClientCommand::ReadTranscriptContent { .. }
         | ClientCommand::GetTodos { .. }
