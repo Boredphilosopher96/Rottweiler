@@ -17493,7 +17493,7 @@ mod tests {
             &ToolchainConfig {
                 formatter: Some("rustfmt {file}".to_owned()),
                 linters: vec![
-                    "cargo clippy --offline --workspace --all-targets -- -D warnings".to_owned(),
+                    "env -u CARGO_TARGET_DIR cargo clippy --offline --workspace --all-targets -- -D warnings".to_owned(),
                 ],
                 test: None,
                 rules: Vec::new(),
