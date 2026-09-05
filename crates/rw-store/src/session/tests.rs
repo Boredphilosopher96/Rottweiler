@@ -17,6 +17,12 @@ struct FixtureEvent {
     text: String,
 }
 
+impl rw_types::allocation::DecodeAllocation for FixtureEvent {
+    fn decode_node_bytes() -> Option<usize> {
+        Some(std::mem::size_of::<Self>().max(std::mem::size_of::<String>()))
+    }
+}
+
 fn accounting_entry(
     session_id: &str,
     turn: u64,
@@ -56,6 +62,13 @@ fn utc_timestamp(value: &str) -> UtcTimestamp {
 struct FailableEvent {
     text: &'static str,
     fail: bool,
+}
+
+impl rw_types::allocation::DecodeAllocation for FailableEvent {
+    fn decode_node_bytes() -> Option<usize> {
+        // The successful serializer emits exactly one JSON string.
+        <String as rw_types::allocation::DecodeAllocation>::decode_node_bytes()
+    }
 }
 
 impl Serialize for FailableEvent {

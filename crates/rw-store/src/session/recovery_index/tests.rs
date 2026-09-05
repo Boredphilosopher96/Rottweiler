@@ -125,14 +125,14 @@ fn stale_and_foreign_transitions_preserve_rows_and_checkpoint() {
         foreign_advance.next().prefix_identity()
     );
     assert!(matches!(
-        index.apply(&foreign_advance, b"wrong", &[put(0, b"wrong")]),
+        index.apply(&foreign_advance, b"wrong", &[put(0, b"wrong")], &[]),
         Err(RecoveryIndexError::Invalid("foreign journal"))
     ));
     index
         .apply(&advance, b"right", &[put(0, b"right")], &[])
         .expect("apply");
     assert!(matches!(
-        index.apply(&advance, b"stale", &[put(0, b"stale")]),
+        index.apply(&advance, b"stale", &[put(0, b"stale")], &[]),
         Err(RecoveryIndexError::Stale)
     ));
     let read = index.read().expect("snapshot");
@@ -159,27 +159,28 @@ fn byte_and_row_admission_precedes_storage_mutation() {
         .expect("advance");
     let before = index.io_metrics();
     assert!(matches!(
-        index.apply(&advance, &vec![0; MAX_RECOVERY_HEAD_BYTES + 1], &[]),
+        index.apply(&advance, &vec![0; MAX_RECOVERY_HEAD_BYTES + 1], &[], &[]),
         Err(RecoveryIndexError::Limit(_))
     ));
     assert!(matches!(
         index.apply(
             &advance,
             b"",
-            &[put(0, &vec![0; MAX_RECOVERY_ROW_BYTES + 1])]
+            &[put(0, &vec![0; MAX_RECOVERY_ROW_BYTES + 1])],
+            &[]
         ),
         Err(RecoveryIndexError::Limit(_))
     ));
     let too_many = vec![put(0, b""); MAX_RECOVERY_BATCH_ROWS + 1];
     assert!(matches!(
-        index.apply(&advance, b"", &too_many),
+        index.apply(&advance, b"", &too_many, &[]),
         Err(RecoveryIndexError::Limit(_))
     ));
     let too_large: Vec<_> = (0..16)
         .map(|i| put(i, &vec![0; MAX_RECOVERY_ROW_BYTES]))
         .collect();
     assert!(matches!(
-        index.apply(&advance, b"", &too_large),
+        index.apply(&advance, b"", &too_large, &[]),
         Err(RecoveryIndexError::Limit(_))
     ));
     let after = index.io_metrics();
