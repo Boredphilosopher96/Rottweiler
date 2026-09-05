@@ -254,7 +254,7 @@ fn selected_runtime_refuses_symlink_artifacts() {
 
 #[test]
 fn client_tokens_are_bound_to_server_minted_ids() {
-    let registry = ClientRegistry::new();
+    let registry = ClientAuthority::new(&SecretToken::generate().expect("runtime key"));
     let first = registry
         .mint(ClientCapability::Interactive)
         .expect("first client");

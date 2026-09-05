@@ -1,7 +1,9 @@
+mod client_authority;
 mod command_input;
+use client_authority::{AuthenticatedClient, ClientAuthority, ClientCapability};
 pub(crate) use command_input::LANE_HEADER as COMMAND_LANE_HEADER;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     convert::Infallible,
     fmt,
     fs::{self, OpenOptions},
@@ -320,79 +322,6 @@ pub struct ClientCredentials {
     pub token: String,
 }
 
-#[derive(Debug)]
-struct ClientRegistry {
-    clients: Mutex<HashMap<ClientId, RegisteredClient>>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ClientCapability {
-    Interactive,
-    PluginDevelopment,
-    ShellBroker,
-}
-
-#[derive(Clone, Debug)]
-struct RegisteredClient {
-    token: SecretToken,
-    capability: ClientCapability,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct AuthenticatedClient {
-    client_id: ClientId,
-    capability: ClientCapability,
-}
-
-impl ClientRegistry {
-    fn new() -> Self {
-        Self {
-            clients: Mutex::new(HashMap::new()),
-        }
-    }
-
-    fn mint(&self, capability: ClientCapability) -> Result<ClientCredentials> {
-        for _ in 0..32 {
-            let token = SecretToken::generate()?;
-            let client_id = ClientId(format!("client-{}", &token.encode()[..24]));
-            let mut clients = self
-                .clients
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if clients.contains_key(&client_id) {
-                continue;
-            }
-            clients.insert(
-                client_id.clone(),
-                RegisteredClient {
-                    token: token.clone(),
-                    capability,
-                },
-            );
-            return Ok(ClientCredentials {
-                client_id,
-                token: token.encode(),
-            });
-        }
-        Err(miette!(
-            "could not allocate a unique engine client identity"
-        ))
-    }
-
-    fn authenticate(&self, client_id: &str, token: &str) -> Option<AuthenticatedClient> {
-        let client_id = ClientId(client_id.to_owned());
-        self.clients
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&client_id)
-            .filter(|registered| registered.token.matches_encoded(token))
-            .map(|registered| AuthenticatedClient {
-                client_id,
-                capability: registered.capability,
-            })
-    }
-}
-
 /// Protocol host boundary consumed by the HTTP/SSE transport.
 #[async_trait]
 pub trait ServerEngine: Send + Sync + 'static {
@@ -636,7 +565,7 @@ impl Drop for ProviderApiKeyAttemptGuard {
 pub struct ServerState {
     engine: Arc<dyn ServerEngine>,
     bootstrap: SecretToken,
-    clients: Arc<ClientRegistry>,
+    clients: Arc<ClientAuthority>,
     shutdown_notifier: Arc<Notify>,
     command_ingress: Arc<command_input::CommandIngress>,
     connections: Arc<tokio::sync::Semaphore>,
@@ -658,7 +587,7 @@ impl ServerState {
         Self {
             engine,
             bootstrap: runtime.bootstrap().clone(),
-            clients: Arc::new(ClientRegistry::new()),
+            clients: Arc::new(ClientAuthority::new(runtime.bootstrap())),
             shutdown_notifier: Arc::new(Notify::new()),
             command_ingress: Arc::default(),
             connections: Arc::new(tokio::sync::Semaphore::new(128)),
@@ -1105,7 +1034,7 @@ fn authenticate_bootstrap(request: &Request<Incoming>, expected: &SecretToken) -
 
 fn authenticate_client(
     request: &Request<Incoming>,
-    registry: &ClientRegistry,
+    registry: &ClientAuthority,
 ) -> Option<AuthenticatedClient> {
     let client_id = request.headers().get(CLIENT_HEADER)?.to_str().ok()?;
     registry.authenticate(client_id, bearer(request)?)
