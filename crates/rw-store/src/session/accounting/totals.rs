@@ -9,8 +9,8 @@ const TIME_BITS: u32 = 49;
 const TIME_ROOT: u64 = 1 << TIME_BITS;
 const FIELD_COUNT: usize = 7;
 const NODE_BYTES: usize = FIELD_COUNT * 16;
-const REBUILD_PAGE: usize = 128;
-const MAX_COST_BYTES: usize = 1024 * 1024;
+const REBUILD_PAGE: i64 = 128;
+const MAX_COST_BYTES: i64 = 1024 * 1024;
 const USD: usize = 0;
 const CREDITS: usize = 1;
 const TOKENS: usize = 2;
@@ -108,10 +108,13 @@ fn time_key(time: &UtcTimestamp) -> u64 {
         * 1000
         + number(20, 23)
 }
+fn sql_node(node: u64) -> Result<i64, SessionStoreError> {
+    i64::try_from(node).map_err(|_| SessionStoreError::CorruptAccountingTotals)
+}
 fn read_node(connection: &Connection, scope: &str, node: u64) -> Result<Sum, SessionStoreError> {
     let bytes: Option<Option<Vec<u8>>> = connection.prepare_cached(
         "SELECT CASE WHEN typeof(totals)='blob' AND length(totals)=112 THEN totals END FROM accounting_totals WHERE scope=?1 AND node=?2"
-    )?.query_row(params![scope, node], |row| row.get(0)).optional()?;
+    )?.query_row(params![scope, sql_node(node)?], |row| row.get(0)).optional()?;
     match bytes {
         None => Ok(Sum::default()),
         Some(Some(bytes)) => Sum::decode(&bytes),
@@ -132,7 +135,7 @@ fn add_fact(
             sum.add(delta)?;
             connection.prepare_cached(
                 "INSERT INTO accounting_totals(scope,node,totals) VALUES (?1,?2,?3) ON CONFLICT(scope,node) DO UPDATE SET totals=excluded.totals"
-            )?.execute(params![scope, node, sum.encode().as_slice()])?;
+            )?.execute(params![scope, sql_node(node)?, sum.encode().as_slice()])?;
             node += node & node.wrapping_neg();
         }
     }
@@ -208,7 +211,7 @@ pub(super) fn record(
 
 /// Opens and repairs the derived projection in bounded, resumable transactions.
 /// Normal reads and duplicate reconciliation do no historical folding.
-pub(super) fn catch_up(connection: &mut Connection) -> Result<(), SessionStoreError> {
+pub(in crate::session) fn catch_up(connection: &mut Connection) -> Result<(), SessionStoreError> {
     if require_complete(connection).is_ok() {
         return Ok(());
     }
