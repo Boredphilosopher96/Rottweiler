@@ -144,6 +144,13 @@ pub(super) async fn dispatch_protocol(
         return;
     }
 
+    if let Err(error) = super::source_rewind::resolve(&mut command, state, config).await {
+        let outcome = protocol_rejection("invalid_rewind_source", error.to_string());
+        send_ack(state, events, &meta, session, outcome.clone());
+        let _ = respond.send(outcome);
+        return;
+    }
+
     if let ClientCommand::UserShellEnded {
         captured_output, ..
     } = &mut command
@@ -402,18 +409,6 @@ pub(super) async fn dispatch_protocol(
             let outcome = protocol_rejection(
                 "shell_end_rejected",
                 "shell end must match the active shell id and its captured output must fit the durable limit",
-            );
-            send_ack(state, events, &meta, session, outcome.clone());
-            let _ = respond.send(outcome);
-            return;
-        }
-        ClientCommand::Rewind {
-            target: RewindTarget::Checkpoint { .. },
-            ..
-        } => {
-            let outcome = protocol_rejection(
-                "checkpoint_target_not_available",
-                "rewind requires a turn identity",
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);

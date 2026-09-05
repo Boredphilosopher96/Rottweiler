@@ -211,6 +211,18 @@ pub(super) fn plugin_event_payload(
 
 #[async_trait]
 impl SessionEventSink for PluginFanoutEventSink {
+    async fn source_rewind_target(
+        &self,
+        expected_through: rw_types::SequenceId,
+        source: rw_types::SequenceId,
+        turn: u64,
+        position: rw_types::RewindSourcePosition,
+    ) -> std::result::Result<u64, AgentLoopError> {
+        self.inner
+            .source_rewind_target(expected_through, source, turn, position)
+            .await
+    }
+
     async fn extension_state(
         &self,
         plugin_id: &str,

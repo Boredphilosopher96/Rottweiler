@@ -6,8 +6,8 @@ use super::{
         ACCOUNTING, ACTIVE_ASSISTANT, ACTIVE_TOOL_LIFECYCLE, ACTIVE_TOOL_RESULTS, AcceptedSource,
         ActiveSource, ActiveTurn, BOUNDARIES, Boundary, CONTEXT_ACTIONS, CONVERSATION,
         ConversationCut, ConversationSource, MAX_QUESTIONS, MAX_QUEUED, Maintenance,
-        PRUNED_OUTPUTS, QuestionSource, QueuedSource, RecoveryHead, RewindPhase, SourceTotals,
-        ToolLifecycleSource, ToolStartIdentity, TurnSourceKind,
+        PRUNED_OUTPUTS, QuestionSource, QueuedSource, RecoveryHead, RewindPhase, SOURCE_ORDINAL,
+        SourceTotals, ToolLifecycleSource, ToolStartIdentity, TurnSourceKind,
     },
 };
 use crate::engine::{
@@ -143,6 +143,7 @@ pub(super) fn reduce(
             rows.put(
                 key(BOUNDARIES, 0, turn),
                 &Boundary {
+                    source_sequence: sequence,
                     conversation: head.conversation,
                     control: head.control.clone(),
                     context_cut: head.context_cut,
@@ -485,6 +486,7 @@ fn append_turn(
             cumulative_tokens: cut.estimated_tokens,
         },
     )?;
+    rows.put(key(SOURCE_ORDINAL, cut.generation, sequence.0), &cut.turns)?;
     cut.turns = cut
         .turns
         .checked_add(1)

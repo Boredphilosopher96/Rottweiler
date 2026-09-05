@@ -26,6 +26,15 @@ pub struct ExtensionStateView {
 /// actor invokes this boundary before making the event visible to subscribers.
 #[async_trait]
 pub trait SessionEventSink: Send + Sync {
+    /// Resolve an effective committed user source against an exact durable prefix.
+    async fn source_rewind_target(
+        &self,
+        expected_through: SequenceId,
+        source: SequenceId,
+        turn: u64,
+        position: rw_types::RewindSourcePosition,
+    ) -> Result<u64, AgentLoopError>;
+
     /// Reads one bounded extension namespace from the canonical committed state.
     /// Implementations must include session aggregate counters from that same prefix.
     async fn extension_state(&self, plugin_id: &str) -> Result<ExtensionStateView, AgentLoopError>;
@@ -87,6 +96,18 @@ impl NoopSessionEventSink {
 
 #[async_trait]
 impl SessionEventSink for NoopSessionEventSink {
+    async fn source_rewind_target(
+        &self,
+        _expected_through: rw_types::SequenceId,
+        _source: rw_types::SequenceId,
+        _turn: u64,
+        _position: rw_types::RewindSourcePosition,
+    ) -> std::result::Result<u64, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no canonical source index".into(),
+        ))
+    }
+
     async fn extension_state(
         &self,
         _plugin_id: &str,

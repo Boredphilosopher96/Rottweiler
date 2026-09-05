@@ -10,6 +10,7 @@ mod permissions;
 mod plugin_messages;
 mod replies;
 mod rewind;
+mod source_rewind;
 use crate::engine::AgentLoopError;
 use crate::engine::MAX_CAPTURED_SHELL_OUTPUT_BYTES;
 use crate::engine::MAX_PLUGIN_NOTIFICATION_MESSAGE_BYTES;

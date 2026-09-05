@@ -323,6 +323,37 @@ impl RecoveryReadView {
             .transpose()
     }
 
+    /// Find the immediately preceding record in one namespace and scope.
+    ///
+    /// # Errors
+    /// Rejects corrupt row lengths and storage failures.
+    pub fn last_before(
+        &self,
+        namespace: u8,
+        scope: u64,
+        ordinal: u64,
+    ) -> Result<Option<RecoveryRow>, RecoveryIndexError> {
+        let rows = self.read.open_table(ROWS).map_err(storage)?;
+        let mut range = rows
+            .range((namespace, scope, 0)..(namespace, scope, ordinal))
+            .map_err(storage)?;
+        range
+            .next_back()
+            .map(|entry| {
+                let (key, value) = entry.map_err(storage)?;
+                let (_, _, ordinal) = key.value();
+                decode_row(
+                    RecoveryKey {
+                        namespace,
+                        scope,
+                        ordinal,
+                    },
+                    value.value(),
+                )
+            })
+            .transpose()
+    }
+
     /// Read a bounded ordinal page within one namespace/generation.
     ///
     /// # Errors

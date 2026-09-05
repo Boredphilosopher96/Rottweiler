@@ -747,7 +747,9 @@ pub enum PlanDecision {
 #[serde(deny_unknown_fields)]
 #[derive(Allocation)]
 pub enum RewindTarget {
-    Turn { turn_id: TurnId },
+    Turn {
+        turn_id: TurnId,
+    },
     Source {
         expected_through: SequenceId,
         source: SequenceId,

@@ -67,3 +67,6 @@ mod indexed_read_tests;
 
 #[cfg(test)]
 mod workspace_tests;
+
+#[cfg(test)]
+mod source_lookup_tests;

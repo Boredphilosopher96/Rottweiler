@@ -4,7 +4,7 @@ use super::{
     projector::{CanonicalRecovery, RecoveryProgress, key, progress},
     state::{
         BOUNDARIES, CONTEXT_ACTIONS, CONVERSATION, ConversationSource, Maintenance, PRUNED_OUTPUTS,
-        RewindPhase,
+        RewindPhase, SOURCE_ORDINAL,
     },
 };
 use rw_store::session::{
@@ -105,6 +105,10 @@ impl CanonicalRecovery {
                     mutations.push(RecoveryMutation::Put(RecoveryRow {
                         key: key(CONVERSATION, to.generation, to.turns),
                         payload: encode(&item, 64 * 1024)?,
+                    }));
+                    mutations.push(RecoveryMutation::Put(RecoveryRow {
+                        key: key(SOURCE_ORDINAL, to.generation, item.sequence.0),
+                        payload: encode(&to.turns, 64 * 1024)?,
                     }));
                     to.turns += 1;
                 }

@@ -34,6 +34,18 @@ pub(in crate::engine::tests) struct RecordingSink {
 
 #[async_trait]
 impl SessionEventSink for RecordingSink {
+    async fn source_rewind_target(
+        &self,
+        _expected_through: rw_types::SequenceId,
+        _source: rw_types::SequenceId,
+        _turn: u64,
+        _position: rw_types::RewindSourcePosition,
+    ) -> std::result::Result<u64, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no canonical source index".into(),
+        ))
+    }
+
     async fn extension_state(
         &self,
         _plugin_id: &str,
@@ -118,6 +130,18 @@ pub(in crate::engine::tests) struct AccountingRecordingSink {
 
 #[async_trait]
 impl SessionEventSink for AccountingRecordingSink {
+    async fn source_rewind_target(
+        &self,
+        _expected_through: rw_types::SequenceId,
+        _source: rw_types::SequenceId,
+        _turn: u64,
+        _position: rw_types::RewindSourcePosition,
+    ) -> std::result::Result<u64, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no canonical source index".into(),
+        ))
+    }
+
     async fn extension_state(
         &self,
         _plugin_id: &str,
@@ -228,6 +252,18 @@ pub(in crate::engine::tests) struct FailingSink;
 
 #[async_trait]
 impl SessionEventSink for FailingSink {
+    async fn source_rewind_target(
+        &self,
+        _expected_through: rw_types::SequenceId,
+        _source: rw_types::SequenceId,
+        _turn: u64,
+        _position: rw_types::RewindSourcePosition,
+    ) -> std::result::Result<u64, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no canonical source index".into(),
+        ))
+    }
+
     async fn extension_state(
         &self,
         _plugin_id: &str,
@@ -266,6 +302,18 @@ pub(in crate::engine::tests) struct FailCompactionLedgerSink {
 
 #[async_trait]
 impl SessionEventSink for FailCompactionLedgerSink {
+    async fn source_rewind_target(
+        &self,
+        _expected_through: rw_types::SequenceId,
+        _source: rw_types::SequenceId,
+        _turn: u64,
+        _position: rw_types::RewindSourcePosition,
+    ) -> std::result::Result<u64, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no canonical source index".into(),
+        ))
+    }
+
     async fn extension_state(
         &self,
         _plugin_id: &str,
@@ -332,6 +380,18 @@ pub(in crate::engine::tests) struct FailNextBatchSink {
 
 #[async_trait]
 impl SessionEventSink for FailNextBatchSink {
+    async fn source_rewind_target(
+        &self,
+        _expected_through: rw_types::SequenceId,
+        _source: rw_types::SequenceId,
+        _turn: u64,
+        _position: rw_types::RewindSourcePosition,
+    ) -> std::result::Result<u64, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no canonical source index".into(),
+        ))
+    }
+
     async fn extension_state(
         &self,
         _plugin_id: &str,
@@ -379,6 +439,18 @@ pub(in crate::engine::tests) struct FailFirstTextDeltaSink {
 
 #[async_trait]
 impl SessionEventSink for FailFirstTextDeltaSink {
+    async fn source_rewind_target(
+        &self,
+        _expected_through: rw_types::SequenceId,
+        _source: rw_types::SequenceId,
+        _turn: u64,
+        _position: rw_types::RewindSourcePosition,
+    ) -> std::result::Result<u64, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no canonical source index".into(),
+        ))
+    }
+
     async fn extension_state(
         &self,
         _plugin_id: &str,
@@ -432,6 +504,18 @@ pub(in crate::engine::tests) struct WorkspaceChangeFailingSink {
 
 #[async_trait]
 impl SessionEventSink for WorkspaceChangeFailingSink {
+    async fn source_rewind_target(
+        &self,
+        _expected_through: rw_types::SequenceId,
+        _source: rw_types::SequenceId,
+        _turn: u64,
+        _position: rw_types::RewindSourcePosition,
+    ) -> std::result::Result<u64, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no canonical source index".into(),
+        ))
+    }
+
     async fn extension_state(
         &self,
         _plugin_id: &str,
@@ -489,6 +573,18 @@ pub(in crate::engine::tests) struct MalformedBatchSink {
 
 #[async_trait]
 impl SessionEventSink for MalformedBatchSink {
+    async fn source_rewind_target(
+        &self,
+        _expected_through: rw_types::SequenceId,
+        _source: rw_types::SequenceId,
+        _turn: u64,
+        _position: rw_types::RewindSourcePosition,
+    ) -> std::result::Result<u64, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no canonical source index".into(),
+        ))
+    }
+
     async fn extension_state(
         &self,
         _plugin_id: &str,
@@ -565,6 +661,18 @@ impl BlockingBatchSink {
 
 #[async_trait]
 impl SessionEventSink for BlockingBatchSink {
+    async fn source_rewind_target(
+        &self,
+        _expected_through: rw_types::SequenceId,
+        _source: rw_types::SequenceId,
+        _turn: u64,
+        _position: rw_types::RewindSourcePosition,
+    ) -> std::result::Result<u64, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no canonical source index".into(),
+        ))
+    }
+
     async fn extension_state(
         &self,
         _plugin_id: &str,
@@ -627,6 +735,18 @@ pub(in crate::engine::tests) struct OrderedRewindSink {
 
 #[async_trait]
 impl SessionEventSink for OrderedRewindSink {
+    async fn source_rewind_target(
+        &self,
+        _expected_through: rw_types::SequenceId,
+        _source: rw_types::SequenceId,
+        _turn: u64,
+        _position: rw_types::RewindSourcePosition,
+    ) -> std::result::Result<u64, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no canonical source index".into(),
+        ))
+    }
+
     async fn extension_state(
         &self,
         _plugin_id: &str,
@@ -701,6 +821,18 @@ pub(in crate::engine::tests) struct CorruptGapSink {
 
 #[async_trait]
 impl SessionEventSink for CorruptGapSink {
+    async fn source_rewind_target(
+        &self,
+        _expected_through: rw_types::SequenceId,
+        _source: rw_types::SequenceId,
+        _turn: u64,
+        _position: rw_types::RewindSourcePosition,
+    ) -> std::result::Result<u64, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no canonical source index".into(),
+        ))
+    }
+
     async fn extension_state(
         &self,
         _plugin_id: &str,
@@ -741,6 +873,18 @@ impl SessionEventSink for CorruptGapSink {
 
 #[async_trait]
 impl SessionEventSink for ToggleLeaseSink {
+    async fn source_rewind_target(
+        &self,
+        _expected_through: rw_types::SequenceId,
+        _source: rw_types::SequenceId,
+        _turn: u64,
+        _position: rw_types::RewindSourcePosition,
+    ) -> std::result::Result<u64, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no canonical source index".into(),
+        ))
+    }
+
     async fn extension_state(
         &self,
         _plugin_id: &str,
@@ -835,6 +979,18 @@ pub(in crate::engine::tests) struct CountedReplaySink {
 
 #[async_trait]
 impl SessionEventSink for CountedReplaySink {
+    async fn source_rewind_target(
+        &self,
+        _expected_through: rw_types::SequenceId,
+        _source: rw_types::SequenceId,
+        _turn: u64,
+        _position: rw_types::RewindSourcePosition,
+    ) -> std::result::Result<u64, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "sink has no canonical source index".into(),
+        ))
+    }
+
     async fn extension_state(
         &self,
         _plugin_id: &str,

@@ -216,6 +216,11 @@ async fn invalid_protocol_rewind_is_rejected_without_poisoning_the_session() {
             .expect("rewind outcome"),
         CommandOutcome::Rejected { .. }
     ));
+    assert!(matches!(handle.dispatch(ClientCommand::Rewind {
+        meta: protocol_meta("driver", "stale-source-rewind"), session_id: session_id.clone(),
+        target: RewindTarget::Source { expected_through: rw_types::SequenceId(999), source: rw_types::SequenceId(0),
+            turn_id: TurnId("1".into()), position: rw_types::RewindSourcePosition::Through },
+    }).await.expect("source outcome"), CommandOutcome::Rejected { ref error } if error.code == "invalid_rewind_source"));
     assert_eq!(
         handle
             .dispatch(ClientCommand::SendMessage {

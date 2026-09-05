@@ -10,6 +10,7 @@ pub(super) const ACCOUNTING: u8 = 5;
 pub(super) const ACTIVE_ASSISTANT: u8 = 6;
 pub(super) const ACTIVE_TOOL_LIFECYCLE: u8 = 7;
 pub(super) const ACTIVE_TOOL_RESULTS: u8 = 8;
+pub(super) const SOURCE_ORDINAL: u8 = 12;
 pub(super) const MAX_QUEUED: usize = 128;
 pub(super) const MAX_QUESTIONS: usize = 64;
 
@@ -159,6 +160,7 @@ impl Default for RecoveryControl {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(super) struct Boundary {
+    pub source_sequence: SequenceId,
     pub conversation: ConversationCut,
     pub control: RecoveryControl,
     pub context_cut: u64,

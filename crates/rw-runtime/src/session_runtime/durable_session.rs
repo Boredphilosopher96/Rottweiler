@@ -271,6 +271,19 @@ impl DurableEventSink {
 
 #[async_trait]
 impl SessionEventSink for DurableEventSink {
+    async fn source_rewind_target(
+        &self,
+        expected_through: rw_types::SequenceId,
+        source: rw_types::SequenceId,
+        turn: u64,
+        position: rw_types::RewindSourcePosition,
+    ) -> std::result::Result<u64, AgentLoopError> {
+        self.read_canonical(move |history| {
+            history.resolve_source_rewind(expected_through, source, turn, position)
+        })
+        .await
+    }
+
     async fn extension_state(
         &self,
         plugin_id: &str,

@@ -642,7 +642,7 @@ pub(super) async fn apply_accepted(
         | ClientCommand::CloseSubagent { .. }
         | ClientCommand::ShutdownHost { .. }
         | ClientCommand::Rewind {
-            target: RewindTarget::Checkpoint { .. },
+            target: RewindTarget::Source { .. },
             ..
         } => {}
     }

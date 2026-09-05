@@ -156,3 +156,84 @@ async fn canonical_bootstrap_shares_committed_prefix_without_mutating_prior_resu
         "returned bootstrap remains exact after the next commit"
     );
 }
+
+#[tokio::test]
+async fn source_rewind_query_validates_exact_published_prefix() {
+    let root = tempfile::tempdir().expect("root");
+    let current = sink(root.path());
+    let mut events = Vec::new();
+    let meta = |sequence| EventMeta {
+        protocol_version: rw_core::SESSION_EVENT_VERSION,
+        session_id: SessionId("state".into()),
+        sequence_id: SequenceId(sequence),
+        emitted_at: "2026-09-05T00:00:00Z".into(),
+        caused_by: None,
+    };
+    for turn in 1..=2 {
+        let start = events.len() as u64;
+        events.extend([
+            EngineEvent::TurnStarted {
+                meta: meta(start),
+                turn_id: rw_types::TurnId(turn.to_string()),
+            },
+            EngineEvent::ConversationTurnCommitted {
+                meta: meta(start + 1),
+                agent_turn: turn,
+                turn: rw_types::Turn {
+                    role: rw_types::Role::User,
+                    blocks: vec![rw_types::Block::Text {
+                        text: "user".into(),
+                    }],
+                    meta: rw_types::TurnMeta::default(),
+                },
+            },
+            EngineEvent::TurnFinished {
+                meta: meta(start + 2),
+                turn_id: rw_types::TurnId(turn.to_string()),
+                status: rw_types::TurnStatus::Completed,
+                usage: rw_core::SessionUsage::default().into(),
+                cost: rw_types::Cost::Unavailable {
+                    reason: "fixture".into(),
+                },
+            },
+        ]);
+    }
+    commit_session_events(Arc::clone(&current), events)
+        .await
+        .expect("commit");
+    assert_eq!(
+        current
+            .source_rewind_target(
+                SequenceId(5),
+                SequenceId(4),
+                2,
+                rw_types::RewindSourcePosition::Before
+            )
+            .await
+            .expect("before"),
+        1
+    );
+    assert_eq!(
+        current
+            .source_rewind_target(
+                SequenceId(5),
+                SequenceId(4),
+                2,
+                rw_types::RewindSourcePosition::Through
+            )
+            .await
+            .expect("through"),
+        2
+    );
+    assert!(
+        current
+            .source_rewind_target(
+                SequenceId(4),
+                SequenceId(4),
+                2,
+                rw_types::RewindSourcePosition::Through
+            )
+            .await
+            .is_err()
+    );
+}
