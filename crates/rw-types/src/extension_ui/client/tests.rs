@@ -60,3 +60,40 @@ fn generation_identity_rejects_unbounded_and_noncanonical_data() {
         Some(identity)
     );
 }
+
+#[test]
+fn decoded_surface_and_catalog_reject_retention_overflow_and_duplicate_fields() {
+    let contribution = UiContribution::Panel {
+        id: "p".into(),
+        title: "Panel".into(),
+        fields: vec![UiField::Text {
+            id: "text".into(),
+            label: "Text".into(),
+            path: Vec::new(),
+        }],
+        actions: Vec::new(),
+    };
+    let presentation = UiPresentation::project(
+        UiContributionOwner {
+            extension: "example".into(),
+            generation: UiGenerationId::from_bytes([2; 16]),
+        },
+        &contribution,
+        &json!("ok"),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let mut value = serde_json::to_value(&presentation).unwrap_or_else(|error| panic!("{error}"));
+    value["projected"]["fields"][0]["value"] = json!("🔐".repeat(1025));
+    assert!(serde_json::from_value::<UiPresentation>(value.clone()).is_err());
+    value["projected"]["fields"][0]["value"] = json!("ok");
+    value["descriptor"]["fields"]
+        .as_array_mut()
+        .unwrap_or_else(|| panic!("fields"))
+        .push(json!({"kind":"text","id":"text","label":"Duplicate"}));
+    assert!(serde_json::from_value::<UiPresentation>(value).is_err());
+    let entry = json!({"owner":presentation.owner,"descriptors":[presentation.descriptor]});
+    assert!(
+        serde_json::from_value::<super::UiCatalog>(json!({"entries":[entry.clone(),entry]}))
+            .is_err()
+    );
+}

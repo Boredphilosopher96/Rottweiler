@@ -1,4 +1,5 @@
 //! Client-facing presentation values contain neither selectors nor executable action data.
+mod admission;
 use super::{
     MAX_UI_DESCRIPTOR_BYTES, MAX_UI_SURFACE_BYTES, UiContractError, UiContribution, UiField,
     UiProjectedFields, projection, validate_contributions, validation,
@@ -58,6 +59,7 @@ impl<'de> Deserialize<'de> for UiGenerationId {
 )]
 #[serde(deny_unknown_fields)]
 pub struct UiContributionOwner {
+    #[schemars(length(min=1,max=128),extend("x-rw-max-utf8-bytes"=128))]
     pub extension: String,
     pub generation: UiGenerationId,
 }
@@ -68,22 +70,33 @@ pub struct UiContributionOwner {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UiDisplayField {
     Text {
+        #[schemars(length(min=1,max=128),extend("x-rw-max-utf8-bytes"=128))]
         id: String,
+        #[schemars(length(min=1,max=128),extend("x-rw-max-utf8-bytes"=128))]
         label: String,
     },
     Badge {
+        #[schemars(length(min=1,max=128),extend("x-rw-max-utf8-bytes"=128))]
         id: String,
+        #[schemars(length(min=1,max=128),extend("x-rw-max-utf8-bytes"=128))]
         label: String,
     },
     List {
+        #[schemars(length(min=1,max=128),extend("x-rw-max-utf8-bytes"=128))]
         id: String,
+        #[schemars(length(min=1,max=128),extend("x-rw-max-utf8-bytes"=128))]
         label: String,
+        #[schemars(range(min = 1, max = 32))]
         max_items: u32,
     },
     Table {
+        #[schemars(length(min=1,max=128),extend("x-rw-max-utf8-bytes"=128))]
         id: String,
+        #[schemars(length(min=1,max=128),extend("x-rw-max-utf8-bytes"=128))]
         label: String,
+        #[schemars(schema_with = "super::bounded_column_labels")]
         columns: Vec<String>,
+        #[schemars(range(min = 1, max = 32))]
         max_rows: u32,
     },
 }
@@ -92,7 +105,9 @@ pub enum UiDisplayField {
 )]
 #[serde(deny_unknown_fields)]
 pub struct UiDisplayAction {
+    #[schemars(length(min=1,max=128),extend("x-rw-max-utf8-bytes"=128))]
     pub id: String,
+    #[schemars(length(min=1,max=128),extend("x-rw-max-utf8-bytes"=128))]
     pub label: String,
 }
 
@@ -110,10 +125,14 @@ pub enum UiDisplaySurface {
 )]
 #[serde(deny_unknown_fields)]
 pub struct UiDisplayDescriptor {
+    #[schemars(length(min=1,max=128),extend("x-rw-max-utf8-bytes"=128))]
     pub id: String,
+    #[schemars(length(min=1,max=128),extend("x-rw-max-utf8-bytes"=128))]
     pub title: String,
     pub surface: UiDisplaySurface,
+    #[schemars(length(max = 32))]
     pub fields: Vec<UiDisplayField>,
+    #[schemars(length(max = 4))]
     pub actions: Vec<UiDisplayAction>,
 }
 impl UiDisplayDescriptor {
@@ -180,9 +199,8 @@ impl UiDisplayDescriptor {
 
 /// A self-contained, host-produced surface. A canonical tool result retains this
 /// descriptor so historical rendering does not consult a different live plugin.
-#[derive(
-    Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS, PrepareAllocation,
-)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema, TS, PrepareAllocation)]
+#[schemars(extend("x-rw-max-json-bytes" = MAX_UI_SURFACE_BYTES))]
 #[serde(deny_unknown_fields)]
 pub struct UiPresentation {
     pub owner: UiContributionOwner,
@@ -221,13 +239,14 @@ impl UiPresentation {
 #[serde(deny_unknown_fields)]
 pub struct UiCatalogEntry {
     pub owner: UiContributionOwner,
+    #[schemars(length(max = 128))]
     pub descriptors: Vec<UiDisplayDescriptor>,
 }
-#[derive(
-    Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS, PrepareAllocation,
-)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema, TS, PrepareAllocation)]
+#[schemars(extend("x-rw-max-json-bytes" = MAX_UI_DESCRIPTOR_BYTES))]
 #[serde(deny_unknown_fields)]
 pub struct UiCatalog {
+    #[schemars(length(max = 64))]
     pub entries: Vec<UiCatalogEntry>,
 }
 

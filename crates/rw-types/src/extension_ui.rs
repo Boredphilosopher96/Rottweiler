@@ -6,6 +6,10 @@ pub use client::{
     UiDisplayAction, UiDisplayDescriptor, UiDisplayField, UiDisplaySurface, UiGenerationId,
     UiPanelSnapshot, UiPresentation,
 };
+mod wire_bounds;
+use wire_bounds::{
+    bounded_column_labels, bounded_display_list, bounded_display_table, nullable_display_value,
+};
 mod projection;
 mod validation;
 pub use projection::project_fields;
@@ -177,21 +181,23 @@ pub enum UiProjectedField {
     Text {
         id: String,
         #[serde(deserialize_with = "Option::deserialize")]
-        #[schemars(schema_with = "crate::schema::required_nullable::<String>")]
+        #[schemars(schema_with = "nullable_display_value")]
         value: Option<String>,
     },
     Badge {
         id: String,
         #[serde(deserialize_with = "Option::deserialize")]
-        #[schemars(schema_with = "crate::schema::required_nullable::<String>")]
+        #[schemars(schema_with = "nullable_display_value")]
         value: Option<String>,
     },
     List {
         id: String,
+        #[schemars(schema_with = "bounded_display_list")]
         values: Vec<String>,
     },
     Table {
         id: String,
+        #[schemars(schema_with = "bounded_display_table")]
         rows: Vec<Vec<String>>,
     },
 }
@@ -201,6 +207,7 @@ pub enum UiProjectedField {
 )]
 #[serde(deny_unknown_fields)]
 pub struct UiProjectedFields {
+    #[schemars(length(max = 32))]
     pub fields: Vec<UiProjectedField>,
     /// At least one source value was truncated by a declared or aggregate bound.
     pub truncated: bool,
