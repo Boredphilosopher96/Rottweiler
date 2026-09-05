@@ -74,11 +74,11 @@ prove whole-record precedence — explicit user config, then provider-discovered
 metadata, then models.dev — while subscription and credit-accounted providers
 reject dollar-pricing overrides and retain their non-dollar accounting.
 
-The plugin SDK and Rust host conformance surface covers protocol 2 only.
+The plugin SDK and Rust host conformance surface covers protocol 3 only.
 The `rw-plugin-protocol` codegen check owns and verifies the
-TypeScript, `protocol-2.json`, and schema projections; the protocol also
+TypeScript, `protocol-3.json`, and schema projections; the protocol also
 negotiates model-catalog capability and validates bounded catalog entries.
-Cross-host `provider-v2.ts` and `provider-auth-v2.ts` fixtures exercise
+Cross-host `provider-v3.ts` and `provider-auth-v3.ts` fixtures exercise
 catalog metadata plus host-mediated authentication, including declared
 credential references, response redaction across chunk boundaries,
 cancellation, and terminal refusal of an undeclared reference before HTTP.

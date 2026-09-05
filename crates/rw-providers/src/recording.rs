@@ -431,6 +431,7 @@ impl WriteJob {
 enum WriterMessage {
     Fixture(Box<WriteJob>),
     Barrier(oneshot::Sender<Result<(), ProviderError>>),
+    Settled(oneshot::Sender<()>),
 }
 
 struct RecordingWriter {
@@ -471,6 +472,9 @@ impl RecordingWriter {
                             let _ = completion.send(result);
                         }
                     }
+                    WriterMessage::Settled(completion) => {
+                        let _ = completion.send(());
+                    }
                     WriterMessage::Barrier(completion) => {
                         let result = first_error.take().map_or(Ok(()), Err);
                         let _ = completion.send(result);
@@ -491,6 +495,21 @@ impl RecordingWriter {
             .reserve_owned()
             .await
             .map_err(|_| self.unavailable_error())
+    }
+
+    async fn settle(&self) {
+        self.start();
+        let (completion, result) = oneshot::channel();
+        if self
+            .sender
+            .send(WriterMessage::Settled(completion))
+            .await
+            .is_err()
+            || result.await.is_err()
+        {
+            tracing::error!("recording worker exited without effect settlement proof");
+            std::future::pending::<()>().await;
+        }
     }
 
     async fn flush(&self) -> Result<(), ProviderError> {
@@ -595,6 +614,11 @@ impl Recorder {
 
 #[async_trait]
 impl Provider for Recorder {
+    async fn settle_effects(&self) {
+        self.inner.settle_effects().await;
+        self.writer.settle().await;
+    }
+
     fn name(&self) -> &str {
         self.inner.name()
     }
@@ -2598,6 +2622,7 @@ mod tests {
                 ..
             }))
         ));
+        recorder.settle_effects().await;
         let first_error = recorder
             .flush()
             .await

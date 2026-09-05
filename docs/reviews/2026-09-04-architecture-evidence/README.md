@@ -6,6 +6,12 @@ changes or a substitute for integration regressions. Exit zero means the stated
 failure was reproduced. After fixing a finding, change its assertion to require
 correct behavior.
 
+The plugin duplex probe is archived protocol-2 evidence: run it in a checkout of
+`c729e3bf4d87b6c80f6a2e8655ed935aeb67cafd`. Protocol 3 removed that contract under
+ADR-031; current behavior is covered by `packages/plugin-sdk/test/duplex.test.ts`
+and the Rust plugin runtime tests. Do not interpret a current-tree version
+rejection as reproduction of the old deadlock.
+
 Run from the repository root:
 
 ```sh

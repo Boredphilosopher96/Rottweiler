@@ -2,23 +2,30 @@ import { definePlugin, runPlugin } from "../../src/index.ts"
 
 export const plugin = definePlugin({
   manifest: {
-    name: "conformance-provider-v2",
+    name: "conformance-provider-v3",
     version: "1.0.0",
-    protocol: 2,
+    protocol: 3,
     capabilities: {
-      providers: [{ "alias-prefix": "fixture-v2/", capabilities: ["models"] }],
+      providers: [{ "alias-prefix": "fixture-v3/", capabilities: ["models"] }],
     },
   },
   handlers: {
     providers: {
-      "fixture-v2/": async function* ({ alias }) {
+      "fixture-v3/": async function* ({ alias }) {
         yield { type: "message_start", model: alias }
-        yield { type: "text_delta", text: `fixture response for ${alias}` }
+        if (alias.endsWith("numeric-credit")) {
+          for (let n = 0; n < 256; n += 1) {
+            yield { type: "tool_call_end", id: String(n), arguments: {
+              decimal: 0.000001, large: 100000000000000000000,
+              tiny: 1e-7, exponent: 1e21, escaped: "é\n\"\\/",
+            } }
+          }
+        } else yield { type: "text_delta", text: `fixture response for ${alias}` }
         yield { type: "finished", reason: "stop" }
       },
     },
     providerModels: {
-      "fixture-v2/": () => ({
+      "fixture-v3/": () => ({
         models: [{
           id: "vision-thinking",
           display_name: "Vision Thinking",

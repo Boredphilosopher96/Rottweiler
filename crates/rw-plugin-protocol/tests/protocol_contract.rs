@@ -17,14 +17,14 @@ fn fixture(name: &str) -> Value {
 
 #[test]
 fn current_fixture_deserializes_through_owned_wire_dtos() {
-    let protocol_two = fixture("protocol-2.json");
+    let protocol_three = fixture("protocol-3.json");
     let models: ProviderModelsResponse =
-        serde_json::from_value(protocol_two["provider_models_response"]["result"].clone())
+        serde_json::from_value(protocol_three["provider_models_response"]["result"].clone())
             .expect("provider models result");
     assert_eq!(models.models[0].id, "vision-thinking");
 
     let http: ProviderHttpCapabilityParams =
-        serde_json::from_value(protocol_two["provider_http_request"]["params"].clone())
+        serde_json::from_value(protocol_three["provider_http_request"]["params"].clone())
             .expect("provider HTTP request");
     assert_eq!(http.credential_reference, "fixture-token");
     assert_eq!(http.request.body_base64.as_deref(), Some("e30="));
@@ -49,7 +49,7 @@ fn independent_negative_samples_fail_at_the_owner_boundary() {
     let invalid_manifest = json!({
         "name": "plugin",
         "version": "1.0.0",
-        "protocol": 2,
+        "protocol": 3,
         "capabilities": { "providers": [{ "alias-prefix": "Upper/" }] }
     });
     assert!(matches!(
@@ -63,7 +63,7 @@ fn independent_negative_samples_fail_at_the_owner_boundary() {
     let shorthand_hook = json!({
         "name": "plugin",
         "version": "1.0.0",
-        "protocol": 2,
+        "protocol": 3,
         "capabilities": { "hooks": ["pre_tool"] }
     });
     assert!(
@@ -83,7 +83,13 @@ fn independent_negative_samples_fail_at_the_owner_boundary() {
     let valid = decoder
         .push(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n")
         .expect("valid frame");
-    assert!(matches!(valid.as_slice(), [RpcFrame::Request(_)]));
+    assert!(matches!(
+        valid.as_slice(),
+        [rw_plugin_protocol::DecodedFrame {
+            frame: RpcFrame::Request(_),
+            ..
+        }]
+    ));
 }
 
 #[test]
@@ -97,4 +103,33 @@ fn provider_alias_prefix_grammar_is_owned_and_bounded() {
         );
     }
     assert!(validate_provider_alias_prefix(&format!("{}/", "a".repeat(128))).is_err());
+}
+
+#[test]
+fn decoder_preserves_original_byte_charges_across_numeric_and_escape_normalization() {
+    for value in [
+        "0.000001",
+        "100000000000000000000",
+        "1e-7",
+        "1e+21",
+        "-0",
+        r#""\u0061\n\/é""#,
+    ] {
+        let line = format!(
+            r#"{{"jsonrpc":"2.0","method":"provider/event","params":{{"request_id":1,"event":{{"type":"tool_call_end","arguments":{value}}}}}}}"#
+        );
+        let mut decoder = FrameDecoder::default();
+        let input = format!("{line}\n");
+        let mut frames = Vec::new();
+        for chunk in input.as_bytes().chunks(7) {
+            frames.extend(decoder.push(chunk).expect("wire frame"));
+        }
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].wire_bytes, line.len());
+        // Byte credit is independent of serde's canonical numeric/string spelling.
+        let serialized = serde_json::to_vec(&frames[0].frame).expect("reserialize");
+        if value == "0.000001" || value == "100000000000000000000" {
+            assert_ne!(serialized.len(), line.len());
+        }
+    }
 }

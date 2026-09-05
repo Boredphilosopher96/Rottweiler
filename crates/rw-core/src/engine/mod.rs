@@ -376,6 +376,10 @@ impl<'a> StreamingSecretRedactor<'a> {
 /// Provider-neutral model streaming boundary used by the actor loop.
 #[async_trait]
 pub trait ModelDriver: Send + Sync {
+    /// Drains local provider work retained after an invocation future is dropped.
+    /// Drivers with only future-owned effects may use the default.
+    async fn settle_effects(&self) {}
+
     /// Starts one provider iteration for an already-resolved model alias.
     ///
     /// # Errors
@@ -533,6 +537,10 @@ pub struct ModelContextMetadata {
 
 #[async_trait]
 impl ModelDriver for ProviderRuntime {
+    async fn settle_effects(&self) {
+        self.settle_provider_effects().await;
+    }
+
     fn stream(
         &self,
         alias: &str,
@@ -9450,6 +9458,100 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[derive(Default)]
+    struct GatedCleanupProvider {
+        invoked: Notify,
+        cleanup: Notify,
+        release: Notify,
+        settled: AtomicBool,
+    }
+
+    #[async_trait]
+    impl rw_providers::Provider for GatedCleanupProvider {
+        fn name(&self) -> &'static str {
+            "gated"
+        }
+        fn capabilities(&self) -> rw_providers::Capabilities {
+            rw_providers::Capabilities {
+                tool_calling: false,
+                vision: false,
+                thinking: false,
+                cache_breakpoints: CacheBreakpointSupport::None,
+                max_context_tokens: None,
+                max_output_tokens: None,
+                wire_mode: rw_providers::WireMode::NormalizedReplay,
+            }
+        }
+        async fn stream(
+            &self,
+            _request: ProviderRequest,
+        ) -> Result<BoxEventStream, rw_providers::ProviderError> {
+            self.invoked.notify_one();
+            std::future::pending().await
+        }
+        async fn settle_effects(&self) {
+            self.cleanup.notify_one();
+            self.release.notified().await;
+            self.settled.store(true, Ordering::SeqCst);
+        }
+    }
+
+    struct CleanupModel(rw_providers::ProviderRouter);
+
+    #[async_trait]
+    impl ModelDriver for CleanupModel {
+        fn stream(
+            &self,
+            alias: &str,
+            request: ProviderRequest,
+        ) -> Result<BoxEventStream, AgentLoopError> {
+            self.0
+                .stream_alias(alias, request)
+                .map_err(|error| AgentLoopError::Provider(error.to_string()))
+        }
+        async fn settle_effects(&self) {
+            self.0.settle_effects().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_provider_start_cannot_finish_turn_before_local_effect_settlement() {
+        let root = TempDir::new().expect("tempdir");
+        let provider = Arc::new(GatedCleanupProvider::default());
+        let model = Arc::new(CleanupModel(
+            rw_providers::ProviderRouter::new(
+                BTreeMap::from([("fast".to_owned(), vec!["gated/model".to_owned()])]),
+                [provider.clone() as Arc<dyn rw_providers::Provider>],
+                rw_providers::RetryPolicy::default(),
+            )
+            .expect("router"),
+        ));
+        let actor_config = config(
+            root.path(),
+            model,
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let mut events = handle.subscribe();
+        handle.send_message("run").await.expect("message");
+        timeout(Duration::from_secs(2), provider.invoked.notified())
+            .await
+            .expect("provider started");
+        assert!(handle.interrupt().await.expect("interrupt"));
+        timeout(Duration::from_secs(2), provider.cleanup.notified())
+            .await
+            .expect("cleanup began after future drop");
+        while let Ok(event) = events.receiver.try_recv() {
+            assert!(!matches!(event.event, EngineEvent::TurnFinished { .. }));
+        }
+        assert!(!provider.settled.load(Ordering::SeqCst));
+        provider.release.notify_one();
+        let _ = collect_turn(&mut events).await;
+        assert!(provider.settled.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

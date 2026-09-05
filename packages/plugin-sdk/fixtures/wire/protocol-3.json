@@ -12,8 +12,8 @@
       ],
       "host": "rottweiler",
       "max_frame_bytes": 4194304,
-      "min_protocol": 2,
-      "protocol": 2
+      "min_protocol": 3,
+      "protocol": 3
     }
   },
   "initialize_response": {
@@ -23,7 +23,7 @@
       "capabilities": {
         "providers": [
           {
-            "alias-prefix": "fixture-v2/",
+            "alias-prefix": "fixture-v3/",
             "capabilities": [
               "models"
             ],
@@ -33,22 +33,29 @@
           }
         ]
       },
-      "name": "wire-fixture-v2",
-      "protocol": 2,
+      "name": "wire-fixture-v3",
+      "protocol": 3,
       "version": "1.0.0"
     }
   },
   "limits": {
+    "control_queue_bytes": 16777216,
+    "control_queue_frames": 64,
+    "data_queue_bytes": 16777220,
     "max_capabilities_per_kind": 256,
     "max_description_bytes": 16384,
     "max_frame_bytes": 4194304,
     "max_manifest_bytes": 262144,
     "max_model_tokens": 16777216,
     "max_name_bytes": 128,
+    "max_operation_duration_ms": 300000,
     "max_price_micros_usd": 1000000000000,
+    "max_provider_streams": 4,
     "max_schema_bytes": 65536,
     "max_schema_depth": 32,
-    "max_version_bytes": 64
+    "max_version_bytes": 64,
+    "provider_window_bytes": 4194304,
+    "provider_window_events": 64
   },
   "methods": {
     "commandExecute": "command/execute",
@@ -58,8 +65,8 @@
     "initialize": "initialize",
     "injectMessage": "session/inject_message",
     "notify": "ui/notify",
-    "providerCancel": "provider/cancel",
     "providerComplete": "provider/complete",
+    "providerCredit": "provider/credit",
     "providerEvent": "provider/event",
     "providerHttp": "provider/http",
     "providerHttpCancel": "provider/http_cancel",
@@ -69,7 +76,7 @@
     "shutdown": "shutdown",
     "toolCall": "tool/call"
   },
-  "protocol": 2,
+  "protocol": 3,
   "provider_http_body": {
     "jsonrpc": "2.0",
     "method": "provider/http_event",
@@ -113,7 +120,7 @@
     "jsonrpc": "2.0",
     "method": "provider/http",
     "params": {
-      "alias": "fixture-v2/vision-thinking",
+      "alias": "fixture-v3/vision-thinking",
       "credential_reference": "fixture-token",
       "request": {
         "body_base64": "e30=",
@@ -135,7 +142,7 @@
     "jsonrpc": "2.0",
     "method": "provider/models",
     "params": {
-      "alias_prefix": "fixture-v2/"
+      "alias_prefix": "fixture-v3/"
     }
   },
   "provider_models_response": {

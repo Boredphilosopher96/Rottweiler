@@ -543,6 +543,11 @@ pub(crate) struct RawSseFrame {
 /// A backend adapter. Record/replay implements this same boundary.
 #[async_trait]
 pub trait Provider: Send + Sync {
+    /// Waits for host-owned effects abandoned by a dropped invocation or stream.
+    /// The default is valid only when dropping futures also drops all local work.
+    /// This never proves that a remote HTTP service stopped work or billing.
+    async fn settle_effects(&self) {}
+
     /// Stable provider key used by qualified model ids.
     fn name(&self) -> &str;
 

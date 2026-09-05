@@ -1,3 +1,4 @@
+import { StreamCredit } from "./stream-credit"
 import {
   PLUGIN_PROTOCOL_VERSION,
   PLUGIN_HOST_ID,
@@ -23,7 +24,7 @@ import {
   type RpcId,
   type ToolCallParams,
   type ToolResponse,
-} from "./generated/protocol-2"
+} from "./generated/protocol-3"
 import {
   BoundedJsonWriter,
   DEFAULT_MAX_RPC_LINE_BYTES,
@@ -483,6 +484,7 @@ export class PluginServer {
   #shuttingDown = false
   #shutdownPromise: Promise<void> | undefined
   readonly #providerCalls = new Map<RpcId, AbortController>()
+  readonly #providerCredits = new Map<RpcId, StreamCredit>()
   readonly #handlerTasks = new Set<Promise<void>>()
   #activeInvocations = 0
   readonly #providerHttp = new Map<RpcId, PendingProviderHttp>()
@@ -590,11 +592,17 @@ export class PluginServer {
       }
       return
     }
-    if (candidate.method === RPC_METHODS.providerCancel && isNotification) {
+    if (candidate.method === RPC_METHODS.providerCredit && isNotification) {
       try {
-        this.#cancelProvider(candidate.params)
+        const params = object(candidate.params, "provider credit")
+        requireRpcKeys(params, "provider credit", ["request_id", "events", "bytes"])
+        if ((typeof params.request_id !== "string" && typeof params.request_id !== "number")
+          || typeof params.events !== "number" || typeof params.bytes !== "number") {
+          throw new SafeRpcError(-32602, "invalid provider credit")
+        }
+        this.#providerCredits.get(params.request_id)?.grant(params.events, params.bytes)
       } catch {
-        this.#debug("notification provider/cancel failed")
+        this.#lifetime.abort()
       }
       return
     }
@@ -717,11 +725,11 @@ export class PluginServer {
           || hostCapabilities.length > PROTOCOL_LIMITS.maxCapabilitiesPerKind
           || hostCapabilities.some((capability) => typeof capability !== "string")
         ))
-        || (selectedProtocol === 2 && needsProviderModels && (
+        || (needsProviderModels && (
           !Array.isArray(hostCapabilities)
           || !hostCapabilities.includes("provider-models")
         ))
-        || (selectedProtocol === 2 && needsProviderHttp && (
+        || (needsProviderHttp && (
           !Array.isArray(hostCapabilities)
           || !hostCapabilities.includes("provider-http")
         ))
@@ -790,7 +798,7 @@ export class PluginServer {
   }
 
   async #handleProvider(id: RpcId, rawParams: unknown): Promise<void> {
-    if (!this.#initialized || this.#shuttingDown || this.#providerCalls.has(id) || this.#providerCalls.size >= 64) {
+    if (!this.#initialized || this.#shuttingDown || this.#providerCalls.has(id) || this.#providerCalls.size >= PROTOCOL_LIMITS.maxProviderStreams) {
       await this.#failure(id, -32005, "provider stream admission denied")
       return
     }
@@ -811,6 +819,9 @@ export class PluginServer {
     this.#lifetime.signal.addEventListener("abort", cancel, { once: true })
     if (this.#lifetime.signal.aborted) call.abort()
     this.#providerCalls.set(id, call)
+    const credit = new StreamCredit(call.signal)
+    this.#providerCredits.set(id, credit)
+    const deadline = setTimeout(cancel, PROTOCOL_LIMITS.maxOperationDurationMs)
     let rejectCancelled!: (error: Error) => void
     const cancelled = new Promise<never>((_resolve, reject) => { rejectCancelled = reject })
     const abort = () => rejectCancelled(new SafeRpcError(-32800, "plugin request cancelled"))
@@ -830,11 +841,13 @@ export class PluginServer {
             if (call.signal.aborted) throw new SafeRpcError(-32800, "plugin request cancelled")
             this.#validateProviderEvent(event, sawFinished)
             if (event.type === "finished") sawFinished = true
-            await this.#writer.write({
+            const frame: JsonValue = {
               jsonrpc: "2.0",
               method: RPC_METHODS.providerEvent,
               params: { request_id: id, event } as unknown as JsonValue,
-            })
+            }
+            if (event.type !== "finished") await credit.take(byteLength(JSON.stringify(frame)))
+            await this.#writer.write(frame, "data")
           }
           if (!sawFinished) throw new SafeRpcError(-32603, "provider stream ended before finished")
         }),
@@ -846,19 +859,12 @@ export class PluginServer {
       else await this.#failure(id, -32603, "plugin provider failed")
     } finally {
       this.#providerCalls.delete(id)
+      this.#providerCredits.delete(id)
+      clearTimeout(deadline)
+      credit.close()
       call.signal.removeEventListener("abort", abort)
       this.#lifetime.signal.removeEventListener("abort", cancel)
     }
-  }
-
-  #cancelProvider(rawParams: unknown): void {
-    const value = object(rawParams)
-    requireRpcKeys(value, "provider/cancel params", ["request_id"])
-    const requestId = value.request_id
-    if (typeof requestId !== "string" && typeof requestId !== "number") {
-      throw new SafeRpcError(-32602, "invalid provider/cancel params")
-    }
-    this.#providerCalls.get(requestId)?.abort()
   }
 
   #validateProviderEvent(event: ProviderEvent, sawFinished: boolean): void {

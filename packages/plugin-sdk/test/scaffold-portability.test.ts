@@ -59,7 +59,7 @@ describe("scaffold mapping portability", () => {
   }
 
   test("rejects a source path outside the canonical template", async () => {
-    await withMapping("../wire/protocol-2.json\tpackage.json\n", async (scaffold) => {
+    await withMapping("../wire/protocol-3.json\tpackage.json\n", async (scaffold) => {
       expect(() => scaffold.renderTypeScriptScaffold()).toThrow("invalid canonical scaffold")
     })
   })

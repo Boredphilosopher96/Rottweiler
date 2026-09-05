@@ -1961,7 +1961,7 @@ oauth_client_id = 'public-native-client'
         fs::create_dir_all(&package).expect("package");
         fs::write(
             package.join("manifest.json"),
-            r#"{"name":"example","version":"1.0.0","protocol":2,"capabilities":{}}"#,
+            r#"{"name":"example","version":"1.0.0","protocol":3,"capabilities":{}}"#,
         )
         .expect("manifest");
         fs::write(
@@ -1990,7 +1990,7 @@ oauth_client_id = 'public-native-client'
         fs::write(package.join("src/index.ts"), "export const plugin = {};\n").expect("entry");
         fs::write(
             package.join("manifest.json"),
-            r#"{"name":"source-example","version":"1.0.0","protocol":2,"capabilities":{}}"#,
+            r#"{"name":"source-example","version":"1.0.0","protocol":3,"capabilities":{}}"#,
         )
         .expect("manifest");
         fs::write(

@@ -287,11 +287,11 @@ resolve(alias) → [candidate models] → adapter → provider
   and credential-backed headers, primary auth header scheme, extra query/body
   fields, a `{model}` path template, and model-id remapping. They do not make an
   unknown streaming/error wire dialect a configuration string.
-- RPC protocol 2 adds bounded `provider/models` discovery and host-mediated
+- RPC protocol 3 adds bounded `provider/models` discovery and host-mediated
   `provider/http` authentication. Model capabilities, context/output limits,
   and optional pricing flow into the live catalog and accounting path. The
   plugin names an approval-fingerprinted credential reference; the host alone
-  resolves, registers, and applies the secret. Protocol 2 is the only supported
+  resolves, registers, and applies the secret. Protocol 3 is the only supported
   plugin generation.
 
 ### Context engine (`rw-context`)

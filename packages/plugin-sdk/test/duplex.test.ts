@@ -15,7 +15,7 @@ const decoder = new TextDecoder()
 const initialize = {
   jsonrpc: "2.0", id: 1, method: "initialize",
   params: {
-    host: "rottweiler", protocol: 2, min_protocol: 2, max_frame_bytes: PROTOCOL_LIMITS.maxLineBytes,
+    host: "rottweiler", protocol: 3, min_protocol: 3, max_frame_bytes: PROTOCOL_LIMITS.maxLineBytes,
     capabilities: ["provider-models", "provider-http"],
   },
 } satisfies JsonValue
@@ -26,7 +26,7 @@ const httpRequest = { method: "GET", url: "https://example.com/models", credenti
 function fixture(): PluginDefinition {
   return {
     manifest: {
-      name: "duplex", version: "1", protocol: 2,
+      name: "duplex", version: "1", protocol: 3,
       capabilities: {
         providers: [{ "alias-prefix": "probe/", capabilities: ["models"], "credential-references": ["probe-key"] }],
         tools: [{ name: "hang", description: "test admission", schema: {}, caps: [] }],
@@ -139,7 +139,7 @@ describe("production SDK duplex serve", () => {
     expect(frames.find((frame) => frame.id === 74)?.error).toMatchObject({ code: -32005 })
   })
 
-  test("cancel settles a provider even when its iterator ignores abort", async () => {
+  test("shutdown reports cancellation when a provider iterator ignores abort", async () => {
     let entered = false
     const definition = fixture()
     const { frames, send, serving } = harness({ ...definition, handlers: {
@@ -147,9 +147,9 @@ describe("production SDK duplex serve", () => {
       providers: { "probe/": async function* () { entered = true; await new Promise<never>(() => {}) } },
     } })
     send({ jsonrpc: "2.0", id: 3, method: "provider/complete", params: { alias: "probe/model", request: {} } })
+    send({ jsonrpc: "2.0", method: "provider/credit", params: { request_id: 3,
+      events: PROTOCOL_LIMITS.providerWindowEvents, bytes: PROTOCOL_LIMITS.providerWindowBytes } })
     await until(() => entered)
-    send({ jsonrpc: "2.0", method: "provider/cancel", params: { request_id: 3 } })
-    await until(() => frames.some((frame) => frame.id === 3))
     send(stop)
     await serving
     expect(frames.find((frame) => frame.id === 3)?.error).toMatchObject({ code: -32800 })
@@ -333,4 +333,119 @@ describe("correlated host command outcomes", () => {
     await serving
     expect(frames.find(frame => frame.id === 2)?.error).toMatchObject({ code: -32800 })
   })
+})
+
+describe("provider delivery credit", () => {
+  test("pauses a burst at the item window while unrelated control remains live", async () => {
+    const base = fixture()
+    const { frames, send, serving } = harness({ ...base, handlers: { ...base.handlers,
+      providers: { "probe/": async function* () {
+        for (let n = 0; n < 100; n += 1) yield { type: "text_delta", text: String(n) }
+        yield { type: "finished", reason: "stop" }
+      } },
+    } })
+    send({ jsonrpc: "2.0", id: 2, method: "provider/complete", params: { alias: "probe/model", request: {} } })
+    send({ jsonrpc: "2.0", method: "provider/credit", params: {
+      request_id: 2, events: PROTOCOL_LIMITS.providerWindowEvents, bytes: PROTOCOL_LIMITS.providerWindowBytes,
+    } })
+    await until(() => frames.filter(frame => frame.method === "provider/event").length === 64)
+    send({ jsonrpc: "2.0", id: 3, method: "unknown" })
+    await until(() => frames.some(frame => frame.id === 3))
+    expect(frames.some(frame => frame.id === 2)).toBe(false)
+    const returnedBytes = frames.filter(frame => frame.method === "provider/event").reduce((sum, frame) => {
+      const params = frame.params
+      if (params === null || typeof params !== "object" || Array.isArray(params)) throw new Error("bad event")
+      return sum + encoder.encode(JSON.stringify(frame)).byteLength
+    }, 0)
+    send({ jsonrpc: "2.0", method: "provider/credit", params: { request_id: 2, events: 64, bytes: returnedBytes } })
+    await until(() => frames.some(frame => frame.id === 2))
+    expect(frames.filter(frame => frame.method === "provider/event")).toHaveLength(101)
+    expect(frames.find(frame => frame.id === 2)?.result).toBeNull()
+    send(stop)
+    await serving
+  })
+})
+
+test("shutdown progresses while a provider exhausts its delivery credits", async () => {
+  const base = fixture()
+  let produced = 0
+  let cleaned = false
+  const { frames, send, serving } = harness({ ...base, handlers: { ...base.handlers,
+    providers: { "probe/": async function* () {
+      try {
+        for (let n = 0; n < 100; n += 1) {
+          produced += 1
+          yield { type: "text_delta", text: String(n) }
+        }
+        yield { type: "finished", reason: "stop" }
+      } finally { cleaned = true }
+    } },
+  } })
+  send({ jsonrpc: "2.0", id: 2, method: "provider/complete", params: { alias: "probe/model", request: {} } })
+  send({ jsonrpc: "2.0", method: "provider/credit", params: {
+    request_id: 2, events: 64, bytes: PROTOCOL_LIMITS.providerWindowBytes,
+  } })
+  await until(() => produced === 65)
+  expect(frames.filter(frame => frame.method === "provider/event")).toHaveLength(64)
+  send(stop)
+  await serving
+  expect(cleaned).toBe(true)
+  expect(frames.find(frame => frame.id === 2)?.error).toMatchObject({ code: -32800 })
+  expect(frames.find(frame => frame.id === 999)?.result).toBeNull()
+})
+
+test("production writer prioritizes control while preserving each provider terminal order", async () => {
+  const base = fixture()
+  let input!: ReadableStreamDefaultController<Uint8Array>
+  const stream = new ReadableStream<Uint8Array>({ start(controller) { input = controller } })
+  const frames: Frame[] = []
+  let release!: () => void
+  let blocked = false
+  const held = new Promise<void>(resolve => { release = resolve })
+  const transport: ServerTransport = {
+    input: readableStreamBytes(stream),
+    output: { async write(bytes) {
+      const raw: unknown = JSON.parse(decoder.decode(bytes))
+      if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid output frame")
+      const frame = raw as Frame
+      if (frame.method === "provider/event" && !blocked) { blocked = true; await held }
+      frames.push(frame)
+    } },
+  }
+  const server = new PluginServer({ ...base, handlers: { ...base.handlers,
+    providers: { "probe/": async function* () {
+      yield { type: "text_delta", text: "first" }
+      yield { type: "finished", reason: "stop" }
+    } },
+  } }, transport, PROTOCOL_LIMITS.maxLineBytes, 1000)
+  const send = (frame: JsonValue) => input.enqueue(encoder.encode(`${JSON.stringify(frame)}\n`))
+  const serving = server.serve(transport.input).finally(() => input.close())
+  send(initialize)
+  for (const id of [2, 3]) {
+    send({ jsonrpc: "2.0", id, method: "provider/complete", params: { alias: "probe/model", request: {} } })
+    send({ jsonrpc: "2.0", method: "provider/credit", params: {
+      request_id: id, events: 64, bytes: PROTOCOL_LIMITS.providerWindowBytes,
+    } })
+  }
+  await until(() => blocked)
+  send({ jsonrpc: "2.0", id: 4, method: "unknown" })
+  await Bun.sleep(10)
+  expect(frames.some(frame => frame.id === 2 || frame.id === 3 || frame.id === 4)).toBe(false)
+  release()
+  await until(() => frames.some(frame => frame.id === 2) && frames.some(frame => frame.id === 3))
+  const control = frames.findIndex(frame => frame.id === 4)
+  const data = frames.flatMap((frame, index) => frame.method === "provider/event" ? [index] : [])
+  expect(control).toBeGreaterThan(data[0] ?? Infinity)
+  expect(control).toBeLessThan(data[1] ?? -1)
+  for (const id of [2, 3]) {
+    const terminal = frames.findIndex(frame => {
+      const params = frame.params
+      if (frame.method !== "provider/event" || params === null || typeof params !== "object" || Array.isArray(params)) return false
+      const event = params.event
+      return params.request_id === id && event !== null && typeof event === "object" && !Array.isArray(event) && event.type === "finished"
+    })
+    expect(frames.findIndex(frame => frame.id === id)).toBeGreaterThan(terminal)
+  }
+  send(stop)
+  await serving
 })

@@ -1,4 +1,4 @@
-export * from "./generated/protocol-2"
+export * from "./generated/protocol-3"
 export * from "./scaffold"
 export * from "./server"
 export * from "./transport"

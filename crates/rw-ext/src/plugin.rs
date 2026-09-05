@@ -26,7 +26,7 @@ use crate::{HookDirective, HookError, HookEvent, HookHandler, HookInvocation};
 #[cfg(test)]
 use rw_plugin_protocol::{
     FrameDecoder, FrameError, MAX_FRAME_BYTES, MAX_MANIFEST_BYTES, MAX_VERSION_BYTES,
-    METHOD_PROVIDER_CANCEL, METHOD_PROVIDER_COMPLETE, METHOD_PROVIDER_EVENT, METHOD_PROVIDER_HTTP,
+    METHOD_PROVIDER_COMPLETE, METHOD_PROVIDER_EVENT, METHOD_PROVIDER_HTTP,
     METHOD_PROVIDER_HTTP_CANCEL, METHOD_PROVIDER_HTTP_EVENT, METHOD_PROVIDER_MODELS,
     METHOD_TOOL_CALL, METHOD_UI_NOTIFY, PROTOCOL_VERSION, PluginProviderCapability,
 };
@@ -1247,7 +1247,7 @@ mod tests {
     #[test]
     fn language_neutral_protocol_fixture_matches_rust_constants() {
         let fixture: Value = serde_json::from_str(include_str!(
-            "../../../packages/plugin-sdk/fixtures/wire/protocol-2.json"
+            "../../../packages/plugin-sdk/fixtures/wire/protocol-3.json"
         ))
         .expect("protocol fixture JSON");
         assert_eq!(fixture["protocol"], PROTOCOL_VERSION);
@@ -1261,7 +1261,6 @@ mod tests {
             METHOD_PROVIDER_COMPLETE
         );
         assert_eq!(fixture["methods"]["providerEvent"], METHOD_PROVIDER_EVENT);
-        assert_eq!(fixture["methods"]["providerCancel"], METHOD_PROVIDER_CANCEL);
         assert_eq!(fixture["methods"]["notify"], METHOD_UI_NOTIFY);
         assert_eq!(fixture["methods"]["providerModels"], METHOD_PROVIDER_MODELS);
         assert_eq!(fixture["methods"]["providerHttp"], METHOD_PROVIDER_HTTP);

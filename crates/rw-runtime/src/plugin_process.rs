@@ -603,7 +603,7 @@ mod tests {
             (
                 "pre-tool-deny-custom-tool.ts",
                 json!({
-                    "name":"conformance-policy-tool", "version":"1.0.0", "protocol":2,
+                    "name":"conformance-policy-tool", "version":"1.0.0", "protocol":3,
                     "capabilities": {
                         "tools":[{"name":"fixture_echo","description":"Echo bounded fixture input","schema":{"type":"object","required":["text"],"properties":{"text":{"type":"string"}}},"caps":[]}],
                         "hooks":[{"name":"pre_tool","failure_policy":"fail-closed"}]
@@ -613,14 +613,14 @@ mod tests {
             (
                 "event-subscriber.ts",
                 json!({
-                    "name":"conformance-event-subscriber", "version":"1.0.0", "protocol":2,
+                    "name":"conformance-event-subscriber", "version":"1.0.0", "protocol":3,
                     "capabilities":{"event_subscriptions":["TurnFinished"],"push":["session/set_status"]}
                 }),
             ),
             (
                 "provider.ts",
                 json!({
-                    "name":"conformance-provider", "version":"1.0.0", "protocol":2,
+                    "name":"conformance-provider", "version":"1.0.0", "protocol":3,
                     "capabilities":{"providers":[{"alias-prefix":"fixture/"}]}
                 }),
             ),
@@ -662,7 +662,7 @@ mod tests {
         };
         let config = compiled_fixture_config(&bun, &sdk, &package, "network-without-capability.ts");
         let manifest: PluginManifest = serde_json::from_value(json!({
-            "name":"network-without-capability", "version":"1.0.0", "protocol":2,
+            "name":"network-without-capability", "version":"1.0.0", "protocol":3,
             "capabilities":{}
         }))
         .expect("adversarial manifest");
@@ -725,7 +725,7 @@ mod tests {
         let config =
             compiled_fixture_config(&bun, &sdk, &package, "read-sibling-without-capability.ts");
         let manifest: PluginManifest = serde_json::from_value(json!({
-            "name":"read-sibling-without-capability", "version":"1.0.0", "protocol":2,
+            "name":"read-sibling-without-capability", "version":"1.0.0", "protocol":3,
             "capabilities":{"tools":[{
                 "name":"read_sibling_probe",
                 "description":"Verify sibling workspace reads are denied",

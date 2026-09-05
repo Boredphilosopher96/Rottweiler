@@ -231,7 +231,7 @@
       "type": "object"
     }
   },
-  "$id": "https://rottweiler.dev/schema/plugin/protocol-2.json",
+  "$id": "https://rottweiler.dev/schema/plugin/protocol-3.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
@@ -250,6 +250,15 @@
     "limits": {
       "additionalProperties": false,
       "properties": {
+        "control_queue_bytes": {
+          "const": 16777216
+        },
+        "control_queue_frames": {
+          "const": 64
+        },
+        "data_queue_bytes": {
+          "const": 16777220
+        },
         "max_capabilities_per_kind": {
           "const": 256
         },
@@ -268,8 +277,14 @@
         "max_name_bytes": {
           "const": 128
         },
+        "max_operation_duration_ms": {
+          "const": 300000
+        },
         "max_price_micros_usd": {
           "const": 1000000000000
+        },
+        "max_provider_streams": {
+          "const": 4
         },
         "max_schema_bytes": {
           "const": 65536
@@ -279,19 +294,32 @@
         },
         "max_version_bytes": {
           "const": 64
+        },
+        "provider_window_bytes": {
+          "const": 4194304
+        },
+        "provider_window_events": {
+          "const": 64
         }
       },
       "required": [
+        "control_queue_bytes",
+        "control_queue_frames",
+        "data_queue_bytes",
+        "max_capabilities_per_kind",
+        "max_description_bytes",
         "max_frame_bytes",
         "max_manifest_bytes",
-        "max_capabilities_per_kind",
+        "max_model_tokens",
         "max_name_bytes",
-        "max_version_bytes",
-        "max_description_bytes",
+        "max_operation_duration_ms",
+        "max_price_micros_usd",
+        "max_provider_streams",
         "max_schema_bytes",
         "max_schema_depth",
-        "max_model_tokens",
-        "max_price_micros_usd"
+        "max_version_bytes",
+        "provider_window_bytes",
+        "provider_window_events"
       ],
       "type": "object"
     },
@@ -299,7 +327,7 @@
       "type": "object"
     },
     "protocol": {
-      "const": 2
+      "const": 3
     },
     "provider_http_body": {
       "$ref": "#/$defs/notification"

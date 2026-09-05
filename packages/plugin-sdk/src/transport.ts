@@ -1,4 +1,4 @@
-import { PROTOCOL_LIMITS, type JsonValue } from "./generated/protocol-2"
+import { PROTOCOL_LIMITS, type JsonValue } from "./generated/protocol-3"
 
 export const DEFAULT_MAX_RPC_LINE_BYTES = PROTOCOL_LIMITS.maxLineBytes
 
@@ -63,6 +63,7 @@ export interface JsonWriterOptions {
 }
 
 interface PendingWrite {
+  readonly priority: "control" | "data"
   readonly bytes: Uint8Array
   readonly resolve: () => void
   readonly reject: (error: Error) => void
@@ -71,6 +72,8 @@ interface PendingWrite {
 export class BoundedJsonWriter {
   readonly #encoder = new TextEncoder()
   readonly #queue: PendingWrite[] = []
+  readonly #dataQueue: PendingWrite[] = []
+  #dataBytes = 0
   readonly #drainers: Array<{ resolve: () => void; reject: (error: Error) => void }> = []
   #active: PendingWrite | undefined
   #queuedBytes = 0
@@ -86,8 +89,8 @@ export class BoundedJsonWriter {
     private readonly maxBytes = DEFAULT_MAX_RPC_LINE_BYTES,
     options: JsonWriterOptions = {},
   ) {
-    this.#maxQueuedBytes = options.maxQueuedBytes ?? 16 * 1024 * 1024
-    this.#maxQueuedFrames = options.maxQueuedFrames ?? 256
+    this.#maxQueuedBytes = options.maxQueuedBytes ?? PROTOCOL_LIMITS.controlQueueBytes
+    this.#maxQueuedFrames = options.maxQueuedFrames ?? PROTOCOL_LIMITS.controlQueueFrames
     this.#writeTimeoutMs = options.writeTimeoutMs ?? 30_000
     this.#onFailure = options.onFailure
     for (const limit of [maxBytes, this.#maxQueuedBytes, this.#maxQueuedFrames, this.#writeTimeoutMs]) {
@@ -95,7 +98,7 @@ export class BoundedJsonWriter {
     }
   }
 
-  write(value: JsonValue): Promise<void> {
+  write(value: JsonValue, priority: "control" | "data" = "control"): Promise<void> {
     if (this.#error !== undefined) return Promise.reject(this.#error)
     const serialized = JSON.stringify(value)
     if (serialized === undefined) return Promise.reject(new TypeError("JSON-RPC value is not serializable"))
@@ -104,14 +107,20 @@ export class BoundedJsonWriter {
       return Promise.reject(new LineTooLargeError(this.maxBytes))
     }
     const bytes = this.#encoder.encode(`${serialized}\n`)
-    if (this.#queuedBytes + bytes.byteLength > this.#maxQueuedBytes
-      || this.#queue.length + (this.#active === undefined ? 0 : 1) >= this.#maxQueuedFrames) {
+    const queue = priority === "control" ? this.#queue : this.#dataQueue
+    const active = this.#active?.priority === priority ? 1 : 0
+    const queuedBytes = priority === "control" ? this.#queuedBytes : this.#dataBytes
+    const maxBytes = priority === "control" ? this.#maxQueuedBytes
+      : PROTOCOL_LIMITS.dataQueueBytes
+    const maxFrames = priority === "control" ? this.#maxQueuedFrames : PROTOCOL_LIMITS.maxProviderStreams
+    if (queuedBytes + bytes.byteLength > maxBytes || queue.length + active >= maxFrames) {
       const error = new OutboundQueueFullError()
       this.abort(error)
       return Promise.reject(error)
     }
-    this.#queuedBytes += bytes.byteLength
-    const pending = new Promise<void>((resolve, reject) => this.#queue.push({ bytes, resolve, reject }))
+    if (priority === "control") this.#queuedBytes += bytes.byteLength
+    else this.#dataBytes += bytes.byteLength
+    const pending = new Promise<void>((resolve, reject) => queue.push({ bytes, priority, resolve, reject }))
     this.#pump()
     return pending
   }
@@ -127,8 +136,9 @@ export class BoundedJsonWriter {
     this.#error = error
     this.#active?.reject(error)
     this.#active = undefined
-    for (const item of this.#queue.splice(0)) item.reject(error)
+    for (const item of [...this.#queue.splice(0), ...this.#dataQueue.splice(0)]) item.reject(error)
     this.#queuedBytes = 0
+    this.#dataBytes = 0
     for (const waiter of this.#drainers.splice(0)) waiter.reject(error)
     if (this.#timeout !== undefined) clearTimeout(this.#timeout)
     this.#onFailure?.(error)
@@ -136,7 +146,7 @@ export class BoundedJsonWriter {
 
   #pump(): void {
     if (this.#active !== undefined || this.#error !== undefined) return
-    const item = this.#queue.shift()
+    const item = this.#queue.shift() ?? this.#dataQueue.shift()
     if (item === undefined) {
       for (const waiter of this.#drainers.splice(0)) waiter.resolve()
       return
@@ -149,7 +159,8 @@ export class BoundedJsonWriter {
       if (this.#active !== item) return
       if (this.#timeout !== undefined) clearTimeout(this.#timeout)
       this.#active = undefined
-      this.#queuedBytes -= item.bytes.byteLength
+      if (item.priority === "control") this.#queuedBytes -= item.bytes.byteLength
+      else this.#dataBytes -= item.bytes.byteLength
       item.resolve()
       this.#pump()
     }, () => this.abort(new Error("JSON-RPC output write failed")))

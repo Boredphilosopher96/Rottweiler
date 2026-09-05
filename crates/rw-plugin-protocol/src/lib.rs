@@ -8,7 +8,7 @@ use thiserror::Error;
 
 pub const JSON_RPC_VERSION: &str = "2.0";
 pub const PLUGIN_HOST_ID: &str = "rottweiler";
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 pub const MIN_PROTOCOL_VERSION: u32 = PROTOCOL_VERSION;
 pub const SUPPORTED_PROTOCOL_VERSIONS: [u32; 1] = [PROTOCOL_VERSION];
 pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
@@ -24,6 +24,13 @@ pub const MAX_SCHEMA_DEPTH: usize = 32;
 pub const MAX_PLUGIN_MODEL_TOKENS: u64 = 16 * 1024 * 1024;
 pub const MAX_PLUGIN_PRICE_MICROS_USD: u64 = 1_000_000_000_000;
 pub const DEFAULT_HANDLER_TIMEOUT_MS: u64 = 5_000;
+pub const MAX_PROVIDER_STREAMS: usize = 4;
+pub const CONTROL_QUEUE_FRAMES: usize = 64;
+pub const CONTROL_QUEUE_BYTES: usize = 16 * 1024 * 1024;
+pub const DATA_QUEUE_BYTES: usize = MAX_PROVIDER_STREAMS * (MAX_FRAME_BYTES + 1);
+pub const PROVIDER_WINDOW_EVENTS: usize = 64;
+pub const PROVIDER_WINDOW_BYTES: usize = MAX_FRAME_BYTES;
+pub const MAX_OPERATION_DURATION_MS: u64 = 300_000;
 
 /// Maximum wire length of a provider alias prefix, including its trailing slash.
 pub const MAX_PROVIDER_ALIAS_PREFIX_BYTES: usize = MAX_NAME_BYTES;
@@ -62,7 +69,7 @@ pub const METHOD_HOOK_INVOKE: &str = "hook/invoke";
 pub const METHOD_PROVIDER_COMPLETE: &str = "provider/complete";
 pub const METHOD_PROVIDER_MODELS: &str = "provider/models";
 pub const METHOD_PROVIDER_EVENT: &str = "provider/event";
-pub const METHOD_PROVIDER_CANCEL: &str = "provider/cancel";
+pub const METHOD_PROVIDER_CREDIT: &str = "provider/credit";
 pub const METHOD_PROVIDER_HTTP: &str = "provider/http";
 pub const METHOD_PROVIDER_HTTP_EVENT: &str = "provider/http_event";
 pub const METHOD_PROVIDER_HTTP_CANCEL: &str = "provider/http_cancel";
@@ -134,7 +141,11 @@ pub enum RpcFrame {
 }
 
 impl RpcFrame {
-    fn validate(&self) -> Result<(), FrameError> {
+    /// Checks envelope, method, correlation ID, and error-message bounds.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid JSON-RPC envelope or bounded field.
+    pub fn validate(&self) -> Result<(), FrameError> {
         let (version, method, id) = match self {
             Self::Request(frame) => (&frame.jsonrpc, Some(frame.method.as_str()), Some(&frame.id)),
             Self::Notification(frame) => (&frame.jsonrpc, Some(frame.method.as_str()), None),
@@ -179,6 +190,13 @@ pub enum FrameError {
     InvalidMessage,
 }
 
+/// A validated frame and its original wire payload length, excluding LF.
+#[derive(Debug, PartialEq)]
+pub struct DecodedFrame {
+    pub frame: RpcFrame,
+    pub wire_bytes: usize,
+}
+
 /// Incremental newline-delimited JSON-RPC decoder with a hard memory bound.
 #[derive(Debug)]
 pub struct FrameDecoder {
@@ -210,7 +228,7 @@ impl FrameDecoder {
     /// # Errors
     ///
     /// Returns an error for an oversized, empty, malformed, or invalid JSON-RPC frame.
-    pub fn push(&mut self, input: &[u8]) -> Result<Vec<RpcFrame>, FrameError> {
+    pub fn push(&mut self, input: &[u8]) -> Result<Vec<DecodedFrame>, FrameError> {
         let mut frames = Vec::new();
         let mut remaining = input;
         while let Some(newline) = remaining.iter().position(|byte| *byte == b'\n') {
@@ -222,6 +240,7 @@ impl FrameDecoder {
                 });
             }
             self.buffer.extend_from_slice(part);
+            let wire_bytes = self.buffer.len();
             if self.buffer.last() == Some(&b'\r') {
                 self.buffer.pop();
             }
@@ -231,7 +250,7 @@ impl FrameDecoder {
             let complete = std::mem::take(&mut self.buffer);
             let frame: RpcFrame = serde_json::from_slice(&complete)?;
             frame.validate()?;
-            frames.push(frame);
+            frames.push(DecodedFrame { frame, wire_bytes });
             remaining = &remaining[newline + 1..];
         }
         if self.buffer.len().saturating_add(remaining.len()) > self.max_frame_bytes {
@@ -859,6 +878,14 @@ pub struct ProviderCompleteParams {
     pub request: Value,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderCreditParams {
+    pub request_id: RpcId,
+    pub events: u32,
+    pub bytes: u32,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderEventParams {
@@ -961,6 +988,6 @@ pub struct ProviderHttpCapabilityParams {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ProviderCancelParams {
+pub struct ProviderHttpCancelParams {
     pub request_id: RpcId,
 }

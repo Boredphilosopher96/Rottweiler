@@ -2,12 +2,12 @@ import { definePlugin, runPlugin, type ProviderEvent } from "../../src/index"
 
 export const plugin = definePlugin({
   manifest: {
-    name: "conformance-provider-auth-v2",
+    name: "conformance-provider-auth-v3",
     version: "1.0.0",
-    protocol: 2,
+    protocol: 3,
     capabilities: {
       providers: [{
-        "alias-prefix": "auth-v2/",
+        "alias-prefix": "auth-v3/",
         capabilities: ["models"],
         "credential-references": ["fixture-token"],
       }],
@@ -15,7 +15,7 @@ export const plugin = definePlugin({
   },
   handlers: {
     providers: {
-      "auth-v2/": async function* (params, context) {
+      "auth-v3/": async function* (params, context) {
         const credentialReference = params.request.model === "undeclared"
           ? "undeclared-token"
           : "fixture-token"
@@ -44,7 +44,7 @@ export const plugin = definePlugin({
       },
     },
     providerModels: {
-      "auth-v2/": () => ({ models: [{
+      "auth-v3/": () => ({ models: [{
         id: "tool-model",
         capabilities: {
           tool_calling: true,

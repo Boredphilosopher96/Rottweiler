@@ -25,7 +25,7 @@ Workspace with all crates stubbed; **codegen spike first (ADR-013): schemars/typ
 credential, proxy, and accounting surfaces, but this document does **not** mark
 M1 accepted. Its live-smoke, replay, failover, proxy, and billing acceptance
 evidence must be current CI/release evidence, not inferred from implementation.
-Typed gateway configuration and protocol-2 provider extensibility have shipped:
+Typed gateway configuration and protocol-3 provider extensibility have shipped:
 compatible routes support header/auth/query/body/path/model-id controls and
 user pricing, while RPC providers can publish model metadata and use
 host-mediated authentication. The remaining provider replay limit is explicit:
@@ -75,9 +75,9 @@ Agent definitions; spawn_agent with parallelism/depth limits; nested progress in
 
 ## M8 — MCP + plugin host
 
-rmcp client (stdio + HTTP), deferred tool loading + `tool_search`, `/mcp` runtime controls, size-capped TOON-encoded responses; plugin host: protocol-2 negotiation, capability approval, hook catalog, event subscriptions, provider catalog/metadata and host-mediated authenticated HTTP; `rw plugin scaffold/dev`; TypeScript SDK; Rottweiler-as-MCP-server.
+rmcp client (stdio + HTTP), deferred tool loading + `tool_search`, `/mcp` runtime controls, size-capped TOON-encoded responses; plugin host: protocol-3 negotiation, capability approval, hook catalog, event subscriptions, provider catalog/metadata and host-mediated authenticated HTTP; `rw plugin scaffold/dev`; TypeScript SDK; Rottweiler-as-MCP-server.
 
-**AC:** connect 5 real MCP servers simultaneously — context increase < 2k tokens until a tool is used (deferred-loading proof); scaffolded TS plugin implementing `pre_tool` deny + a custom tool passes the conformance suite; capability-violation test (plugin exceeds manifest) → killed; another agent drives Rottweiler over its MCP server interface. **Protocol 2 is stable and is the only supported generation; the checked-in schema, wire fixture, Rust host, and TypeScript SDK cover the same contract.**
+**AC:** connect 5 real MCP servers simultaneously — context increase < 2k tokens until a tool is used (deferred-loading proof); scaffolded TS plugin implementing `pre_tool` deny + a custom tool passes the conformance suite; capability-violation test (plugin exceeds manifest) → killed; another agent drives Rottweiler over its MCP server interface. **Protocol 3 is stable and is the only supported generation; the checked-in schema, wire fixture, Rust host, and TypeScript SDK cover the same contract.**
 
 ## M9 — Fork, review, replay, export
 

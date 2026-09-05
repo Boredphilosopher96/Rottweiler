@@ -257,7 +257,8 @@ state changes only from the exact-tag workflow.
   scratch, credentials, or network authority.
 - One plugin crash retains fail-closed behavior and leaves other plugins and the
   engine alive.
-- Direct executable protocol 2 plugins keep their approval fingerprints and behavior.
+- Direct executable plugins use the sole current protocol generation. ADR-031
+  replaces protocol 2 with protocol 3; the manifest change requires fresh approval.
 - Live attach invokes real tools and hooks, keeps the last good generation after a
   broken edit, blocks capability expansion, drains old work, restores production,
   and reaps on disconnect.

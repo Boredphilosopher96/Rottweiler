@@ -10,7 +10,7 @@ for await (const line of console) {
   process.stdout.write(encoder.encode(`${JSON.stringify({
     jsonrpc: "2.0",
     id: request.id,
-    result: { name: "network-without-capability", version: "1.0.0", protocol: 2, capabilities: {} },
+    result: { name: "network-without-capability", version: "1.0.0", protocol: 3, capabilities: {} },
   })}\n`))
   const proxy = new URL(process.env.HTTP_PROXY ?? "")
   void Bun.connect({

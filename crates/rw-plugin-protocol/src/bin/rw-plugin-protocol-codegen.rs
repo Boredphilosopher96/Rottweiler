@@ -2,15 +2,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use rw_plugin_protocol::{
-    DEFAULT_HANDLER_TIMEOUT_MS, JSON_RPC_VERSION, MAX_CAPABILITIES_PER_KIND, MAX_DESCRIPTION_BYTES,
-    MAX_FRAME_BYTES, MAX_HOOK_PAYLOAD_BYTES, MAX_MANIFEST_BYTES, MAX_NAME_BYTES,
-    MAX_PLUGIN_MODEL_TOKENS, MAX_PLUGIN_PRICE_MICROS_USD, MAX_RPC_MESSAGE_BYTES, MAX_SCHEMA_BYTES,
-    MAX_SCHEMA_DEPTH, MAX_VERSION_BYTES, METHOD_COMMAND_EXECUTE, METHOD_EVENT_PUBLISH, METHOD_EXIT,
-    METHOD_HOOK_INVOKE, METHOD_INITIALIZE, METHOD_PROVIDER_CANCEL, METHOD_PROVIDER_COMPLETE,
-    METHOD_PROVIDER_EVENT, METHOD_PROVIDER_HTTP, METHOD_PROVIDER_HTTP_CANCEL,
-    METHOD_PROVIDER_HTTP_EVENT, METHOD_PROVIDER_MODELS, METHOD_SESSION_INJECT_MESSAGE,
-    METHOD_SESSION_SET_STATUS, METHOD_SHUTDOWN, METHOD_TOOL_CALL, METHOD_UI_NOTIFY,
-    MIN_PROTOCOL_VERSION, PLUGIN_HOST_ID, PROTOCOL_VERSION,
+    CONTROL_QUEUE_BYTES, CONTROL_QUEUE_FRAMES, DATA_QUEUE_BYTES, DEFAULT_HANDLER_TIMEOUT_MS,
+    JSON_RPC_VERSION, MAX_CAPABILITIES_PER_KIND, MAX_DESCRIPTION_BYTES, MAX_FRAME_BYTES,
+    MAX_HOOK_PAYLOAD_BYTES, MAX_MANIFEST_BYTES, MAX_NAME_BYTES, MAX_OPERATION_DURATION_MS,
+    MAX_PLUGIN_MODEL_TOKENS, MAX_PLUGIN_PRICE_MICROS_USD, MAX_PROVIDER_STREAMS,
+    MAX_RPC_MESSAGE_BYTES, MAX_SCHEMA_BYTES, MAX_SCHEMA_DEPTH, MAX_VERSION_BYTES,
+    METHOD_COMMAND_EXECUTE, METHOD_EVENT_PUBLISH, METHOD_EXIT, METHOD_HOOK_INVOKE,
+    METHOD_INITIALIZE, METHOD_PROVIDER_COMPLETE, METHOD_PROVIDER_CREDIT, METHOD_PROVIDER_EVENT,
+    METHOD_PROVIDER_HTTP, METHOD_PROVIDER_HTTP_CANCEL, METHOD_PROVIDER_HTTP_EVENT,
+    METHOD_PROVIDER_MODELS, METHOD_SESSION_INJECT_MESSAGE, METHOD_SESSION_SET_STATUS,
+    METHOD_SHUTDOWN, METHOD_TOOL_CALL, METHOD_UI_NOTIFY, MIN_PROTOCOL_VERSION, PLUGIN_HOST_ID,
+    PROTOCOL_VERSION, PROVIDER_WINDOW_BYTES, PROVIDER_WINDOW_EVENTS,
 };
 use serde_json::{Value, json};
 
@@ -56,7 +58,7 @@ export interface HookDeclaration {
 
 export interface ProviderDeclaration {
   readonly "alias-prefix": string
-  /** Approval-fingerprinted provider RPC capabilities. Protocol 2 defines `models`. */
+  /** Approval-fingerprinted provider RPC capabilities. Protocol 3 defines `models`. */
   readonly capabilities?: readonly string[]
   /** Approval-fingerprinted credential references. Values remain host-only. */
   readonly "credential-references"?: readonly string[]
@@ -200,12 +202,18 @@ export interface ProviderCompleteParams {
   readonly request: ProviderRequest
 }
 
+export interface ProviderCreditParams {
+  readonly request_id: RpcId
+  readonly events: number
+  readonly bytes: number
+}
+
 export interface ProviderEventParams {
   readonly request_id: RpcId
   readonly event: ProviderEvent
 }
 
-export interface ProviderCancelParams {
+export interface ProviderHttpCancelParams {
   readonly request_id: RpcId
 }
 
@@ -284,7 +292,7 @@ export type RpcResponse =
   | { readonly jsonrpc: "2.0"; readonly id: RpcId | null; readonly error: RpcErrorObject }
 "#;
 const FIXTURE_TEMPLATE: &str = r#"{
-  "protocol": 2,
+  "protocol": 3,
   "status": "stable",
   "framing": "newline-delimited-json-rpc-2.0",
   "limits": {
@@ -307,7 +315,6 @@ const FIXTURE_TEMPLATE: &str = r#"{
     "providerComplete": "provider/complete",
     "providerModels": "provider/models",
     "providerEvent": "provider/event",
-    "providerCancel": "provider/cancel",
     "providerHttp": "provider/http",
     "providerHttpEvent": "provider/http_event",
     "providerHttpCancel": "provider/http_cancel",
@@ -324,7 +331,7 @@ const FIXTURE_TEMPLATE: &str = r#"{
     "method": "initialize",
     "params": {
       "host": "rottweiler",
-      "protocol": 2,
+      "protocol": 3,
       "min_protocol": 1,
       "max_frame_bytes": 4194304,
       "capabilities": ["provider-models", "provider-http"]
@@ -334,12 +341,12 @@ const FIXTURE_TEMPLATE: &str = r#"{
     "jsonrpc": "2.0",
     "id": 1,
     "result": {
-      "name": "wire-fixture-v2",
+      "name": "wire-fixture-v3",
       "version": "1.0.0",
-      "protocol": 2,
+      "protocol": 3,
       "capabilities": {
         "providers": [{
-          "alias-prefix": "fixture-v2/",
+          "alias-prefix": "fixture-v3/",
           "capabilities": ["models"],
           "credential-references": ["fixture-token"]
         }]
@@ -350,7 +357,7 @@ const FIXTURE_TEMPLATE: &str = r#"{
     "jsonrpc": "2.0",
     "id": 2,
     "method": "provider/models",
-    "params": { "alias_prefix": "fixture-v2/" }
+    "params": { "alias_prefix": "fixture-v3/" }
   },
   "provider_models_response": {
     "jsonrpc": "2.0",
@@ -381,7 +388,7 @@ const FIXTURE_TEMPLATE: &str = r#"{
     "id": "plugin-http-1",
     "method": "provider/http",
     "params": {
-      "alias": "fixture-v2/vision-thinking",
+      "alias": "fixture-v3/vision-thinking",
       "credential_reference": "fixture-token",
       "request": {
         "method": "POST",
@@ -417,7 +424,7 @@ const FIXTURE_TEMPLATE: &str = r#"{
 }"#;
 const SCHEMA_TEMPLATE: &str = r##"{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://rottweiler.dev/schema/plugin/protocol-2.json",
+  "$id": "https://rottweiler.dev/schema/plugin/protocol-3.json",
   "title": "Rottweiler Plugin API conformance fixture",
   "type": "object",
   "required": ["protocol", "status", "framing", "limits", "methods", "initialize_request", "initialize_response", "provider_models_request", "provider_models_response", "provider_http_request", "provider_http_head", "provider_http_body", "provider_http_finished"],
@@ -563,7 +570,7 @@ fn methods() -> Value {
         "providerComplete": METHOD_PROVIDER_COMPLETE,
         "providerModels": METHOD_PROVIDER_MODELS,
         "providerEvent": METHOD_PROVIDER_EVENT,
-        "providerCancel": METHOD_PROVIDER_CANCEL,
+        "providerCredit": METHOD_PROVIDER_CREDIT,
         "providerHttp": METHOD_PROVIDER_HTTP,
         "providerHttpEvent": METHOD_PROVIDER_HTTP_EVENT,
         "providerHttpCancel": METHOD_PROVIDER_HTTP_CANCEL,
@@ -579,6 +586,13 @@ fn methods() -> Value {
 fn limits() -> Value {
     json!({
         "max_frame_bytes": MAX_FRAME_BYTES,
+        "max_provider_streams": MAX_PROVIDER_STREAMS,
+        "provider_window_events": PROVIDER_WINDOW_EVENTS,
+        "provider_window_bytes": PROVIDER_WINDOW_BYTES,
+        "control_queue_frames": CONTROL_QUEUE_FRAMES,
+        "control_queue_bytes": CONTROL_QUEUE_BYTES,
+        "data_queue_bytes": DATA_QUEUE_BYTES,
+        "max_operation_duration_ms": MAX_OPERATION_DURATION_MS,
         "max_manifest_bytes": MAX_MANIFEST_BYTES,
         "max_capabilities_per_kind": MAX_CAPABILITIES_PER_KIND,
         "max_name_bytes": MAX_NAME_BYTES,
@@ -605,7 +619,7 @@ export const RPC_METHODS = Object.freeze({{\n\
   providerComplete: \"{METHOD_PROVIDER_COMPLETE}\",\n\
   providerModels: \"{METHOD_PROVIDER_MODELS}\",\n\
   providerEvent: \"{METHOD_PROVIDER_EVENT}\",\n\
-  providerCancel: \"{METHOD_PROVIDER_CANCEL}\",\n\
+  providerCredit: \"{METHOD_PROVIDER_CREDIT}\",\n\
   providerHttp: \"{METHOD_PROVIDER_HTTP}\",\n\
   providerHttpEvent: \"{METHOD_PROVIDER_HTTP_EVENT}\",\n\
   providerHttpCancel: \"{METHOD_PROVIDER_HTTP_CANCEL}\",\n\
@@ -630,6 +644,13 @@ export const PROTOCOL_LIMITS = {{\n\
   maxModelTokens: {MAX_PLUGIN_MODEL_TOKENS} as number,\n\
   maxPriceMicrosUsd: {MAX_PLUGIN_PRICE_MICROS_USD} as number,\n\
   defaultHandlerTimeoutMs: {DEFAULT_HANDLER_TIMEOUT_MS} as number,\n\
+  maxProviderStreams: {MAX_PROVIDER_STREAMS} as number,\n\
+  controlQueueFrames: {CONTROL_QUEUE_FRAMES} as number,\n\
+  controlQueueBytes: {CONTROL_QUEUE_BYTES} as number,\n\
+  dataQueueBytes: {DATA_QUEUE_BYTES} as number,\n\
+  providerWindowEvents: {PROVIDER_WINDOW_EVENTS} as number,\n\
+  providerWindowBytes: {PROVIDER_WINDOW_BYTES} as number,\n\
+  maxOperationDurationMs: {MAX_OPERATION_DURATION_MS} as number,\n\
 }} as const\n\n{TYPESCRIPT_DECLARATIONS}"
     )
 }
@@ -669,9 +690,15 @@ fn render_schema() -> Result<String, serde_json::Error> {
     if let Some(properties) = value["properties"]["limits"]["properties"].as_object_mut() {
         let current = limits();
         for (name, limit) in current.as_object().into_iter().flatten() {
-            properties[name]["const"] = limit.clone();
+            properties.insert(name.clone(), json!({"const":limit}));
         }
     }
+    value["properties"]["limits"]["required"] = json!(
+        limits()
+            .as_object()
+            .map(|limits| limits.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default()
+    );
     value["$defs"]["id"]["oneOf"][1]["maxLength"] = json!(MAX_NAME_BYTES);
     value["$defs"]["request"]["properties"]["jsonrpc"]["const"] = json!(JSON_RPC_VERSION);
     value["$defs"]["request"]["properties"]["method"]["maxLength"] = json!(MAX_NAME_BYTES);
@@ -713,17 +740,17 @@ fn main() -> Result<(), String> {
     };
     let root = repo_root();
     ensure_output(
-        &root.join("packages/plugin-sdk/src/generated/protocol-2.ts"),
+        &root.join("packages/plugin-sdk/src/generated/protocol-3.ts"),
         &render_typescript(),
         check,
     )?;
     ensure_output(
-        &root.join("packages/plugin-sdk/fixtures/wire/protocol-2.json"),
+        &root.join("packages/plugin-sdk/fixtures/wire/protocol-3.json"),
         &render_fixture().map_err(|error| error.to_string())?,
         check,
     )?;
     ensure_output(
-        &root.join("packages/plugin-sdk/fixtures/wire/protocol-2.schema.json"),
+        &root.join("packages/plugin-sdk/fixtures/wire/protocol-3.schema.json"),
         &render_schema().map_err(|error| error.to_string())?,
         check,
     )?;

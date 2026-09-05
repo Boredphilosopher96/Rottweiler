@@ -5,7 +5,7 @@ the TypeScript, schema, and fixture projections beside this file.
 
 ## Initialization
 
-The host sends `initialize` with `protocol`, `min_protocol`, and an optional bounded string
+Protocol 3 is the only supported generation. The host sends `initialize` with `protocol`, `min_protocol`, and an optional bounded string
 `capabilities` list. A plugin's approved manifest must select the version offered
 by the host. Declared model discovery requires `provider-models`, and declared
 credential references require `provider-http`. Unknown host capability strings
@@ -58,33 +58,52 @@ deny guard, response bounds, and backpressure used by guarded provider HTTP appl
 `provider/complete` receives Rottweiler's provider-neutral request (`model`, `turns`, `tools`,
 tagged `tool_choice`, `max_output_tokens`, nullable `temperature`, `thinking`, optional
 `cache_hint`). Its original JSON-RPC ID is the stream correlation ID. The plugin emits each tagged
-normalized event immediately as a `provider/event` notification with
-`{ "request_id": <original-id>, "event": ... }`, emits exactly one terminal `finished` event, then
-answers the original request with `result: null`. The host bounds each request's event queue and
-kills a producer that overruns backpressure, emits malformed/out-of-order events, or crosses
-correlation. Dropping the consumer sends `provider/cancel` with the same request ID; the SDK aborts
-the handler's signal and closes the async iterator. Provider streams have bounded admission and
-write deadlines but deliberately have no five-second whole-call deadline. Other handlers retain
-the default five-second deadline.
+normalized event as a `provider/event` notification with
+`{ "request_id": <original-id>, "event": ... }`. The host initially sends
+`provider/credit` with 64 events and 4 MiB; consuming data returns exactly that
+credit, measured as the exact UTF-8 JSON frame bytes excluding LF. The host
+preserves the decoder's original byte length; reserializing numbers or escapes
+must never change the refund. The SDK pauses before emitting data without credit. Each of at most four
+streams has a fixed five-minute total lifetime, including time waiting for a
+consumer. Credit and progress never renew that deadline.
 
-The SDK input pump routes correlated HTTP replies and cancellation independently
-of application handlers. Ordinary handlers can run concurrently, including a
+The producer emits exactly one terminal `finished` event, then replies to the
+original request with `result: null`. Finished has reserved storage outside the
+data window. The host exposes it only after validating the final RPC success and
+draining earlier data. Malformed order, missing completion, and credit violations
+terminate the process. Dropping an unfinished consumer or reaching its deadline
+also closes process admission and starts owned native teardown. There is no
+per-stream native cancellation acknowledgement: shared native authority requires
+whole-process settlement. The actual invoked provider remains retained across
+registry changes and caller-future drop until local process/HTTP/recording owners
+settle. This makes no claim that a remote inference service stopped or that its
+final billing is known.
+
+The SDK input pump handles correlated host replies and delivery control separately
+from application handlers. Ordinary handlers can run concurrently, including a
 catalog handler awaiting host-mediated HTTP. The SDK admits at most 64 handler
 invocations; timed-out invocations keep their slot until the underlying handler
-settles. New requests beyond that limit receive `-32005` (busy).
+settles. New requests beyond that limit receive `-32005` (busy). Ordinary tool,
+hook, and catalog requests still use the five-second deadline; the separate
+long-running tool/progress contract remains pending.
 
-The SDK's output FIFO includes the active write in its 16 MiB and 256-frame
-limits. Overflow, write failure, or a write deadline closes the connection and
-settles pending writers. The server uses its configured handler timeout as the
-write deadline. Host HTTP requests have separate bounded admission and body
-queues; an overflowing body is cancelled without blocking the input pump.
-These are local admission policies, owned by the SDK server and transport;
-generated protocol limits continue to own individual wire-value bounds.
+Both sides use separate bounded control and data queues. Control has a 64-frame,
+16 MiB budget. Provider data has a 16 MiB payload budget across four windows;
+encoded data writers reserve an additional byte per maximum-sized frame for its
+newline. The SDK permits one pending data write per admitted stream. Control
+traffic has priority between physical writes; one blocked write remains bounded
+by the write deadline. Each data producer awaits its actual write before enqueueing
+a terminal reply, so priority cannot reverse that producer's ordering. The Rust
+host's mediated HTTP data lane has 64 frame slots and the same aggregate encoded
+byte limit. An overflowing SDK HTTP body cancels only that host-owned HTTP request
+without blocking the input pump.
 
-Host requests use the generated default deadline and a separately enforced bounded in-flight/writer limit.
-Cancellation removes correlation state atomically; late responses to cancelled/timed-out IDs are
-ignored up to the bounded abandoned-ID limit. Fatal errors close admission, kill the complete
-process tree, and perform a bounded reap. Secret redaction is mandatory before any host value is
+Ordinary host requests retain separately bounded in-flight admission. Cancellation,
+timeout, or a dropped request future closes admission and starts owned teardown;
+caller completion waits for native process-tree and admitted host-effect proof.
+A failed or lost proof remains unsettled. An SDK cancellation reply alone cannot
+prove that an uncooperative native handler has stopped.
+Secret redaction is mandatory before any host value is
 serialized to a plugin. Plugin environment inheritance is cleared and restored only from the
 small safe allowlist. Approved network plugins receive only canonical public `allowed_domains`;
 private, local, link-local, and loopback destinations remain denied by the policy proxy.

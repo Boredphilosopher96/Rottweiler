@@ -48,6 +48,9 @@ impl ModelCandidate {
 /// Router configuration or dispatch error.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum RouterError {
+    /// Active or unsettled operations exhausted bounded admission.
+    #[error("provider operation admission failed: {0}")]
+    OperationAdmission(String),
     /// Alias is missing or has no candidates.
     #[error("model alias '{0}' is not configured; add an ordered provider/model chain")]
     AliasNotConfigured(String),
@@ -64,6 +67,7 @@ pub enum RouterError {
 
 /// Provider-blind alias router with ordered failover chains.
 pub struct ProviderRouter {
+    operations: crate::settlement::ProviderOperations,
     aliases: BTreeMap<String, Vec<ModelCandidate>>,
     providers: BTreeMap<String, Arc<dyn Provider>>,
     retry: RetryPolicy,
@@ -86,6 +90,25 @@ impl std::fmt::Debug for ProviderRouter {
 }
 
 impl ProviderRouter {
+    /// Retains the exact invoked provider through asynchronous local settlement.
+    ///
+    /// # Errors
+    /// Returns an admission error while the bounded operation registry is full.
+    pub fn stream_provider(
+        &self,
+        provider: Arc<dyn Provider>,
+        request: ProviderRequest,
+    ) -> Result<BoxEventStream, RouterError> {
+        self.operations
+            .stream(provider, request)
+            .map_err(|error| RouterError::OperationAdmission(error.to_string()))
+    }
+
+    /// Waits for abandoned invocation owners, including ones no longer in a catalog.
+    pub async fn settle_effects(&self) {
+        self.operations.settle().await;
+    }
+
     /// Creates a router from provider-qualified alias chains.
     ///
     /// # Errors
@@ -210,6 +233,7 @@ impl ProviderRouter {
             }
         }
         Ok(Self {
+            operations: crate::settlement::ProviderOperations::default(),
             aliases,
             providers,
             retry,
@@ -268,6 +292,7 @@ impl ProviderRouter {
             return Err(RouterError::AliasNotConfigured(alias.to_owned()));
         }
         let providers = self.providers.clone();
+        let operations = self.operations.clone();
         let retry = self.retry.clone();
         let delay = Arc::clone(&self.delay);
         let jitter = Arc::clone(&self.jitter);
@@ -290,7 +315,7 @@ impl ProviderRouter {
                 let mut candidate_request = request.clone();
                 candidate_request.model = candidate.model.clone();
                 'attempt: for attempt in 0..retry.max_attempts.max(1) {
-                    let mut provider_stream = match provider.stream(candidate_request.clone()).await {
+                    let mut provider_stream = match operations.stream(Arc::clone(&provider), candidate_request.clone()) {
                         Ok(provider_stream) => provider_stream,
                         Err(error) => {
                             let can_retry = error.is_retryable()
@@ -333,6 +358,8 @@ impl ProviderRouter {
                                 }
                             }
                             Err(error) => {
+                                drop(provider_stream);
+                                operations.settle().await;
                                 if semantic_emitted || !error.is_retryable() {
                                     yield Err(error);
                                     return;

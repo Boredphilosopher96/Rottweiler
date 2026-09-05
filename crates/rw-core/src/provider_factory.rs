@@ -434,6 +434,11 @@ impl fmt::Debug for ProviderRuntime {
 }
 
 impl ProviderRuntime {
+    /// Drains abandoned local provider ownership retained by the router.
+    pub async fn settle_provider_effects(&self) {
+        self.router.settle_effects().await;
+    }
+
     /// Default provider-blind model alias.
     #[must_use]
     pub fn default_alias(&self) -> &str {
@@ -982,13 +987,7 @@ impl ProviderRuntime {
         let provider =
             provider.ok_or_else(|| RouterError::AliasNotConfigured(candidate.to_owned()))?;
         request.model = model;
-        let stream = async_stream::try_stream! {
-            let mut inner = provider.stream(request).await?;
-            while let Some(event) = inner.next().await {
-                yield event?;
-            }
-        };
-        Ok(Box::pin(stream))
+        self.router.stream_provider(provider, request)
     }
 
     /// Authenticates and binds one concrete live-discovered model so a later
@@ -2948,6 +2947,10 @@ fn block_contains_image(block: &rw_types::Block) -> bool {
 
 #[async_trait]
 impl Provider for ModelBoundProvider {
+    async fn settle_effects(&self) {
+        self.inner.settle_effects().await;
+    }
+
     fn name(&self) -> &str {
         &self.name
     }

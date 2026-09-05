@@ -67,7 +67,7 @@ Plugin returns a manifest on `initialize`:
 
 ```json
 {
-  "name": "my-plugin", "version": "1.0.0", "protocol": 2,
+  "name": "my-plugin", "version": "1.0.0", "protocol": 3,
   "capabilities": {
     "tools": [ { "name": "...", "description": "...", "schema": {...}, "caps": ["reads-fs"] } ],
     "commands": [ ... ],
@@ -201,7 +201,7 @@ The scaffold contains one inert `manifest.json`, imported through `parsePluginMa
 
 The separate executable target pins its executable, explicit interpreter entrypoints, adjacent dependency descriptors, manifest, code root, origin, environment names, and domains by canonical path, length, and BLAKE3 identity. Eval, module-runner, package-runner, and `PATH`-resolved forms are rejected.
 
-The Rust host and TypeScript SDK consume the same generated contract projections. Provider plugins emit request-correlated `provider/event` notifications incrementally and receive `provider/cancel` when the consumer drops; their streams are bounded and cancellation-cleaned without a whole-call five-second deadline. Catalog and host-HTTP requests are separately bounded and negotiated. `packages/plugin-sdk/PROTOCOL.md` explains the wire contract; its schema and fixture are projections of `rw-plugin-protocol`, not additional owners.
+The Rust host and TypeScript SDK consume the same generated contract projections. Provider plugins emit request-correlated `provider/event` notifications within host-issued event/byte credit windows. Four streams share a bounded process budget; each has a fixed five-minute total deadline and reserved terminal storage. Dropping a consumer initiates whole-process teardown, and the invoked provider remains owned until local effects settle. Control and response traffic has a separate bounded queue with priority between data writes. Catalog and host-HTTP requests are separately bounded and negotiated. `packages/plugin-sdk/PROTOCOL.md` explains the wire contract; its schema and fixture are projections of `rw-plugin-protocol`, not additional owners.
 
 The public documentation site in `packages/docs-site` copies the protocol
 crate's generated schema and fixture byte-for-byte and links to the SDK's
@@ -235,7 +235,7 @@ Registry catalogs are bounded refreshable caches, and every entry is validated b
 
 - `rw plugin scaffold --lang ts` generates a working plugin skeleton with tests.
 - `rw plugin dev <path> --session current --allow-dev-exec` hot-reloads a source plugin inside a live local session.
-- Protocol 2 is the sole accepted generation; upgrades migrate every caller and
+- Protocol 3 is the sole accepted generation; upgrades migrate every caller and
   remove the previous contract in the same change.
 
 ## What extensions can never do

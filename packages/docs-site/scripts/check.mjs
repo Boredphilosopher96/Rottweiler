@@ -21,7 +21,8 @@ const banned = [
   ["unreleased", "iteration language instead of the product surface"],
   ["current main", "a source-track distinction"],
   ["current `main`", "a source-track distinction"],
-  ["protocol 2", "an internal plugin protocol version"],
+  ["protocol 3", "an internal plugin protocol version"],
+  ["protocol 2", "an obsolete plugin protocol version"],
   ["protocol 1", "an internal client protocol version"],
   ["not published", "a package-publication staging note"],
 ]

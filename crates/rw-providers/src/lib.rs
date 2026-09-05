@@ -17,6 +17,7 @@ mod proxy;
 mod recording;
 mod retry;
 mod router;
+mod settlement;
 mod sse;
 mod token_response;
 mod types;

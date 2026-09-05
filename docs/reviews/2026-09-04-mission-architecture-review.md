@@ -383,7 +383,7 @@ Acceptance: capability negotiation, unsolicited requests, catalog changes, disco
 
 **Growth requirement.** The current IR has text, reasoning, tool calls/results, images, and citations. The provider SDK projects some block data as generic JSON. New document/audio/artifact content, native tools, structured output, or provider continuation state need explicit ownership before implementation.
 
-Evidence: [crates/rw-types/src/ir.rs:63](/Users/sumukhnitundila/MyProjects/Rottweiler/crates/rw-types/src/ir.rs:63), [crates/rw-providers/src/types.rs:156](/Users/sumukhnitundila/MyProjects/Rottweiler/crates/rw-providers/src/types.rs:156), and [packages/plugin-sdk/src/generated/protocol-2.ts:178](/Users/sumukhnitundila/MyProjects/Rottweiler/packages/plugin-sdk/src/generated/protocol-2.ts:178).
+Evidence: [crates/rw-types/src/ir.rs:63](/Users/sumukhnitundila/MyProjects/Rottweiler/crates/rw-types/src/ir.rs:63), [crates/rw-providers/src/types.rs:156](/Users/sumukhnitundila/MyProjects/Rottweiler/crates/rw-providers/src/types.rs:156), and [original protocol-2 SDK projection](https://github.com/Boredphilosopher96/Rottweiler/blob/035ecdca18b926e627c727a3754c845e7bc16efb/packages/plugin-sdk/src/generated/protocol-2.ts#L178) (subsequently replaced by protocol 3 under ADR-031).
 
 Keep built-in adapter kinds and wire modes closed where their behavior is concrete; the existing RPC provider seam already supports other dialects. Generate SDK block types from the shared IR. Add typed semantic content/capability variants as required. Keep opaque continuation data adapter-owned and bound to its provider/model/provenance; never carry it blindly across failover.
 

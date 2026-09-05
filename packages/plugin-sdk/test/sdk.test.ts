@@ -27,8 +27,8 @@ const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 const initializeParams = {
   host: "rottweiler",
-  protocol: 2,
-  min_protocol: 2,
+  protocol: 3,
+  min_protocol: 3,
   max_frame_bytes: PROTOCOL_LIMITS.maxLineBytes,
 } as const
 
@@ -47,7 +47,7 @@ function fixtureDefinition(secret = "handler-secret"): PluginDefinition {
     manifest: {
       name: "fixture",
       version: "1.0.0",
-      protocol: 2,
+      protocol: 3,
       capabilities: {
         tools: [{ name: "echo", description: "echo", schema: { type: "object" }, caps: [] }],
         commands: [{ name: "fixture", description: "fixture command" }],
@@ -109,6 +109,10 @@ function harness(definition = fixtureDefinition()): {
 
 async function request(server: PluginServer, id: number, method: string, params?: JsonValue): Promise<void> {
   await server.handleLine(JSON.stringify({ jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) }))
+  if (method === RPC_METHODS.providerComplete) await server.handleLine(JSON.stringify({
+    jsonrpc: "2.0", method: RPC_METHODS.providerCredit,
+    params: { request_id: id, events: PROTOCOL_LIMITS.providerWindowEvents, bytes: PROTOCOL_LIMITS.providerWindowBytes },
+  }))
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
@@ -130,7 +134,7 @@ describe("wire protocol", () => {
       providerComplete: "provider/complete",
       providerModels: "provider/models",
       providerEvent: "provider/event",
-      providerCancel: "provider/cancel",
+      providerCredit: "provider/credit",
       providerHttp: "provider/http",
       providerHttpEvent: "provider/http_event",
       providerHttpCancel: "provider/http_cancel",
@@ -145,14 +149,14 @@ describe("wire protocol", () => {
 
   test("the protocol fixture and schema publish the negotiated model catalog contract", async () => {
     const fixture = JSON.parse(
-      await readFile(join(import.meta.dir, "../fixtures/wire/protocol-2.json"), "utf8"),
+      await readFile(join(import.meta.dir, "../fixtures/wire/protocol-3.json"), "utf8"),
     ) as {
       protocol: number
       methods: Readonly<Record<string, string>>
       provider_models_response: { result: { models: readonly [{ id: string }] } }
     }
     const schema = JSON.parse(
-      await readFile(join(import.meta.dir, "../fixtures/wire/protocol-2.schema.json"), "utf8"),
+      await readFile(join(import.meta.dir, "../fixtures/wire/protocol-3.schema.json"), "utf8"),
     ) as { properties: { protocol: { const: number } }; $defs: Record<string, unknown> }
     expect(fixture.protocol).toBe(schema.properties.protocol.const)
     expect(fixture.methods).toEqual(RPC_METHODS)
@@ -188,7 +192,7 @@ describe("wire protocol", () => {
       event: "TurnFinished", payload: { session_id: "s" },
     })
     expect(messages).toHaveLength(11)
-    expect(messages[0]).toMatchObject({ id: 1, result: { protocol: 2 } })
+    expect(messages[0]).toMatchObject({ id: 1, result: { protocol: 3 } })
     expect(messages[1]).toEqual({
       jsonrpc: "2.0", id: "plugin-push-1", method: "ui/notify", params: { title: "fixture", message: "called" },
     })
@@ -255,6 +259,9 @@ describe("wire protocol", () => {
         jsonrpc: "2.0", id: 2, method: "provider/complete",
         params: { alias: "fixture/model", request: providerRequest },
       },
+      { jsonrpc: "2.0", method: "provider/credit", params: {
+        request_id: 2, events: PROTOCOL_LIMITS.providerWindowEvents, bytes: PROTOCOL_LIMITS.providerWindowBytes,
+      } },
     ].map((line) => JSON.stringify(line)).join("\n") + "\n"
     const providerChild = Bun.spawn(
       ["bun", join(import.meta.dir, "../fixtures/conformance/provider.ts")],
@@ -294,11 +301,11 @@ describe("wire protocol", () => {
     )).toBe(true)
   })
 
-  test("provider/cancel aborts and cleans the correlated producer", async () => {
+  test("shutdown aborts and cleans a cooperative provider", async () => {
     let cleaned = false
     const definition = definePlugin({
       manifest: {
-        name: "cancel-provider", version: "1", protocol: 2,
+        name: "cancel-provider", version: "1", protocol: 3,
         capabilities: { providers: [{ "alias-prefix": "fixture/" }] },
       },
       handlers: { providers: {
@@ -321,9 +328,7 @@ describe("wire protocol", () => {
       typeof message === "object" && message !== null && !Array.isArray(message)
         && message.method === RPC_METHODS.providerEvent
     ))
-    await server.handleLine(JSON.stringify({
-      jsonrpc: "2.0", method: RPC_METHODS.providerCancel, params: { request_id: 2 },
-    }))
+    await request(server, 3, RPC_METHODS.shutdown, {})
     await waitFor(() => cleaned && messages.some((message) =>
       typeof message === "object" && message !== null && !Array.isArray(message)
         && message.id === 2 && "error" in message
@@ -367,17 +372,17 @@ describe("wire protocol", () => {
   test("rejects calls before initialize and an unsupported version range", async () => {
     const { server, messages } = harness()
     await request(server, 1, RPC_METHODS.toolCall, {})
-    await request(server, 2, RPC_METHODS.initialize, { ...initializeParams, protocol: 3, min_protocol: 3 })
+    await request(server, 2, RPC_METHODS.initialize, { ...initializeParams, protocol: 4, min_protocol: 4 })
     expect(messages).toEqual([
       { jsonrpc: "2.0", id: 1, error: { code: -32002, message: "plugin is not initialized" } },
       { jsonrpc: "2.0", id: 2, error: { code: -32001, message: "unsupported plugin protocol" } },
     ])
   })
 
-  test("negotiates protocol 2 and publishes a bounded provider catalog", async () => {
+  test("negotiates protocol 3 and publishes a bounded provider catalog", async () => {
     const definition = definePlugin({
       manifest: {
-        name: "catalog-provider", version: "1", protocol: 2,
+        name: "catalog-provider", version: "1", protocol: 3,
         capabilities: {
           providers: [{ "alias-prefix": "catalog/", capabilities: ["models"] }],
         },
@@ -403,20 +408,20 @@ describe("wire protocol", () => {
     })
     const { server, messages } = harness(definition)
     await request(server, 1, RPC_METHODS.initialize, {
-      ...initializeParams, protocol: 2, capabilities: ["provider-models", "future-host-capability"],
+      ...initializeParams, protocol: 3, capabilities: ["provider-models", "future-host-capability"],
     })
     await request(server, 2, RPC_METHODS.providerModels, { alias_prefix: "catalog/" })
-    expect(messages[0]).toMatchObject({ id: 1, result: { protocol: 2 } })
+    expect(messages[0]).toMatchObject({ id: 1, result: { protocol: 3 } })
     expect(messages[1]).toMatchObject({
       id: 2,
       result: { models: [{ id: "capable", capabilities: { vision: true }, max_context_tokens: 200_000 }] },
     })
   })
 
-  test("protocol 2 refuses initialization without its negotiated catalog capability", async () => {
+  test("protocol 3 refuses initialization without its negotiated catalog capability", async () => {
     const definition = definePlugin({
       manifest: {
-        name: "catalog-provider", version: "1", protocol: 2,
+        name: "catalog-provider", version: "1", protocol: 3,
         capabilities: { providers: [{ "alias-prefix": "catalog/", capabilities: ["models"] }] },
       },
       handlers: {
@@ -425,7 +430,7 @@ describe("wire protocol", () => {
       },
     })
     const { server, messages } = harness(definition)
-    await request(server, 1, RPC_METHODS.initialize, { ...initializeParams, protocol: 2 })
+    await request(server, 1, RPC_METHODS.initialize, { ...initializeParams, protocol: 3 })
     expect(messages).toEqual([
       { jsonrpc: "2.0", id: 1, error: { code: -32001, message: "unsupported plugin protocol" } },
     ])
@@ -443,7 +448,7 @@ describe("wire protocol", () => {
   test("gracefully shuts down when aborted while input is idle", async () => {
     let shutdowns = 0
     const definition = definePlugin({
-      manifest: { name: "shutdown", version: "1", protocol: 2, capabilities: {} },
+      manifest: { name: "shutdown", version: "1", protocol: 3, capabilities: {} },
       handlers: { shutdown: () => { shutdowns += 1 } },
     })
     const { server } = harness(definition)
@@ -459,7 +464,7 @@ describe("wire protocol", () => {
     let observedAbort = false
     const definition = definePlugin({
       manifest: {
-        name: "hung-handler", version: "1", protocol: 2,
+        name: "hung-handler", version: "1", protocol: 3,
         capabilities: {
           tools: [{ name: "hang", description: "hang", schema: {}, caps: [] }],
         },
@@ -492,7 +497,7 @@ describe("wire protocol", () => {
     let observedAbort = false
     const definition = definePlugin({
       manifest: {
-        name: "abort-handler", version: "1", protocol: 2,
+        name: "abort-handler", version: "1", protocol: 3,
         capabilities: { tools: [{ name: "hang", description: "hang", schema: {}, caps: [] }] },
       },
       handlers: { tools: { hang: (_params, { signal }) => new Promise<never>(() => {
@@ -514,7 +519,7 @@ describe("wire protocol", () => {
   test("refuses undeclared pushes locally without emitting a push frame", async () => {
     const definition = definePlugin({
       manifest: {
-        name: "no-push", version: "1", protocol: 2,
+        name: "no-push", version: "1", protocol: 3,
         capabilities: { tools: [{ name: "attempt", description: "attempt", schema: {}, caps: [] }] },
       },
       handlers: { tools: { attempt: async (_params, { push }) => {
@@ -561,13 +566,13 @@ describe("bounded transport and manifests", () => {
 
   test("rejects undeclared handlers and unbounded manifests before startup", () => {
     expect(() => definePlugin({
-      manifest: { name: "bad", version: "1", protocol: 2, capabilities: {} },
+      manifest: { name: "bad", version: "1", protocol: 3, capabilities: {} },
       handlers: { tools: { escaped: () => ({ content: "escaped", data: null }) } },
     })).toThrow("exceeds the manifest")
     expect(() => definePlugin({
       manifest: {
         name: "x".repeat(PROTOCOL_LIMITS.maxNameBytes + 1),
-        version: "1", protocol: 2, capabilities: {},
+        version: "1", protocol: 3, capabilities: {},
       },
       handlers: {},
     })).toThrow("plugin name")
@@ -575,19 +580,19 @@ describe("bounded transport and manifests", () => {
 
   test("matches Rust canonical manifest limits and names", () => {
     expect(() => definePlugin({
-      manifest: { name: "version", version: "x".repeat(65), protocol: 2, capabilities: {} },
+      manifest: { name: "version", version: "x".repeat(65), protocol: 3, capabilities: {} },
       handlers: {},
     })).toThrow("plugin version")
     expect(() => definePlugin({
       manifest: {
-        name: "event", version: "1", protocol: 2,
+        name: "event", version: "1", protocol: 3,
         capabilities: { event_subscriptions: ["turnFinished"] },
       },
       handlers: { events: { turnFinished: () => undefined } },
     })).toThrow("canonical event")
     expect(() => definePlugin({
       manifest: {
-        name: "provider", version: "1", protocol: 2,
+        name: "provider", version: "1", protocol: 3,
         capabilities: { providers: [{ "alias-prefix": "fixture" }] },
       },
       handlers: { providers: { fixture: async function* () { yield { type: "finished", reason: "stop" } } } },
@@ -596,7 +601,7 @@ describe("bounded transport and manifests", () => {
     const maximumPrefix = `${"a".repeat(PROTOCOL_LIMITS.maxNameBytes - 1)}/`
     expect(() => definePlugin({
       manifest: {
-        name: "provider", version: "1", protocol: 2,
+        name: "provider", version: "1", protocol: 3,
         capabilities: { providers: [{ "alias-prefix": maximumPrefix }] },
       },
       handlers: { providers: { [maximumPrefix]: async function* () { yield { type: "finished", reason: "stop" } } } },
@@ -604,7 +609,7 @@ describe("bounded transport and manifests", () => {
     const overlongPrefix = `${"a".repeat(PROTOCOL_LIMITS.maxNameBytes)}/`
     expect(() => definePlugin({
       manifest: {
-        name: "provider", version: "1", protocol: 2,
+        name: "provider", version: "1", protocol: 3,
         capabilities: { providers: [{ "alias-prefix": overlongPrefix }] },
       },
       handlers: { providers: { [overlongPrefix]: async function* () { yield { type: "finished", reason: "stop" } } } },
@@ -614,7 +619,7 @@ describe("bounded transport and manifests", () => {
     for (let depth = 0; depth < 33; depth += 1) schema = { nested: schema }
     expect(() => definePlugin({
       manifest: {
-        name: "schema", version: "1", protocol: 2,
+        name: "schema", version: "1", protocol: 3,
         capabilities: {
           tools: [{ name: "deep", description: "deep", schema: schema as never, caps: [] }],
         },
@@ -636,7 +641,7 @@ describe("scaffold", () => {
     const manifest = parsePluginManifest({
       name: "inert",
       version: "1.0.0",
-      protocol: 2,
+      protocol: 3,
       capabilities: {},
     })
     expect(manifest.name).toBe("inert")
@@ -644,13 +649,13 @@ describe("scaffold", () => {
     expect(() => parsePluginManifest({
       name: "inert",
       version: "1.0.0",
-      protocol: 2,
+      protocol: 3,
       capabilities: { unknown: [] },
     })).toThrow("unknown field")
     expect(() => parsePluginManifest({
       name: "inert",
       version: "1.0.0",
-      protocol: 2,
+      protocol: 3,
       capabilities: { hooks: ["pre_tool"] },
     })).toThrow()
   })

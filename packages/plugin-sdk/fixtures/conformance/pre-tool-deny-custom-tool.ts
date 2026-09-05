@@ -4,7 +4,7 @@ export const plugin = definePlugin({
   manifest: {
     name: "conformance-policy-tool",
     version: "1.0.0",
-    protocol: 2,
+    protocol: 3,
     capabilities: {
       tools: [{
         name: "fixture_echo",

@@ -1300,7 +1300,10 @@ async fn generate_session_title(
         );
         Some((title, usage, cost))
     };
-    match tokio::time::timeout(SESSION_TITLE_TIMEOUT, collect).await {
+    let result = tokio::time::timeout(SESSION_TITLE_TIMEOUT, collect).await;
+    drop(stream);
+    model.settle_effects().await;
+    match result {
         Ok(Some((title, usage, cost))) => (Some(title), usage, cost),
         Ok(None) => (
             None,
@@ -1485,6 +1488,7 @@ fn prepare_turn_opening(
     events
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) async fn start_turn_with_overrides(
     state: &mut ActorState,
     runtime: StartTurnRuntime<'_>,
@@ -1555,6 +1559,7 @@ pub(super) async fn start_turn_with_overrides(
     let state_budgeter = state.budgeter;
     let local_session_accounting = session_accounting_fallback(&state.accounting);
     let state_mode = state.mode;
+    let provider_owner = Arc::clone(&config.model);
     tokio::spawn(async move {
         let outcome = AssertUnwindSafe(run_turn(
             turn,
@@ -1585,6 +1590,7 @@ pub(super) async fn start_turn_with_overrides(
             pruned_tool_outputs: panic_pruned_tool_outputs,
             budgeter: state_budgeter,
         });
+        provider_owner.settle_effects().await;
         let _ = signals.send(TurnSignal::Complete(outcome));
     });
     Ok(())
@@ -4379,6 +4385,8 @@ async fn execute_compaction(
                 }
             }
         }
+        drop(stream);
+        config.model.settle_effects().await;
         if let Some(error) = failed {
             if let Some((cost, false)) = persist_failed_compaction_attempt(
                 config,
@@ -5358,6 +5366,8 @@ async fn run_turn(
                 }
             }
         }
+        drop(stream);
+        config.model.settle_effects().await;
         let normalized_iteration_usage: TokenUsage = iteration_usage.into();
         let reconciliation =
             budgeter.reconcile(input_estimate.local_tokens, normalized_iteration_usage);

@@ -97,8 +97,8 @@ await writeFile(
 await Promise.all([
   cp(join(repoRoot, "docs/assets/rottweiler-logo.png"), join(publicRoot, "rottweiler-logo.png")),
   cp(join(repoRoot, "docs/assets/rottweiler-hero.png"), join(publicRoot, "rottweiler-hero.png")),
-  cp(join(repoRoot, "packages/plugin-sdk/fixtures/wire/protocol-2.schema.json"), join(publicRoot, "generated/plugin/schema.json")),
-  cp(join(repoRoot, "packages/plugin-sdk/fixtures/wire/protocol-2.json"), join(publicRoot, "generated/plugin/wire-example.json")),
+  cp(join(repoRoot, "packages/plugin-sdk/fixtures/wire/protocol-3.schema.json"), join(publicRoot, "generated/plugin/schema.json")),
+  cp(join(repoRoot, "packages/plugin-sdk/fixtures/wire/protocol-3.json"), join(publicRoot, "generated/plugin/wire-example.json")),
   cp(join(repoRoot, "protocol/schema"), join(publicRoot, "generated/client"), { recursive: true }),
   cp(join(repoRoot, "protocol/types.ts"), join(publicRoot, "generated/client/types.ts")),
   cp(join(repoRoot, "protocol/session-event-envelope.schema.json"), join(publicRoot, "generated/session/event-envelope.schema.json")),

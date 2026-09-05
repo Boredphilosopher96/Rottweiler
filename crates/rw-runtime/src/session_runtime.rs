@@ -16789,7 +16789,7 @@ mod tests {
             br#"{
                 "name":"retained-hook",
                 "version":"1.0.0",
-                "protocol":2,
+                "protocol":3,
                 "capabilities":{"hooks":[{"name":"post_tool","failure_policy":"fail-open"}]}
             }"#,
         )

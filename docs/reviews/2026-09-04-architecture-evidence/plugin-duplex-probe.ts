@@ -3,7 +3,9 @@ import {
   type PluginDefinition,
   type ServerTransport,
 } from "../../../packages/plugin-sdk/src/server"
-import type { JsonValue } from "../../../packages/plugin-sdk/src/generated/protocol-2"
+// Historical protocol-2 reproduction. Run against checkpoint c729e3bf4d87b6c80f6a2e8655ed935aeb67cafd;
+// protocol 3 removed the old projection and the duplex regression is now in the SDK suite.
+import type { JsonValue } from "../../../packages/plugin-sdk/src/index"
 
 const queue: Uint8Array[] = []
 const output: unknown[] = []
