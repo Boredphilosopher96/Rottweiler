@@ -47,7 +47,6 @@ pub(super) use tool_requests::current_approval_diff;
 pub(super) use command_tools::frame_command_tool_output;
 #[cfg(test)]
 pub(super) use context::prompt_turn;
-#[cfg(test)]
 pub(super) use redaction::redacted_json;
 #[cfg(test)]
 pub(super) use subagent_events::ActorSubagentEventSink;
