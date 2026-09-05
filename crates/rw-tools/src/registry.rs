@@ -777,6 +777,8 @@ pub struct CandidateLocation {
 /// Stable errors suitable for model-visible tool failures.
 #[derive(Debug, Error)]
 pub enum ToolError {
+    #[error("tool effect settlement is unproven: {0}")]
+    EffectsUnsettled(String),
     #[error("invalid tool input: {0}")]
     InvalidInput(String),
     #[error("path escapes the workspace: {0}")]
@@ -998,8 +1000,8 @@ pub trait Tool: Send + Sync {
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError>;
 
     /// Waits for externally owned effects after an execution future is dropped.
-    /// A supervisor must keep this pending if termination cannot be proven.
-    async fn settle_effects(&self) {}
+    /// A failed proof is an error; it cannot authorize releasing owned mutation resources.
+    async fn settle_effects(&self) -> Result<(), ToolError>;
 }
 
 #[derive(Clone)]

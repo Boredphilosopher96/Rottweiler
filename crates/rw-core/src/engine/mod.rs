@@ -381,8 +381,8 @@ impl<'a> StreamingSecretRedactor<'a> {
 #[async_trait]
 pub trait ModelDriver: Send + Sync {
     /// Drains local provider work retained after an invocation future is dropped.
-    /// Drivers with only future-owned effects may use the default.
-    async fn settle_effects(&self) {}
+    /// Implementations must explicitly prove settlement or report an unsettled outcome.
+    async fn settle_effects(&self) -> Result<(), AgentLoopError>;
 
     /// Starts one provider iteration for an already-resolved model alias.
     ///
@@ -684,6 +684,9 @@ impl ModelDriver for ProviderRuntime {
 /// Stable turn-loop construction or runtime failure.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum AgentLoopError {
+    /// Owned effects could not be proven settled.
+    #[error("effect settlement is unproven: {0}")]
+    EffectsUnsettled(String),
     /// A replay cursor is beyond its captured committed prefix.
     #[error("replay cursor is ahead of the captured journal")]
     ReplayCursorAhead,
