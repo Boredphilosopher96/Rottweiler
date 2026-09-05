@@ -31,6 +31,30 @@ export type ExtensionStateMutation = { "action": "set", key: string, value: Json
 
 export type ExtensionStateTransaction = { expected_revision: SequenceId | null, mutations: Array<ExtensionStateMutation>, acknowledged: ExtensionDeliveryCursor | null, };
 
+export type UiGenerationId = string;
+
+export type UiContributionOwner = { extension: string, generation: UiGenerationId, };
+
+export type UiDisplayField = { "kind": "text", id: string, label: string, } | { "kind": "badge", id: string, label: string, } | { "kind": "list", id: string, label: string, max_items: number, } | { "kind": "table", id: string, label: string, columns: Array<string>, max_rows: number, };
+
+export type UiDisplayAction = { id: string, label: string, };
+
+export type UiDisplaySurface = { "surface": "tool", tool_name: string, } | { "surface": "panel", };
+
+export type UiDisplayDescriptor = { id: string, title: string, surface: UiDisplaySurface, fields: Array<UiDisplayField>, actions: Array<UiDisplayAction>, };
+
+export type UiPresentation = { owner: UiContributionOwner, descriptor: UiDisplayDescriptor, projected: UiProjectedFields, };
+
+export type UiCatalogEntry = { owner: UiContributionOwner, descriptors: Array<UiDisplayDescriptor>, };
+
+export type UiCatalog = { entries: Array<UiCatalogEntry>, };
+
+export type UiActionTarget = { "surface": "tool", invocation_id: ToolInvocationId, } | { "surface": "panel", revision: number, };
+
+export type UiActionRequest = { owner: UiContributionOwner, contribution_id: string, action_id: string, target: UiActionTarget, };
+
+export type UiPanelSnapshot = { revision: number, presentation: UiPresentation, };
+
 export type UiAction = { id: string, label: string, command: string, arguments: JsonValue, };
 
 export type UiContribution = { "surface": "tool", id: string, tool_name: string, title: string, fields: Array<UiField>, actions: Array<UiAction>, } | { "surface": "panel", id: string, title: string, fields: Array<UiField>, actions: Array<UiAction>, };
