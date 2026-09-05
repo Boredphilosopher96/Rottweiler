@@ -166,6 +166,7 @@ function applyKnownEvent(
   activeSessionId: string | null,
 ): RottweilerState {
   switch (event.type) {
+    case "session_navigation_requested":
     case "ui_catalog_ready":
     case "ui_panels_ready":
     case "transcript_page_ready":

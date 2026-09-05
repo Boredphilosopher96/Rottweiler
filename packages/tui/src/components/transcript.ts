@@ -336,6 +336,15 @@ export class TranscriptRenderable extends BoxRenderable {
     return this.#selectedBlockId
   }
 
+  async revealHistorySource(sequence: string): Promise<import("../protocol").TranscriptAnchor | null> {
+    this.#requestedAnchor = { id: sequence, offset: 0 }
+    try {
+      await this.#historyOptions.onHistoryAround?.(sequence)
+      if (this.#history?.error !== null && this.#history?.error !== undefined) throw new Error(this.#history.error)
+      return this.#history?.page?.anchor ?? null
+    } finally { this.#requestedAnchor = null }
+  }
+
   captureHistoryViewport(): HistoryViewport | null {
     if (this.#history === null || this.#history.following) return { following: true, anchor: null }
     // An in-flight navigation has not selected a physical source row yet.

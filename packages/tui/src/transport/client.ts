@@ -254,12 +254,13 @@ export class EngineHttpSseClient {
           await options.onReconnect?.()
         }
 
+        const streamAuth = await this.#ensureClientAuth(options.signal)
         const response = await this.#fetch(
           this.#url(this.#eventsPath(options.attach.session_id, lastSeen)),
           {
             unix: this.#socketPath,
             method: "GET",
-            headers: this.#clientHeaders(await this.#ensureClientAuth(options.signal), {
+            headers: this.#clientHeaders(streamAuth, {
               Accept: "text/event-stream",
             }),
             signal: eventStreamController.signal,
@@ -294,6 +295,10 @@ export class EngineHttpSseClient {
           finally { if (decodedAt !== undefined) this.#diagnostics?.finish("event_decode", decodedAt) }
           if (value === null) {
             throw new EngineProtocolError("engine event stream emitted an invalid event")
+          }
+          if (ENGINE_EVENT_DELIVERY[value.type] === "connection" && "meta" in value
+            && "client_id" in value.meta && value.meta.client_id !== streamAuth.clientId) {
+            throw new EngineProtocolError("engine event is addressed to another client")
           }
           await options.onEvent(value)
           receivedEvent = true

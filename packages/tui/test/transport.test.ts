@@ -593,6 +593,7 @@ describe("authenticated UDS engine transport", () => {
 
   for (const [name, frame] of [
     ["known event without payload", encodeSseJson({ type: "command_acknowledged" })],
+    ["connection event addressed to another authenticated client", encodeSseJson({ type: "session_navigation_requested", meta: { protocol_version: PROTOCOL_VERSION, client_id: "foreign-client", request_id: "forged-navigation", emitted_at: "2026-01-01T00:00:00Z" }, session_id: "session-transport", target: { kind: "session", session_id: "foreign-session" } })],
     ["known event with malformed nested data", encodeSseJson({ type: "text_delta", meta: durableMeta("2"), turn_id: "1", text: [] })],
     ["invalid JSON", new TextEncoder().encode("data: {broken\n\n")],
   ] as const) {

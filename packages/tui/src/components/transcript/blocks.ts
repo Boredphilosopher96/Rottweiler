@@ -43,7 +43,7 @@ export interface TranscriptRenderableOptions {
   readonly onOpenChild?: (child: Extract<TranscriptContent, { type: "subagent" }>) => void
   readonly onHistoryAnchor?: (anchor: HistoryAnchor) => void
   readonly onHistorySeek?: (ordinal: bigint) => void
-  readonly onHistoryAround?: (item: string) => void
+  readonly onHistoryAround?: (item: string) => void | Promise<void>
   readonly onHistoryBoundary?: (boundary: "first" | "latest") => void
   readonly onHistoryFollowing?: (following: boolean) => void
 }

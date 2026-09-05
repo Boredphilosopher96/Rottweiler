@@ -39,6 +39,7 @@ interface SessionUiHost {
   composerNotice: string | null
   refresh(): void
   closePicker(): void
+  navigateTranscript(sequence: string): Promise<import("../protocol").TranscriptAnchor | null>
   selectSession(sessionId: string): void | Promise<void>
   sendMessage(content: string, attachments: readonly Attachment[]): Promise<boolean>
   projectError(code: string, message: string, retryable?: boolean): void
@@ -110,9 +111,10 @@ export class SessionUiController {
   #pendingExport: PendingExport | null = null
   #timeline: TimelineController | null = null
   #rewindRead: AbortController | null = null
+  #navigation: object | null = null
   #retrying = false
   constructor(host: SessionUiHost) { this.#host = host }
-  get pending(): boolean { return this.#retrying || this.#rewindRead !== null || this.#pendingRewindIntent !== null || this.#pendingExport !== null || this.#pendingSessionCreateRequestId !== null }
+  get pending(): boolean { return this.#navigation !== null || this.#retrying || this.#rewindRead !== null || this.#pendingRewindIntent !== null || this.#pendingExport !== null || this.#pendingSessionCreateRequestId !== null }
   clearRewind(): boolean {
     const pending = this.#pendingRewindIntent !== null || this.#rewindRead !== null
     this.#rewindRead?.abort(); this.#rewindRead = null
@@ -124,8 +126,15 @@ export class SessionUiController {
     this.#sessionActionId = null; this.clearSessionSearchTimer()
     this.#timeline?.dispose(); this.#timeline = null; this.#timelineTurn = null
   }
-  reset(): void { this.#timelineTurn = null; this.clearRewind(); this.#pendingExport = null; this.#pendingSessionCreateRequestId = null; this.pickerClosed(); this.clearExportNotice() }
+  reset(): void { this.#navigation = null; this.#timelineTurn = null; this.clearRewind(); this.#pendingExport = null; this.#pendingSessionCreateRequestId = null; this.pickerClosed(); this.clearExportNotice() }
   afterEvent(event: EngineEvent, eventRecord: Record<string, unknown>, commandRequestId: string | null, next: RottweilerState): void {
+    if (event.type === "session_navigation_requested") {
+      const state = this.#host.state
+      if (event.session_id !== this.#host.sessionId || state.replay.active
+        || state.driverClientId !== event.meta.client_id) return
+      void this.#navigate(event)
+      return
+    }
     const pendingRewind = this.#pendingRewindIntent
     const causedBy = isRecord(eventRecord.meta) && typeof eventRecord.meta.caused_by === "string"
       ? eventRecord.meta.caused_by
@@ -284,6 +293,33 @@ export class SessionUiController {
         true,
       )
     }
+  }
+
+  async #navigate(event: Extract<EngineEvent, { type: "session_navigation_requested" }>): Promise<void> {
+    if (this.#navigation !== null) {
+      this.#host.projectError("navigation_pending", "A session navigation is already pending.", true)
+      return
+    }
+    const request = {}
+    this.#navigation = request
+    try {
+      if (event.target.kind === "session") {
+        this.#host.closePicker()
+        await this.#host.selectSession(event.target.session_id)
+      } else {
+        const anchor = await this.#host.navigateTranscript(event.target.sequence)
+        if (this.#navigation !== request || this.#host.sessionId !== event.session_id) return
+        if (anchor?.type === "replaced") {
+          this.#host.composerNotice = anchor.replacement === null ? "The requested transcript item is unavailable."
+            : `Transcript item ${anchor.requested} is unavailable; showing item ${anchor.replacement}.`
+          this.#host.refresh()
+        }
+      }
+    } catch (error) {
+      if (this.#navigation === request && !this.#host.destroyed && this.#host.sessionId === event.session_id) {
+        this.#host.projectError("session_navigation_failed", safeErrorMessage(error), true)
+      }
+    } finally { if (this.#navigation === request) this.#navigation = null }
   }
 
   #handleExportRejection(outcome: Extract<CommandOutcome, { type: "rejected" }>, pending: PendingExport): void {
