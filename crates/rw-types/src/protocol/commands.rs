@@ -5,12 +5,13 @@ use super::{
     SessionId, ShellId, SubagentId, TranscriptFormat, TurnId,
 };
 use crate::{ToolCallId, ToolInvocationId, config::PermissionDecision};
+use rw_memory_derive::PrepareAllocation as Allocation;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 /// Commands accepted by the headless engine from any client.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case", optional_fields = nullable)]
 #[serde(deny_unknown_fields)]

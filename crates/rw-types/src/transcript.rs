@@ -186,6 +186,7 @@ pub struct TranscriptView {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case")]
 #[serde(deny_unknown_fields)]
+#[derive(Allocation)]
 pub enum TranscriptPosition {
     First {},
     Latest {},
@@ -206,6 +207,7 @@ pub enum TranscriptPosition {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(deny_unknown_fields)]
+#[derive(Allocation)]
 pub struct TranscriptRead {
     pub known_view: Option<TranscriptView>,
     pub position: TranscriptPosition,
@@ -281,6 +283,7 @@ pub enum TranscriptReadResult {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(deny_unknown_fields)]
+#[derive(Allocation)]
 pub struct TranscriptContentRead {
     pub view: TranscriptView,
     pub source: TranscriptContentSource,

@@ -81,7 +81,7 @@ async fn abandoned_canonical_query_retains_worker_until_actual_completion() {
     let owner = Arc::clone(current.canonical.get().expect("owner"));
     let (ready, locked) = tokio::sync::oneshot::channel();
     let (release, wait) = std::sync::mpsc::channel();
-    let locker = std::thread::spawn({
+    let lock_thread = std::thread::spawn({
         let owner = Arc::clone(&owner);
         move || {
             let _lock = owner.recovery.lock().expect("lock");
@@ -112,7 +112,7 @@ async fn abandoned_canonical_query_retains_worker_until_actual_completion() {
             .is_err()
     );
     release.send(()).expect("release");
-    locker.join().expect("locker");
+    lock_thread.join().expect("locker");
     current
         .settle_effects()
         .await

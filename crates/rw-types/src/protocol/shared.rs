@@ -171,7 +171,7 @@ impl From<u64> for SequenceId {
 }
 
 /// Metadata common to commands from all client transports.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 #[serde(deny_unknown_fields)]
 pub struct CommandMeta {
     pub protocol_version: u16,
@@ -206,6 +206,7 @@ pub struct CommandAckMeta {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum ClientRole {
     Driver,
     Observer,
@@ -639,6 +640,7 @@ pub struct WorkspaceRootDescriptor {
 /// Optional structured unified diff attached to a mutating-tool approval.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(deny_unknown_fields)]
+#[derive(Allocation)]
 pub struct ApprovalBinding {
     pub proposal_id: String,
     pub arguments_hash: String,
@@ -663,6 +665,7 @@ pub struct UnifiedDiff {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum ApprovalDecision {
     AllowOnce,
     AllowSession,
@@ -740,6 +743,7 @@ pub enum PlanDecision {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case")]
 #[serde(deny_unknown_fields)]
+#[derive(Allocation)]
 pub enum RewindTarget {
     Turn { turn_id: TurnId },
     Checkpoint { checkpoint_id: String },
@@ -1099,6 +1103,7 @@ pub struct PromptDump {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum TranscriptFormat {
     Markdown,
     Html,
