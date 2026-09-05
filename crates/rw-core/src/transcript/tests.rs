@@ -1137,3 +1137,86 @@ fn finished_invocation_source_uses_effective_binding_and_exact_invocation() {
         None
     );
 }
+
+#[test]
+fn tool_surface_rows_retain_only_invocation_bound_source_and_load_complete_surface() {
+    use rw_types::extension_ui::{
+        UiContribution, UiContributionOwner, UiField, UiGenerationId, UiPresentation,
+        UiSelectorStep,
+    };
+    let root = tempdir().expect("root");
+    let mut journal = SegmentedJournal::open(root.path(), "semantic").expect("journal");
+    let mut index = TranscriptIndex::open(&journal.read_view(), 1).expect("index");
+    let mut state = TranscriptProjectionState::default();
+    let presentation = UiPresentation::project(
+        UiContributionOwner {
+            extension: "example".into(),
+            generation: UiGenerationId::from_bytes([1; 16]),
+        },
+        &UiContribution::Tool {
+            id: "result".into(),
+            tool_name: "read_file".into(),
+            title: "Read result".into(),
+            actions: vec![],
+            fields: (0..12)
+                .map(|id| UiField::Text {
+                    id: format!("field-{id}"),
+                    label: "Value".into(),
+                    path: vec![UiSelectorStep::Field {
+                        name: "text".into(),
+                    }],
+                })
+                .collect(),
+        },
+        &serde_json::json!({"text": "x".repeat(4000)}),
+    )
+    .expect("bounded presentation");
+    assert!(
+        serde_json::to_vec(&presentation)
+            .expect("surface JSON")
+            .len()
+            > MAX_ROW_BYTES
+    );
+    commit(&start(0, 0), &mut journal, &mut index, &mut state);
+    let mut event = finish(1, 0, "result");
+    if let EngineEvent::ToolCallFinished {
+        presentation: target,
+        ..
+    } = &mut event
+    {
+        *target = Some(presentation.clone());
+    }
+    commit(&event, &mut journal, &mut index, &mut state);
+    let row = index
+        .bound_row(&entity_binding("tool", &["invocation-0"]))
+        .expect("binding")
+        .expect("row");
+    assert!(row.payload.len() < 4096);
+    let TranscriptContent::Tool {
+        status:
+            TranscriptToolStatus::Finished {
+                presentation: Some(reference),
+                ..
+            },
+        ..
+    } = decode(&row).expect("row payload")
+    else {
+        panic!("presentation reference");
+    };
+    assert_eq!(reference.title, "Read result");
+    let document = TranscriptDocument::from_event(event.clone(), &reference.source, 65536)
+        .expect("exact source");
+    let chunk = document.chunk(0, 65536).expect("surface chunk");
+    assert_eq!(chunk.next_offset, None);
+    assert_eq!(
+        serde_json::from_str::<UiPresentation>(chunk.text).expect("surface JSON"),
+        presentation
+    );
+    let wrong = source(
+        SequenceId(1),
+        TranscriptContentSelector::ToolPresentation {
+            invocation_id: rw_types::ToolInvocationId("another".into()),
+        },
+    );
+    assert!(TranscriptDocument::from_event(event, &wrong, 65536).is_err());
+}

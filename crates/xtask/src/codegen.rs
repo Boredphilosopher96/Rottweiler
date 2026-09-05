@@ -361,6 +361,7 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(rw_types::transcript::TranscriptBodyPreview);
     declaration!(rw_types::transcript::TranscriptConversationBlock);
     declaration!(rw_types::transcript::TranscriptToolStatus);
+    declaration!(rw_types::transcript::TranscriptToolPresentation);
     declaration!(rw_types::transcript::TranscriptSubagentStatus);
     declaration!(rw_types::transcript::TranscriptContent);
 

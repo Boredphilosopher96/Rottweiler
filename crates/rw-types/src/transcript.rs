@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 /// Version of the rebuildable semantic transcript projection.
-pub const TRANSCRIPT_PROJECTION_VERSION: u32 = 3;
+pub const TRANSCRIPT_PROJECTION_VERSION: u32 = 4;
 /// Maximum retained text bytes across previews in one semantic item.
 pub const TRANSCRIPT_PREVIEW_TEXT_BYTES: usize = 4 * 1024;
 /// Maximum inline conversation block descriptors in one semantic item.
@@ -25,10 +25,15 @@ pub struct TranscriptItemId(pub SequenceId);
 #[serde(deny_unknown_fields)]
 pub enum TranscriptContentSelector {
     Conversation {},
-    ConversationBlock { index: u32 },
+    ConversationBlock {
+        index: u32,
+    },
     ToolArguments {},
     ToolOutput {},
     ToolDiff {},
+    ToolPresentation {
+        invocation_id: crate::ToolInvocationId,
+    },
     CommandMessage {},
     ShellCommand {},
     ShellOutput {},
@@ -78,6 +83,15 @@ pub enum TranscriptConversationBlock {
     Citation { body: TranscriptBodyPreview },
 }
 
+/// Compact reference to a complete host-projected tool surface.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptToolPresentation {
+    #[schemars(length(max = 128), extend("x-rw-max-utf8-bytes" = 128))]
+    pub title: String,
+    pub source: TranscriptContentSource,
+}
+
 /// Tool invocation lifecycle independent of provider call/result IR placement.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -89,6 +103,10 @@ pub enum TranscriptToolStatus {
     Finished {
         is_error: bool,
         output: TranscriptBodyPreview,
+        #[serde(deserialize_with = "Option::deserialize")]
+        #[schemars(schema_with = "crate::schema::required_nullable::<TranscriptToolPresentation>")]
+        #[ts(optional = false)]
+        presentation: Option<TranscriptToolPresentation>,
     },
 }
 

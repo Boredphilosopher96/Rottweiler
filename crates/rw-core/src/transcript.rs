@@ -440,6 +440,7 @@ fn project_tool_update(
             turn_id,
             invocation_id,
             output,
+            presentation,
             is_error,
             call_index,
             ..
@@ -473,6 +474,17 @@ fn project_tool_update(
             *status = TranscriptToolStatus::Finished {
                 is_error: *is_error,
                 output,
+                presentation: presentation.as_ref().map(|presentation| {
+                    rw_types::transcript::TranscriptToolPresentation {
+                        title: presentation.descriptor.title.clone(),
+                        source: source(
+                            meta.sequence_id,
+                            TranscriptContentSelector::ToolPresentation {
+                                invocation_id: invocation_id.clone(),
+                            },
+                        ),
+                    }
+                }),
             };
             Ok(Some(ProjectedRow {
                 prior: Some(prior),
