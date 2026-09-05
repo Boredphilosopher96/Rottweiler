@@ -838,6 +838,15 @@ and initialized manifest are checked before the generation becomes ready.
 Inert metadata grants no execution authority. Failure is cached for the generation;
 a changed configuration creates a new generation instead of retrying implicitly.
 
+`PluginEndpoint` separates validated manifest metadata from `connect`, required
+`settle_effects`, and permanent `close` operations. `PluginConnection` contains
+only an initialized host's client and actual process enforcer. A ready endpoint
+owns its initialized host; the runtime's dormant endpoint owns preparation and
+activation. Tool, hook, command, provider, and event adapters use this endpoint
+contract directly. Registrations never construct a placeholder native process or
+capability enforcer. Cleanup returns an explicit result; RPC clients must declare
+their own settlement implementation.
+
 Activation owns its subprocesses, preparation jobs, pipes, and cleanup task. A
 waiter's cancellation or future drop closes the shared generation while it is
 starting. This may fail other first uses of the same native plugin: startup can

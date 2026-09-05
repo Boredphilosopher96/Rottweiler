@@ -1,0 +1,3 @@
+    Checking rw-tools v0.1.4 (/Users/sumukhnitundila/MyProjects/Rottweiler-process-settlement/crates/rw-tools)
+    Checking rw-ext v0.1.4 (/Users/sumukhnitundila/MyProjects/Rottweiler-process-settlement/crates/rw-ext)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.90s

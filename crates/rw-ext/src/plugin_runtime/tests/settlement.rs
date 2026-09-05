@@ -146,25 +146,26 @@ async fn approved_handshake_registers_custom_tool_and_reaps_on_shutdown() {
         push: None,
         hang_method: None,
     };
-    let host = PluginHost::launch_approved(
-        &launcher,
-        &store,
-        &config,
-        "project:test",
-        &[root.path().to_path_buf()],
-        manifest.clone(),
-        Arc::new(DenyPushHandler),
-        Arc::new(NoopPluginBoundaryRedactor),
-    )
-    .await
-    .expect("launch");
+    let host = Arc::new(
+        PluginHost::launch_approved(
+            &launcher,
+            &store,
+            &config,
+            "project:test",
+            &[root.path().to_path_buf()],
+            manifest.clone(),
+            Arc::new(DenyPushHandler),
+            Arc::new(NoopPluginBoundaryRedactor),
+        )
+        .await
+        .expect("launch"),
+    );
     let mut registry = ToolRegistry::new();
     registry
         .register(Arc::new(
             RpcToolAdapter::new(
                 manifest.capabilities.tools[0].clone(),
-                host.client(),
-                host.enforcer(),
+                ready_endpoint(&host),
             )
             .expect("approved adapter"),
         ))

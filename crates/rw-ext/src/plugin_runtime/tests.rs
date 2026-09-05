@@ -60,6 +60,9 @@ struct CatalogClient(Value);
 
 #[async_trait]
 impl PluginRpcClient for CatalogClient {
+    async fn settle_effects(&self) -> Result<(), PluginRpcError> {
+        Ok(())
+    }
     async fn request(&self, method: &str, params: Value) -> Result<Value, PluginRpcError> {
         assert_eq!(method, METHOD_PROVIDER_MODELS);
         assert_eq!(params, json!({"alias_prefix":"fixture/"}));
@@ -85,8 +88,11 @@ fn catalog_adapter(value: Value) -> RpcProviderAdapter {
             max_output_tokens: None,
             wire_mode: WireMode::NormalizedReplay,
         },
-        Arc::new(CatalogClient(value)),
-        enforcer,
+        crate::plugin_endpoint::fixture_endpoint(
+            approved,
+            Arc::new(CatalogClient(value)),
+            enforcer,
+        ),
     )
     .with_model_catalog()
 }
@@ -548,7 +554,7 @@ async fn approved_fixture_host(
     config: &PluginProcessConfig,
     root: &std::path::Path,
     push: Arc<dyn PushHandler>,
-) -> PluginHost {
+) -> Arc<PluginHost> {
     approved_fixture_host_with_http(
         config,
         root,
@@ -565,7 +571,7 @@ async fn approved_fixture_host_with_http(
     push: Arc<dyn PushHandler>,
     provider_http: Arc<dyn PluginProviderHttpHandler>,
     redactor: Arc<dyn PluginBoundaryRedactor>,
-) -> PluginHost {
+) -> Arc<PluginHost> {
     let manifest = probe_plugin_manifest(
         &TestDirectLauncher,
         config,
@@ -577,17 +583,23 @@ async fn approved_fixture_host_with_http(
     let store = MemoryApproval::default();
     approve_plugin_launch(&store, &manifest, config, "conformance:typescript")
         .expect("approve fixture");
-    PluginHost::launch_approved_with_http(
-        &TestDirectLauncher,
-        &store,
-        config,
-        "conformance:typescript",
-        &[root.to_path_buf()],
-        manifest,
-        push,
-        provider_http,
-        redactor,
+    Arc::new(
+        PluginHost::launch_approved_with_http(
+            &TestDirectLauncher,
+            &store,
+            config,
+            "conformance:typescript",
+            &[root.to_path_buf()],
+            manifest,
+            push,
+            provider_http,
+            redactor,
+        )
+        .await
+        .expect("launch approved fixture"),
     )
-    .await
-    .expect("launch approved fixture")
+}
+
+fn ready_endpoint(host: &Arc<PluginHost>) -> Arc<dyn crate::PluginEndpoint> {
+    Arc::new(crate::ReadyPluginEndpoint::new(Arc::clone(host)).expect("ready endpoint"))
 }

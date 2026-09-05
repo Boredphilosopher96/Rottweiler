@@ -776,16 +776,7 @@ impl CapabilityEnforcer {
     /// than claiming only its handler's narrower declaration.
     #[must_use]
     pub fn process_tool_effects(&self) -> BTreeSet<PluginToolEffect> {
-        let mut effects = self
-            .capabilities
-            .tools
-            .iter()
-            .flat_map(|tool| tool.caps.iter().copied())
-            .collect::<BTreeSet<_>>();
-        if !self.capabilities.providers.is_empty() {
-            effects.insert(PluginToolEffect::Network);
-        }
-        effects
+        crate::plugin_endpoint::declared_process_effects(&self.capabilities)
     }
 
     /// Verifies a command declaration, terminating the process on violation.
@@ -986,9 +977,7 @@ pub type PluginProviderEventStream =
 #[async_trait]
 pub trait PluginRpcClient: Send + Sync {
     /// Waits for teardown started by a cancelled or dropped request.
-    async fn settle_effects(&self) -> Result<(), PluginRpcError> {
-        Ok(())
-    }
+    async fn settle_effects(&self) -> Result<(), PluginRpcError>;
 
     async fn request(&self, method: &str, params: Value) -> Result<Value, PluginRpcError>;
 
@@ -1043,14 +1032,13 @@ pub trait PluginRpcClient: Send + Sync {
 
 /// Adapter that registers an out-of-process hook through the common dispatcher.
 pub struct RpcHookHandler {
-    client: Arc<dyn PluginRpcClient>,
-    enforcer: Arc<CapabilityEnforcer>,
+    endpoint: Arc<dyn crate::PluginEndpoint>,
 }
 
 impl RpcHookHandler {
     #[must_use]
-    pub fn new(client: Arc<dyn PluginRpcClient>, enforcer: Arc<CapabilityEnforcer>) -> Self {
-        Self { client, enforcer }
+    pub fn new(endpoint: Arc<dyn crate::PluginEndpoint>) -> Self {
+        Self { endpoint }
     }
 }
 
@@ -1072,18 +1060,24 @@ pub enum RpcHookResponse {
 #[async_trait]
 impl HookHandler for RpcHookHandler {
     async fn settle_effects(&self) -> std::result::Result<(), crate::HookError> {
-        self.client
+        self.endpoint
             .settle_effects()
             .await
             .map_err(|error| HookError::new("effects_unsettled", error.to_string()))
     }
     async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError> {
         let hook = PluginHook::from(invocation.event());
-        self.enforcer
+        let connection = self
+            .endpoint
+            .connect(invocation.cancellation())
+            .await
+            .map_err(|error| HookError::new(error.code, error.message))?;
+        connection
+            .enforcer()
             .check_hook(hook)
             .map_err(|error| HookError::new("capability_violation", error.to_string()))?;
-        let result = self
-            .client
+        let result = connection
+            .client()
             .request_cancellable(
                 METHOD_HOOK_INVOKE,
                 serde_json::to_value(HookInvokeParams {
@@ -1466,6 +1460,9 @@ mod tests {
 
     #[async_trait]
     impl PluginRpcClient for DenyClient {
+        async fn settle_effects(&self) -> Result<(), PluginRpcError> {
+            Ok(())
+        }
         async fn request(&self, method: &str, params: Value) -> Result<Value, PluginRpcError> {
             assert_eq!(method, METHOD_HOOK_INVOKE);
             assert_eq!(params["hook"], "pre_tool");
@@ -1477,7 +1474,9 @@ mod tests {
     async fn pre_tool_deny_uses_common_hook_dispatcher() {
         let process = Arc::new(ProcessState::default());
         let enforcer = Arc::new(CapabilityEnforcer::new(&manifest(), process));
-        let handler = RpcHookHandler::new(Arc::new(DenyClient), enforcer);
+        let endpoint =
+            crate::plugin_endpoint::fixture_endpoint(manifest(), Arc::new(DenyClient), enforcer);
+        let handler = RpcHookHandler::new(endpoint);
         let mut dispatcher = HookDispatcher::new();
         dispatcher
             .register(

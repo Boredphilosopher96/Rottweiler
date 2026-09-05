@@ -8,6 +8,7 @@ mod discovery;
 mod hook;
 mod mode;
 mod plugin;
+mod plugin_endpoint;
 mod plugin_runtime;
 mod registry;
 mod wasm;
@@ -40,6 +41,9 @@ pub use mode::{
     parse_mode_toml,
 };
 pub use plugin::*;
+pub use plugin_endpoint::{
+    PluginConnection, PluginEndpoint, PluginEndpointMetadata, ReadyPluginEndpoint,
+};
 pub use plugin_runtime::*;
 pub use registry::*;
 pub use wasm::*;

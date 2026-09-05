@@ -1,31 +1,29 @@
 use super::*;
+use crate::PluginEndpoint;
 
 pub struct RpcToolAdapter {
     declaration: rw_plugin_protocol::PluginToolCapability,
-    client: Arc<dyn PluginRpcClient>,
-    enforcer: Arc<CapabilityEnforcer>,
+    endpoint: Arc<dyn PluginEndpoint>,
 }
 
 impl RpcToolAdapter {
-    /// Constructs an adapter only for the exact immutable approved declaration.
+    /// Constructs an adapter only for the exact immutable endpoint declaration.
     ///
     /// # Errors
     ///
     /// Returns an approval error if any declaration field differs from the manifest snapshot.
     pub fn new(
         declaration: rw_plugin_protocol::PluginToolCapability,
-        client: Arc<dyn PluginRpcClient>,
-        enforcer: Arc<CapabilityEnforcer>,
+        endpoint: Arc<dyn PluginEndpoint>,
     ) -> Result<Self, PluginHostError> {
-        if !enforcer.tool_declaration_matches(&declaration) {
+        if !endpoint.metadata().tool_declaration_matches(&declaration) {
             return Err(PluginHostError::Approval(
-                "tool adapter declaration differs from approved manifest".to_owned(),
+                "tool adapter declaration differs from endpoint manifest".to_owned(),
             ));
         }
         Ok(Self {
             declaration,
-            client,
-            enforcer,
+            endpoint,
         })
     }
 }
@@ -33,24 +31,25 @@ impl RpcToolAdapter {
 #[async_trait]
 impl Tool for RpcToolAdapter {
     async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
-        self.client
+        self.endpoint
             .settle_effects()
             .await
             .map_err(|error| ToolError::EffectsUnsettled(error.to_string()))
     }
     fn descriptor(&self) -> ToolDescriptor {
-        let process_effects = self.enforcer.process_tool_effects();
+        let process_effects = self.endpoint.metadata().process_tool_effects();
         ToolDescriptor {
             name: self.declaration.name.clone(),
             description: self.declaration.description.clone(),
             input_schema: self.declaration.schema.clone(),
-            capabilities: CapabilityManifest::new(process_effects.into_iter().map(tool_effect)),
+            capabilities: CapabilityManifest::new(process_effects.iter().copied().map(tool_effect)),
         }
     }
 
     fn mutation_scope(&self, _input: &Value) -> MutationScope {
         if self
-            .enforcer
+            .endpoint
+            .metadata()
             .process_tool_effects()
             .contains(&rw_plugin_protocol::PluginToolEffect::WritesFilesystem)
         {
@@ -61,11 +60,17 @@ impl Tool for RpcToolAdapter {
     }
 
     async fn execute(&self, _context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {
-        self.enforcer
+        let connection = self
+            .endpoint
+            .connect(&_context.cancellation)
+            .await
+            .map_err(|error| ToolError::Output(error.to_string()))?;
+        connection
+            .enforcer()
             .check_tool(&self.declaration.name)
             .map_err(|error| ToolError::Output(error.to_string()))?;
-        let result = self
-            .client
+        let result = connection
+            .client()
             .call_tool(
                 ToolCallParams {
                     name: self.declaration.name.clone(),
@@ -94,21 +99,15 @@ fn tool_effect(effect: rw_plugin_protocol::PluginToolEffect) -> ToolCapability {
 
 pub struct RpcCommandAdapter {
     name: String,
-    client: Arc<dyn PluginRpcClient>,
-    enforcer: Arc<CapabilityEnforcer>,
+    endpoint: Arc<dyn PluginEndpoint>,
 }
 
 impl RpcCommandAdapter {
     #[must_use]
-    pub fn new(
-        name: impl Into<String>,
-        client: Arc<dyn PluginRpcClient>,
-        enforcer: Arc<CapabilityEnforcer>,
-    ) -> Self {
+    pub fn new(name: impl Into<String>, endpoint: Arc<dyn PluginEndpoint>) -> Self {
         Self {
             name: name.into(),
-            client,
-            enforcer,
+            endpoint,
         }
     }
 }
@@ -123,10 +122,19 @@ where
         _context: &mut Context,
         invocation: CommandInvocation,
     ) -> Result<Value, CommandExecutionError> {
-        self.enforcer.check_command(&self.name).map_err(|error| {
-            CommandExecutionError::new("capability_violation", error.to_string())
-        })?;
-        self.client
+        let connection = self
+            .endpoint
+            .connect(&CancellationToken::default())
+            .await
+            .map_err(|error| CommandExecutionError::new(error.code, error.message))?;
+        connection
+            .enforcer()
+            .check_command(&self.name)
+            .map_err(|error| {
+                CommandExecutionError::new("capability_violation", error.to_string())
+            })?;
+        connection
+            .client()
             .request(
                 METHOD_COMMAND_EXECUTE,
                 serde_json::to_value(CommandExecuteParams {
@@ -146,8 +154,7 @@ pub struct RpcProviderAdapter {
     name: String,
     alias_prefix: String,
     capabilities: Capabilities,
-    client: Arc<dyn PluginRpcClient>,
-    enforcer: Arc<CapabilityEnforcer>,
+    endpoint: Arc<dyn PluginEndpoint>,
     model_catalog: bool,
     catalog_cache: StdRwLock<RpcProviderCatalogCache>,
 }
@@ -166,15 +173,13 @@ impl RpcProviderAdapter {
         name: impl Into<String>,
         alias_prefix: impl Into<String>,
         capabilities: Capabilities,
-        client: Arc<dyn PluginRpcClient>,
-        enforcer: Arc<CapabilityEnforcer>,
+        endpoint: Arc<dyn PluginEndpoint>,
     ) -> Self {
         Self {
             name: name.into(),
             alias_prefix: alias_prefix.into(),
             capabilities,
-            client,
-            enforcer,
+            endpoint,
             model_catalog: false,
             catalog_cache: StdRwLock::new(RpcProviderCatalogCache::default()),
         }
@@ -353,7 +358,7 @@ fn common_plugin_limit(
 #[async_trait]
 impl Provider for RpcProviderAdapter {
     async fn settle_effects(&self) -> std::result::Result<(), rw_providers::ProviderError> {
-        self.client.settle_effects().await.map_err(|error| {
+        self.endpoint.settle_effects().await.map_err(|error| {
             ProviderError::new(ProviderErrorKind::EffectsUnsettled, error.to_string())
         })
     }
@@ -391,13 +396,19 @@ impl Provider for RpcProviderAdapter {
         if !self.model_catalog {
             return Ok(None);
         }
-        self.enforcer
+        let connection = self
+            .endpoint
+            .connect(&CancellationToken::default())
+            .await
+            .map_err(|error| provider_rpc_error(&error))?;
+        connection
+            .enforcer()
             .check_provider(&format!("{}catalog", self.alias_prefix))
             .map_err(|error| {
                 ProviderError::new(ProviderErrorKind::Unsupported, error.to_string())
             })?;
-        let value = self
-            .client
+        let value = connection
+            .client()
             .request(
                 METHOD_PROVIDER_MODELS,
                 serde_json::to_value(ProviderModelsParams {
@@ -419,11 +430,19 @@ impl Provider for RpcProviderAdapter {
     }
     async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
         let alias = format!("{}{}", self.alias_prefix, request.model);
-        self.enforcer.check_provider(&alias).map_err(|error| {
-            ProviderError::new(ProviderErrorKind::Unsupported, error.to_string())
-        })?;
-        let events = self
-            .client
+        let connection = self
+            .endpoint
+            .connect(&CancellationToken::default())
+            .await
+            .map_err(|error| provider_rpc_error(&error))?;
+        connection
+            .enforcer()
+            .check_provider(&alias)
+            .map_err(|error| {
+                ProviderError::new(ProviderErrorKind::Unsupported, error.to_string())
+            })?;
+        let events = connection
+            .client()
             .provider_stream(
                 serde_json::to_value(ProviderCompleteParams {
                     alias,
@@ -453,7 +472,8 @@ fn provider_rpc_error(error: &PluginRpcError) -> ProviderError {
     let kind = match error.code.as_str() {
         "provider_http_authentication" | "authentication" => ProviderErrorKind::Authentication,
         "provider_http_rate_limited" => ProviderErrorKind::RateLimited,
-        "provider_http_timeout" => ProviderErrorKind::Timeout,
+        "provider_http_timeout" | "timeout" => ProviderErrorKind::Timeout,
+        "effects_unsettled" => ProviderErrorKind::EffectsUnsettled,
         "provider_http_server" => ProviderErrorKind::Server,
         "provider_http_network" => ProviderErrorKind::Network,
         "provider_http_network_disabled" => ProviderErrorKind::NetworkDisabled,
@@ -467,14 +487,13 @@ fn provider_rpc_error(error: &PluginRpcError) -> ProviderError {
 }
 
 pub struct PluginEventRouter {
-    client: Arc<dyn PluginRpcClient>,
-    enforcer: Arc<CapabilityEnforcer>,
+    endpoint: Arc<dyn PluginEndpoint>,
 }
 
 impl PluginEventRouter {
     #[must_use]
-    pub fn new(client: Arc<dyn PluginRpcClient>, enforcer: Arc<CapabilityEnforcer>) -> Self {
-        Self { client, enforcer }
+    pub fn new(endpoint: Arc<dyn PluginEndpoint>) -> Self {
+        Self { endpoint }
     }
     /// Publishes an event only when it appears in the immutable subscription snapshot.
     ///
@@ -482,10 +501,13 @@ impl PluginEventRouter {
     ///
     /// Returns an RPC error for an undeclared event or failed notification delivery.
     pub async fn publish(&self, event: &str, payload: Value) -> Result<(), PluginRpcError> {
-        self.enforcer
+        let connection = self.endpoint.connect(&CancellationToken::default()).await?;
+        connection
+            .enforcer()
             .check_event(event)
             .map_err(|error| rpc_error("capability_violation", &error.to_string()))?;
-        self.client
+        connection
+            .client()
             .notify(
                 METHOD_EVENT_PUBLISH,
                 serde_json::to_value(EventPublishParams {

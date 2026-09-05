@@ -6,7 +6,7 @@ async fn typescript_tool_hook_event_push_and_provider_cross_rust_host() {
     let (sdk, tool_config) = sdk_fixture_config("pre-tool-deny-custom-tool.ts");
     let tool_host = approved_fixture_host(&tool_config, &sdk, Arc::new(DenyPushHandler)).await;
     let declaration = tool_host.manifest().capabilities.tools[0].clone();
-    let adapter = RpcToolAdapter::new(declaration, tool_host.client(), tool_host.enforcer())
+    let adapter = RpcToolAdapter::new(declaration, ready_endpoint(&tool_host))
         .expect("approved tool adapter");
     let context = ToolContext::new(&sdk).expect("tool context");
     let result = adapter
@@ -14,7 +14,7 @@ async fn typescript_tool_hook_event_push_and_provider_cross_rust_host() {
         .await
         .expect("TypeScript tool result");
     assert_eq!(result.content, "hello");
-    let hook = crate::RpcHookHandler::new(tool_host.client(), tool_host.enforcer());
+    let hook = crate::RpcHookHandler::new(ready_endpoint(&tool_host));
     let mut dispatcher = crate::HookDispatcher::new();
     dispatcher
         .register(
@@ -37,7 +37,7 @@ async fn typescript_tool_hook_event_push_and_provider_cross_rust_host() {
     let (sdk, event_config) = sdk_fixture_config("event-subscriber.ts");
     let pushes = Arc::new(RecordingPush::default());
     let event_host = approved_fixture_host(&event_config, &sdk, pushes.clone()).await;
-    PluginEventRouter::new(event_host.client(), event_host.enforcer())
+    PluginEventRouter::new(ready_endpoint(&event_host))
         .publish("TurnFinished", json!({"session_id":"s"}))
         .await
         .expect("publish event");
@@ -75,8 +75,7 @@ async fn typescript_tool_hook_event_push_and_provider_cross_rust_host() {
             max_output_tokens: None,
             wire_mode: WireMode::NormalizedReplay,
         },
-        provider_host.client(),
-        provider_host.enforcer(),
+        ready_endpoint(&provider_host),
     );
     let mut events = provider
         .stream(ProviderRequest {
@@ -197,8 +196,7 @@ async fn typescript_protocol_three_catalog_crosses_rust_host() {
             max_output_tokens: None,
             wire_mode: WireMode::NormalizedReplay,
         },
-        host.client(),
-        host.enforcer(),
+        ready_endpoint(&host),
     )
     .with_model_catalog();
     let catalog = provider
@@ -255,8 +253,7 @@ async fn protocol_three_provider_auth_streams_through_host_without_secret_delive
             max_output_tokens: None,
             wire_mode: WireMode::NormalizedReplay,
         },
-        host.client(),
-        host.enforcer(),
+        ready_endpoint(&host),
     );
     let events = provider
         .stream(ProviderRequest {
@@ -338,8 +335,7 @@ async fn protocol_three_provider_refuses_undeclared_credential_reference_at_call
             max_output_tokens: None,
             wire_mode: WireMode::NormalizedReplay,
         },
-        host.client(),
-        host.enforcer(),
+        ready_endpoint(&host),
     );
     let result = provider
         .stream(ProviderRequest {
