@@ -146,6 +146,7 @@ struct StubFactory {
     fork_started: Notify,
     fork_release: Notify,
     fork_turns: Mutex<Vec<TurnId>>,
+    fork_receipts: Mutex<HashMap<String, (String, ForkOperationState)>>,
     shutdowns: AtomicUsize,
     event_sink: Option<Arc<dyn SessionEventSink>>,
     model: Arc<dyn ModelDriver>,
@@ -171,6 +172,7 @@ impl StubFactory {
             fork_started: Notify::new(),
             fork_release: Notify::new(),
             fork_turns: Mutex::new(Vec::new()),
+            fork_receipts: Mutex::default(),
             shutdowns: AtomicUsize::new(0),
             event_sink: None,
             model: Arc::new(IdleModel),
@@ -259,6 +261,71 @@ impl StubFactory {
 
 #[async_trait]
 impl SessionFactory for StubFactory {
+    async fn load_fork_operation(
+        &self,
+        key: &ForkOperationKey,
+    ) -> Result<ForkOperationState, HostError> {
+        let receipts = self.fork_receipts.lock().expect("fixture receipts");
+        match receipts.get(&key.operation_id) {
+            Some((fingerprint, state)) if fingerprint == &key.payload_hash => Ok(state.clone()),
+            Some(_) => Err(HostError::Protocol("fork identity conflict".into())),
+            None => Ok(ForkOperationState::Missing),
+        }
+    }
+    async fn prepare_fork_operation(
+        &self,
+        operation: PreparedForkOperation,
+    ) -> Result<PreparedForkOperation, HostError> {
+        let mut receipts = self.fork_receipts.lock().expect("fixture receipts");
+        if let Some((fingerprint, state)) = receipts.get(&operation.key.operation_id) {
+            if fingerprint == &operation.key.payload_hash {
+                if let ForkOperationState::Pending(prepared) = state {
+                    return Ok(prepared.clone());
+                }
+            }
+            return Err(HostError::Protocol("fork identity conflict".into()));
+        }
+        receipts.insert(
+            operation.key.operation_id.clone(),
+            (
+                operation.key.payload_hash.clone(),
+                ForkOperationState::Pending(operation.clone()),
+            ),
+        );
+        Ok(operation)
+    }
+    async fn complete_fork_operation(
+        &self,
+        key: &ForkOperationKey,
+        result: &CompletedForkOperation,
+    ) -> Result<CompletedForkOperation, HostError> {
+        let mut receipts = self.fork_receipts.lock().expect("fixture receipts");
+        let Some((fingerprint, state)) = receipts.get_mut(&key.operation_id) else {
+            return Err(HostError::Protocol("fork not prepared".into()));
+        };
+        if fingerprint != &key.payload_hash {
+            return Err(HostError::Protocol("fork identity conflict".into()));
+        }
+        if let ForkOperationState::Completed(existing) = state {
+            if existing != result {
+                return Err(HostError::Protocol("fork outcome conflict".into()));
+            }
+        }
+        *state = ForkOperationState::Completed(result.clone());
+        Ok(result.clone())
+    }
+    async fn abandon_prepared_fork_operation(
+        &self,
+        key: &ForkOperationKey,
+    ) -> Result<(), HostError> {
+        let mut receipts = self.fork_receipts.lock().expect("fixture receipts");
+        if matches!(receipts.get(&key.operation_id), Some((fingerprint, ForkOperationState::Pending(_))) if fingerprint == &key.payload_hash)
+        {
+            receipts.remove(&key.operation_id);
+        }
+        Ok(())
+    }
+
     async fn admit_command_receipt(
         &self,
         command: &ClientCommand,

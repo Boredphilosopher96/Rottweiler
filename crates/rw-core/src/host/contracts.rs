@@ -284,40 +284,24 @@ pub trait SessionFactory: Send + Sync + 'static {
 
     async fn resume(&self, session_id: &SessionId) -> Result<HostedSession, HostError>;
 
-    async fn fork(&self, _request: ForkSessionRequest) -> Result<HostedSession, HostError> {
-        Err(HostError::Protocol(
-            "session forking is not configured".to_owned(),
-        ))
-    }
-
+    async fn fork(&self, request: ForkSessionRequest) -> Result<HostedSession, HostError>;
     async fn load_fork_operation(
         &self,
-        _key: &ForkOperationKey,
-    ) -> Result<ForkOperationState, HostError> {
-        Ok(ForkOperationState::Missing)
-    }
-
+        key: &ForkOperationKey,
+    ) -> Result<ForkOperationState, HostError>;
     async fn prepare_fork_operation(
         &self,
         operation: PreparedForkOperation,
-    ) -> Result<PreparedForkOperation, HostError> {
-        Ok(operation)
-    }
-
+    ) -> Result<PreparedForkOperation, HostError>;
     async fn complete_fork_operation(
         &self,
-        _key: &ForkOperationKey,
+        key: &ForkOperationKey,
         result: &CompletedForkOperation,
-    ) -> Result<CompletedForkOperation, HostError> {
-        Ok(result.clone())
-    }
-
+    ) -> Result<CompletedForkOperation, HostError>;
     async fn abandon_prepared_fork_operation(
         &self,
-        _key: &ForkOperationKey,
-    ) -> Result<(), HostError> {
-        Ok(())
-    }
+        key: &ForkOperationKey,
+    ) -> Result<(), HostError>;
 
     async fn persisted_sessions(&self) -> Result<Vec<SessionDescriptor>, HostError> {
         Ok(Vec::new())

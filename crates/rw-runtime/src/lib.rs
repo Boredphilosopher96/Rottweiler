@@ -134,6 +134,38 @@ mod tests {
 
     #[async_trait]
     impl SessionFactory for EmptyFactory {
+        async fn fork(
+            &self,
+            _request: rw_core::ForkSessionRequest,
+        ) -> Result<rw_core::HostedSession, HostError> {
+            Err(HostError::Protocol("no fork storage configured".into()))
+        }
+        async fn load_fork_operation(
+            &self,
+            _key: &rw_core::ForkOperationKey,
+        ) -> Result<rw_core::ForkOperationState, HostError> {
+            Err(HostError::Protocol("no fork storage configured".into()))
+        }
+        async fn prepare_fork_operation(
+            &self,
+            _operation: rw_core::PreparedForkOperation,
+        ) -> Result<rw_core::PreparedForkOperation, HostError> {
+            Err(HostError::Protocol("no fork storage configured".into()))
+        }
+        async fn complete_fork_operation(
+            &self,
+            _key: &rw_core::ForkOperationKey,
+            _result: &rw_core::CompletedForkOperation,
+        ) -> Result<rw_core::CompletedForkOperation, HostError> {
+            Err(HostError::Protocol("no fork storage configured".into()))
+        }
+        async fn abandon_prepared_fork_operation(
+            &self,
+            _key: &rw_core::ForkOperationKey,
+        ) -> Result<(), HostError> {
+            Err(HostError::Protocol("no fork storage configured".into()))
+        }
+
         async fn admit_command_receipt(
             &self,
             _command: &rw_core::ClientCommand,
