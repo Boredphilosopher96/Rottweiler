@@ -54,7 +54,7 @@ fn recover(pending: Vec<PendingEvent>) -> (SessionRecoveredState, InterruptedTur
         .iter()
         .enumerate()
         .map(|(index, event)| {
-            event.stamp(EventMeta {
+            event.clone().stamp(EventMeta {
                 protocol_version: PROTOCOL_VERSION,
                 session_id: SessionId("canonical".into()),
                 sequence_id: SequenceId(index as u64),
