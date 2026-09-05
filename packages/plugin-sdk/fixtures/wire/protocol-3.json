@@ -55,7 +55,6 @@
     "params": {
       "host": "rottweiler",
       "protocol": 3,
-      "min_protocol": 3,
       "max_frame_bytes": 4194304,
       "capabilities": [
         "provider-models",

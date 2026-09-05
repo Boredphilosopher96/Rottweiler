@@ -158,10 +158,10 @@ async fn typescript_numeric_and_escaped_events_replenish_exact_wire_credit() {
     let mut events = host
         .client()
         .provider_stream(json!({
-            "alias": "fixture-v3/numeric-credit", "request": {
-                "model": "numeric-credit", "turns": [], "tools": [],
-                "tool_choice": {"mode":"auto"}, "max_output_tokens":64,
-                "temperature":null, "thinking":"off"
+            "alias": "fixture-v3/numeric-credit", "request": ProviderRequest {
+                model: "numeric-credit".to_owned(), turns: Vec::new(), tools: Vec::new(),
+                tool_choice: ToolChoice::Auto {}, max_output_tokens: 64,
+                temperature: None, thinking: ThinkingLevel::Off, cache_hint: None,
             }
         }))
         .await

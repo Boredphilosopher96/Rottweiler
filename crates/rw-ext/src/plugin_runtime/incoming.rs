@@ -68,10 +68,7 @@ async fn process_incoming_frame(frame: RpcFrame, wire_bytes: usize, state: &Read
     }
     match frame {
         RpcFrame::Success(success) => {
-            let Some(id) = success.id else {
-                let _ = state.process.kill_tree();
-                return false;
-            };
+            let id = success.id;
             let provider = state
                 .provider_streams
                 .lock()
@@ -263,7 +260,7 @@ fn start_host_command(request: RpcRequest, state: &ReaderState) -> bool {
         let response = match response {
             Ok(result) => RpcFrame::Success(RpcSuccess {
                 jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
-                id: Some(request.id),
+                id: request.id,
                 result: redactor.redact(result),
             }),
             Err(error) => RpcFrame::Failure(RpcFailure {
@@ -425,7 +422,7 @@ fn provider_http_result_frame(id: RpcId, result: Result<(), PluginRpcError>) -> 
     match result {
         Ok(()) => RpcFrame::Success(RpcSuccess {
             jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
-            id: Some(id),
+            id,
             result: Value::Null,
         }),
         Err(error) => RpcFrame::Failure(RpcFailure {

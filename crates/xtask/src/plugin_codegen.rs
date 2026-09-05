@@ -18,8 +18,8 @@ use rw_plugin_protocol::{
     METHOD_PROVIDER_EVENT, METHOD_PROVIDER_HTTP, METHOD_PROVIDER_HTTP_CANCEL,
     METHOD_PROVIDER_HTTP_EVENT, METHOD_PROVIDER_MODELS, METHOD_SESSION_INJECT_MESSAGE,
     METHOD_SESSION_SET_STATUS, METHOD_SHUTDOWN, METHOD_TOOL_CALL, METHOD_TOOL_PROGRESS,
-    METHOD_UI_NOTIFY, MIN_PROTOCOL_VERSION, PLUGIN_HOST_ID, PROTOCOL_VERSION,
-    PROVIDER_WINDOW_BYTES, PROVIDER_WINDOW_EVENTS,
+    METHOD_UI_NOTIFY, PLUGIN_HOST_ID, PROTOCOL_VERSION, PROVIDER_WINDOW_BYTES,
+    PROVIDER_WINDOW_EVENTS,
 };
 use serde_json::{Value, json};
 use ts_rs::TS;
@@ -88,7 +88,6 @@ export interface PluginManifest {
 export interface InitializeParams {
   readonly host: string
   readonly protocol: number
-  readonly min_protocol: number
   readonly max_frame_bytes: number
   readonly capabilities?: readonly string[]
 }
@@ -271,7 +270,6 @@ const FIXTURE_TEMPLATE: &str = r#"{
     "params": {
       "host": "rottweiler",
       "protocol": 3,
-      "min_protocol": 1,
       "max_frame_bytes": 4194304,
       "capabilities": ["provider-models", "provider-http"]
     }
@@ -562,7 +560,6 @@ fn render_typescript() -> String {
     format!(
         "{GENERATED_MARKER}\n\n\
 export const PLUGIN_PROTOCOL_VERSION = {PROTOCOL_VERSION} as const\n\
-export const MIN_PLUGIN_PROTOCOL_VERSION = {MIN_PROTOCOL_VERSION} as const\n\
 export const PLUGIN_HOST_ID = \"{PLUGIN_HOST_ID}\" as const\n\n\
 export const RPC_METHODS = Object.freeze({{\n\
   initialize: \"{METHOD_INITIALIZE}\",\n\
@@ -626,7 +623,6 @@ fn render_fixture() -> Result<String, serde_json::Error> {
     value["initialize_request"]["method"] = json!(METHOD_INITIALIZE);
     value["initialize_request"]["params"]["host"] = json!(PLUGIN_HOST_ID);
     value["initialize_request"]["params"]["protocol"] = json!(PROTOCOL_VERSION);
-    value["initialize_request"]["params"]["min_protocol"] = json!(MIN_PROTOCOL_VERSION);
     value["initialize_request"]["params"]["max_frame_bytes"] = json!(MAX_FRAME_BYTES);
     value["initialize_response"]["jsonrpc"] = json!(JSON_RPC_VERSION);
     value["initialize_response"]["result"]["protocol"] = json!(PROTOCOL_VERSION);

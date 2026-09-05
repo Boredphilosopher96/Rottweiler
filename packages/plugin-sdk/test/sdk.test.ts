@@ -28,7 +28,6 @@ const decoder = new TextDecoder()
 const initializeParams = {
   host: "rottweiler",
   protocol: 3,
-  min_protocol: 3,
   max_frame_bytes: PROTOCOL_LIMITS.maxLineBytes,
 } as const
 
@@ -383,17 +382,23 @@ describe("wire protocol", () => {
     })
   })
 
-  test("rejects calls before initialize and an unsupported version range", async () => {
+  test("rejects calls before initialize and a mismatched protocol", async () => {
     const { server, messages } = harness()
     await request(server, 1, RPC_METHODS.toolCall, {})
-    await request(server, 2, RPC_METHODS.initialize, { ...initializeParams, protocol: 4, min_protocol: 4 })
+    await request(server, 2, RPC_METHODS.initialize, { ...initializeParams, protocol: 4 })
     expect(messages).toEqual([
       { jsonrpc: "2.0", id: 1, error: { code: -32002, message: "plugin is not initialized" } },
       { jsonrpc: "2.0", id: 2, error: { code: -32001, message: "unsupported plugin protocol" } },
     ])
   })
 
-  test("negotiates protocol 3 and publishes a bounded provider catalog", async () => {
+  test("rejects a range field in initialize", async () => {
+    const { server, messages } = harness()
+    await request(server, 1, RPC_METHODS.initialize, { ...initializeParams, min_protocol: 3 })
+    expect(messages.at(-1)).toMatchObject({ id: 1, error: { code: -32602 } })
+  })
+
+  test("initializes protocol 3 and publishes a bounded provider catalog", async () => {
     const definition = definePlugin({
       manifest: {
         name: "catalog-provider", version: "1", protocol: 3,

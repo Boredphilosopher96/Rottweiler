@@ -87,7 +87,7 @@ impl PluginLauncher for FailSecondPluginLauncher {
                         let response =
                             rw_plugin_protocol::RpcFrame::Success(rw_plugin_protocol::RpcSuccess {
                                 jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
-                                id: Some(request.id),
+                                id: request.id,
                                 result: serde_json::to_value(&manifest).expect("manifest"),
                             });
                         output
@@ -107,7 +107,7 @@ impl PluginLauncher for FailSecondPluginLauncher {
                         let response =
                             rw_plugin_protocol::RpcFrame::Success(rw_plugin_protocol::RpcSuccess {
                                 jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
-                                id: Some(request.id),
+                                id: request.id,
                                 result: Value::Null,
                             });
                         output
@@ -149,7 +149,7 @@ pub(super) fn rollback_plugin(
     let manifest = PluginManifest {
         name: name.to_owned(),
         version: "1.0.0".to_owned(),
-        protocol: rw_plugin_protocol::MIN_PROTOCOL_VERSION,
+        protocol: rw_plugin_protocol::PROTOCOL_VERSION,
         capabilities: rw_plugin_protocol::PluginCapabilities::default(),
     };
     let manifest_path = plugin_root.join("manifest.json");

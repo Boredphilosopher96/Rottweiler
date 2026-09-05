@@ -3,7 +3,7 @@ import { ToolProgressReporter } from "../src/tool-progress"
 import { PluginServer, definePlugin, PROTOCOL_LIMITS, type JsonValue } from "../src/index"
 
 const lifetime = { total_ms: 800, idle_ms: 450 }
-const initialize = { host: "rottweiler", protocol: 3, min_protocol: 3, max_frame_bytes: PROTOCOL_LIMITS.maxLineBytes }
+const initialize = { host: "rottweiler", protocol: 3, max_frame_bytes: PROTOCOL_LIMITS.maxLineBytes }
 
 test("one active write and one replaceable progress survive a producer flood", async () => {
   let release!: () => void

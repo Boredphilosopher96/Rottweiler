@@ -17,7 +17,7 @@ fn fixture(name: &str) -> Value {
 }
 
 #[test]
-fn current_fixture_deserializes_through_owned_wire_dtos() {
+fn fixture_deserializes_through_owned_wire_dtos() {
     let protocol_three = fixture("protocol-3.json");
     let models: ProviderModelsResponse =
         serde_json::from_value(protocol_three["provider_models_response"]["result"].clone())
@@ -144,5 +144,29 @@ fn decoder_preserves_original_byte_charges_across_numeric_and_escape_normalizati
         if value == "0.000001" || value == "100000000000000000000" {
             assert_ne!(serialized.len(), line.len());
         }
+    }
+}
+
+#[test]
+fn initialization_has_one_exact_protocol_and_no_range_fields() {
+    let params = fixture("protocol-3.json")["initialize_request"]["params"].clone();
+    let parsed: rw_plugin_protocol::InitializeParams =
+        serde_json::from_value(params.clone()).expect("initialize params");
+    assert_eq!(parsed.protocol, rw_plugin_protocol::PROTOCOL_VERSION);
+    let mut ranged = params;
+    ranged["min_protocol"] = json!(rw_plugin_protocol::PROTOCOL_VERSION);
+    assert!(serde_json::from_value::<rw_plugin_protocol::InitializeParams>(ranged).is_err());
+    for protocol in [0, 2, 4, u32::MAX] {
+        let bytes = serde_json::to_vec(&json!({
+            "name": "plugin", "version": "1", "protocol": protocol, "capabilities": {}
+        }))
+        .expect("manifest");
+        assert_eq!(
+            PluginManifest::from_slice(&bytes).expect_err("protocol identity"),
+            ManifestError::UnsupportedProtocol {
+                protocol,
+                expected: rw_plugin_protocol::PROTOCOL_VERSION,
+            }
+        );
     }
 }

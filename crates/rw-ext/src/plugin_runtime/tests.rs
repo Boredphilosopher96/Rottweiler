@@ -27,7 +27,7 @@ fn manifest() -> PluginManifest {
     PluginManifest {
         name: "runtime-fixture".to_owned(),
         version: "1.0.0".to_owned(),
-        protocol: rw_plugin_protocol::MIN_PROTOCOL_VERSION,
+        protocol: rw_plugin_protocol::PROTOCOL_VERSION,
         capabilities: PluginCapabilities {
             tools: vec![PluginToolCapability {
                 name: "fixture_tool".to_owned(),
@@ -347,7 +347,7 @@ impl PluginLauncher for MemoryLauncher {
                         }
                         let response = RpcFrame::Success(RpcSuccess {
                             jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
-                            id: Some(request.id),
+                            id: request.id,
                             result: serde_json::to_value(&manifest).expect("manifest"),
                         });
                         output
@@ -362,7 +362,7 @@ impl PluginLauncher for MemoryLauncher {
                     RpcFrame::Request(request) if request.method == METHOD_TOOL_CALL => {
                         let response = RpcFrame::Success(RpcSuccess {
                             jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
-                            id: Some(request.id),
+                            id: request.id,
                             result: serde_json::to_value(ToolResult::new(
                                 "fixture",
                                 json!({"ok":true}),
@@ -379,7 +379,7 @@ impl PluginLauncher for MemoryLauncher {
                     RpcFrame::Request(request) if request.method == METHOD_SHUTDOWN => {
                         let response = RpcFrame::Success(RpcSuccess {
                             jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
-                            id: Some(request.id),
+                            id: request.id,
                             result: Value::Null,
                         });
                         output

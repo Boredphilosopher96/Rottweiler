@@ -153,7 +153,6 @@ impl PluginHost {
         let initialize = serde_json::to_value(InitializeParams {
             host: rw_plugin_protocol::PLUGIN_HOST_ID.to_owned(),
             protocol: expected_manifest.protocol,
-            min_protocol: rw_plugin_protocol::MIN_PROTOCOL_VERSION,
             max_frame_bytes: MAX_FRAME_BYTES,
             capabilities: vec!["provider-models".to_owned(), "provider-http".to_owned()],
         })
@@ -277,7 +276,6 @@ pub(crate) async fn probe_plugin_manifest(
             serde_json::to_value(InitializeParams {
                 host: rw_plugin_protocol::PLUGIN_HOST_ID.to_owned(),
                 protocol: rw_plugin_protocol::PROTOCOL_VERSION,
-                min_protocol: rw_plugin_protocol::MIN_PROTOCOL_VERSION,
                 max_frame_bytes: MAX_FRAME_BYTES,
                 capabilities: vec!["provider-models".to_owned(), "provider-http".to_owned()],
             })

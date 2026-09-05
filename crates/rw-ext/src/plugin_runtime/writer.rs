@@ -196,7 +196,7 @@ mod tests {
     fn response(id: i64) -> RpcFrame {
         RpcFrame::Success(RpcSuccess {
             jsonrpc: "2.0".to_owned(),
-            id: Some(RpcId::Number(id)),
+            id: RpcId::Number(id),
             result: json!(null),
         })
     }

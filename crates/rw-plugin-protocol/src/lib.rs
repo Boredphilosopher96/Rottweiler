@@ -11,8 +11,6 @@ use thiserror::Error;
 pub const JSON_RPC_VERSION: &str = "2.0";
 pub const PLUGIN_HOST_ID: &str = "rottweiler";
 pub const PROTOCOL_VERSION: u32 = 3;
-pub const MIN_PROTOCOL_VERSION: u32 = PROTOCOL_VERSION;
-pub const SUPPORTED_PROTOCOL_VERSIONS: [u32; 1] = [PROTOCOL_VERSION];
 pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 pub const MAX_CAPABILITIES_PER_KIND: usize = 256;
@@ -114,7 +112,7 @@ pub struct RpcNotification {
 #[serde(deny_unknown_fields)]
 pub struct RpcSuccess {
     pub jsonrpc: String,
-    pub id: Option<RpcId>,
+    pub id: RpcId,
     pub result: Value,
 }
 
@@ -131,6 +129,7 @@ pub struct RpcErrorObject {
 #[serde(deny_unknown_fields)]
 pub struct RpcFailure {
     pub jsonrpc: String,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub id: Option<RpcId>,
     pub error: RpcErrorObject,
 }
@@ -153,7 +152,7 @@ impl RpcFrame {
         let (version, method, id) = match self {
             Self::Request(frame) => (&frame.jsonrpc, Some(frame.method.as_str()), Some(&frame.id)),
             Self::Notification(frame) => (&frame.jsonrpc, Some(frame.method.as_str()), None),
-            Self::Success(frame) => (&frame.jsonrpc, None, frame.id.as_ref()),
+            Self::Success(frame) => (&frame.jsonrpc, None, Some(&frame.id)),
             Self::Failure(frame) => (&frame.jsonrpc, None, frame.id.as_ref()),
         };
         if version != JSON_RPC_VERSION {
@@ -407,12 +406,8 @@ pub enum ManifestError {
     TooLarge { limit: usize },
     #[error("manifest JSON is invalid: {message}")]
     Malformed { message: String },
-    #[error("protocol {protocol} is unsupported; expected {minimum}..={maximum}")]
-    UnsupportedProtocol {
-        protocol: u32,
-        minimum: u32,
-        maximum: u32,
-    },
+    #[error("protocol {protocol} is unsupported; expected {expected}")]
+    UnsupportedProtocol { protocol: u32, expected: u32 },
     #[error("manifest field `{field}` is invalid: {reason}")]
     InvalidField {
         field: &'static str,
@@ -444,17 +439,16 @@ impl PluginManifest {
         Ok(manifest)
     }
 
-    /// Validates protocol compatibility and every declared capability.
+    /// Validates protocol identity and every declared capability.
     ///
     /// # Errors
     ///
     /// Returns an error for any invalid or out-of-bounds manifest field.
     pub fn validate(&self) -> Result<(), ManifestError> {
-        if !SUPPORTED_PROTOCOL_VERSIONS.contains(&self.protocol) {
+        if self.protocol != PROTOCOL_VERSION {
             return Err(ManifestError::UnsupportedProtocol {
                 protocol: self.protocol,
-                minimum: MIN_PROTOCOL_VERSION,
-                maximum: PROTOCOL_VERSION,
+                expected: PROTOCOL_VERSION,
             });
         }
         validate_name(&self.name, NameKind::Plugin, "name")?;
@@ -827,7 +821,6 @@ fn canonicalize(value: Value) -> Value {
 pub struct InitializeParams {
     pub host: String,
     pub protocol: u32,
-    pub min_protocol: u32,
     pub max_frame_bytes: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,

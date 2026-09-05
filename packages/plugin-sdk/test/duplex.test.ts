@@ -22,7 +22,7 @@ const decoder = new TextDecoder()
 const initialize = {
   jsonrpc: "2.0", id: 1, method: "initialize",
   params: {
-    host: "rottweiler", protocol: 3, min_protocol: 3, max_frame_bytes: PROTOCOL_LIMITS.maxLineBytes,
+    host: "rottweiler", protocol: 3, max_frame_bytes: PROTOCOL_LIMITS.maxLineBytes,
     capabilities: ["provider-models", "provider-http"],
   },
 } satisfies JsonValue
@@ -363,20 +363,34 @@ describe("correlated host command outcomes", () => {
     await serving
   })
 
-  test("host rejection reaches the caller and malformed outcomes cannot strand a promise", async () => {
-    for (const outcome of [{ error: { code: -32003, message: "wrong session" } }, { error: null }]) {
+  test("host rejection reaches the caller", async () => {
+    const { frames, send, serving } = harness(commandDefinition())
+    send({ jsonrpc: "2.0", id: 2, method: "tool/call", params: { name: "hang", input: {}, lifetime: { total_ms: 300000, idle_ms: 90000 } } })
+    await until(() => frames.some(frame => frame.method === "session/inject_message"))
+    const command = frames.find(frame => frame.method === "session/inject_message")
+    if (command?.id === undefined) throw new Error("missing command id")
+    send({ jsonrpc: "2.0", id: command.id, error: { code: -32003, message: "wrong session" } })
+    await until(() => frames.some(frame => frame.id === 2))
+    expect(frames.find(frame => frame.id === 2)?.error).toMatchObject({ code: -32003 })
+    send(stop)
+    await serving
+  })
+
+  test("malformed responses close transport and settle a pending command handler", async () => {
+    for (const malformed of [
+      { result: null },
+      { id: null, result: null },
+      { id: "plugin-push-1", error: null },
+      { id: "plugin-push-1", result: null, error: { code: -32603, message: "bad" } },
+      { id: "plugin-push-1", result: null, extra: true },
+    ]) {
       const { frames, send, serving } = harness(commandDefinition())
+      const terminated = serving.then(() => { throw new Error("expected transport rejection") }, (error: unknown) => error)
       send({ jsonrpc: "2.0", id: 2, method: "tool/call", params: { name: "hang", input: {}, lifetime: { total_ms: 300000, idle_ms: 90000 } } })
       await until(() => frames.some(frame => frame.method === "session/inject_message"))
-      const command = frames.find(frame => frame.method === "session/inject_message")
-      if (command?.id === undefined) throw new Error("missing command id")
-      send({ jsonrpc: "2.0", id: command.id, ...outcome })
-      await until(() => frames.some(frame => frame.id === 2))
-      expect(frames.find(frame => frame.id === 2)?.error).toMatchObject({
-        code: outcome.error === null ? -32603 : -32003,
-      })
-      send(stop)
-      await serving
+      send({ jsonrpc: "2.0", ...malformed })
+      expect(await terminated).toMatchObject({ message: "invalid host response" })
+      expect(frames.find(frame => frame.id === 2)?.error).toMatchObject({ code: -32800 })
     }
   })
 

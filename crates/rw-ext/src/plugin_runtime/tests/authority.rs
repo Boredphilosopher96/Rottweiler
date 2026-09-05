@@ -165,7 +165,7 @@ async fn no_reads_manifest_rejects_workspace_root_as_code_root() {
     let manifest = PluginManifest {
         name: "workspace-root-code".to_owned(),
         version: "1.0.0".to_owned(),
-        protocol: rw_plugin_protocol::MIN_PROTOCOL_VERSION,
+        protocol: rw_plugin_protocol::PROTOCOL_VERSION,
         capabilities: PluginCapabilities::default(),
     };
     let store = MemoryApproval::default();

@@ -247,7 +247,7 @@ async fn full_provider_data_queue_preserves_terminal_and_unrelated_responses() {
             &encode_frame(
                 &RpcFrame::Success(RpcSuccess {
                     jsonrpc: "2.0".to_owned(),
-                    id: Some(request.id),
+                    id: request.id,
                     result: Value::Null,
                 }),
                 MAX_FRAME_BYTES,
@@ -268,7 +268,7 @@ async fn full_provider_data_queue_preserves_terminal_and_unrelated_responses() {
             &encode_frame(
                 &RpcFrame::Success(RpcSuccess {
                     jsonrpc: "2.0".to_owned(),
-                    id: Some(ping_request.id),
+                    id: ping_request.id,
                     result: json!("pong"),
                 }),
                 MAX_FRAME_BYTES,
@@ -305,18 +305,22 @@ async fn full_provider_data_queue_preserves_terminal_and_unrelated_responses() {
 }
 
 #[test]
-fn null_or_missing_response_ids_decode_for_json_rpc_error_compatibility() {
-    let mut decoder = FrameDecoder::default();
-    let frames = decoder
-        .push(b"{\"jsonrpc\":\"2.0\",\"result\":null}\n")
-        .expect("response frame");
-    assert!(matches!(
-        frames.as_slice(),
-        [rw_plugin_protocol::DecodedFrame {
-            frame: RpcFrame::Success(RpcSuccess { id: None, .. }),
-            ..
-        }]
-    ));
+fn response_ids_are_explicit_and_success_ids_are_non_null() {
+    for line in [
+        r#"{"jsonrpc":"2.0","result":null}"#,
+        r#"{"jsonrpc":"2.0","id":null,"result":null}"#,
+        r#"{"jsonrpc":"2.0","error":{"code":-32700,"message":"parse error"}}"#,
+    ] {
+        assert!(
+            FrameDecoder::default()
+                .push(format!("{line}\n").as_bytes())
+                .is_err()
+        );
+    }
+    let frames = FrameDecoder::default()
+        .push(b"{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"parse error\"}}\n")
+        .expect("explicit parse-error ID");
+    assert!(matches!(&frames[0].frame, RpcFrame::Failure(failure) if failure.id.is_none()));
 }
 
 #[tokio::test]
@@ -368,7 +372,7 @@ async fn redaction_is_mandatory_for_hook_event_and_incoming_push_values() {
                 &encode_frame(
                     &RpcFrame::Success(RpcSuccess {
                         jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
-                        id: Some(request.id),
+                        id: request.id,
                         result: Value::Null,
                     }),
                     MAX_FRAME_BYTES,
@@ -454,7 +458,7 @@ async fn plugin_originated_undeclared_push_is_killed_and_reaped() {
     let manifest = PluginManifest {
         name: "undeclared-push".to_owned(),
         version: "1.0.0".to_owned(),
-        protocol: rw_plugin_protocol::MIN_PROTOCOL_VERSION,
+        protocol: rw_plugin_protocol::PROTOCOL_VERSION,
         capabilities: PluginCapabilities::default(),
     };
     let store = MemoryApproval::default();

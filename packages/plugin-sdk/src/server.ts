@@ -579,6 +579,25 @@ export class PluginServer {
     }
     const candidate = message as Record<string, unknown>
     const id = typeof candidate.id === "string" || typeof candidate.id === "number" ? candidate.id : undefined
+    if (own(candidate, "result") || own(candidate, "error")) {
+      try {
+        requireRpcKeys(candidate, "response", own(candidate, "error")
+          ? ["jsonrpc", "id", "error"] : ["jsonrpc", "id", "result"])
+        if (candidate.jsonrpc !== "2.0" || id === undefined) throw new Error("response ID is missing")
+        if (typeof id === "string") requireText(id, "response ID", PROTOCOL_LIMITS.maxNameBytes)
+        else if (!Number.isSafeInteger(id)) throw new Error("response ID is not an integer")
+        if (own(candidate, "error")) {
+          const error = object(candidate.error, "response error")
+          requireRpcKeys(error, "response error", ["code", "message", "data"])
+          if (typeof error.code !== "number" || !Number.isSafeInteger(error.code)
+            || typeof error.message !== "string") throw new Error("invalid response error")
+          requireText(error.message, "response error", PROTOCOL_LIMITS.maxRpcMessageBytes)
+        }
+      } catch {
+        this.#lifetime.abort()
+        throw new SafeRpcError(-32600, "invalid host response")
+      }
+    }
     if (own(candidate, "id") && id === undefined) {
       await this.#controlReply(this.#failure(null, -32600, "invalid request"), concurrent)
       return
@@ -708,7 +727,7 @@ export class PluginServer {
     if (method === RPC_METHODS.initialize) {
       if (this.#initialized) throw new SafeRpcError(-32600, "plugin is already initialized")
       const params = object(rawParams)
-      requireRpcKeys(params, "initialize params", ["host", "protocol", "min_protocol", "max_frame_bytes", "capabilities"])
+      requireRpcKeys(params, "initialize params", ["host", "protocol", "max_frame_bytes", "capabilities"])
       const selectedProtocol = this.definition.manifest.protocol
       const hostCapabilities = params.capabilities
       const needsProviderModels = this.definition.manifest.capabilities.providers?.some(
@@ -719,14 +738,8 @@ export class PluginServer {
       ) === true
       if (
         params.host !== PLUGIN_HOST_ID
-        || typeof params.protocol !== "number"
-        || !Number.isSafeInteger(params.protocol)
-        || typeof params.min_protocol !== "number"
-        || !Number.isSafeInteger(params.min_protocol)
-        || params.min_protocol < PLUGIN_PROTOCOL_VERSION
-        || params.min_protocol > selectedProtocol
-        || params.protocol < selectedProtocol
-        || params.protocol > PLUGIN_PROTOCOL_VERSION
+        || params.protocol !== PLUGIN_PROTOCOL_VERSION
+        || selectedProtocol !== PLUGIN_PROTOCOL_VERSION
         || typeof params.max_frame_bytes !== "number"
         || !Number.isSafeInteger(params.max_frame_bytes)
         || params.max_frame_bytes < 1

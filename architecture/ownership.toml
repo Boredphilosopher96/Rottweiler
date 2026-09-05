@@ -39,7 +39,6 @@ path = "crates/rw-plugin-protocol/src/lib.rs"
 symbols = [
   "PROTOCOL_VERSION",
   "PLUGIN_HOST_ID",
-  "SUPPORTED_PROTOCOL_VERSIONS",
   "METHOD_INITIALIZE",
   "RpcFrame",
   "PluginManifest",
@@ -763,11 +762,11 @@ pattern = '''params\.host\s*!==\s*"rottweiler"'''
 reason = "The SDK consumes the generated host identity projection."
 
 [[shadow]]
-id = "legacy-plugin-protocol-range"
+id = "plugin-handshake-identity"
 owner = "plugin-wire-contract"
 path = "crates/rw-plugin-protocol/src/lib.rs"
-pattern = '''(?:MIN_PROTOCOL_VERSION:\s*u32\s*=\s*1|SUPPORTED_PROTOCOL_VERSIONS:\s*\[u32;\s*2\])'''
-reason = "The wire owner accepts only the current protocol generation."
+pattern = '''(?:pub\s+min_protocol\s*:|pub\s+const\s+(?:MIN_PROTOCOL_VERSION|SUPPORTED_PROTOCOL_VERSIONS))'''
+reason = "The handshake carries one exact protocol identity."
 
 [[shadow]]
 id = "duplicate-model-descriptor-selection"

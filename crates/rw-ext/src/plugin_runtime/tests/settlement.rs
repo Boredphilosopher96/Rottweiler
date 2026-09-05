@@ -448,7 +448,7 @@ async fn ordinary_cancellation_drains_admitted_host_push_before_reporting_settle
             &encode_frame(
                 &RpcFrame::Success(RpcSuccess {
                     jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
-                    id: Some(ping_request.id),
+                    id: ping_request.id,
                     result: json!("pong"),
                 }),
                 MAX_FRAME_BYTES,

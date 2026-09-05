@@ -27,16 +27,16 @@ proof before allowing conflicting work.
 
 ## Initialization
 
-Protocol 3 is the only supported generation. The host sends `initialize` with `protocol`, `min_protocol`, and an optional bounded string
-`capabilities` list. A plugin's approved manifest must select the version offered
-by the host. Declared model discovery requires `provider-models`, and declared
+The host sends `initialize` with `host: "rottweiler"`, `protocol: 3`,
+`max_frame_bytes`, and an optional bounded string `capabilities` list.
+The approved manifest and host request must both declare protocol 3. Declared model discovery requires `provider-models`, and declared
 credential references require `provider-http`. Unknown host capability strings
 do not grant authority.
 
 Transport is newline-terminated JSON-RPC 2.0 over stdin/stdout. Empty or unterminated lines,
 invalid UTF-8/JSON, unknown response IDs, and malformed envelopes are fatal protocol violations.
 Requests use bounded integer or string IDs. Error messages are sanitized; arbitrary handler
-exceptions must never cross the boundary. The generated `PROTOCOL_LIMITS` object and current
+exceptions must never cross the boundary. The generated `PROTOCOL_LIMITS` object and
 schema project the authoritative bounds.
 
 Production loads the expected manifest from trusted configuration before any process is started.
