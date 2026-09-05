@@ -375,3 +375,35 @@ fn read_only_search_rejects_symlink_and_hardlink_indexes() {
         .unwrap_or_else(|error| panic!("index hardlink: {error}"));
     assert!(SessionIndex::search_read_only(hard.path(), "needle", 10).is_err());
 }
+
+#[test]
+fn missing_or_contradictory_search_triggers_require_a_derived_rebuild() {
+    for replacement in [
+        "",
+        "CREATE TRIGGER search_documents_ai AFTER INSERT ON search_documents BEGIN SELECT 1; END;",
+    ] {
+        let root = tempdir().expect("root");
+        let index = SessionIndex::open(root.path()).expect("index");
+        let row = projection(summary("session", "needle", 1), 1);
+        index.upsert(&row).expect("initial row");
+        let connection =
+            rusqlite::Connection::open(root.path().join("index.sqlite")).expect("connection");
+        connection
+            .execute_batch("DROP TRIGGER search_documents_ai;")
+            .expect("remove trigger");
+        connection.execute_batch(replacement).expect("replacement");
+        assert!(matches!(
+            SessionIndex::search_read_only(root.path(), "needle", 10),
+            Err(SessionStoreError::UnsupportedSqliteSchema {
+                table: "search_documents"
+            })
+        ));
+        assert!(SessionIndex::open(root.path()).is_err());
+        let rebuilt = SessionIndex::reset_derived(root.path()).expect("rebuild derived owner");
+        rebuilt.upsert(&row).expect("regenerated row");
+        assert_eq!(
+            rebuilt.search("needle", 10).expect("valid trigger"),
+            vec![row.summary]
+        );
+    }
+}

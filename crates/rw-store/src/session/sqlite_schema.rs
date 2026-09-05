@@ -59,17 +59,28 @@ pub(super) const INVOCATIONS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS search_i
 pub(super) const FTS_SCHEMA: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
     body,content='search_documents',content_rowid='rowid'
 );";
-pub(super) const SEARCH_SCHEMA: &str = "CREATE INDEX IF NOT EXISTS search_documents_turn ON search_documents(session_id,length(agent_turn),agent_turn);
-CREATE TRIGGER IF NOT EXISTS search_documents_ai AFTER INSERT ON search_documents BEGIN
-    INSERT INTO sessions_fts(rowid,body) VALUES (new.rowid,new.body);
-END;
-CREATE TRIGGER IF NOT EXISTS search_documents_ad AFTER DELETE ON search_documents BEGIN
-    INSERT INTO sessions_fts(sessions_fts,rowid,body) VALUES ('delete',old.rowid,old.body);
-END;
-CREATE TRIGGER IF NOT EXISTS search_documents_au AFTER UPDATE ON search_documents BEGIN
-    INSERT INTO sessions_fts(sessions_fts,rowid,body) VALUES ('delete',old.rowid,old.body);
-    INSERT INTO sessions_fts(rowid,body) VALUES (new.rowid,new.body);
-END;";
+const SEARCH_OBJECTS: [(&str, &str, &str); 4] = [
+    (
+        "index",
+        "search_documents_turn",
+        "CREATE INDEX IF NOT EXISTS search_documents_turn ON search_documents(session_id,length(agent_turn),agent_turn);",
+    ),
+    (
+        "trigger",
+        "search_documents_ai",
+        "CREATE TRIGGER IF NOT EXISTS search_documents_ai AFTER INSERT ON search_documents BEGIN INSERT INTO sessions_fts(rowid,body) VALUES (new.rowid,new.body); END;",
+    ),
+    (
+        "trigger",
+        "search_documents_ad",
+        "CREATE TRIGGER IF NOT EXISTS search_documents_ad AFTER DELETE ON search_documents BEGIN INSERT INTO sessions_fts(sessions_fts,rowid,body) VALUES ('delete',old.rowid,old.body); END;",
+    ),
+    (
+        "trigger",
+        "search_documents_au",
+        "CREATE TRIGGER IF NOT EXISTS search_documents_au AFTER UPDATE ON search_documents BEGIN INSERT INTO sessions_fts(sessions_fts,rowid,body) VALUES ('delete',old.rowid,old.body); INSERT INTO sessions_fts(rowid,body) VALUES (new.rowid,new.body); END;",
+    ),
+];
 
 pub(super) fn validate_accounting(connection: &Connection) -> Result<(), SessionStoreError> {
     validate_table(connection, "turn_accounting", ACCOUNTING_SCHEMA)?;
@@ -102,6 +113,28 @@ pub(super) fn validate_sessions(connection: &Connection) -> Result<(), SessionSt
         return Err(SessionStoreError::UnsupportedSqliteSchema {
             table: "search_documents",
         });
+    }
+    if count == 4 {
+        for (kind, name, expected) in SEARCH_OBJECTS {
+            let sql: Option<String> = connection
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type=?1 AND name=?2",
+                    [kind, name],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if sql.is_none_or(|sql| normalized_schema(&sql) != normalized_schema(expected)) {
+                return Err(SessionStoreError::UnsupportedSqliteSchema {
+                    table: "search_documents",
+                });
+            }
+        }
+        let triggers: u32 = connection.query_row("SELECT count(*) FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('sessions','search_documents','search_invocations')", [], |row| row.get(0))?;
+        if triggers != 3 {
+            return Err(SessionStoreError::UnsupportedSqliteSchema {
+                table: "search_documents",
+            });
+        }
     }
     Ok(())
 }
@@ -178,7 +211,9 @@ pub(super) fn ensure_sessions_schema(connection: &Connection) -> Result<(), Sess
         connection.execute_batch(DOCUMENTS_SCHEMA)?;
         connection.execute_batch(INVOCATIONS_SCHEMA)?;
         connection.execute_batch(FTS_SCHEMA)?;
-        connection.execute_batch(SEARCH_SCHEMA)?;
+        for (_, _, schema) in SEARCH_OBJECTS {
+            connection.execute_batch(schema)?;
+        }
         Ok::<(), SessionStoreError>(())
     })();
     match result {
