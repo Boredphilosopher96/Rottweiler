@@ -621,7 +621,7 @@ export const CLIENT_COMMAND_LANE = {
   add_mcp_http_server: "normal",
   add_mcp_stdio_server: "normal",
   add_session_permission_rule: "normal",
-  answer_question: "normal",
+  answer_question: "urgent",
   approve_mcp_server: "normal",
   approve_plan: "urgent",
   approve_tool: "urgent",
