@@ -1,4 +1,5 @@
 //! Invocation-bound access to the session's approved tool execution path.
+use crate::allocation::PrepareAllocation as _;
 use crate::{ToolInvocationId, ToolOutput, TurnId, extension_invocation::ExtensionInvocationId};
 use rw_memory_derive::PrepareAllocation;
 use schemars::JsonSchema;
@@ -25,7 +26,6 @@ impl ExtensionToolCall {
         if self.name.is_empty() || self.name.len() > crate::tool_admission::MAX_TOOL_NAME_BYTES {
             return Err("invalid host tool identity");
         }
-        use crate::allocation::PrepareAllocation as _;
         if self
             .input
             .prepared_bytes()

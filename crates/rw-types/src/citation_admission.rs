@@ -20,10 +20,6 @@ impl CitationAdmission {
     /// Rejection leaves the prior allowance unchanged.
     /// # Errors
     /// Rejects an oversized entry, aggregate or arithmetic overflow.
-    #[expect(
-        clippy::ptr_arg,
-        reason = "Admission includes producer String spare capacity."
-    )]
     pub fn admit(
         &mut self,
         uri: &String,
@@ -72,6 +68,7 @@ impl CitationAdmission {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::{CitationAdmission, MAX_TURN_CITATION_PREPARED_BYTES, MAX_TURN_CITATIONS};
     #[test]

@@ -14,10 +14,6 @@ pub const MAX_PENDING_QUESTION_PREPARED_BYTES: usize =
 /// producer owns its input allocation; this checks the exact retained wire payload.
 /// # Errors
 /// Rejects empty/oversized question sets, duplicate identities and byte overflow.
-#[expect(
-    clippy::ptr_arg,
-    reason = "Admission charges the producer vector's retained capacity, including unused slots."
-)]
 pub fn validate_questions(questions: &Vec<Question>) -> Result<(), &'static str> {
     if questions.is_empty() || questions.len() > MAX_PENDING_QUESTION_REQUESTS {
         return Err("question entry count exceeds admission");

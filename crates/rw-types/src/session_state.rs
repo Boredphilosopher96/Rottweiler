@@ -109,6 +109,7 @@ pub struct SessionBudgetState {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::{SessionActiveTurn, SessionQueuedPreview};
     use crate::{SequenceId, TurnId};
