@@ -155,6 +155,7 @@ printf 'only exact ancestor entries\n'
         .execute(
             PreparationRequest {
                 config,
+                output_root: None,
                 launcher,
                 scratch,
             },

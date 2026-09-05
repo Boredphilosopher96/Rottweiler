@@ -119,31 +119,9 @@ fn spawn_sandboxed_plugin(
     profile: &PluginSandboxProfile,
     scratch: &Path,
     helper: &Path,
-) -> Result<(Child, SupervisedEgressProxy), PluginProcessError> {
+) -> Result<(Child, Option<SupervisedEgressProxy>), PluginProcessError> {
     let roots = approved_write_roots(config, profile, scratch)?;
-    // Keep even no-network plugins on an empty policy proxy so denied
-    // egress is observable and terminal instead of an invisible EPERM.
-    let proxy = SupervisedEgressProxy::start(EgressPolicy::new(&profile.allowed_domains))
-        .map_err(|sandbox| error(&sandbox.to_string()))?;
-    let network = NetworkPolicy::PolicyProxy {
-        port: proxy.address().port(),
-        relay_path: proxy.relay_path().map(Path::to_path_buf),
-    };
-    let mut read_roots = intrinsic_plugin_read_roots(config, scratch)?;
-    if profile.allows_workspace_reads() {
-        read_roots.extend(profile.approved_roots.iter().cloned());
-    }
-    let policy = SandboxPolicy::new(&roots, network)
-        .and_then(|policy| policy.with_read_roots(read_roots))
-        .map_err(|sandbox| error(&sandbox.to_string()))?;
-    #[cfg(target_os = "macos")]
-    let policy = if profile.mode == rw_ext::PluginSandboxMode::Preparation {
-        policy
-            .with_read_directory_ancestors(config.cwd())
-            .map_err(|sandbox| error(&sandbox.to_string()))?
-    } else {
-        policy
-    };
+    let (policy, proxy) = plugin_sandbox_policy(config, profile, scratch, &roots)?;
     let args = config.argv().to_vec();
     #[allow(unused_mut)]
     let mut plan = shell_launch_plan(&policy, helper, config.executable(), &args)
@@ -169,10 +147,12 @@ fn spawn_sandboxed_plugin(
             command.env(name, value);
         }
     }
-    command
-        .env("HTTP_PROXY", proxy.url())
-        .env("HTTPS_PROXY", proxy.url())
-        .env("NO_PROXY", "");
+    if let Some(proxy) = &proxy {
+        command
+            .env("HTTP_PROXY", proxy.url())
+            .env("HTTPS_PROXY", proxy.url())
+            .env("NO_PROXY", "");
+    }
     #[cfg(unix)]
     command.process_group(0);
     let child = command.spawn().map_err(|error| process_error(&error))?;
@@ -181,16 +161,62 @@ fn spawn_sandboxed_plugin(
     Ok((child, proxy))
 }
 
+fn plugin_sandbox_policy(
+    config: &PluginProcessConfig,
+    profile: &PluginSandboxProfile,
+    scratch: &Path,
+    roots: &[PathBuf],
+) -> Result<(SandboxPolicy, Option<SupervisedEgressProxy>), PluginProcessError> {
+    #[cfg(target_os = "linux")]
+    if let rw_ext::PluginSandboxMode::Preparation { filesystem } = &profile.mode {
+        if profile.capabilities != rw_plugin_protocol::PluginCapabilities::default()
+            || !profile.approved_roots.is_empty()
+            || !profile.allowed_domains.is_empty()
+        {
+            return Err(error(
+                "source preparation cannot request plugin capabilities",
+            ));
+        }
+        return SandboxPolicy::for_preparation(filesystem.as_ref().clone())
+            .map(|policy| (policy, None))
+            .map_err(|sandbox| error(&sandbox.to_string()));
+    }
+    // Keep even no-network plugins on an empty policy proxy so denied
+    // egress is observable and terminal instead of an invisible EPERM.
+    let proxy = SupervisedEgressProxy::start(EgressPolicy::new(&profile.allowed_domains))
+        .map_err(|sandbox| error(&sandbox.to_string()))?;
+    let network = NetworkPolicy::PolicyProxy {
+        port: proxy.address().port(),
+        relay_path: proxy.relay_path().map(Path::to_path_buf),
+    };
+    let mut read_roots = intrinsic_plugin_read_roots(config, scratch)?;
+    if profile.allows_workspace_reads() {
+        read_roots.extend(profile.approved_roots.iter().cloned());
+    }
+    let policy = SandboxPolicy::new(roots, network)
+        .and_then(|policy| policy.with_read_roots(read_roots))
+        .map_err(|sandbox| error(&sandbox.to_string()))?;
+    #[cfg(target_os = "macos")]
+    let policy = if matches!(profile.mode, rw_ext::PluginSandboxMode::Preparation { .. }) {
+        policy
+            .with_read_directory_ancestors(config.cwd())
+            .map_err(|sandbox| error(&sandbox.to_string()))?
+    } else {
+        policy
+    };
+    Ok((policy, Some(proxy)))
+}
+
 async fn attach_supervisor(
     mut child: Child,
-    proxy: SupervisedEgressProxy,
+    proxy: Option<SupervisedEgressProxy>,
     config: &PluginProcessConfig,
 ) -> Result<LaunchedPluginProcess, PluginProcessError> {
     let process_group = child.id();
     let stdin = child.stdin.take();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let denials = proxy.denials();
+    let denials = proxy.as_ref().map(SupervisedEgressProxy::denials);
     let process = Arc::new(PluginChild {
         child: Mutex::new(child),
         process_group,
@@ -206,27 +232,29 @@ async fn attach_supervisor(
         }
         return Err(error("plugin stdio is unavailable"));
     };
-    let weak = Arc::downgrade(&process);
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-            let Some(process) = weak.upgrade() else {
-                return;
-            };
-            if denials.count() == 0 {
-                continue;
-            }
-            if let Ok(mut violation) = process.violation.lock() {
-                *violation = Some(
+    if let Some(denials) = denials {
+        let weak = Arc::downgrade(&process);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                let Some(process) = weak.upgrade() else {
+                    return;
+                };
+                if denials.count() == 0 {
+                    continue;
+                }
+                if let Ok(mut violation) = process.violation.lock() {
+                    *violation = Some(
                         "plugin attempted network egress outside its approved manifest/domain allowlist"
                             .to_owned(),
                     );
+                }
+                tracing::error!("plugin killed after network capability/domain violation");
+                let _ = process.kill_tree();
+                return;
             }
-            tracing::error!("plugin killed after network capability/domain violation");
-            let _ = process.kill_tree();
-            return;
-        }
-    });
+        });
+    }
     let process: Arc<dyn SupervisedPluginProcess> = process;
     Ok(LaunchedPluginProcess {
         stdin: Box::pin(stdin),
@@ -241,7 +269,7 @@ struct PluginChild {
     child: Mutex<Child>,
     process_group: Option<u32>,
     violation: Arc<Mutex<Option<String>>>,
-    _proxy: SupervisedEgressProxy,
+    _proxy: Option<SupervisedEgressProxy>,
 }
 
 impl Drop for PluginChild {
@@ -819,7 +847,7 @@ mod tests {
         let config = PluginProcessConfig::new("/bin/sh").expect("identity");
         let outcome = tokio::time::timeout(
             Duration::from_secs(3),
-            attach_supervisor(child, proxy, &config),
+            attach_supervisor(child, Some(proxy), &config),
         )
         .await
         .expect("failed handoff settles");

@@ -191,6 +191,7 @@ impl SourcePluginResolver {
     async fn graph(&self, root: &Path, entry: &Path) -> Result<GraphReport> {
         self.invoke(
             root,
+            None,
             [
                 "graph".to_owned(),
                 root.to_string_lossy().into_owned(),
@@ -203,6 +204,7 @@ impl SourcePluginResolver {
     async fn bundle(&self, root: &Path, entry: &Path, output: &Path) -> Result<GraphReport> {
         self.invoke(
             root,
+            Some(output),
             [
                 "bundle".to_owned(),
                 root.to_string_lossy().into_owned(),
@@ -213,7 +215,12 @@ impl SourcePluginResolver {
         .await
     }
 
-    async fn invoke<const N: usize>(&self, root: &Path, argv: [String; N]) -> Result<GraphReport> {
+    async fn invoke<const N: usize>(
+        &self,
+        root: &Path,
+        output_root: Option<&Path>,
+        argv: [String; N],
+    ) -> Result<GraphReport> {
         let config = PluginProcessConfig::new(&self.host)
             .and_then(|config| config.with_argv(argv))
             .and_then(|config| config.with_cwd(root))
@@ -228,6 +235,7 @@ impl SourcePluginResolver {
             .execute(
                 PreparationRequest {
                     config,
+                    output_root: output_root.map(Path::to_path_buf),
                     launcher: Arc::clone(&self.launcher),
                     scratch: Arc::clone(&self.scratch),
                 },

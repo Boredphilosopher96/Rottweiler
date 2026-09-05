@@ -15,6 +15,11 @@ use thiserror::Error;
 #[cfg(target_os = "macos")]
 mod directory_reads;
 
+#[cfg(target_os = "linux")]
+mod preparation;
+#[cfg(target_os = "linux")]
+pub use preparation::PreparationFilesystem;
+
 mod proxy;
 pub use proxy::{EgressPin, ProxyDenials, ProxyLifecycle, SupervisedEgressProxy, UpstreamProxy};
 
@@ -98,6 +103,8 @@ pub struct SandboxPolicy {
     #[serde(default)]
     read_root_kinds: Option<Vec<RootKind>>,
     network: NetworkPolicy,
+    #[cfg(target_os = "linux")]
+    preparation: Option<PreparationFilesystem>,
     #[cfg(target_os = "macos")]
     read_directory_ancestors: Vec<PathBuf>,
 }
@@ -165,6 +172,8 @@ impl SandboxPolicy {
             write_root_kinds,
             read_roots: None,
             read_root_kinds: None,
+            #[cfg(target_os = "linux")]
+            preparation: None,
             #[cfg(target_os = "macos")]
             read_directory_ancestors: Vec::new(),
             network,
@@ -235,6 +244,8 @@ impl SandboxPolicy {
             write_root_kinds: self.write_root_kinds.clone(),
             read_roots: self.read_roots.clone(),
             read_root_kinds: self.read_root_kinds.clone(),
+            #[cfg(target_os = "linux")]
+            preparation: self.preparation.clone(),
             #[cfg(target_os = "macos")]
             read_directory_ancestors: self.read_directory_ancestors.clone(),
             network,
@@ -250,6 +261,8 @@ impl SandboxPolicy {
             write_root_kinds: Vec::new(),
             read_roots: self.read_roots.clone(),
             read_root_kinds: self.read_root_kinds.clone(),
+            #[cfg(target_os = "linux")]
+            preparation: self.preparation.clone(),
             #[cfg(target_os = "macos")]
             read_directory_ancestors: self.read_directory_ancestors.clone(),
             network: self.network.clone(),
@@ -701,7 +714,8 @@ pub fn shell_launch_plan(
             }
             let unshare = audited_linux_tool(&["/usr/bin/unshare"])
                 .ok_or(SandboxError::PolicyProxyUnavailable)?;
-            let mut unshare_args = linux_namespace_args(&helper_executable);
+            let mut unshare_args =
+                linux_namespace_args(&helper_executable, policy.preparation.is_some());
             unshare_args.extend(args);
             return Ok(LaunchPlan {
                 program: unshare,
@@ -713,7 +727,8 @@ pub fn shell_launch_plan(
         let unshare = audited_linux_tool(&["/usr/bin/unshare"]).ok_or_else(|| {
             SandboxError::Unavailable("trusted /usr/bin/unshare is unavailable".to_owned())
         })?;
-        let mut unshare_args = linux_namespace_args(&helper_executable);
+        let mut unshare_args =
+            linux_namespace_args(&helper_executable, policy.preparation.is_some());
         unshare_args.extend(args);
         Ok(LaunchPlan {
             program: unshare,
@@ -734,17 +749,25 @@ pub fn shell_launch_plan(
 }
 
 #[cfg(target_os = "linux")]
-fn linux_namespace_args(helper: &Path) -> Vec<OsString> {
-    vec![
+fn linux_namespace_args(helper: &Path, preparation: bool) -> Vec<OsString> {
+    let mut args = vec![
         OsString::from("--user"),
-        OsString::from("--map-current-user"),
+        OsString::from(if preparation {
+            "--map-root-user"
+        } else {
+            "--map-current-user"
+        }),
         OsString::from("--net"),
         OsString::from("--pid"),
         OsString::from("--fork"),
         OsString::from("--kill-child"),
-        OsString::from("--"),
-        helper.as_os_str().to_owned(),
-    ]
+    ];
+    if preparation {
+        args.extend(["--mount", "--propagation", "private"].map(OsString::from));
+    }
+    args.push(OsString::from("--"));
+    args.push(helper.as_os_str().to_owned());
+    args
 }
 
 #[cfg(target_os = "linux")]

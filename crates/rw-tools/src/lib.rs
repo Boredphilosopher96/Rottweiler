@@ -65,6 +65,9 @@ pub use rw_intel::{
     Language, Location, LspConfig, LspProcessHandle, LspProcessSpawner, LspServerConfig, Position,
     Range, RenameResult, SpawnedLspProcess, SymbolIndex, WorkspaceUriMapper,
 };
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub use rw_sandbox::PreparationFilesystem;
 #[doc(hidden)]
 pub use rw_sandbox::{
     EgressDecision, EgressPin, EgressPolicy, NetworkPolicy, SandboxError, SandboxPolicy,

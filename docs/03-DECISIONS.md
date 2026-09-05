@@ -869,3 +869,20 @@ rules cannot represent that grant. Linux must use a controlled preparation
 filesystem or hermetic resolver instead of broadening ancestor access. The
 native Linux arm64 failure and macOS production checks are recorded in
 [preparation evidence](reviews/2026-09-04-architecture-evidence/source-preparation-settlement.md).
+
+Linux preparation now uses `PreparationFilesystem`: immutable, disjoint physical
+code, work, mount, and optional output roots. The helper creates a private mount
+namespace and exposes code at `/plugin`, owned work at `/scratch`, and output at
+`/output`. It binds only declared code and reviewed runtime roots, masks home and
+credential paths before binding, mounts a private proc filesystem, and enters the
+view before executing the compiler. Directory synthesis is limited to branches
+that contain an excluded path: 512 view nodes and 8,192 inspected entries. It does
+not copy an entire installed package or recursively grant host ancestors.
+
+The helper pins directory identities before mounting. Source and runtime mounts
+are read-only. Landlock restricts writes to declared output and work directories
+plus `/dev/null`. Network access is denied without an egress relay. The helper
+removes capabilities and mount-changing syscall authority before compiler exec;
+view setup errors fail closed. The preparation owner retains the private view
+directory until actual process settlement, including cancellation and panic.
+Required user and mount namespaces remain a deployment prerequisite.

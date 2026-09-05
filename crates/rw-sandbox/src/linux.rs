@@ -1,3 +1,5 @@
+mod preparation;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::TryInto as _;
 use std::io;
@@ -58,6 +60,9 @@ pub(super) fn run_helper(args: &[OsString]) -> Result<std::convert::Infallible, 
     }
     let policy: SandboxPolicy = serde_json::from_os_str(&args[2])?;
     let helper_pin = inherited_helper_pin(args)?;
+    if let Some(layout) = &policy.preparation {
+        return preparation::run(&policy, layout, &args[3], &args[4..], helper_pin);
+    }
     if let NetworkPolicy::PolicyProxy {
         port,
         relay_path: Some(relay_path),
@@ -309,7 +314,7 @@ fn install_landlock(policy: &SandboxPolicy, program: &OsString) -> Result<(), Sa
     Ok(())
 }
 
-fn linux_homes() -> Vec<PathBuf> {
+pub(super) fn linux_homes() -> Vec<PathBuf> {
     let mut homes = BTreeSet::new();
     if let Some(home) = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -344,7 +349,7 @@ fn linux_homes() -> Vec<PathBuf> {
     homes.into_iter().collect()
 }
 
-fn sensitive_linux_roots(home: &Path) -> Vec<PathBuf> {
+pub(super) fn sensitive_linux_roots(home: &Path) -> Vec<PathBuf> {
     let mut roots = BTreeSet::new();
     for lexical in sensitive_home_roots(home) {
         roots.insert(lexical.clone());

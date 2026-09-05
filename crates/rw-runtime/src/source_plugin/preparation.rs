@@ -48,6 +48,7 @@ impl SourcePreparations {
 }
 pub(super) struct PreparationRequest {
     pub config: PluginProcessConfig,
+    pub output_root: Option<std::path::PathBuf>,
     pub launcher: Arc<dyn PluginLauncher>,
     pub scratch: Arc<PrivateMcpScratch>,
 }
@@ -90,6 +91,8 @@ impl Drop for CancelOnDrop {
 // An aborted/panicking executor is not proof that launched native work stopped.
 struct Ownership {
     scratch: Option<Arc<PrivateMcpScratch>>,
+    #[cfg(target_os = "linux")]
+    view_directory: Option<tempfile::TempDir>,
     admission: Option<OwnedSemaphorePermit>,
     execution: Option<OwnedSemaphorePermit>,
     settled: bool,
@@ -97,6 +100,10 @@ struct Ownership {
 impl Drop for Ownership {
     fn drop(&mut self) {
         if !self.settled {
+            #[cfg(target_os = "linux")]
+            if let Some(directory) = self.view_directory.take() {
+                std::mem::forget(directory);
+            }
             if let Some(scratch) = self.scratch.take() {
                 std::mem::forget(scratch);
             }
@@ -133,6 +140,8 @@ impl SourcePreparations {
         tokio::spawn(async move {
             let mut ownership = Ownership {
                 scratch: Some(Arc::clone(&request.scratch)),
+                #[cfg(target_os = "linux")]
+                view_directory: None,
                 admission: Some(admission),
                 execution: None,
                 settled: false,
@@ -183,12 +192,39 @@ impl SourcePreparations {
             () = tokio::time::sleep_until(deadline) => return Err(miette!("TypeScript preparation exceeded its deadline")),
             permit = Arc::clone(&self.budget.execution).acquire_owned() => permit.map_err(|_| miette!("TypeScript preparation admission closed"))?,
         });
+        #[cfg(target_os = "linux")]
+        let mode = {
+            let directory = tempfile::Builder::new()
+                .prefix("preparation-")
+                .tempdir_in(request.scratch.path())
+                .map_err(|error| miette!(error.to_string()))?;
+            let work = directory.path().join("work");
+            let mount = directory.path().join("view");
+            std::fs::create_dir(&work).map_err(|error| miette!(error.to_string()))?;
+            std::fs::create_dir(&mount).map_err(|error| miette!(error.to_string()))?;
+            let filesystem = rw_tools::PreparationFilesystem::new(
+                request.config.cwd(),
+                &work,
+                &mount,
+                request.output_root.as_deref(),
+            )
+            .map_err(|error| miette!(error.to_string()))?;
+            ownership.view_directory = Some(directory);
+            PluginSandboxMode::Preparation {
+                filesystem: Box::new(filesystem),
+            }
+        };
+        #[cfg(not(target_os = "linux"))]
+        let mode = {
+            let _ = &request.output_root;
+            PluginSandboxMode::Preparation {}
+        };
         let child = request
             .launcher
             .launch(
                 &request.config,
                 &PluginSandboxProfile {
-                    mode: PluginSandboxMode::Preparation,
+                    mode,
                     capabilities: PluginCapabilities::default(),
                     approved_roots: Vec::new(),
                     allowed_domains: Vec::new(),

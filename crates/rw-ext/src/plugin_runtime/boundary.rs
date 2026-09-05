@@ -9,13 +9,16 @@ pub struct PluginSandboxProfile {
     pub allowed_domains: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PluginSandboxMode {
     /// Initialization-only launch: deny network/writes and expose only runtime/entrypoint reads.
     #[cfg(test)]
     ManifestProbe,
     /// Release-owned source graph discovery and sealed-bundle preparation.
-    Preparation,
+    Preparation {
+        #[cfg(target_os = "linux")]
+        filesystem: Box<rw_tools::PreparationFilesystem>,
+    },
     Approved,
 }
 

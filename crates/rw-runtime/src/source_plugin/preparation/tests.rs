@@ -104,12 +104,15 @@ impl PluginLauncher for Launcher {
 }
 fn request(launcher: &Arc<Launcher>, script: &str) -> PreparationRequest {
     let scratch = Arc::new(PrivateMcpScratch::create().expect("private scratch"));
+    let code = scratch.path().join("code");
+    std::fs::create_dir(&code).expect("private code");
     let config = PluginProcessConfig::new(PathBuf::from("/bin/sh"))
         .and_then(|config| config.with_argv(["-c", script]))
-        .and_then(|config| config.with_cwd(scratch.path()))
+        .and_then(|config| config.with_cwd(&code))
         .expect("helper config");
     PreparationRequest {
         config,
+        output_root: None,
         launcher: launcher.clone(),
         scratch,
     }
@@ -304,7 +307,7 @@ async fn executor_panic_cannot_release_admission_or_pass_the_settlement_barrier(
         .expect("spare shared capacity remains usable");
     assert_eq!(result.stdout, b"healthy");
     // This fixture panics before spawning native work; remove its retained directory.
-    std::fs::remove_dir(&scratch).expect("remove inert panic fixture scratch");
+    std::fs::remove_dir_all(&scratch).expect("remove inert panic fixture scratch");
     assert_eq!(
         pool.budget.admission.available_permits(),
         MAX_PREPARATIONS - 1

@@ -6,6 +6,11 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[[test]]
+name = "linux_source_preparation"
+path = "tests/linux_source_preparation.rs"
+harness = false
+
 [dependencies]
 async-stream = "0.3.6"
 async-trait = "0.1.89"
