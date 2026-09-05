@@ -16,7 +16,9 @@ pub(super) fn read_context(
     request: ExtensionContextRead,
 ) -> Result<ExtensionContextPage, AgentLoopError> {
     let sequence = state.sequence.map(SequenceId);
-    if request.after_item_id.is_some() && request.expected_sequence != sequence {
+    if (request.after_item_id.is_some() || request.expected_sequence.is_some())
+        && request.expected_sequence != sequence
+    {
         return Ok(ExtensionContextPage::Restart {});
     }
     let assembled = assemble_session_context(
@@ -29,19 +31,49 @@ pub(super) fn read_context(
     )?;
     let start = if let Some(id) = &request.after_item_id {
         validate_name(&id.0).map_err(invalid)?;
-        match assembled.items.iter().position(|item| item.id.0 == id.0) {
+        match assembled
+            .items
+            .iter()
+            .position(|item| item.id.0 == id.0)
+            .or_else(|| {
+                id.0.strip_prefix("tool:")
+                    .and_then(|name| assembled.tools.iter().position(|tool| tool.name == name))
+                    .map(|index| assembled.items.len() + index)
+            }) {
             Some(index) => index + 1,
             None => return Ok(ExtensionContextPage::Restart {}),
         }
     } else {
         0
     };
-    let end = start
-        .saturating_add(MAX_CONTEXT_PAGE_ITEMS)
-        .min(assembled.items.len());
-    let items = assembled.items[start..end]
-        .iter()
-        .map(|item| {
+    let total = assembled
+        .items
+        .len()
+        .checked_add(assembled.tools.len())
+        .ok_or_else(|| invalid("context inventory overflow"))?;
+    let end = start.saturating_add(MAX_CONTEXT_PAGE_ITEMS).min(total);
+    let items = (start..end)
+        .map(|index| {
+            if index >= assembled.items.len() {
+                let tool = &assembled.tools[index - assembled.items.len()];
+                let item_id = ContextItemId(format!("tool:{}", tool.name));
+                validate_name(&item_id.0).map_err(invalid)?;
+                return Ok(ExtensionContextItem {
+                    item_id,
+                    kind: rw_types::ContextItemKind::ToolDefinitions,
+                    source: rw_types::extension_control::ExtensionContextSource::ToolRegistry,
+                    estimated_tokens: rw_context::LocalTokenEstimator::tools(std::slice::from_ref(
+                        tool,
+                    )),
+                    state: ContextItemState {
+                        pinned: false,
+                        evicted: false,
+                        summarized: false,
+                        pruned: false,
+                    },
+                });
+            }
+            let item = &assembled.items[index];
             validate_name(&item.id.0).map_err(invalid)?;
             let role = item
                 .assembled_turn_index
@@ -80,7 +112,7 @@ pub(super) fn read_context(
             })
         })
         .collect::<Result<Vec<_>, AgentLoopError>>()?;
-    let next_after_item_id = (end < assembled.items.len())
+    let next_after_item_id = (end < total)
         .then(|| items.last().map(|item| item.item_id.clone()))
         .flatten();
     Ok(ExtensionContextPage::Ready {

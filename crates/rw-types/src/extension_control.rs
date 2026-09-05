@@ -30,6 +30,7 @@ pub enum ExtensionContextSource {
     Conversation,
     UserPin,
     ClientQueue,
+    ToolRegistry,
 }
 
 /// Metadata only. Prompt bodies, tool outputs and machine-local paths are not exposed.
