@@ -65,6 +65,8 @@ pub enum SessionStoreError {
     AccountingQueryLimitTooLarge,
     #[error("accounting query exceeds the {max_entries}-entry read limit")]
     AccountingResultTooLarge { max_entries: usize },
+    #[error("accounting read exceeds its aggregate allocation allowance")]
+    AccountingReadTooLarge,
     #[error("session search index is missing or has an unsafe file identity")]
     UnsafeSessionIndex,
     #[error("session search {component} exceeds the {max_bytes}-byte snapshot limit")]

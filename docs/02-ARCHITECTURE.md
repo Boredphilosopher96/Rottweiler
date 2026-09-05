@@ -415,8 +415,10 @@ resolve(alias) → [candidate models] → adapter → provider
   only the selected totals to u64. A missing derived index rebuilds in resumable
   pages of at most 128 facts. Queries reject incomplete coverage. Accounting
   dispositions admit at most 1 MiB of encoded JSON before serialization; reads
-  apply the same bound before allocating a database payload. Rewind and search
-  rebuild never erase charged facts.
+  apply the same bound before allocating a database payload. Fact inspection and
+  historical reports require an explicit row allowance and share a 16 MiB
+  allocation allowance, checked against borrowed database values before decoding.
+  Rewind and search rebuild never erase charged facts.
 - `checkpoints/` — content-addressed blobs (BLAKE3) + per-turn manifests of touched files. Rewind = restore manifest.
 - Config precedence: built-in defaults ← `~/.rottweiler/config.toml` ← `.rottweiler/config.toml` ← env ← CLI flags. **Exception**: security-sensitive keys (`[permissions]`, safe-list, `[network]`/proxy, telemetry opt-in, update channel) are ignored at project level with a warning (05 Layer 0). Schema in `rw-types`, `rw config check` validates and prints effective config with provenance per key.
 

@@ -206,7 +206,7 @@ async fn production_factory_fork_composes_and_resumes_child() {
     assert!(
         rw_store::session::AccountingLedger::open(&storage_root)
             .expect("accounting ledger")
-            .entries_for_session(&child.descriptor().session_id.0)
+            .entries_bounded(Some(&child.descriptor().session_id.0), 4096)
             .expect("child accounting")
             .is_empty()
     );

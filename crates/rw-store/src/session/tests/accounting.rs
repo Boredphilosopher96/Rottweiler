@@ -281,7 +281,7 @@ fn accounting_rebuild_is_idempotent_conflict_checked_and_rewind_independent() {
         .unwrap_or_else(|error| panic!("duplicate projection must be idempotent: {error}"));
     assert_eq!(
         ledger
-            .entries_for_session("paid-session")
+            .entries_bounded(Some("paid-session"), 4096)
             .unwrap_or_else(|error| panic!("entries must query: {error}")),
         vec![paid.clone()]
     );
@@ -312,7 +312,7 @@ fn accounting_rebuild_is_idempotent_conflict_checked_and_rewind_independent() {
         .unwrap_or_else(|error| panic!("empty rewind reconciliation must succeed: {error}"));
     assert_eq!(
         ledger
-            .entries_for_session("paid-session")
+            .entries_bounded(Some("paid-session"), 4096)
             .unwrap_or_else(|error| panic!("paid history must query: {error}")),
         vec![paid.clone()]
     );
@@ -322,13 +322,13 @@ fn accounting_rebuild_is_idempotent_conflict_checked_and_rewind_independent() {
         .unwrap_or_else(|error| panic!("authoritative rebuild must replace rows: {error}"));
     assert_eq!(
         ledger
-            .entries_for_session("paid-session")
+            .entries_bounded(Some("paid-session"), 4096)
             .unwrap_or_else(|error| panic!("rebuilt paid history must query: {error}")),
         vec![paid]
     );
     assert_eq!(
         ledger
-            .entries_for_session("other-session")
+            .entries_bounded(Some("other-session"), 4096)
             .unwrap_or_else(|error| panic!("replacement must query: {error}")),
         vec![replacement]
     );

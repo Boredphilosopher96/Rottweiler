@@ -147,7 +147,7 @@ fn derived_rebuild_is_paged_resumable_and_never_exposes_partial_totals() {
     );
     assert_eq!(
         reopened
-            .entries_for_session("chosen")
+            .entries_bounded(Some("chosen"), 4096)
             .expect("authority")
             .len(),
         300
@@ -186,7 +186,7 @@ fn accounting_rejects_oversized_dispositions_before_persisting() {
     ));
     assert!(
         ledger
-            .entries_for_session("chosen")
+            .entries_bounded(Some("chosen"), 4096)
             .expect("facts")
             .is_empty()
     );

@@ -647,7 +647,9 @@ fn accounting_projection_keeps_main_and_compaction_attribution() {
     ledger
         .reconcile(&entries)
         .expect("idempotent reconciliation");
-    let persisted = ledger.entries().expect("persisted accounting entries");
+    let persisted = ledger
+        .entries_bounded(None, 4096)
+        .expect("persisted accounting entries");
     assert_eq!(persisted.len(), 3);
     assert_eq!(persisted[1].sequence_id, SequenceId(4));
     assert_eq!(persisted[2].sequence_id, SequenceId(5));

@@ -58,7 +58,7 @@ fn accounting_progress_commits_with_facts_and_conflict_rolls_back_both() {
     ));
     assert_eq!(
         ledger
-            .entries_for_session("accounted")
+            .entries_bounded(Some("accounted"), 4096)
             .expect("facts")
             .len(),
         2
@@ -116,7 +116,7 @@ fn accounting_progress_rejects_foreign_view_and_changed_prefix_digest() {
     );
     assert_eq!(
         ledger
-            .entries_for_session("accounted")
+            .entries_bounded(Some("accounted"), 4096)
             .expect("facts")
             .len(),
         1

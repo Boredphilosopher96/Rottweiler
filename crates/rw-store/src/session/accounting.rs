@@ -1,5 +1,7 @@
 //! Durable accounting facts, reconciliation, and bounded reporting.
 mod progress;
+mod rows;
+use rows::accounting_entry_from_row;
 pub(super) mod totals;
 use super::{
     SessionStoreError,
@@ -276,46 +278,27 @@ impl AccountingLedger {
         Ok(())
     }
 
-    /// Returns typed entries for one session in numeric event-sequence order.
-    ///
+    /// Reads accounting facts under explicit row and allocation limits.
+    /// `None` selects every session; a session identity restricts the result.
     /// # Errors
-    ///
-    /// Returns an invalid-id, corrupt-row, JSON, or `SQLite` error.
-    pub fn entries_for_session(
+    /// Rejects invalid identities, excess rows/bytes, malformed facts or database errors.
+    pub fn entries_bounded(
         &self,
-        session_id: &str,
+        session_id: Option<&str>,
+        max_entries: usize,
     ) -> Result<Vec<TurnAccountingEntry>, SessionStoreError> {
-        validate_session_id(session_id)?;
+        if let Some(session_id) = session_id {
+            validate_session_id(session_id)?;
+        }
+        let limit = rows::sql_limit(max_entries)?;
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT session_id,turn_id,sequence_id,emitted_at_utc,utc_day,\
-                    attribution_json,usage_json,cost_json \
-             FROM turn_accounting WHERE session_id=?1 \
-             ORDER BY length(sequence_id),sequence_id",
+            "SELECT session_id,turn_id,sequence_id,emitted_at_utc,utc_day,attribution_json,usage_json,cost_json FROM turn_accounting WHERE (?1 IS NULL OR session_id=?1) ORDER BY session_id,length(sequence_id),sequence_id LIMIT ?2"
         )?;
-        let rows = statement.query_map([session_id], accounting_entry_from_row)?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(SessionStoreError::from)
-    }
-
-    /// Returns every typed entry in stable session and numeric sequence order.
-    /// This is primarily useful for validating or copying a derived projection;
-    /// rebuild callers should prefer entries projected directly from JSONL.
-    ///
-    /// # Errors
-    ///
-    /// Returns a corrupt-row, JSON, or `SQLite` error.
-    pub fn entries(&self) -> Result<Vec<TurnAccountingEntry>, SessionStoreError> {
-        let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT session_id,turn_id,sequence_id,emitted_at_utc,utc_day,\
-                    attribution_json,usage_json,cost_json \
-             FROM turn_accounting \
-             ORDER BY session_id,length(sequence_id),sequence_id",
-        )?;
-        let rows = statement.query_map([], accounting_entry_from_row)?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(SessionStoreError::from)
+        rows::collect(
+            &mut statement.query(params![session_id, limit])?,
+            max_entries,
+        )
     }
 
     /// Reads a bounded UTC range from an existing accounting projection
@@ -339,13 +322,7 @@ impl AccountingLedger {
         if start_utc > end_utc {
             return Err(SessionStoreError::InvalidAccountingTimestamp);
         }
-        if max_entries > 1_000_000 {
-            return Err(SessionStoreError::AccountingQueryLimitTooLarge);
-        }
-        let sql_limit = max_entries
-            .checked_add(1)
-            .ok_or(SessionStoreError::LimitOverflow)?;
-        let sql_limit = i64::try_from(sql_limit).map_err(|_| SessionStoreError::LimitOverflow)?;
+        let sql_limit = rows::sql_limit(max_entries)?;
         let path = root.join("index.sqlite");
         let before = validate_read_only_index(&path)?;
         let canonical_root = fs::canonicalize(root)?;
@@ -374,16 +351,10 @@ impl AccountingLedger {
              ORDER BY emitted_at_utc,session_id,length(sequence_id),sequence_id \
              LIMIT ?3",
         )?;
-        let rows = statement.query_map(
-            params![start_utc.as_str(), end_utc.as_str(), sql_limit],
-            accounting_entry_from_row,
-        )?;
-        let mut entries = rows.collect::<Result<Vec<_>, _>>()?;
-        if entries.len() > max_entries {
-            return Err(SessionStoreError::AccountingResultTooLarge { max_entries });
-        }
-        entries.shrink_to_fit();
-        Ok(entries)
+        rows::collect(
+            &mut statement.query(params![start_utc.as_str(), end_utc.as_str(), sql_limit])?,
+            max_entries,
+        )
     }
 
     fn connection(&self) -> Result<Connection, SessionStoreError> {
@@ -555,50 +526,4 @@ pub(super) fn insert_accounting_entry(
     } else {
         Err(SessionStoreError::AccountingConflict)
     }
-}
-
-fn accounting_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TurnAccountingEntry> {
-    let sequence = row.get::<_, String>(2)?;
-    let attribution_json = row.get::<_, String>(5)?;
-    let usage_json = row.get::<_, String>(6)?;
-    let cost_json = row.get::<_, String>(7)?;
-    let sequence_id = sequence.parse::<u64>().map(SequenceId).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(error))
-    })?;
-    let attribution =
-        serde_json::from_str::<AccountingAttribution>(&attribution_json).map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(
-                5,
-                rusqlite::types::Type::Text,
-                Box::new(error),
-            )
-        })?;
-    let usage = serde_json::from_str::<Usage>(&usage_json).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(error))
-    })?;
-    let cost = serde_json::from_str::<Cost>(&cost_json).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, Box::new(error))
-    })?;
-    Ok(TurnAccountingEntry {
-        session_id: row.get(0)?,
-        turn_id: TurnId(row.get(1)?),
-        sequence_id,
-        emitted_at_utc: UtcTimestamp::parse(row.get::<_, String>(3)?).map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(
-                3,
-                rusqlite::types::Type::Text,
-                Box::new(error),
-            )
-        })?,
-        utc_day: UtcDayKey::parse(row.get::<_, String>(4)?).map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(
-                4,
-                rusqlite::types::Type::Text,
-                Box::new(error),
-            )
-        })?,
-        attribution,
-        usage,
-        cost,
-    })
 }

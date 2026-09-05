@@ -47,7 +47,10 @@ fn derived_rebuild_preserves_authority_and_rolls_back_on_accounting_conflict() {
     };
     let index =
         SessionIndex::rebuild(root.path(), std::slice::from_ref(&row), &[]).expect("rebuild");
-    assert_eq!(ledger.entries().expect("ledger survives"), vec![charge()]);
+    assert_eq!(
+        ledger.entries_bounded(None, 4096).expect("ledger survives"),
+        vec![charge()]
+    );
     let connection = Connection::open(root.path().join("index.sqlite")).expect("db");
     let reserved: i64 = connection
         .query_row(
@@ -79,7 +82,12 @@ fn derived_rebuild_preserves_authority_and_rolls_back_on_accounting_conflict() {
             .len(),
         1
     );
-    assert_eq!(ledger.entries().expect("ledger unchanged"), vec![charge()]);
+    assert_eq!(
+        ledger
+            .entries_bounded(None, 4096)
+            .expect("ledger unchanged"),
+        vec![charge()]
+    );
 }
 
 #[test]
@@ -108,7 +116,12 @@ fn explicit_search_rebuild_can_replace_an_unsupported_derived_schema() {
     ));
     let index = SessionIndex::rebuild(root.path(), &[], &[]).expect("explicit derived repair");
     assert!(index.list(10).expect("empty current index").is_empty());
-    assert_eq!(ledger.entries().expect("ledger preserved"), vec![charge()]);
+    assert_eq!(
+        ledger
+            .entries_bounded(None, 4096)
+            .expect("ledger preserved"),
+        vec![charge()]
+    );
 }
 
 #[test]

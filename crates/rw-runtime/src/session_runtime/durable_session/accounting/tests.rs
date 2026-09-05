@@ -64,7 +64,7 @@ async fn indexed_accounting_reconciles_multiple_pages_and_reopens_at_exact_prefi
     let ledger = AccountingLedger::open(root.path()).expect("ledger");
     assert_eq!(
         ledger
-            .entries_for_session("accounting")
+            .entries_bounded(Some("accounting"), 4096)
             .expect("facts")
             .len(),
         192
@@ -82,7 +82,7 @@ async fn indexed_accounting_reconciles_multiple_pages_and_reopens_at_exact_prefi
         .expect("reopen reconciliation");
     assert_eq!(
         ledger
-            .entries_for_session("accounting")
+            .entries_bounded(Some("accounting"), 4096)
             .expect("facts")
             .len(),
         192
@@ -134,7 +134,7 @@ async fn text_batches_do_not_checkpoint_accounting_until_the_billed_boundary() {
     );
     assert_eq!(
         ledger
-            .entries_for_session("accounting")
+            .entries_bounded(Some("accounting"), 4096)
             .expect("facts")
             .len(),
         1
