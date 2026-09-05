@@ -278,10 +278,10 @@ impl SessionFactory for StubFactory {
     ) -> Result<PreparedForkOperation, HostError> {
         let mut receipts = self.fork_receipts.lock().expect("fixture receipts");
         if let Some((fingerprint, state)) = receipts.get(&operation.key.operation_id) {
-            if fingerprint == &operation.key.payload_hash {
-                if let ForkOperationState::Pending(prepared) = state {
-                    return Ok(prepared.clone());
-                }
+            if fingerprint == &operation.key.payload_hash
+                && let ForkOperationState::Pending(prepared) = state
+            {
+                return Ok(prepared.clone());
             }
             return Err(HostError::Protocol("fork identity conflict".into()));
         }
@@ -306,10 +306,10 @@ impl SessionFactory for StubFactory {
         if fingerprint != &key.payload_hash {
             return Err(HostError::Protocol("fork identity conflict".into()));
         }
-        if let ForkOperationState::Completed(existing) = state {
-            if existing != result {
-                return Err(HostError::Protocol("fork outcome conflict".into()));
-            }
+        if let ForkOperationState::Completed(existing) = state
+            && existing != result
+        {
+            return Err(HostError::Protocol("fork outcome conflict".into()));
         }
         *state = ForkOperationState::Completed(result.clone());
         Ok(result.clone())
@@ -778,5 +778,6 @@ mod sessions;
 mod startup;
 
 fn decode_host_event(event: HostEvent) -> EngineEvent {
-    serde_json::from_slice(&event.json).expect("valid encoded host event")
+    let HostEvent { json, .. } = event;
+    serde_json::from_slice(&json).expect("valid encoded host event")
 }

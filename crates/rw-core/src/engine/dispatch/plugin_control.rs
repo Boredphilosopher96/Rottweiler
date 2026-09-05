@@ -13,7 +13,7 @@ use tokio::sync::broadcast;
 pub(super) fn read_context(
     state: &ActorState,
     config: &SessionActorConfig,
-    request: ExtensionContextRead,
+    request: &ExtensionContextRead,
 ) -> Result<ExtensionContextPage, AgentLoopError> {
     let sequence = state.sequence.map(SequenceId);
     if (request.after_item_id.is_some() || request.expected_sequence.is_some())
@@ -82,26 +82,7 @@ pub(super) fn read_context(
             Ok(ExtensionContextItem {
                 item_id: ContextItemId(item.id.0.clone()),
                 kind: protocol_context_kind(item.kind, role),
-                source: match &item.provenance {
-                    rw_context::ContextProvenance::BuiltIn => {
-                        rw_types::extension_control::ExtensionContextSource::BuiltIn
-                    }
-                    rw_context::ContextProvenance::ProjectFile { .. } => {
-                        rw_types::extension_control::ExtensionContextSource::ProjectFile
-                    }
-                    rw_context::ContextProvenance::Extension { .. } => {
-                        rw_types::extension_control::ExtensionContextSource::Extension
-                    }
-                    rw_context::ContextProvenance::Conversation { .. } => {
-                        rw_types::extension_control::ExtensionContextSource::Conversation
-                    }
-                    rw_context::ContextProvenance::UserPin => {
-                        rw_types::extension_control::ExtensionContextSource::UserPin
-                    }
-                    rw_context::ContextProvenance::ClientQueue => {
-                        rw_types::extension_control::ExtensionContextSource::ClientQueue
-                    }
-                },
+                source: context_source(&item.provenance),
                 estimated_tokens: item.tokens,
                 state: ContextItemState {
                     pinned: item.pinned,
@@ -194,4 +175,29 @@ pub(super) async fn control(
 }
 fn invalid(message: &str) -> AgentLoopError {
     AgentLoopError::InvalidConfiguration(message.into())
+}
+
+fn context_source(
+    provenance: &rw_context::ContextProvenance,
+) -> rw_types::extension_control::ExtensionContextSource {
+    match provenance {
+        rw_context::ContextProvenance::BuiltIn => {
+            rw_types::extension_control::ExtensionContextSource::BuiltIn
+        }
+        rw_context::ContextProvenance::ProjectFile { .. } => {
+            rw_types::extension_control::ExtensionContextSource::ProjectFile
+        }
+        rw_context::ContextProvenance::Extension { .. } => {
+            rw_types::extension_control::ExtensionContextSource::Extension
+        }
+        rw_context::ContextProvenance::Conversation { .. } => {
+            rw_types::extension_control::ExtensionContextSource::Conversation
+        }
+        rw_context::ContextProvenance::UserPin => {
+            rw_types::extension_control::ExtensionContextSource::UserPin
+        }
+        rw_context::ContextProvenance::ClientQueue => {
+            rw_types::extension_control::ExtensionContextSource::ClientQueue
+        }
+    }
 }

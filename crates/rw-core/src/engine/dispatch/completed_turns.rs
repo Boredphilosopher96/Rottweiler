@@ -1,7 +1,4 @@
-use crate::engine::{
-    AgentLoopError,
-    session::{ActorState, SessionActorConfig},
-};
+use crate::engine::session::{ActorState, SessionActorConfig};
 use rw_types::{ClientCommand, CommandOutcome, RewindTarget};
 
 use super::replies::protocol_rejection;
@@ -47,10 +44,9 @@ pub(super) async fn rejection(
             code,
             "turn is not a currently completed target",
         )),
-        Err(error) => Some(read_failure(error)),
+        Err(error) => Some(protocol_rejection(
+            "completed_turn_unavailable",
+            error.to_string(),
+        )),
     }
-}
-
-fn read_failure(error: AgentLoopError) -> CommandOutcome {
-    protocol_rejection("completed_turn_unavailable", error.to_string())
 }

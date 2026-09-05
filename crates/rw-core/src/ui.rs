@@ -9,12 +9,20 @@ pub type BoundUiCommand = BoundCommand<SessionCommandContext, SessionCommandOutp
 /// bounded snapshots; they never invoke extension code. The command channel owns
 /// read allocation admission and driver authority before calling this boundary.
 pub trait UiRegistry: Send + Sync {
+    /// Read the bounded approved catalog without activating code.
+    /// # Errors
+    /// Rejects unavailable or oversized registry snapshots.
     fn catalog(&self) -> Result<UiCatalog, AgentLoopError>;
+    /// Read the bounded live panel state.
+    /// # Errors
+    /// Rejects unavailable or oversized registry snapshots.
     fn panels(&self) -> Result<UiPanels, AgentLoopError>;
 
     /// Resolves against the exact live generation and host-owned action data.
     /// For tools, `tool` must come from the canonical invocation query at the
     /// actor's exact committed prefix. Panels use the registry's live revision.
+    /// # Errors
+    /// Rejects stale generation, source, revision or undeclared action identities.
     fn resolve_action(
         &self,
         request: &UiActionRequest,

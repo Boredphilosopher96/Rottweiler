@@ -59,7 +59,7 @@ impl CanonicalHistory {
     /// Rejects an invalid source selector or malformed task state.
     pub fn todo_state(&self) -> Result<rw_types::todo::TodoSnapshot, RecoveryError> {
         let Some(sequence) = self.head.control.todos else {
-            return Ok(Default::default());
+            return Ok(rw_types::todo::TodoSnapshot::default());
         };
         let mut reader = ControlReader {
             source: SourceReader {

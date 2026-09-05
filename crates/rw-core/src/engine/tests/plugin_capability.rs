@@ -325,6 +325,19 @@ async fn typed_controls_preserve_policy_and_page_context_without_prompt_payloads
             .await
             .is_err()
     );
+    assert_selection_policy(&plugin).await;
+    assert!(
+        sink.events
+            .lock()
+            .expect("events")
+            .iter()
+            .all(|event| !matches!(event.wire, EngineEvent::DriverChanged { .. }))
+    );
+    handle.close().await.expect("shutdown");
+}
+
+async fn assert_selection_policy(plugin: &crate::PluginSessionCapability) {
+    use rw_types::extension_control::{ExtensionControl, ExtensionControlOutcome};
     assert!(matches!(
         plugin
             .control(ExtensionControl::SelectMode {
@@ -366,12 +379,4 @@ async fn typed_controls_preserve_policy_and_page_context_without_prompt_payloads
             .expect("busy"),
         ExtensionControlOutcome::Busy {}
     ));
-    assert!(
-        sink.events
-            .lock()
-            .expect("events")
-            .iter()
-            .all(|event| !matches!(event.wire, EngineEvent::DriverChanged { .. }))
-    );
-    handle.close().await.expect("shutdown");
 }

@@ -172,13 +172,13 @@ impl TodoStateStore for ActorTodoStore {
             job: Arc::clone(&job),
             complete: false,
         };
-        if let Err(error) = self.signals.send(TurnSignal::Todo(request)) {
-            if let TurnSignal::Todo(mut request) = error.0 {
-                request.finish(
-                    Err(ToolError::InvalidInput("task session is closed".into())),
-                    None,
-                );
-            }
+        if let Err(error) = self.signals.send(TurnSignal::Todo(request))
+            && let TurnSignal::Todo(mut request) = error.0
+        {
+            request.finish(
+                Err(ToolError::InvalidInput("task session is closed".into())),
+                None,
+            );
         }
         job.wait().await;
         waiter.consumed = true;
