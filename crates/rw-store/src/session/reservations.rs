@@ -1,28 +1,11 @@
 //! Provider-call budget identities and admission bounds shared by durable storage and core.
 
-use rw_types::{
-    AccountingAttribution, BudgetScope, BudgetUnit, Cost, SessionId, TurnId, Usage,
-    config::BudgetConfig,
-};
+use rw_types::{BudgetScope, BudgetUnit, SequenceId, config::BudgetConfig};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{SessionStoreError, UtcTimestamp};
-
-/// Host-assigned logical call identity plus a distinct provider attempt.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ProviderCallIdentity {
-    /// Session which owns the provider request.
-    pub session_id: SessionId,
-    /// Durable agent turn which owns this request.
-    pub turn_id: TurnId,
-    /// Separates ordinary generation from compaction, title, and child usage.
-    pub attribution: AccountingAttribution,
-    /// Bounded host-generated identity, never a model-supplied tool identifier.
-    pub call_id: String,
-    /// Retries under a logical call must increment this value.
-    pub attempt: u32,
-}
+pub use rw_types::{ProviderCallActuals, ProviderCallIdentity};
 
 /// A charge in exactly one supported billing unit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -63,13 +46,18 @@ pub struct BudgetReservationPlan {
     pub budget: BudgetConfig,
 }
 
-/// Provider-reported actuals; a missing or ambiguous terminal is never represented as zero.
+/// Exact journal event whose charge can replace one provider attempt's reservation.
+/// Callers submit this only after the event append has completed durably.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ProviderCallActuals {
-    /// Normalized input, output, cache and reasoning usage.
-    pub usage: Usage,
-    /// Normalized monetary, credit, subscription, or unavailable accounting.
-    pub cost: Cost,
+pub struct ProviderCallReceipt {
+    /// Identity from the durable provider accounting event.
+    pub identity: ProviderCallIdentity,
+    /// Exact source sequence; later corrections supersede earlier receipts.
+    pub sequence_id: SequenceId,
+    /// Injected event time, which assigns settled usage to its UTC day.
+    pub accounted_at: UtcTimestamp,
+    /// Provider-normalized actuals from that exact event.
+    pub actuals: ProviderCallActuals,
 }
 
 /// Admission can fail without starting provider work.

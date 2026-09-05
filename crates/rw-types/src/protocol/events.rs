@@ -11,7 +11,7 @@ use super::{
     UnrestorablePath, Usage, UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch,
     WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus, decimal_u64,
 };
-use crate::{ToolCallId, ToolInvocationId, ToolOutput};
+use crate::{ProviderCallActuals, ProviderCallIdentity, ToolCallId, ToolInvocationId, ToolOutput};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -436,6 +436,11 @@ pub enum EngineEvent {
         question_id: QuestionId,
         answers: Vec<Answer>,
     },
+    ProviderCallAccounted {
+        meta: EventMeta,
+        call: ProviderCallIdentity,
+        actuals: ProviderCallActuals,
+    },
     TurnFinished {
         meta: EventMeta,
         turn_id: TurnId,
@@ -742,6 +747,7 @@ impl EngineEvent {
             | Self::ToolCallFinished { meta, .. }
             | Self::QuestionAsked { meta, .. }
             | Self::QuestionAnswered { meta, .. }
+            | Self::ProviderCallAccounted { meta, .. }
             | Self::TurnFinished { meta, .. }
             | Self::ContextUsageUpdated { meta, .. }
             | Self::BudgetStatusChanged { meta, .. }
@@ -835,6 +841,7 @@ impl EngineEvent {
             | Self::ToolCallFinished { meta, .. }
             | Self::QuestionAsked { meta, .. }
             | Self::QuestionAnswered { meta, .. }
+            | Self::ProviderCallAccounted { meta, .. }
             | Self::TurnFinished { meta, .. }
             | Self::ContextUsageUpdated { meta, .. }
             | Self::BudgetStatusChanged { meta, .. }

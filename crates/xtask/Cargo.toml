@@ -11,6 +11,7 @@ publish = false
 base64.workspace = true
 ed25519-dalek.workspace = true
 rw-types.workspace = true
+rw-store.workspace = true
 rustix.workspace = true
 schemars.workspace = true
 semver.workspace = true

@@ -1,3 +1,5 @@
+mod envelope;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs::{self};
@@ -21,16 +23,16 @@ use rw_types::{
     PermissionApprovalDescriptor, PermissionApprovalScope, PermissionModeDescriptor,
     PermissionRuleDescriptor, PermissionStateDescriptor, PlanArtifact, PlanDecision, PlanStep,
     ProgressAmount, PromptDump, PromptTool, ProviderAuthAttemptId, ProviderAuthChallenge,
-    ProviderAuthKind, ProviderDescriptor, ProviderNextAction, Question, QuestionId, QuestionOption,
-    QuestionResponseKind, RequestId, ReviewFileDecision, ReviewFileStatus, RewindTarget, Role,
-    RuntimeServiceDescriptor, RuntimeServiceKind, SequenceId, SessionDescriptor, SessionId,
-    SessionReview, SessionReviewFile, ShellId, StoredAttachment, SubagentActivity,
-    SubagentDescriptor, SubagentId, SubagentIsolation, SubagentReplayItem, SubagentResult,
-    SubagentStatus, TRANSIENT_ENGINE_EVENT_TYPES, ToolCallId, ToolCapability, ToolInvocationId,
-    ToolOutput, ToolOutputPart, ToolOutputStream, ToolProgress, TouchedFile, TouchedFileStatus,
-    TranscriptFormat, Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus, UnifiedDiff,
-    UnrestorablePath, Usage, UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch,
-    WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus,
+    ProviderAuthKind, ProviderCallActuals, ProviderCallIdentity, ProviderDescriptor,
+    ProviderNextAction, Question, QuestionId, QuestionOption, QuestionResponseKind, RequestId,
+    ReviewFileDecision, ReviewFileStatus, RewindTarget, Role, RuntimeServiceDescriptor,
+    RuntimeServiceKind, SequenceId, SessionDescriptor, SessionId, SessionReview, SessionReviewFile,
+    ShellId, StoredAttachment, SubagentActivity, SubagentDescriptor, SubagentId, SubagentIsolation,
+    SubagentReplayItem, SubagentResult, SubagentStatus, TRANSIENT_ENGINE_EVENT_TYPES, ToolCallId,
+    ToolCapability, ToolInvocationId, ToolOutput, ToolOutputPart, ToolOutputStream, ToolProgress,
+    TouchedFile, TouchedFileStatus, TranscriptFormat, Turn, TurnAccounting, TurnId, TurnMeta,
+    TurnStatus, UnifiedDiff, UnrestorablePath, Usage, UserSettingDescriptor, WorkspaceDiff,
+    WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
@@ -91,6 +93,10 @@ struct ContractFixture {
 fn generated_artifacts() -> Result<Vec<(PathBuf, String)>, XtaskError> {
     let fixture = contract_fixture();
     Ok(vec![
+        (
+            PathBuf::from("session-event-envelope.schema.json"),
+            envelope::generate()?,
+        ),
         (PathBuf::from("types.ts"), generate_typescript()?),
         (
             PathBuf::from("schema/block.schema.json"),
@@ -255,6 +261,8 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(CacheBreakpoint);
     declaration!(ContextSnapshot);
     declaration!(AccountingAttribution);
+    declaration!(ProviderCallIdentity);
+    declaration!(ProviderCallActuals);
     declaration!(TurnAccounting);
     declaration!(CostSnapshot);
     declaration!(PromptTool);
@@ -706,6 +714,29 @@ fn contract_fixture() -> ContractFixture {
             },
         ],
         engine_events: vec![
+            EngineEvent::ProviderCallAccounted {
+                meta: event_meta(52),
+                call: ProviderCallIdentity {
+                    session_id: SessionId("session-fixture".to_owned()),
+                    turn_id: TurnId("turn-fixture".to_owned()),
+                    attribution: AccountingAttribution::Main,
+                    call_id: "provider-call-fixture".to_owned(),
+                    attempt: 0,
+                },
+                actuals: ProviderCallActuals {
+                    usage: Usage {
+                        input_tokens: 100,
+                        output_tokens: 20,
+                        cache_read_tokens: 80,
+                        cache_write_tokens: 0,
+                        reasoning_tokens: 5,
+                    },
+                    cost: Cost::Monetary {
+                        amount_micros: 125,
+                        currency: "USD".to_owned(),
+                    },
+                },
+            },
             EngineEvent::CommandAcknowledged {
                 meta: CommandAckMeta {
                     protocol_version: rw_types::PROTOCOL_VERSION,

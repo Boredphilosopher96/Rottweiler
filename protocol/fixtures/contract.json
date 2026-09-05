@@ -386,6 +386,37 @@
   ],
   "engine_events": [
     {
+      "type": "provider_call_accounted",
+      "meta": {
+        "protocol_version": 1,
+        "session_id": "session-fixture",
+        "sequence_id": "52",
+        "emitted_at": "2026-01-01T00:00:00Z",
+        "caused_by": null
+      },
+      "call": {
+        "session_id": "session-fixture",
+        "turn_id": "turn-fixture",
+        "attribution": "main",
+        "call_id": "provider-call-fixture",
+        "attempt": 0
+      },
+      "actuals": {
+        "usage": {
+          "input_tokens": "100",
+          "output_tokens": "20",
+          "cache_read_tokens": "80",
+          "cache_write_tokens": "0",
+          "reasoning_tokens": "5"
+        },
+        "cost": {
+          "kind": "monetary",
+          "amount_micros": "125",
+          "currency": "USD"
+        }
+      }
+    },
+    {
       "type": "command_acknowledged",
       "meta": {
         "protocol_version": 1,

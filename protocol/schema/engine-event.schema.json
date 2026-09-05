@@ -1745,6 +1745,30 @@
         "meta": {
           "$ref": "#/$defs/EventMeta"
         },
+        "call": {
+          "$ref": "#/$defs/ProviderCallIdentity"
+        },
+        "actuals": {
+          "$ref": "#/$defs/ProviderCallActuals"
+        },
+        "type": {
+          "type": "string",
+          "const": "provider_call_accounted"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "call",
+        "actuals"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
         "turn_id": {
           "$ref": "#/$defs/TurnId"
         },
@@ -5740,6 +5764,59 @@
       "required": [
         "question_id",
         "values"
+      ]
+    },
+    "ProviderCallIdentity": {
+      "description": "Host-assigned logical call identity plus a distinct provider attempt.",
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "description": "Session which owns the provider request.",
+          "$ref": "#/$defs/SessionId"
+        },
+        "turn_id": {
+          "description": "Durable agent turn which owns this request.",
+          "$ref": "#/$defs/TurnId"
+        },
+        "attribution": {
+          "description": "Separates ordinary generation from compaction, title, and child usage.",
+          "$ref": "#/$defs/AccountingAttribution"
+        },
+        "call_id": {
+          "description": "Bounded host-generated identity, never a model-supplied tool identifier.",
+          "type": "string"
+        },
+        "attempt": {
+          "description": "Retries under a logical call must increment this value.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "session_id",
+        "turn_id",
+        "attribution",
+        "call_id",
+        "attempt"
+      ]
+    },
+    "ProviderCallActuals": {
+      "description": "Provider-reported actuals; a missing or ambiguous terminal is never represented as zero.",
+      "type": "object",
+      "properties": {
+        "usage": {
+          "description": "Normalized input, output, cache and reasoning usage.",
+          "$ref": "#/$defs/Usage"
+        },
+        "cost": {
+          "description": "Normalized monetary, credit, subscription, or unavailable accounting.",
+          "$ref": "#/$defs/Cost"
+        }
+      },
+      "required": [
+        "usage",
+        "cost"
       ]
     },
     "TurnStatus": {

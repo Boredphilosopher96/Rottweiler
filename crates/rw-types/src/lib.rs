@@ -4,6 +4,9 @@
 //! algebraic enums use internally tagged, named-field variants so Rust, JSON
 //! Schema, and TypeScript all retain the same discriminated-union shape.
 
+mod accounting;
+pub use accounting::{ProviderCallActuals, ProviderCallIdentity};
+
 pub mod attachment_contract;
 pub mod config;
 mod error;

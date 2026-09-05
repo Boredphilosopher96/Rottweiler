@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 pub use rw_store::session::reservations::{
     BudgetCharge, BudgetChargeBound, BudgetReservationError, BudgetReservationPlan,
-    ProviderCallActuals, ProviderCallIdentity,
+    ProviderCallActuals, ProviderCallIdentity, ProviderCallReceipt,
 };
 
 /// Application-scoped admission service backed by the shared accounting root.
@@ -30,12 +30,13 @@ pub trait ReservedProviderCall: Send {
 /// A provider attempt whose effects and accounting remain owned until reconciliation.
 #[async_trait]
 pub trait ActiveProviderCall: Send {
-    /// Records authoritative terminal actuals after provider effect settlement.
-    /// This replaces the planned charge; it does not release the reservation.
-    /// The matching durable turn accounting transaction transfers the charge,
-    /// scoped by session, turn and attribution. Ambiguous actuals remain reserved.
-    async fn record_terminal(
+    /// Transfers the reservation to the exact durable provider-call accounting fact.
+    /// The caller must first append `EngineEvent::ProviderCallAccounted` and await
+    /// durable completion. Replaying the same receipt is idempotent; a later
+    /// source sequence may correct actual usage. Ambiguous actuals retain their
+    /// admission charge. A turn summary cannot be supplied as a call receipt.
+    async fn settle_accounted(
         &mut self,
-        actuals: ProviderCallActuals,
+        receipt: ProviderCallReceipt,
     ) -> Result<(), BudgetReservationError>;
 }
