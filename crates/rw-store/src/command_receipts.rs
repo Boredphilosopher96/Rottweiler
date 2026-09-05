@@ -91,7 +91,7 @@ impl CommandReceipts {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let application_id: u32 =
             transaction.pragma_query_value(None, "application_id", |row| row.get(0))?;
-        let tables: u64 = transaction.query_row(
+        let tables: i64 = transaction.query_row(
             "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
             [],
             |row| row.get(0),
