@@ -55,6 +55,15 @@ impl SessionEventReadView for Journal {
 }
 #[async_trait]
 impl SessionEventSink for Journal {
+    async fn completed_turn(
+        &self,
+        _turn: u64,
+    ) -> Result<Option<rw_core::CompletedTurn>, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "delivery fixture has no completed turn index".into(),
+        ))
+    }
+
     async fn todo_state(&self) -> Result<rw_types::todo::TodoSnapshot, AgentLoopError> {
         Err(AgentLoopError::InvalidConfiguration(
             "delivery fixture does not expose task state".into(),
