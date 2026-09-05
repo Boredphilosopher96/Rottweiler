@@ -12,7 +12,7 @@ use rw_store::{
 use rw_types::SessionId;
 use std::{path::Path, sync::Arc};
 
-pub(super) fn recover_rewind_transactions(
+pub(in crate::session_runtime) fn recover_rewind_transactions(
     checkpoint_root: &Path,
     checkpoints: &[Arc<CheckpointStore>],
     log: &mut SessionEventLog,

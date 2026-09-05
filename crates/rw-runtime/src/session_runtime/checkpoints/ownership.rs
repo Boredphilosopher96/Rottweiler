@@ -7,6 +7,7 @@ use std::sync::{
 use tokio::sync::{OwnedMutexGuard, oneshot, watch};
 
 /// The lock follows disk work and its unacknowledged result, including unwinding.
+#[derive(Debug)]
 pub(super) struct MutationGuard {
     _lock: OwnedMutexGuard<()>,
     poisoned: Arc<AtomicBool>,
