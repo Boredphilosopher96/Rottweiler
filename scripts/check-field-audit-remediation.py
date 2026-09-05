@@ -189,7 +189,9 @@ def main() -> int:
     require_contains(
         "crates/rw-runtime/src/extension_runtime/development.rs",
         "RuntimeSessionExtensionController",
-        "candidate.shutdown().await",
+        "self.retire(candidate).await?",
+        "RuntimeSessionResources::new",
+        "SessionResources::shutdown(resources.as_ref()).await?",
         "state.active.replace(candidate)",
     )
     require_contains(
