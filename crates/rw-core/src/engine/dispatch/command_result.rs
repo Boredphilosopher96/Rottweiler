@@ -18,7 +18,6 @@ use crate::engine::dispatch::replies::send_connection_event;
 use crate::engine::dispatch::rewind::rewind_state;
 use crate::engine::mode_permission_base;
 use crate::engine::pending_event::PendingEvent;
-use crate::engine::session_extension::SessionExtensionSnapshot;
 use crate::engine::turn::CommandTurnOverrides;
 use crate::engine::turn::StartTurnRuntime;
 use crate::engine::turn::assemble_session_context;
@@ -27,7 +26,6 @@ use crate::engine::turn::context_snapshot;
 use crate::engine::turn::emit;
 use crate::engine::turn::start_turn_with_overrides;
 use crate::engine::wire_turn_id;
-use rw_tools::ToolContext;
 use rw_types::CommandMeta;
 use rw_types::EngineEvent;
 use rw_types::SessionMode;
@@ -38,7 +36,7 @@ pub(super) async fn apply(
     command_meta: CommandMeta,
     content: String,
     observed_turn: u64,
-    result: Result<crate::engine::commands::SessionCommandOutput, rw_ext::CommandRegistryError>,
+    result: super::command_job::Execution,
     respond: super::command_job::CommandReply,
     context: DispatchContext<'_>,
 ) {
@@ -53,7 +51,30 @@ pub(super) async fn apply(
         mode_registry,
     } = context;
     let disposition = match result {
-        Ok(mut output) => {
+        Ok(prepared) => {
+            let super::command_job::PreparedCommand { mut output, change } = prepared;
+            if let Err(error) = super::command_generation::apply(
+                change,
+                DispatchContext {
+                    state,
+                    config,
+                    tool_context,
+                    turn_signals,
+                    events,
+                    active_turn,
+                    command_descriptors,
+                    mode_registry,
+                },
+            )
+            .await
+            {
+                if matches!(error, AgentLoopError::EffectsUnsettled(_)) {
+                    state.unsettled = Some(error.to_string());
+                    state.tasks.cancel();
+                }
+                let _ = respond.send(Err(error));
+                return;
+            }
             let mut unrestorable_paths = Vec::new();
             let mut submitted_prompt = None;
             let mut deferred_command_completion = false;
@@ -283,162 +304,11 @@ pub(super) async fn apply(
                         }
                     }
                 }
-                SessionCommandAction::AddWorkspaceRoot { path } => {
-                    let current_roots = std::iter::once(config.workspace_root.clone())
-                        .chain(config.additional_workspace_roots.iter().cloned())
-                        .collect::<Vec<_>>();
-                    let generation = match config
-                        .workspace_roots
-                        .append_root(
-                            &path,
-                            &current_roots,
-                            config.workspace_generation,
-                            state.next_turn,
-                            Arc::clone(&config.permissions),
-                        )
-                        .await
-                    {
-                        Ok(generation) => generation,
-                        Err(error) => {
-                            let _ = respond.send(Err(error));
-                            return;
-                        }
-                    };
-                    let valid_append = generation.generation
-                        == config.workspace_generation.saturating_add(1)
-                        && generation.effective_from_turn == state.next_turn
-                        && generation.roots.len() == current_roots.len() + 1
-                        && generation
-                            .roots
-                            .iter()
-                            .take(current_roots.len())
-                            .eq(current_roots.iter())
-                        && generation.roots.iter().all(|root| {
-                            std::fs::canonicalize(root).is_ok_and(|canonical| canonical == *root)
-                        });
-                    if !valid_append {
-                        let _ = config
-                            .workspace_roots
-                            .abort_generation(generation.generation)
-                            .await;
-                        let _ = respond.send(Err(
-                        AgentLoopError::InvalidConfiguration(
-                            "workspace root controller returned a non-canonical or non-append generation"
-                                .to_owned(),
-                        ),
-                    ));
-                        return;
-                    }
-                    let replacement_context =
-                        match ToolContext::from_workspace_roots(&generation.roots) {
-                            Ok(context) => context
-                                .with_session_id(config.session_id.clone())
-                                .with_mcp_tool_policy(config.tools.mcp_tool_policy().clone()),
-                            Err(_error) => {
-                                let _ = config
-                                    .workspace_roots
-                                    .abort_generation(generation.generation)
-                                    .await;
-                                let _ = respond.send(Err(AgentLoopError::ToolContext(
-                                    "workspace tool context could not prepare".to_owned(),
-                                )));
-                                return;
-                            }
-                        };
-                    let descriptors = generation
-                        .roots
-                        .iter()
-                        .enumerate()
-                        .map(|(index, _root)| rw_types::WorkspaceRootDescriptor {
-                            index: u32::try_from(index).unwrap_or(u32::MAX),
-                            path: format!("@root/{index}"),
-                            machine_local: false,
-                        })
-                        .collect::<Vec<_>>();
-                    if let Err(_error) = config
-                        .workspace_roots
-                        .prepare_commit_generation(generation.generation)
-                        .await
-                    {
-                        let _ = config
-                            .workspace_roots
-                            .abort_generation(generation.generation)
-                            .await;
-                        let _ = respond.send(Err(AgentLoopError::Persistence(
-                            "workspace root generation could not commit".to_owned(),
-                        )));
-                        return;
-                    }
-                    if let Err(_error) = emit(
-                        state,
-                        events,
-                        &config.event_sink,
-                        PendingEvent::WorkspaceRootsChanged {
-                            generation: generation.generation,
-                            effective_from_turn: generation.effective_from_turn,
-                            roots: descriptors,
-                        },
-                    )
-                    .await
-                    .map(|_| ())
-                    {
-                        let _ = config
-                            .workspace_roots
-                            .abort_generation(generation.generation)
-                            .await;
-                        let _ = respond.send(Err(AgentLoopError::Persistence(
-                            "workspace root change event could not persist".to_owned(),
-                        )));
-                        return;
-                    }
-                    config
-                        .workspace_roots
-                        .finalize_generation(generation.generation);
-                    let base_config = config.with_workspace_generation(&generation, &state.mode_id);
-                    let rebase = config
-                        .extension_development
-                        .rebase(SessionExtensionSnapshot {
-                            publication: crate::RuntimePublication::Active,
-                            ui: Arc::clone(&config.ui),
-                            revision: base_config.workspace_generation,
-                            workspace_roots: Arc::from(generation.roots.clone()),
-                            tools: Arc::clone(&base_config.tools),
-                            hooks: Arc::clone(&base_config.hooks),
-                            commands: Arc::clone(&base_config.commands),
-                        })
-                        .await;
-                    let (rebased, development_detached) = match rebase {
-                        Ok(result) => result,
-                        Err(error) => {
-                            state.unsettled = Some(error.to_string());
-                            state.tasks.cancel();
-                            let _ = respond.send(Err(error));
-                            return;
-                        }
-                    };
-                    let next_config = Arc::new(base_config.with_extension_snapshot(&rebased));
-                    *command_descriptors
-                        .write()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::from(
-                        next_config
-                            .commands
-                            .descriptors()
-                            .cloned()
-                            .collect::<Vec<_>>(),
-                    );
-                    *mode_registry
-                        .write()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                        Arc::clone(&next_config.modes);
-                    *config = next_config;
-                    *tool_context = replacement_context;
-                    output.message =
-                        format!("added workspace root @root/{}", generation.roots.len() - 1);
-                    if development_detached {
-                        output.message.push_str(
-                            "; detached the development plugin after a registry collision",
-                        );
-                    }
+                SessionCommandAction::AddWorkspaceRoot { .. } => {
+                    let _ = respond.send(Err(AgentLoopError::InvalidConfiguration(
+                        "workspace action reached completion without preparation".into(),
+                    )));
+                    return;
                 }
                 SessionCommandAction::Trust { operation } => {
                     match config.folder_trust.execute(operation).await {
@@ -555,9 +425,7 @@ pub(super) async fn apply(
             )
             .await
             .map(|_| ());
-            Err(persisted
-                .err()
-                .unwrap_or_else(|| AgentLoopError::Extension(error.to_string())))
+            Err(persisted.err().unwrap_or(error))
         }
     };
     let _ = respond.send(disposition);

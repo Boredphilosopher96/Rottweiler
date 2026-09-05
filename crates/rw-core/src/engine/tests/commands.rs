@@ -522,14 +522,17 @@ async fn live_plugin_reload_swaps_only_successful_generations_and_detach_restore
     };
 
     assert_eq!(
-        handle.dispatch(attach("dev-attach")).await.expect("attach"),
+        handle
+            .dispatch_durably(attach("dev-attach"))
+            .await
+            .expect("attach"),
         CommandOutcome::Accepted {}
     );
     assert!(has_command(&handle, "development-marker"));
 
     assert_eq!(
         handle
-            .dispatch(ClientCommand::SendMessage {
+            .dispatch_durably(ClientCommand::SendMessage {
                 meta: protocol_meta("driver", "add-root-with-development-plugin"),
                 session_id: session_id.clone(),
                 content: format!("/add-dir {}", added.display()),
@@ -543,13 +546,12 @@ async fn live_plugin_reload_swaps_only_successful_generations_and_detach_restore
     assert!(has_command(&handle, "development-marker"));
 
     extension_controller.reject.store(true, Ordering::SeqCst);
-    assert!(matches!(
+    assert!(
         handle
-            .dispatch(attach("dev-reload-rejected"))
+            .dispatch_durably(attach("dev-reload-rejected"))
             .await
-            .expect("typed reload rejection"),
-        CommandOutcome::Rejected { .. }
-    ));
+            .is_err()
+    );
     assert!(
         has_command(&handle, "development-marker"),
         "a rejected candidate must retain the last good generation"
@@ -557,7 +559,7 @@ async fn live_plugin_reload_swaps_only_successful_generations_and_detach_restore
 
     assert_eq!(
         handle
-            .dispatch(ClientCommand::DetachDevelopmentPlugin {
+            .dispatch_durably(ClientCommand::DetachDevelopmentPlugin {
                 meta: protocol_meta("plugin-dev", "dev-detach"),
                 session_id,
             })

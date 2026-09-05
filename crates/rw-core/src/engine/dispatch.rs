@@ -1,5 +1,6 @@
 mod accepted;
 mod admission;
+mod command_generation;
 pub(super) mod command_job;
 mod command_result;
 mod command_snapshot;

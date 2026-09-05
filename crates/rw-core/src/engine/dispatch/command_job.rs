@@ -4,17 +4,23 @@ use crate::engine::commands::SessionCommandOutput;
 use crate::engine::session::{ProtocolCompletion, SessionActorConfig};
 use crate::engine::{AgentLoopError, MessageDisposition};
 use crate::ui::BoundUiCommand;
-use rw_ext::{CommandExecutionError, CommandRegistryError};
+use rw_ext::CommandRegistryError;
 use rw_tools::CancellationToken;
 use rw_types::{ClientId, CommandMeta, ModeId};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
-type Execution = Result<SessionCommandOutput, CommandRegistryError>;
+pub(in crate::engine) type Execution = Result<PreparedCommand, AgentLoopError>;
+
+pub(in crate::engine) struct PreparedCommand {
+    pub(super) output: SessionCommandOutput,
+    pub(super) change: super::command_generation::PreparedChange,
+}
 
 pub(in crate::engine) enum CommandReply {
     Direct(oneshot::Sender<Result<MessageDisposition, AgentLoopError>>),
     Protocol(Option<oneshot::Sender<Result<ProtocolCompletion, AgentLoopError>>>),
+    Control(Option<oneshot::Sender<Result<ProtocolCompletion, AgentLoopError>>>),
 }
 impl CommandReply {
     pub(super) fn send(self, result: Result<MessageDisposition, AgentLoopError>) -> Result<(), ()> {
@@ -23,7 +29,10 @@ impl CommandReply {
             Self::Protocol(Some(sender)) => sender
                 .send(result.map(ProtocolCompletion::Message))
                 .map_err(|_| ()),
-            Self::Protocol(None) => Ok(()),
+            Self::Control(Some(sender)) => sender
+                .send(result.map(|_| ProtocolCompletion::Unit))
+                .map_err(|_| ()),
+            Self::Protocol(None) | Self::Control(None) => Ok(()),
         }
     }
 }
@@ -60,7 +69,7 @@ pub(super) async fn start(
                 meta,
                 String::new(),
                 observed_turn,
-                Err(error),
+                Err(command_error(error)),
                 reply,
                 context,
             )
@@ -68,30 +77,116 @@ pub(super) async fn start(
             return;
         }
     };
-    let mut bytes = [0; 16];
-    if getrandom::fill(&mut bytes).is_err() {
-        let _ = reply.send(Err(AgentLoopError::InvalidConfiguration(
-            "command invocation identity unavailable".into(),
-        )));
-        return;
-    }
-    let origin = rw_types::extension_invocation::ExtensionInvocationId::from_bytes(bytes);
+    let origin = match invocation_id() {
+        Ok(origin) => origin,
+        Err(error) => {
+            let _ = reply.send(Err(error));
+            return;
+        }
+    };
     let bound = bound.with_origin(origin.clone());
     let name = bound.name().to_owned();
     let mut snapshot = super::command_snapshot::capture(context.state, context.config);
+    let owner = Arc::clone(context.config);
+    let next_turn = context.state.next_turn;
+    let operation = async move {
+        let result = bound.execute(&mut snapshot).await.map_err(command_error);
+        let result = match result {
+            Ok(output) => {
+                super::command_generation::prepare_output(output, &owner, next_turn).await
+            }
+            Err(error) => Err(error),
+        };
+        (result, Some(bound))
+    };
+    admit(meta, observed_turn, reply, name, origin, operation, context);
+}
+
+fn invocation_id() -> Result<rw_types::extension_invocation::ExtensionInvocationId, AgentLoopError>
+{
+    let mut bytes = [0; 16];
+    getrandom::fill(&mut bytes).map_err(|_| {
+        AgentLoopError::InvalidConfiguration("command invocation identity unavailable".into())
+    })?;
+    Ok(rw_types::extension_invocation::ExtensionInvocationId::from_bytes(bytes))
+}
+
+pub(super) fn start_development(
+    meta: CommandMeta,
+    source: Option<std::path::PathBuf>,
+    reply: CommandReply,
+    context: DispatchContext<'_>,
+) {
+    let origin = match invocation_id() {
+        Ok(origin) => origin,
+        Err(error) => {
+            let _ = reply.send(Err(error));
+            return;
+        }
+    };
+    let owner = Arc::clone(context.config);
+    let operation = async move {
+        (
+            super::command_generation::prepare_development(source.as_deref(), &owner).await,
+            None,
+        )
+    };
+    admit(
+        meta,
+        context.state.next_turn,
+        reply,
+        "plugin-development".into(),
+        origin,
+        operation,
+        context,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn admit(
+    meta: CommandMeta,
+    observed_turn: u64,
+    reply: CommandReply,
+    name: String,
+    origin: rw_types::extension_invocation::ExtensionInvocationId,
+    operation: impl std::future::Future<Output = (Execution, Option<BoundUiCommand>)> + Send + 'static,
+    context: DispatchContext<'_>,
+) {
+    if context.state.pending_command.is_some() {
+        let _ = reply.send(Err(AgentLoopError::InvalidConfiguration(
+            "another command is still executing".into(),
+        )));
+        return;
+    }
     let (send, receive) = oneshot::channel();
+    let owner = Arc::clone(context.config);
     let task = context.state.tasks.spawn(
         Arc::clone(context.config),
         CancellationToken::default(),
         async move {
-            // Dropping the user/HTTP waiter never cancels this admitted operation.
-            // RPC execution has its own immutable deadline and settlement barrier.
-            let result = bound.execute(&mut snapshot).await;
+            tokio::pin!(operation);
+            let (result, bound) = tokio::select! {
+                result = &mut operation => result,
+                () = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
+                    let _ = send.send(Err(AgentLoopError::EffectsUnsettled(
+                        "command generation preparation exceeded its proof deadline".into(),
+                    )));
+                    // Keep the real operation, generation and effects owned after
+                    // reporting failed proof. The deadline does not cancel them.
+                    let (result, bound) = operation.await;
+                    if let Ok(prepared) = &result { prepared.change.abort(&owner).await; }
+                    if unproven(&result) { std::future::pending::<()>().await; }
+                    drop(bound);
+                    return;
+                }
+            };
             let unproven = unproven(&result);
-            let _ = send.send(result);
+            if let Err(Ok(prepared)) = send.send(result) {
+                prepared.change.abort(&owner).await;
+            }
             if unproven {
-                // Retain the actual handler too: UI commands need not be registered
-                // in the generation's public slash-command catalog.
+                // A handler absent from the public slash catalog still owns its
+                // actual effects; failed proof cannot release that handler.
                 std::future::pending::<()>().await;
             }
             drop(bound);
@@ -122,13 +217,9 @@ pub(super) async fn start(
 pub(in crate::engine) async fn wait(pending: &mut Option<PendingCommand>) -> Execution {
     match pending {
         Some(pending) => (&mut pending.receive).await.unwrap_or_else(|_| {
-            Err(CommandRegistryError::Execution {
-                name: pending.name.clone(),
-                source: CommandExecutionError::new(
-                    "effects_unsettled",
-                    "command owner exited without completion proof",
-                ),
-            })
+            Err(AgentLoopError::EffectsUnsettled(
+                "command owner exited without completion proof".into(),
+            ))
         }),
         None => std::future::pending().await,
     }
@@ -153,6 +244,14 @@ pub(in crate::engine) async fn finish(result: Execution, context: DispatchContex
         || pending.mode != context.state.mode_id
         || pending.driver != context.state.control.driver()
     {
+        if let Ok(prepared) = &result {
+            if prepared.change.requires_publication() {
+                context.state.unsettled =
+                    Some("prepared generation lost publication authority".into());
+                context.state.tasks.cancel();
+            }
+            prepared.change.abort(&pending.owner).await;
+        }
         let _ = pending.reply.send(Err(AgentLoopError::InvalidConfiguration(
             "command completion authority is no longer current".into(),
         )));
@@ -194,7 +293,16 @@ pub(in crate::engine) async fn finish(result: Execution, context: DispatchContex
 }
 
 fn unproven(result: &Execution) -> bool {
-    matches!(result, Err(CommandRegistryError::Execution {source,..}) if matches!(source.code(), "panic" | "effects_unsettled"))
+    matches!(result, Err(AgentLoopError::EffectsUnsettled(_)))
+}
+
+fn command_error(error: CommandRegistryError) -> AgentLoopError {
+    if matches!(&error, CommandRegistryError::Execution {source,..} if matches!(source.code(), "panic" | "effects_unsettled"))
+    {
+        AgentLoopError::EffectsUnsettled(error.to_string())
+    } else {
+        AgentLoopError::Extension(error.to_string())
+    }
 }
 
 /// Only conversational queueing, lease takeover, existing turn answers and

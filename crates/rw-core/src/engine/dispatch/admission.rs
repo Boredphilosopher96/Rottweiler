@@ -20,7 +20,6 @@ use crate::engine::session::PrecommittedAnswer;
 use crate::engine::session::ProtocolCompletion;
 use crate::engine::session::recover_actor_from_journal;
 use crate::engine::session::validate_gap;
-use crate::engine::session_extension::SessionExtensionSnapshot;
 use crate::engine::turn::assemble_session_context;
 use crate::engine::turn::current_approval_diff;
 use crate::engine::turn::emit;
@@ -1102,60 +1101,31 @@ pub(super) async fn dispatch_protocol(
         ClientCommand::AttachDevelopmentPlugin { .. }
             | ClientCommand::DetachDevelopmentPlugin { .. }
     ) {
-        let current = SessionExtensionSnapshot {
-            publication: crate::RuntimePublication::Active,
-            ui: Arc::clone(&config.ui),
-            revision: config.workspace_generation,
-            workspace_roots: Arc::from(
-                std::iter::once(config.workspace_root.clone())
-                    .chain(config.additional_workspace_roots.iter().cloned())
-                    .collect::<Vec<_>>(),
-            ),
-            tools: Arc::clone(&config.tools),
-            hooks: Arc::clone(&config.hooks),
-            commands: Arc::clone(&config.commands),
-        };
-        let prepared = match &command {
+        let source = match &command {
             ClientCommand::AttachDevelopmentPlugin { source, .. } => {
-                config
-                    .extension_development
-                    .attach(Path::new(source), current)
-                    .await
+                Some(std::path::PathBuf::from(source))
             }
-            ClientCommand::DetachDevelopmentPlugin { .. } => {
-                config.extension_development.detach().await
-            }
-            _ => unreachable!("development command guard narrows the command"),
+            ClientCommand::DetachDevelopmentPlugin { .. } => None,
+            _ => unreachable!("development command guard"),
         };
-        match prepared {
-            Ok(snapshot) => {
-                let next_config = Arc::new(config.with_extension_snapshot(&snapshot));
-                *command_descriptors
-                    .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::from(
-                    next_config
-                        .commands
-                        .descriptors()
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                );
-                *config = next_config;
-                let accepted = CommandOutcome::Accepted {};
-                send_ack(state, events, &meta, session, accepted.clone());
-                let _ = respond.send(accepted);
-                if let Some(complete) = completion.take() {
-                    let _ = complete.send(Ok(ProtocolCompletion::Unit));
-                }
-            }
-            Err(error) => {
-                let outcome = protocol_rejection("development_plugin_rejected", error.to_string());
-                send_ack(state, events, &meta, session, outcome.clone());
-                let _ = respond.send(outcome);
-                if let Some(complete) = completion.take() {
-                    let _ = complete.send(Err(error));
-                }
-            }
-        }
+        let accepted = CommandOutcome::Accepted {};
+        send_ack(state, events, &meta, session, accepted.clone());
+        let _ = respond.send(accepted);
+        super::command_job::start_development(
+            meta,
+            source,
+            super::command_job::CommandReply::Control(completion.take()),
+            DispatchContext {
+                state,
+                config,
+                tool_context,
+                turn_signals,
+                events,
+                active_turn,
+                command_descriptors,
+                mode_registry,
+            },
+        );
         return false;
     }
     let accepted = CommandOutcome::Accepted {};

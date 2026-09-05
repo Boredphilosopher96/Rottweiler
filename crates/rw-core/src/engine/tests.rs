@@ -17,6 +17,7 @@ mod diff_approval;
 mod doom_loop;
 mod event_batches;
 mod fixtures;
+mod generation_lifetime;
 mod hooks;
 mod model_preparation;
 mod model_selection;
