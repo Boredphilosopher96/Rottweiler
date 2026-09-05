@@ -57,7 +57,7 @@ pub(super) fn requires_driver(command: &ClientCommand) -> bool {
     )
 }
 
-pub(super) fn unsupported_in_m2(command: &ClientCommand) -> bool {
+pub(super) fn is_host_command(command: &ClientCommand) -> bool {
     matches!(
         command,
         ClientCommand::CreateSession { .. }
@@ -108,10 +108,10 @@ pub(super) async fn dispatch_protocol(
         ))
     } else if state.closing {
         Some(protocol_rejection("session_closing", "session is closing"))
-    } else if unsupported_in_m2(&command) {
+    } else if is_host_command(&command) {
         Some(protocol_rejection(
             "command_not_available",
-            "command is not available in milestone M2",
+            "command requires host dispatch",
         ))
     } else if state.poisoned
         && !matches!(
@@ -129,7 +129,7 @@ pub(super) async fn dispatch_protocol(
             "session_requires_recovery",
             "session is fail-closed until checkpoint journal recovery completes",
         ))
-    } else if requires_driver(&command) && state.driver_client_id.as_ref() != Some(&meta.client_id)
+    } else if requires_driver(&command) && state.control.driver().as_ref() != Some(&meta.client_id)
     {
         Some(protocol_rejection(
             "driver_required",
@@ -171,7 +171,8 @@ pub(super) async fn dispatch_protocol(
         ClientCommand::AttachSession { role, .. } => {
             if *role == ClientRole::Driver
                 && state
-                    .driver_client_id
+                    .control
+                    .driver()
                     .as_ref()
                     .is_some_and(|driver| driver != &meta.client_id)
             {
@@ -196,7 +197,7 @@ pub(super) async fn dispatch_protocol(
         ClientCommand::AttachDevelopmentPlugin { source, .. }
             if state.running.is_some()
                 || state.active_shell.is_some()
-                || state.driver_client_id.is_none()
+                || state.control.driver().is_none()
                 || source.is_empty()
                 || source.len() > 4096
                 || source.chars().any(char::is_control) =>
@@ -212,7 +213,7 @@ pub(super) async fn dispatch_protocol(
         ClientCommand::DetachDevelopmentPlugin { .. }
             if state.running.is_some()
                 || state.active_shell.is_some()
-                || state.driver_client_id.is_none() =>
+                || state.control.driver().is_none() =>
         {
             let outcome = protocol_rejection(
                 "development_detach_requires_idle_session",
@@ -412,7 +413,7 @@ pub(super) async fn dispatch_protocol(
         } => {
             let outcome = protocol_rejection(
                 "checkpoint_target_not_available",
-                "rewind by checkpoint id is not available in milestone M2",
+                "rewind requires a turn identity",
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
@@ -940,7 +941,7 @@ pub(super) async fn dispatch_protocol(
     state.transient_cause = Some(meta.request_id.clone());
     let lease_persist = match &command {
         ClientCommand::AttachSession { role, .. }
-            if *role == ClientRole::Driver && state.driver_client_id.is_none() =>
+            if *role == ClientRole::Driver && state.control.driver().is_none() =>
         {
             let driver_event = if state.sequence.is_none() {
                 PendingEvent::SessionCreated {
@@ -956,7 +957,7 @@ pub(super) async fn dispatch_protocol(
                 .map(|_| ())
         }
         ClientCommand::TakeDriver { .. }
-            if state.driver_client_id.as_ref() != Some(&meta.client_id) =>
+            if state.control.driver().as_ref() != Some(&meta.client_id) =>
         {
             emit(
                 state,

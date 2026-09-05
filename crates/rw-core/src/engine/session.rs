@@ -1,5 +1,6 @@
 mod actor;
 mod config;
+mod control;
 mod handle;
 mod plugin_capability;
 mod recovery;
@@ -26,3 +27,5 @@ pub(super) use subscription::validate_gap;
 
 #[cfg(test)]
 pub(super) use recovery::interrupted_tool_recovery_events;
+
+pub(super) use control::SessionControl;

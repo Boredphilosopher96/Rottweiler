@@ -196,6 +196,7 @@ pub(in crate::engine) async fn start_turn_with_overrides(
         cancellation: cancellation.clone(),
         caused_by: state.transient_cause.clone(),
     });
+    state.control.start(turn, cancellation.clone());
     runtime.active_turn.store(turn, Ordering::Release);
     let prepare_users_synchronously = runtime
         .config
@@ -219,6 +220,7 @@ pub(in crate::engine) async fn start_turn_with_overrides(
     )
     .await
     {
+        state.control.finish(turn);
         state.running = None;
         runtime.active_turn.store(0, Ordering::Release);
         return Err(error);

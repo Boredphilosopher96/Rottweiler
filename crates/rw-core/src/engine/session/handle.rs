@@ -191,6 +191,12 @@ impl SessionHandle {
     ///
     /// Returns [`AgentLoopError::Closed`] if the actor is unavailable.
     pub async fn dispatch(&self, command: ClientCommand) -> Result<CommandOutcome, AgentLoopError> {
+        if let ClientCommand::Interrupt { meta, session_id } = &command {
+            return Ok(self
+                .shutdown
+                .control
+                .interrupt(meta, session_id, &self.events));
+        }
         let (respond, receive) = oneshot::channel();
         self.commands
             .send(ActorCommand::Protocol {
@@ -310,6 +316,14 @@ impl SessionHandle {
         &self,
         command: ClientCommand,
     ) -> Result<ProtocolCompletion, AgentLoopError> {
+        if matches!(command, ClientCommand::Interrupt { .. }) {
+            return match self.dispatch(command).await? {
+                CommandOutcome::Accepted {} => Ok(ProtocolCompletion::Unit),
+                CommandOutcome::Rejected { error } => {
+                    Err(AgentLoopError::InvalidConfiguration(error.message))
+                }
+            };
+        }
         let (respond, receive) = oneshot::channel();
         let (complete, completed) = oneshot::channel();
         self.commands

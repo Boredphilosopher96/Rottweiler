@@ -26,13 +26,15 @@ pub(super) type Cleanup = tokio::task::JoinHandle<Result<(), String>>;
 
 #[derive(Clone)]
 pub(super) struct ActorShutdown {
+    pub(super) control: Arc<super::session::SessionControl>,
     cancellation: CancellationToken,
     completion: watch::Sender<Option<Proof>>,
 }
 
-impl Default for ActorShutdown {
-    fn default() -> Self {
+impl ActorShutdown {
+    pub(super) fn new(control: Arc<super::session::SessionControl>) -> Self {
         Self {
+            control,
             cancellation: CancellationToken::default(),
             completion: watch::channel(None).0,
         }
@@ -47,6 +49,7 @@ impl ActorShutdown {
         self.cancellation.cancelled().await;
     }
     pub(super) fn complete(&self, result: Result<(), String>) {
+        self.control.close();
         self.completion.send_if_modified(|current| {
             if current.is_some() {
                 return false;
@@ -57,6 +60,7 @@ impl ActorShutdown {
     }
     pub(super) async fn close(&self) -> Result<(), AgentLoopError> {
         let mut completion = self.completion.subscribe();
+        self.control.close();
         self.cancellation.cancel();
         let deadline = tokio::time::Instant::now() + SHUTDOWN_PROOF_TIMEOUT;
         loop {

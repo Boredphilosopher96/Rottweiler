@@ -112,7 +112,7 @@ pub(in crate::engine) async fn handle_turn_signal(
             }
             if let Some(progress) = slot.take() {
                 let _ = events.send(RoutedEvent {
-                    target: state.driver_client_id.clone(),
+                    target: state.control.driver().clone(),
                     event: EngineEvent::ToolProgress {
                         session_id: state.session_id.clone(),
                         turn_id: wire_turn_id(slot.turn),
@@ -132,7 +132,7 @@ pub(in crate::engine) async fn handle_turn_signal(
                 event: progress.event,
             };
             let _ = events.send(RoutedEvent {
-                target: state.driver_client_id.clone(),
+                target: state.control.driver().clone(),
                 event,
             });
         }
@@ -160,7 +160,7 @@ pub(in crate::engine) async fn handle_turn_signal(
                 },
             };
             let _ = events.send(RoutedEvent {
-                target: state.driver_client_id.clone(),
+                target: state.control.driver().clone(),
                 event,
             });
         }
@@ -315,6 +315,7 @@ pub(in crate::engine) async fn handle_turn_signal(
                 return Ok(());
             }
             let completed_successfully = outcome.status == AgentTurnStatus::Completed;
+            state.control.finish(outcome.turn);
             state.running = None;
             active_turn.store(0, Ordering::Release);
             if state.unsettled.is_some() {
@@ -392,6 +393,7 @@ pub(in crate::engine) async fn handle_turn_signal(
                 result = Err(AgentLoopError::EffectsUnsettled(message.clone()));
             }
             if state.running.as_ref().map(|running| running.id) == Some(turn) {
+                state.control.finish(turn);
                 state.running = None;
                 active_turn.store(0, Ordering::Release);
                 if result.is_ok() {

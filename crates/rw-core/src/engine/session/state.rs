@@ -18,7 +18,6 @@ use rw_types::ApprovalBinding;
 use rw_types::ApprovalDecision;
 use rw_types::Attachment;
 use rw_types::ClientCommand;
-use rw_types::ClientId;
 use rw_types::ClientRole;
 use rw_types::CommandMeta;
 use rw_types::CommandOutcome;
@@ -132,7 +131,7 @@ pub(in crate::engine) struct ActorState {
     pub(in crate::engine) closing: bool,
     pub(in crate::engine) unsettled: Option<String>,
     pub(in crate::engine) tasks: task_ownership::ActorTasks,
-    pub(in crate::engine) driver_client_id: Option<ClientId>,
+    pub(in crate::engine) control: Arc<super::control::SessionControl>,
     pub(in crate::engine) client_roles: BTreeMap<String, ClientRole>,
     pub(in crate::engine) pending_questions: BTreeMap<String, PendingQuestion>,
     pub(in crate::engine) pending_model_switches: BTreeMap<String, PendingModelSwitch>,
@@ -192,6 +191,7 @@ impl ActorState {
         default_thinking: ThinkingLevel,
         modes: &ModeRegistry,
         recovered: &SessionRecoveredState,
+        control: Arc<super::control::SessionControl>,
     ) -> Self {
         let pending_model_switches = recovered
             .pending_questions
@@ -255,7 +255,7 @@ impl ActorState {
             closing: false,
             unsettled: None,
             tasks: task_ownership::ActorTasks::default(),
-            driver_client_id: recovered.driver_client_id.clone(),
+            control,
             client_roles: BTreeMap::new(),
             pending_questions: BTreeMap::new(),
             pending_model_switches,

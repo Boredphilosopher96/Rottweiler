@@ -84,6 +84,7 @@ pub(in crate::engine) async fn recover_actor_from_journal(
 ) -> Result<(), AgentLoopError> {
     if let Some(running) = &state.running {
         running.cancellation.cancel();
+        state.control.finish(running.id);
     }
     active_turn.store(0, Ordering::Release);
     for (_, pending) in std::mem::take(&mut state.pending_approvals) {
@@ -101,6 +102,8 @@ pub(in crate::engine) async fn recover_actor_from_journal(
     .await?;
     let client_roles = std::mem::take(&mut state.client_roles);
     let tasks = state.tasks.clone();
+    let control = Arc::clone(&state.control);
+    control.commit_driver(recovered.driver_client_id.clone());
     *state = ActorState::recover(
         config.session_id.clone(),
         Arc::clone(&config.event_clock),
@@ -108,6 +111,7 @@ pub(in crate::engine) async fn recover_actor_from_journal(
         config.thinking,
         &config.modes,
         &recovered,
+        control,
     );
     state.tasks = tasks;
     state.client_roles = client_roles;

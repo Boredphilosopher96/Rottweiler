@@ -357,7 +357,7 @@ pub(super) async fn handle_actor_command(
                         machine_local: false,
                     })
                     .collect(),
-                driver_client_id: state.driver_client_id.clone(),
+                driver_client_id: state.control.driver().clone(),
             });
         }
     }

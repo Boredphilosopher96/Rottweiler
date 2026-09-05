@@ -131,6 +131,13 @@ The signed updater follows the same boundary: `rw-core` owns exact-byte threshol
 
 **Resync semantics**: events carry per-session monotonic sequence ids. Live delivery uses the in-memory broadcast channel; **the source of truth for gap replay is the persisted event log** — a reconnecting client sends its last-seen id and the engine streams the gap from disk, so resync is unbounded and immune to broadcast-buffer lag (a lagging live subscriber is dropped to catch-up-from-log mode rather than losing events). If a repaired or truncated log ends before the client's cursor, the host rejects the subscription before SSE success with a typed `replay_cursor_ahead` response. The TUI discards the mismatched projection once and replays that session from the beginning instead of retrying the impossible cursor.
 
+Interrupt admission uses the committed driver lease and exact active turn under
+one short control lock. Cancellation and its connection acknowledgement do not
+wait for journal I/O or the actor command queue. The actor publishes lease changes
+only after commit, and turn completion still waits for effect and journal settlement.
+An admitted interrupt cannot cancel a subsequent turn. Actor closure disables this
+control boundary and cancels the active turn before awaiting cleanup.
+
 **Concurrent clients**: a session has **one driver and any number of observers**. Only the driver's mutating commands (SendMessage, Interrupt, SwitchMode, approvals) are accepted; observers get the event stream and read-only queries. Driver status is a lease — a new client may take over explicitly (`TakeDriver`), which notifies the old driver; simultaneous mutation conflicts are therefore impossible by construction. **Lease exemptions, stated**: engine-internal injections (compaction auto-continue, doom-loop interruptions) and plugin pushes (`session/inject_message`) bypass the lease — they're session machinery, not clients. Rottweiler-as-MCP-server clients operate only on sessions they created unless they explicitly `TakeDriver` on an existing one; they never silently yank a TUI's lease.
 
 **Supervision & lifetime**: `rw` supervises both children. TUI crash → respawn + reattach. Engine crash → `rw` restarts it; the engine recovers sessions from the event log, marking any in-flight turn `interrupted` (partial provider output is preserved up to the last persisted event; the user is told the turn was cut). Quitting the TUI shuts the engine down by default; `--detach` (and remote mode, always) leaves the engine running for later reattach.

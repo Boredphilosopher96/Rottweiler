@@ -35,6 +35,7 @@ pub(super) fn start_manual_compaction(
         cancellation: cancellation.clone(),
         caused_by: state.transient_cause.clone(),
     });
+    state.control.start(summary_turn, cancellation.clone());
     active_turn.store(summary_turn, Ordering::Release);
     let mut conversation = state.conversation.clone();
     let mut context_surgery = state.context_surgery.clone();

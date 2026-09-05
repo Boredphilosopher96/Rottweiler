@@ -11,6 +11,7 @@ mod compaction;
 mod compaction_recovery;
 mod completion_hooks;
 mod context;
+mod control_admission;
 mod diff_approval;
 mod doom_loop;
 mod event_batches;

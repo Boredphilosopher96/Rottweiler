@@ -114,12 +114,8 @@ pub(super) async fn apply_accepted(
             state
                 .client_roles
                 .insert(meta.client_id.0.clone(), role.clone());
-            if role == ClientRole::Driver && state.driver_client_id.is_none() {
-                state.driver_client_id = Some(meta.client_id.clone());
-            }
         }
         ClientCommand::TakeDriver { .. } => {
-            state.driver_client_id = Some(meta.client_id.clone());
             state
                 .client_roles
                 .insert(meta.client_id.0.clone(), ClientRole::Driver);
@@ -380,9 +376,7 @@ pub(super) async fn apply_accepted(
             }
         }
         ClientCommand::Interrupt { .. } => {
-            if let Some(running) = &state.running {
-                running.cancellation.cancel();
-            }
+            unreachable!("interrupt admission belongs to session control")
         }
         ClientCommand::ApproveTool {
             tool_call_id,

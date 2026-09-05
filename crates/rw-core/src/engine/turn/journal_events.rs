@@ -74,6 +74,15 @@ pub(in crate::engine) async fn emit_batch(
         .cloned()
         .collect();
     for event in persisted {
+        if let EngineEvent::SessionCreated {
+            driver_client_id, ..
+        }
+        | EngineEvent::DriverChanged {
+            driver_client_id, ..
+        } = &event
+        {
+            state.control.commit_driver(Some(driver_client_id.clone()));
+        }
         let _ = events.send(RoutedEvent {
             target: None,
             event,

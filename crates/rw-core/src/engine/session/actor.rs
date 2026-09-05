@@ -94,7 +94,11 @@ impl SessionActor {
             config.commands.descriptors().cloned().collect::<Vec<_>>(),
         )));
         let mode_registry = Arc::new(RwLock::new(Arc::clone(&config.modes)));
-        let shutdown = shutdown::ActorShutdown::default();
+        let shutdown = shutdown::ActorShutdown::new(Arc::new(super::control::SessionControl::new(
+            config.session_id.clone(),
+            config.recovered.driver_client_id.clone(),
+            Arc::clone(&config.event_clock),
+        )));
         let handle = SessionHandle {
             shutdown: shutdown.clone(),
             commands: command_tx,
@@ -202,6 +206,7 @@ pub(super) async fn run_actor(
         config.thinking,
         &config.modes,
         &config.recovered,
+        Arc::clone(&shutdown.control),
     );
     let interrupted_turn = config.recovered.interrupted_turn;
     let mut config = config;
@@ -317,6 +322,7 @@ pub(super) async fn run_actor(
     let mut cleanup = None;
     loop {
         if shutdown.requested() || !commands_open || state.unsettled.is_some() {
+            state.control.close();
             state.closing = true;
             state.tasks.cancel();
             if let Some(running) = &state.running {
