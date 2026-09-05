@@ -138,9 +138,7 @@ async fn live_child_model_selection_is_private_to_each_session() {
     config.providers = BTreeMap::from([(
         "local".into(),
         rw_types::config::ProviderConfig {
-            kind: "openai_compatible".into(),
-            base_url: Some("http://127.0.0.1:1/v1".into()),
-            auth_scheme: Some(rw_types::config::ProviderAuthScheme::None),
+            kind: "extension".into(),
             ..Default::default()
         },
     )]);
@@ -161,7 +159,10 @@ async fn live_child_model_selection_is_private_to_each_session() {
         instruction_roots: Arc::new(RwLock::new(vec![root.path().to_owned()])),
         active_sources: Arc::new(RwLock::new(BTreeSet::new())),
     };
-    let compose = recipe.child_composer(Vec::new());
+    let provider: Arc<dyn rw_providers::Provider> = Arc::new(
+        super::super::script_provider::ScriptProvider::new("local".into(), Vec::new(), 0),
+    );
+    let compose = recipe.child_composer(vec![("local/".into(), provider)]);
     let first = compose(root.path(), "first");
     let second = compose(root.path(), "second");
     first
