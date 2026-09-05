@@ -24,7 +24,7 @@ export const plugin = definePlugin({
           const navigation = await session.control({ action: "navigate", target: { kind: "transcript", sequence: "0" } })
           if (navigation.outcome !== "applied") throw new Error("navigation was not deferred")
           const identity = await session.query()
-          await push.notify(identity.session_id, "Navigation waiting", "The command callback is still active")
+          await push.notify("Navigation waiting", "The command callback is still active", identity.session_id)
           while (!(await state.read()).entries.some(entry => entry.key === "navigation/release")) {
             await new Promise(resolve => setTimeout(resolve, 5))
           }
