@@ -239,7 +239,7 @@ id = "release-contract-typescript"
 owner = "release-distribution-contract"
 command = "python3 scripts/release_contract.py generate-typescript --check"
 marker = "// @generated TypeScript projection by scripts/release_contract.py; do not edit."
-outputs = ["packages/tui/generated/release-contract.ts"]
+outputs = ["packages/js-host/generated/release-contract.ts"]
 
 [[generator]]
 id = "client-protocol-typescript"
@@ -505,9 +505,9 @@ reason = "The performance gate reads the platform engine budget from the release
 [[shadow]]
 id = "duplicate-tui-release-budget"
 owner = "release-distribution-contract"
-path = "packages/tui/build.ts"
+path = "packages/js-host/build.ts"
 pattern = '''(?:100_000_000|150_000_000)'''
-reason = "The TUI build reads its bundle budget from the generated release contract projection."
+reason = "The shared JavaScript host build reads its bundle budget from the generated release contract projection."
 
 [[shadow]]
 id = "duplicate-core-attachment-limits"

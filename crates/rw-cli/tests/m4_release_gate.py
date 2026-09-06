@@ -30,6 +30,9 @@ from dataclasses import dataclass
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "scripts"))
 from journal_observer import observed_envelopes, session_journals
+from release_contract import load_contract
+
+TUI_ROLE = load_contract(pathlib.Path(__file__).resolve().parents[3] / "contracts/release-contract.json").js_host_roles["tui"]
 from m4_socket_latency import measure_socket_channels
 from m4_gate_support import (
     BLOCKED_TURN_MARKER,
@@ -88,7 +91,7 @@ def isolated_env(home: pathlib.Path, tui: pathlib.Path | None = None) -> dict[st
         "NO_COLOR": "1",
     }
     if tui is not None:
-        env["ROTTWEILER_TUI_BIN"] = str(tui)
+        env["ROTTWEILER_JS_HOST_BIN"] = str(tui)
     return env
 
 
@@ -212,7 +215,7 @@ def one_startup_sample(
                 "ROTTWEILER_INTERACTIVE_EPOCH": "1",
             }
         )
-        tui_process = spawn_pty(tui, env, workspace)
+        tui_process = spawn_pty(tui, env, workspace, [TUI_ROLE])
         # Production supervision starts both children before waiting for the
         # engine handoff. Poll readiness while OpenTUI loads so neither cold
         # start is hidden and the total measures their real concurrent path.
@@ -358,7 +361,7 @@ def installed_first_launch_gate(
         artifact_bin = root / f"installed-first-interactive-{index}" / "bin"
         artifact_bin.mkdir(mode=0o700, parents=True)
         rw = artifact_bin / "rw"
-        tui = artifact_bin / "rottweiler-tui"
+        tui = artifact_bin / "rottweiler-js-host"
         native = artifact_bin / source_tui_native.name
         for source, destination in [
             (source_rw, rw),
@@ -1190,7 +1193,7 @@ def run_gate(args: argparse.Namespace, evidence: GateEvidence) -> int:
                                "source": receipt["identity"]["source"],
                                "components": receipt["components"]})
     source_rw = candidate / receipt["components"]["engine"]["path"]
-    source_tui = candidate / receipt["components"]["tui"]["path"]
+    source_tui = candidate / receipt["components"]["js_host"]["path"]
     source_tui_native = source_tui.with_name(opentui_native_library_name())
     if not source_rw.is_file() or not source_tui.is_file() or not source_tui_native.is_file():
         raise RuntimeError(
@@ -1210,7 +1213,7 @@ def run_gate(args: argparse.Namespace, evidence: GateEvidence) -> int:
         artifact_bin = root / "bin"
         artifact_bin.mkdir(mode=0o700)
         rw = artifact_bin / "rw"
-        tui = artifact_bin / "rottweiler-tui"
+        tui = artifact_bin / "rottweiler-js-host"
         tui_native = artifact_bin / source_tui_native.name
         shutil.copyfile(source_rw, rw)
         shutil.copyfile(source_tui, tui)
@@ -1252,7 +1255,7 @@ def run_gate(args: argparse.Namespace, evidence: GateEvidence) -> int:
                 evidence.update(phase="ssh_loopback")
                 ssh_loopback_gate(rw, tui, root, workspace, port, args.ssh_loopback)
     if args.metrics_json is not None:
-        metrics["tui_bundle_bytes"] = source_tui.stat().st_size + source_tui_native.stat().st_size
+        metrics["js_bundle_bytes"] = source_tui.stat().st_size + source_tui_native.stat().st_size
         args.metrics_json.parent.mkdir(parents=True, exist_ok=True)
         temporary = args.metrics_json.with_name(f".{args.metrics_json.name}.tmp")
         temporary.write_text(

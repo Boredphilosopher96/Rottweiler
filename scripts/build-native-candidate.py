@@ -66,9 +66,8 @@ def build(base: Path, target: Path) -> Path:
             stage = temporary / root_name
             stage_release(contract, stage, REPO / "scripts/install-release.sh", identity["version"], platform.id,
                           release_directory / "rw", release_directory / "rottweiler-wasm-host",
-                          REPO / "packages/plugin-host/dist/rottweiler-plugin-host",
-                          REPO / "packages/tui/dist/rottweiler-tui",
-                          REPO / "packages/tui/dist" / platform.native_library)
+                          REPO / "packages/js-host/dist/rottweiler-js-host",
+                          REPO / "packages/js-host/dist" / platform.native_library)
             archive = temporary / f"{root_name}.tar.gz"
             run([sys.executable, "scripts/package-release.py", str(stage), str(archive)], environment)
             verify_archive(contract, archive, identity["version"], platform.id)
@@ -93,7 +92,7 @@ def build(base: Path, target: Path) -> Path:
             with tempfile.TemporaryDirectory(prefix=".verify-", dir=base) as extracted:
                 run(["tar", "-xzf", str(archive), "-C", extracted], environment)
                 run([str(Path(extracted) / relative_paths["engine"]), "--version"], environment)
-                host_identity = subprocess.check_output([str(Path(extracted) / relative_paths["plugin_host"]), "version"], env=environment, text=True)
+                host_identity = subprocess.check_output([str(Path(extracted) / relative_paths["js_host"]), contract.js_host_roles["source_plugin"], "version"], env=environment, text=True)
                 host = json.loads(host_identity)
                 if set(host) != {"abi", "format"} or not isinstance(host["abi"], int) or host["abi"] < 1 or not isinstance(host["format"], str) or not host["format"]:
                     raise ValueError("candidate plugin host reported an invalid semantic identity")

@@ -94,7 +94,7 @@ fn m9_rw_replay_renders_a_persisted_envelope_log_through_production_tui() {
     let report = root.path().join("replay-report.json");
     let output = base_command(&workspace, &home)
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("ROTTWEILER_TUI_BIN", &wrapper)
+        .env("ROTTWEILER_JS_HOST_BIN", &wrapper)
         .env("ROTTWEILER_TEST_REPORT_FILE", &report)
         .args(["replay", session_id])
         .output()

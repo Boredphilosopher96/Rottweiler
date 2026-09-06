@@ -22,7 +22,7 @@ use crate::remote_session::spawn_detached_server;
 #[cfg(unix)]
 use crate::runtime_paths::{
     RuntimeDirectoryGuard, allocate_runtime_paths, create_guarded_server_runtime,
-    locate_tui_executable, resolve_server_paths, session_metadata_path,
+    locate_js_host_executable, resolve_server_paths, session_metadata_path,
 };
 use crate::trust_cli::{
     canonical_workspace_roots, configuration_root, configuration_root_path,
@@ -87,7 +87,7 @@ pub(super) async fn run_local_tui(cli: &Cli) -> Result<()> {
     let supervisor = supervisor::Supervisor::new(
         supervisor::SupervisorConfig {
             rw_executable: std::env::current_exe().into_diagnostic()?,
-            tui_executable: locate_tui_executable()?,
+            js_host_executable: locate_js_host_executable()?,
             socket: paths.socket,
             token_file: paths.token,
             last_seen_file: paths.directory.join("last-seen"),

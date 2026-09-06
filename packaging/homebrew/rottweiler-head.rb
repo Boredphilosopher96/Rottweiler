@@ -25,34 +25,31 @@ class Rottweiler < Formula
     system "bun", "install", "--cwd", "packages/plugin-sdk", "--frozen-lockfile"
     system "bun", "install", "--cwd", "packages/plugin-host", "--frozen-lockfile"
     system "bun", "run", "--cwd", "packages/plugin-sdk", "build"
+    system "bun", "install", "--cwd", "packages/js-host", "--frozen-lockfile"
     if OS.linux?
       with_env(ROTTWEILER_STRIP_BIN: formula_opt_bin("binutils")/"strip") do
-        system "bun", "run", "--cwd", "packages/tui", "build"
+        system "bun", "run", "--cwd", "packages/js-host", "build"
       end
     else
-      system "bun", "run", "--cwd", "packages/tui", "build"
+      system "bun", "run", "--cwd", "packages/js-host", "build"
     end
-    system "bun", "run", "--cwd", "packages/plugin-host", "build"
 
     release_dir = Utils.safe_popen_read("scripts/cargo-release.sh", "artifact-dir").strip
     libexec.install "#{release_dir}/rw"
     libexec.install "#{release_dir}/rottweiler-wasm-host"
-    libexec.install "packages/plugin-host/dist/rottweiler-plugin-host"
-    libexec.install "packages/tui/dist/rottweiler-tui"
+    libexec.install "packages/js-host/dist/rottweiler-js-host"
     native = OS.mac? ? "libopentui.dylib" : "libopentui.so"
-    libexec.install "packages/tui/dist/#{native}"
+    libexec.install "packages/js-host/dist/#{native}"
     bin.install_symlink libexec/"rw"
   end
 
   test do
     assert_match(/^rw \d+\.\d+\.\d+/, shell_output("#{bin}/rw --version"))
-    assert_predicate libexec/"rottweiler-tui", :executable?
+    assert_predicate libexec/"rottweiler-js-host", :executable?
     assert_predicate libexec/"rottweiler-wasm-host", :executable?
-    assert_predicate libexec/"rottweiler-plugin-host", :executable?
     native = OS.mac? ? "libopentui.dylib" : "libopentui.so"
     assert_predicate libexec/native, :file?
-    refute_path_exists bin/"rottweiler-tui"
-    refute_path_exists bin/"rottweiler-plugin-host"
+    refute_path_exists bin/"rottweiler-js-host"
     guidance = shell_output("#{bin}/rw upgrade 2>&1", 1)
     assert_match "managed by Homebrew", guidance
     assert_match "brew upgrade", guidance

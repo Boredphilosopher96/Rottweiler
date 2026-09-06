@@ -130,7 +130,7 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertIn("${{ needs.validate.outputs.candidate_artifact }}", soak)
         self.assertIn("native_candidate.py prepare", soak)
         self.assertIn("${{ steps.components.outputs.engine }}", soak)
-        self.assertIn("${{ steps.components.outputs.tui }}", soak)
+        self.assertIn("${{ steps.components.outputs.js_host }}", soak)
         self.assertNotIn("bun run build", soak)
         self.assertNotIn("--require-measured", soak)
         wsl2 = workflow_job(workflow, "wsl2-acceptance")

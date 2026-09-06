@@ -107,14 +107,14 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
     def test_release_compresses_embedded_wasm_and_never_rewrites_compiled_elf(
         self,
     ) -> None:
-        build = (REPO / "packages/tui/build.ts").read_text(encoding="utf-8")
+        build = (REPO / "packages/js-host/build.ts").read_text(encoding="utf-8")
         runtime = (
             REPO / "packages/tui/src/tree-sitter-runtime.ts"
         ).read_text(encoding="utf-8")
         native_strip = (
             "stripLinuxNativeLibrary(outputNativePath)"
         )
-        bundle_gate = "enforceTuiBundleSize(outputExecutable, outputNativePath)"
+        bundle_gate = "enforceJavaScriptBundleSize(outputExecutable, outputNativePath)"
         embedded_smoke = "compiled embedded-parser smoke failed"
 
         self.assertIn('name: "rottweiler-compressed-tree-sitter-assets"', build)
@@ -134,13 +134,13 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
         self.assertIn("Bun.zstdDecompressSync(compressed)", runtime)
         self.assertIn("bytes.byteLength !== expectedBytes", runtime)
         self.assertNotIn("maxOutputLength", runtime)
-        self.assertIn('target: "bun-linux-x64-baseline" as const', build)
+        self.assertIn('"bun-linux-x64-baseline" as const', build)
         self.assertIn("const MAX_RUNTIME_BYTES = 32 * 1024 * 1024", runtime)
         self.assertIn("Linux Bun compiled output bytes:", build)
         self.assertIn(native_strip, build)
         self.assertIn("process.platform === \"darwin\"", build)
         self.assertIn("releasePlatformForNodeTarget", build)
-        self.assertIn("productBudgets.tuiBundleLessThanBytes", build)
+        self.assertIn("productBudgets.jsBundleLessThanBytes", build)
         self.assertNotIn("100_000_000", build)
         self.assertNotIn("150_000_000", build)
         self.assertIn(bundle_gate, build)

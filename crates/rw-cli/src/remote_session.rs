@@ -17,7 +17,7 @@ use rw_types::PermissionModeDescriptor as PermissionMode;
 use crate::cli_args::Cli;
 #[cfg(unix)]
 use crate::runtime_paths::{
-    RuntimeDirectoryGuard, allocate_runtime_paths, locate_tui_executable,
+    RuntimeDirectoryGuard, allocate_runtime_paths, locate_js_host_executable,
     read_private_bootstrap_token, remove_stale_forward_socket, runtime_artifacts_ready,
     runtime_is_live, valid_bootstrap_token, write_private_file_atomic,
 };
@@ -169,7 +169,7 @@ pub(super) async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
         model: cli.model.clone(),
         permission_mode: cli.permission_mode,
     };
-    let tui_executable = locate_tui_executable()?;
+    let js_host_executable = locate_js_host_executable()?;
     let fork_operation_directory = storage_root.join("control/pending-forks");
     let (user_home, user_rottweiler) =
         session::extension_user_roots(&storage_root.join("credentials.toml"));
@@ -242,7 +242,7 @@ pub(super) async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
         return Err(error);
     }
     let tui = run_remote_tui_process(
-        tui_executable,
+        js_host_executable,
         &local_paths,
         &fork_operation_directory,
         &session_id,

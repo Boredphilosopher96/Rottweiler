@@ -21,7 +21,7 @@ from typing import NoReturn
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_CONTRACT_PATH = REPO / "contracts" / "release-contract.json"
 DEFAULT_RUST_OUTPUT = REPO / "crates" / "rw-types" / "src" / "generated" / "release_contract.rs"
-DEFAULT_TYPESCRIPT_OUTPUT = REPO / "packages" / "tui" / "generated" / "release-contract.ts"
+DEFAULT_TYPESCRIPT_OUTPUT = REPO / "packages" / "js-host" / "generated" / "release-contract.ts"
 VERSION_PATTERN = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?")
 PLATFORM_PATTERN = re.compile(r"[a-z0-9]+-[a-z0-9_]+")
 SAFE_PATH_PATTERN = re.compile(r"[A-Za-z0-9_.{}/-]+")
@@ -29,10 +29,9 @@ SAFE_LIBRARY_PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
 EXPECTED_MEMBER_IDS = {
     "installer",
     "engine",
-    "tui",
+    "js_host",
     "wasm_host",
     "wasm_host_identity",
-    "plugin_host",
     "opentui_native",
 }
 
@@ -49,8 +48,7 @@ class ArchiveMember:
 class ProductBudgets:
     engine_less_than_bytes: int
     wasm_host_less_than_bytes: int
-    plugin_host_less_than_bytes: int
-    tui_bundle_less_than_bytes: int
+    js_bundle_less_than_bytes: int
 
 
 @dataclass(frozen=True)
@@ -82,6 +80,7 @@ class ReleaseContract:
     schema_version: int
     root_format: str
     expanded_max_bytes: int
+    js_host_roles: dict[str, str]
     platforms: tuple[PlatformContract, ...]
 
     def platform(self, platform_id: str) -> PlatformContract:
@@ -175,8 +174,7 @@ def _parse_budgets(value: object, path: str) -> ProductBudgets:
     fields = {
         "engine_less_than_bytes",
         "wasm_host_less_than_bytes",
-        "plugin_host_less_than_bytes",
-        "tui_bundle_less_than_bytes",
+        "js_bundle_less_than_bytes",
     }
     _expect_keys(document, path, fields)
     return ProductBudgets(
@@ -186,11 +184,8 @@ def _parse_budgets(value: object, path: str) -> ProductBudgets:
         wasm_host_less_than_bytes=_positive_integer(
             document["wasm_host_less_than_bytes"], f"{path}.wasm_host_less_than_bytes"
         ),
-        plugin_host_less_than_bytes=_positive_integer(
-            document["plugin_host_less_than_bytes"], f"{path}.plugin_host_less_than_bytes"
-        ),
-        tui_bundle_less_than_bytes=_positive_integer(
-            document["tui_bundle_less_than_bytes"], f"{path}.tui_bundle_less_than_bytes"
+        js_bundle_less_than_bytes=_positive_integer(
+            document["js_bundle_less_than_bytes"], f"{path}.js_bundle_less_than_bytes"
         ),
     )
 
@@ -216,9 +211,17 @@ def load_contract(path: Path = DEFAULT_CONTRACT_PATH) -> ReleaseContract:
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"could not read release contract {path}: {error}") from error
     document = _object(raw, "contract")
-    _expect_keys(document, "contract", {"schema_version", "archive", "platforms"})
+    _expect_keys(document, "contract", {"schema_version", "archive", "platforms", "js_host_roles"})
     if isinstance(document["schema_version"], bool) or document["schema_version"] != 1:
         _fail("schema_version", "must be 1")
+
+    roles = _object(document["js_host_roles"], "js_host_roles")
+    _expect_keys(roles, "js_host_roles", {"tui", "source_plugin"})
+    for name, role in roles.items():
+        if not isinstance(role, str) or re.fullmatch(r"[a-z]+(?:-[a-z]+)*", role) is None:
+            _fail(f"js_host_roles.{name}", "must be an explicit role argument")
+    if len(set(roles.values())) != len(roles):
+        _fail("js_host_roles", "roles must be distinct")
 
     archive = _object(document["archive"], "archive")
     _expect_keys(archive, "archive", {"root_format", "expanded_max_bytes", "members"})
@@ -331,26 +334,20 @@ def load_contract(path: Path = DEFAULT_CONTRACT_PATH) -> ReleaseContract:
                 f"platforms.{platform.id}.product_budgets.wasm_host_less_than_bytes",
                 "WASM host product budget exceeds its member extraction limit",
             )
-        if budgets.plugin_host_less_than_bytes > member_by_id["plugin_host"].max_bytes:
-            _fail(
-                f"platforms.{platform.id}.product_budgets.plugin_host_less_than_bytes",
-                "plugin host product budget exceeds its member extraction limit",
-            )
-        tui_extraction_bytes = (
-            member_by_id["tui"].max_bytes + member_by_id["opentui_native"].max_bytes
+        js_extraction_bytes = (
+            member_by_id["js_host"].max_bytes + member_by_id["opentui_native"].max_bytes
         )
-        if budgets.tui_bundle_less_than_bytes > tui_extraction_bytes:
+        if budgets.js_bundle_less_than_bytes > js_extraction_bytes:
             _fail(
-                f"platforms.{platform.id}.product_budgets.tui_bundle_less_than_bytes",
-                "TUI bundle product budget exceeds its member extraction limits",
+                f"platforms.{platform.id}.product_budgets.js_bundle_less_than_bytes",
+                "JavaScript bundle product budget exceeds its member extraction limits",
             )
         maximum_allowed_product_bytes = (
             member_by_id["installer"].max_bytes
             + member_by_id["wasm_host_identity"].max_bytes
             + budgets.engine_less_than_bytes
             + budgets.wasm_host_less_than_bytes
-            + budgets.plugin_host_less_than_bytes
-            + budgets.tui_bundle_less_than_bytes
+            + budgets.js_bundle_less_than_bytes
         )
         if maximum_allowed_product_bytes > expanded_max_bytes:
             _fail(
@@ -362,6 +359,7 @@ def load_contract(path: Path = DEFAULT_CONTRACT_PATH) -> ReleaseContract:
         schema_version=1,
         root_format=root_format,
         expanded_max_bytes=expanded_max_bytes,
+        js_host_roles=roles,
         platforms=tuple(platforms),
     )
 
@@ -378,16 +376,14 @@ def validate_build(
     platform_id: str,
     engine: Path,
     wasm_host: Path,
-    plugin_host: Path,
-    tui: Path,
+    js_host: Path,
     opentui_native: Path,
 ) -> None:
     platform = contract.platform(platform_id)
     paths = {
         "engine": engine,
         "wasm_host": wasm_host,
-        "plugin_host": plugin_host,
-        "tui": tui,
+        "js_host": js_host,
         "opentui_native": opentui_native,
     }
     sizes: dict[str, int] = {}
@@ -412,11 +408,10 @@ def validate_build(
     checks = (
         ("engine", sizes["engine"], budgets.engine_less_than_bytes),
         ("WASM helper", sizes["wasm_host"], budgets.wasm_host_less_than_bytes),
-        ("TypeScript plugin host", sizes["plugin_host"], budgets.plugin_host_less_than_bytes),
         (
-            "TUI bundle",
-            sizes["tui"] + sizes["opentui_native"],
-            budgets.tui_bundle_less_than_bytes,
+            "JavaScript bundle",
+            sizes["js_host"] + sizes["opentui_native"],
+            budgets.js_bundle_less_than_bytes,
         ),
     )
     for label, actual, exclusive_limit in checks:
@@ -530,8 +525,12 @@ def _rust_integer(value: int) -> str:
 
 
 def render_rust(contract: ReleaseContract) -> str:
+    host_name = PurePosixPath(_member_by_id(contract.platforms[0], "js_host").path).name
     lines = [
         "// @generated by scripts/release_contract.py; do not edit.",
+        f"pub const JS_HOST_EXECUTABLE_NAME: &str = {_rust_string(host_name)};",
+        f"pub const JS_HOST_TUI_ROLE: &str = {_rust_string(contract.js_host_roles['tui'])};",
+        f"pub const JS_HOST_SOURCE_PLUGIN_ROLE: &str = {_rust_string(contract.js_host_roles['source_plugin'])};",
         "",
         "#[derive(Clone, Copy, Debug, Eq, PartialEq)]",
         "pub struct ReleaseArchiveMember {",
@@ -545,8 +544,7 @@ def render_rust(contract: ReleaseContract) -> str:
         "pub struct ReleaseProductBudgets {",
         "    pub engine_less_than_bytes: u64,",
         "    pub wasm_host_less_than_bytes: u64,",
-        "    pub plugin_host_less_than_bytes: u64,",
-        "    pub tui_bundle_less_than_bytes: u64,",
+        "    pub js_bundle_less_than_bytes: u64,",
         "}",
         "",
         "#[derive(Clone, Copy, Debug, Eq, PartialEq)]",
@@ -605,10 +603,8 @@ def render_rust(contract: ReleaseContract) -> str:
                 f"{_rust_integer(budgets.engine_less_than_bytes)},",
                 "            wasm_host_less_than_bytes: "
                 f"{_rust_integer(budgets.wasm_host_less_than_bytes)},",
-                "            plugin_host_less_than_bytes: "
-                f"{_rust_integer(budgets.plugin_host_less_than_bytes)},",
-                "            tui_bundle_less_than_bytes: "
-                f"{_rust_integer(budgets.tui_bundle_less_than_bytes)},",
+                "            js_bundle_less_than_bytes: "
+                f"{_rust_integer(budgets.js_bundle_less_than_bytes)},",
                 "        },",
                 f"        archive_members: {constant_name}_ARCHIVE_MEMBERS,",
                 "    },",
@@ -637,16 +633,18 @@ def render_rust(contract: ReleaseContract) -> str:
 
 
 def render_typescript(contract: ReleaseContract) -> str:
+    host_name = PurePosixPath(_member_by_id(contract.platforms[0], "js_host").path).name
     node_platforms = {"macos": "darwin", "linux": "linux"}
     node_arches = {"aarch64": "arm64", "x86_64": "x64"}
     lines = [
         "// @generated TypeScript projection by scripts/release_contract.py; do not edit.",
+        f"export const JS_HOST_EXECUTABLE_NAME = {json.dumps(host_name)} as const",
+        f"export const JS_HOST_ROLES = {json.dumps(contract.js_host_roles, sort_keys=True)} as const",
         "",
         "export interface ReleaseProductBudgets {",
         "  readonly engineLessThanBytes: number",
         "  readonly wasmHostLessThanBytes: number",
-        "  readonly pluginHostLessThanBytes: number",
-        "  readonly tuiBundleLessThanBytes: number",
+        "  readonly jsBundleLessThanBytes: number",
         "}",
         "",
         "export interface ReleasePlatform {",
@@ -678,8 +676,7 @@ def render_typescript(contract: ReleaseContract) -> str:
                 "    productBudgets: {",
                 f"      engineLessThanBytes: {budgets.engine_less_than_bytes},",
                 f"      wasmHostLessThanBytes: {budgets.wasm_host_less_than_bytes},",
-                f"      pluginHostLessThanBytes: {budgets.plugin_host_less_than_bytes},",
-                f"      tuiBundleLessThanBytes: {budgets.tui_bundle_less_than_bytes},",
+                f"      jsBundleLessThanBytes: {budgets.js_bundle_less_than_bytes},",
                 "    },",
                 "  },",
             ]
@@ -806,8 +803,7 @@ def stage_release(
     platform_id: str,
     engine: Path,
     wasm_host: Path,
-    plugin_host: Path,
-    tui: Path,
+    js_host: Path,
     opentui_native: Path,
 ) -> None:
     platform = contract.platform(platform_id)
@@ -816,12 +812,11 @@ def stage_release(
         raise ValueError(f"release stage must be named {expected_root}: {output}")
     if output.exists() or output.is_symlink():
         raise ValueError(f"release stage already exists: {output}")
-    validate_build(contract, platform_id, engine, wasm_host, plugin_host, tui, opentui_native)
+    validate_build(contract, platform_id, engine, wasm_host, js_host, opentui_native)
     sources = {
         "engine": engine,
         "wasm_host": wasm_host,
-        "plugin_host": plugin_host,
-        "tui": tui,
+        "js_host": js_host,
         "opentui_native": opentui_native,
     }
     output.mkdir(parents=True, mode=0o755)
@@ -877,8 +872,7 @@ def parse_args() -> argparse.Namespace:
     validate.add_argument("--platform", required=True)
     validate.add_argument("--engine", required=True, type=Path)
     validate.add_argument("--wasm-host", required=True, type=Path)
-    validate.add_argument("--plugin-host", required=True, type=Path)
-    validate.add_argument("--tui", required=True, type=Path)
+    validate.add_argument("--js-host", required=True, type=Path)
     validate.add_argument("--opentui-native", required=True, type=Path)
 
     installer = subparsers.add_parser("render-installer")
@@ -894,8 +888,7 @@ def parse_args() -> argparse.Namespace:
     stage.add_argument("--platform", required=True)
     stage.add_argument("--engine", required=True, type=Path)
     stage.add_argument("--wasm-host", required=True, type=Path)
-    stage.add_argument("--plugin-host", required=True, type=Path)
-    stage.add_argument("--tui", required=True, type=Path)
+    stage.add_argument("--js-host", required=True, type=Path)
     stage.add_argument("--opentui-native", required=True, type=Path)
 
     verify = subparsers.add_parser("verify-archive")
@@ -929,8 +922,7 @@ def run(args: argparse.Namespace) -> None:
             args.platform,
             args.engine,
             args.wasm_host,
-            args.plugin_host,
-            args.tui,
+            args.js_host,
             args.opentui_native,
         )
     elif args.command == "render-installer":
@@ -948,8 +940,7 @@ def run(args: argparse.Namespace) -> None:
             args.platform,
             args.engine,
             args.wasm_host,
-            args.plugin_host,
-            args.tui,
+            args.js_host,
             args.opentui_native,
         )
     elif args.command == "verify-archive":

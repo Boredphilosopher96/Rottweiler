@@ -48,14 +48,14 @@ mod linux {
             &helper,
         )
         .expect("owned helper");
-        let host = root.path().join("rottweiler-plugin-host");
+        let host = root.path().join("rottweiler-js-host");
         if let Some(compiled) = std::env::var_os("ROTTWEILER_PREPARATION_TEST_HOST") {
             fs::copy(compiled, &host).expect("compiled fixture host");
         } else {
             let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../packages/plugin-host/src/index.ts");
+                .join("../../packages/js-host/src/index.ts");
             let status = Command::new("bun")
-                .args(["build", "--compile"])
+                .args(["build", "--compile", "--external", "../../tui/*"])
                 .arg(entry)
                 .arg("--outfile")
                 .arg(&host)
@@ -103,8 +103,12 @@ mod linux {
                 .await
                 .expect("production source preparation");
             let identity = config.source_identity().expect("sealed source identity");
-            assert_eq!(config.argv()[0], "run");
-            let bundle = fs::read(&config.argv()[1]).expect("sealed bundle");
+            assert_eq!(
+                config.argv()[0],
+                rw_types::release_contract::JS_HOST_SOURCE_PLUGIN_ROLE
+            );
+            assert_eq!(config.argv()[1], "run");
+            let bundle = fs::read(&config.argv()[2]).expect("sealed bundle");
             assert_eq!(
                 identity.bundle_blake3,
                 blake3::hash(&bundle).to_hex().as_str()

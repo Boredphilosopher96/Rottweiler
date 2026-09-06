@@ -187,7 +187,7 @@ async fn prepare_process(
                         "Rottweiler executable has no release directory",
                     )
                 })?
-                .join("rottweiler-plugin-host");
+                .join(rw_types::release_contract::JS_HOST_EXECUTABLE_NAME);
             let resolver = SourcePluginResolver::new(
                 &host,
                 &recipe.private_root,

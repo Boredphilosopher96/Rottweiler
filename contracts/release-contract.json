@@ -17,8 +17,8 @@
         "max_bytes": 52428800
       },
       {
-        "id": "tui",
-        "path": "bin/rottweiler-tui",
+        "id": "js_host",
+        "path": "bin/rottweiler-js-host",
         "mode": "0755",
         "max_bytes": 104857600
       },
@@ -33,12 +33,6 @@
         "path": "bin/rottweiler-wasm-host.identity.json",
         "mode": "0644",
         "max_bytes": 4096
-      },
-      {
-        "id": "plugin_host",
-        "path": "bin/rottweiler-plugin-host",
-        "mode": "0755",
-        "max_bytes": 83886080
       },
       {
         "id": "opentui_native",
@@ -59,8 +53,7 @@
       "product_budgets": {
         "engine_less_than_bytes": 40000000,
         "wasm_host_less_than_bytes": 30000000,
-        "plugin_host_less_than_bytes": 75000000,
-        "tui_bundle_less_than_bytes": 100000000
+        "js_bundle_less_than_bytes": 100000000
       },
       "distribution": {
         "operating_system": "macos",
@@ -78,8 +71,7 @@
       "product_budgets": {
         "engine_less_than_bytes": 40000000,
         "wasm_host_less_than_bytes": 30000000,
-        "plugin_host_less_than_bytes": 75000000,
-        "tui_bundle_less_than_bytes": 100000000
+        "js_bundle_less_than_bytes": 100000000
       },
       "distribution": {
         "operating_system": "macos",
@@ -97,8 +89,7 @@
       "product_budgets": {
         "engine_less_than_bytes": 28000000,
         "wasm_host_less_than_bytes": 30000000,
-        "plugin_host_less_than_bytes": 75000000,
-        "tui_bundle_less_than_bytes": 150000000
+        "js_bundle_less_than_bytes": 150000000
       },
       "distribution": {
         "operating_system": "linux",
@@ -116,8 +107,7 @@
       "product_budgets": {
         "engine_less_than_bytes": 28000000,
         "wasm_host_less_than_bytes": 30000000,
-        "plugin_host_less_than_bytes": 75000000,
-        "tui_bundle_less_than_bytes": 150000000
+        "js_bundle_less_than_bytes": 150000000
       },
       "distribution": {
         "operating_system": "linux",
@@ -125,5 +115,9 @@
         "homebrew_condition": "Hardware::CPU.intel? && Hardware::CPU.is_64_bit?"
       }
     }
-  ]
+  ],
+  "js_host_roles": {
+    "tui": "tui",
+    "source_plugin": "source-plugin"
+  }
 }

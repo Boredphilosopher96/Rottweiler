@@ -57,7 +57,7 @@ def pinned_toolchains(repo: Path) -> tuple[str, str]:
     rust = tomllib.loads((repo / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
     managers = {
         json.loads((repo / "packages" / name / "package.json").read_text())["packageManager"]
-        for name in ("tui", "plugin-sdk", "plugin-host")
+        for name in ("tui", "plugin-sdk", "plugin-host", "js-host")
     }
     if len(managers) != 1 or not next(iter(managers)).startswith("bun@"):
         raise ValueError("native packages must declare one exact Bun version")
@@ -173,7 +173,7 @@ def verify(root: Path, repo: Path, *, expected_identity: dict | None = None) -> 
                          "sha256": hash_file(root / relative)}:
             raise ValueError(f"candidate component differs: {name}")
     validate_build(contract, platform.id, *(root / expected_paths[name] for name in
-                   ("engine", "wasm_host", "plugin_host", "tui", "opentui_native")))
+                   ("engine", "wasm_host", "js_host", "opentui_native")))
     archive = root / expected_paths["archive"]
     verify_archive(contract, archive, identity["version"], platform.id)
     with tarfile.open(archive, "r:gz") as bundle:

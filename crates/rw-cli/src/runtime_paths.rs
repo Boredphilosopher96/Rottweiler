@@ -264,18 +264,19 @@ pub(super) fn resolve_server_paths(
     allocate_runtime_paths(storage_root)
 }
 
-pub(super) fn locate_tui_executable() -> Result<PathBuf> {
+pub(super) fn locate_js_host_executable() -> Result<PathBuf> {
     let current = std::env::current_exe().into_diagnostic()?;
-    let development =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/tui/dist/rottweiler-tui");
-    resolve_tui_executable(
+    let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packages/js-host/dist")
+        .join(rw_types::release_contract::JS_HOST_EXECUTABLE_NAME);
+    resolve_js_host_executable(
         &current,
-        std::env::var_os("ROTTWEILER_TUI_BIN").map(PathBuf::from),
+        std::env::var_os("ROTTWEILER_JS_HOST_BIN").map(PathBuf::from),
         &development,
     )
 }
 
-pub(super) fn resolve_tui_executable(
+pub(super) fn resolve_js_host_executable(
     current_executable: &Path,
     override_path: Option<PathBuf>,
     development_path: &Path,
@@ -290,7 +291,7 @@ pub(super) fn resolve_tui_executable(
     let installed = fs::canonicalize(current_executable).into_diagnostic()?;
     if let Some(sibling) = installed
         .parent()
-        .map(|parent| parent.join("rottweiler-tui"))
+        .map(|parent| parent.join(rw_types::release_contract::JS_HOST_EXECUTABLE_NAME))
         && sibling.is_file()
     {
         return require_executable(sibling);
@@ -309,7 +310,7 @@ pub(super) fn require_executable(path: PathBuf) -> Result<PathBuf> {
     let executable = true;
     if metadata.file_type().is_symlink() || !metadata.is_file() || !executable {
         return Err(miette!(
-            "compiled OpenTUI executable is not a regular executable at {}; run `bun run build` in packages/tui or set ROTTWEILER_TUI_BIN",
+            "compiled JavaScript host is not a regular executable at {}; run `bun run build` in packages/js-host or set ROTTWEILER_JS_HOST_BIN",
             path.display()
         ));
     }

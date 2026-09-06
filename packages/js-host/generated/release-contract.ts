@@ -1,10 +1,11 @@
 // @generated TypeScript projection by scripts/release_contract.py; do not edit.
+export const JS_HOST_EXECUTABLE_NAME = "rottweiler-js-host" as const
+export const JS_HOST_ROLES = {"source_plugin": "source-plugin", "tui": "tui"} as const
 
 export interface ReleaseProductBudgets {
   readonly engineLessThanBytes: number
   readonly wasmHostLessThanBytes: number
-  readonly pluginHostLessThanBytes: number
-  readonly tuiBundleLessThanBytes: number
+  readonly jsBundleLessThanBytes: number
 }
 
 export interface ReleasePlatform {
@@ -24,8 +25,7 @@ export const RELEASE_PLATFORMS = [
     productBudgets: {
       engineLessThanBytes: 40000000,
       wasmHostLessThanBytes: 30000000,
-      pluginHostLessThanBytes: 75000000,
-      tuiBundleLessThanBytes: 100000000,
+      jsBundleLessThanBytes: 100000000,
     },
   },
   {
@@ -36,8 +36,7 @@ export const RELEASE_PLATFORMS = [
     productBudgets: {
       engineLessThanBytes: 40000000,
       wasmHostLessThanBytes: 30000000,
-      pluginHostLessThanBytes: 75000000,
-      tuiBundleLessThanBytes: 100000000,
+      jsBundleLessThanBytes: 100000000,
     },
   },
   {
@@ -48,8 +47,7 @@ export const RELEASE_PLATFORMS = [
     productBudgets: {
       engineLessThanBytes: 28000000,
       wasmHostLessThanBytes: 30000000,
-      pluginHostLessThanBytes: 75000000,
-      tuiBundleLessThanBytes: 150000000,
+      jsBundleLessThanBytes: 150000000,
     },
   },
   {
@@ -60,8 +58,7 @@ export const RELEASE_PLATFORMS = [
     productBudgets: {
       engineLessThanBytes: 28000000,
       wasmHostLessThanBytes: 30000000,
-      pluginHostLessThanBytes: 75000000,
-      tuiBundleLessThanBytes: 150000000,
+      jsBundleLessThanBytes: 150000000,
     },
   },
 ] as const satisfies readonly ReleasePlatform[]

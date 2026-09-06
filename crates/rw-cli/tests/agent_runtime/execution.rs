@@ -467,7 +467,7 @@ fn local_tui_launch_anchors_relative_added_roots_before_repository_discovery() {
 
     let output = base_command(&nested, &run.home)
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("ROTTWEILER_TUI_BIN", &wrapper)
+        .env("ROTTWEILER_JS_HOST_BIN", &wrapper)
         .env("ROTTWEILER_TEST_REPORT_FILE", &report)
         .args([
             "--add-dir",
@@ -541,7 +541,7 @@ fn supervised_tui_crosses_the_real_host_for_commands_and_tool_approval() {
 
     let output = base_command(&run.workspace, &run.home)
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("ROTTWEILER_TUI_BIN", &wrapper)
+        .env("ROTTWEILER_JS_HOST_BIN", &wrapper)
         .env("ROTTWEILER_TEST_REPORT_FILE", &report)
         .args([
             "--dangerously-trust",

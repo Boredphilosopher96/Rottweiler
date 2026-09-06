@@ -25,7 +25,7 @@ bun test --cwd packages/plugin-sdk
 bun run --cwd packages/plugin-sdk build
 bun run --cwd packages/tui typecheck
 bun test --cwd packages/tui
-bun run --cwd packages/tui build
+bun run --cwd packages/js-host build
 bun run --cwd packages/docs-site check
 bun test --cwd packages/docs-site
 bun run --cwd packages/docs-site build

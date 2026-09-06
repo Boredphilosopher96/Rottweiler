@@ -34,7 +34,7 @@ async fn source_resolver_seals_current_host_output_after_native_helpers_settle()
     let package = root.path().join("package");
     fs::create_dir(&package).expect("package directory");
     let package = fs::canonicalize(package).expect("canonical package directory");
-    let host = root.path().join("rottweiler-plugin-host");
+    let host = root.path().join("rottweiler-js-host");
     compile_source_host(root.path(), &host).await;
     fs::write(
         package.join("package.json"),
@@ -88,8 +88,12 @@ async fn source_resolver_seals_current_host_output_after_native_helpers_settle()
         .await
         .expect("sealed source config");
     let identity = config.source_identity().expect("source identity");
-    assert_eq!(config.argv()[0], "run");
-    let bundle = fs::read(&config.argv()[1]).expect("sealed bundle");
+    assert_eq!(
+        config.argv()[0],
+        rw_types::release_contract::JS_HOST_SOURCE_PLUGIN_ROLE
+    );
+    assert_eq!(config.argv()[1], "run");
+    let bundle = fs::read(&config.argv()[2]).expect("sealed bundle");
     assert_eq!(
         identity.bundle_blake3,
         blake3::hash(&bundle).to_hex().as_str()
@@ -113,7 +117,7 @@ async fn source_resolver_seals_current_host_output_after_native_helpers_settle()
     drop(resolver);
     assert!(!scratch_path.exists());
     assert!(
-        Path::new(&config.argv()[1]).exists(),
+        Path::new(&config.argv()[2]).exists(),
         "sealed output outlives scratch"
     );
 }
@@ -185,9 +189,9 @@ async fn compile_source_host(root: &Path, host: &Path) {
         .tempdir_in(root)
         .expect("compiler temporary directory");
     let entry =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/plugin-host/src/index.ts");
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/js-host/src/index.ts");
     let mut compiler = tokio::process::Command::new("bun")
-        .args(["build", "--compile"])
+        .args(["build", "--compile", "--external", "../../tui/*"])
         .arg(entry)
         .arg("--outfile")
         .arg(host)

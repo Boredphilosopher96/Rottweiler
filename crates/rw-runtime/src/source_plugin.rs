@@ -1,5 +1,7 @@
 //! Release-owned TypeScript source preparation and identity.
 
+use rw_types::release_contract::JS_HOST_SOURCE_PLUGIN_ROLE;
+
 mod preparation;
 use preparation::{PreparationOutput, PreparationRequest};
 pub(crate) use preparation::{SourcePreparationBudget, SourcePreparations};
@@ -71,7 +73,7 @@ pub async fn resolve_plugin_process(
         .installation_path()
         .parent()
         .ok_or_else(|| miette!("Rottweiler executable has no release directory"))?
-        .join("rottweiler-plugin-host");
+        .join(rw_types::release_contract::JS_HOST_EXECUTABLE_NAME);
     SourcePluginResolver::new(
         &host,
         private_root,
@@ -171,6 +173,7 @@ impl SourcePluginResolver {
         PluginProcessConfig::new(&self.host)
             .and_then(|config| {
                 config.with_argv([
+                    JS_HOST_SOURCE_PLUGIN_ROLE.to_owned(),
                     "run".to_owned(),
                     prepared.join("plugin.mjs").to_string_lossy().into_owned(),
                 ])
@@ -223,7 +226,9 @@ impl SourcePluginResolver {
         argv: [String; N],
     ) -> Result<GraphReport> {
         let config = PluginProcessConfig::new(&self.host)
-            .and_then(|config| config.with_argv(argv))
+            .and_then(|config| {
+                config.with_argv(std::iter::once(JS_HOST_SOURCE_PLUGIN_ROLE.to_owned()).chain(argv))
+            })
             .and_then(|config| config.with_cwd(root))
             .and_then(|config| config.with_code_root(root))
             .map_err(|error| miette!(error.to_string()))?;

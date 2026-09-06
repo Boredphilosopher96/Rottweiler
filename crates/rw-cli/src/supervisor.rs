@@ -55,7 +55,7 @@ pub struct ChildSpec {
 #[derive(Clone, Debug)]
 pub struct SupervisorConfig {
     pub rw_executable: PathBuf,
-    pub tui_executable: PathBuf,
+    pub js_host_executable: PathBuf,
     pub socket: PathBuf,
     pub token_file: PathBuf,
     pub last_seen_file: PathBuf,
@@ -844,8 +844,8 @@ fn tui_spec(config: &SupervisorConfig, last_seen: Option<SequenceId>) -> ChildSp
         OsString::from(&config.tui_theme),
     );
     ChildSpec {
-        program: config.tui_executable.clone(),
-        args: Vec::new(),
+        program: config.js_host_executable.clone(),
+        args: vec![rw_types::release_contract::JS_HOST_TUI_ROLE.into()],
         env,
         stdio: StdioMode::Inherit,
         // The TUI must remain in `rw`'s foreground process group so it can

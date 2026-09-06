@@ -18,7 +18,7 @@ REPO = Path(__file__).resolve().parents[2]
 CONTRACT_PATH = REPO / "contracts" / "release-contract.json"
 SCRIPT = REPO / "scripts" / "release_contract.py"
 GENERATED_RUST = REPO / "crates" / "rw-types" / "src" / "generated" / "release_contract.rs"
-GENERATED_TYPESCRIPT = REPO / "packages" / "tui" / "generated" / "release-contract.ts"
+GENERATED_TYPESCRIPT = REPO / "packages" / "js-host" / "generated" / "release-contract.ts"
 VERSION = "1.2.3"
 
 
@@ -32,7 +32,7 @@ def load_module():
     return module
 
 
-def make_archive(path: Path, contract, platform_id: str, *, extra: bool = False, identity: bytes | None = None) -> None:
+def make_archive(path: Path, contract, platform_id: str, *, extra: bool | str = False, identity: bytes | None = None) -> None:
     platform_contract = contract.platform(platform_id)
     root = contract.archive_root(VERSION, platform_id)
     with tarfile.open(path, "w:gz") as archive:
@@ -54,7 +54,7 @@ def make_archive(path: Path, contract, platform_id: str, *, extra: bool = False,
             archive.addfile(info, io.BytesIO(content))
         if extra:
             content = b"unexpected\n"
-            info = tarfile.TarInfo(f"{root}/extra")
+            info = tarfile.TarInfo(f"{root}/{extra if isinstance(extra, str) else 'extra'}")
             info.mode = 0o644
             info.size = len(content)
             archive.addfile(info, io.BytesIO(content))
@@ -93,6 +93,27 @@ class ReleaseContractTests(unittest.TestCase):
             28_000_000,
         )
         self.assertEqual(contract.platform("linux-aarch64").native_library, "libopentui.so")
+
+    def test_archive_rejects_separate_role_executables(self) -> None:
+        contract = self.module.load_contract(CONTRACT_PATH)
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / f"{contract.archive_root(VERSION, 'linux-aarch64')}.tar.gz"
+            for path in ("bin/rottweiler-tui", "bin/rottweiler-plugin-host"):
+                make_archive(archive, contract, "linux-aarch64", extra=path)
+                with self.assertRaises(ValueError):
+                    self.module.verify_archive(contract, archive, VERSION, "linux-aarch64")
+
+    def test_shared_host_has_one_member_and_preserves_bundle_ceilings(self) -> None:
+        contract = self.module.load_contract(CONTRACT_PATH)
+        self.assertEqual(contract.js_host_roles, {"tui": "tui", "source_plugin": "source-plugin"})
+        for platform in contract.platforms:
+            self.assertEqual({member.id for member in platform.archive_members},
+                             {"installer", "engine", "js_host", "wasm_host", "wasm_host_identity", "opentui_native"})
+            host = next(member for member in platform.archive_members if member.id == "js_host")
+            self.assertEqual(host.path, "bin/rottweiler-js-host")
+            self.assertEqual(host.max_bytes, 104_857_600)
+            expected = 100_000_000 if platform.system == "Darwin" else 150_000_000
+            self.assertEqual(platform.product_budgets.js_bundle_less_than_bytes, expected)
 
     def test_contract_rejects_unknown_fields_and_duplicate_platform_ids(self) -> None:
         document = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
@@ -198,18 +219,16 @@ class ReleaseContractTests(unittest.TestCase):
                 output.truncate(30_000_000)
             wasm_host = root / "rottweiler-wasm-host"
             wasm_host.write_bytes(b"wasm")
-            plugin_host = root / "rottweiler-plugin-host"
-            plugin_host.write_bytes(b"plugin")
-            tui = root / "rottweiler-tui"
+            tui = root / "rottweiler-js-host"
             tui.write_bytes(b"tui")
             native = root / "libopentui.dylib"
             native.write_bytes(b"native")
             self.module.validate_build(
-                contract, "darwin-arm64", engine, wasm_host, plugin_host, tui, native
+                contract, "darwin-arm64", engine, wasm_host, tui, native
             )
             with self.assertRaisesRegex(ValueError, "product budget is <28000000"):
                 self.module.validate_build(
-                    contract, "linux-x86_64", engine, wasm_host, plugin_host, tui, native
+                    contract, "linux-x86_64", engine, wasm_host, tui, native
                 )
 
     def test_stage_release_projects_exact_archive_shape_and_modes(self) -> None:
@@ -218,7 +237,7 @@ class ReleaseContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             sources: dict[str, Path] = {}
-            for member_id in ("engine", "wasm_host", "plugin_host", "tui", "opentui_native"):
+            for member_id in ("engine", "wasm_host", "js_host", "opentui_native"):
                 source = root / member_id
                 source.write_bytes(member_id.encode("ascii"))
                 sources[member_id] = source
@@ -234,8 +253,7 @@ class ReleaseContractTests(unittest.TestCase):
                 platform_id,
                 sources["engine"],
                 sources["wasm_host"],
-                sources["plugin_host"],
-                sources["tui"],
+                sources["js_host"],
                 sources["opentui_native"],
             )
             platform_contract = contract.platform(platform_id)

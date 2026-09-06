@@ -73,7 +73,7 @@ class SoakHarnessTests(unittest.TestCase):
         rows = SOAK.parse_process_table(
             "10 1 100 /tmp/rw\n"
             "11 10 200 /tmp/rw serve --max-turns 32\n"
-            "12 10 300 /tmp/rottweiler-tui\n"
+            "12 10 300 /tmp/rottweiler-js-host\n"
             "13 11 400 helper\n"
             "99 1 999 unrelated\n"
         )
@@ -83,8 +83,19 @@ class SoakHarnessTests(unittest.TestCase):
             SOAK.find_descendant(rows, 10, Path("/tmp/rw"), " serve "), 11
         )
         self.assertEqual(
-            SOAK.find_descendant(rows, 10, Path("/tmp/rottweiler-tui")), 12
+            SOAK.find_descendant(rows, 10, Path("/tmp/rottweiler-js-host")), 12
         )
+
+    def test_shared_host_restart_selects_only_the_exact_tui_role(self) -> None:
+        rows = SOAK.parse_process_table(
+            "10 1 100 /tmp/rw\n"
+            "11 10 200 /tmp/rottweiler-js-host source-plugin run /tmp/tui\n"
+            "12 10 300 /tmp/rottweiler-js-host tui\n"
+        )
+        host = Path("/tmp/rottweiler-js-host")
+        self.assertEqual(SOAK.find_descendant(rows, 10, host, role=SOAK.TUI_ROLE), 12)
+        del rows[12]
+        self.assertIsNone(SOAK.find_descendant(rows, 10, host, role=SOAK.TUI_ROLE))
 
     def test_event_probe_reads_only_growth_and_remembers_persisted_marker(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -173,7 +184,7 @@ class SoakHarnessTests(unittest.TestCase):
                 "max_rss_bytes": 700,
                 "process_rss": [
                     {"executable": "rw", "pid": 10, "rss_bytes": 300},
-                    {"executable": "rottweiler-tui", "pid": 11, "rss_bytes": 400},
+                    {"executable": "rottweiler-js-host", "pid": 11, "rss_bytes": 400},
                 ],
                 "rss_limit_bytes": 600,
                 "turns_completed": 20,
@@ -281,7 +292,7 @@ class SoakHarnessTests(unittest.TestCase):
             with self.subTest(ready=ready), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 rw = root / "rw"
-                tui = root / "rottweiler-tui"
+                tui = root / "rottweiler-js-host"
                 observed = root / "input.txt"
                 output = root / "soak.json"
                 tui.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(10)\n")
@@ -307,10 +318,10 @@ class SoakHarnessTests(unittest.TestCase):
                 )
                 rw.chmod(0o700)
                 tui.chmod(0o700)
-                def fixture_descendant(rows, supervisor, executable, required=""):
+                def fixture_descendant(rows, supervisor, executable, required="", *, role=None):
                     # macOS ps can expose only the interpreter name for scripts.
                     # The fixture's only child is its fake TUI; retain real PIDs.
-                    if executable.name == "rottweiler-tui":
+                    if executable.name == "rottweiler-js-host":
                         return next((pid for pid, row in rows.items() if row.parent == supervisor), None)
                     return None
 

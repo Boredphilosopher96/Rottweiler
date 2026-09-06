@@ -15,7 +15,9 @@ import { dirname, isAbsolute, join } from "node:path"
 
 import type { BunPlugin } from "bun"
 
-import { releasePlatformForNodeTarget } from "./generated/release-contract.ts"
+import { JS_HOST_EXECUTABLE_NAME, JS_HOST_ROLES, releasePlatformForNodeTarget } from "./generated/release-contract.ts"
+
+const tuiDirectory = join(import.meta.dir, "../tui")
 
 const MAX_EMBEDDED_TREE_SITTER_ASSET_BYTES = 8 * 1024 * 1024
 const COMPRESSED_TREE_SITTER_ASSET_HEADER_BYTES = 8
@@ -72,7 +74,7 @@ function nativePackage(): string {
 }
 
 const selectedNativePackage = nativePackage()
-const selectedNativeEntry = Bun.resolveSync(selectedNativePackage, import.meta.dir)
+const selectedNativeEntry = Bun.resolveSync(selectedNativePackage, tuiDirectory)
 const selectedNativeDirectory = dirname(selectedNativeEntry)
 const selectedReleasePlatform = releasePlatformForNodeTarget(
   process.platform,
@@ -85,9 +87,9 @@ const selectedNativeLibrary =
   selectedReleasePlatform?.nativeLibrary ?? "opentui.dll"
 const selectedNativePath = join(selectedNativeDirectory, selectedNativeLibrary)
 const treeSitterAssetDigest = createHash("sha256")
-  .update(readFileSync(join(import.meta.dir, "bun.lock")))
-  .update(readFileSync(join(import.meta.dir, "src/tree-sitter-runtime.ts")))
-  .update(readFileSync(join(import.meta.dir, "src/tree-sitter-client.ts")))
+  .update(readFileSync(join(tuiDirectory, "bun.lock")))
+  .update(readFileSync(join(tuiDirectory, "src/tree-sitter-runtime.ts")))
+  .update(readFileSync(join(tuiDirectory, "src/tree-sitter-client.ts")))
   .digest("hex")
 function stripLinuxNativeLibrary(path: string): void {
   if (process.platform !== "linux") return
@@ -127,15 +129,15 @@ function signDarwinArtifact(path: string, label: string): void {
   }
 }
 
-function enforceTuiBundleSize(executable: string, nativeLibrary: string): void {
-  const limit = selectedReleasePlatform?.productBudgets.tuiBundleLessThanBytes
+function enforceJavaScriptBundleSize(executable: string, nativeLibrary: string): void {
+  const limit = selectedReleasePlatform?.productBudgets.jsBundleLessThanBytes
   if (limit === undefined) return
   const executableBytes = statSync(executable).size
   const nativeBytes = statSync(nativeLibrary).size
   const bundleBytes = executableBytes + nativeBytes
-  console.log(`Release TUI bundle bytes: ${bundleBytes} (executable ${executableBytes}, native ${nativeBytes}; budget <${limit})`)
+  console.log(`Release JavaScript bundle bytes: ${bundleBytes} (executable ${executableBytes}, native ${nativeBytes}; budget <${limit})`)
   if (bundleBytes >= limit) {
-    throw new Error(`release TUI bundle is ${bundleBytes} bytes; budget is <${limit}`)
+    throw new Error(`release JavaScript bundle is ${bundleBytes} bytes; budget is <${limit}`)
   }
 }
 
@@ -183,12 +185,8 @@ const nativePrelude: BunPlugin = {
   },
 }
 
-const outputDirectory = "dist"
-const outputExecutable = join(outputDirectory, "rottweiler-tui")
-// Remove obsolete sidecar parser bundles from older builds. The signed release
-// contract permits only the executable and native renderer in this directory.
-rmSync(join(outputDirectory, "parser.worker.js"), { force: true })
-rmSync(join(outputDirectory, "assets"), { recursive: true, force: true })
+const outputDirectory = join(import.meta.dir, "dist")
+const outputExecutable = join(outputDirectory, JS_HOST_EXECUTABLE_NAME)
 const compilationDirectory = mkdtempSync(join(tmpdir(), `rottweiler-bun-build-${process.pid}-`))
 const originalWorkingDirectory = process.cwd()
 let result: Awaited<ReturnType<typeof Bun.build>>
@@ -212,11 +210,11 @@ try {
   result = await Bun.build({
     entrypoints: [join(import.meta.dir, "src/index.ts")],
     compile: {
-      outfile: join(import.meta.dir, outputExecutable),
+      outfile: outputExecutable,
       autoloadDotenv: false,
       autoloadBunfig: false,
       ...(process.platform === "linux"
-        ? { target: "bun-linux-x64-baseline" as const }
+        ? { target: (process.arch === "arm64" ? "bun-linux-arm64" as const : "bun-linux-x64-baseline" as const) }
         : {}),
     },
     format: "esm",
@@ -248,21 +246,33 @@ mkdirSync(outputDirectory, { recursive: true })
 const outputNativePath = join(outputDirectory, selectedNativeLibrary)
 copyFileSync(selectedNativePath, outputNativePath)
 stripLinuxNativeLibrary(outputNativePath)
-signDarwinArtifact(outputExecutable, "OpenTUI executable")
+signDarwinArtifact(outputExecutable, "JavaScript host")
 signDarwinArtifact(outputNativePath, "OpenTUI native library")
-enforceTuiBundleSize(outputExecutable, outputNativePath)
+enforceJavaScriptBundleSize(outputExecutable, outputNativePath)
 
 // Prove the compiled release executable contains its parser runtime. Only the
 // native renderer remains adjacent, preserving the signed six-entry archive.
 const smokeDirectory = mkdtempSync(join(tmpdir(), "rottweiler-embedded-parser-smoke-"))
 try {
-  const smokeExecutable = join(smokeDirectory, "rottweiler-tui")
+  const smokeExecutable = join(smokeDirectory, JS_HOST_EXECUTABLE_NAME)
   const smokeNative = join(smokeDirectory, selectedNativeLibrary)
   const smokeReport = join(smokeDirectory, "report.json")
   const smokeHome = join(smokeDirectory, "home")
   copyFileSync(outputExecutable, smokeExecutable)
+  // This role must run with no native renderer or parser assets available.
+  const sourceSmoke = spawnSync(smokeExecutable, [JS_HOST_ROLES.source_plugin, "version"], {
+    cwd: smokeDirectory,
+    encoding: "utf8",
+    timeout: 10_000,
+    env: { ...process.env, ROTTWEILER_HOME: smokeHome, ROTTWEILER_TREE_SITTER_SMOKE_REPORT: smokeReport },
+  })
+  if (sourceSmoke.error !== undefined || sourceSmoke.status !== 0 || sourceSmoke.stderr !== ""
+    || sourceSmoke.stdout !== '{"abi":1,"format":"bun-esm-v1"}\n'
+    || readdirSync(smokeDirectory).join("\n") !== JS_HOST_EXECUTABLE_NAME) {
+    throw new Error(`compiled source-plugin role initialized unexpected resources: ${sourceSmoke.stderr}`)
+  }
   copyFileSync(outputNativePath, smokeNative)
-  const smoke = spawnSync(smokeExecutable, [], {
+  const smoke = spawnSync(smokeExecutable, [JS_HOST_ROLES.tui], {
     cwd: smokeDirectory,
     encoding: "utf8",
     timeout: 30_000,
@@ -283,7 +293,7 @@ try {
   }
   rmSync(smokeHome, { recursive: true, force: true })
   const entries = readdirSync(smokeDirectory).sort()
-  if (entries.join("\n") !== [selectedNativeLibrary, "report.json", "rottweiler-tui"].sort().join("\n")) {
+  if (entries.join("\n") !== [selectedNativeLibrary, "report.json", JS_HOST_EXECUTABLE_NAME].sort().join("\n")) {
     throw new Error("compiled TUI required unexpected adjacent parser assets")
   }
 } finally {

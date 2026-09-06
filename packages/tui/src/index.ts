@@ -451,11 +451,8 @@ async function parseKeybindingsFromEnvironment(source: string | undefined) {
   return parseKeybindingToml(source)
 }
 
-writeStartupSplash(process.stdout)
-emitStartupMarker("ROTTWEILER_PROCESS_START_MARKER", "ROTTWEILER_PROCESS_START_EPOCH")
-void main().catch((error: unknown) => {
-  process.stderr.write(
-    `rottweiler TUI failed to start: ${error instanceof Error ? error.message : "unknown error"}\n`,
-  )
-  process.exitCode = 1
-})
+export async function runTui(): Promise<void> {
+  writeStartupSplash(process.stdout)
+  emitStartupMarker("ROTTWEILER_PROCESS_START_MARKER", "ROTTWEILER_PROCESS_START_EPOCH")
+  await main()
+}

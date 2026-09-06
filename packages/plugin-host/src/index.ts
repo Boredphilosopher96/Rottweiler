@@ -190,20 +190,5 @@ export async function main(argv: readonly string[]): Promise<void> {
     await run(args[0])
     return
   }
-  throw new Error("usage: rottweiler-plugin-host version|graph ROOT ENTRY|bundle ROOT ENTRY OUTDIR|run BUNDLE")
-}
-
-if (import.meta.main) {
-  try {
-    await main(process.argv.slice(2))
-  } catch (error) {
-    const causes: readonly unknown[] = error instanceof AggregateError ? error.errors : []
-    const message = [error, ...causes.slice(0, 8)]
-      .map((cause) => (cause instanceof Error || isRecord(cause)) && typeof cause.message === "string"
-        ? cause.message
-        : "plugin host failed")
-      .join("\n")
-    process.stderr.write(`${message.slice(0, 4096)}\n`)
-    process.exitCode = 1
-  }
+  throw new Error("usage: rottweiler-js-host source-plugin version|graph ROOT ENTRY|bundle ROOT ENTRY OUTDIR|run BUNDLE")
 }

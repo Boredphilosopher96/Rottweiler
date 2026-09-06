@@ -22,6 +22,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from journal_observer import journal_files, session_journals
+from release_contract import load_contract
+
+TUI_ROLE = load_contract(Path(__file__).resolve().parents[1] / "contracts/release-contract.json").js_host_roles["tui"]
 
 
 DEFAULT_SECONDS = 8 * 60 * 60
@@ -164,13 +167,15 @@ def process_rss(root_pid: int) -> tuple[int, int]:
 
 
 def find_descendant(
-    rows: dict[int, ProcessRow], root_pid: int, executable: Path, required: str = ""
+    rows: dict[int, ProcessRow], root_pid: int, executable: Path, required: str = "", *, role: str | None = None
 ) -> int | None:
     executable_text = str(executable)
     for pid in sorted(descendants(rows, root_pid)):
         if pid == root_pid:
             continue
         command = rows[pid].command
+        if role is not None and command != f"{executable_text} {role}":
+            continue
         if executable_text in command and (not required or required in command):
             return pid
     return None
@@ -522,8 +527,8 @@ def _run_soak(
     progress: SoakProgress,
 ) -> dict[str, object]:
     rw = validate_executable(rw, "rw")
-    tui_executable = validate_executable(
-        tui if tui is not None else rw.with_name("rottweiler-tui"),
+    js_host_executable = validate_executable(
+        tui if tui is not None else rw.with_name("rottweiler-js-host"),
         "TUI",
     )
     if duration <= 0 or sample_seconds <= 0 or turn_seconds <= 0:
@@ -589,7 +594,7 @@ def _run_soak(
             "TERM": "xterm-256color",
         }
         if tui is not None:
-            environment["ROTTWEILER_TUI_BIN"] = str(tui_executable)
+            environment["ROTTWEILER_JS_HOST_BIN"] = str(js_host_executable)
         master, slave = pty.openpty()
         os.set_blocking(master, False)
         try:
@@ -709,7 +714,7 @@ def _run_soak(
                             driver_ready_count += markers
                             if markers:
                                 ready_tui_pid = find_descendant(
-                                    process_table(), process.pid, tui_executable
+                                    process_table(), process.pid, js_host_executable, role=TUI_ROLE
                                 )
                             # The first marker is initial readiness; every later
                             # marker is a successfully reattached TUI, including
@@ -782,7 +787,7 @@ def _run_soak(
                                     f"engine={engine_diagnostic}; terminal tail: "
                                     f"{terminal_tail.decode('utf-8', errors='replace')[-4000:]}"
                                 )
-                            current_tui = find_descendant(process_table(), process.pid, tui_executable)
+                            current_tui = find_descendant(process_table(), process.pid, js_host_executable, role=TUI_ROLE)
                             if current_tui is None or current_tui != ready_tui_pid:
                                 raise RuntimeError(
                                     f"TUI driver changed before input acceptance for {waiting.marker}"
@@ -818,7 +823,7 @@ def _run_soak(
                 ):
                     rows = process_table()
                     engine_pid = find_descendant(rows, process.pid, rw, " serve ")
-                    tui_pid = find_descendant(rows, process.pid, tui_executable)
+                    tui_pid = find_descendant(rows, process.pid, js_host_executable, role=TUI_ROLE)
                     if engine_pid is not None and tui_pid is not None:
                         os.kill(tui_pid, signal.SIGKILL)
                         restart_old_tui = tui_pid
@@ -830,7 +835,7 @@ def _run_soak(
                 if restart_old_tui is not None:
                     rows = process_table()
                     current_engine = find_descendant(rows, process.pid, rw, " serve ")
-                    current_tui = find_descendant(rows, process.pid, tui_executable)
+                    current_tui = find_descendant(rows, process.pid, js_host_executable, role=TUI_ROLE)
                     if (
                         current_engine == restart_engine
                         and current_tui is not None
@@ -856,7 +861,7 @@ def _run_soak(
                     and now >= next_submit
                     and submitted < len(steps)
                 ):
-                    current_tui = find_descendant(process_table(), process.pid, tui_executable)
+                    current_tui = find_descendant(process_table(), process.pid, js_host_executable, role=TUI_ROLE)
                     if current_tui is None or current_tui != ready_tui_pid:
                         if readiness_deadline is None:
                             readiness_deadline = now + 20
@@ -887,7 +892,7 @@ def _run_soak(
                     owned_processes = {pid: rows[pid].command for pid in selected}
                     for generations, current in (
                         (engine_generations, find_descendant(rows, process.pid, rw, " serve ")),
-                        (tui_generations, find_descendant(rows, process.pid, tui_executable)),
+                        (tui_generations, find_descendant(rows, process.pid, js_host_executable, role=TUI_ROLE)),
                     ):
                         if current is not None and (not generations or generations[-1] != current):
                             generations.append(current)
@@ -1010,7 +1015,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--rw", required=True, type=Path)
     parser.add_argument(
-        "--tui",
+        "--js-host",
         type=Path,
         help="development-only TUI override; release bundles discover the private sibling",
     )
@@ -1032,7 +1037,7 @@ def main() -> None:
     try:
         result = run_soak(
             args.rw,
-            args.tui,
+            args.js_host,
             args.duration_seconds,
             args.sample_seconds,
             args.rss_limit_mib * 1024 * 1024,

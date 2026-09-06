@@ -10,7 +10,7 @@ use rw_core::{
 use rw_runtime::{TranscriptReader, session};
 
 #[cfg(unix)]
-use crate::runtime_paths::{RuntimeDirectoryGuard, allocate_runtime_paths, locate_tui_executable};
+use crate::runtime_paths::{RuntimeDirectoryGuard, allocate_runtime_paths, locate_js_host_executable};
 use crate::{server, tui_config};
 
 #[derive(Clone)]
@@ -280,7 +280,7 @@ impl server::ServerEngine for HistoricalReplayEngine {
 }
 
 pub(super) async fn run_history_replay(storage_root: &Path, session: &str) -> Result<()> {
-    let tui = locate_tui_executable()?;
+    let tui = locate_js_host_executable()?;
     run_history_replay_with_tui(storage_root, session, &tui).await
 }
 
@@ -309,6 +309,7 @@ pub(super) async fn run_history_replay_with_tui(
     let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
     let server_task = tokio::spawn(server::serve(listener, state, shutdown_rx));
     let mut command = tokio::process::Command::new(tui);
+    command.arg(rw_types::release_contract::JS_HOST_TUI_ROLE);
     command
         .env_remove("ROTTWEILER_TUI_KEYBINDINGS")
         .env("ROTTWEILER_ENGINE_SOCKET", &runtime.paths.socket)

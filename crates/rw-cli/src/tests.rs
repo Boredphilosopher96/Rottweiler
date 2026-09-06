@@ -11,7 +11,7 @@ use crate::remote_session::{DetachedServerReady, append_execution_lease_restart_
 #[cfg(unix)]
 use crate::runtime_paths::{
     MAX_UNIX_SOCKET_PATH_BYTES, RuntimeDirectoryGuard, create_guarded_server_runtime,
-    resolve_tui_executable, runtime_root, rustix_device_id, rustix_mode_bits,
+    resolve_js_host_executable, runtime_root, rustix_device_id, rustix_mode_bits,
     valid_bootstrap_token, write_private_file_atomic,
 };
 use crate::trust_cli::ensure_folder_trust_grantable;
@@ -595,7 +595,7 @@ fn tui_resolution_follows_public_launcher_to_private_runtime_sibling() {
     std::fs::create_dir_all(&public)
         .unwrap_or_else(|error| panic!("public bin must exist: {error}"));
     let rw = private.join("rw");
-    let tui = private.join("rottweiler-tui");
+    let tui = private.join("rottweiler-js-host");
     for executable in [&rw, &tui] {
         std::fs::write(executable, b"fixture")
             .unwrap_or_else(|error| panic!("executable fixture must exist: {error}"));
@@ -607,7 +607,7 @@ fn tui_resolution_follows_public_launcher_to_private_runtime_sibling() {
         .unwrap_or_else(|error| panic!("public launcher symlink must exist: {error}"));
 
     assert_eq!(
-        resolve_tui_executable(&launcher, None, &root.path().join("missing"))
+        resolve_js_host_executable(&launcher, None, &root.path().join("missing"))
             .unwrap_or_else(|error| panic!("TUI sibling must resolve: {error}")),
         std::fs::canonicalize(&tui)
             .unwrap_or_else(|error| panic!("TUI sibling must canonicalize: {error}"))
@@ -619,7 +619,7 @@ fn tui_resolution_follows_public_launcher_to_private_runtime_sibling() {
     std::fs::set_permissions(&override_path, std::fs::Permissions::from_mode(0o700))
         .unwrap_or_else(|error| panic!("override must be executable: {error}"));
     assert_eq!(
-        resolve_tui_executable(&launcher, Some(override_path.clone()), &tui)
+        resolve_js_host_executable(&launcher, Some(override_path.clone()), &tui)
             .unwrap_or_else(|error| panic!("explicit override must win: {error}")),
         override_path
     );

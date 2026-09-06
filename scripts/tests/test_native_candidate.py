@@ -34,7 +34,7 @@ class NativeCandidateFixture:
         self.repo = Path(self.temporary.name) / "repo"
         self.repo.mkdir()
         for name in ("Cargo.toml", "rust-toolchain.toml", ".bun-version", "contracts/release-contract.json",
-                     "packages/tui/package.json", "packages/plugin-sdk/package.json", "packages/plugin-host/package.json"):
+                     "packages/tui/package.json", "packages/plugin-sdk/package.json", "packages/plugin-host/package.json", "packages/js-host/package.json"):
             target = self.repo / name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(SCRIPTS.parent / name, target)

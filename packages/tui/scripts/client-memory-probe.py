@@ -13,11 +13,14 @@ import tempfile
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / "scripts"))
 import native_candidate
+from release_contract import load_contract
+
+TUI_ROLE = load_contract(REPO / "contracts/release-contract.json").js_host_roles["tui"]
 
 
 def run(candidate: Path, output: Path, cycles: int, generations: int) -> None:
     receipt = native_candidate.verify(candidate, REPO)
-    executable = candidate / receipt["components"]["tui"]["path"]
+    executable = candidate / receipt["components"]["js_host"]["path"]
     output.mkdir(parents=True, exist_ok=True)
     reports = []
     with tempfile.TemporaryDirectory(prefix="rw-client-memory-", dir="/tmp") as temporary:
@@ -31,7 +34,7 @@ def run(candidate: Path, output: Path, cycles: int, generations: int) -> None:
                                ROTTWEILER_CLIENT_MEMORY_PROBE_CYCLES=str(cycles),
                                ROTTWEILER_CLIENT_MEMORY_PROBE_RECYCLE="1" if recycle else "0")
             with (output / f"process-{generation}.log").open("wb") as log:
-                result = subprocess.run([str(executable)], cwd=private, env=environment,
+                result = subprocess.run([str(executable), TUI_ROLE], cwd=private, env=environment,
                                         stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, timeout=180)
             if result.returncode != (75 if recycle else 0):
                 raise ValueError(f"compiled memory probe generation {generation} exited {result.returncode}; see its log")
@@ -54,7 +57,7 @@ def run(candidate: Path, output: Path, cycles: int, generations: int) -> None:
 
 def run_held(candidate: Path, output: Path, cycles: int, view: str) -> None:
     receipt = native_candidate.verify(candidate, REPO)
-    executable = candidate / receipt["components"]["tui"]["path"]
+    executable = candidate / receipt["components"]["js_host"]["path"]
     output.mkdir(parents=True, exist_ok=True)
     report = output / f"held-{view}.json"
     with tempfile.TemporaryDirectory(prefix="rw-held-memory-", dir="/tmp") as temporary:
@@ -65,7 +68,7 @@ def run_held(candidate: Path, output: Path, cycles: int, view: str) -> None:
                            ROTTWEILER_CLIENT_MEMORY_PROBE_CYCLES=str(cycles),
                            ROTTWEILER_CLIENT_MEMORY_HELD_VIEW=view)
         with (output / f"held-{view}.log").open("wb") as log:
-            result = subprocess.run([str(executable)], cwd=private, env=environment,
+            result = subprocess.run([str(executable), TUI_ROLE], cwd=private, env=environment,
                                     stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, timeout=300)
         if result.returncode != 0:
             raise ValueError(f"held {view} probe exited {result.returncode}; see its log")

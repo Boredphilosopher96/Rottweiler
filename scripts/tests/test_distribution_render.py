@@ -133,10 +133,10 @@ class DistributionRenderTests(unittest.TestCase):
                 'bin.install_symlink libexec/"rw"',
                 formula_text,
             )
-            self.assertNotIn('bin.install "rottweiler-tui"', formula_text)
-            self.assertIn('refute_path_exists bin/"rottweiler-tui"', formula_text)
+            self.assertNotIn('bin.install "rottweiler-js-host"', formula_text)
+            self.assertIn('refute_path_exists bin/"rottweiler-js-host"', formula_text)
             self.assertIn('libexec/"rottweiler-wasm-host"', formula_text)
-            self.assertIn('libexec/"rottweiler-plugin-host"', formula_text)
+            self.assertIn('libexec/"rottweiler-js-host"', formula_text)
             self.assertIn('license "Apache-2.0"', formula_text)
             self.assertIn("preserve_rpath", formula_text)
             self.assertIn("managed by Homebrew", formula_text)
@@ -278,22 +278,20 @@ class DistributionRenderTests(unittest.TestCase):
         self.assertIn('ROTTWEILER_STRIP_BIN: formula_opt_bin("binutils")/"strip"', text)
         self.assertIn("preserve_rpath", text)
         self.assertIn('"scripts/cargo-release.sh", "build", "--locked", "--release"', text)
-        self.assertIn('libexec.install "packages/tui/dist/rottweiler-tui"', text)
+        self.assertIn('libexec.install "packages/js-host/dist/rottweiler-js-host"', text)
         self.assertIn('libexec.install "#{release_dir}/rottweiler-wasm-host"', text)
-        self.assertIn('libexec.install "packages/plugin-host/dist/rottweiler-plugin-host"', text)
         self.assertIn(
             'bin.install_symlink libexec/"rw"',
             text,
         )
-        self.assertNotIn('bin.install "rottweiler-tui"', text)
-        self.assertIn('refute_path_exists bin/"rottweiler-tui"', text)
-        self.assertIn('refute_path_exists bin/"rottweiler-plugin-host"', text)
+        self.assertNotIn('bin.install "rottweiler-js-host"', text)
+        self.assertIn('refute_path_exists bin/"rottweiler-js-host"', text)
         self.assertIn("managed by Homebrew", text)
         self.assertIn("brew upgrade", text)
         if subprocess.run(["sh", "-c", "command -v ruby"], check=False).returncode == 0:
             subprocess.run(["ruby", "-c", str(formula)], check=True)
 
-        tui_build = (REPO / "packages/tui/build.ts").read_text(encoding="utf-8")
+        tui_build = (REPO / "packages/js-host/build.ts").read_text(encoding="utf-8")
         self.assertIn('process.env.ROTTWEILER_STRIP_BIN ?? "/usr/bin/strip"', tui_build)
         self.assertIn("isAbsolute(stripExecutable)", tui_build)
         self.assertIn('"/usr/bin/codesign"', tui_build)

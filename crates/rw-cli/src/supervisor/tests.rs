@@ -10,7 +10,7 @@ use super::*;
 fn fixture_config() -> SupervisorConfig {
     SupervisorConfig {
         rw_executable: PathBuf::from("/bin/rw"),
-        tui_executable: PathBuf::from("/bin/rottweiler-tui"),
+        js_host_executable: PathBuf::from("/bin/rottweiler-js-host"),
         socket: PathBuf::from("/private/run/engine.sock"),
         token_file: PathBuf::from("/private/run/auth.token"),
         last_seen_file: PathBuf::from("/private/run/last-seen"),
@@ -47,6 +47,10 @@ fn token_is_passed_by_private_file_environment_never_argv() {
     assert!(engine_spec(&config).new_process_group);
     assert!(!tui_spec(&config, None).new_process_group);
     let tui = tui_spec(&config, Some(SequenceId(41)));
+    assert_eq!(
+        tui.args,
+        [OsString::from(rw_types::release_contract::JS_HOST_TUI_ROLE)]
+    );
     assert_eq!(
         tui.env.get(&OsString::from(LAST_SEEN_ENV)),
         Some(&OsString::from("41"))

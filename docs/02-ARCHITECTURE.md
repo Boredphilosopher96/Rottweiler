@@ -71,7 +71,8 @@ rottweiler/
 │   ├── rw-cli/                # `rw` binary: args, presentation, transports, supervision
 │   └── xtask/                 # code generation and release signing tools
 ├── packages/
-│   └── tui/                   # OpenTUI frontend (TypeScript, Bun; compiled with `bun build --compile`)
+│   ├── js-host/               # Private Bun executable with lazy tui/source-plugin roles
+│   └── tui/                   # OpenTUI frontend source (TypeScript)
 ├── protocol/                  # GENERATED (ADR-013): JSON Schema + TS types emitted from rw-types
 │                              #   (schemars/typeshare); committed, CI-checked for drift
 ├── docs/
@@ -161,10 +162,11 @@ receive the same unsupported-capability behavior.
 
 ### Process model
 
-`rw` (Rust) is the single entry point. In TUI mode it: binds the engine server to a unix socket (localhost TCP on Windows) with a per-engine auth token, spawns the bundled TUI executable with the socket address + token, and supervises it. Engine and TUI fail independently: TUI crash → `rw` restarts it and reattaches to the live session; engine crash → TUI shows a reconnect state, sessions recover from the event log. Print/serve/SDK paths never touch Bun — headless usage is pure Rust.
+`rw` (Rust) is the single entry point. In TUI mode it: binds the engine server to a unix socket (localhost TCP on Windows) with a per-engine auth token, spawns `rottweiler-js-host tui` with the socket address + token, and supervises it. Engine and TUI fail independently: TUI crash → `rw` restarts it and reattaches to the live session; engine crash → TUI shows a reconnect state, sessions recover from the event log. Headless startup runs only Rust. A source-plugin invocation lazily starts `rottweiler-js-host source-plugin`; this role never initializes OpenTUI, terminal I/O, or parser assets.
 
 The process boundary is not a product boundary. Every supported release is one
-platform application bundle containing `rw`, `rottweiler-tui`, the private
+platform application bundle containing `rw`, one `rottweiler-js-host` executable with explicit
+`tui` and `source-plugin` roles, the private
 `rottweiler-wasm-host`, and exactly one native OpenTUI library. Homebrew's
 versioned Cask stages the exact macOS archive in its managed directory and
 exposes only an `rw` symlink; the versioned Formula keeps

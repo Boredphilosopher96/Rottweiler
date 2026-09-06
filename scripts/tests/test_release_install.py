@@ -37,21 +37,18 @@ class ReleaseInstallTests(unittest.TestCase):
             "esac\n",
             encoding="utf-8",
         )
-        tui = binary_dir / "rottweiler-tui"
+        tui = binary_dir / "rottweiler-js-host"
         tui.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         wasm_host = binary_dir / "rottweiler-wasm-host"
         wasm_host.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         identity = binary_dir / "rottweiler-wasm-host.identity.json"
         identity.write_text(json.dumps({"bytes": wasm_host.stat().st_size, "sha256": hashlib.sha256(wasm_host.read_bytes()).hexdigest()}) + "\n")
-        plugin_host = binary_dir / "rottweiler-plugin-host"
-        plugin_host.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         native = binary_dir / PLATFORM_CONTRACT.native_library
         native.write_bytes(b"native fixture\n")
         (release / "install.sh").chmod(0o755)
         rw.chmod(0o755)
         tui.chmod(0o755)
         wasm_host.chmod(0o755)
-        plugin_host.chmod(0o755)
         return release
 
     def install(self, release: Path, prefix: Path) -> subprocess.CompletedProcess[bytes]:
