@@ -123,12 +123,12 @@ fn captured_context_pages_keep_exact_sources_across_rewind_and_reused_ordinals()
         append_script(
             &mut journal,
             vec![
-                SourceEvent::Event(PendingEvent::TurnStarted { turn }),
+                SourceEvent::event(PendingEvent::TurnStarted { turn }),
                 SourceEvent::Input {
                     agent_turn: turn,
                     turn: text(Role::User, &format!("original {turn}")),
                 },
-                SourceEvent::Event(finish(turn)),
+                SourceEvent::event(finish(turn)),
             ],
         );
     }
@@ -141,17 +141,17 @@ fn captured_context_pages_keep_exact_sources_across_rewind_and_reused_ordinals()
     append_script(
         &mut journal,
         vec![
-            SourceEvent::Event(PendingEvent::ConversationRewound {
+            SourceEvent::event(PendingEvent::ConversationRewound {
                 to_turn: 1,
                 operation_id: "rewind".into(),
                 unrestorable_paths: vec![],
             }),
-            SourceEvent::Event(PendingEvent::TurnStarted { turn: 2 }),
+            SourceEvent::event(PendingEvent::TurnStarted { turn: 2 }),
             SourceEvent::Input {
                 agent_turn: 2,
                 turn: text(Role::User, "replacement"),
             },
-            SourceEvent::Event(finish(2)),
+            SourceEvent::event(finish(2)),
         ],
     );
     catch_up(&mut recovery, &journal.read_view(), &modes);

@@ -42,30 +42,30 @@ fn context_revision_seek_restores_rewind_without_resurrecting_discarded_actions(
     append_script(
         &mut journal,
         vec![
-            SourceEvent::Event(PendingEvent::TurnStarted { turn: 1 }),
+            SourceEvent::event(PendingEvent::TurnStarted { turn: 1 }),
             SourceEvent::Input {
                 agent_turn: 1,
                 turn: text(Role::User, "first"),
             },
-            SourceEvent::Event(PendingEvent::ContextItemPinned {
+            SourceEvent::event(PendingEvent::ContextItemPinned {
                 item_id: ContextItemId("conversation:2".into()),
                 effective_after_agent_turn: 1,
             }),
-            SourceEvent::Event(completed(1)),
-            SourceEvent::Event(PendingEvent::TurnStarted { turn: 2 }),
+            SourceEvent::event(completed(1)),
+            SourceEvent::event(PendingEvent::TurnStarted { turn: 2 }),
             SourceEvent::Input {
                 agent_turn: 2,
                 turn: text(Role::User, "discarded"),
             },
-            SourceEvent::Event(PendingEvent::ContextItemEvicted {
+            SourceEvent::event(PendingEvent::ContextItemEvicted {
                 item_id: ContextItemId("conversation:2".into()),
                 effective_after_agent_turn: 2,
             }),
-            SourceEvent::Event(PendingEvent::ContextItemPinned {
+            SourceEvent::event(PendingEvent::ContextItemPinned {
                 item_id: ContextItemId("conversation:7".into()),
                 effective_after_agent_turn: 2,
             }),
-            SourceEvent::Event(completed(2)),
+            SourceEvent::event(completed(2)),
         ],
     );
     catch_up(&mut recovery, &journal.read_view(), &modes);
@@ -92,16 +92,16 @@ fn context_revision_seek_restores_rewind_without_resurrecting_discarded_actions(
     append_script(
         &mut journal,
         vec![
-            SourceEvent::Event(PendingEvent::TurnStarted { turn: 3 }),
+            SourceEvent::event(PendingEvent::TurnStarted { turn: 3 }),
             SourceEvent::Input {
                 agent_turn: 3,
                 turn: text(Role::User, "replacement"),
             },
-            SourceEvent::Event(PendingEvent::ContextItemEvicted {
+            SourceEvent::event(PendingEvent::ContextItemEvicted {
                 item_id: ContextItemId("conversation:14".into()),
                 effective_after_agent_turn: 3,
             }),
-            SourceEvent::Event(completed(3)),
+            SourceEvent::event(completed(3)),
         ],
     );
     catch_up(&mut recovery, &journal.read_view(), &modes);
@@ -169,18 +169,18 @@ fn context_mutation_rejects_a_discarded_source_after_position_reuse() {
     append_script(
         &mut journal,
         vec![
-            SourceEvent::Event(PendingEvent::TurnStarted { turn: 1 }),
+            SourceEvent::event(PendingEvent::TurnStarted { turn: 1 }),
             SourceEvent::Input {
                 agent_turn: 1,
                 turn: text(Role::User, "retained"),
             },
-            SourceEvent::Event(completed(1)),
-            SourceEvent::Event(PendingEvent::TurnStarted { turn: 2 }),
+            SourceEvent::event(completed(1)),
+            SourceEvent::event(PendingEvent::TurnStarted { turn: 2 }),
             SourceEvent::Input {
                 agent_turn: 2,
                 turn: text(Role::User, "discarded"),
             },
-            SourceEvent::Event(completed(2)),
+            SourceEvent::event(completed(2)),
         ],
     );
     catch_up(&mut recovery, &journal.read_view(), &modes);

@@ -71,19 +71,19 @@ fn exact_window_admission_and_snapshot_are_independent_of_later_appends() {
     append_script(
         &mut journal,
         vec![
-            SourceEvent::Event(PendingEvent::SessionCreated {
+            SourceEvent::event(PendingEvent::SessionCreated {
                 driver_client_id: ClientId("driver".into()),
             }),
-            SourceEvent::Event(PendingEvent::TurnStarted { turn: 1 }),
+            SourceEvent::event(PendingEvent::TurnStarted { turn: 1 }),
             SourceEvent::Input {
                 agent_turn: 1,
                 turn: user.clone(),
             },
-            SourceEvent::Event(PendingEvent::ConversationTurnCommitted {
+            SourceEvent::event(PendingEvent::ConversationTurnCommitted {
                 agent_turn: 1,
                 turn: answer.clone(),
             }),
-            SourceEvent::Event(terminal(1)),
+            SourceEvent::event(terminal(1)),
         ],
     );
     catch_up(&mut recovery, &journal.read_view(), &modes);
@@ -140,12 +140,12 @@ fn exact_window_admission_and_snapshot_are_independent_of_later_appends() {
     append_script(
         &mut journal,
         vec![
-            SourceEvent::Event(PendingEvent::TurnStarted { turn: 2 }),
+            SourceEvent::event(PendingEvent::TurnStarted { turn: 2 }),
             SourceEvent::Input {
                 agent_turn: 2,
                 turn: text(Role::User, "later"),
             },
-            SourceEvent::Event(terminal(2)),
+            SourceEvent::event(terminal(2)),
         ],
     );
     catch_up(&mut recovery, &journal.read_view(), &modes);
@@ -166,20 +166,20 @@ fn compaction_generation_and_rewind_restore_exact_canonical_turns_across_reopen(
     append_script(
         &mut journal,
         vec![
-            SourceEvent::Event(PendingEvent::TurnStarted { turn: 1 }),
+            SourceEvent::event(PendingEvent::TurnStarted { turn: 1 }),
             SourceEvent::Input {
                 agent_turn: 1,
                 turn: text(Role::User, "original"),
             },
-            SourceEvent::Event(terminal(1)),
-            SourceEvent::Event(PendingEvent::CompactionStarted {
+            SourceEvent::event(terminal(1)),
+            SourceEvent::event(PendingEvent::CompactionStarted {
                 reason: CompactionReason::Manual,
             }),
-            SourceEvent::Event(PendingEvent::ConversationTurnCommitted {
+            SourceEvent::event(PendingEvent::ConversationTurnCommitted {
                 agent_turn: 2,
                 turn: text(Role::Assistant, "summary"),
             }),
-            SourceEvent::Event(PendingEvent::CompactionFinished {
+            SourceEvent::event(PendingEvent::CompactionFinished {
                 summary_turn: 2,
                 reclaimed_tokens: 0,
                 usage: None,
@@ -286,7 +286,7 @@ fn model_clear_retains_only_system_rows_and_resumes_bounded_batches() {
     let pending = (0..200)
         .map(|index| {
             if index % 50 == 0 {
-                SourceEvent::Event(PendingEvent::ConversationTurnCommitted {
+                SourceEvent::event(PendingEvent::ConversationTurnCommitted {
                     agent_turn: 1,
                     turn: text(Role::System, &index.to_string()),
                 })
@@ -350,12 +350,12 @@ fn recovery_head_stays_small_when_canonical_payload_history_grows() {
         append_script(
             &mut journal,
             vec![
-                SourceEvent::Event(PendingEvent::TurnStarted { turn }),
+                SourceEvent::event(PendingEvent::TurnStarted { turn }),
                 SourceEvent::Input {
                     agent_turn: turn,
                     turn: text(Role::User, &"historical".repeat(1000)),
                 },
-                SourceEvent::Event(terminal(turn)),
+                SourceEvent::event(terminal(turn)),
             ],
         );
     }
@@ -432,7 +432,7 @@ fn changed_mode_definition_rejects_entire_batch_without_advancing_head() {
                 agent_turn: 1,
                 turn: text(Role::User, "must not publish"),
             },
-            SourceEvent::Event(PendingEvent::ModeChanged {
+            SourceEvent::event(PendingEvent::ModeChanged {
                 mode: rw_types::ModeId("plan".into()),
                 definition_fingerprint: "changed".into(),
             }),

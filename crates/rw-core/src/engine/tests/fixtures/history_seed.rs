@@ -43,40 +43,7 @@ pub(super) fn events(
             definition_fingerprint: definition.semantic_fingerprint(),
         });
     }
-    let original_start = pending.len();
-    let mut sources = BTreeMap::new();
-    for (ordinal, turn) in recovered.conversation.iter().enumerate() {
-        if turn.role == Role::User {
-            let [Block::Text { text }] = turn.blocks.as_slice() else {
-                return Err(AgentLoopError::InvalidConfiguration(
-                    "user fixture requires explicit accepted attachments".into(),
-                ));
-            };
-            if turn.meta != TurnMeta::default() {
-                return Err(AgentLoopError::InvalidConfiguration(
-                    "accepted fixture input cannot carry provider metadata".into(),
-                ));
-            }
-            let accepted_source = SequenceId(pending.len() as u64);
-            pending.push(PendingEvent::UserMessageAccepted {
-                turn: 0,
-                content: text.clone(),
-                attachments: vec![],
-            });
-            sources.insert((original_start + ordinal) as u64, pending.len() as u64);
-            pending.push(PendingEvent::ConversationInputCommitted {
-                agent_turn: 0,
-                accepted_source,
-                selection: rw_types::conversation_input::InputSelection::Accepted {},
-            });
-        } else {
-            sources.insert((original_start + ordinal) as u64, pending.len() as u64);
-            pending.push(PendingEvent::ConversationTurnCommitted {
-                agent_turn: 0,
-                turn: turn.clone(),
-            });
-        }
-    }
+    let sources = append_conversation(&mut pending, &recovered.conversation)?;
     for action in &recovered.context_surgery {
         let item_id = if let Some(sequence) = action.item_id.0.strip_prefix("conversation:") {
             let original = sequence.parse::<u64>().map_err(|_| {
@@ -150,4 +117,45 @@ pub(super) fn events(
             })
         })
         .collect())
+}
+
+fn append_conversation(
+    pending: &mut Vec<PendingEvent>,
+    conversation: &[rw_types::Turn],
+) -> Result<BTreeMap<u64, u64>, AgentLoopError> {
+    let original_start = pending.len();
+    let mut sources = BTreeMap::new();
+    for (ordinal, turn) in conversation.iter().enumerate() {
+        if turn.role == Role::User {
+            let [Block::Text { text }] = turn.blocks.as_slice() else {
+                return Err(AgentLoopError::InvalidConfiguration(
+                    "user fixture requires explicit accepted attachments".into(),
+                ));
+            };
+            if turn.meta != TurnMeta::default() {
+                return Err(AgentLoopError::InvalidConfiguration(
+                    "accepted fixture input cannot carry provider metadata".into(),
+                ));
+            }
+            let accepted_source = SequenceId(pending.len() as u64);
+            pending.push(PendingEvent::UserMessageAccepted {
+                turn: 0,
+                content: text.clone(),
+                attachments: vec![],
+            });
+            sources.insert((original_start + ordinal) as u64, pending.len() as u64);
+            pending.push(PendingEvent::ConversationInputCommitted {
+                agent_turn: 0,
+                accepted_source,
+                selection: rw_types::conversation_input::InputSelection::Accepted {},
+            });
+        } else {
+            sources.insert((original_start + ordinal) as u64, pending.len() as u64);
+            pending.push(PendingEvent::ConversationTurnCommitted {
+                agent_turn: 0,
+                turn: turn.clone(),
+            });
+        }
+    }
+    Ok(sources)
 }

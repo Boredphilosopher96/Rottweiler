@@ -30,12 +30,12 @@ fn accounting_byte_cut_resumes_exactly_and_rewind_preserves_billed_history() {
         append_script(
             &mut journal,
             vec![
-                SourceEvent::Event(PendingEvent::TurnStarted { turn }),
+                SourceEvent::event(PendingEvent::TurnStarted { turn }),
                 SourceEvent::Input {
                     agent_turn: turn,
                     turn: text(Role::User, "message"),
                 },
-                SourceEvent::Event(terminal(turn)),
+                SourceEvent::event(terminal(turn)),
             ],
         );
     }

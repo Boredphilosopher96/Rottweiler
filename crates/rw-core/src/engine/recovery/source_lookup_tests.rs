@@ -14,12 +14,12 @@ fn turn(journal: &mut SegmentedJournal, id: u64, body: &str) -> SequenceId {
     append_script(
         journal,
         vec![
-            SourceEvent::Event(PendingEvent::TurnStarted { turn: id }),
+            SourceEvent::event(PendingEvent::TurnStarted { turn: id }),
             SourceEvent::Input {
                 agent_turn: id,
                 turn: text(Role::User, body),
             },
-            SourceEvent::Event(PendingEvent::TurnFinished {
+            SourceEvent::event(PendingEvent::TurnFinished {
                 turn: id,
                 status: AgentTurnStatus::Completed,
                 usage: SessionUsage::default(),

@@ -220,35 +220,35 @@ fn completed_boundary_bootstrap_matches_rewind_without_materializing_history() {
     append_script(
         &mut journal,
         vec![
-            SourceEvent::Event(PendingEvent::ModeChanged {
+            SourceEvent::event(PendingEvent::ModeChanged {
                 mode: rw_types::ModeId("plan".into()),
                 definition_fingerprint: modes.get("plan").expect("mode").semantic_fingerprint(),
             }),
-            SourceEvent::Event(PendingEvent::TurnStarted { turn: 1 }),
+            SourceEvent::event(PendingEvent::TurnStarted { turn: 1 }),
             SourceEvent::Input {
                 agent_turn: 1,
                 turn: text(Role::User, "first"),
             },
-            SourceEvent::Event(PendingEvent::ConversationTurnCommitted {
+            SourceEvent::event(PendingEvent::ConversationTurnCommitted {
                 agent_turn: 1,
                 turn: text(Role::Assistant, &"history".repeat(100_000)),
             }),
-            SourceEvent::Event(super::tests::terminal(1)),
-            SourceEvent::Event(PendingEvent::ModeChanged {
+            SourceEvent::event(super::tests::terminal(1)),
+            SourceEvent::event(PendingEvent::ModeChanged {
                 mode: rw_types::ModeId("execute".into()),
                 definition_fingerprint: modes.get("execute").expect("mode").semantic_fingerprint(),
             }),
-            SourceEvent::Event(PendingEvent::SessionTitleUpdated {
+            SourceEvent::event(PendingEvent::SessionTitleUpdated {
                 title: "Present title".into(),
                 usage: None,
                 cost: None,
             }),
-            SourceEvent::Event(PendingEvent::TurnStarted { turn: 2 }),
+            SourceEvent::event(PendingEvent::TurnStarted { turn: 2 }),
             SourceEvent::Input {
                 agent_turn: 2,
                 turn: text(Role::User, "second"),
             },
-            SourceEvent::Event(super::tests::terminal(2)),
+            SourceEvent::event(super::tests::terminal(2)),
         ],
     );
     catch_up(&mut recovery, &journal.read_view(), &modes);

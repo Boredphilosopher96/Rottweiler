@@ -11,12 +11,12 @@ use rw_types::{Cost, Role};
 
 fn billed_turn(id: u64, used: &str) -> Vec<SourceEvent> {
     vec![
-        SourceEvent::Event(PendingEvent::TurnStarted { turn: id }),
+        SourceEvent::event(PendingEvent::TurnStarted { turn: id }),
         SourceEvent::Input {
             agent_turn: id,
             turn: text(Role::User, "request"),
         },
-        SourceEvent::Event(PendingEvent::TurnFinished {
+        SourceEvent::event(PendingEvent::TurnFinished {
             turn: id,
             status: AgentTurnStatus::Completed,
             usage: SessionUsage {

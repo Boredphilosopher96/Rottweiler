@@ -61,12 +61,12 @@ fn prompt_cut_precedes_answer_and_tracks_effective_reused_turn_identity() {
     append_script(
         &mut journal,
         vec![
-            SourceEvent::Event(PendingEvent::ConversationRewound {
+            SourceEvent::event(PendingEvent::ConversationRewound {
                 to_turn: 1,
                 operation_id: "rewind".into(),
                 unrestorable_paths: vec![],
             }),
-            SourceEvent::Event(PendingEvent::TurnStarted { turn: 2 }),
+            SourceEvent::event(PendingEvent::TurnStarted { turn: 2 }),
             SourceEvent::Input {
                 agent_turn: 2,
                 turn: text(Role::User, "replacement"),
@@ -123,18 +123,18 @@ fn append_two_completed_prompts(journal: &mut SegmentedJournal) {
         append_script(
             journal,
             vec![
-                SourceEvent::Event(PendingEvent::TurnStarted { turn }),
+                SourceEvent::event(PendingEvent::TurnStarted { turn }),
                 SourceEvent::Input {
                     agent_turn: turn,
                     turn: text(Role::User, &format!("request {turn}")),
                 },
-                SourceEvent::Event(usage(turn)),
-                SourceEvent::Event(PendingEvent::ConversationTurnCommitted {
+                SourceEvent::event(usage(turn)),
+                SourceEvent::event(PendingEvent::ConversationTurnCommitted {
                     agent_turn: turn,
                     turn: text(Role::Assistant, &format!("answer {turn}")),
                 }),
-                SourceEvent::Event(usage(turn)),
-                SourceEvent::Event(terminal(turn)),
+                SourceEvent::event(usage(turn)),
+                SourceEvent::event(terminal(turn)),
             ],
         );
     }

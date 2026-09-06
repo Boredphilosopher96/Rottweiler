@@ -6,7 +6,12 @@ use rw_types::{Block, Role, SequenceId, Turn, TurnMeta, conversation_input::Inpu
 
 pub(super) enum SourceEvent {
     Input { agent_turn: u64, turn: Turn },
-    Event(PendingEvent),
+    Event(Box<PendingEvent>),
+}
+impl SourceEvent {
+    pub(super) fn event(event: PendingEvent) -> Self {
+        Self::Event(Box::new(event))
+    }
 }
 /// Each returned sequence identifies the script item's actual durable commit.
 /// Acceptance and its reference remain in the same source batch.
@@ -37,7 +42,7 @@ pub(super) fn append_script(
                     selection: InputSelection::Accepted {},
                 });
             }
-            SourceEvent::Event(event) => pending.push(event),
+            SourceEvent::Event(event) => pending.push(*event),
         }
         identities.push(SequenceId(first + pending.len() as u64 - 1));
     }

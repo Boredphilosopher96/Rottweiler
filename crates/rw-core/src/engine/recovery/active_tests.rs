@@ -28,21 +28,21 @@ fn interrupted_inputs_keep_only_uncommitted_fragments_and_unresolved_host_invoca
     append_script(
         &mut journal,
         vec![
-            SourceEvent::Event(PendingEvent::TurnStarted { turn: 1 }),
+            SourceEvent::event(PendingEvent::TurnStarted { turn: 1 }),
             SourceEvent::Input {
                 agent_turn: 1,
                 turn: user.clone(),
             },
-            SourceEvent::Event(PendingEvent::TextDelta {
+            SourceEvent::event(PendingEvent::TextDelta {
                 turn: 1,
                 text: "already committed".into(),
             }),
-            SourceEvent::Event(PendingEvent::ConversationTurnCommitted {
+            SourceEvent::event(PendingEvent::ConversationTurnCommitted {
                 agent_turn: 1,
                 turn: answer.clone(),
             }),
-            SourceEvent::Event(start("first")),
-            SourceEvent::Event(PendingEvent::ToolCallFinished {
+            SourceEvent::event(start("first")),
+            SourceEvent::event(PendingEvent::ToolCallFinished {
                 presentation: None,
                 turn: 1,
                 id: "reused-provider-id".into(),
@@ -53,11 +53,11 @@ fn interrupted_inputs_keep_only_uncommitted_fragments_and_unresolved_host_invoca
                 is_error: false,
                 index: 0,
             }),
-            SourceEvent::Event(PendingEvent::ConversationTurnCommitted {
+            SourceEvent::event(PendingEvent::ConversationTurnCommitted {
                 agent_turn: 1,
                 turn: output.clone(),
             }),
-            SourceEvent::Event(start("second")),
+            SourceEvent::event(start("second")),
         ],
     );
     append(
