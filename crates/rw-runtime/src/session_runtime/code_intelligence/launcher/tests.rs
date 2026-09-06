@@ -1,7 +1,6 @@
 #![allow(clippy::expect_used)]
 use super::*;
 use rw_tools::{CodeIntelligence, IntelligenceBackend, LspConfig, Position, SymbolIndex};
-use std::time::Duration;
 
 #[tokio::test]
 async fn syntax_queries_do_not_prepare_native_launch_authority() {
@@ -32,7 +31,7 @@ async fn syntax_queries_do_not_prepare_native_launch_authority() {
         .await;
     assert_eq!(result.backend, IntelligenceBackend::TreeSitter);
     assert!(!result.items.is_empty());
-    assert!(spawner.prepared.lock().expect("preparation").is_none());
+    assert!(spawner.prepared.try_lock().expect("preparation").is_none());
 }
 
 struct PendingKill {
@@ -41,6 +40,10 @@ struct PendingKill {
 }
 #[async_trait]
 impl LspProcessHandle for PendingKill {
+    fn request_termination(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
     async fn kill(&mut self) -> io::Result<()> {
         if let Some(started) = self.started.take() {
             let _ = started.send(());
@@ -51,7 +54,7 @@ impl LspProcessHandle for PendingKill {
 #[tokio::test]
 async fn dropped_lsp_handle_retains_scratch_until_actual_settlement() {
     let root = tempfile::tempdir().expect("workspace");
-    let owner = prepare(&[root.path().to_path_buf()], &Mutex::new(None)).expect("prepare");
+    let owner = prepare(&[root.path().to_path_buf()], &mut None).expect("prepare");
     let weak = Arc::downgrade(&owner);
     let scratch = owner.scratch.path().to_path_buf();
     let (started, entered) = tokio::sync::oneshot::channel();
@@ -88,26 +91,24 @@ async fn first_native_launch_prepares_once_and_preserves_protocol_and_cleanup() 
         command: PathBuf::from("/bin/cat"),
         args: Vec::new(),
     };
-    let mut first = spawner
-        .spawn(root.path(), &server)
-        .await
-        .expect("first child");
+    let (first, second) = tokio::join!(
+        spawner.spawn(root.path(), &server),
+        spawner.spawn(root.path(), &server),
+    );
+    let mut first = first.expect("first child");
+    let mut second = second.expect("contending child");
     let owner = spawner
         .prepared
-        .lock()
+        .try_lock()
         .expect("prepared")
         .clone()
         .expect("owner");
     let scratch = owner.scratch.path().to_path_buf();
-    let mut second = spawner
-        .spawn(root.path(), &server)
-        .await
-        .expect("second child");
     assert!(Arc::ptr_eq(
         &owner,
         spawner
             .prepared
-            .lock()
+            .try_lock()
             .expect("prepared")
             .as_ref()
             .expect("owner")

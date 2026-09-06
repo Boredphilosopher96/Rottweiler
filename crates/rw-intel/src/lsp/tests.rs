@@ -20,6 +20,10 @@ struct NoopHandle;
 
 #[async_trait]
 impl LspProcessHandle for NoopHandle {
+    fn request_termination(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
     async fn kill(&mut self) -> io::Result<()> {
         Ok(())
     }

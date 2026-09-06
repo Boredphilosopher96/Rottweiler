@@ -51,6 +51,9 @@ impl ProcessOwner {
             Err(_) => Ok(None),
         }
     }
+    pub(crate) fn request_termination(&mut self) -> io::Result<()> {
+        self.0.as_mut().map_or(Ok(()), Physical::signal)
+    }
     pub(crate) async fn settle(&mut self, timeout: Duration) -> io::Result<()> {
         if let Some(owner) = self.0.as_mut() {
             owner.settle(timeout).await?;

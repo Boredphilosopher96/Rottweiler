@@ -113,6 +113,13 @@ pub struct LspServerConfig {
 /// ambient process-launch authority; hosts must provide a sandboxed spawner.
 #[async_trait]
 pub trait LspProcessHandle: Send {
+    /// Request termination synchronously, including when no async runtime remains.
+    /// This is not settlement proof: retain process authority until `kill` succeeds.
+    ///
+    /// # Errors
+    /// Returns an OS signalling failure without releasing physical ownership.
+    fn request_termination(&mut self) -> io::Result<()>;
+
     async fn kill(&mut self) -> io::Result<()>;
 }
 

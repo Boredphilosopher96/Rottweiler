@@ -124,3 +124,37 @@ async fn signal_failure_never_replaces_actual_reap_and_absence_proof() {
         "proven retirement releases actual ownership"
     );
 }
+
+#[tokio::test]
+async fn synchronous_termination_signals_without_polling_async_cleanup() {
+    let (mut owner, _) = physical(None);
+    owner.request_termination().expect("synchronous signal");
+    assert!(
+        owner.0.is_some(),
+        "signal does not release physical authority"
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if owner
+            .child()
+            .expect("child")
+            .try_wait()
+            .expect("try reap")
+            .is_some()
+        {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "signal was deferred");
+        // No async cleanup task can progress on this current-thread runtime.
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        owner.0.is_some(),
+        "reaping alone does not consume group authority"
+    );
+    owner
+        .settle(Duration::from_secs(2))
+        .await
+        .expect("group proof");
+    assert!(owner.0.is_none());
+}

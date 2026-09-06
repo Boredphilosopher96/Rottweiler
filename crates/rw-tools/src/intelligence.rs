@@ -154,6 +154,10 @@ impl SandboxedLspSpawner {
 struct TokioLspHandle(ProcessOwner);
 #[async_trait]
 impl LspProcessHandle for TokioLspHandle {
+    fn request_termination(&mut self) -> io::Result<()> {
+        self.0.request_termination()
+    }
+
     async fn kill(&mut self) -> io::Result<()> {
         self.0.settle(std::time::Duration::from_secs(2)).await
     }
