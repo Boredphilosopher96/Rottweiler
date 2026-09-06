@@ -141,7 +141,7 @@ async fn failed_result_selector_stays_repairable_without_reexecuting_the_tool() 
         loop {
             let event = events.recv().await.expect("event delivery");
             if let EngineEvent::TurnFinished { status, .. } = event.as_ref() {
-                break *status;
+                break status.clone();
             }
         }
     })
@@ -150,20 +150,7 @@ async fn failed_result_selector_stays_repairable_without_reexecuting_the_tool() 
         .test_events_after(None)
         .await
         .expect("diagnostic source");
-    let trace = diagnostic
-        .iter()
-        .filter_map(|event| match event {
-            EngineEvent::TurnStarted { .. } => Some("started".into()),
-            EngineEvent::ToolCallFinished { is_error, .. } => Some(format!("tool:{is_error}")),
-            EngineEvent::ConversationToolResultsCommitted { .. } => Some("selector".into()),
-            EngineEvent::TurnFinished { status, .. } => Some(format!("terminal:{status:?}")),
-            EngineEvent::Error { message, .. } => Some(format!(
-                "error:{}",
-                message.chars().take(512).collect::<String>()
-            )),
-            _ => None,
-        })
-        .collect::<Vec<String>>();
+    let trace = closure_trace(&diagnostic);
     assert_eq!(
         terminal.ok(),
         Some(rw_types::TurnStatus::Interrupted),
@@ -261,4 +248,21 @@ fn assert_repaired_order(source: &[EngineEvent]) {
         })
         .expect("repaired terminal");
     assert!(completion < selector && selector < terminal);
+}
+
+fn closure_trace(events: &[EngineEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            EngineEvent::TurnStarted { .. } => Some("started".into()),
+            EngineEvent::ToolCallFinished { is_error, .. } => Some(format!("tool:{is_error}")),
+            EngineEvent::ConversationToolResultsCommitted { .. } => Some("selector".into()),
+            EngineEvent::TurnFinished { status, .. } => Some(format!("terminal:{status:?}")),
+            EngineEvent::Error { error, .. } => Some(format!(
+                "error:{}",
+                error.message.chars().take(512).collect::<String>()
+            )),
+            _ => None,
+        })
+        .collect()
 }
