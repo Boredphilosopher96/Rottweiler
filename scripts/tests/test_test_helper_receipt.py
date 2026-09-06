@@ -21,13 +21,19 @@ class HelperReceiptTests(unittest.TestCase):
             executable.chmod(0o700)
             receipt = HELPER.write_receipt(executable)
             body = json.loads(receipt.read_text())
-            metadata = executable.stat()
+            snapshot = Path(body["executable"])
+            self.assertNotEqual(snapshot, executable.resolve())
+            metadata = snapshot.stat()
             self.assertEqual(body, {
-                "executable": str(executable.resolve()), "device": metadata.st_dev,
+                "executable": str(snapshot), "device": metadata.st_dev,
                 "inode": metadata.st_ino, "bytes": metadata.st_size,
                 "sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
             })
+            self.assertEqual(HELPER.write_receipt(executable), receipt)
             executable.write_bytes(b"changed artifact")
+            self.assertEqual(snapshot.read_bytes(), b"trusted build artifact")
+            self.assertEqual(snapshot.stat().st_ino, body["inode"])
+            self.assertNotEqual(HELPER.write_receipt(executable), receipt)
             self.assertNotEqual(body["sha256"], hashlib.sha256(executable.read_bytes()).hexdigest())
             self.assertEqual(HELPER.ENVIRONMENT_KEY, "ROTTWEILER_TEST_SANDBOX_HELPER_RECEIPT")
 

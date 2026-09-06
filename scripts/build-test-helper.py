@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the native sandbox test prerequisite and report its Cargo-owned executable."""
+"""Build the native sandbox test prerequisite and publish its immutable artifact receipt."""
 from __future__ import annotations
 
 import argparse
@@ -8,6 +8,9 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import stat
+import tempfile
+import shutil
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,24 +41,63 @@ def build() -> Path:
 
 
 def write_receipt(executable: Path) -> Path:
-    """Bind the Cargo artifact to the exact bytes approved by this host build."""
+    """Publish independent bytes so later Cargo feature builds cannot replace them."""
     executable = executable.resolve(strict=True)
-    with executable.open("rb") as source:
-        before = os.fstat(source.fileno())
-        digest = hashlib.file_digest(source, "sha256").hexdigest()
-        after = os.fstat(source.fileno())
-    fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
-    if any(getattr(before, key) != getattr(after, key) for key in fields):
-        raise RuntimeError("sandbox helper changed while producing its receipt")
-    if before.st_size <= 0 or before.st_size > 256 * 1024 * 1024 or before.st_mode & 0o111 == 0:
-        raise RuntimeError("sandbox helper artifact size or mode is invalid")
-    receipt = executable.with_name(executable.name + ".identity.json")
-    body = {"executable": str(executable), "device": before.st_dev,
-            "inode": before.st_ino, "bytes": before.st_size, "sha256": digest}
-    temporary = receipt.with_suffix(".tmp")
-    temporary.write_text(json.dumps(body, separators=(",", ":")) + "\n")
-    temporary.replace(receipt)
-    return receipt
+    base = executable.parent / ".rw-test-helpers"
+    base.mkdir(mode=0o700, exist_ok=True)
+    if base.is_symlink() or not base.is_dir():
+        raise RuntimeError("sandbox helper snapshot directory is invalid")
+    temporary = Path(tempfile.mkdtemp(prefix=".building-", dir=base))
+    try:
+        snapshot = temporary / BINARY
+        with executable.open("rb") as source, snapshot.open("xb") as output:
+            before = os.fstat(source.fileno())
+            if (not stat.S_ISREG(before.st_mode) or before.st_size <= 0
+                    or before.st_size > 256 * 1024 * 1024 or before.st_mode & 0o111 == 0):
+                raise RuntimeError("sandbox helper artifact size or mode is invalid")
+            digest = hashlib.sha256()
+            copied = 0
+            while chunk := source.read(64 * 1024):
+                copied += len(chunk)
+                if copied > before.st_size:
+                    raise RuntimeError("sandbox helper changed while copying its bytes")
+                digest.update(chunk)
+                output.write(chunk)
+            output.flush()
+            os.fsync(output.fileno())
+            after = os.fstat(source.fileno())
+        fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if copied != before.st_size or any(getattr(before, key) != getattr(after, key) for key in fields):
+            raise RuntimeError("sandbox helper changed while producing its receipt")
+        snapshot.chmod(0o500)
+        generation = base / digest.hexdigest()
+        if not generation.exists() and not generation.is_symlink():
+            temporary.rename(generation)
+        if generation.is_symlink() or not generation.is_dir():
+            raise RuntimeError("sandbox helper snapshot generation is invalid")
+        snapshot = generation / BINARY
+        if snapshot.is_symlink():
+            raise RuntimeError("sandbox helper snapshot must be a regular file")
+        with snapshot.open("rb") as source:
+            metadata = os.fstat(source.fileno())
+            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                    or metadata.st_size != copied or metadata.st_mode & 0o777 != 0o500
+                    or hashlib.file_digest(source, "sha256").hexdigest() != digest.hexdigest()):
+                raise RuntimeError("sandbox helper snapshot identity does not match approved bytes")
+        receipt = generation / (BINARY + ".identity.json")
+        body = {"executable": str(snapshot), "device": metadata.st_dev,
+                "inode": metadata.st_ino, "bytes": metadata.st_size, "sha256": digest.hexdigest()}
+        encoded = json.dumps(body, separators=(",", ":")) + "\n"
+        if receipt.exists():
+            if receipt.is_symlink() or receipt.read_text() != encoded:
+                raise RuntimeError("sandbox helper snapshot receipt identity is invalid")
+        else:
+            with receipt.open("x") as output:
+                output.write(encoded)
+        return receipt
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary)
 
 
 def main() -> None:
