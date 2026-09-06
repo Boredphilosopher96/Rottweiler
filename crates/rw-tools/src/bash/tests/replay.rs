@@ -19,6 +19,12 @@ fn command_recordings_require_complete_explicit_request_contracts() {
     let write = |value: &serde_json::Value| {
         std::fs::write(&path, serde_json::to_vec(&json!([value])).expect("encode"))
             .expect("write fixture");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .expect("private fixture");
+        }
     };
     write(&occurrence);
     ReplayCommandExecutor::load(fixtures.path(), workspace.path()).expect("complete contract");
