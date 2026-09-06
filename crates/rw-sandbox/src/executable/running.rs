@@ -1,7 +1,5 @@
 //! One verified snapshot per running image; requested descriptors are checked on every call.
-use super::{
-    ApprovedExecutable, ExecutableArtifactIdentity, MAX_EXECUTABLE_BYTES, hex_digest, invalid,
-};
+use super::{ApprovedExecutable, ExecutableArtifactIdentity, hex_digest, invalid};
 use crate::SandboxError;
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -56,11 +54,16 @@ pub(super) fn capture(
         }
         return Ok(image.executable.clone());
     }
-    if identity.bytes == 0 || identity.bytes > MAX_EXECUTABLE_BYTES {
+    if identity.bytes == 0 {
         return Err(SandboxError::UntrustedHelper);
     }
     let mut hasher = Sha256::new();
-    let mut input = source.take(identity.bytes + 1);
+    let mut input = source.take(
+        identity
+            .bytes
+            .checked_add(1)
+            .ok_or(SandboxError::UntrustedHelper)?,
+    );
     let mut buffer = [0_u8; 16 * 1024];
     loop {
         let count = input.read(&mut buffer).map_err(invalid)?;
@@ -69,13 +72,16 @@ pub(super) fn capture(
         }
         hasher.update(&buffer[..count]);
     }
-    let executable = ApprovedExecutable::from_artifact(&ExecutableArtifactIdentity {
-        executable: path.to_path_buf(),
-        device: identity.device,
-        inode: identity.inode,
-        bytes: identity.bytes,
-        sha256: hex_digest(&hasher.finalize()),
-    })?;
+    let executable = ApprovedExecutable::snapshot(
+        &ExecutableArtifactIdentity {
+            executable: path.to_path_buf(),
+            device: identity.device,
+            inode: identity.inode,
+            bytes: identity.bytes,
+            sha256: hex_digest(&hasher.finalize()),
+        },
+        source,
+    )?;
     if ImageIdentity::new(path, &source.metadata().map_err(invalid)?) != identity {
         return Err(SandboxError::UntrustedHelper);
     }

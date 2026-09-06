@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{
     fs::File,
-    io::{Read as _, Write as _},
+    io::{Read as _, Seek as _, Write as _},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -127,6 +127,16 @@ impl ApprovedExecutable {
             return Err(SandboxError::UntrustedHelper);
         }
         let source = File::open(&approved.executable).map_err(invalid)?;
+        Self::snapshot(approved, &source)
+    }
+
+    // Callers establish authority: external receipts have a hard size bound;
+    // kernel-proven running images stream their actual descriptor size.
+    fn snapshot(
+        approved: &ExecutableArtifactIdentity,
+        mut source: &File,
+    ) -> Result<Self, SandboxError> {
+        source.rewind().map_err(invalid)?;
         let before = source.metadata().map_err(invalid)?;
         if !before.is_file()
             || before.len() != approved.bytes
@@ -154,7 +164,12 @@ impl ApprovedExecutable {
             .open(&launch_path)
             .map_err(invalid)?;
         let mut hasher = Sha256::new();
-        let mut remaining = (&source).take(approved.bytes + 1);
+        let mut remaining = source.take(
+            approved
+                .bytes
+                .checked_add(1)
+                .ok_or(SandboxError::UntrustedHelper)?,
+        );
         let mut copied = 0_u64;
         let mut buffer = [0_u8; 16 * 1024];
         loop {

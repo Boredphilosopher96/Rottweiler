@@ -70,7 +70,7 @@ captures its own executable identity. Hosts using a separately built helper must
 supply its exact device, inode, byte count, and SHA-256 approval receipt; the
 launcher executes a verified private snapshot, with sealed executable bytes on
 Linux. The process owner retains that authority through settlement. A filesystem
-path alone does not authorize an internal helper.
+path alone does not authorize an internal helper. External artifacts are limited to 256 MiB. The kernel-proven running image uses its actual descriptor size and a fixed streaming buffer; native product size gates apply independently.
 
 Sandbox implementation (`rw-sandbox`):
 - **macOS**: Seatbelt profile generated per-invocation — FS read broad, write restricted to workspace + `$TMPDIR` scratch; network denied unless the call was granted `network`.
