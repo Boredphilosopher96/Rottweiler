@@ -20,7 +20,7 @@ pub(super) fn retire_dropped(process: &mut PluginChild) {
     let owner = PluginChild {
         settlement: tokio::sync::Mutex::new(()),
         admission: Mutex::new(Some(admission)),
-        _helper: process._helper.clone(),
+        helper: process.helper.clone(),
         child: Mutex::new(child),
         process_group: process.process_group,
         violation: Arc::clone(&process.violation),

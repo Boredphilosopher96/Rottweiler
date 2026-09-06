@@ -51,7 +51,7 @@ async fn kill_tree_signals_the_actual_child_after_it_changes_groups() {
     let owner = PluginChild {
         settlement: tokio::sync::Mutex::new(()),
         admission: Mutex::new(Some(process_fixture_lease())),
-        _helper: rw_tools::SandboxHelper::from_running(
+        helper: rw_tools::SandboxHelper::from_running(
             &std::env::current_exe().expect("executable"),
         )
         .expect("helper"),

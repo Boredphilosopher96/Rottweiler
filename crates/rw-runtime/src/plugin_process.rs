@@ -214,7 +214,7 @@ async fn attach_supervisor(
     let stderr = child.stderr.take();
     let denials = proxy.as_ref().map(SupervisedEgressProxy::denials);
     let process = Arc::new(PluginChild {
-        _helper: helper,
+        helper,
         admission: Mutex::new(Some(admission)),
         settlement: tokio::sync::Mutex::new(()),
         child: Mutex::new(Some(child)),
@@ -301,7 +301,7 @@ impl Drop for PendingPluginHandoff {
 struct PluginChild {
     settlement: tokio::sync::Mutex<()>,
     admission: Mutex<Option<rw_resources::ResourceLease>>,
-    _helper: rw_tools::SandboxHelper,
+    helper: rw_tools::SandboxHelper,
     child: Mutex<Option<Child>>,
     process_group: Option<u32>,
     violation: Arc<Mutex<Option<String>>>,
