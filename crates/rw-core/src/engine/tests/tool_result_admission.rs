@@ -54,7 +54,7 @@ async fn excess_batch_output_is_rejected_before_completion_and_closes_exact_ir()
             if matches!(
                 event.as_ref(),
                 EngineEvent::TurnFinished {
-                    status: AgentTurnStatus::MaxTurns,
+                    status: rw_types::TurnStatus::MaxTurns,
                     ..
                 }
             ) {

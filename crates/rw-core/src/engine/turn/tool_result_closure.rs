@@ -4,9 +4,7 @@ use super::{
     tool_requests::{PendingToolCall, ToolExecution},
     tool_result_budget::ToolResultBudget,
 };
-use crate::engine::{
-    AgentLoopError, SessionActorConfig, session::state::ActorState, task_ownership::ActorTasks,
-};
+use crate::engine::{ActorState, AgentLoopError, SessionActorConfig, task_ownership::ActorTasks};
 use rw_types::{EventMeta, SequenceId, tool_result_admission::ToolResultAdmission};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};

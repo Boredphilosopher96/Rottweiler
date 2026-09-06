@@ -44,7 +44,6 @@ use rw_types::hook_contract::HookInput;
 use rw_types::hook_contract::HookToolInput;
 use rw_types::hook_contract::HookToolResultInput;
 use serde_json::Value;
-use serde_json::json;
 use std::panic::AssertUnwindSafe;
 use std::path::Component;
 use std::sync::Arc;

@@ -23,7 +23,7 @@ pub(super) async fn profile(
     let task = tasks
         .spawn_blocking(
             Arc::clone(config),
-            CancellationToken::new(),
+            CancellationToken::default(),
             rw_resources::ResourceClass::Cpu,
             move || {
                 let logical = ToolResultAdmission::measure(&turn)
@@ -51,7 +51,7 @@ pub(super) async fn completion(
     let task = tasks
         .spawn_blocking(
             Arc::clone(config),
-            CancellationToken::new(),
+            CancellationToken::default(),
             rw_resources::ResourceClass::Cpu,
             move || {
                 let _owner = owner;

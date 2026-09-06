@@ -198,7 +198,7 @@ pub(super) async fn execute_tool_calls(
         let admitted = profiles
             .admit(next, execution, turn, tasks, config, &retained, signals)
             .await;
-        let mut execution = match admitted {
+        let execution = match admitted {
             Ok(execution) => execution,
             Err(error) => {
                 mark_unsettled(signals, cancellation, error.to_string());
