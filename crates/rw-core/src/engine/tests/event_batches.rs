@@ -213,8 +213,8 @@ async fn successful_single_delta_batches_delta_commit_and_finish() {
         &sink.batch_sizes.lock().expect("batch sizes")[initial_batches..],
         &[1, 3, 1, 1, 3]
     );
-    let persisted = sink.events.lock().expect("event sink lock");
-    let persisted = &persisted[initial_events..];
+    let persisted_guard = sink.events.lock().expect("event sink lock");
+    let persisted = &persisted_guard[initial_events..];
     assert!(matches!(
         persisted[1].kind,
         PendingEvent::TurnStarted { turn: 1 }
@@ -292,8 +292,8 @@ async fn no_hook_multi_message_opening_batch_preserves_accept_and_commit_order()
         &sink.batch_sizes.lock().expect("batch sizes")[initial_batches..],
         &[5, 1, 1, 3]
     );
-    let persisted = sink.events.lock().expect("event sink lock");
-    let persisted = &persisted[initial_events..];
+    let persisted_guard = sink.events.lock().expect("event sink lock");
+    let persisted = &persisted_guard[initial_events..];
     assert!(matches!(
         persisted[0].kind,
         PendingEvent::TurnStarted { turn: 1 }
@@ -324,7 +324,7 @@ async fn no_hook_multi_message_opening_batch_preserves_accept_and_commit_order()
             } if matches!(blocks.as_slice(), [Block::Text { text }] if text == expected)
         ));
     }
-    drop(persisted);
+    drop(persisted_guard);
     let requests = model.requests.lock().expect("request lock");
     let user_text = requests[0]
         .turns
@@ -378,8 +378,8 @@ async fn registered_user_prompt_hook_keeps_rewrite_on_the_separate_commit_path()
         &sink.batch_sizes.lock().expect("batch sizes")[initial_batches..],
         &[1, 2, 1, 1, 1, 3]
     );
-    let persisted = sink.events.lock().expect("event sink lock");
-    let persisted = &persisted[initial_events..];
+    let persisted_guard = sink.events.lock().expect("event sink lock");
+    let persisted = &persisted_guard[initial_events..];
     assert!(matches!(
         &persisted[2].kind,
         PendingEvent::UserMessageAccepted { content, .. } if content == "raw input"
@@ -391,7 +391,7 @@ async fn registered_user_prompt_hook_keeps_rewrite_on_the_separate_commit_path()
             ..
         } if matches!(blocks.as_slice(), [Block::Text { text }] if text == "rewritten by hook")
     ));
-    drop(persisted);
+    drop(persisted_guard);
     let requests = model.requests.lock().expect("request lock");
     assert!(requests[0].turns.iter().any(|turn| matches!(
         turn.blocks.as_slice(),

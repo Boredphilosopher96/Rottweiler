@@ -1057,59 +1057,6 @@ impl SessionProjector {
     }
 }
 
-pub(super) async fn find_journal_boundary(
-    view: &Arc<dyn SessionEventReadView>,
-    session_id: &SessionId,
-    mut predicate: impl FnMut(&EngineEvent) -> bool,
-    last: bool,
-) -> Result<Option<SequenceId>, AgentLoopError> {
-    let mut cursor = None;
-    let mut found = None;
-    while cursor != view.last_sequence() {
-        let page = view
-            .read_page(cursor, SessionReplayLimits::default())
-            .await?;
-        session::validate_gap(cursor, &page, session_id)?;
-        if page.is_empty() {
-            return Err(AgentLoopError::Persistence(
-                "journal scan did not advance".to_owned(),
-            ));
-        }
-        for event in page {
-            cursor = event.meta().map(|meta| meta.sequence_id);
-            if predicate(&event) {
-                found = cursor;
-                if !last {
-                    return Ok(found);
-                }
-            }
-        }
-    }
-    Ok(found)
-}
-
-pub(super) async fn project_journal_prefix(
-    view: Arc<dyn SessionEventReadView>,
-    session_id: &SessionId,
-    modes: &ModeRegistry,
-    through: Option<SequenceId>,
-) -> Result<SessionRecoveredState, AgentLoopError> {
-    if through.is_some_and(|through| view.last_sequence().is_none_or(|tail| through > tail)) {
-        return Err(AgentLoopError::Persistence(
-            "projection boundary is ahead of the journal".to_owned(),
-        ));
-    }
-    project_session_read_view(
-        Arc::new(replay::PrefixReadView {
-            inner: view,
-            tail: through,
-        }),
-        session_id,
-        modes,
-    )
-    .await
-}
-
 /// Rebuilds semantic recovery state while retaining only one bounded raw page.
 ///
 /// # Errors

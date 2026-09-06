@@ -127,32 +127,3 @@ impl SessionEventReadView for MemoryEventReadView {
         Ok(page)
     }
 }
-
-/// Restricts an already pinned source to an earlier semantic boundary.
-#[derive(Debug)]
-pub(super) struct PrefixReadView {
-    pub(super) inner: std::sync::Arc<dyn SessionEventReadView>,
-    pub(super) tail: Option<SequenceId>,
-}
-#[async_trait]
-impl SessionEventReadView for PrefixReadView {
-    fn last_sequence(&self) -> Option<SequenceId> {
-        self.tail
-    }
-    async fn read_page(
-        &self,
-        after: Option<SequenceId>,
-        limits: SessionReplayLimits,
-    ) -> Result<Vec<EngineEvent>, AgentLoopError> {
-        if after == self.tail {
-            return Ok(Vec::new());
-        }
-        let mut page = self.inner.read_page(after, limits).await?;
-        page.retain(|event| {
-            event
-                .meta()
-                .is_some_and(|meta| self.tail.is_some_and(|tail| meta.sequence_id <= tail))
-        });
-        Ok(page)
-    }
-}
