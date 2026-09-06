@@ -782,10 +782,7 @@ if "TYPE_ERROR" in text:
             SandboxedLspSpawner::new(
                 &[workspace.path().to_path_buf()],
                 scratch.path(),
-                &rw_sandbox::SandboxHelper::from_running(
-                    &std::env::current_exe().expect("helper executable"),
-                )
-                .expect("running helper"),
+                &sandbox_fixture_helper(),
             )
             .expect("spawner"),
         );
@@ -830,6 +827,26 @@ if "TYPE_ERROR" in text:
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn sandbox_fixture_helper() -> rw_sandbox::SandboxHelper {
+        use std::io::Read as _;
+        static HELPER: std::sync::OnceLock<rw_sandbox::SandboxHelper> = std::sync::OnceLock::new();
+        HELPER.get_or_init(|| {
+            let receipt = std::env::var_os("ROTTWEILER_TEST_SANDBOX_HELPER_RECEIPT")
+                .expect("native fixture prerequisite: run scripts/build-test-helper.py and export ROTTWEILER_TEST_SANDBOX_HELPER_RECEIPT");
+            let mut bytes = Vec::new();
+            std::fs::File::open(receipt)
+                .expect("open sandbox helper receipt")
+                .take(4097)
+                .read_to_end(&mut bytes)
+                .expect("read sandbox helper receipt");
+            assert!(bytes.len() <= 4096, "sandbox helper receipt exceeds 4096 bytes");
+            let identity = serde_json::from_slice(&bytes).expect("strict sandbox helper identity");
+            rw_sandbox::SandboxHelper::from_artifact(&identity)
+                .expect("verify sandbox helper artifact")
+        }).clone()
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[tokio::test]
     async fn lsp_handle_kills_and_reaps_the_complete_process_group() {
         use tokio::io::AsyncBufReadExt as _;
@@ -852,10 +869,7 @@ if "TYPE_ERROR" in text:
         let spawner = SandboxedLspSpawner::new(
             &[workspace.path().to_path_buf()],
             scratch.path(),
-            &rw_sandbox::SandboxHelper::from_running(
-                &std::env::current_exe().expect("helper executable"),
-            )
-            .expect("running helper"),
+            &sandbox_fixture_helper(),
         )
         .expect("spawner");
         let mut process = spawner
