@@ -89,7 +89,7 @@ fn oversized_sparse_fixture_is_rejected_before_payload_allocation() {
     file.set_len((MAX_FIXTURE_BYTES + 1) as u64)
         .expect("sparse fixture");
     drop(file);
-    let result = read_fixture(path.clone());
+    let result = read_fixture(&path);
     std::fs::remove_file(path).expect("cleanup");
     assert_eq!(
         result.expect_err("encoded admission").kind,
@@ -121,7 +121,7 @@ fn fifo_fixture_is_rejected_without_waiting_for_a_writer() {
     let source = path.clone();
     let (sent, received) = std::sync::mpsc::channel();
     let worker =
-        std::thread::spawn(move || sent.send(read_fixture(source)).expect("result observer"));
+        std::thread::spawn(move || sent.send(read_fixture(&source)).expect("result observer"));
     let result = received.recv_timeout(Duration::from_secs(1));
     if result.is_err() {
         // Release an incorrectly blocking open before failing the test; no
