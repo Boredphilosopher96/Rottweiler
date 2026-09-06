@@ -428,7 +428,12 @@ pub(in crate::engine::tests) async fn collect_turn(
     loop {
         let wire = timeout(Duration::from_secs(3), receiver.recv())
             .await
-            .expect("event timeout")
+            .unwrap_or_else(|_| {
+                panic!(
+                    "event timeout: delivery phase {:?}",
+                    receiver.delivery_phase()
+                )
+            })
             .expect("event channel");
         let Some(event) = observe_event(wire.as_ref().clone()) else {
             continue;

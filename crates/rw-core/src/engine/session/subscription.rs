@@ -164,6 +164,24 @@ impl SessionSubscription {
         }
     }
 
+    #[cfg(test)]
+    pub(in crate::engine) fn delivery_phase(&self) -> (&'static str, Option<SequenceId>) {
+        let phase = if let Some(read) = &self.read {
+            if read.is_finished() {
+                "completed replay worker"
+            } else {
+                "source read or CPU admission/preparation"
+            }
+        } else if self.replay.is_some() {
+            "replay byte admission"
+        } else if !self.pending.is_empty() {
+            "prepared replay delivery"
+        } else {
+            "live actor publication"
+        };
+        (phase, self.last_sequence)
+    }
+
     pub(super) fn observe(&mut self, event: &EngineEvent) {
         if let Some(meta) = event.meta() {
             self.last_sequence = Some(meta.sequence_id);
