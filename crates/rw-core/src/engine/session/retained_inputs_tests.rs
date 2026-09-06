@@ -150,10 +150,13 @@ fn repeated_crash_repair_claims_one_accepted_body_without_duplicate_markers() {
     );
     let audit = crate::engine::project_session_events(&events).expect("audit exact claims");
     assert_eq!(audit.conversation.len(), 1);
-    let expected =
-        crate::engine::recovery::input::resolve_input(&event(100, commit(4)), &event(1, input()))
-            .expect("body");
-    assert_eq!(audit.conversation[0], expected);
+    let resolved =
+        crate::recovery::materialize_conversation_event(&source, &events[events.len() - 2])
+            .expect("public canonical input materialization");
+    let EngineEvent::ConversationTurnCommitted { turn, .. } = resolved.as_ref() else {
+        panic!("resolved conversation input");
+    };
+    assert_eq!(&audit.conversation[0], turn);
 }
 
 #[test]
