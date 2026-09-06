@@ -12,11 +12,11 @@ use std::{sync::Arc, time::Duration};
 
 #[tokio::test]
 async fn excess_batch_output_is_rejected_before_completion_and_closes_exact_ir() {
-    let root = tempfile::tempdir().expect("root");
     // Every result fits the registry's 256 KiB per-tool limit; their combined
     // logical IR exceeds 16 MiB, exercising the batch owner itself.
     const CALLS: usize = 96;
     const BODY_BYTES: usize = 192 * 1024;
+    let root = tempfile::tempdir().expect("root");
     let ids = (0..CALLS)
         .map(|index| format!("call-{index}"))
         .collect::<Vec<_>>();
@@ -188,6 +188,17 @@ async fn failed_result_selector_stays_repairable_without_reexecuting_the_tool() 
     assert_eq!(tool.calls.load(Ordering::Acquire), 1);
     assert_eq!(reopen_model.request_count(), 0);
     let source = sink.test_events_after(None).await.expect("repaired source");
+    assert_repaired_order(&source);
+    assert!(
+        project_session_events(&source)
+            .expect("repaired claim")
+            .interrupted_turn
+            .is_none()
+    );
+    reopened.close().await.expect("settled reopen");
+}
+
+fn assert_repaired_order(source: &[EngineEvent]) {
     assert_eq!(
         source
             .iter()
@@ -202,16 +213,6 @@ async fn failed_result_selector_stays_repairable_without_reexecuting_the_tool() 
             .count(),
         1
     );
-    assert!(
-        project_session_events(&source)
-            .expect("repaired claim")
-            .interrupted_turn
-            .is_none()
-    );
-    reopened.close().await.expect("settled reopen");
-}
-
-fn assert_repaired_order(source: &[EngineEvent]) {
     assert_eq!(
         source
             .iter()
