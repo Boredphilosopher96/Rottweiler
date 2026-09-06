@@ -80,14 +80,6 @@ fn semantic_and_stream_failures_preserve_error_classification() {
             Err(serde::ser::Error::custom("invalid semantic value"))
         }
     }
-    let mut count = JsonWriter::count(1024);
-    assert!(
-        count
-            .serialize(&Invalid)
-            .expect_err("semantic rejection")
-            .is_data()
-    );
-    assert!(!count.exceeded());
     struct Broken;
     impl Write for Broken {
         fn write(&mut self, _: &[u8]) -> io::Result<usize> {
@@ -100,6 +92,14 @@ fn semantic_and_stream_failures_preserve_error_classification() {
             Ok(())
         }
     }
+    let mut count = JsonWriter::count(1024);
+    assert!(
+        count
+            .serialize(&Invalid)
+            .expect_err("semantic rejection")
+            .is_data()
+    );
+    assert!(!count.exceeded());
     let mut sink = Broken;
     let mut stream = JsonWriter::stream(&mut sink, 1024);
     let error = stream.serialize(&true).expect_err("transport rejection");
