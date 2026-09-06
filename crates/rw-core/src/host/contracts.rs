@@ -240,7 +240,7 @@ impl HostedSession {
                             descriptor.model = model.clone();
                         }
                         EngineEvent::SessionTitleUpdated { title, .. } => {
-                            descriptor.title = title.clone();
+                            descriptor.title.clone_from(title);
                         }
                         EngineEvent::UserShellStateChanged { active, .. } => {
                             descriptor.shell_active = *active;
