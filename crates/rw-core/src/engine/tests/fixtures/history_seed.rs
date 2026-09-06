@@ -1,7 +1,8 @@
 //! Explicit fixture inputs are converted to durable events before an actor starts.
 #![cfg(test)]
 use crate::engine::{AgentLoopError, PendingEvent, SessionActorConfig};
-use rw_types::{EngineEvent, EventMeta, SequenceId};
+use rw_types::{Block, EngineEvent, EventMeta, Role, SequenceId, TurnMeta};
+use std::collections::BTreeMap;
 
 pub(super) fn events(
     config: &SessionActorConfig,
@@ -42,21 +43,60 @@ pub(super) fn events(
             definition_fingerprint: definition.semantic_fingerprint(),
         });
     }
-    for turn in &recovered.conversation {
-        pending.push(PendingEvent::ConversationTurnCommitted {
-            agent_turn: 0,
-            turn: turn.clone(),
-        });
+    let original_start = pending.len();
+    let mut sources = BTreeMap::new();
+    for (ordinal, turn) in recovered.conversation.iter().enumerate() {
+        if turn.role == Role::User {
+            let [Block::Text { text }] = turn.blocks.as_slice() else {
+                return Err(AgentLoopError::InvalidConfiguration(
+                    "user fixture requires explicit accepted attachments".into(),
+                ));
+            };
+            if turn.meta != TurnMeta::default() {
+                return Err(AgentLoopError::InvalidConfiguration(
+                    "accepted fixture input cannot carry provider metadata".into(),
+                ));
+            }
+            let accepted_source = SequenceId(pending.len() as u64);
+            pending.push(PendingEvent::UserMessageAccepted {
+                turn: 0,
+                content: text.clone(),
+                attachments: vec![],
+            });
+            sources.insert((original_start + ordinal) as u64, pending.len() as u64);
+            pending.push(PendingEvent::ConversationInputCommitted {
+                agent_turn: 0,
+                accepted_source,
+                selection: rw_types::conversation_input::InputSelection::Accepted {},
+            });
+        } else {
+            sources.insert((original_start + ordinal) as u64, pending.len() as u64);
+            pending.push(PendingEvent::ConversationTurnCommitted {
+                agent_turn: 0,
+                turn: turn.clone(),
+            });
+        }
     }
     for action in &recovered.context_surgery {
+        let item_id = if let Some(sequence) = action.item_id.0.strip_prefix("conversation:") {
+            let original = sequence.parse::<u64>().map_err(|_| {
+                AgentLoopError::InvalidConfiguration("fixture context source".into())
+            })?;
+            let source = sources.get(&original).ok_or_else(|| {
+                AgentLoopError::InvalidConfiguration("fixture context source is absent".into())
+            })?;
+            rw_types::ContextItemId(format!("conversation:{source}"))
+        } else {
+            action.item_id.clone()
+        };
         pending.push(if action.pinned {
             PendingEvent::ContextItemPinned {
-                item_id: action.item_id.clone(),
+                item_id: item_id.clone(),
                 effective_after_agent_turn: action.effective_after_agent_turn,
             }
         } else {
             PendingEvent::ContextItemEvicted {
-                item_id: action.item_id.clone(),
+                item_id: item_id.clone(),
                 effective_after_agent_turn: action.effective_after_agent_turn,
             }
         });
@@ -65,15 +105,22 @@ pub(super) fn events(
         let (sequence, block_index) = key
             .split_once(':')
             .ok_or_else(|| AgentLoopError::InvalidConfiguration("fixture block source".into()))?;
-        let source =
-            rw_types::ContextBlockId {
-                sequence: SequenceId(sequence.parse().map_err(|_| {
-                    AgentLoopError::InvalidConfiguration("fixture sequence".into())
-                })?),
-                block_index: block_index.parse().map_err(|_| {
-                    AgentLoopError::InvalidConfiguration("fixture block index".into())
-                })?,
-            };
+        let source = rw_types::ContextBlockId {
+            sequence: SequenceId(
+                *sources
+                    .get(&sequence.parse::<u64>().map_err(|_| {
+                        AgentLoopError::InvalidConfiguration("fixture sequence".into())
+                    })?)
+                    .ok_or_else(|| {
+                        AgentLoopError::InvalidConfiguration(
+                            "fixture prune source is absent".into(),
+                        )
+                    })?,
+            ),
+            block_index: block_index
+                .parse()
+                .map_err(|_| AgentLoopError::InvalidConfiguration("fixture block index".into()))?,
+        };
         pending.push(PendingEvent::ToolOutputPruned {
             source,
             reclaimed_tokens: *reclaimed_tokens,
