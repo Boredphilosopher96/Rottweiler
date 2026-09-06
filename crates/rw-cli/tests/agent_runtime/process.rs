@@ -63,8 +63,10 @@ impl TestProcess {
             .journal_home
             .as_deref()
             .and_then(event_log)
-            .map(|path| file_tail(&path).unwrap_or_else(|error| error.to_string()))
-            .unwrap_or_else(|| "no session journal published".to_owned());
+            .map_or_else(
+                || "no session journal published".to_owned(),
+                |path| file_tail(&path).unwrap_or_else(|error| error.to_string()),
+            );
         format!("{stderr}; durable journal tail: {source}")
     }
 }

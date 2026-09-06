@@ -17,7 +17,7 @@ pub(super) struct DeferredLspSpawner {
 }
 struct Prepared {
     spawner: SandboxedLspSpawner,
-    _scratch: PrivateScratch,
+    scratch: PrivateScratch,
 }
 impl DeferredLspSpawner {
     pub(super) fn new(roots: &[PathBuf]) -> Self {
@@ -42,7 +42,7 @@ fn prepare(
     let helper = crate::plugin_process::helper_executable()?;
     let prepared = Arc::new(Prepared {
         spawner: SandboxedLspSpawner::new(roots, scratch.path(), &helper)?,
-        _scratch: scratch,
+        scratch,
     });
     *slot = Some(Arc::clone(&prepared));
     Ok(prepared)
@@ -66,7 +66,7 @@ impl LspProcessSpawner for DeferredLspSpawner {
             let mut process = runtime.block_on(owner.spawner.spawn(&workspace, &server))?;
             process.handle = Box::new(OwnedLspHandle(Some(PhysicalLsp {
                 handle: process.handle,
-                _owner: owner,
+                owner,
             })));
             Ok(process)
         })
@@ -76,7 +76,7 @@ impl LspProcessSpawner for DeferredLspSpawner {
 }
 struct PhysicalLsp {
     handle: Box<dyn LspProcessHandle>,
-    _owner: Arc<Prepared>,
+    owner: Arc<Prepared>,
 }
 struct OwnedLspHandle(Option<PhysicalLsp>);
 #[async_trait]
@@ -110,7 +110,7 @@ struct Retirement(Option<PhysicalLsp>);
 impl Drop for Retirement {
     fn drop(&mut self) {
         if let Some(physical) = self.0.take() {
-            tracing::error!("LSP launch authority retained without process settlement proof");
+            tracing::error!(scratch = %physical.owner.scratch.path().display(), "LSP launch authority retained without process settlement proof");
             std::mem::forget(physical);
         }
     }

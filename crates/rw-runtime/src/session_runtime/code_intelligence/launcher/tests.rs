@@ -49,11 +49,11 @@ impl LspProcessHandle for PendingKill {
     }
 }
 #[tokio::test]
-async fn dropped_lsp_handle_retains_scratch_until_actual_settlement() {
+async fn dropped_lsp_handle_retainsscratch_until_actual_settlement() {
     let root = tempfile::tempdir().expect("workspace");
     let owner = prepare(&[root.path().to_path_buf()], &Mutex::new(None)).expect("prepare");
     let weak = Arc::downgrade(&owner);
-    let scratch = owner._scratch.path().to_path_buf();
+    let scratch = owner.scratch.path().to_path_buf();
     let (started, entered) = tokio::sync::oneshot::channel();
     let (release, finish) = tokio::sync::oneshot::channel();
     drop(OwnedLspHandle(Some(PhysicalLsp {
@@ -61,7 +61,7 @@ async fn dropped_lsp_handle_retains_scratch_until_actual_settlement() {
             started: Some(started),
             finish,
         }),
-        _owner: owner,
+        owner,
     })));
     entered.await.expect("physical cleanup entered");
     assert!(scratch.is_dir());
@@ -98,7 +98,7 @@ async fn first_native_launch_prepares_once_and_preserves_protocol_and_cleanup() 
         .expect("prepared")
         .clone()
         .expect("owner");
-    let scratch = owner._scratch.path().to_path_buf();
+    let scratch = owner.scratch.path().to_path_buf();
     let mut second = spawner
         .spawn(root.path(), &server)
         .await
