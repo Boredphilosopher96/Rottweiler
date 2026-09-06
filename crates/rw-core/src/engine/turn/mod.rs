@@ -3,6 +3,7 @@ pub(in crate::engine) mod child_progress;
 mod command_tools;
 mod compaction;
 mod completion_hooks;
+mod doom_loop;
 pub(in crate::engine) mod context;
 mod context_cache;
 pub(in crate::engine) mod context_commits;

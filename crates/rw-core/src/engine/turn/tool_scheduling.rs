@@ -22,54 +22,11 @@ use rw_tools::CancellationToken;
 use rw_tools::SubagentLifecycleMode;
 use rw_tools::ToolContext;
 use rw_types::SessionMode;
-use serde_json::json;
 use std::collections::BTreeMap;
-use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-pub(super) struct DoomLoopGuard {
-    pub(super) threshold: usize,
-    pub(super) recent_failures: VecDeque<Option<String>>,
-    pub(super) window_capacity: usize,
-}
-
-impl DoomLoopGuard {
-    pub(super) fn new(threshold: usize) -> Self {
-        Self {
-            threshold,
-            recent_failures: VecDeque::new(),
-            window_capacity: threshold.saturating_mul(4),
-        }
-    }
-
-    pub(super) fn observe(&mut self, call: &PendingToolCall, result: &ToolExecution) -> bool {
-        let signature = if result.is_error {
-            Some(
-                serde_json::to_string(&json!({
-                    "name": call.name,
-                    "arguments": call.arguments,
-                    "output": result.output,
-                }))
-                .unwrap_or_else(|_| "unserializable-tool-failure".to_owned()),
-            )
-        } else {
-            None
-        };
-        self.recent_failures.push_back(signature.clone());
-        while self.recent_failures.len() > self.window_capacity {
-            self.recent_failures.pop_front();
-        }
-        signature.is_some_and(|signature| {
-            self.recent_failures
-                .iter()
-                .flatten()
-                .filter(|recent| *recent == &signature)
-                .count()
-                >= self.threshold
-        })
-    }
-}
+pub(super) use super::doom_loop::DoomLoopGuard;
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 #[tracing::instrument(target = "rw_performance", level = "trace", name = "tool.batch", skip_all, fields(session_id = config.session_id.0.as_str(), turn, calls = calls.calls.len()))]
