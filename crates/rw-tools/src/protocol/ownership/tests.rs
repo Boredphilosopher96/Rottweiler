@@ -73,7 +73,7 @@ async fn failed_reap_retains_every_physical_owner() {
         owner.0.is_some(),
         "child, helper and resource credit remain owned"
     );
-    assert!(matches!(owner.child(), Ok(_)));
+    assert!(owner.child().is_ok());
 }
 
 #[tokio::test]

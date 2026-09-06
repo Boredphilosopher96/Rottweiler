@@ -8,6 +8,8 @@ pub(crate) struct ProcessOwner(Option<Physical>);
 struct Physical {
     child: Child,
     group: Option<u32>,
+    signal_result: Option<Result<(), String>>,
+    proxy_failed: bool,
     _helper: SandboxHelper,
     _credit: ResourceLease,
     proxy: Option<SupervisedEgressProxy>,
@@ -25,6 +27,8 @@ impl ProcessOwner {
         Self(Some(Physical {
             child,
             group,
+            signal_result: None,
+            proxy_failed: false,
             _helper: helper,
             _credit: credit,
             proxy_proof: proxy.as_ref().map(SupervisedEgressProxy::lifecycle),
@@ -57,6 +61,12 @@ impl ProcessOwner {
 }
 impl Physical {
     fn signal(&mut self) -> io::Result<()> {
+        if let Some(result) = &self.signal_result {
+            return result
+                .as_ref()
+                .map(|()| ())
+                .map_err(|error| io::Error::other(error.clone()));
+        }
         #[cfg(unix)]
         let group = if let Some(group) = self
             .group
@@ -79,10 +89,15 @@ impl Physical {
         let group: io::Result<()> = Ok(());
         // The direct child remains ours even if it changed its process group.
         let child = self.child.start_kill();
-        group.and(child)
+        let result = group.and(child);
+        self.signal_result = Some(result.as_ref().map(|()| ()).map_err(ToString::to_string));
+        result
     }
     async fn settle(&mut self, timeout: Duration) -> io::Result<()> {
         self.signal()?;
+        if self.proxy_failed {
+            return Err(io::Error::other("protocol proxy cleanup proof failed"));
+        }
         tokio::time::timeout(timeout, async {
             self.child.wait().await?;
             #[cfg(unix)]
@@ -104,7 +119,10 @@ impl Physical {
                 self.proxy_job = Some(tokio::task::spawn_blocking(move || drop(proxy)));
             }
             if let Some(job) = self.proxy_job.as_mut() {
-                job.await.map_err(io::Error::other)?;
+                if let Err(error) = job.await {
+                    self.proxy_failed = true;
+                    return Err(io::Error::other(error));
+                }
                 self.proxy_job.take();
             }
             if self
