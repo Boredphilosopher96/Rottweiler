@@ -259,11 +259,15 @@ async fn failed_repair_append_keeps_reconstructed_state_unavailable() {
         "repair append attempted"
     );
     assert!(
-        fixture
-            .handle
-            .send_message("must not run after failed repair")
-            .await
-            .is_err()
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            fixture
+                .handle
+                .send_message("must not run after failed repair")
+        )
+        .await
+        .expect("closed admission rejects promptly")
+        .is_err()
     );
     assert!(
         !fixture
@@ -275,4 +279,33 @@ async fn failed_repair_append_keeps_reconstructed_state_unavailable() {
             .iter()
             .any(|event| matches!(event.kind, PendingEvent::TurnFinished { .. }))
     );
+}
+
+#[tokio::test]
+async fn failed_repair_rejects_buffered_actor_requests_before_quarantine() {
+    use futures_util::FutureExt;
+    let fixture = fixture(false).await;
+    assert_deferred(&fixture).await;
+    fixture
+        .sink
+        .fail_interrupted_finish
+        .store(true, Ordering::Release);
+    fixture.sink.block_repair.store(true, Ordering::Release);
+    fixture.peer.release.notify_one();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        fixture.sink.repair_entered.notified(),
+    )
+    .await
+    .expect("repair owns actor");
+    let mut pending = Box::pin(fixture.handle.snapshot());
+    assert!(pending.as_mut().now_or_never().is_none());
+    fixture.sink.release_repair.notify_one();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), pending)
+            .await
+            .expect("buffered request is rejected")
+            .is_err()
+    );
+    assert!(fixture.handle.close().await.is_err());
 }

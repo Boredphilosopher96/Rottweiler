@@ -506,6 +506,15 @@ pub(super) async fn run_actor(
         }
     }
     state.closing = true;
+    // Quarantine retains these receiver owners, so close admission explicitly.
+    // Buffered requests were never dispatched; dropping their replies reports
+    // Closed instead of leaving callers parked behind an inert receiver.
+    commands.close();
+    while commands.try_recv().is_ok() {}
+    signals.close();
+    while let Ok(signal) = signals.try_recv() {
+        super::recovery::reject_signal(signal, &mut state);
+    }
     super::control_observation::publish(&state);
     active_turn.store(0, Ordering::Release);
     // Quarantined effects can outlive the actor loop; event consumers still

@@ -446,6 +446,9 @@ pub(in crate::engine::tests) struct FailNextBatchSink {
     pub(in crate::engine::tests) fail_tool_result_commit: AtomicBool,
     pub(in crate::engine::tests) fail_tool_finished: AtomicBool,
     pub(in crate::engine::tests) fail_interrupted_finish: AtomicBool,
+    pub(in crate::engine::tests) block_repair: AtomicBool,
+    pub(in crate::engine::tests) repair_entered: Notify,
+    pub(in crate::engine::tests) release_repair: Notify,
 }
 
 #[async_trait]
@@ -517,6 +520,10 @@ impl SessionEventSink for FailNextBatchSink {
                 }
             )
         }) && self.fail_interrupted_finish.swap(false, Ordering::AcqRel);
+        if reject_repair && self.block_repair.load(Ordering::Acquire) {
+            self.repair_entered.notify_one();
+            self.release_repair.notified().await;
+        }
         if self.fail_next.swap(false, Ordering::AcqRel)
             || reject_tool_result
             || reject_finished
