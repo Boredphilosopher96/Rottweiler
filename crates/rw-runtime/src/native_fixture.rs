@@ -13,15 +13,17 @@ pub(crate) async fn admit() -> SemaphorePermit<'static> {
 
 /// The ordinary test harness cannot execute trusted worker bootstrap arguments.
 pub(crate) fn sandbox_helper() -> std::io::Result<rw_tools::SandboxHelper> {
-    static HELPER: std::sync::OnceLock<Result<rw_tools::SandboxHelper, String>> =
+    static IDENTITY: std::sync::OnceLock<Result<rw_tools::ExecutableArtifactIdentity, String>> =
         std::sync::OnceLock::new();
-    HELPER
-        .get_or_init(|| load_helper().map_err(|error| error.to_string()))
-        .clone()
-        .map_err(std::io::Error::other)
+    let identity = IDENTITY
+        .get_or_init(|| load_identity().map_err(|error| error.to_string()))
+        .as_ref()
+        .map_err(|error| std::io::Error::other(error.clone()))?;
+    rw_tools::SandboxHelper::from_artifact(identity)
+        .map_err(|error| std::io::Error::other(format!("sandbox helper receipt rejected: {error}")))
 }
 
-fn load_helper() -> std::io::Result<rw_tools::SandboxHelper> {
+fn load_identity() -> std::io::Result<rw_tools::ExecutableArtifactIdentity> {
     use std::io::Read as _;
     let supplied = std::env::var_os("ROTTWEILER_TEST_SANDBOX_HELPER_RECEIPT").ok_or_else(|| {
         std::io::Error::other("native fixture prerequisite: run scripts/build-test-helper.py and set ROTTWEILER_TEST_SANDBOX_HELPER_RECEIPT to its artifact receipt")
@@ -35,8 +37,5 @@ fn load_helper() -> std::io::Result<rw_tools::SandboxHelper> {
             "sandbox helper receipt exceeds 4096 bytes",
         ));
     }
-    let identity: rw_tools::ExecutableArtifactIdentity =
-        serde_json::from_slice(&bytes).map_err(std::io::Error::other)?;
-    rw_tools::SandboxHelper::from_artifact(&identity)
-        .map_err(|error| std::io::Error::other(format!("sandbox helper receipt rejected: {error}")))
+    serde_json::from_slice(&bytes).map_err(std::io::Error::other)
 }

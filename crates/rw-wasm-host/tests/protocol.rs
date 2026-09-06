@@ -7,10 +7,9 @@ use rw_plugin_protocol::{
     HookFailurePolicy, PROTOCOL_VERSION, PluginCapabilities, PluginHookCapability, PluginManifest,
 };
 
-fn approve_helper(path: &std::path::Path) -> rw_tools::ApprovedExecutable {
+fn helper_digest(path: &Path) -> rw_tools::ExecutableDigest {
     use sha2::{Digest as _, Sha256};
-    let path = path.canonicalize().expect("fixture executable");
-    let bytes = std::fs::read(&path).expect("fixture bytes");
+    let bytes = std::fs::read(path).expect("fixture bytes");
     let digest = Sha256::digest(&bytes)
         .iter()
         .flat_map(|byte| {
@@ -21,21 +20,29 @@ fn approve_helper(path: &std::path::Path) -> rw_tools::ApprovedExecutable {
             ]
         })
         .collect();
-    rw_tools::ApprovedExecutable::from_installed(
-        &path,
-        &rw_tools::ExecutableDigest {
-            bytes: bytes.len() as u64,
-            sha256: digest,
-        },
-    )
-    .expect("approved fixture executable")
+    rw_tools::ExecutableDigest {
+        bytes: bytes.len() as u64,
+        sha256: digest,
+    }
+}
+
+fn approve_helper(path: &Path) -> rw_tools::ApprovedExecutable {
+    let path = path.canonicalize().expect("fixture executable");
+    rw_tools::ApprovedExecutable::from_installed(&path, &helper_digest(&path))
+        .expect("approved fixture executable")
 }
 
 fn fixture_helper() -> rw_tools::ApprovedExecutable {
-    static HELPER: std::sync::OnceLock<rw_tools::ApprovedExecutable> = std::sync::OnceLock::new();
-    HELPER
-        .get_or_init(|| approve_helper(Path::new(env!("CARGO_BIN_EXE_rottweiler-wasm-host"))))
-        .clone()
+    static IDENTITY: std::sync::OnceLock<(std::path::PathBuf, rw_tools::ExecutableDigest)> =
+        std::sync::OnceLock::new();
+    let (path, digest) = IDENTITY.get_or_init(|| {
+        let path = Path::new(env!("CARGO_BIN_EXE_rottweiler-wasm-host"))
+            .canonicalize()
+            .expect("fixture executable");
+        let digest = helper_digest(&path);
+        (path, digest)
+    });
+    rw_tools::ApprovedExecutable::from_installed(path, digest).expect("approved fixture executable")
 }
 
 fn manifest() -> PluginManifest {
