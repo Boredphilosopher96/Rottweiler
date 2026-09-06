@@ -136,13 +136,13 @@ jobs:
         run: |
           python3 scripts/native_candidate.py prepare "$RUNNER_TEMP/native-candidate.noindex"
           echo "engine=$(python3 scripts/native_candidate.py path "$RUNNER_TEMP/native-candidate.noindex" engine)" >> "$GITHUB_OUTPUT"
-          echo "tui=$(python3 scripts/native_candidate.py path "$RUNNER_TEMP/native-candidate.noindex" tui)" >> "$GITHUB_OUTPUT"
+          echo "js_host=$(python3 scripts/native_candidate.py path "$RUNNER_TEMP/native-candidate.noindex" js_host)" >> "$GITHUB_OUTPUT"
       - name: Run the real supervisor, engine, and OpenTUI for eight hours
         run: >-
           python3 scripts/ci_evidence.py --gate soak --output soak-gate.json --
           python3 scripts/run-soak.py
           --rw "${{ steps.components.outputs.engine }}"
-          --tui "${{ steps.components.outputs.tui }}"
+          --js-host "${{ steps.components.outputs.js_host }}"
           --duration-seconds 28800
           --output soak-result.json
       - name: Enforce the checked-in 10 percent regression baseline
