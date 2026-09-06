@@ -85,7 +85,10 @@ The CLI owns bounded line input, approval input, text/JSON rendering, standard s
 performance markers. Runtime composition does not depend on terminal libraries or
 write to standard streams; diagnostics go to the client's tracing subscriber.
 Closing a local session waits for actor effects, finalizes durable projections and
-session-local state, then settles services. Dropping a client or a cleanup waiter
+session-local state, then settles services. Successful actor close is published only
+after its configuration and state are destroyed; after callers release their session
+handles, an independent reader can capture the journal without racing its writer lock.
+Dropping a client or a cleanup waiter
 requests that same independently owned shutdown; it cannot cancel cleanup.
 
 The native renderer is built from checksum-verified OpenTUI source and the exact

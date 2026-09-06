@@ -213,12 +213,23 @@ async fn sample(root: &Path, expected: &Expected, phase: &str, ordinal: usize, w
     child.close(None).await.expect("actor effects settled");
     drop(child);
     drop(factory);
+    assert_offline_prefix(&storage, expected);
     owner
         .journal_service
         .commits
         .shutdown()
         .await
         .expect("source jobs settled");
+}
+
+fn assert_offline_prefix(storage: &Path, expected: &Expected) {
+    let view = rw_store::session::journal::JournalReadView::open_existing(storage, SESSION)
+        .expect("settled actor releases its exclusive journal writer")
+        .expect("existing source");
+    assert_eq!(
+        view.last_sequence(),
+        Some(SequenceId(expected.next_sequence - 1))
+    );
 }
 
 async fn transcript(

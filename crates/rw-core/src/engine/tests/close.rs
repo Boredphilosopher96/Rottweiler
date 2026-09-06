@@ -515,3 +515,69 @@ async fn failed_resource_binding_prevents_actor_startup() {
     tokio::task::yield_now().await;
     assert!(sink.events.lock().expect("events").is_empty());
 }
+
+struct DroppingResources {
+    entered: Option<tokio::sync::oneshot::Sender<()>>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+#[async_trait]
+impl crate::SessionResources for DroppingResources {
+    fn bind_session(&self, _: crate::PluginSessionBinding) -> Result<(), AgentLoopError> {
+        Ok(())
+    }
+    async fn shutdown(&self) -> Result<(), AgentLoopError> {
+        Ok(())
+    }
+}
+
+impl Drop for DroppingResources {
+    fn drop(&mut self) {
+        if let Some(entered) = self.entered.take() {
+            let _ = entered.send(());
+        }
+        // A finite fallback keeps a failing regression from stranding the runtime.
+        let _ = self
+            .release
+            .lock()
+            .expect("drop gate")
+            .recv_timeout(Duration::from_secs(5));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn successful_close_waits_for_actor_configuration_destruction() {
+    use futures_util::FutureExt;
+
+    let root = tempfile::tempdir().expect("root");
+    let (entered, dropping) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::sync_channel(1);
+    let mut configuration = config(
+        root.path(),
+        Arc::new(ScriptedModel::new(Vec::new())),
+        Arc::new(ToolRegistry::new()),
+        PermissionDecision::Allow,
+        HookDispatcher::new(),
+    );
+    configuration.resources = Arc::new(DroppingResources {
+        entered: Some(entered),
+        release: Mutex::new(wait),
+    });
+    let handle = crate::engine::tests::fixtures::history::spawn(configuration)
+        .await
+        .expect("actor");
+    let mut closing = Box::pin(handle.close());
+    assert!(closing.as_mut().now_or_never().is_none());
+    tokio::time::timeout(Duration::from_secs(2), dropping)
+        .await
+        .expect("actor destruction started")
+        .expect("drop signal");
+    let premature = closing.as_mut().now_or_never();
+    release.send(()).expect("release destruction");
+    assert!(
+        premature.is_none(),
+        "close must not precede actor owner destruction"
+    );
+    closing.await.expect("physically closed");
+    handle.close().await.expect("repeat close");
+}

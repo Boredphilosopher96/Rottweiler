@@ -121,8 +121,14 @@ impl SessionActor {
                     .complete(Err("session actor exited without cleanup proof".to_owned()));
                 event_closer.close();
                 shutdown::retain_unproven(retained).await;
+                return;
             }
+            // The completed actor future has released state and its configuration.
+            // Release the panic-retention copy before publishing a successful close:
+            // its durable sink may still own the journal's exclusive writer lock.
+            drop(retained);
             event_closer.close();
+            task_shutdown.complete(Ok(()));
         });
         Ok(handle)
     }
@@ -474,7 +480,5 @@ pub(super) async fn run_actor(
     if let Some(message) = state.unsettled.clone() {
         shutdown.complete(Err(message));
         shutdown::retain_unproven((state, config, cleanup, commands, signals)).await;
-    } else {
-        shutdown.complete(Ok(()));
     }
 }
