@@ -537,7 +537,12 @@ fn fork_storage_starts_empty_review_and_skips_inherited_accounting() {
         &fork_modes,
     )
     .expect_err("removed custom mode must reject fork");
-    assert!(error.to_string().contains("mode projection"));
+    assert!(
+        error
+            .to_string()
+            .contains("unknown mode id `removed-custom-mode`"),
+        "fork must reject the missing mode before creating child state: {error:?}"
+    );
     assert!(!storage.join("sessions").join(&invalid_child.0).exists());
     assert!(!checkpoint_root(&storage, &workspace, &invalid_child.0).exists());
     assert_eq!(
