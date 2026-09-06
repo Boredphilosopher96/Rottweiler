@@ -495,8 +495,15 @@ names, duplicates, links, unsupported/missing platforms, length changes, and
 digest changes. Until notarization is configured, the generated pre-v1 Cask
 must disclose and encode its post-verification quarantine-removal postflight;
 a clean Cask install must launch `rw --version` before publication is called
-usable. The unadvertised development Formula still builds both locked
-Rust and Bun components with the same private-helper/public-symlink layout. Stable release
+usable. The development Formula invokes the native candidate builder with an isolated
+target directory. It verifies the resulting candidate and installs its complete
+private binary directory, including identity files; only `rw` enters `PATH`.
+Its Rustup dependency installs the source-selected compiler into an isolated
+build directory without self-updating or touching user toolchains. Bun comes
+from a Homebrew resource bound to the exact official release URL and SHA-256 in
+`contracts/toolchain-artifacts.json`; `scripts/homebrew_toolchains.py --refresh`
+refreshes those identities from the official checksum list when the source pin
+changes. The builder verifies the installed toolchains and product limits. Stable release
 CI syntax-checks all generated files, attests and publishes them with the
 archives, and verifies the Homebrew tap's resulting `main` commit. Release and
 soak acceptance must invoke only the installed public `rw` with no TUI path

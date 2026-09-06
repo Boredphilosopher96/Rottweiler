@@ -272,8 +272,9 @@ class DistributionRenderTests(unittest.TestCase):
         formula = REPO / "packaging/homebrew/rottweiler-head.rb"
         text = formula.read_text(encoding="utf-8")
         self.assertIn('head "https://github.com/Boredphilosopher96/Rottweiler.git"', text)
-        self.assertIn('depends_on "bun" => :build', text)
-        self.assertIn('depends_on "rust" => :build', text)
+        self.assertIn('depends_on "rustup" => :build', text)
+        self.assertNotIn('depends_on "bun" => :build', text)
+        self.assertNotIn('depends_on "rust" => :build', text)
         self.assertIn('depends_on "binutils" => :build', text)
         self.assertIn('ROTTWEILER_STRIP_BIN: formula_opt_bin("binutils")/"strip"', text)
         self.assertIn("preserve_rpath", text)
