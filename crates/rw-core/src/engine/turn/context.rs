@@ -7,8 +7,6 @@ use crate::engine::session::SessionActorConfig;
 use crate::engine::turn::provider_messages::persist_event;
 use crate::engine::turn::signals::TurnSignal;
 use rw_context::AssembledContext;
-use rw_context::AssemblyInput;
-use rw_context::ContextAssembler;
 use rw_context::ContextItem as AssemblyContextItem;
 use rw_context::ContextItemId as AssemblyContextItemId;
 use rw_context::ContextItemKind as AssemblyContextItemKind;
@@ -107,10 +105,9 @@ pub(in crate::engine) fn prompt_turn(
     pruned_tool_outputs: &BTreeMap<String, u64>,
     toon: &mut ToonPromptEncoder,
 ) -> Turn {
-    let mut prompt = turn.clone();
-    prompt.blocks = prompt
+    let blocks = turn
         .blocks
-        .into_iter()
+        .iter()
         .enumerate()
         .map(|(block_index, block)| match block {
             Block::ToolResult {
@@ -121,15 +118,19 @@ pub(in crate::engine) fn prompt_turn(
                 let is_pruned =
                     pruned_tool_outputs.contains_key(&block_source(sequence, block_index).key());
                 Block::ToolResult {
-                    id,
-                    output: prompt_tool_output(&output, is_pruned, toon),
-                    is_error,
+                    id: id.clone(),
+                    output: prompt_tool_output(output, is_pruned, toon),
+                    is_error: *is_error,
                 }
             }
-            other => other,
+            other => other.clone(),
         })
         .collect();
-    prompt
+    Turn {
+        role: turn.role.clone(),
+        blocks,
+        meta: turn.meta.clone(),
+    }
 }
 
 #[tracing::instrument(target = "rw_performance", level = "trace", name = "context.assemble", skip_all, fields(session_id = config.session_id.0.as_str(), turns = conversation.len()))]
@@ -148,7 +149,119 @@ pub(in crate::engine) fn assemble_session_context(
             "context source alignment".into(),
         ));
     }
-    let stable_prefix = config
+    let mut cache = working
+        .cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let normalized = cache.conversation(conversation, sources, pruned_tool_outputs);
+    let conversation = conversation_items(
+        conversation,
+        normalized,
+        sources,
+        surgery,
+        pruned_tool_outputs,
+    );
+    let queued = queued_items(queued);
+    let support = config
+        .model
+        .context_metadata(&config.model_alias)
+        .cache_breakpoints
+        .unwrap_or(CacheBreakpointSupport::None);
+    if cache
+        .prefix
+        .as_ref()
+        .is_none_or(|(stored, _)| *stored != support)
+    {
+        cache.prefix = Some((
+            support,
+            rw_context::PreparedPrefix::new(
+                stable_items(config),
+                tool_definitions(config),
+                support,
+            )
+            .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?,
+        ));
+    }
+    cache
+        .prefix
+        .as_ref()
+        .ok_or_else(|| {
+            AgentLoopError::InvalidConfiguration("context prefix was not prepared".into())
+        })?
+        .1
+        .assemble(conversation, Vec::new(), queued)
+        .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))
+}
+
+fn conversation_items(
+    conversation: &[Turn],
+    normalized: Vec<Turn>,
+    sources: &[ConversationSource],
+    surgery: &[ContextSurgeryAction],
+    pruned_tool_outputs: &BTreeMap<String, u64>,
+) -> Vec<AssemblyContextItem> {
+    conversation
+        .iter()
+        .zip(normalized)
+        .enumerate()
+        .map(|(index, (turn, normalized))| {
+            let sequence = sources[index].sequence;
+            let item_id = conversation_item(sequence);
+            let (pinned, evicted) = context_action_state(surgery, &item_id);
+            let pruned = turn.blocks.iter().enumerate().any(|(block_index, block)| {
+                matches!(block, Block::ToolResult { .. } if pruned_tool_outputs.contains_key(&block_source(sequence, block_index).key()))
+            });
+            AssemblyContextItem {
+                id: AssemblyContextItemId(item_id.0),
+                kind: if pinned {
+                    AssemblyContextItemKind::Pin
+                } else {
+                    AssemblyContextItemKind::Conversation
+                },
+                label: format!("{:?} turn {}", turn.role, index.saturating_add(1)),
+                provenance: if pinned {
+                    ContextProvenance::UserPin
+                } else {
+                    ContextProvenance::Conversation {
+                        sequence: sequence.0,
+                    }
+                },
+                turn: normalized,
+                pinned,
+                evicted,
+                summarized: turn.meta.summary,
+                pruned,
+            }
+        })
+        .collect()
+}
+
+fn queued_items(queued: &VecDeque<String>) -> Vec<AssemblyContextItem> {
+    queued
+        .iter()
+        .enumerate()
+        .map(|(index, content)| AssemblyContextItem {
+            id: AssemblyContextItemId(format!("queued:{index}")),
+            kind: AssemblyContextItemKind::Queued,
+            label: format!("Queued message {}", index.saturating_add(1)),
+            provenance: ContextProvenance::ClientQueue,
+            turn: Turn {
+                role: Role::User,
+                blocks: vec![Block::Text {
+                    text: content.clone(),
+                }],
+                meta: TurnMeta::default(),
+            },
+            pinned: false,
+            evicted: false,
+            summarized: false,
+            pruned: false,
+        })
+        .collect()
+}
+
+fn stable_items(config: &SessionActorConfig) -> Vec<AssemblyContextItem> {
+    config
         .initial_session_context
         .iter()
         .enumerate()
@@ -171,83 +284,18 @@ pub(in crate::engine) fn assemble_session_context(
             summarized: false,
             pruned: false,
         })
-        .collect();
-    let mut toon = ToonPromptEncoder::default();
-    let conversation = conversation
-        .iter()
-        .enumerate()
-        .map(|(index, turn)| {
-            let sequence = sources[index].sequence;
-            let item_id = conversation_item(sequence);
-            let (pinned, evicted) = context_action_state(surgery, &item_id);
-            let pruned = turn.blocks.iter().enumerate().any(|(block_index, block)| {
-                matches!(block, Block::ToolResult { .. } if pruned_tool_outputs.contains_key(&block_source(sequence, block_index).key()))
-            });
-            AssemblyContextItem {
-                id: AssemblyContextItemId(item_id.0),
-                kind: if pinned {
-                    AssemblyContextItemKind::Pin
-                } else {
-                    AssemblyContextItemKind::Conversation
-                },
-                label: format!("{:?} turn {}", turn.role, index.saturating_add(1)),
-                provenance: if pinned {
-                    ContextProvenance::UserPin
-                } else {
-                    ContextProvenance::Conversation {
-                        sequence: sequence.0,
-                    }
-                },
-                turn: prompt_turn(turn, sequence, pruned_tool_outputs, &mut toon),
-                pinned,
-                evicted,
-                summarized: turn.meta.summary,
-                pruned,
-            }
+        .collect()
+}
+fn tool_definitions(config: &SessionActorConfig) -> Vec<rw_providers::ToolDefinition> {
+    config
+        .tools
+        .descriptor_refs()
+        .map(|tool| rw_providers::ToolDefinition {
+            name: tool.name.clone(),
+            description: tool.description.clone(),
+            input_schema: normalized_json_copy(&tool.input_schema),
         })
-        .collect();
-    let queued = queued
-        .iter()
-        .enumerate()
-        .map(|(index, content)| AssemblyContextItem {
-            id: AssemblyContextItemId(format!("queued:{index}")),
-            kind: AssemblyContextItemKind::Queued,
-            label: format!("Queued message {}", index.saturating_add(1)),
-            provenance: ContextProvenance::ClientQueue,
-            turn: Turn {
-                role: Role::User,
-                blocks: vec![Block::Text {
-                    text: content.clone(),
-                }],
-                meta: TurnMeta::default(),
-            },
-            pinned: false,
-            evicted: false,
-            summarized: false,
-            pruned: false,
-        })
-        .collect();
-    let metadata = config.model.context_metadata(&config.model_alias);
-    ContextAssembler::assemble(AssemblyInput {
-        stable_prefix,
-        conversation,
-        pins: Vec::new(),
-        queued,
-        tools: config
-            .tools
-            .descriptor_refs()
-            .map(|tool| rw_providers::ToolDefinition {
-                name: tool.name.clone(),
-                description: tool.description.clone(),
-                input_schema: normalized_json_copy(&tool.input_schema),
-            })
-            .collect(),
-        cache_support: metadata
-            .cache_breakpoints
-            .unwrap_or(CacheBreakpointSupport::None),
-        include_prompt_dump: false,
-    })
-    .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))
+        .collect()
 }
 
 pub(in crate::engine) fn protocol_context_kind(
@@ -499,12 +547,11 @@ pub(super) async fn prune_before_provider_request(
     let mut tool_names = BTreeMap::<String, String>::new();
     let mut records = Vec::new();
     let mut identities = BTreeMap::new();
-    let mut toon = ToonPromptEncoder::default();
-    let prompt_conversation = conversation
-        .iter()
-        .zip(sources)
-        .map(|(turn, source)| prompt_turn(turn, source.sequence, pruned_tool_outputs, &mut toon))
-        .collect::<Vec<_>>();
+    let prompt_conversation = working
+        .cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .conversation(conversation, sources, pruned_tool_outputs);
     for (turn_index, (conversation_turn, prompt_conversation_turn)) in
         conversation.iter().zip(&prompt_conversation).enumerate()
     {
@@ -618,4 +665,35 @@ fn normalized_json_copy(value: &serde_json::Value) -> serde_json::Value {
         ),
         value => value.clone(),
     }
+}
+
+#[cfg(test)]
+pub(in crate::engine) fn assemble_full_session_context(
+    config: &SessionActorConfig,
+    conversation: &[Turn],
+    sources: &[ConversationSource],
+    queued: &VecDeque<String>,
+    surgery: &[ContextSurgeryAction],
+    pruned: &BTreeMap<String, u64>,
+) -> Result<AssembledContext, AgentLoopError> {
+    let mut toon = ToonPromptEncoder::default();
+    let normalized = conversation
+        .iter()
+        .zip(sources)
+        .map(|(turn, source)| prompt_turn(turn, source.sequence, pruned, &mut toon))
+        .collect();
+    rw_context::ContextAssembler::assemble(rw_context::AssemblyInput {
+        stable_prefix: stable_items(config),
+        conversation: conversation_items(conversation, normalized, sources, surgery, pruned),
+        pins: Vec::new(),
+        queued: queued_items(queued),
+        tools: tool_definitions(config),
+        cache_support: config
+            .model
+            .context_metadata(&config.model_alias)
+            .cache_breakpoints
+            .unwrap_or(CacheBreakpointSupport::None),
+        include_prompt_dump: false,
+    })
+    .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))
 }

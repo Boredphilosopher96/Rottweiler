@@ -206,6 +206,7 @@ pub(super) async fn run_turn(
     let mut citation_admission = rw_types::citation_admission::CitationAdmission::default();
 
     let mut compacted_source_owner = None;
+    let mut context_working = None;
     'iterations: for iteration in 0..config.max_turns {
         if cancellation.is_cancelled() {
             status = AgentTurnStatus::Interrupted;
@@ -261,25 +262,17 @@ pub(super) async fn run_turn(
                     break;
                 }
             };
-        let reserved = match super::history_context::reserve_working(&config).await {
-            Ok(reserved) => reserved,
-            Err(error) => {
-                send_event(
-                    &signals,
-                    PendingEvent::Error {
-                        message: error.to_string(),
-                    },
-                );
-                status = AgentTurnStatus::Failed;
-                break;
+        let working_result = if let Some(working) = context_working.take() {
+            super::context_memory::readmit(working, &config, &conversation, &VecDeque::new())
+        } else {
+            match super::history_context::reserve_working(&config).await {
+                Ok(reserved) => {
+                    super::context_memory::admit(reserved, &config, &conversation, &VecDeque::new())
+                }
+                Err(error) => Err(error),
             }
         };
-        let mut working = match super::context_memory::admit(
-            reserved,
-            &config,
-            &conversation,
-            &VecDeque::new(),
-        ) {
+        let mut working = match working_result {
             Ok(working) => working,
             Err(error) => {
                 send_event(
@@ -387,8 +380,8 @@ pub(super) async fn run_turn(
                         break;
                     }
                 };
-                working = match super::context_memory::admit(
-                    working.map(|_| ()),
+                working = match super::context_memory::readmit(
+                    working,
                     &config,
                     &conversation,
                     &VecDeque::new(),
@@ -486,6 +479,7 @@ pub(super) async fn run_turn(
             thinking: config.thinking,
             cache_hint,
         };
+        context_working = Some(working);
         if let Err(error) = config.model.prepare_model(&config.model_alias).await {
             send_event(
                 &signals,

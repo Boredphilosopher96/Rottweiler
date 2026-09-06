@@ -6,8 +6,6 @@ use crate::engine::turn::signals::CompactionProgress;
 use crate::engine::turn::signals::CompactionProgressKind;
 use crate::engine::turn::signals::TurnSignal;
 use crate::engine::turn::tool_requests::ToolExecution;
-use rw_providers::ToolDefinition;
-use rw_tools::ToolDescriptor;
 use rw_tools::ToolRegistry;
 use rw_types::Block;
 use rw_types::EventMeta;
@@ -111,14 +109,6 @@ pub(in crate::engine) fn append_thinking(
         content: delta.to_owned(),
         signature,
     });
-}
-
-pub(super) fn tool_definition(descriptor: ToolDescriptor) -> ToolDefinition {
-    ToolDefinition {
-        name: descriptor.name,
-        description: descriptor.description,
-        input_schema: descriptor.input_schema,
-    }
 }
 
 pub(super) fn emit_plan_submission(

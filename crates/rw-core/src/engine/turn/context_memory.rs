@@ -6,6 +6,8 @@ use std::{collections::VecDeque, io::Write};
 pub(super) const TOON_WORKING_BYTES: usize = 32 * 1024 * 1024;
 pub(in crate::engine) struct ContextWorkPlan {
     bytes: usize,
+    generation: usize,
+    pub(super) cache: std::sync::Mutex<super::context_cache::ContextCache>,
 }
 pub(in crate::engine) type ContextWorkingSet = HistoryRead<ContextWorkPlan>;
 
@@ -21,9 +23,45 @@ pub(in crate::engine) fn admit(
             "context transformation exceeds shared working admission",
         ));
     }
-    Ok(reserved.map(|()| ContextWorkPlan { bytes }))
+    Ok(reserved.map(|()| ContextWorkPlan {
+        bytes,
+        generation: std::ptr::from_ref(config) as usize,
+        cache: std::sync::Mutex::default(),
+    }))
+}
+/// Replan within the same immutable actor configuration, retaining cached bytes
+/// under the original shared reservation across provider iterations.
+pub(in crate::engine) fn readmit(
+    reserved: ContextWorkingSet,
+    config: &SessionActorConfig,
+    conversation: &[Turn],
+    queued: &VecDeque<String>,
+) -> Result<ContextWorkingSet, AgentLoopError> {
+    let bytes = planned_bytes(config, conversation, queued)?;
+    if bytes > crate::engine::recovery::MAX_HISTORY_RESULT_BYTES {
+        return Err(invalid(
+            "context transformation exceeds shared working admission",
+        ));
+    }
+    Ok(reserved.map(|mut plan| {
+        plan.bytes = bytes;
+        let generation = std::ptr::from_ref(config) as usize;
+        if plan.generation != generation {
+            plan.cache = std::sync::Mutex::default();
+            plan.generation = generation;
+        }
+        plan
+    }))
 }
 impl ContextWorkPlan {
+    #[cfg(test)]
+    pub(in crate::engine) fn normalizations(&self) -> u64 {
+        self.cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .normalizations
+    }
+
     pub(super) fn validate(&self) -> Result<(), AgentLoopError> {
         if self.bytes > crate::engine::recovery::MAX_HISTORY_RESULT_BYTES {
             return Err(invalid("context working reservation is insufficient"));

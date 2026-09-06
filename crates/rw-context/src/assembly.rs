@@ -1,5 +1,8 @@
 //! Stable-prefix context assembly with provenance and cache metadata.
 
+mod prepared;
+pub use prepared::PreparedPrefix;
+
 use std::collections::HashSet;
 
 use rw_providers::{CacheBreakpointSupport, ToolDefinition};
