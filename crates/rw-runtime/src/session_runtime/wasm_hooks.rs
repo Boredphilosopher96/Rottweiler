@@ -35,16 +35,16 @@ pub(super) fn compose_runtime_hooks_with_extensions(
     tools: Arc<ToolRegistry>,
     catalog: &ExtensionCatalog,
     intelligence: Arc<dyn CodeIntelligenceProvider>,
-    validated_wasm_hooks: &[NamedWasmHook],
+    wasm_hooks: &[NamedWasmHook],
 ) -> Result<HookDispatcher> {
     let mut hooks = compose_runtime_hooks(config, Arc::clone(runtime), tools, Some(intelligence))?;
     register_declarative_hooks(&mut hooks, catalog, runtime)?;
-    register_retained_wasm_hooks(&mut hooks, validated_wasm_hooks)?;
+    register_retained_wasm_hooks(&mut hooks, wasm_hooks)?;
     Ok(hooks)
 }
 
-pub(super) async fn compose_runtime_hooks_with_extensions_validated(
-    wasm_workers: Arc<rw_ext::WasmWorkerPool>,
+pub(super) fn compose_initial_runtime_hooks(
+    wasm_workers: &Arc<rw_ext::WasmWorkerPool>,
     config: &ToolchainConfig,
     runtime: &Arc<ToolchainRuntime>,
     tools: Arc<ToolRegistry>,
@@ -57,25 +57,18 @@ pub(super) async fn compose_runtime_hooks_with_extensions_validated(
 )> {
     let mut hooks = compose_runtime_hooks(config, Arc::clone(runtime), tools, Some(intelligence))?;
     register_declarative_hooks(&mut hooks, catalog, runtime)?;
-    let (validated_wasm_hooks, notices) =
-        register_validated_wasm_hooks(wasm_workers, &mut hooks).await?;
-    Ok((hooks, notices, validated_wasm_hooks.into()))
+    let (hosts, notices) = load_active_wasm_hook_proxies(wasm_workers)?;
+    let (wasm_hooks, notices) = register_wasm_hook_proxies(&mut hooks, hosts, notices);
+    Ok((hooks, notices, wasm_hooks.into()))
 }
 
-pub(super) async fn register_validated_wasm_hooks(
-    wasm_workers: Arc<rw_ext::WasmWorkerPool>,
+pub(super) fn register_wasm_hook_proxies(
     dispatcher: &mut HookDispatcher,
-) -> Result<(Vec<NamedWasmHook>, Vec<StartupNotification>)> {
-    let (hosts, mut notices) = load_active_wasm_hook_proxies(&wasm_workers)?;
-    let mut validated = Vec::new();
+    hosts: Vec<NamedWasmHook>,
+    mut notices: Vec<StartupNotification>,
+) -> (Vec<NamedWasmHook>, Vec<StartupNotification>) {
+    let mut retained = Vec::new();
     for (name, host) in hosts {
-        if host.validate().await.is_err() {
-            notices.push(wasm_startup_notice(
-                &format!("wasm:{name}"),
-                &format!("Extension {name} was skipped because its component failed validation."),
-            ));
-            continue;
-        }
         if host.register_hooks(dispatcher).is_err() {
             notices.push(wasm_startup_notice(
                 &format!("wasm:{name}"),
@@ -85,18 +78,18 @@ pub(super) async fn register_validated_wasm_hooks(
             ));
             continue;
         }
-        validated.push((name, host));
+        retained.push((name, host));
     }
-    Ok((validated, notices))
+    (retained, notices)
 }
 
 pub(super) fn register_retained_wasm_hooks(
     dispatcher: &mut HookDispatcher,
-    validated_wasm_hooks: &[NamedWasmHook],
+    wasm_hooks: &[NamedWasmHook],
 ) -> Result<()> {
-    for (name, host) in validated_wasm_hooks {
+    for (name, host) in wasm_hooks {
         host.register_hooks(dispatcher).map_err(|error| {
-            miette!("validated WASM extension `{name}` could not re-register: {error}")
+            miette!("retained WASM extension `{name}` could not re-register: {error}")
         })?;
     }
     Ok(())

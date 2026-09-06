@@ -119,7 +119,7 @@ pub(crate) struct RuntimeWorkspaceRootController {
     pub(super) trust_store_path: PathBuf,
     pub(super) toolchain_config: ToolchainConfig,
     pub(super) toolchain_runtime: Arc<ToolchainRuntime>,
-    pub(super) validated_wasm_hooks: Arc<[NamedWasmHook]>,
+    pub(super) wasm_hooks: Arc<[NamedWasmHook]>,
     pub(super) extension_user_home: PathBuf,
     pub(super) extension_user_rottweiler: PathBuf,
     pub(super) dangerously_trust: bool,
@@ -232,7 +232,7 @@ impl RuntimeWorkspaceRootController {
             Arc::clone(&built.registry),
             &catalog,
             Arc::clone(&built.code_intelligence),
-            &self.validated_wasm_hooks,
+            &self.wasm_hooks,
         )
         .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
         register_nested_instruction_guard(
@@ -336,7 +336,7 @@ impl RuntimeWorkspaceRootController {
             trust_store_path: self.trust_store_path.clone(),
             toolchain_config: self.toolchain_config.clone(),
             toolchain_runtime,
-            validated_wasm_hooks: Arc::clone(&self.validated_wasm_hooks),
+            wasm_hooks: Arc::clone(&self.wasm_hooks),
             extension_user_home: self.extension_user_home.clone(),
             extension_user_rottweiler: self.extension_user_rottweiler.clone(),
             dangerously_trust: self.dangerously_trust,
@@ -601,7 +601,7 @@ impl RuntimeWorkspaceRootController {
             Arc::clone(&built.registry),
             catalog,
             Arc::clone(&built.code_intelligence),
-            &self.validated_wasm_hooks,
+            &self.wasm_hooks,
         )
         .map_err(|_error| {
             AgentLoopError::InvalidConfiguration(

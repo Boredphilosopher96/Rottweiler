@@ -71,7 +71,7 @@ pub(super) fn controller(private: &Path, primary: &Path) -> RuntimeWorkspaceRoot
             Arc::new(ReplayCommandExecutor::empty(&primary).expect("offline executor")),
             std::slice::from_ref(&primary),
         )),
-        validated_wasm_hooks: Arc::from([]),
+        wasm_hooks: Arc::from([]),
         extension_user_home: private.clone(),
         extension_user_rottweiler: private.join(".rottweiler"),
         dangerously_trust: true,

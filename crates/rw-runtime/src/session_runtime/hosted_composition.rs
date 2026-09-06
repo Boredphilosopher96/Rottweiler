@@ -58,8 +58,8 @@ use super::tool_composition::build_tools;
 use super::tool_composition::trusted_lsp_roots;
 use super::toolchain::RuntimeServiceView;
 use super::toolchain::ToolchainRuntime;
+use super::wasm_hooks::compose_initial_runtime_hooks;
 use super::wasm_hooks::compose_runtime_hooks_with_extensions;
-use super::wasm_hooks::compose_runtime_hooks_with_extensions_validated;
 use super::workspace_roots::RuntimeWorkspaceRootController;
 use super::workspace_roots::WorkspaceRootAuthorization;
 use super::workspace_roots::canonical_workspace_roots;
@@ -644,16 +644,14 @@ pub(crate) async fn compose_hosted_actor(
     if let Some(index) = skill_index_turn(&extension_catalog)? {
         initial_context.push(index);
     }
-    let (_, mut wasm_startup_notifications, validated_wasm_hooks) =
-        compose_runtime_hooks_with_extensions_validated(
-            Arc::clone(&options.wasm_workers),
-            &options.config.toolchain,
-            &toolchain_runtime,
-            Arc::clone(&built_tools.registry),
-            &extension_catalog,
-            Arc::clone(&built_tools.code_intelligence),
-        )
-        .await?;
+    let (_, mut wasm_startup_notifications, wasm_hooks) = compose_initial_runtime_hooks(
+        &options.wasm_workers,
+        &options.config.toolchain,
+        &toolchain_runtime,
+        Arc::clone(&built_tools.registry),
+        &extension_catalog,
+        Arc::clone(&built_tools.code_intelligence),
+    )?;
     wasm_startup_notifications.extend(extension_startup_notifications(&extension_catalog));
     let workspace_root_controller = Arc::new(RuntimeWorkspaceRootController {
         child_plugins: native_extensions.child_configuration(),
@@ -679,7 +677,7 @@ pub(crate) async fn compose_hosted_actor(
         trust_store_path: options.storage_root.join("trust.json"),
         toolchain_config: options.config.toolchain.clone(),
         toolchain_runtime: Arc::clone(&toolchain_runtime),
-        validated_wasm_hooks,
+        wasm_hooks,
         extension_user_home,
         extension_user_rottweiler,
         dangerously_trust: options.dangerously_trust,
@@ -862,7 +860,7 @@ pub(crate) async fn compose_hosted_actor(
         Arc::clone(&runtime_tools),
         &extension_catalog,
         Arc::clone(&built_tools.code_intelligence),
-        &workspace_root_controller.validated_wasm_hooks,
+        &workspace_root_controller.wasm_hooks,
     )?;
     for (registration, handler) in &plugin_runtime.hooks {
         runtime_hooks

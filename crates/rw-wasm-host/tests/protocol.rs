@@ -113,9 +113,10 @@ async fn helper_reuses_compilation_with_fresh_invocations() {
         WasmHookLimits::default(),
     )
     .expect("proxy");
-    hook.validate().await.expect("validation");
     let mut dispatcher = HookDispatcher::new();
     hook.register_hooks(&mut dispatcher).expect("registered");
+    assert_eq!(pool.stats().process_starts, 0);
+    assert_eq!(pool.stats().component_loads, 0);
     for _ in 0..10 {
         let result = dispatcher
             .dispatch(rw_ext::HookInput::PreTool(
@@ -135,7 +136,7 @@ async fn helper_reuses_compilation_with_fresh_invocations() {
     }
     assert_eq!(pool.stats().process_starts, 1);
     assert_eq!(pool.stats().component_loads, 1);
-    assert_eq!(pool.stats().cache_hits, 10);
+    assert_eq!(pool.stats().cache_hits, 9);
     assert!(pool.shutdown().await.is_ok());
 }
 

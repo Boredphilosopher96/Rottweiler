@@ -314,8 +314,8 @@ async fn declarative_pre_tool_hook_matches_and_blocks_through_shared_executor() 
     assert_eq!(calls[0].sandbox, BashSandboxMode::Sandboxed);
 }
 
-#[test]
-fn root_recomposition_reuses_the_validated_wasm_generation() {
+#[tokio::test]
+async fn composition_and_recomposition_retain_inert_wasm_hooks() {
     use std::os::unix::fs::PermissionsExt as _;
     let fixture = tempdir().expect("fixture");
     let helper = fixture.path().join("validated-helper");
@@ -325,7 +325,7 @@ fn root_recomposition_reuses_the_validated_wasm_generation() {
                 "name":"retained-hook",
                 "version":"1.0.0",
                 "protocol":3,
-                "capabilities":{"hooks":[{"name":"post_tool", "class": "transform","failure_policy":"fail-open"}]}
+                "capabilities":{"hooks":[{"name":"pre_tool", "class": "policy","failure_policy":"fail-closed"}]}
             }"#,
     )
     .expect("manifest");
@@ -339,25 +339,49 @@ fn root_recomposition_reuses_the_validated_wasm_generation() {
         },
     )
     .expect("fixture approval");
+    let pool = rw_ext::WasmWorkerPool::new();
     let host = WasmProcessHook::new(
-        rw_ext::WasmWorkerPool::new(),
+        Arc::clone(&pool),
         approved,
         manifest,
         vec![0],
         WasmHookLimits::default(),
     )
     .expect("proxy");
-    let retained = vec![("retained-hook".to_owned(), host)];
+    let mut initial = HookDispatcher::new();
+    let (retained, notices) = super::super::wasm_hooks::register_wasm_hook_proxies(
+        &mut initial,
+        vec![("retained-hook".to_owned(), host)],
+        Vec::new(),
+    );
+    assert!(notices.is_empty(), "component compilation is deferred");
+    assert_eq!(retained.len(), 1);
+    assert_eq!(pool.stats().process_starts, 0);
+    assert_eq!(pool.stats().component_loads, 0);
     std::fs::remove_file(helper).expect("remove original helper");
 
     let mut recomposed = HookDispatcher::new();
     register_retained_wasm_hooks(&mut recomposed, &retained)
         .expect("retained generation registers without reloading disk state");
-    assert_eq!(recomposed.registrations(HookEvent::PostTool).len(), 1);
+    assert_eq!(recomposed.registrations(HookEvent::PreTool).len(), 1);
 
     let error = register_retained_wasm_hooks(&mut recomposed, &retained)
         .expect_err("registration conflicts must not be discarded");
     assert!(error.to_string().contains("could not re-register"));
+    assert_eq!(pool.stats().process_starts, 0);
+    let result = initial
+        .dispatch(rw_ext::HookInput::PreTool(
+            rw_types::hook_contract::HookToolInput {
+                id: "call".to_owned(),
+                name: "read".to_owned(),
+                arguments: serde_json::json!({}),
+            },
+        ))
+        .await
+        .expect("failed helper launch is physically settled");
+    assert!(!result.completed(), "first use applies fail-closed policy");
+    assert_eq!(result.failures().len(), 1);
+    pool.shutdown().await.expect("pool settled");
 }
 
 #[test]
