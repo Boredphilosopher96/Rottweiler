@@ -216,12 +216,18 @@ impl SessionEventSink for JournalFixture {
         batch: Arc<AdmittedEventBatch>,
     ) -> Result<Arc<AdmittedEventBatch>, AgentLoopError> {
         let committed = Arc::clone(&self.inner).commit(batch).await?;
-        self.log
-            .lock()
-            .map_err(failure)?
-            .append_batch(committed.events().iter().cloned())
-            .map_err(failure)?;
-        Ok(committed)
+        // Journal fsync belongs to a physical worker even for fixture actors.
+        // A ready stream of tool chunks must not monopolize their Tokio executor.
+        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+            self.log
+                .lock()
+                .map_err(failure)?
+                .append_batch(committed.events().iter().cloned())
+                .map_err(failure)?;
+            Ok(committed)
+        })
+        .await
+        .map_err(failure)?
     }
     async fn settle_effects(&self) -> Result<(), AgentLoopError> {
         self.inner.settle_effects().await
