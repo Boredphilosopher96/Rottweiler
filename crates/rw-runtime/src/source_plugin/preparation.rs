@@ -18,6 +18,7 @@ use tokio::{
     time::Instant,
 };
 
+mod io;
 mod ownership;
 use ownership::{Operation, Ownership};
 
@@ -64,8 +65,8 @@ pub(super) struct PreparationOutput {
     pub stderr: Vec<u8>,
     pub status: Option<i32>,
 }
-struct CompletedPreparation {
-    result: Result<PreparationOutput>,
+struct CompletedPreparation<T = PreparationOutput> {
+    result: Result<T>,
     _admission: Option<OwnedSemaphorePermit>,
 }
 struct CancelOnDrop(Option<Arc<Operation>>);

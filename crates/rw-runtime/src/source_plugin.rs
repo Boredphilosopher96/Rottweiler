@@ -3,6 +3,7 @@
 use rw_types::release_contract::JS_HOST_SOURCE_PLUGIN_ROLE;
 
 mod preparation;
+mod stages;
 use preparation::{PreparationOutput, PreparationRequest};
 pub(crate) use preparation::{SourcePreparationBudget, SourcePreparations};
 
@@ -42,6 +43,7 @@ struct GraphReport {
     inputs: Vec<GraphInput>,
 }
 
+#[derive(Clone)]
 pub(crate) struct SourcePluginResolver {
     host: PathBuf,
     private_root: PathBuf,
@@ -62,27 +64,37 @@ pub async fn resolve_plugin_process(
     helper: &rw_tools::SandboxHelper,
 ) -> Result<PluginProcessConfig> {
     if matches!(plugin.target, DiscoveredPluginTarget::Executable { .. }) {
-        return plugin.executable_process_config();
+        let plugin = plugin.clone();
+        return rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+            plugin.executable_process_config()
+        })
+        .await
+        .map_err(|error| miette!(error.to_string()))?;
     }
-    let scratch = Arc::new(crate::extension_runtime::PrivateMcpScratch::create()?);
-    let launcher: Arc<dyn PluginLauncher> = Arc::new(
-        crate::plugin_process::SandboxedPluginLauncher::new(scratch.path(), helper)
-            .map_err(|error| miette!(error.to_string()))?,
-    );
-    let host = helper
-        .installation_path()
-        .parent()
-        .ok_or_else(|| miette!("Rottweiler executable has no release directory"))?
-        .join(rw_types::release_contract::JS_HOST_EXECUTABLE_NAME);
-    SourcePluginResolver::new(
-        &host,
-        private_root,
-        scratch,
-        launcher,
-        Arc::new(SourcePreparationBudget::default()),
-    )?
-    .resolve(plugin)
+    let helper = helper.clone();
+    let private_root = private_root.to_path_buf();
+    let resolver = rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+        let scratch = Arc::new(crate::extension_runtime::PrivateMcpScratch::create()?);
+        let launcher: Arc<dyn PluginLauncher> = Arc::new(
+            crate::plugin_process::SandboxedPluginLauncher::new(scratch.path(), &helper)
+                .map_err(|error| miette!(error.to_string()))?,
+        );
+        let host = helper
+            .installation_path()
+            .parent()
+            .ok_or_else(|| miette!("Rottweiler executable has no release directory"))?
+            .join(rw_types::release_contract::JS_HOST_EXECUTABLE_NAME);
+        SourcePluginResolver::new(
+            &host,
+            &private_root,
+            scratch,
+            launcher,
+            Arc::new(SourcePreparationBudget::default()),
+        )
+    })
     .await
+    .map_err(|error| miette!(error.to_string()))??;
+    resolver.resolve(plugin).await
 }
 
 impl SourcePluginResolver {
@@ -118,78 +130,46 @@ impl SourcePluginResolver {
             entry,
         } = &plugin.target
         else {
-            return plugin.executable_process_config();
+            let plugin = plugin.clone();
+            return self
+                .io("source.executable_identity", move || {
+                    plugin.executable_process_config()
+                })
+                .await;
         };
-        let package = package_root.join("package.json");
-        let lockfile = package_root.join("bun.lock");
-        for required in [&package, &lockfile, &plugin.manifest_path, entry] {
-            require_regular_file(required)?;
-        }
-        let discovered = self.graph(package_root, entry).await?;
-        validate_report(&discovered)?;
+        let source_root = package_root.clone();
+        let source_entry = entry.clone();
+        let owned_plugin = plugin.clone();
+        self.io("source.input_validation", move || {
+            stages::check_inputs(&owned_plugin)
+        })
+        .await?;
+        let discovered = self.graph(&source_root, &source_entry).await?;
+        let owner = self.clone();
+        let staged = self
+            .io("source.graph_copy", move || {
+                stages::stage(&owner, &source_root, &source_entry, discovered)
+            })
+            .await?;
+        let rebuilt = self
+            .bundle(&staged.root, &staged.entry, &staged.output)
+            .await?;
+        let owner = self.clone();
+        let plugin = plugin.clone();
+        self.io("source.bundle_attestation", move || {
+            stages::publish(&owner, &plugin, staged, rebuilt)
+        })
+        .await
+    }
 
-        let staging = self
-            .scratch
-            .path()
-            .join(format!("source-{}", random_suffix()?));
-        fs::create_dir(&staging).into_diagnostic()?;
-        copy_graph(package_root, &staging, &discovered)?;
-        let staged_entry = staging.join(entry.strip_prefix(package_root).into_diagnostic()?);
-        let staged_package = staging.join("package.json");
-        let staged_lockfile = staging.join("bun.lock");
-        let package_bytes = read_bounded_nofollow(&staged_package, MAX_REPORT_BYTES)?;
-        let lock_bytes = read_bounded_nofollow(&staged_lockfile, MAX_GRAPH_BYTES)?;
-        validate_graph(
-            &staging,
-            &staged_entry,
-            &discovered,
-            &package_bytes,
-            &lock_bytes,
-        )?;
-        let output = self
-            .scratch
-            .path()
-            .join(format!("bundle-{}", random_suffix()?));
-        fs::create_dir(&output).into_diagnostic()?;
-        let rebuilt = self.bundle(&staging, &staged_entry, &output).await?;
-        if rebuilt != discovered {
-            return Err(miette!(
-                "TypeScript plugin source graph changed during preparation"
-            ));
-        }
-        let bundle = output.join("plugin.mjs");
-        let bundle_bytes = read_bounded_nofollow(&bundle, MAX_BUNDLE_BYTES)?;
-        let graph_blake3 = graph_digest(&staging, &discovered)?;
-        let lockfile_blake3 = blake3::hash(&lock_bytes).to_hex().to_string();
-        let bundle_blake3 = blake3::hash(&bundle_bytes).to_hex().to_string();
-        let identity = SourcePluginIdentity {
-            graph_blake3,
-            lockfile_blake3,
-            bundle_blake3,
-            host_abi: discovered.abi,
-            bundle_format: discovered.format.clone(),
-        };
-        let prepared = publish_bundle(&self.private_root, &identity, &bundle_bytes, &discovered)?;
-        PluginProcessConfig::new(&self.host)
-            .and_then(|config| {
-                config.with_argv([
-                    JS_HOST_SOURCE_PLUGIN_ROLE.to_owned(),
-                    "run".to_owned(),
-                    prepared.join("plugin.mjs").to_string_lossy().into_owned(),
-                ])
-            })
-            .and_then(|config| config.with_cwd(&prepared))
-            .and_then(|config| config.with_code_root(&prepared))
-            .and_then(|config| {
-                config
-                    .with_attested_files([prepared.join("plugin.mjs"), prepared.join("graph.json")])
-            })
-            .and_then(|config| {
-                config.with_environment_allowlist(plugin.inherit_env.iter().cloned())
-            })
-            .and_then(|config| config.with_allowed_domains(plugin.allowed_domains.iter().cloned()))
-            .map(|config| config.with_source_identity(identity))
-            .map_err(|error| miette!(error.to_string()))
+    async fn io<T: Send + 'static>(
+        &self,
+        stage: &'static str,
+        work: impl FnOnce() -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        self.preparation
+            .execute_io(self.scratch.clone(), stage, work)
+            .await
     }
 
     async fn graph(&self, root: &Path, entry: &Path) -> Result<GraphReport> {
@@ -225,13 +205,21 @@ impl SourcePluginResolver {
         output_root: Option<&Path>,
         argv: [String; N],
     ) -> Result<GraphReport> {
-        let config = PluginProcessConfig::new(&self.host)
-            .and_then(|config| {
-                config.with_argv(std::iter::once(JS_HOST_SOURCE_PLUGIN_ROLE.to_owned()).chain(argv))
+        let host = self.host.clone();
+        let root = root.to_path_buf();
+        let config = self
+            .io("source.host_identity", move || {
+                PluginProcessConfig::new(&host)
+                    .and_then(|config| {
+                        config.with_argv(
+                            std::iter::once(JS_HOST_SOURCE_PLUGIN_ROLE.to_owned()).chain(argv),
+                        )
+                    })
+                    .and_then(|config| config.with_cwd(&root))
+                    .and_then(|config| config.with_code_root(&root))
+                    .map_err(|error| miette!(error.to_string()))
             })
-            .and_then(|config| config.with_cwd(root))
-            .and_then(|config| config.with_code_root(root))
-            .map_err(|error| miette!(error.to_string()))?;
+            .await?;
         let PreparationOutput {
             stdout: output,
             stderr: errors,
@@ -248,17 +236,20 @@ impl SourcePluginResolver {
                 tokio::time::Instant::now() + HOST_DEADLINE,
             )
             .await?;
-        if status != Some(0) {
-            let error = String::from_utf8_lossy(&errors);
-            return Err(miette!(
-                "TypeScript plugin preparation failed: {}",
-                error.trim()
-            ));
-        }
-        let report: GraphReport = serde_json::from_slice(&output)
-            .map_err(|_| miette!("TypeScript plugin host returned an invalid graph report"))?;
-        validate_report(&report)?;
-        Ok(report)
+        self.io("source.graph_report", move || {
+            if status != Some(0) {
+                let error = String::from_utf8_lossy(&errors);
+                return Err(miette!(
+                    "TypeScript plugin preparation failed: {}",
+                    error.trim()
+                ));
+            }
+            let report: GraphReport = serde_json::from_slice(&output)
+                .map_err(|_| miette!("TypeScript plugin host returned an invalid graph report"))?;
+            validate_report(&report)?;
+            Ok(report)
+        })
+        .await
     }
 }
 

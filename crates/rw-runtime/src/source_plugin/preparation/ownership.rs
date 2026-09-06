@@ -1,7 +1,7 @@
 //! A launched helper's ownership cannot disappear with its async caller.
 use super::{
-    Arc, CompletedPreparation, Mutex, Ordering, OwnedSemaphorePermit, PreparationOutput,
-    PrivateMcpScratch, Result, SourcePreparations, miette,
+    Arc, CompletedPreparation, Mutex, Ordering, OwnedSemaphorePermit, PrivateMcpScratch, Result,
+    SourcePreparations, miette,
 };
 use rw_ext::SupervisedPluginProcess;
 use rw_tools::CancellationToken;
@@ -79,7 +79,7 @@ impl Ownership {
             complete: false,
         }
     }
-    pub fn complete(&mut self, result: Result<PreparationOutput>) -> CompletedPreparation {
+    pub fn complete<T>(&mut self, result: Result<T>) -> CompletedPreparation<T> {
         if self.proof_required {
             return CompletedPreparation {
                 result: result.and_then(|_| Err(miette!("source helper settlement is unproven"))),

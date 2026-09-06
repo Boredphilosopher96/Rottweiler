@@ -470,3 +470,71 @@ async fn rejected_launch_releases_admission_without_poisoning_generation() {
         .expect("same generation remains usable");
     assert_eq!(output.stdout, b"healthy");
 }
+
+#[tokio::test]
+async fn cancelled_source_io_keeps_scratch_and_admission_until_its_last_write() {
+    let root = tempfile::tempdir().expect("outside proof root");
+    let marker = root.path().join("committed");
+    let scratch = Arc::new(PrivateMcpScratch::create().expect("scratch"));
+    let scratch_path = scratch.path().to_path_buf();
+    let held_scratch = Arc::downgrade(&scratch);
+    let pool = Arc::new(SourcePreparations::default());
+    let (started, entered) = oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let worker_marker = marker.clone();
+    let source_write = scratch_path.join("source");
+    let worker_pool = pool.clone();
+    let waiter = tokio::spawn(async move {
+        worker_pool
+            .execute_io(scratch, "source.test_write", move || {
+                let _ = started.send(());
+                released
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("release finite IO");
+                std::fs::write(source_write, "owned source bytes").expect("scratch retained");
+                std::fs::write(worker_marker, "last write").expect("durable marker");
+                Ok(())
+            })
+            .await
+    });
+    entered.await.expect("IO worker started");
+    waiter.abort();
+    assert!(matches!(waiter.await, Err(error) if error.is_cancelled()));
+    assert!(held_scratch.upgrade().is_some());
+    assert_eq!(
+        pool.budget.admission.available_permits(),
+        MAX_PREPARATIONS - 1
+    );
+    assert_eq!(
+        pool.budget.execution.available_permits(),
+        CONCURRENT_PREPARATIONS - 1
+    );
+    assert!(!marker.exists());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), pool.settle_cancelled())
+            .await
+            .is_err(),
+        "cancellation is not physical IO completion"
+    );
+    release.send(()).expect("finish source mutation");
+    pool.settle_cancelled().await.expect("actual IO proof");
+    assert_eq!(
+        std::fs::read_to_string(marker).expect("last write proof"),
+        "last write"
+    );
+    assert!(held_scratch.upgrade().is_none());
+    assert!(!scratch_path.exists());
+    assert_eq!(
+        pool.budget.execution.available_permits(),
+        CONCURRENT_PREPARATIONS
+    );
+    // Result-channel destruction can follow the settlement publication by a
+    // scheduling turn; it owns the admission until the undelivered result drops.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while pool.budget.admission.available_permits() != MAX_PREPARATIONS {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("result admission retired");
+}
