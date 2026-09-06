@@ -311,7 +311,7 @@ describing the evidence and tradeoff. Nightly and release jobs never accept
 waivers.
 
 The initial checked-in values are explicitly `bootstrap`: core ceilings are
-derived from the fixed v1 absolute budgets and the RSS value preserves the
+derived from the absolute budgets and the RSS value preserves the
 pre-baseline guard. They are not empirical measurements and do not satisfy the
 v1 regression gate. Pull-request jobs may use them only as an
 absolute-equivalent smoke comparison. Nightly and exact-tag core and soak jobs
