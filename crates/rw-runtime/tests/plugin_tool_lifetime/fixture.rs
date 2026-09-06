@@ -23,6 +23,19 @@ impl ApprovalStore for Approvals {
 }
 struct Redactor;
 impl rw_ext::PluginBoundaryRedactor for Redactor {
+    fn redact_reply_text(
+        &self,
+        text: &str,
+        max_bytes: usize,
+    ) -> Result<String, rw_ext::PluginRpcError> {
+        if text.len() > max_bytes {
+            return Err(rw_ext::PluginRpcError {
+                code: "reply_admission".into(),
+                message: "fixture reply exceeds admission".into(),
+            });
+        }
+        Ok(text.to_owned())
+    }
     fn redact(&self, value: serde_json::Value) -> serde_json::Value {
         value
     }
