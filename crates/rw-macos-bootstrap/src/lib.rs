@@ -1,4 +1,4 @@
-//! The only unsafe boundary for removing inherited application Mach authority.
+//! Audited macOS process authority and running executable identity.
 #![deny(unsafe_code)]
 
 #[cfg(target_os = "macos")]
@@ -22,4 +22,17 @@ pub fn exec_worker(program: &std::ffi::OsStr, args: &[std::ffi::OsString]) -> st
         return error;
     }
     std::process::Command::new(program).args(args).exec()
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod image_identity;
+
+/// Returns the kernel device/inode for this statically linked executable image.
+///
+/// # Errors
+/// Rejects unavailable or inconsistent kernel mapping information.
+#[cfg(target_os = "macos")]
+pub fn running_image_identity() -> std::io::Result<(u64, u64)> {
+    image_identity::running()
 }

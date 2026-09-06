@@ -2871,6 +2871,7 @@ dependencies = [
 name = "rw-macos-bootstrap"
 version = "0.1.4"
 dependencies = [
+ "libc",
  "mach2",
 ]
 

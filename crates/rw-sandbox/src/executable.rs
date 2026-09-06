@@ -78,13 +78,37 @@ impl ApprovedExecutable {
         let executable = File::open(&path).map_err(invalid)?;
         #[cfg(target_os = "linux")]
         let running = File::open("/proc/self/exe").map_err(invalid)?;
-        #[cfg(not(target_os = "linux"))]
-        let running = File::open(std::env::current_exe().map_err(invalid)?).map_err(invalid)?;
-        if identity(&executable.metadata().map_err(invalid)?)?
-            != identity(&running.metadata().map_err(invalid)?)?
-        {
+        #[cfg(target_os = "linux")]
+        let running_identity = identity(&running.metadata().map_err(invalid)?)?;
+        #[cfg(target_os = "macos")]
+        let running_identity = rw_macos_bootstrap::running_image_identity().map_err(invalid)?;
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let running_identity = return Err(SandboxError::UntrustedHelper);
+        let metadata = executable.metadata().map_err(invalid)?;
+        if identity(&metadata)? != running_identity {
             return Err(SandboxError::UntrustedHelper);
         }
+        #[cfg(target_os = "macos")]
+        {
+            let mut hasher = Sha256::new();
+            let mut input = (&executable).take(MAX_EXECUTABLE_BYTES + 1);
+            let mut buffer = [0_u8; 16 * 1024];
+            loop {
+                let count = input.read(&mut buffer).map_err(invalid)?;
+                if count == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..count]);
+            }
+            return Self::from_artifact(&ExecutableArtifactIdentity {
+                executable: path,
+                device: running_identity.0,
+                inode: running_identity.1,
+                bytes: metadata.len(),
+                sha256: hex_digest(&hasher.finalize()),
+            });
+        }
+        #[cfg(not(target_os = "macos"))]
         Ok(Self(Arc::new(OwnedExecutable {
             installation: path.clone(),
             digest: None,
