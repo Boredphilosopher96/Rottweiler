@@ -18,8 +18,35 @@ pub struct JsonStructure {
     pub nodes: usize,
     pub string_bytes: usize,
     pub depth: usize,
+    pub objects: usize,
+    pub object_entries: usize,
+    pub arrays: usize,
+    pub array_entries: usize,
 }
 impl JsonStructure {
+    /// Bound direct `serde_json::Value` decoding without a tagged Content tree.
+    /// Objects charge their own map backing; scalar leaves do not each own a map.
+    /// Counts include spare vector capacity and simultaneous decoder/string growth.
+    /// The encoded input buffer remains separately owned by the caller.
+    #[must_use]
+    pub fn direct_value_decode_bytes(&self) -> Option<usize> {
+        let maps = self
+            .objects
+            .checked_add(self.object_entries)?
+            .checked_mul(<serde_json::Value as DecodeAllocation>::decode_node_bytes()?)?;
+        let vectors = self
+            .array_entries
+            .checked_mul(std::mem::size_of::<serde_json::Value>())?
+            .checked_mul(2)?
+            .checked_add(self.arrays.checked_mul(128)?)?;
+        self.nodes
+            .checked_mul(std::mem::size_of::<serde_json::Value>())?
+            .checked_add(maps)?
+            .checked_add(vectors)?
+            .checked_add(self.string_bytes)?
+            .checked_mul(2)
+    }
+
     /// Charge typed containers, owned serde intermediates, string growth and scratch.
     /// The caller separately owns the encoded input buffer.
     #[must_use]
@@ -110,6 +137,7 @@ impl<'de> Visitor<'de> for Seed<'_> {
         Ok(())
     }
     fn visit_seq<A: SeqAccess<'de>>(self, mut values: A) -> Result<(), A::Error> {
+        self.shape.arrays += 1;
         while values
             .next_element_seed(Seed {
                 shape: self.shape,
@@ -117,10 +145,13 @@ impl<'de> Visitor<'de> for Seed<'_> {
                 depth: self.depth + 1,
             })?
             .is_some()
-        {}
+        {
+            self.shape.array_entries += 1;
+        }
         Ok(())
     }
     fn visit_map<A: MapAccess<'de>>(self, mut values: A) -> Result<(), A::Error> {
+        self.shape.objects += 1;
         while values
             .next_key_seed(Seed {
                 shape: self.shape,
@@ -129,6 +160,7 @@ impl<'de> Visitor<'de> for Seed<'_> {
             })?
             .is_some()
         {
+            self.shape.object_entries += 1;
             values.next_value_seed(Seed {
                 shape: self.shape,
                 limits: self.limits,

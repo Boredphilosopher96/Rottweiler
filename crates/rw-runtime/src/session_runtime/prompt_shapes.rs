@@ -243,13 +243,6 @@ impl PromptShapeJournal {
             .transpose()
     }
 }
-impl rw_types::allocation::DecodeAllocation for PromptShapeProfile {
-    fn decode_node_bytes() -> Option<usize> {
-        Some(std::mem::size_of::<Self>().max(
-            <serde_json::Value as rw_types::allocation::DecodeAllocation>::decode_node_bytes()?,
-        ))
-    }
-}
 fn admit_profile(bytes: &[u8]) -> Result<()> {
     let shape = rw_types::json_structure::preflight_json(
         bytes,
@@ -261,8 +254,15 @@ fn admit_profile(bytes: &[u8]) -> Result<()> {
         },
     )
     .into_diagnostic()?;
+    // The profile and ToolDefinition are directly decoded structs; their only
+    // recursive value is JSON schema. No internally tagged Content tree exists.
+    // Charge typed envelope slots in addition to the direct JSON container bound.
+    let slot = std::mem::size_of::<PromptShapeProfile>()
+        .max(std::mem::size_of::<ToolDefinition>())
+        .max(std::mem::size_of::<PromptCacheBreakpoint>());
     if shape
-        .decode_bytes::<PromptShapeProfile>()
+        .direct_value_decode_bytes()
+        .and_then(|bytes| bytes.checked_add(shape.nodes.checked_mul(slot)?.checked_mul(2)?))
         .is_none_or(|size| size > 16 * 1024 * 1024)
     {
         return Err(miette!("prompt shape exceeds decoded allocation admission"));

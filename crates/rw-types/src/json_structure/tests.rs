@@ -36,3 +36,54 @@ fn dense_empty_containers_and_nesting_are_admitted_by_structure() {
         .is_err()
     );
 }
+
+#[test]
+fn direct_value_admission_charges_actual_container_shapes() {
+    use crate::allocation::PrepareAllocation as _;
+    for value in [
+        serde_json::json!({"a":[1,2,3], "b":{"c":"text"}}),
+        serde_json::json!(
+            (0..1024)
+                .map(|n| serde_json::json!({"x":n, "y":[true, null, "v"]}))
+                .collect::<Vec<_>>()
+        ),
+        serde_json::json!({"wide": (0..1024).map(|n| (n.to_string(), serde_json::json!(n))).collect::<std::collections::BTreeMap<_,_>>()}),
+    ] {
+        let bytes = serde_json::to_vec(&value).expect("JSON");
+        let shape = super::preflight_json(
+            &bytes,
+            super::JsonStructureLimits {
+                max_encoded_bytes: 1024 * 1024,
+                max_nodes: 32768,
+                max_string_bytes: 1024 * 1024,
+                max_depth: 32,
+            },
+        )
+        .expect("preflight");
+        let mut decoded: serde_json::Value = serde_json::from_slice(&bytes).expect("decode");
+        decoded.prepare_allocations();
+        assert!(
+            shape.direct_value_decode_bytes().expect("decode bound")
+                >= decoded.prepared_bytes().expect("retained bound")
+        );
+    }
+    let shape = super::preflight_json(
+        br#"{"a":[1,2,3],"b":{"c":"text"}}"#,
+        super::JsonStructureLimits {
+            max_encoded_bytes: 1024,
+            max_nodes: 128,
+            max_string_bytes: 1024,
+            max_depth: 8,
+        },
+    )
+    .expect("shape");
+    assert_eq!(
+        (
+            shape.objects,
+            shape.object_entries,
+            shape.arrays,
+            shape.array_entries
+        ),
+        (2, 3, 1, 3)
+    );
+}
