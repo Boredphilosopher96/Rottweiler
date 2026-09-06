@@ -215,3 +215,89 @@ async fn ancestry_and_task_projection_share_one_four_transaction_allowance() {
         TodoReadResult::Ready { .. }
     ));
 }
+
+#[tokio::test]
+async fn concurrent_task_query_waits_for_publication_without_blocking_other_sessions() {
+    use std::future::{Future as _, poll_fn};
+    use std::task::Poll;
+
+    let root = tempfile::tempdir().expect("root");
+    let service = JournalService::new(root.path()).expect("service");
+    for session in ["same", "independent"] {
+        let mut journal = SegmentedJournal::open(root.path(), session).expect("journal");
+        journal
+            .append_batch([EngineEvent::TodoStateCommitted {
+                meta: EventMeta {
+                    protocol_version: PROTOCOL_VERSION,
+                    session_id: SessionId(session.into()),
+                    sequence_id: SequenceId(0),
+                    emitted_at: "2026-09-05T12:00:00Z".into(),
+                    caused_by: None,
+                },
+                snapshot: TodoSnapshot::default(),
+            }])
+            .expect("task state");
+    }
+    let (published, release, publisher) = withheld_task_publisher(Arc::clone(&service));
+    published.await.expect("index publication held");
+    let mut pending = Box::pin(read_todos(
+        Arc::clone(&service),
+        SessionId("same".into()),
+        |_| Ok(()),
+    ));
+    poll_fn(|context| {
+        assert!(
+            pending.as_mut().poll(context).is_pending(),
+            "same-session query waits"
+        );
+        Poll::Ready(())
+    })
+    .await;
+    let independent = read_todos(
+        Arc::clone(&service),
+        SessionId("independent".into()),
+        |_| Ok(()),
+    )
+    .await
+    .expect("independent session remains available");
+    assert!(matches!(independent, TodoReadResult::Ready { .. }));
+    poll_fn(|context| {
+        assert!(
+            pending.as_mut().poll(context).is_pending(),
+            "publisher still owns the index"
+        );
+        Poll::Ready(())
+    })
+    .await;
+    release.send(()).expect("release publication");
+    publisher.join().expect("publisher settled");
+    assert!(
+        matches!(pending.await.expect("ordered read does not report Busy"),
+        TodoReadResult::Ready { todos } if todos.through == Some(SequenceId(0)))
+    );
+}
+
+fn withheld_task_publisher(
+    service: Arc<JournalService>,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    std::sync::mpsc::Sender<()>,
+    std::thread::JoinHandle<()>,
+) {
+    let (published, ready) = tokio::sync::oneshot::channel();
+    let (release, hold) = std::sync::mpsc::channel();
+    let publisher = std::thread::spawn(move || {
+        let order = service
+            .task_projection_order("same")
+            .expect("projection order");
+        let _order = order.lock().expect("publisher order");
+        let lease = service.capture("same").expect("source");
+        let mut projector =
+            rw_core::todo_projection::TodoProjector::open(&lease.view).expect("writer");
+        projector.advance(&lease.view).expect("publication");
+        published.send(()).expect("reader waiting");
+        hold.recv().expect("release publication");
+        drop(projector);
+    });
+    (ready, release, publisher)
+}

@@ -14,9 +14,16 @@ pub(crate) async fn read_todos(
     SessionId::validate(&session.0).map_err(storage)?;
     // Admission is held during queued authorization, descriptor capture, index
     // work, and the completed-but-unconsumed result. Caller drop cannot detach it.
+    let order = journals
+        .task_projection_order(&session.0)
+        .map_err(storage)?;
     let admission = journals.admit_read().map_err(storage)?;
     let (result, _lease) =
         rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+            // Index publication and the captured source prefix have one ordered owner.
+            let _order = order
+                .lock()
+                .map_err(|_| storage("task projection order is poisoned"))?;
             let mut budget = ProjectionBudget::new();
             authorize(&mut budget)?;
             let lease = admission.capture(&session.0).map_err(storage)?;

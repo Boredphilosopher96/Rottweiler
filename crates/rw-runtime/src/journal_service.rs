@@ -22,6 +22,7 @@ pub(crate) struct JournalService {
     active: Mutex<HashMap<String, Weak<JournalPublication>>>,
     child_projection_orders: Mutex<HashMap<String, Weak<Mutex<()>>>>,
     routing_projection_orders: Mutex<HashMap<String, Weak<Mutex<()>>>>,
+    task_projection_orders: Mutex<HashMap<String, Weak<Mutex<()>>>>,
     admission: Arc<Semaphore>,
 }
 
@@ -105,6 +106,7 @@ impl JournalService {
             active: Mutex::new(HashMap::new()),
             child_projection_orders: Mutex::new(HashMap::new()),
             routing_projection_orders: Mutex::new(HashMap::new()),
+            task_projection_orders: Mutex::new(HashMap::new()),
             admission: Arc::new(Semaphore::new(MAX_READ_VIEWS)),
         }))
     }
@@ -112,41 +114,15 @@ impl JournalService {
     /// All lifecycle and presentation readers serialize this session's derived writer.
     /// Acquire its lock before capturing a prefix so a waiting read cannot go behind the index.
     pub(crate) fn child_projection_order(&self, session: &str) -> Result<Arc<Mutex<()>>> {
-        rw_types::SessionId::validate(session)
-            .map_err(|error| miette!("child projection identity: {error}"))?;
-        let mut orders = self
-            .child_projection_orders
-            .lock()
-            .map_err(|_| miette!("child projection registry is poisoned"))?;
-        orders.retain(|_, order| order.strong_count() > 0);
-        if let Some(order) = orders.get(session).and_then(Weak::upgrade) {
-            return Ok(order);
-        }
-        if orders.len() >= MAX_ACTIVE_JOURNALS {
-            return Err(miette!("child projection admission exhausted"));
-        }
-        let order = Arc::new(Mutex::new(()));
-        orders.insert(session.to_owned(), Arc::downgrade(&order));
-        Ok(order)
+        projection_order(&self.child_projection_orders, session, "child")
     }
 
     pub(crate) fn routing_projection_order(&self, session: &str) -> Result<Arc<Mutex<()>>> {
-        rw_types::SessionId::validate(session)
-            .map_err(|error| miette!("routing projection identity: {error}"))?;
-        let mut orders = self
-            .routing_projection_orders
-            .lock()
-            .map_err(|_| miette!("routing projection registry is poisoned"))?;
-        orders.retain(|_, order| order.strong_count() > 0);
-        if let Some(order) = orders.get(session).and_then(Weak::upgrade) {
-            return Ok(order);
-        }
-        if orders.len() >= MAX_ACTIVE_JOURNALS {
-            return Err(miette!("routing projection admission exhausted"));
-        }
-        let order = Arc::new(Mutex::new(()));
-        orders.insert(session.to_owned(), Arc::downgrade(&order));
-        Ok(order)
+        projection_order(&self.routing_projection_orders, session, "routing")
+    }
+
+    pub(crate) fn task_projection_order(&self, session: &str) -> Result<Arc<Mutex<()>>> {
+        projection_order(&self.task_projection_orders, session, "task")
     }
 
     pub(crate) fn contains_session(&self, session: &str) -> Result<bool> {
@@ -254,6 +230,28 @@ impl JournalService {
             _permit: Arc::new(permit),
         })
     }
+}
+
+fn projection_order(
+    registry: &Mutex<HashMap<String, Weak<Mutex<()>>>>,
+    session: &str,
+    projection: &str,
+) -> Result<Arc<Mutex<()>>> {
+    rw_types::SessionId::validate(session)
+        .map_err(|error| miette!("{projection} projection identity: {error}"))?;
+    let mut orders = registry
+        .lock()
+        .map_err(|_| miette!("{projection} projection registry is poisoned"))?;
+    orders.retain(|_, order| order.strong_count() > 0);
+    if let Some(order) = orders.get(session).and_then(Weak::upgrade) {
+        return Ok(order);
+    }
+    if orders.len() >= MAX_ACTIVE_JOURNALS {
+        return Err(miette!("{projection} projection admission exhausted"));
+    }
+    let order = Arc::new(Mutex::new(()));
+    orders.insert(session.to_owned(), Arc::downgrade(&order));
+    Ok(order)
 }
 
 #[cfg(test)]
