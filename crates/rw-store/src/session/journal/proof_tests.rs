@@ -2,7 +2,7 @@
 
 use super::*;
 use serde_json::{Value, json};
-use std::os::unix::fs::FileExt as _;
+use std::os::unix::fs::{FileExt as _, MetadataExt as _};
 use tempfile::tempdir;
 
 fn limits(count: usize) -> SessionEventPageLimits {
@@ -162,6 +162,13 @@ fn page_proof_retains_descriptor_across_rotation_and_detects_later_corruption_on
     let root = tempdir().expect("root");
     let mut journal = SegmentedJournal::open(root.path(), "pin").expect("journal");
     journal.append_batch(0..10).expect("append");
+    // Linux pwrite on O_APPEND descriptors appends even with offset zero. Keep a
+    // separate non-append descriptor so corruption changes the selected prefix.
+    let corruptor = std::fs::OpenOptions::new()
+        .write(true)
+        .open(journal.directory.path.join("active.jsonl"))
+        .expect("non-append descriptor");
+    let original = corruptor.metadata().expect("original inode");
     let page = journal
         .read_view()
         .verified_page::<u64>(None, limits(5))
@@ -185,15 +192,32 @@ fn page_proof_retains_descriptor_across_rotation_and_detects_later_corruption_on
     );
     // Corruption after validation does not cause another proof I/O pass. Any read
     // through its retained descriptor still verifies the pinned checksum.
+    let pinned = advance.next().active.metadata().expect("pinned inode");
+    assert_eq!(
+        (original.dev(), original.ino()),
+        (pinned.dev(), pinned.ino())
+    );
+    assert_eq!(
+        corruptor.write_at(b"!", 0).expect("corrupt pinned prefix"),
+        1
+    );
+    assert_eq!(corruptor.metadata().expect("same file").len(), pinned.len());
+    let mut changed = [0];
     advance
         .next()
         .active
-        .write_at(b"!", 0)
-        .expect("corrupt pinned descriptor");
+        .read_exact_at(&mut changed, 0)
+        .expect("changed prefix byte");
+    assert_eq!(changed, *b"!");
     assert!(
         page.proof()
             .advance(JournalPrefixIdentity::empty(), Some(SequenceId(4)))
             .is_ok()
     );
-    assert!(advance.next().page::<u64>(None, limits(10)).is_err());
+    assert!(matches!(
+        advance.next().page::<u64>(None, limits(10)),
+        Err(SessionStoreError::CorruptEvent(
+            "pinned journal segment checksum changed"
+        ))
+    ));
 }
