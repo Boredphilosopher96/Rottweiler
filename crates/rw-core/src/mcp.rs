@@ -1,5 +1,6 @@
 mod oauth;
 mod presentation;
+mod resolution;
 pub use oauth::*;
 
 use std::{
@@ -117,10 +118,7 @@ impl McpPolicyProxy {
         let port = endpoint
             .port_or_known_default()
             .ok_or(ProductionMcpHttpError)?;
-        let addresses = tokio::net::lookup_host((host, port))
-            .await
-            .map_err(|_| ProductionMcpHttpError)?
-            .collect::<Vec<_>>();
+        let addresses = resolution::addresses(host, port).await?;
         let ips = addresses.iter().map(SocketAddr::ip).collect::<Vec<_>>();
         let policy = EgressPolicy::new([host]);
         if policy.evaluate(host, &ips) != EgressDecision::Allowed {
@@ -244,10 +242,7 @@ impl ProductionMcpHttpClient {
         let url = Url::parse(uri).map_err(|_| ProductionMcpHttpError)?;
         let host = url.host_str().ok_or(ProductionMcpHttpError)?;
         let port = url.port_or_known_default().ok_or(ProductionMcpHttpError)?;
-        let addresses = tokio::net::lookup_host((host.trim_matches(['[', ']']), port))
-            .await
-            .map_err(|_| ProductionMcpHttpError)?
-            .collect::<Vec<_>>();
+        let addresses = resolution::addresses(host.trim_matches(['[', ']']), port).await?;
         if addresses.is_empty() {
             return Err(ProductionMcpHttpError);
         }
