@@ -59,10 +59,7 @@ impl SessionEventDelivery {
         events: Vec<EngineEvent>,
         admission: ReplayAdmission,
     ) -> Result<std::collections::VecDeque<Self>, AgentLoopError> {
-        let ReplayAdmission {
-            mut credit,
-            construction: _construction,
-        } = admission;
+        let ReplayAdmission { mut credit } = admission;
         let count = events.len();
         let plan =
             AllocationPlan::new(events).map_err(|_| AgentLoopError::EventDeliverySaturated)?;
