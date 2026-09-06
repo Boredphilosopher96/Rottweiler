@@ -124,22 +124,7 @@ pub(super) async fn activate(
         Ok((store, origin))
     })
     .await?;
-    let provider_http: Arc<dyn PluginProviderHttpHandler> =
-        if recipe.metadata.manifest().capabilities.providers.is_empty() {
-            Arc::new(rw_ext::DenyPluginProviderHttpHandler)
-        } else {
-            let registrar: Arc<dyn rw_providers::KnownSecretRegistrar> = recipe.redactor.clone();
-            Arc::new(RuntimePluginProviderHttp::new(
-                &recipe.private_root.join("credentials.toml"),
-                &process
-                    .allowed_domains()
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<_>>(),
-                registrar,
-                recipe.budget.clone(),
-            ))
-        };
+    let provider_http = provider_http(recipe, &process);
     let redactor: Arc<dyn PluginBoundaryRedactor> = recipe.redactor.clone();
     // Accepted launch is never cancellation-dropped. A late initialized host is
     // retained here and retired by the operation owner before proof is reported.
@@ -174,6 +159,27 @@ pub(super) async fn activate(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .host = Some(Arc::clone(&host));
     Ok(host)
+}
+
+fn provider_http(
+    recipe: &ActivationRecipe,
+    process: &rw_ext::PluginProcessConfig,
+) -> Arc<dyn PluginProviderHttpHandler> {
+    if recipe.metadata.manifest().capabilities.providers.is_empty() {
+        Arc::new(rw_ext::DenyPluginProviderHttpHandler)
+    } else {
+        let registrar: Arc<dyn rw_providers::KnownSecretRegistrar> = recipe.redactor.clone();
+        Arc::new(RuntimePluginProviderHttp::new(
+            &recipe.private_root.join("credentials.toml"),
+            &process
+                .allowed_domains()
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            registrar,
+            recipe.budget.clone(),
+        ))
+    }
 }
 
 async fn prepare_process(

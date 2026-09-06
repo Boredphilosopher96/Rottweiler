@@ -79,7 +79,7 @@ pub(super) fn publish(
     owner: &SourcePluginResolver,
     plugin: &DiscoveredPlugin,
     staged: StagedSource,
-    rebuilt: GraphReport,
+    rebuilt: &GraphReport,
 ) -> Result<PluginProcessConfig> {
     let StagedSource {
         root: staging,
@@ -88,7 +88,7 @@ pub(super) fn publish(
         discovered,
         ..
     } = staged;
-    if rebuilt != discovered {
+    if rebuilt != &discovered {
         return Err(miette!(
             "TypeScript plugin source graph changed during preparation"
         ));

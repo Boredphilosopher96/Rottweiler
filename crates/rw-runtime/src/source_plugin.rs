@@ -157,7 +157,7 @@ impl SourcePluginResolver {
         let owner = self.clone();
         let plugin = plugin.clone();
         self.io("source.bundle_attestation", move || {
-            stages::publish(&owner, &plugin, staged, rebuilt)
+            stages::publish(&owner, &plugin, staged, &rebuilt)
         })
         .await
     }

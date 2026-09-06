@@ -191,7 +191,11 @@ async fn dropped_launch_waiter_retires_the_child_returned_by_its_blocking_worker
         loop {
             match rustix::process::test_kill_process_group(group) {
                 Err(rustix::io::Errno::SRCH) => return,
-                Ok(()) => tokio::time::sleep(Duration::from_millis(5)).await,
+                // Darwin can report EPERM while a departed member awaits reap.
+                // Keep waiting: only ESRCH proves that the group is absent.
+                Err(rustix::io::Errno::PERM) | Ok(()) => {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
                 other => panic!("unexpected group proof: {other:?}"),
             }
         }
