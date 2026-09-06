@@ -151,17 +151,30 @@ async fn approval_actor(
     path: &std::path::Path,
 ) -> (SessionHandle, Arc<super::fixtures::tools::StubTool>) {
     use super::fixtures::tools::{StubOutcome, StubTool};
-    let tool = Arc::new(StubTool::new(
-        "effect",
-        vec![rw_types::ToolCapability::Execute],
-        StubOutcome::Success(rw_tools::ToolResult::new("ran", serde_json::Value::Null)),
-    ));
+    let tool = Arc::new(
+        StubTool::new(
+            "bash",
+            vec![
+                rw_types::ToolCapability::Execute,
+                rw_types::ToolCapability::WriteFilesystem,
+            ],
+            StubOutcome::Success(rw_tools::ToolResult::new("ran", serde_json::Value::Null)),
+        )
+        .with_behavior(rw_tools::ToolBehavior::Shell),
+    );
     let mut tools = ToolRegistry::new();
     tools.register(tool.clone()).expect("tool");
     let mut config = config(
         path,
         Arc::new(ScriptedModel::new([
-            tool_script(&[("provider-call", "effect", serde_json::json!({}))], &[]),
+            tool_script(
+                &[(
+                    "provider-call",
+                    "bash",
+                    serde_json::json!({"command":"rm -rf /tmp/outside-workspace","cwd":".","env":{},"network_domains":[]}),
+                )],
+                &[],
+            ),
             stop_script("denied", &[]),
         ])),
         Arc::new(tools),
@@ -197,10 +210,14 @@ async fn child_approval_rechecks_root_driver_and_survives_response_waiter_loss()
         })
         .await
         .expect("send");
-    while !matches!(
-        events.recv().await.expect("event"),
-        EngineEvent::ToolApprovalNeeded { .. }
-    ) {}
+    loop {
+        match next_family_event(&mut events).await {
+            EngineEvent::ToolApprovalNeeded { .. } => break,
+            EngineEvent::TurnFinished { .. } => panic!("approval fixture completed without asking"),
+            EngineEvent::Error { error, .. } => panic!("approval fixture failed: {error:?}"),
+            _ => {}
+        }
+    }
     let controls = child.child_controls().await.expect("pending approval");
     let approval = controls
         .snapshot
@@ -243,7 +260,7 @@ async fn child_approval_rechecks_root_driver_and_survives_response_waiter_loss()
     drop(reply);
     let mut resolutions = 0;
     loop {
-        match events.recv().await.expect("settled event") {
+        match next_family_event(&mut events).await {
             EngineEvent::ToolApprovalResolved { .. } => resolutions += 1,
             EngineEvent::TurnFinished { .. } => break,
             _ => {}
@@ -285,4 +302,11 @@ async fn replace_root_driver(root: &SessionHandle) -> crate::FamilyControlAuthor
         CommandOutcome::Accepted {}
     ));
     old_authority
+}
+
+async fn next_family_event(events: &mut crate::SessionSubscription) -> EngineEvent {
+    tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+        .await
+        .expect("family control event deadline")
+        .expect("family control event")
 }

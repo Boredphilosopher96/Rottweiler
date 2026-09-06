@@ -58,7 +58,7 @@ fn legal_reference_sources_exceeding_window_bytes_fragment_without_body_loss() {
         agent_turn: 1,
         accepted_source: SequenceId(1),
         selection: InputSelection::Transformed {
-            text: "t".repeat(SessionEventPageLimits::default().max_line_bytes - 4096),
+            text: "\0".repeat((SessionEventPageLimits::default().max_line_bytes - 4096) / 6),
         },
     };
     for value in [&accepted, &commit] {
