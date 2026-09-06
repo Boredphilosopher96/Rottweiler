@@ -352,6 +352,8 @@ pub struct McpServerDescriptor {
 pub struct McpApprovalReview {
     pub server: String,
     pub transport: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<String>")]
     pub endpoint: Option<String>,
     pub origin: String,
     pub defer_tools: bool,
@@ -475,12 +477,12 @@ pub struct ModelCapabilities {
     pub vision: bool,
     pub thinking: bool,
     pub cache_behavior: ModelCacheBehavior,
-    #[serde(default, with = "decimal_option_u64")]
-    #[schemars(with = "Option<String>")]
+    #[serde(with = "decimal_option_u64")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<String>")]
     #[ts(type = "string | null")]
     pub max_context_tokens: Option<u64>,
-    #[serde(default, with = "decimal_option_u64")]
-    #[schemars(with = "Option<String>")]
+    #[serde(with = "decimal_option_u64")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<String>")]
     #[ts(type = "string | null")]
     pub max_output_tokens: Option<u64>,
 }
@@ -843,7 +845,8 @@ pub enum ModelContextTransfer {
 #[serde(deny_unknown_fields)]
 pub struct ModelSwitchQuestion {
     pub model: ModelAlias,
-    #[serde(default)]
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<String>")]
     pub provider: Option<String>,
 }
 
@@ -1035,40 +1038,40 @@ pub struct CostSnapshot {
     #[ts(type = "string")]
     pub trailing_minute_subscription_tokens: u64,
     pub cache_hit_basis_points: u16,
-    #[serde(default, with = "decimal_option_u64")]
-    #[schemars(with = "Option<String>")]
+    #[serde(with = "decimal_option_u64")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<String>")]
     #[ts(type = "string | null")]
     pub session_cost_cap_micros_usd: Option<u64>,
-    #[serde(default, with = "decimal_option_u64")]
-    #[schemars(with = "Option<String>")]
+    #[serde(with = "decimal_option_u64")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<String>")]
     #[ts(type = "string | null")]
     pub daily_cost_cap_micros_usd: Option<u64>,
-    #[serde(default, with = "decimal_option_u64")]
-    #[schemars(with = "Option<String>")]
+    #[serde(with = "decimal_option_u64")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<String>")]
     #[ts(type = "string | null")]
     pub session_ai_credit_cap_micros: Option<u64>,
-    #[serde(default, with = "decimal_option_u64")]
-    #[schemars(with = "Option<String>")]
+    #[serde(with = "decimal_option_u64")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<String>")]
     #[ts(type = "string | null")]
     pub daily_ai_credit_cap_micros: Option<u64>,
-    #[serde(default, with = "decimal_option_u64")]
-    #[schemars(with = "Option<String>")]
+    #[serde(with = "decimal_option_u64")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<String>")]
     #[ts(type = "string | null")]
     pub session_token_cap: Option<u64>,
-    #[serde(default, with = "decimal_option_u64")]
-    #[schemars(with = "Option<String>")]
+    #[serde(with = "decimal_option_u64")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<String>")]
     #[ts(type = "string | null")]
     pub daily_token_cap: Option<u64>,
-    #[serde(default, with = "decimal_option_u64")]
-    #[schemars(with = "Option<String>")]
+    #[serde(with = "decimal_option_u64")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<String>")]
     #[ts(type = "string | null")]
     pub spend_rate_alarm_micros_usd_per_minute: Option<u64>,
-    #[serde(default, with = "decimal_option_u64")]
-    #[schemars(with = "Option<String>")]
+    #[serde(with = "decimal_option_u64")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<String>")]
     #[ts(type = "string | null")]
     pub ai_credit_rate_alarm_micros_per_minute: Option<u64>,
-    #[serde(default, with = "decimal_option_u64")]
-    #[schemars(with = "Option<String>")]
+    #[serde(with = "decimal_option_u64")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<String>")]
     #[ts(type = "string | null")]
     pub token_rate_alarm_per_minute: Option<u64>,
     pub hard_cap_reached: bool,

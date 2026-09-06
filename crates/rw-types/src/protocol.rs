@@ -13,3 +13,6 @@ mod tests;
 
 #[cfg(test)]
 mod strict_tests;
+
+#[cfg(test)]
+mod nullable_tests;

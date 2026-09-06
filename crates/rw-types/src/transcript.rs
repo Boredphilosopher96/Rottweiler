@@ -122,6 +122,9 @@ pub enum TranscriptSubagentStatus {
         status: SubagentStatus,
         result: TranscriptBodyPreview,
         touched_file_count: u32,
+        #[serde(deserialize_with = "Option::deserialize")]
+        #[schemars(schema_with = "crate::schema::required_nullable::<TranscriptContentSource>")]
+        #[ts(optional = false)]
         diff: Option<TranscriptContentSource>,
     },
 }
@@ -150,6 +153,9 @@ pub enum TranscriptContent {
         name: String,
         call_index: u32,
         arguments: TranscriptBodyPreview,
+        #[serde(deserialize_with = "Option::deserialize")]
+        #[schemars(schema_with = "crate::schema::required_nullable::<TranscriptBodyPreview>")]
+        #[ts(optional = false)]
         diff: Option<TranscriptBodyPreview>,
         status: TranscriptToolStatus,
     },
@@ -158,9 +164,18 @@ pub enum TranscriptContent {
         message: TranscriptBodyPreview,
     },
     Shell {
+        #[serde(deserialize_with = "Option::deserialize")]
+        #[schemars(schema_with = "crate::schema::required_nullable::<TranscriptBodyPreview>")]
+        #[ts(optional = false)]
         command: Option<TranscriptBodyPreview>,
+        #[serde(deserialize_with = "Option::deserialize")]
+        #[schemars(schema_with = "crate::schema::required_nullable::<TranscriptBodyPreview>")]
+        #[ts(optional = false)]
         output: Option<TranscriptBodyPreview>,
         active: bool,
+        #[serde(deserialize_with = "Option::deserialize")]
+        #[schemars(schema_with = "crate::schema::required_nullable::<i32>")]
+        #[ts(optional = false)]
         status: Option<i32>,
     },
     Subagent {
@@ -196,6 +211,8 @@ pub struct TranscriptView {
     pub session_id: SessionId,
     pub projection_version: u32,
     pub generation: TranscriptGeneration,
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<SequenceId>")]
     pub through: Option<SequenceId>,
     pub digest: [u8; 32],
 }
@@ -227,6 +244,8 @@ pub enum TranscriptPosition {
 #[serde(deny_unknown_fields)]
 #[derive(Allocation)]
 pub struct TranscriptRead {
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<TranscriptView>")]
     pub known_view: Option<TranscriptView>,
     pub position: TranscriptPosition,
     pub max_items: u32,
@@ -239,6 +258,8 @@ pub struct TranscriptItem {
     pub id: TranscriptItemId,
     pub ordinal: TranscriptOrdinal,
     pub revision: SequenceId,
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<crate::TurnId>")]
     pub agent_turn: Option<crate::TurnId>,
     pub content: TranscriptContent,
 }
@@ -266,6 +287,9 @@ pub enum TranscriptAnchor {
     },
     Replaced {
         requested: TranscriptItemId,
+        #[serde(deserialize_with = "Option::deserialize")]
+        #[schemars(schema_with = "crate::schema::required_nullable::<TranscriptItemId>")]
+        #[ts(optional = false)]
         replacement: Option<TranscriptItemId>,
     },
 }
@@ -291,7 +315,13 @@ pub enum TranscriptReadResult {
         page: TranscriptPage,
     },
     CatchingUp {
+        #[serde(deserialize_with = "Option::deserialize")]
+        #[schemars(schema_with = "crate::schema::required_nullable::<SequenceId>")]
+        #[ts(optional = false)]
         through: Option<SequenceId>,
+        #[serde(deserialize_with = "Option::deserialize")]
+        #[schemars(schema_with = "crate::schema::required_nullable::<SequenceId>")]
+        #[ts(optional = false)]
         target: Option<SequenceId>,
     },
     OrderingChanged {
@@ -315,6 +345,8 @@ pub struct TranscriptContentPage {
     pub view: TranscriptView,
     pub source: TranscriptContentSource,
     pub offset: u32,
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<u32>")]
     pub next_offset: Option<u32>,
     pub total_bytes: u32,
     pub format: TranscriptPreviewFormat,
