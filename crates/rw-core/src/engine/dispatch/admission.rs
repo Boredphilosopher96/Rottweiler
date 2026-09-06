@@ -1157,16 +1157,8 @@ pub(super) async fn dispatch_protocol(
             meta,
             source,
             super::command_job::CommandReply::Control(completion.take()),
-            DispatchContext {
-                state,
-                config,
-                tool_context,
-                turn_signals,
-                events,
-                active_turn,
-                command_descriptors,
-                mode_registry,
-            },
+            state,
+            config,
         );
         return false;
     }

@@ -134,7 +134,8 @@ pub(super) fn start_development(
     meta: CommandMeta,
     source: Option<std::path::PathBuf>,
     reply: CommandReply,
-    context: DispatchContext<'_>,
+    state: &mut crate::engine::session::ActorState,
+    config: &Arc<SessionActorConfig>,
 ) {
     let origin = match invocation_id() {
         Ok(origin) => origin,
@@ -143,7 +144,7 @@ pub(super) fn start_development(
             return;
         }
     };
-    let owner = Arc::clone(context.config);
+    let owner = Arc::clone(config);
     let (prepare_started, preparation) = oneshot::channel();
     let operation = async move {
         let _ = prepare_started.send(());
@@ -154,15 +155,15 @@ pub(super) fn start_development(
     };
     admit(
         meta,
-        context.state.next_turn,
+        state.next_turn,
         reply,
         "plugin-development".into(),
         origin,
         Arc::from([]),
         preparation,
         operation,
-        context.state,
-        context.config,
+        state,
+        config,
     );
 }
 

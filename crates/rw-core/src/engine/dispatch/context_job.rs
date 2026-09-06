@@ -105,7 +105,7 @@ pub(in crate::engine) fn start(
                 mode: state.mode_id.clone(),
                 target,
                 receive,
-            })
+            });
         }
         Err(error) => target.reject(error),
     }
@@ -142,13 +142,13 @@ async fn read(
         .await
         .try_map(|result| result)?
         .flatten();
-    let result = tasks
+    tasks
         .spawn_blocking(
             Arc::clone(&config),
             rw_tools::CancellationToken::default(),
             move || {
                 // Both materializations remain owned through transformation and output delivery.
-                let output = current.try_map(|current| {
+                current.try_map(|current| {
                     if let Some(request) = plugin {
                         super::plugin_control::read_context(&current, &request).map(Output::Plugin)
                     } else if dump {
@@ -169,13 +169,11 @@ async fn read(
                             current.through,
                         )))
                     }
-                });
-                output
+                })
             },
         )?
         .await
-        .map_err(|error| invalid(&format!("context result worker failed: {error}")))?;
-    result
+        .map_err(|error| invalid(&format!("context result worker failed: {error}")))?
 }
 
 async fn historical_prompt(

@@ -46,48 +46,7 @@ impl SessionActor {
     ///
     /// Rejects zero guardrails, empty aliases, or an unusable workspace root.
     pub fn spawn(mut config: SessionActorConfig) -> Result<SessionHandle, AgentLoopError> {
-        if SessionId::validate(&config.session_id.0).is_err()
-            || SessionId::validate(&config.budget_session_id.0).is_err()
-        {
-            return Err(AgentLoopError::InvalidConfiguration(
-                "session and budget scope ids must satisfy the canonical session identifier grammar".to_owned(),
-            ));
-        }
-        if config.model_alias.trim().is_empty() {
-            return Err(AgentLoopError::InvalidConfiguration(
-                "model alias must not be empty".to_owned(),
-            ));
-        }
-        if config.recovered.source.is_none() {
-            return Err(AgentLoopError::InvalidConfiguration(
-                "actor startup requires an admitted canonical bootstrap".into(),
-            ));
-        }
-        let recovered_mode = config
-            .recovered
-            .mode_id
-            .as_ref()
-            .map_or("execute", |mode| mode.0.as_str());
-        if config.modes.get(recovered_mode).is_none() {
-            return Err(AgentLoopError::InvalidConfiguration(format!(
-                "recovered mode {recovered_mode:?} is not registered"
-            )));
-        }
-        if config.recovered.permission_mode.is_some() {
-            config
-                .permissions
-                .set_runtime_mode(config.recovered.permission_mode)
-                .map_err(AgentLoopError::InvalidConfiguration)?;
-        }
-        if config.max_turns == 0
-            || config.identical_tool_failure_limit == 0
-            || config.max_output_tokens == 0
-            || config.event_capacity == 0
-        {
-            return Err(AgentLoopError::InvalidConfiguration(
-                "turn, doom-loop, output, and event limits must be greater than zero".to_owned(),
-            ));
-        }
+        validate_config(&config)?;
         let tool_context = ToolContext::from_workspace_roots(
             std::iter::once(&config.workspace_root).chain(&config.additional_workspace_roots),
         )
@@ -122,8 +81,7 @@ impl SessionActor {
             model: Arc::clone(&config.model),
         };
         config.resources.bind_session(handle.plugin_binding())?;
-        // Startup input has one owner; route/workspace configuration clones must
-        // not retain a second lifetime conversation after actor initialization.
+        // Transfer the admitted bootstrap to the actor before sharing route configuration.
         let recovered = std::mem::take(&mut config.recovered);
         let config = Arc::new(config);
         let retained = Arc::clone(&config);
@@ -153,6 +111,53 @@ impl SessionActor {
         });
         Ok(handle)
     }
+}
+
+fn validate_config(config: &SessionActorConfig) -> Result<(), AgentLoopError> {
+    if SessionId::validate(&config.session_id.0).is_err()
+        || SessionId::validate(&config.budget_session_id.0).is_err()
+    {
+        return Err(AgentLoopError::InvalidConfiguration(
+            "session and budget scope ids must satisfy the canonical session identifier grammar"
+                .to_owned(),
+        ));
+    }
+    if config.model_alias.trim().is_empty() {
+        return Err(AgentLoopError::InvalidConfiguration(
+            "model alias must not be empty".to_owned(),
+        ));
+    }
+    if config.recovered.source.is_none() {
+        return Err(AgentLoopError::InvalidConfiguration(
+            "actor startup requires an admitted canonical bootstrap".into(),
+        ));
+    }
+    let recovered_mode = config
+        .recovered
+        .mode_id
+        .as_ref()
+        .map_or("execute", |mode| mode.0.as_str());
+    if config.modes.get(recovered_mode).is_none() {
+        return Err(AgentLoopError::InvalidConfiguration(format!(
+            "recovered mode {recovered_mode:?} is not registered"
+        )));
+    }
+    if config.recovered.permission_mode.is_some() {
+        config
+            .permissions
+            .set_runtime_mode(config.recovered.permission_mode)
+            .map_err(AgentLoopError::InvalidConfiguration)?;
+    }
+    if config.max_turns == 0
+        || config.identical_tool_failure_limit == 0
+        || config.max_output_tokens == 0
+        || config.event_capacity == 0
+    {
+        return Err(AgentLoopError::InvalidConfiguration(
+            "turn, doom-loop, output, and event limits must be greater than zero".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 pub(super) async fn dispatch_lifecycle_hook(

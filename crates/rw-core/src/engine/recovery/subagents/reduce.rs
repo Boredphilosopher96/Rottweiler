@@ -52,53 +52,7 @@ pub(super) fn apply(
             task,
             ..
         } => {
-            let turn = head
-                .active_turn
-                .ok_or(RecoveryError::Invalid("child spawn outside active turn"))?;
-            let id = identity(subagent_id)?;
-            let scope = if let Some(scope) = rows.lookup(IDENTITIES, id)? {
-                scope
-            } else {
-                rows.put_lookup(IDENTITIES, id.to_vec(), &sequence.0)?;
-                sequence.0
-            };
-            let current: Option<SubagentBinding> = rows.get(key(STATES, 0, scope))?;
-            if current
-                .as_ref()
-                .is_some_and(|current| current.terminal.is_none())
-            {
-                return Err(RecoveryError::Invalid("child spawned without terminal"));
-            }
-            rows.put_lookup(
-                RAW_SPAWNS,
-                raw_identity(subagent_id, child_session_id)?,
-                &sequence,
-            )?;
-            let next = SubagentBinding {
-                subagent_id: subagent_id.clone(),
-                session_id: child_session_id.clone(),
-                spawned: sequence,
-                spawned_turn: turn,
-                task_preview: task[..task.floor_char_boundary(
-                    rw_types::session_children::MAX_CHILD_TASK_PREVIEW_BYTES.min(task.len()),
-                )]
-                    .to_owned(),
-                task_truncated: task.len()
-                    > rw_types::session_children::MAX_CHILD_TASK_PREVIEW_BYTES,
-                terminal: None,
-                latest_artifact: current
-                    .as_ref()
-                    .filter(|current| &current.session_id == child_session_id)
-                    .and_then(|current| current.latest_artifact.clone()),
-                latest_result: current
-                    .filter(|current| &current.session_id == child_session_id)
-                    .and_then(|current| current.latest_result),
-                scope,
-                revision: sequence,
-                artifact_scope: None,
-            };
-            version(rows, turn, &next)?;
-            publish(rows, &next)?;
+            spawn(head, rows, sequence, subagent_id, child_session_id, task)?;
         }
         EngineEvent::SubagentFinished {
             subagent_id,
@@ -113,6 +67,62 @@ pub(super) fn apply(
         .0
         .checked_add(1)
         .ok_or(RecoveryError::Invalid("child sequence overflow"))?;
+    Ok(())
+}
+fn spawn(
+    head: &Head,
+    rows: &mut BatchRows,
+    sequence: SequenceId,
+    subagent_id: &rw_types::SubagentId,
+    child_session_id: &rw_types::SessionId,
+    task: &str,
+) -> Result<(), RecoveryError> {
+    let turn = head
+        .active_turn
+        .ok_or(RecoveryError::Invalid("child spawn outside active turn"))?;
+    let id = identity(subagent_id)?;
+    let scope = if let Some(scope) = rows.lookup(IDENTITIES, id)? {
+        scope
+    } else {
+        rows.put_lookup(IDENTITIES, id.to_vec(), &sequence.0)?;
+        sequence.0
+    };
+    let current: Option<SubagentBinding> = rows.get(key(STATES, 0, scope))?;
+    if current
+        .as_ref()
+        .is_some_and(|current| current.terminal.is_none())
+    {
+        return Err(RecoveryError::Invalid("child spawned without terminal"));
+    }
+    rows.put_lookup(
+        RAW_SPAWNS,
+        raw_identity(subagent_id, child_session_id)?,
+        &sequence,
+    )?;
+    let next = SubagentBinding {
+        subagent_id: subagent_id.clone(),
+        session_id: child_session_id.clone(),
+        spawned: sequence,
+        spawned_turn: turn,
+        task_preview: task[..task.floor_char_boundary(
+            rw_types::session_children::MAX_CHILD_TASK_PREVIEW_BYTES.min(task.len()),
+        )]
+            .to_owned(),
+        task_truncated: task.len() > rw_types::session_children::MAX_CHILD_TASK_PREVIEW_BYTES,
+        terminal: None,
+        latest_artifact: current
+            .as_ref()
+            .filter(|current| &current.session_id == child_session_id)
+            .and_then(|current| current.latest_artifact.clone()),
+        latest_result: current
+            .filter(|current| &current.session_id == child_session_id)
+            .and_then(|current| current.latest_result),
+        scope,
+        revision: sequence,
+        artifact_scope: None,
+    };
+    version(rows, turn, &next)?;
+    publish(rows, &next)?;
     Ok(())
 }
 fn finish(

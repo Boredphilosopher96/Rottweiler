@@ -258,7 +258,7 @@ impl RecoveryHead {
             budget: rw_context::Budgeter::default().snapshot(),
             accounting: crate::engine::SessionAccountingState::default(),
             latest_budget: None,
-            plugin_statuses: Default::default(),
+            plugin_statuses: std::collections::BTreeMap::default(),
             compacting: None,
             context_cut: 0,
             maintenance: None,

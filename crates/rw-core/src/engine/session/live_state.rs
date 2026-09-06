@@ -6,6 +6,7 @@ use rw_types::{
     session_state::{SessionBudgetState, SessionCompactionState},
 };
 
+#[derive(Clone, Copy)]
 pub(in crate::engine) enum CompactionPreview<'a> {
     Started,
     Text(&'a str),
