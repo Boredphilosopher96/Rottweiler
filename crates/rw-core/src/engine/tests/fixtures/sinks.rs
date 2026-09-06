@@ -445,6 +445,7 @@ pub(in crate::engine::tests) struct FailNextBatchSink {
     pub(in crate::engine::tests) fail_next: AtomicBool,
     pub(in crate::engine::tests) fail_tool_result_commit: AtomicBool,
     pub(in crate::engine::tests) fail_tool_finished: AtomicBool,
+    pub(in crate::engine::tests) fail_interrupted_finish: AtomicBool,
 }
 
 #[async_trait]
@@ -507,7 +508,20 @@ impl SessionEventSink for FailNextBatchSink {
             .iter()
             .any(|event| matches!(event, EngineEvent::ToolCallFinished { .. }))
             && self.fail_tool_finished.swap(false, Ordering::AcqRel);
-        if self.fail_next.swap(false, Ordering::AcqRel) || reject_tool_result || reject_finished {
+        let reject_repair = batch.events().iter().any(|event| {
+            matches!(
+                event,
+                EngineEvent::TurnFinished {
+                    status: rw_types::TurnStatus::Interrupted,
+                    ..
+                }
+            )
+        }) && self.fail_interrupted_finish.swap(false, Ordering::AcqRel);
+        if self.fail_next.swap(false, Ordering::AcqRel)
+            || reject_tool_result
+            || reject_finished
+            || reject_repair
+        {
             return Err(AgentLoopError::Persistence(
                 "transient fixture failure".to_owned(),
             ));

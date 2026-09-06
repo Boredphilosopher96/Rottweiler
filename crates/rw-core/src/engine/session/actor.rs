@@ -498,10 +498,8 @@ pub(super) async fn run_actor(
                 ).await {
                     if state.closing {
                         state.unsettled.get_or_insert_with(|| error.to_string());
-                    } else {
-                        if let Err(error) = recover_actor_from_journal(&mut state, &config, &events, &active_turn).await {
-                            state.unsettled.get_or_insert_with(|| error.to_string());
-                        }
+                    } else if let Err(error) = recover_actor_from_journal(&mut state, &config, &events, &active_turn).await {
+                        state.unsettled.get_or_insert_with(|| error.to_string());
                     }
                 }
             }

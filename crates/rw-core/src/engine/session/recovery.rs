@@ -210,6 +210,10 @@ pub(in crate::engine) async fn recover_actor_from_journal(
         recovered,
         control,
     );
+    // Reconstructed memory is not current until its repair batch is durable.
+    // Keep the fence on every early error so failed repair cannot accept work.
+    state.recovery_requested = true;
+    state.poisoned = true;
     state.suspended_inputs = suspended_inputs;
     state.tasks = tasks;
     state.client_roles = client_roles;
@@ -237,5 +241,7 @@ pub(in crate::engine) async fn recover_actor_from_journal(
         });
         state.completed_turns = state.completed_turns.saturating_add(1);
     }
+    state.recovery_requested = false;
+    state.poisoned = false;
     Ok(())
 }

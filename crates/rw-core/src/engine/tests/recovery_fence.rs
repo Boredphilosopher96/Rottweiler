@@ -127,8 +127,8 @@ async fn assert_deferred(fixture: &Fixture) {
     tokio::time::timeout(Duration::from_secs(2), peer.cancelled.notified())
         .await
         .expect("failed append cancels peer");
-    // This request crosses the actor mailbox after the failed append. Under the
-    // former immediate repair it observes a successful, already-interrupted state.
+    // This request crosses the actor mailbox after the failed append and must
+    // not observe a repaired projection while the physical peer remains owned.
     assert!(
         handle.snapshot().await.is_err(),
         "damaged projection is unavailable until repair"
@@ -237,4 +237,42 @@ async fn close_during_deferred_repair_keeps_the_physical_peer_owned() {
             ..
         }
     )));
+}
+
+#[tokio::test]
+async fn failed_repair_append_keeps_reconstructed_state_unavailable() {
+    let fixture = fixture(false).await;
+    assert_deferred(&fixture).await;
+    fixture
+        .sink
+        .fail_interrupted_finish
+        .store(true, Ordering::Release);
+    fixture.peer.release.notify_one();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), fixture.handle.close())
+            .await
+            .expect("failed repair is bounded")
+            .is_err()
+    );
+    assert!(
+        !fixture.sink.fail_interrupted_finish.load(Ordering::Acquire),
+        "repair append attempted"
+    );
+    assert!(
+        fixture
+            .handle
+            .send_message("must not run after failed repair")
+            .await
+            .is_err()
+    );
+    assert!(
+        !fixture
+            .sink
+            .inner
+            .events
+            .lock()
+            .expect("source")
+            .iter()
+            .any(|event| matches!(event.kind, PendingEvent::TurnFinished { .. }))
+    );
 }
