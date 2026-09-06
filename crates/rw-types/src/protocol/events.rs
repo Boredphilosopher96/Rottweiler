@@ -744,6 +744,10 @@ pub enum EngineEvent {
 impl EngineEvent {
     /// Rebinds connection-scoped receipt metadata without modifying durable event identity.
     #[must_use]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Every event must explicitly declare its durable or connection metadata ownership."
+    )]
     pub fn command_meta_mut(&mut self) -> Option<&mut CommandAckMeta> {
         match self {
             Self::SessionNavigationRequested { meta, .. }
@@ -864,6 +868,10 @@ impl EngineEvent {
 
     /// Returns durable session metadata. Non-durable events return `None`.
     #[must_use]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Every event must explicitly declare its durable or connection metadata ownership."
+    )]
     pub fn meta(&self) -> Option<&EventMeta> {
         match self {
             Self::SessionNavigationRequested { .. }
@@ -971,6 +979,10 @@ impl EngineEvent {
     /// Mutable durable session metadata for storage adapters and validators.
     /// Non-durable events return `None`.
     #[must_use]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Every event must explicitly declare its durable or connection metadata ownership."
+    )]
     pub fn meta_mut(&mut self) -> Option<&mut EventMeta> {
         match self {
             Self::SessionNavigationRequested { .. }
