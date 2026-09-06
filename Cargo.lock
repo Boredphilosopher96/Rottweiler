@@ -2743,6 +2743,7 @@ dependencies = [
  "rw-mcp",
  "rw-plugin-protocol",
  "rw-providers",
+ "rw-resources",
  "rw-runtime",
  "rw-store",
  "rw-tools",

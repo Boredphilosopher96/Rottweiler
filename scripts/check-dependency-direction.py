@@ -55,6 +55,7 @@ ALLOWED = {
     # through the same tool/sandbox ownership API as the runtime caller.
     "rw-wasm-host": {"rw-ext", "rw-plugin-protocol", "rw-tools", "rw-types"},
     "rw-cli": {
+        "rw-resources",
         "rw-core",
         "rw-ext",
         "rw-mcp",
