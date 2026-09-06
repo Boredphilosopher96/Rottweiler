@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import json
+import hashlib
 from pathlib import Path
 import platform
 import subprocess
@@ -39,6 +41,8 @@ class ReleaseInstallTests(unittest.TestCase):
         tui.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         wasm_host = binary_dir / "rottweiler-wasm-host"
         wasm_host.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        identity = binary_dir / "rottweiler-wasm-host.identity.json"
+        identity.write_text(json.dumps({"bytes": wasm_host.stat().st_size, "sha256": hashlib.sha256(wasm_host.read_bytes()).hexdigest()}) + "\n")
         plugin_host = binary_dir / "rottweiler-plugin-host"
         plugin_host.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         native = binary_dir / PLATFORM_CONTRACT.native_library
@@ -73,6 +77,8 @@ class ReleaseInstallTests(unittest.TestCase):
             self.assertEqual(os.readlink(prefix / "current"), f"versions/{VERSION}")
             self.assertEqual(os.readlink(prefix / "bin" / "rw"), "../current/bin/rw")
             self.assertTrue((prefix / "versions" / VERSION / "install.sh").is_file())
+            relative = Path("bin/rottweiler-wasm-host.identity.json")
+            self.assertEqual((prefix / "versions" / VERSION / relative).read_bytes(), (release / relative).read_bytes())
             sync_log = (root / "install-sync.log").read_text(encoding="utf-8")
             self.assertIn("__install-sync", sync_log)
             self.assertIn(str(prefix / "versions"), sync_log)

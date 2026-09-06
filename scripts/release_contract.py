@@ -345,6 +345,7 @@ def load_contract(path: Path = DEFAULT_CONTRACT_PATH) -> ReleaseContract:
             )
         maximum_allowed_product_bytes = (
             member_by_id["installer"].max_bytes
+            + member_by_id["wasm_host_identity"].max_bytes
             + budgets.engine_less_than_bytes
             + budgets.wasm_host_less_than_bytes
             + budgets.plugin_host_less_than_bytes

@@ -382,7 +382,9 @@ Rust tests that launch native plugins require an explicit sandbox worker binary.
 Run `ROTTWEILER_TEST_SANDBOX_HELPER_RECEIPT="$(python3 scripts/build-test-helper.py)" && export ROTTWEILER_TEST_SANDBOX_HELPER_RECEIPT`
 with the worktree's Cargo target before those tests. The script builds the
 `rw-sandbox-helper` binary and selects its executable from Cargo's artifact
-message, then writes its device, inode, byte count, and SHA-256 receipt. The
+message, copies its bytes into a content-addressed target directory, and writes
+that snapshot's device, inode, byte count, and SHA-256 receipt. Repeated builds
+reuse equal snapshots; subsequent Cargo feature builds cannot replace them. The
 fixture host validates that receipt and owns a private executable snapshot; Linux
 seals its bytes against mutation. CI and coverage build this prerequisite before their test command;
 the product executable owns its own worker entrypoint.
