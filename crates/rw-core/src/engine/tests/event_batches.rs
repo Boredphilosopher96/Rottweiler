@@ -181,9 +181,12 @@ async fn successful_single_delta_batches_delta_commit_and_finish() {
     );
     actor_config.recovered.title = Some("batch fixture".to_owned());
     actor_config.event_sink = sink.clone();
-    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+    let actor_config = crate::engine::tests::fixtures::history::bind(actor_config)
         .await
-        .expect("actor");
+        .expect("seed canonical source");
+    let initial_events = sink.events.lock().expect("seed events").len();
+    let initial_batches = sink.batch_sizes.lock().expect("seed batches").len();
+    let handle = crate::engine::SessionActor::spawn(actor_config).expect("actor");
     let mut events = handle.subscribe().expect("subscription");
 
     handle.send_message("run").await.expect("message");
@@ -207,10 +210,11 @@ async fn successful_single_delta_batches_delta_commit_and_finish() {
         .collect::<Vec<_>>();
     assert_eq!(deltas, ["terminal"]);
     assert_eq!(
-        sink.batch_sizes.lock().expect("batch sizes").as_slice(),
+        &sink.batch_sizes.lock().expect("batch sizes")[initial_batches..],
         &[1, 3, 1, 1, 3]
     );
     let persisted = sink.events.lock().expect("event sink lock");
+    let persisted = &persisted[initial_events..];
     assert!(matches!(
         persisted[1].kind,
         PendingEvent::TurnStarted { turn: 1 }
@@ -265,9 +269,12 @@ async fn no_hook_multi_message_opening_batch_preserves_accept_and_commit_order()
     actor_config.event_sink = sink.clone();
     actor_config.recovered.queued_messages =
         vec!["first queued".to_owned(), "second queued".to_owned()];
-    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+    let actor_config = crate::engine::tests::fixtures::history::bind(actor_config)
         .await
-        .expect("actor");
+        .expect("seed canonical source");
+    let initial_events = sink.events.lock().expect("seed events").len();
+    let initial_batches = sink.batch_sizes.lock().expect("seed batches").len();
+    let handle = crate::engine::SessionActor::spawn(actor_config).expect("actor");
 
     timeout(Duration::from_secs(3), async {
         loop {
@@ -282,10 +289,11 @@ async fn no_hook_multi_message_opening_batch_preserves_accept_and_commit_order()
     .expect("queued turn completion");
 
     assert_eq!(
-        sink.batch_sizes.lock().expect("batch sizes").as_slice(),
+        &sink.batch_sizes.lock().expect("batch sizes")[initial_batches..],
         &[5, 1, 1, 3]
     );
     let persisted = sink.events.lock().expect("event sink lock");
+    let persisted = &persisted[initial_events..];
     assert!(matches!(
         persisted[0].kind,
         PendingEvent::TurnStarted { turn: 1 }
@@ -355,19 +363,23 @@ async fn registered_user_prompt_hook_keeps_rewrite_on_the_separate_commit_path()
     );
     actor_config.recovered.title = Some("batch fixture".to_owned());
     actor_config.event_sink = sink.clone();
-    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+    let actor_config = crate::engine::tests::fixtures::history::bind(actor_config)
         .await
-        .expect("actor");
+        .expect("seed canonical source");
+    let initial_events = sink.events.lock().expect("seed events").len();
+    let initial_batches = sink.batch_sizes.lock().expect("seed batches").len();
+    let handle = crate::engine::SessionActor::spawn(actor_config).expect("actor");
     let mut events = handle.subscribe().expect("subscription");
 
     handle.send_message("raw input").await.expect("message");
     collect_turn(&mut events).await;
 
     assert_eq!(
-        sink.batch_sizes.lock().expect("batch sizes").as_slice(),
+        &sink.batch_sizes.lock().expect("batch sizes")[initial_batches..],
         &[1, 2, 1, 1, 1, 3]
     );
     let persisted = sink.events.lock().expect("event sink lock");
+    let persisted = &persisted[initial_events..];
     assert!(matches!(
         &persisted[2].kind,
         PendingEvent::UserMessageAccepted { content, .. } if content == "raw input"

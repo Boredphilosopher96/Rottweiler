@@ -209,9 +209,20 @@ impl CanonicalHistory {
     ) -> Result<super::ConversationMetadata, RecoveryError> {
         let cut = head.conversation;
         let title_prompt = if let Some(sequence) = cut.first_user_source {
-            let PendingEvent::ConversationTurnCommitted { turn, .. } = reader.event(sequence)?
-            else {
-                return Err(RecoveryError::Invalid("title prompt source"));
+            let turn = match reader.event(sequence)? {
+                PendingEvent::ConversationTurnCommitted { turn, .. } => turn,
+                PendingEvent::UserShellStateChanged {
+                    command,
+                    active: false,
+                    status: Some(status),
+                    captured_output,
+                    ..
+                } => crate::engine::projection::shell_context_turn(
+                    &command,
+                    status,
+                    captured_output.as_deref(),
+                ),
+                _ => return Err(RecoveryError::Invalid("title prompt source")),
             };
             Some(
                 crate::engine::turn::title::first_meaningful_user_prompt(std::slice::from_ref(

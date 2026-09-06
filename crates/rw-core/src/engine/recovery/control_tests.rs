@@ -91,14 +91,17 @@ fn live_controls_do_not_materialize_historical_conversation_and_obey_byte_admiss
     assert_eq!(after.head().conversation.turns, 256);
     let bootstrap = after.bootstrap().expect("bounded actor bootstrap");
     assert_eq!(bootstrap.head.conversation.turns, 256);
-    assert_eq!(bootstrap.controls, controls);
+    let mut expected = controls.clone();
+    expected.conversation.turns = 256;
+    expected.conversation.has_assistant_text = true;
+    assert_eq!(bootstrap.controls, expected);
     assert!(bootstrap.interrupted.is_none());
 
     assert_eq!(
         after
             .control_payloads(controls.source_bytes)
             .expect("same bounded controls"),
-        controls
+        expected
     );
     assert_eq!(
         before.head().conversation.turns,

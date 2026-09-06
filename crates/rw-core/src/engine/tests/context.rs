@@ -273,8 +273,8 @@ async fn structured_tool_output_is_toon_only_at_provider_boundary() {
 async fn pruning_uses_provider_visible_toon_size_and_persists_that_reclamation() {
     let root = TempDir::new().expect("tempdir");
     let structured_value = json!({
-        "rows": (0..1_000)
-            .map(|index| json!({"id": index, "state": "candidate-sentinel ".repeat(30)}))
+        "rows": (0..100)
+            .map(|index| json!({"id": index, "state": "candidate-sentinel ".repeat(300)}))
             .collect::<Vec<_>>()
     });
     let candidate = Turn {

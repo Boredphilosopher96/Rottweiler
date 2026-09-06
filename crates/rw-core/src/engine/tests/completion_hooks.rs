@@ -179,6 +179,7 @@ async fn read_only_modes_deny_mutating_completion_policies() {
             hooks,
         );
         cfg.checkpoints = checkpoints.clone();
+        cfg.recovered.mode_id = Some(crate::engine::tests::fixtures::support::wire_mode(mode));
         cfg.recovered.mode = mode;
         let handle = crate::engine::tests::fixtures::history::spawn(cfg)
             .await
