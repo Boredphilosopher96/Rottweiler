@@ -2958,6 +2958,7 @@ dependencies = [
 name = "rw-resources"
 version = "0.1.4"
 dependencies = [
+ "rustix",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -3036,6 +3037,7 @@ dependencies = [
  "redb",
  "rusqlite",
  "rustix",
+ "rw-resources",
  "rw-types",
  "serde",
  "serde_json",
