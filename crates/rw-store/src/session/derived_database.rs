@@ -101,6 +101,7 @@ fn create_database(
     max_bytes: u64,
     counters: &Arc<IoCounters>,
 ) -> Result<Database, DerivedDatabaseError> {
+    let empty = file.metadata()?.len() == 0;
     let backend = BoundedFile {
         inner: redb::backends::FileBackend::new(file).map_err(storage)?,
         counters: Arc::clone(counters),
@@ -108,7 +109,11 @@ fn create_database(
     };
     Database::builder()
         .set_cache_size(cache_bytes)
-        .set_repair_callback(redb::RepairSession::abort)
+        .set_repair_callback(move |repair| {
+            if !empty {
+                repair.abort();
+            }
+        })
         .create_with_backend(backend)
         .map_err(storage)
 }
