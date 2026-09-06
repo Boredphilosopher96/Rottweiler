@@ -1310,6 +1310,8 @@ export class RottweilerApp extends BoxRenderable {
     this.ctx.off(CliRenderEvents.THEME_MODE, this.#onTerminalThemeMode)
     this.ctx.off(CliRenderEvents.SELECTION, this.#onSelection)
     this.ctx.keyInput.off("keypress", this.#input.onGlobalKey)
+    // The app owns its native descendants even when its caller uses shallow destroy.
+    for (const child of this.getChildren()) child.destroyRecursively()
     this.#syntaxStyle.destroy()
     super.destroy()
     this.#bootstrap.dispose()

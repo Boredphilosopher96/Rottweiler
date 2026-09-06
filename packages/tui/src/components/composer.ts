@@ -63,6 +63,7 @@ export class ComposerRenderable extends BoxRenderable {
   #options: ComposerOptions
   #theme: RottweilerTheme
   #inputGeneration: object = {}
+  #retiring = false
   #editorRequest: object | null = null
   #submitting = false
   #shellMode = false
@@ -168,8 +169,15 @@ export class ComposerRenderable extends BoxRenderable {
     this.add(this.queueText)
   }
 
+  override destroyRecursively(): void {
+    this.#retiring = true
+    super.destroyRecursively()
+  }
+
   override destroy(): void {
     if (this.isDestroyed) return
+    this.#retiring = true
+    this.#inputGeneration = {}
     if (this.#ownsDrafts) this.#drafts.clear()
     super.destroy()
   }
@@ -366,6 +374,7 @@ export class ComposerRenderable extends BoxRenderable {
   #scope(): string { return this.#options.submissionScope?.() ?? "default" }
 
   #admitDraft(content: string, attachments: readonly Attachment[]): boolean {
+    if (this.#retiring || this.isDestroyed) return false
     if (this.#drafts.set(this.#scope(), { content, attachments })) return true
     this.#options.onAttachmentError?.("Draft storage is full. Shorten a draft or remove an attachment before adding more content.")
     return false
@@ -488,7 +497,7 @@ export class ComposerRenderable extends BoxRenderable {
   #inputOwner(): () => boolean {
     const generation = this.#inputGeneration
     const scope = this.#options.submissionScope?.()
-    return () => !this.isDestroyed && generation === this.#inputGeneration
+    return () => !this.#retiring && !this.isDestroyed && generation === this.#inputGeneration
       && scope === this.#options.submissionScope?.()
   }
 
@@ -538,6 +547,7 @@ export class ComposerRenderable extends BoxRenderable {
   }
 
   #contentChanged(): void {
+    if (this.#retiring || this.isDestroyed) return
     const value = this.editor.plainText
     if (!this.#admitDraft(value, this.#attachments)) {
       const retained = this.#drafts.get(this.#scope())
