@@ -4,7 +4,7 @@ export type JsonValue = null | boolean | number | string | JsonValue[] | { [key:
 
 export const PROTOCOL_VERSION = 1 as const;
 
-export const TRANSCRIPT_PROJECTION_VERSION = 6 as const;
+export const TRANSCRIPT_PROJECTION_VERSION = 7 as const;
 
 export const TRANSCRIPT_TAIL_PAGE_BYTES = 1048576 as const;
 export const TRANSCRIPT_TAIL_MIN_PAGE_BYTES = 524288 as const;
