@@ -68,3 +68,17 @@ class NativeProfileTests(unittest.TestCase):
         for arguments in [["test", "--bin", "rw"], ["build", "--tests", "--bin", "rw"], ["build", "-p", "rw-cli"]]:
             with self.assertRaisesRegex(ValueError, "explicit --bin"):
                 native_profile.product_command("x86_64-unknown-linux-gnu", arguments)
+
+    def test_native_abort_policy_covers_dependency_configuration_and_final_target(self):
+        target = "x86_64-unknown-linux-gnu"
+        env = native_profile.environment(target, {"CARGO_PROFILE_RELEASE_PANIC": "unwind"})
+        self.assertEqual(env["CARGO_PROFILE_RELEASE_PANIC"], "abort")
+        self.assertIn("panic=abort", native_profile.final_rustflags(target))
+        for flags in ["-C panic=unwind", "-Cpanic=unwind", "--codegen panic=unwind", "--codegen=panic=unwind"]:
+            with self.assertRaisesRegex(ValueError, "dependencies require panic=abort"):
+                native_profile.environment(target, {"RUSTFLAGS": flags})
+        with self.assertRaisesRegex(ValueError, "dependencies require panic=abort"):
+            native_profile.environment(target, {"CARGO_ENCODED_RUSTFLAGS": "-C\x1fpanic=unwind"})
+        harness = native_profile.verification_environment(target, {"CARGO_PROFILE_RELEASE_PANIC": "unwind"})
+        self.assertEqual(harness["CARGO_PROFILE_RELEASE_PANIC"], "unwind")
+        self.assertNotIn("panic", native_profile.verification_settings(target))

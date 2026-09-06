@@ -565,7 +565,9 @@ already emits a newer glibc ABI requirement. The installer does not provide an
 older-loader compatibility layer. The existing musl path does not enable RELR
 without a separately qualified loader floor.
 
-Release panic behavior remains abort. The supplemental GNU linker script removes
+GNU product builds pin Cargo release panic behavior to abort for dependencies
+and the final executable, rejecting explicit compiler overrides to unwind. The
+supplemental GNU linker script removes
 `.eh_frame` inputs and disables their lookup header without changing the default
 section layout. Its exact bytes are part of the portable candidate profile; the
 compiler-only flag cannot remove tables from precompiled dependencies.

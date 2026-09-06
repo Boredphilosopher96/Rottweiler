@@ -21,10 +21,10 @@ def settings(target: str, repo: Path | None = None) -> dict:
             flags += ["-C", "link-arg=-Wl,-z,pack-relative-relocs"]
             # Precompiled std and native inputs can retain unwind sections even
             # with force-unwind-tables=no. Own their final-link removal too.
-            final_flags = ["-C", "link-arg=-Wl,--no-eh-frame-hdr", "-C", f"link-arg=-T{UNWIND_SCRIPT_TOKEN}"]
+            final_flags = ["-C", "panic=abort", "-C", "link-arg=-Wl,--no-eh-frame-hdr", "-C", f"link-arg=-T{UNWIND_SCRIPT_TOKEN}"]
             root = repo or Path(__file__).resolve().parent.parent
             script = {"path": UNWIND_SCRIPT, "sha256": hashlib.sha256((root / UNWIND_SCRIPT).read_bytes()).hexdigest()}
-            return {"opt_level": "s", "rustflags": flags, "final_rustflags": final_flags, "linker_script": script}
+            return {"opt_level": "s", "panic": "abort", "rustflags": flags, "final_rustflags": final_flags, "linker_script": script}
         return {"opt_level": "s", "rustflags": flags}
     raise ValueError(f"unsupported native release target: {target}")
 
@@ -71,6 +71,16 @@ def _environment(profile: dict, inherited: dict[str, str]) -> dict[str, str]:
     # Match Cargo's existing precedence and whitespace tokenization. The owned
     # flags come last, so caller defaults cannot undo the native product policy.
     flags = (encoded.split("\x1f") if encoded else []) if encoded is not None else result.get("RUSTFLAGS", "").split()
+    if profile.get("panic") == "abort":
+        # Cargo's profile controls dependency cfg(panic) too. Explicit compiler
+        # overrides must not silently compile Wasmtime's unwind-only branches.
+        for index, flag in enumerate(flags):
+            option = flag.removeprefix("--codegen=").removeprefix("-C")
+            if flag in {"-C", "--codegen"} and index + 1 < len(flags):
+                option = flags[index + 1]
+            if option.startswith("panic=") and option != "panic=abort":
+                raise ValueError("GNU native product dependencies require panic=abort")
+        result["CARGO_PROFILE_RELEASE_PANIC"] = "abort"
     flags += profile["rustflags"]
     result["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(flags)
     result["CARGO_PROFILE_RELEASE_OPT_LEVEL"] = profile["opt_level"]
