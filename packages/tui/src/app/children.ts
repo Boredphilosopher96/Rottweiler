@@ -63,7 +63,7 @@ export class ChildUiController {
   #subagentDescriptors: readonly SubagentDescriptor[] = []
   #activeChildState: RottweilerState | null = null
   #historicalChild: { readonly sessionId: string; readonly task: string; readonly target: SessionReadTarget } | null = null
-  readonly draftStore = new ComposerDraftStore()
+  readonly draftStore: ComposerDraftStore
   #activeSubagentId: string | null = null
   #subagentActionId: string | null = null
   #subagentErrorBaseline: RottweilerState["errors"][number] | undefined
@@ -71,6 +71,7 @@ export class ChildUiController {
   #activeReadTarget: SessionReadTarget | null = null
   readonly #todos: TodoController
   constructor(host: ChildUiHost) {
+    this.draftStore = new ComposerDraftStore(undefined, undefined, host.history.controller.cache.allocations)
     this.#host = host
     this.#todos = new TodoController({
       reader: host.sessionReader,

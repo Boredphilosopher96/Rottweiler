@@ -83,7 +83,7 @@ Task state has one authoritative typed snapshot, committed independently from tr
 
 ## Asynchronous input
 
-The draft owner admits one outstanding image, external-editor or history-text read. Its reservation covers the eventual retained draft and survives destination cancellation until the read settles. Submission and renderer replacement wait for accepted input reads. Image completion adds its attachment without moving the current cursor or focus; external-editor completion merges a newer draft instead of overwriting it.
+The draft owner shares aggregate allocation admission with history and source snapshots. It retains at most 32 MiB of editable/submitted data; a replacement reserves the old and incoming drafts together before transferring its lease. It admits one outstanding image, external-editor or history-text read. Its reservation covers the eventual retained draft and survives destination cancellation until the read settles. Submission and renderer replacement wait for accepted input reads. Image completion adds its attachment without moving the current cursor or focus; external-editor completion merges a newer draft instead of overwriting it.
 
 Ordinary text paste is a synchronous editor operation at the initiating selection. The platform classifies explicit local image paths into deferred read capabilities before I/O; a recognized image path attaches an image or reports a read failure. Image files are descriptor-checked and bounded to 5 MiB. External-editor input/output is bounded to 2 MiB, and output is read from a checked regular-file descriptor.
 

@@ -1,7 +1,8 @@
+import { ClientAllocationOwner, MAX_CLIENT_DRAFT_BYTES, type ClientAllocationLease } from "./client-allocation"
+export { MAX_CLIENT_DRAFT_BYTES } from "./client-allocation"
 import { MAX_ATTACHMENTS_PER_MESSAGE, type Attachment } from "./protocol"
 import type { ComposerDraft } from "./subagent-state"
 
-export const MAX_CLIENT_DRAFT_BYTES = 32 * 1024 * 1024
 export const MAX_CLIENT_DRAFTS = 256
 export const MAX_ATTACHMENTS_PER_DRAFT = 2 * MAX_ATTACHMENTS_PER_MESSAGE
 const EMPTY: ComposerDraft = { content: "", attachments: [] }
@@ -45,11 +46,18 @@ export class ComposerDraftStore {
   readonly #drafts = new Map<string, Entry>()
   readonly #pending = new Set<Submission>()
   readonly #reads = new Set<DraftRead>()
-  #bytes = 0
-  constructor(readonly maximumBytes = MAX_CLIENT_DRAFT_BYTES, readonly maximumDrafts = MAX_CLIENT_DRAFTS) {
+  #retainedBytes = 0
+  #allocation: ClientAllocationLease
+  get #bytes(): number { return this.#retainedBytes }
+  set #bytes(bytes: number) { this.#allocation.resize(bytes); this.#retainedBytes = bytes }
+  #fits(bytes: number): boolean {
+    return bytes <= this.maximumBytes && this.allocations.canReserve("drafts", bytes, this.#bytes)
+  }
+  constructor(readonly maximumBytes = MAX_CLIENT_DRAFT_BYTES, readonly maximumDrafts = MAX_CLIENT_DRAFTS, readonly allocations = new ClientAllocationOwner()) {
     if (!Number.isSafeInteger(maximumBytes) || maximumBytes <= 0 || !Number.isSafeInteger(maximumDrafts) || maximumDrafts <= 0) {
       throw new RangeError("invalid draft limits")
     }
+    this.#allocation = allocations.reserve("drafts", 0)
   }
   get usage() { return { bytes: this.#bytes, drafts: this.#drafts.size, pending: this.#pending.size + this.#reads.size } }
   get(scope: string): ComposerDraft { return this.#drafts.get(scope)?.draft ?? EMPTY }
@@ -61,14 +69,14 @@ export class ComposerDraftStore {
     const payload = draftBytes(codeUnits, attachments)
     const bytes = payload === 0 ? 0 : payload + scope.length * 2
     const previous = this.#drafts.get(scope)
-    return this.#bytes - (previous?.bytes ?? 0) + bytes <= this.maximumBytes
+    return this.#fits(this.#bytes - (previous?.bytes ?? 0) + bytes)
       && (bytes === 0 || previous !== undefined || this.#drafts.size + this.#pending.size + this.#reads.size < this.maximumDrafts)
   }
   set(scope: string, draft: ComposerDraft): boolean {
     if (!this.#attachmentsFit(scope, draft.attachments.length)) return false
     const old = this.#drafts.get(scope)
     const bytes = composerDraftBytes(draft) + (draft.content === "" && draft.attachments.length === 0 ? 0 : scope.length * 2)
-    if (this.#bytes - (old?.bytes ?? 0) + bytes > this.maximumBytes
+    if (!this.#fits(this.#bytes - (old?.bytes ?? 0) + bytes)
       || (bytes > 0 && old === undefined && this.#drafts.size + this.#pending.size + this.#reads.size >= this.maximumDrafts)) return false
     this.#bytes += bytes - (old?.bytes ?? 0)
     if (bytes === 0) this.#drafts.delete(scope)
@@ -99,11 +107,15 @@ export class ComposerDraftStore {
 
   replace(drafts: readonly { readonly scope: string; readonly draft: ComposerDraft }[]): boolean {
     if (this.#pending.size > 0 || this.#reads.size > 0) return false
-    const candidate = new ComposerDraftStore(this.maximumBytes, this.maximumDrafts)
-    for (const { scope, draft } of drafts) if (!candidate.set(scope, draft)) return false
+    const candidate = new ComposerDraftStore(this.maximumBytes, this.maximumDrafts, this.allocations)
+    for (const { scope, draft } of drafts) if (!candidate.set(scope, draft)) { candidate.clear(); candidate.#allocation.release(); return false }
     this.clear()
     for (const [scope, entry] of candidate.#drafts) this.#drafts.set(scope, entry)
-    this.#bytes = candidate.#bytes
+    this.#allocation.release()
+    this.#allocation = candidate.#allocation
+    this.#retainedBytes = candidate.#retainedBytes
+    candidate.#drafts.clear()
+    candidate.#retainedBytes = 0
     return true
   }
 
@@ -126,7 +138,7 @@ export class ComposerDraftStore {
     if (!Number.isSafeInteger(bytes) || bytes <= 0 || !Number.isSafeInteger(attachmentSlots)
       || attachmentSlots < 0 || attachmentSlots > MAX_ATTACHMENTS_PER_DRAFT
       || this.get(scope).attachments.length + attachmentSlots > MAX_ATTACHMENTS_PER_DRAFT
-      || this.#bytes + bytes > this.maximumBytes
+      || !this.#fits(this.#bytes + bytes)
       || this.#drafts.size + this.#pending.size + this.#reads.size >= this.maximumDrafts
       || this.#reads.size > 0 || this.#pending.size > 0) return null
     const read: DraftRead = { scope, bytes, attachmentSlots, active: true }

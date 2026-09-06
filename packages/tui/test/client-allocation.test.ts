@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test"
 import { ClientAllocationOwner, type ClientAllocationDomain } from "../src/client-allocation"
 import { ClientCache } from "../src/history/cache"
-const limits: Record<ClientAllocationDomain, number> = { history: 4096, controls: 4096, metadata: 4096, children: 4096, tasks: 4096 }
+import { ComposerDraftStore } from "../src/composer-drafts"
+const limits: Record<ClientAllocationDomain, number> = { history: 4096, drafts: 4096, controls: 4096, metadata: 4096, children: 4096, tasks: 4096 }
 
 test("history and retained snapshots compete for one aggregate allocation owner", () => {
   const owner = new ClientAllocationOwner(limits, 5000)
@@ -41,5 +42,50 @@ test("aggregate refusal preserves the resident revision and unrelated eviction c
   const original = cache.lease("body")!
   expect(original.value).toEqual({ text: "original" })
   original.release(); cache.clear(); claim.release()
+  expect(owner.usage.bytes).toBe(0)
+})
+
+test("draft edits compete with mounted history before replacing editable data", () => {
+  const owner = new ClientAllocationOwner(limits, 2000), drafts = new ComposerDraftStore(4096, 8, owner)
+  const history = owner.reserve("history", 1000)
+  expect(drafts.set("parent", { content: "keep", attachments: [] })).toBe(true)
+  const held = owner.usage.bytes
+  expect(drafts.canRetainText("parent", 200, [])).toBe(false)
+  expect(drafts.set("parent", { content: "x".repeat(200), attachments: [] })).toBe(false)
+  expect(drafts.get("parent").content).toBe("keep")
+  expect(owner.usage.bytes).toBe(held)
+  history.release()
+  expect(drafts.set("parent", { content: "x".repeat(200), attachments: [] })).toBe(true)
+  expect(owner.usage.bytes).toBe(drafts.usage.bytes)
+  drafts.clear()
+  expect(owner.usage.bytes).toBe(0)
+})
+
+test("cancelled draft reads and submissions hold aggregate credit until their actual settlement", () => {
+  const owner = new ClientAllocationOwner(limits, 4096), drafts = new ComposerDraftStore(4096, 8, owner)
+  const read = drafts.reserveDraft("parent", 1024, 0)!
+  expect(read).not.toBeNull()
+  const before = owner.usage.bytes
+  drafts.clear()
+  expect(owner.usage.bytes).toBe(before)
+  const submission = read.finish({ content: "received", attachments: [] })
+  expect(owner.usage.bytes).toBeGreaterThan(0)
+  expect(submission.settle(false)).toBeNull()
+  expect(owner.usage.bytes).toBe(0)
+})
+
+test("draft handoff admits old and incoming data together and transfers its lease atomically", () => {
+  const owner = new ClientAllocationOwner(limits, 2000), drafts = new ComposerDraftStore(4096, 8, owner)
+  expect(drafts.set("parent", { content: "old", attachments: [] })).toBe(true)
+  const old = drafts.usage.bytes, history = owner.reserve("history", 2000 - old)
+  expect(drafts.replace([{ scope: "parent", draft: { content: "new", attachments: [] } }])).toBe(false)
+  expect(owner.usage.bytes).toBe(2000)
+  expect(drafts.get("parent").content).toBe("old")
+  history.release()
+  expect(drafts.replace([{ scope: "parent", draft: { content: "new", attachments: [] } }])).toBe(true)
+  expect(owner.usage.bytes).toBe(old)
+  const submission = drafts.submit("parent")!
+  expect(submission.draft.content).toBe("new")
+  submission.settle(true)
   expect(owner.usage.bytes).toBe(0)
 })
