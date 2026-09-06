@@ -156,3 +156,46 @@ fn writable_scratch_cannot_include_or_replace_the_approved_code_view() {
         .validate_write_roots(&[unrelated.path().to_path_buf()])
         .expect("disjoint write authority");
 }
+
+#[tokio::test]
+async fn unpolled_handoff_retains_then_retires_the_complete_physical_owner() {
+    let (_directory, config) = fixture("while :; do :; done");
+    let profile = profile();
+    let bytes = Arc::new(LaunchBytes::capture(&config, &profile).expect("capture"));
+    let pinned_root = bytes.cwd(&config).to_path_buf();
+    let scratch = tempfile::tempdir().expect("scratch");
+    let helper = helper_executable().expect("explicit immutable helper prerequisite");
+    let SpawnedPlugin {
+        child,
+        proxy,
+        bytes,
+    } = spawn_pinned_plugin(
+        &config,
+        &profile,
+        scratch.path(),
+        &helper,
+        bytes,
+        &[scratch.path().to_path_buf()],
+    )
+    .expect("spawn");
+    let pending = attach_supervisor(
+        child,
+        proxy,
+        &config,
+        helper,
+        process_fixture_lease(),
+        bytes,
+    );
+    assert!(
+        pinned_root.exists(),
+        "unpolled handoff owns the captured bytes"
+    );
+    drop(pending);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while pinned_root.exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("unpolled handoff transfers actual retirement, without leaked capacity");
+}

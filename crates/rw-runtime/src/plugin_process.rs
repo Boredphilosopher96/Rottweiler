@@ -370,7 +370,9 @@ impl Drop for PendingPluginHandoff {
     fn drop(&mut self) {
         if !self.settled {
             let _ = self.process.kill_tree();
-            std::mem::forget(Arc::clone(&self.process));
+            // Dropping the last Arc invokes PluginChild's owned retirement.
+            // It retains all bytes and capacity until proof, quarantining only
+            // when cleanup cannot be proven instead of leaking a recoverable wait.
         }
     }
 }
