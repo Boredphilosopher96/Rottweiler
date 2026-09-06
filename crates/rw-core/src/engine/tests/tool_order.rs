@@ -460,9 +460,10 @@ async fn bounded_live_output_drains_excess_chunks_and_finishes() {
     .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("flood").await.expect("message");
-    let turn = timeout(Duration::from_secs(3), collect_turn(&mut events))
-        .await
-        .expect("flood turn must not hang");
+    // collect_turn enforces a three-second inactivity deadline for every event.
+    // This test drains 1,025 individually durable chunks; total fsync throughput
+    // under a parallel workspace run is not the progress/liveness contract.
+    let turn = collect_turn(&mut events).await;
     let chunks = turn
         .iter()
         .filter_map(|event| match &event.kind {
@@ -470,6 +471,8 @@ async fn bounded_live_output_drains_excess_chunks_and_finishes() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert!(chunks.len() <= MAX_LIVE_TOOL_OUTPUT_CHUNKS.saturating_add(1));
+    assert_eq!(chunks.len(), MAX_LIVE_TOOL_OUTPUT_CHUNKS.saturating_add(1));
     assert!(chunks.iter().any(|chunk| chunk.contains("truncated")));
+    assert!(turn.iter().any(|event| matches!(&event.kind, PendingEvent::ToolCallFinished { id, is_error: false, .. } if id == "flood-call")), "the producer drains all excess chunks and completes successfully");
+    handle.close().await.expect("settled actor");
 }

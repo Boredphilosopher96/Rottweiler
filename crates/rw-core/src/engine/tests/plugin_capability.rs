@@ -178,19 +178,21 @@ async fn plugin_machine_capability_preserves_driver_queue_and_durable_order() {
             .position(|event| matches!(event, EngineEvent::UiNotification { plugin_id, title, message, .. } if plugin_id == "fixture-plugin" && title == "fixture" && message == "notice [REDACTED]"))
             .expect("notification event");
     assert!(queued < injected && injected < status && status < notification);
-    let first_sequence = wires[queued].meta().expect("queued metadata").sequence_id.0;
-    assert_eq!(
-        [queued, injected, status, notification].map(|index| wires[index]
-            .meta()
-            .expect("durable metadata")
-            .sequence_id
-            .0),
-        [
-            first_sequence,
-            first_sequence.saturating_add(1),
-            first_sequence.saturating_add(2),
-            first_sequence.saturating_add(3),
-        ]
+    // Queue admission and its injection audit are one durable batch. Independent
+    // status/notification commands may interleave with ordinary turn events.
+    let sequence = |index: usize| wires[index].meta().expect("durable metadata").sequence_id.0;
+    assert_eq!(sequence(injected), sequence(queued) + 1);
+    assert!(sequence(injected) < sequence(status) && sequence(status) < sequence(notification));
+    let durable_sequences = wires
+        .iter()
+        .filter_map(EngineEvent::meta)
+        .map(|meta| meta.sequence_id.0)
+        .collect::<Vec<_>>();
+    assert!(
+        durable_sequences
+            .windows(2)
+            .all(|pair| pair[1] == pair[0] + 1),
+        "all interleaved durable events remain contiguous"
     );
     assert!(
         wires
