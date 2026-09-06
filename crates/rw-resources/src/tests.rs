@@ -78,3 +78,38 @@ fn unproven_settlement_cannot_return_execution_capacity() {
     assert!(matches!(pool.try_acquire(), Err(AdmissionError::Busy)));
     assert_eq!(pool.execution.available_permits(), 0);
 }
+
+#[tokio::test]
+async fn multi_group_operation_reserves_all_capacity_before_starting_effects() {
+    let pool = Pool::new(2, 1);
+    let first = pool.try_acquire().expect("another process");
+    let mut command = Box::pin(pool.acquire_units(2, pending()));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(10), &mut command)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        pool.execution.available_permits(),
+        0,
+        "waiting pair owns its partial reservation"
+    );
+    drop(command);
+    assert_eq!(
+        pool.execution.available_permits(),
+        1,
+        "caller loss returns partial reservation"
+    );
+    drop(first);
+    let pair = pool
+        .acquire_units(2, pending())
+        .await
+        .expect("whole process demand");
+    assert!(matches!(pool.try_acquire(), Err(AdmissionError::Busy)));
+    drop(pair);
+    assert_eq!(pool.execution.available_permits(), 2);
+    assert!(matches!(
+        pool.acquire_units(3, pending()).await,
+        Err(AdmissionError::InvalidDemand)
+    ));
+}

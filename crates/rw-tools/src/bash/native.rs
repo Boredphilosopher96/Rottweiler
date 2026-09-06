@@ -158,8 +158,9 @@ impl CommandExecutor for TokioCommandExecutor {
             () = cancellation.cancelled() => return Err(ToolError::Cancelled),
             permit = Arc::clone(&self.native_cleanup.admission).acquire_owned() => permit.map_err(|_| ToolError::EffectsUnsettled("native executor is quarantined".to_owned()))?,
         };
-        let process_credit = rw_resources::acquire(
+        let process_credit = rw_resources::acquire_units(
             rw_resources::ResourceClass::Process,
+            if cfg!(unix) { 2 } else { 1 },
             cancellation.cancelled(),
         )
         .await

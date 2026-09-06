@@ -23,6 +23,8 @@ pub enum ResourceClass {
 /// A request either retains a bounded waiting slot or fails without starting work.
 #[derive(Debug, thiserror::Error, Eq, PartialEq)]
 pub enum AdmissionError {
+    #[error("resource demand exceeds its execution pool")]
+    InvalidDemand,
     #[error("resource admission was cancelled")]
     Cancelled,
     #[error("resource admission queue is full")]
@@ -51,12 +53,14 @@ impl ResourceLease {
 }
 
 struct Pool {
+    capacity: usize,
     execution: Arc<Semaphore>,
     waiting: Arc<Semaphore>,
 }
 impl Pool {
     fn new(execution: usize, waiting: usize) -> Self {
         Self {
+            capacity: execution,
             execution: Arc::new(Semaphore::new(execution)),
             waiting: Arc::new(Semaphore::new(waiting)),
         }
@@ -78,6 +82,16 @@ impl Pool {
         &self,
         cancelled: impl Future<Output = ()>,
     ) -> Result<ResourceLease, AdmissionError> {
+        self.acquire_units(1, cancelled).await
+    }
+    async fn acquire_units(
+        &self,
+        units: u32,
+        cancelled: impl Future<Output = ()>,
+    ) -> Result<ResourceLease, AdmissionError> {
+        if units == 0 || u64::from(units) > self.capacity as u64 {
+            return Err(AdmissionError::InvalidDemand);
+        }
         let waiting = self.waiting.clone().try_acquire_owned().map_err(|error| {
             if matches!(error, tokio::sync::TryAcquireError::Closed) {
                 AdmissionError::Closed
@@ -89,7 +103,7 @@ impl Pool {
             biased;
             () = cancelled => Err(AdmissionError::Cancelled),
             () = tokio::time::sleep(std::time::Duration::from_secs(30)) => Err(AdmissionError::Deadline),
-            result = self.execution.clone().acquire_owned() => {
+            result = self.execution.clone().acquire_many_owned(units) => {
                 drop(waiting);
                 result.map(|permit| ResourceLease { permit }).map_err(|_| AdmissionError::Closed)
             }
@@ -127,6 +141,21 @@ pub async fn acquire(
     cancelled: impl Future<Output = ()>,
 ) -> Result<ResourceLease, AdmissionError> {
     pool(class).acquire(cancelled).await
+}
+
+/// Atomically reserve every physical unit an operation needs before it starts.
+/// Commands reserve their execution group and independent parent-death watchdog
+/// together, so a saturated pool cannot strand commands waiting for watchdogs.
+///
+/// # Errors
+/// Rejects invalid demand, cancellation, queue exhaustion, deadline or closure.
+#[tracing::instrument(target = "rw_performance", level = "trace", name = "resource.admission_wait", skip(cancelled), fields(?class, units))]
+pub async fn acquire_units(
+    class: ResourceClass,
+    units: u32,
+    cancelled: impl Future<Output = ()>,
+) -> Result<ResourceLease, AdmissionError> {
+    pool(class).acquire_units(units, cancelled).await
 }
 
 /// Admit synchronous launch work without adding an unbounded waiting caller.

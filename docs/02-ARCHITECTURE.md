@@ -91,7 +91,9 @@ Dependency rule: arrows point downward only. No Rust crate depends on anything i
 
 Physical execution has independent process-wide pools: 64 supervised process
 groups, 64 network operations, 16 blocking workers, and at most four CPU workers
-(capped by available parallelism). Each class admits at most 64 waiting requests.
+(capped by available parallelism). Each class admits at most 64 waiting requests, with a 30-second queue deadline.
+Shell commands reserve both their execution group and independent watchdog group
+atomically before either process starts.
 The actual worker or process owner retains its lease through settlement; cached
 results retain allocation credit separately. Cancellation removes a waiter, not
 an already running effect. Nested work transfers ownership or uses a different
