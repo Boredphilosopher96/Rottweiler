@@ -44,7 +44,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use rw_core::{
     AttachmentData, CachedModelCatalog, CommandDescriptor, CompletedForkOperation, Config,
-    CreateSessionRequest, EngineEvent, ForkOperationKey, ForkOperationState, ForkSessionRequest,
+    CreateSessionRequest, ForkOperationKey, ForkOperationState, ForkSessionRequest,
     HostError, HostQueryService, HostedSession, ModelAlias, ModelCatalogError,
     ModelCatalogSnapshot, ModelCatalogSource, PermissionDecision, PreparedForkOperation,
     ProviderAuthAttempt, ProviderAuthChallenge, ProviderAuthCompletion, ProviderLogin,

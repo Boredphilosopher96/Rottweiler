@@ -325,12 +325,6 @@ pub(super) fn load_session_events(log: &SessionEventLog) -> Result<Vec<EngineEve
     let envelopes = log
         .load::<EngineEvent>()
         .map_err(|error| miette!("fixture session events could not load: {error}"))?;
-    validate_session_event_envelopes(envelopes)
-}
-
-pub(super) fn validate_session_event_envelopes(
-    envelopes: Vec<rw_store::session::EventEnvelope<EngineEvent>>,
-) -> Result<Vec<EngineEvent>> {
     envelopes
         .into_iter()
         .map(|envelope| {

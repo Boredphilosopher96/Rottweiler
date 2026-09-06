@@ -1,3 +1,4 @@
+use rw_core::EngineEvent;
 #![allow(clippy::expect_used)]
 use rw_store::session::SessionEventLog;
 
