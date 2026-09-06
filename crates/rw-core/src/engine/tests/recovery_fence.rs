@@ -1,4 +1,5 @@
 //! A durable append failure cannot close a turn whose other tools are still running.
+mod prepared;
 use super::fixtures::{
     models::ScriptedModel,
     sinks::FailNextBatchSink,
@@ -25,6 +26,8 @@ struct Peer {
     release: Notify,
     settled: AtomicBool,
     fail_settlement: bool,
+    hold_fast: AtomicBool,
+    fast_release: Notify,
 }
 struct RecoveryTool {
     blocked: bool,
@@ -42,6 +45,9 @@ impl Tool for RecoveryTool {
             self.peer.cancelled.notify_one();
         } else {
             self.peer.entered.notified().await;
+            if self.peer.hold_fast.load(Ordering::Acquire) {
+                self.peer.fast_release.notified().await;
+            }
         }
         Ok(ToolResult::new("physical tool result", Value::Null))
     }
@@ -69,6 +75,13 @@ struct Fixture {
 }
 
 async fn fixture(fail_settlement: bool) -> Fixture {
+    fixture_with(fail_settlement, |_, _| {}).await
+}
+
+async fn fixture_with(
+    fail_settlement: bool,
+    configure: impl FnOnce(&mut crate::engine::SessionActorConfig, &Arc<Peer>),
+) -> Fixture {
     let root = tempfile::tempdir().expect("workspace");
     let peer = Arc::new(Peer {
         fail_settlement,
@@ -103,6 +116,7 @@ async fn fixture(fail_settlement: bool) -> Fixture {
         builtin_hook_dispatcher().expect("hooks"),
     );
     configuration.event_sink = sink.clone();
+    configure(&mut configuration, &peer);
     let handle = super::fixtures::history::spawn(configuration)
         .await
         .expect("actor");
