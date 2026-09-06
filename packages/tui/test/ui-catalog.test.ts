@@ -171,3 +171,23 @@ test("maximum catalog cardinality fits decoded collection admission and duplicat
   controller.close(); cache.clear()
   expect(cache.usage.bytes).toBe(0)
 })
+
+
+test("catalog decoders receive the cache reservation and cannot decode beyond shared admission", async () => {
+  const cache = new ClientCache<HistoryCacheValue>()
+  let decoded = false
+  const controller = new UiCatalogController({
+    async uiCatalog(_session, _signal, allocation) {
+      allocation.admit(cache.capacityBytes + 1)
+      decoded = true
+      return { entries: [] }
+    },
+    async uiPanels() { return { panels: [] } },
+  }, cache, () => {})
+  controller.open("session", "catalog")
+  await settle()
+  expect(decoded).toBeFalse()
+  expect(controller.snapshot.error).not.toBeNull()
+  expect(cache.usage.bytes).toBe(0)
+  controller.close()
+})

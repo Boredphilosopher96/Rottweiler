@@ -1,5 +1,5 @@
 import { ToolOutputAllocation } from "./tool-output-allocation"
-import { ClientAllocationOwner, type ClientAllocationLease } from "../client-allocation"
+import { ClientAllocationError, ClientAllocationOwner, type ClientAllocationLease } from "../client-allocation"
 import { TOOL_OUTPUT_CACHE_ALLOCATION_BYTES, ToolOutputBuffer, ToolOutputCacheIdentity } from "./display-buffer"
 import { createInitialState, type RottweilerState } from "./model"
 const EMPTY_DISPOSED_STATE = createInitialState()
@@ -25,7 +25,7 @@ export class ProjectionGraph {
     const staging = this.allocations.reserve("live", 0)
     let stagingSteps = 0
     const stage = (bytes: number) => {
-      if (++stagingSteps > MAX_STAGING_STEPS || staging.bytes + bytes > MAX_STAGING_BYTES) throw new Error("client projection staging admission exhausted")
+      if (++stagingSteps > MAX_STAGING_STEPS || staging.bytes + bytes > MAX_STAGING_BYTES) throw new ClientAllocationError("client projection staging admission exhausted")
       staging.resize(staging.bytes + bytes)
     }
     const newParts = new Map<object, Parts>()
@@ -57,7 +57,7 @@ export class ProjectionGraph {
         if (before === 0 && references === 1) {
           bytes += parts.bytes
           if (object instanceof ToolOutputBuffer) updateStream(object, true)
-          if (!this.allocations.canReserve("live", bytes, this.#lease.bytes)) throw new Error("client projection allocation admission exhausted")
+          if (!this.allocations.canReserve("live", bytes, this.#lease.bytes)) throw new ClientAllocationError("client projection allocation admission exhausted")
           for (const child of parts.children) pending.push(child)
         } else if (before === 1 && references === 0) {
           bytes -= parts.bytes

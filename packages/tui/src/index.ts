@@ -244,15 +244,15 @@ async function main(): Promise<void> {
         if (runtime === null) throw new Error("engine runtime is unavailable")
         return runtime.sessionReader.tail(target, read, signal, allocation)
       },
-      uiCatalog: async (sessionId, signal) => {
+      uiCatalog: async (sessionId, signal, allocation) => {
         const { runtime } = await runtimeBootstrap
         if (runtime === null) throw new Error("engine runtime is unavailable")
-        return runtime.sessionReader.uiCatalog(sessionId, signal)
+        return runtime.sessionReader.uiCatalog(sessionId, signal, allocation)
       },
-      uiPanels: async (sessionId, signal) => {
+      uiPanels: async (sessionId, signal, allocation) => {
         const { runtime } = await runtimeBootstrap
         if (runtime === null) throw new Error("engine runtime is unavailable")
-        return runtime.sessionReader.uiPanels(sessionId, signal)
+        return runtime.sessionReader.uiPanels(sessionId, signal, allocation)
       },
       todos: async (target, signal, allocation) => {
         const { runtime } = await runtimeBootstrap
@@ -274,10 +274,10 @@ async function main(): Promise<void> {
       const bootstrap = await runtimeBootstrap
       return (await bootstrap.runtime?.sendCommand(command)) ?? null
     },
-    onProviderApiKey: async (provider, apiKey) => {
+    onProviderApiKey: async (provider, apiKey, allocation) => {
       const bootstrap = await runtimeBootstrap
       if (bootstrap.runtime === null) throw new Error("engine runtime is unavailable")
-      return await bootstrap.runtime.submitProviderApiKey(provider, apiKey)
+      return await bootstrap.runtime.submitProviderApiKey(provider, apiKey, allocation)
     },
     onProviderActivate: async (provider) => {
       const bootstrap = await runtimeBootstrap

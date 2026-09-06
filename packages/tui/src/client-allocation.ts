@@ -1,5 +1,9 @@
 import { MAX_SESSION_CONTROLS_PREPARED_BYTES, MAX_SESSION_STATE_PREPARED_BYTES, MAX_SESSION_CHILDREN_PREPARED_BYTES, MAX_TODO_ITEMS, MAX_TODO_TOTAL_BYTES } from "../../../protocol/types"
 
+export class ClientAllocationError extends Error {
+  constructor(message = "client allocation admission exhausted") { super(message); this.name = "ClientAllocationError" }
+}
+
 export const MAX_CLIENT_DRAFT_BYTES = 32 * 1024 * 1024
 export const CLIENT_HISTORY_BYTES = 16 * 1024 * 1024
 export const CLIENT_TASK_REPLY_BYTES = MAX_TODO_TOTAL_BYTES * 32 + MAX_TODO_ITEMS * 1024 + 8192
@@ -47,7 +51,7 @@ export class ClientAllocationOwner {
       if (!active) throw new Error("client allocation lease is released")
       const change = next - held, domainBytes = (this.#domains.get(domain) ?? 0) + change
       if (!Number.isSafeInteger(next) || next < 0 || domainBytes > this.limits[domain]
-        || this.#bytes + change > this.maximumBytes) throw new Error("client allocation admission exhausted")
+        || this.#bytes + change > this.maximumBytes) throw new ClientAllocationError()
       this.#domains.set(domain, domainBytes)
       this.#bytes += change; this.#peak = Math.max(this.#peak, this.#bytes); held = next
     }

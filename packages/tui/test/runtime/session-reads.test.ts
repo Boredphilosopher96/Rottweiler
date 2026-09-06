@@ -50,10 +50,10 @@ test.each(["uiCatalog", "uiPanels"] as const)("%s reads remain session-bound dir
   const running = runtime.start()
   try {
     await waitFor(() => client.commands.some(command => command.type === "list_commands"))
-    expect(await runtime.sessionReader[method]("parent", new AbortController().signal)).toEqual(method === "uiCatalog" ? { entries: [] } : { panels: [] })
+    expect(await runtime.sessionReader[method]("parent", new AbortController().signal, { admit() {} })).toEqual(method === "uiCatalog" ? { entries: [] } : { panels: [] })
     expect(app.sessionId).toBe("parent")
     foreign = true
-    await expect(runtime.sessionReader[method]("parent", new AbortController().signal)).rejects.toThrow("session-bound result")
+    await expect(runtime.sessionReader[method]("parent", new AbortController().signal, { admit() {} })).rejects.toThrow("session-bound result")
   } finally { await runtime.stop(); await running }
 })
 

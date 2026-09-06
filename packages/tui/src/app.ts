@@ -381,6 +381,7 @@ export class RottweilerApp extends BoxRenderable {
       projectRejection: outcome => this.#projectRejection(outcome),
     })
     this.#providers = new ProviderUiController({
+      allocations: this.historyCache.allocations,
       get state() { return app.#state },
       get activeSubagentId() { return app.#children.activeId },
       get draft() { return app.composer.value },

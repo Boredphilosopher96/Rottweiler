@@ -1,3 +1,4 @@
+import type { ClientAllocationOwner } from "../client-allocation"
 import type { EngineEvent } from "../protocol"
 import { FuzzyPickerRenderable, type PickerItem } from "../components"
 import { PickerController } from "../picker-controller"
@@ -25,6 +26,7 @@ type ProviderAuthPickerAction =
   | { readonly kind: "cancel" }
 
 interface ProviderUiHost {
+  readonly allocations: ClientAllocationOwner
   readonly state: RottweilerState
   readonly activeSubagentId: string | null
   readonly draft: string
@@ -173,8 +175,9 @@ export class ProviderUiController {
     this.#credentialAction = operation
     this.#host.pickerController.kind = "providerApiKey"
     this.#host.pickerController.refresh()
+    const allocation = this.#host.allocations.reserve("decoding", 0)
     try {
-      const result = await this.#host.options.onProviderApiKey?.(provider, apiKey)
+      const result = await this.#host.options.onProviderApiKey?.(provider, apiKey, { admit: bytes => allocation.resize(bytes) })
       if (!this.#currentCredential(operation)) return
       if (result === undefined)
         throw new Error("credential transport unavailable")
@@ -206,6 +209,7 @@ export class ProviderUiController {
       )
       this.openProviderPicker()
     } finally {
+      allocation.release()
       if (this.#currentCredential(operation)) this.#credentialAction = null
     }
   }

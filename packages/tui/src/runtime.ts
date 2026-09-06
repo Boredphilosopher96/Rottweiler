@@ -1,3 +1,4 @@
+import { ClientAllocationOwner } from "./client-allocation"
 import { collectSessionBootstrap, type SessionBootstrap } from "./runtime-bootstrap"
 import { TailChanged } from "./history/live-tail"
 import type { ClientCache } from "./history/cache"
@@ -74,7 +75,8 @@ export interface RuntimeEngineClient {
     sessionId: string,
     provider: string,
     apiKey: string,
-    signal?: AbortSignal,
+    signal: AbortSignal | undefined,
+    allocation: ReplyAllocation,
   ): Promise<{
     readonly stored: true
     readonly activated: boolean
@@ -158,8 +160,9 @@ export class EngineRuntimeError extends Error {
  * synchronous; durable cursor persistence is coalesced in the background.
  */
 export class TuiEngineRuntime {
+  #allocations = new ClientAllocationOwner()
   readonly #metadata = new SessionSnapshotReader(
-    () => this.#requiredApp().historyCache.allocations,
+    () => this.#allocations,
     MAX_SESSION_STATE_PREPARED_BYTES,
     async (sessionId, signal, allocation) => {
       const generation = this.#sessionGeneration
@@ -188,7 +191,7 @@ export class TuiEngineRuntime {
   )
 
   readonly #children = new SessionSnapshotReader(
-    () => this.#requiredApp().historyCache.allocations,
+    () => this.#allocations,
     MAX_SESSION_CHILDREN_PREPARED_BYTES,
     async (sessionId, signal, allocation) => {
       const generation = this.#sessionGeneration
@@ -233,16 +236,16 @@ export class TuiEngineRuntime {
       }
       return event.result
     },
-    uiCatalog: async (sessionId, signal) => {
-      const reply = await this.#readSession({ type: "get_ui_catalog", meta: this.#meta(), session_id: sessionId }, signal)
+    uiCatalog: async (sessionId, signal, allocation) => {
+      const reply = await this.#readSession({ type: "get_ui_catalog", meta: this.#meta(), session_id: sessionId }, signal, allocation)
       const event = reply.events[0]
       if (reply.events.length !== 1 || event?.type !== "ui_catalog_ready" || event.session_id !== sessionId) {
         throw new EngineRuntimeError("UI catalog reply is missing its session-bound result")
       }
       return event.catalog
     },
-    uiPanels: async (sessionId, signal) => {
-      const reply = await this.#readSession({ type: "get_ui_panels", meta: this.#meta(), session_id: sessionId }, signal)
+    uiPanels: async (sessionId, signal, allocation) => {
+      const reply = await this.#readSession({ type: "get_ui_panels", meta: this.#meta(), session_id: sessionId }, signal, allocation)
       const event = reply.events[0]
       if (reply.events.length !== 1 || event?.type !== "ui_panels_ready" || event.session_id !== sessionId) {
         throw new EngineRuntimeError("UI panels reply is missing its session-bound result")
@@ -338,6 +341,8 @@ export class TuiEngineRuntime {
     if (this.#app !== null && this.#app !== app) {
       throw new EngineRuntimeError("engine runtime is already bound to an application")
     }
+    if (this.#allocations !== app.historyCache.allocations && this.#allocations.usage.bytes !== 0) throw new EngineRuntimeError("cannot bind an application while unbound decoding is active")
+    this.#allocations = app.historyCache.allocations
     this.#app = app
     // Source snapshots establish a fresh projection and its own replay cursor.
     // A bare supervisor cursor cannot authorize omitting historical state.
@@ -428,6 +433,7 @@ export class TuiEngineRuntime {
   async submitProviderApiKey(
     provider: string,
     apiKey: string,
+    allocation: ReplyAllocation,
   ): Promise<{
     readonly stored: true
     readonly activated: boolean
@@ -445,6 +451,7 @@ export class TuiEngineRuntime {
       provider,
       apiKey,
       this.#subscriptionController.signal,
+      allocation,
     )
   }
 
@@ -619,8 +626,10 @@ export class TuiEngineRuntime {
         once: true,
       })
 
+      const streamAllocation = this.#allocations.reserve("decoding", 0)
       const subscription = this.#client
         .subscribe({
+          allocation: { admit: bytes => streamAllocation.resize(bytes) },
           attach: {
             type: "attach_session",
             meta: this.#meta(),
@@ -742,6 +751,7 @@ export class TuiEngineRuntime {
           }
         })
         .finally(() => {
+          streamAllocation.release()
           finishInitialReplayBatch()
           if (!subscriptionReady && !subscriptionController.signal.aborted) {
             rejectSubscriptionReady(
@@ -889,17 +899,20 @@ export class TuiEngineRuntime {
     const generation = this.#sessionGeneration
     const lifetime = signal === undefined ? this.#controller.signal : AbortSignal.any([signal, this.#controller.signal])
     lifetime.throwIfAborted()
-    const reply = await this.#client.postCommand(command, lifetime)
+    const claim = this.#allocations.reserve("decoding", 0)
+    try {
+    const reply = await this.#client.postCommand(command, lifetime, { admit: bytes => claim.resize(bytes) })
     if (reply.type === "read" && generation === this.#sessionGeneration && !lifetime.aborted) {
       for (const event of reply.events) this.#requiredApp().handleEvent(event)
     }
     return reply.outcome
+    } finally { claim.release() }
   }
 
   async #readSession(
     command: Extract<ClientCommand, { type: "read_session_children" | "read_transcript_tail" | "read_transcript" | "read_transcript_content" | "get_todos" | "get_ui_catalog" | "get_ui_panels" }>,
     signal: AbortSignal,
-    allocation?: ReplyAllocation,
+    allocation: ReplyAllocation,
   ): Promise<Extract<CommandReply, { type: "read" }>> {
     await this.#ready
     if (!this.#driverReady || this.#subscriptionController === null) {

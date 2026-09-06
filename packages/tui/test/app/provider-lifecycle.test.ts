@@ -35,7 +35,7 @@ describe("provider UI lifetime", () => {
         const app = createRottweilerApp(renderer, {
           sessionReader: emptySessionReader,
           onCommand(command) { commands.push(command); return { type: "accepted" } },
-          onProviderApiKey() { started.resolve(); return pending.promise },
+          onProviderApiKey(_provider, _key, allocation) { allocation.admit(4096); started.resolve(); return pending.promise },
         })
         renderer.root.add(app)
         app.openProviderApiKeyPrompt("company-openai")
@@ -44,11 +44,13 @@ describe("provider UI lifetime", () => {
         await started.promise
         if (end === "session switch") app.setSessionId("next-session")
         else app.destroy()
+        expect(app.historyCache.allocations.usage.domains.decoding).toBe(4096)
         const count = commands.length
         const state = app.state
         if (outcome === "success") pending.resolve({ stored: true, activated: false, warnings: ["old credential warning"] })
         else pending.reject(new Error("old credential error"))
         await settleContinuations()
+        expect(app.historyCache.allocations.usage.domains.decoding).toBe(0)
         expect(commands).toHaveLength(count)
         expect(app.state).toBe(state)
         expect(JSON.stringify(app.state)).not.toContain("secret-lifetime-canary")

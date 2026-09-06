@@ -24,8 +24,8 @@ export function descendantSessionRead(parent: SessionReadTarget, child: SessionR
 export interface SessionReader {
   tail: TailRead
   children(target: SessionReadTarget, signal: AbortSignal, allocation: ReplyAllocation): Promise<SessionChildrenResult>
-  uiCatalog(sessionId: string, signal: AbortSignal): Promise<UiCatalog>
-  uiPanels(sessionId: string, signal: AbortSignal): Promise<UiPanels>
+  uiCatalog(sessionId: string, signal: AbortSignal, allocation: ReplyAllocation): Promise<UiCatalog>
+  uiPanels(sessionId: string, signal: AbortSignal, allocation: ReplyAllocation): Promise<UiPanels>
   todos(target: SessionReadTarget, signal: AbortSignal, allocation: ReplyAllocation): Promise<TodoReadResult>
   page(target: SessionReadTarget, read: TranscriptRead, signal: AbortSignal, allocation: ReplyAllocation): Promise<TranscriptReadResult>
   content(target: SessionReadTarget, read: TranscriptContentRead, signal: AbortSignal, allocation: ReplyAllocation): Promise<TranscriptContentPage>

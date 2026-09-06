@@ -1,3 +1,4 @@
+import type { ReplyAllocation } from "../transport/reply-allocation"
 import { type ThemeMode, type TreeSitterClient } from "@opentui/core"
 import type { ClientDiagnostics } from "../client-diagnostics"
 import type { SessionReader } from "../session-reader"
@@ -26,7 +27,8 @@ export interface RottweilerAppOptions {
   ) => void | CommandOutcome | null | Promise<void | CommandOutcome | null>
   readonly onProviderApiKey?: (
     provider: string,
-    apiKey: string
+    apiKey: string,
+    allocation: ReplyAllocation,
   ) => Promise<{
     readonly stored: true
     readonly activated: boolean

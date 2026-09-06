@@ -115,13 +115,13 @@ export class UiCatalogController {
     try {
       let value: HistoryCacheValue
       if (kind === "catalog") {
-        const catalog = await this.#reader.uiCatalog(session, request.signal)
+        const catalog = await this.#reader.uiCatalog(session, request.signal, reservation)
         if (generation !== this.#generation || request.signal.aborted) return
         const identities = new Set(catalog.entries.map(uiIdentity))
         if (identities.size !== catalog.entries.length) throw new Error("duplicate contribution identity")
         value = { kind: "ui_catalog", catalog }
       } else {
-        const panels = await this.#reader.uiPanels(session, request.signal)
+        const panels = await this.#reader.uiPanels(session, request.signal, reservation)
         if (generation !== this.#generation || request.signal.aborted) return
         const current = this.snapshot.panels
         if (current.length === panels.panels.length && current.every((panel, index) => {
