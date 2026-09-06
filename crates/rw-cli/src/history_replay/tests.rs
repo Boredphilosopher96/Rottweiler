@@ -24,7 +24,7 @@ fn input_events(
     [
         EngineEvent::UserMessageAccepted {
             meta: descendant_meta(session, sequence),
-            turn_id: rw_types::TurnId(agent_turn.to_string()),
+            agent_turn,
             content,
             attachments: vec![],
         },

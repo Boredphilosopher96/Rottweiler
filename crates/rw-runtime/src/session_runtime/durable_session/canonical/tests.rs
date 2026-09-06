@@ -168,8 +168,8 @@ async fn source_rewind_query_validates_exact_published_prefix() {
     assert_eq!(
         current
             .source_rewind_target(
-                SequenceId(5),
-                SequenceId(4),
+                SequenceId(7),
+                SequenceId(6),
                 2,
                 rw_types::RewindSourcePosition::Before
             )
@@ -180,8 +180,8 @@ async fn source_rewind_query_validates_exact_published_prefix() {
     assert_eq!(
         current
             .source_rewind_target(
-                SequenceId(5),
-                SequenceId(4),
+                SequenceId(7),
+                SequenceId(6),
                 2,
                 rw_types::RewindSourcePosition::Through
             )
@@ -192,8 +192,8 @@ async fn source_rewind_query_validates_exact_published_prefix() {
     assert!(
         current
             .source_rewind_target(
-                SequenceId(4),
-                SequenceId(4),
+                SequenceId(6),
+                SequenceId(6),
                 2,
                 rw_types::RewindSourcePosition::Through
             )

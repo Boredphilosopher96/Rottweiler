@@ -74,13 +74,8 @@ fn m9_rw_replay_renders_a_persisted_envelope_log_through_production_tui() {
         .join("../../packages/tui/test/fixtures/m9-replay-events.jsonl");
     let mut persisted =
         rw_store::session::SessionEventLog::open(&home, session_id).expect("event log");
-    for (sequence, line) in fs::read_to_string(source)
-        .expect("replay fixture")
-        .lines()
-        .enumerate()
-    {
-        let mut event: serde_json::Value = serde_json::from_str(line).expect("fixture event");
-        event["meta"]["sequence_id"] = json!(sequence.to_string());
+    for line in fs::read_to_string(source).expect("replay fixture").lines() {
+        let event: EngineEvent = serde_json::from_str(line).expect("fixture event");
         persisted.append(event).expect("durable fixture event");
     }
     drop(persisted);
@@ -113,7 +108,7 @@ fn m9_rw_replay_renders_a_persisted_envelope_log_through_production_tui() {
     let actual: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(report).expect("replay report"))
             .expect("valid replay report");
-    assert_eq!(actual["historyThrough"], "8", "available committed prefix");
+    assert_eq!(actual["historyThrough"], "9", "available committed prefix");
     assert_eq!(actual["mountedItems"], 4, "semantic history rows");
     assert!(
         actual["completedThrough"].is_null(),
