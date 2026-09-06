@@ -25,39 +25,54 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
+fn input_events(sequence: u64, agent_turn: u64, content: String) -> Vec<rw_types::EngineEvent> {
+    vec![
+        wire_event(
+            sequence,
+            PendingEvent::UserMessageAccepted {
+                turn: agent_turn,
+                content,
+                attachments: vec![],
+            },
+        ),
+        wire_event(
+            sequence + 1,
+            PendingEvent::ConversationInputCommitted {
+                agent_turn,
+                accepted_source: rw_types::SequenceId(sequence),
+                selection: rw_types::conversation_input::InputSelection::Accepted {},
+            },
+        ),
+    ]
+}
+
 #[test]
 fn compaction_projection_is_atomic_across_crash_boundaries() {
     let old = text_turn(Role::User, "old history");
     let summary = rw_context::summary_turn("summary");
-    let unfinished = vec![
+    let mut unfinished = input_events(0, 1, "old history".into());
+    unfinished.extend([
         wire_event(
-            0,
-            PendingEvent::ConversationTurnCommitted {
-                agent_turn: 1,
-                turn: old.clone(),
-            },
-        ),
-        wire_event(
-            1,
+            2,
             PendingEvent::CompactionStarted {
                 reason: CompactionReason::Manual,
             },
         ),
         wire_event(
-            2,
+            3,
             PendingEvent::ConversationTurnCommitted {
                 agent_turn: 2,
                 turn: summary.clone(),
             },
         ),
-    ];
+    ]);
     let recovered = project_session_events(&unfinished).expect("unfinished compaction projects");
     assert_eq!(recovered.conversation, vec![old.clone()]);
     assert!(recovered.interrupted_compaction);
 
     let mut finished = unfinished.clone();
     finished.push(wire_event(
-        3,
+        4,
         PendingEvent::CompactionFinished {
             summary_turn: 2,
             reclaimed_tokens: 100,
@@ -72,20 +87,14 @@ fn compaction_projection_is_atomic_across_crash_boundaries() {
     let later = text_turn(Role::User, "later after recovery");
     let mut aborted = unfinished;
     aborted.push(wire_event(
-        3,
+        4,
         PendingEvent::Error {
             message: "interrupted compaction was aborted during recovery".to_owned(),
         },
     ));
+    aborted.extend(input_events(5, 3, "later after recovery".into()));
     aborted.push(wire_event(
-        4,
-        PendingEvent::ConversationTurnCommitted {
-            agent_turn: 3,
-            turn: later.clone(),
-        },
-    ));
-    aborted.push(wire_event(
-        5,
+        7,
         PendingEvent::TurnFinished {
             turn: 3,
             status: AgentTurnStatus::Completed,
@@ -105,12 +114,17 @@ fn projector_rewind_before_multiple_compactions_restores_original_history() {
     let original_user = text_turn(Role::User, "original request");
     let original_assistant = text_turn(Role::Assistant, "original answer");
     let first_summary = rw_context::summary_turn("first summary");
-    let later_user = text_turn(Role::User, "later request");
     let second_summary = rw_context::summary_turn("second summary");
     let kinds = vec![
-        PendingEvent::ConversationTurnCommitted {
+        PendingEvent::UserMessageAccepted {
+            turn: 1,
+            content: "original request".into(),
+            attachments: vec![],
+        },
+        PendingEvent::ConversationInputCommitted {
             agent_turn: 1,
-            turn: original_user.clone(),
+            accepted_source: rw_types::SequenceId(0),
+            selection: rw_types::conversation_input::InputSelection::Accepted {},
         },
         PendingEvent::ConversationTurnCommitted {
             agent_turn: 1,
@@ -135,9 +149,15 @@ fn projector_rewind_before_multiple_compactions_restores_original_history() {
             usage: None,
             cost: None,
         },
-        PendingEvent::ConversationTurnCommitted {
+        PendingEvent::UserMessageAccepted {
+            turn: 2,
+            content: "later request".into(),
+            attachments: vec![],
+        },
+        PendingEvent::ConversationInputCommitted {
             agent_turn: 2,
-            turn: later_user,
+            accepted_source: rw_types::SequenceId(7),
+            selection: rw_types::conversation_input::InputSelection::Accepted {},
         },
         PendingEvent::TurnFinished {
             turn: 2,
@@ -187,23 +207,17 @@ async fn actor_durably_aborts_interrupted_compaction_before_accepting_new_work()
         let root = TempDir::new().expect("tempdir");
         let old = text_turn(Role::User, format!("old history for {reason:?}"));
         let unfinished_summary = rw_context::summary_turn("must stay uncommitted");
-        let durable_prefix = vec![
+        let mut durable_prefix = input_events(0, 1, format!("old history for {reason:?}"));
+        durable_prefix.extend([
+            wire_event(2, PendingEvent::CompactionStarted { reason }),
             wire_event(
-                0,
-                PendingEvent::ConversationTurnCommitted {
-                    agent_turn: 1,
-                    turn: old.clone(),
-                },
-            ),
-            wire_event(1, PendingEvent::CompactionStarted { reason }),
-            wire_event(
-                2,
+                3,
                 PendingEvent::ConversationTurnCommitted {
                     agent_turn: 2,
                     turn: unfinished_summary,
                 },
             ),
-        ];
+        ]);
         let recovered = project_session_events(&durable_prefix).expect("recover prefix");
         assert!(recovered.interrupted_compaction);
         let sink = Arc::new(RecordingSink {
