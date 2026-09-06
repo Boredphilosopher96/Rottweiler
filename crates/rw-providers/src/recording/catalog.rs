@@ -121,7 +121,7 @@ fn scan(
         {
             return Err(ProviderError::new(
                 ProviderErrorKind::Protocol,
-                "replay fixture differs from its required provider capability manifest",
+                "replay fixture has inconsistent provider, source identity, or capabilities",
             ));
         }
         found = true;

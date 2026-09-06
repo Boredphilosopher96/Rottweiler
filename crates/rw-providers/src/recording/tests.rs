@@ -974,28 +974,42 @@ async fn providers_sharing_a_directory_do_not_collide() {
 #[tokio::test]
 async fn replay_rejects_a_fixture_claiming_another_provider() {
     let directory = unique_temp_directory("provider-validation");
-    let alpha = Recorder::new(
+    let beta = Recorder::new(
         Arc::new(FixtureProvider {
-            name: "alpha".to_owned(),
+            name: "beta".to_owned(),
         }),
         &directory,
         FixtureRedactor::default(),
     );
-    let _ = collect(&alpha).await;
+    let recorded = collect(&beta).await;
+    assert!(recorded.iter().all(Result::is_ok));
+    beta.flush()
+        .await
+        .unwrap_or_else(|error| panic!("recording settles: {error}"));
+    ReplayProvider::load("beta", &directory)
+        .await
+        .unwrap_or_else(|error| panic!("complete source loads before mutation: {error}"));
     let hash = request_hash(&request())
         .unwrap_or_else(|error| panic!("fixture request must hash: {error}"));
-    let alpha_path = fixture_path(&directory, "alpha", &hash, 0);
-    let beta_path = fixture_path(&directory, "beta", &hash, 0);
-    tokio::fs::copy(alpha_path, beta_path)
+    let path = fixture_path(&directory, "beta", &hash, 0);
+    let bytes = tokio::fs::read(&path)
         .await
-        .unwrap_or_else(|error| panic!("fixture copy must succeed: {error}"));
-
+        .unwrap_or_else(|error| panic!("fixture read: {error}"));
+    let mut fixture = super::catalog::decode_fixture(&bytes)
+        .unwrap_or_else(|error| panic!("complete source decodes: {error}"));
+    fixture.provider = "alpha".to_owned();
+    tokio::fs::write(
+        &path,
+        super::catalog::encode_fixture(&fixture)
+            .unwrap_or_else(|error| panic!("mutated source encodes: {error}")),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("fixture write: {error}"));
     let Err(error) = ReplayProvider::load("beta", &directory).await else {
         panic!("provider mismatch must be rejected");
     };
-    assert_eq!(error.kind, ProviderErrorKind::ReplayMiss);
+    assert_eq!(error.kind, ProviderErrorKind::Protocol);
     assert!(error.message.contains("provider"));
-
     let _ = tokio::fs::remove_dir_all(directory).await;
 }
 
