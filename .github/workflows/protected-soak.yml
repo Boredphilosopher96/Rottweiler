@@ -175,6 +175,8 @@ jobs:
             "$GITHUB_WORKSPACE/dist" \
             "$GITHUB_WORKSPACE/soak-result.json" \
             "$GITHUB_WORKSPACE/soak-baseline-result.json" \
+            "$GITHUB_WORKSPACE/packages/js-host/dist" \
+            "$GITHUB_WORKSPACE/packages/js-host/node_modules" \
             "$GITHUB_WORKSPACE/packages/tui/dist" \
             "$GITHUB_WORKSPACE/packages/tui/node_modules" \
             "$RUNNER_TEMP/native-candidate.noindex"

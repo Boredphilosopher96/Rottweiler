@@ -45,6 +45,8 @@ class RustPlatformBoundaryTests(unittest.TestCase):
         for workflow_name, job_name, consumer in [
             ("ci.yml", "test", "cargo test"),
             ("quality.yml", "rust-coverage", "cargo llvm-cov"),
+            ("quality.yml", "security-mutation", "cargo mutants"),
+            ("release.yml", "release-gate", "cargo test"),
         ]:
             workflow = yaml.safe_load((ROOT / ".github/workflows" / workflow_name).read_text())
             commands = [step.get("run", "") for step in workflow["jobs"][job_name]["steps"]]
@@ -54,3 +56,9 @@ class RustPlatformBoundaryTests(unittest.TestCase):
             self.assertTrue(consumers, workflow_name)
             self.assertTrue(all(producer < index for index in consumers), workflow_name)
             self.assertIn('"$GITHUB_ENV"', commands[producer])
+            prerequisite = next(index for index, command in enumerate(commands)
+                                if "unshare --user" in command)
+            self.assertLess(prerequisite, producer, workflow_name)
+            self.assertIn("iproute2 util-linux", commands[prerequisite])
+            self.assertIn("ROTTWEILER_REQUIRE_LINUX_SANDBOX=1", commands[prerequisite])
+            self.assertNotIn("|| true", commands[prerequisite])

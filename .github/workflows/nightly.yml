@@ -263,6 +263,8 @@ jobs:
             "$GITHUB_WORKSPACE/target" \
             "$GITHUB_WORKSPACE/dist" \
             "$GITHUB_WORKSPACE/perf-results" \
+            "$GITHUB_WORKSPACE/packages/js-host/dist" \
+            "$GITHUB_WORKSPACE/packages/js-host/node_modules" \
             "$GITHUB_WORKSPACE/packages/tui/dist" \
             "$GITHUB_WORKSPACE/packages/tui/node_modules" \
             "$RUNNER_TEMP/native-candidate.noindex"
@@ -356,6 +358,8 @@ jobs:
             "$GITHUB_WORKSPACE/target" \
             "$GITHUB_WORKSPACE/dist" \
             "$GITHUB_WORKSPACE/perf-results" \
+            "$GITHUB_WORKSPACE/packages/js-host/dist" \
+            "$GITHUB_WORKSPACE/packages/js-host/node_modules" \
             "$GITHUB_WORKSPACE/packages/tui/dist" \
             "$GITHUB_WORKSPACE/packages/tui/node_modules" \
             "$RUNNER_TEMP/native-candidates.noindex" \

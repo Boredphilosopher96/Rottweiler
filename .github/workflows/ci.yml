@@ -156,7 +156,7 @@ jobs:
           bun-version: 1.3.14
 
       - name: Frozen integration dependencies
-        run: python3 scripts/ci_evidence.py --gate frozen-install --output ci-results/install.json -- python3 scripts/ci_inventory.py install plugin-host tui --build-dependencies
+        run: python3 scripts/ci_evidence.py --gate frozen-install --output ci-results/install.json -- python3 scripts/ci_inventory.py install js-host --build-dependencies
       - run: python3 scripts/ci_evidence.py --gate fmt --output ci-results/fmt.json -- cargo fmt --all -- --check
       - run: python3 scripts/ci_evidence.py --gate clippy --output ci-results/clippy.json -- cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Build native sandbox test prerequisite
