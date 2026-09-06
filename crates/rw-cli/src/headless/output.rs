@@ -10,7 +10,6 @@ use rw_core::MessageDisposition;
 use rw_core::QuestionId;
 use rw_core::ToolOutputStream;
 use rw_core::TurnStatus;
-use rw_core::Usage;
 use rw_types::ApprovalBinding;
 use rw_types::ApprovalDecision;
 use rw_types::ToolCapability;
@@ -21,6 +20,9 @@ use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
+
+mod aggregate;
+use aggregate::PrintOutput;
 
 #[allow(clippy::too_many_lines)]
 pub(super) async fn run_print(
@@ -54,7 +56,7 @@ pub(super) async fn run_print(
         .split_whitespace()
         .next()
         .is_some_and(|name| name == "/compact");
-    let mut aggregate = PrintAggregate::new(session_id);
+    let mut aggregate = PrintOutput::new(session_id, format);
     let mut target_turn = None;
     let mut first_event = Some(first_event);
     loop {
@@ -139,7 +141,7 @@ pub(super) async fn run_print(
             )
         };
         if command_mode || target_turn.is_some() {
-            aggregate.push(event);
+            aggregate.push(event)?;
         }
         if target_finished {
             if perf_markers {
@@ -151,56 +153,7 @@ pub(super) async fn run_print(
             break;
         }
     }
-    if format == OutputFormat::Json {
-        serde_json::to_writer(io::stdout().lock(), &aggregate).into_diagnostic()?;
-        println!();
-    } else if format == OutputFormat::Text && !aggregate.text.ends_with('\n') {
-        println!();
-    }
-    Ok(aggregate.status)
-}
-
-#[derive(Serialize)]
-pub(super) struct PrintAggregate {
-    pub(super) session_id: String,
-    pub(super) status: Option<TurnStatus>,
-    pub(super) text: String,
-    pub(super) usage: Usage,
-    pub(super) events: Vec<EngineEvent>,
-}
-
-impl PrintAggregate {
-    pub(super) fn new(session_id: &str) -> Self {
-        Self {
-            session_id: session_id.to_owned(),
-            status: None,
-            text: String::new(),
-            usage: Usage {
-                input_tokens: 0,
-                output_tokens: 0,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
-                reasoning_tokens: 0,
-            },
-            events: Vec::new(),
-        }
-    }
-
-    pub(super) fn push(&mut self, event: EngineEvent) {
-        match &event {
-            EngineEvent::TextDelta { text, .. } => self.text.push_str(text),
-            EngineEvent::TurnFinished { status, usage, .. } => {
-                self.status = Some(status.clone());
-                self.usage = usage.clone();
-            }
-            EngineEvent::CommandFinished { message, .. } => {
-                self.text.push_str(message);
-                self.text.push('\n');
-            }
-            _ => {}
-        }
-        self.events.push(public_cli_event(event));
-    }
+    aggregate.finish(format)
 }
 
 pub(super) fn public_cli_event(mut event: EngineEvent) -> EngineEvent {
