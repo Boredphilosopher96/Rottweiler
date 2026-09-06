@@ -642,6 +642,35 @@ impl RuntimeWorkspaceRootController {
 }
 
 impl RuntimeWorkspaceRootController {
+    fn prepare_checkpoint_generation(
+        &self,
+        current_roots: &[PathBuf],
+        roots: &[PathBuf],
+        generation: u64,
+        effective_from_turn: u64,
+    ) -> std::result::Result<Arc<Vec<Arc<rw_store::checkpoint::CheckpointStore>>>, AgentLoopError>
+    {
+        append_checkpoint_root_generation(
+            &self.checkpoint_root,
+            current_roots,
+            roots,
+            generation,
+            effective_from_turn,
+        )
+        .map_err(|_error| {
+            AgentLoopError::Persistence("workspace generation journal could not prepare".to_owned())
+        })?;
+        match open_checkpoint_stores(&self.checkpoint_root, roots) {
+            Ok(stores) => Ok(stores),
+            Err(_error) => {
+                let _ = abort_checkpoint_root_generation(&self.checkpoint_root, generation);
+                Err(AgentLoopError::Persistence(
+                    "workspace checkpoint generation could not prepare".to_owned(),
+                ))
+            }
+        }
+    }
+
     async fn prepare_native_workspace(
         &self,
         native_owner: Option<Arc<crate::extension_runtime::RuntimeSessionExtensionController>>,
@@ -728,25 +757,12 @@ impl rw_core::WorkspaceRootController for RuntimeWorkspaceRootController {
                     })?,
             ),
         };
-        append_checkpoint_root_generation(
-            &self.checkpoint_root,
+        let stores = self.prepare_checkpoint_generation(
             current_roots,
             &prepared.roots,
             generation,
             effective_from_turn,
-        )
-        .map_err(|_error| {
-            AgentLoopError::Persistence("workspace generation journal could not prepare".to_owned())
-        })?;
-        let stores = match open_checkpoint_stores(&self.checkpoint_root, &prepared.roots) {
-            Ok(stores) => stores,
-            Err(_error) => {
-                let _ = abort_checkpoint_root_generation(&self.checkpoint_root, generation);
-                return Err(AgentLoopError::Persistence(
-                    "workspace checkpoint generation could not prepare".to_owned(),
-                ));
-            }
-        };
+        )?;
         let native = self
             .prepare_native_workspace(native_owner, &mut prepared, model_alias, generation)
             .await?;

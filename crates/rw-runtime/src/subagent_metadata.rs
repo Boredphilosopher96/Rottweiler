@@ -298,22 +298,7 @@ impl PrivateSubagentMetadataStore {
                         "unexpected file in subagent metadata directory",
                     ));
                 }
-                let metadata = fs::symlink_metadata(&path)
-                    .map_err(|error| io_error("inspect subagent metadata record", error))?;
-                if !metadata.file_type().is_file() || metadata.len() > MAX_RECORD_BYTES {
-                    return Err(session_error(
-                        "subagent metadata record is unsafe or oversized",
-                    ));
-                }
-                let mut bytes = Vec::with_capacity(metadata.len() as usize);
-                OpenOptions::new()
-                    .read(true)
-                    .open(&path)
-                    .and_then(|mut file| file.take(MAX_RECORD_BYTES + 1).read_to_end(&mut bytes))
-                    .map_err(|error| io_error("read subagent metadata record", error))?;
-                if bytes.len() as u64 > MAX_RECORD_BYTES {
-                    return Err(session_error("subagent metadata record is oversized"));
-                }
+                let bytes = read_record_portable(&path)?;
                 let charge = decode_charge(&bytes)?;
                 if allocated
                     .checked_add(charge)
@@ -592,6 +577,30 @@ fn validate_private_directory(
         )));
     }
     Ok(())
+}
+
+#[cfg(not(unix))]
+fn read_record_portable(path: &Path) -> Result<Vec<u8>, OrchestrationError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| io_error("inspect subagent metadata record", error))?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_RECORD_BYTES {
+        return Err(session_error(
+            "subagent metadata record is unsafe or oversized",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(metadata.len())
+            .map_err(|_| session_error("subagent metadata size cannot be represented"))?,
+    );
+    OpenOptions::new()
+        .read(true)
+        .open(path)
+        .and_then(|file| file.take(MAX_RECORD_BYTES + 1).read_to_end(&mut bytes))
+        .map_err(|error| io_error("read subagent metadata record", error))?;
+    if bytes.len() as u64 > MAX_RECORD_BYTES {
+        return Err(session_error("subagent metadata record is oversized"));
+    }
+    Ok(bytes)
 }
 
 fn decode_record(
