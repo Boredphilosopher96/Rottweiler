@@ -114,3 +114,43 @@ fn running_helper() -> rw_tools::SandboxHelper {
     rw_tools::SandboxHelper::from_running(&std::env::current_exe().expect("executable"))
         .expect("helper")
 }
+
+#[tokio::test]
+async fn dropping_bare_launched_process_settles_actual_child_and_proxy() {
+    let config = PluginProcessConfig::new("/bin/sh").expect("fixture config");
+    let mut command = tokio::process::Command::new("/bin/sh");
+    command
+        .args(["-c", "while :; do :; done"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    command.as_std_mut().process_group(0);
+    let child = command.spawn().expect("child");
+    let pid = child.id().expect("pid");
+    let proxy =
+        SupervisedEgressProxy::start(EgressPolicy::new(std::iter::empty::<&str>())).expect("proxy");
+    let lifecycle = proxy.lifecycle();
+    let launched = attach_supervisor(
+        child,
+        Some(proxy),
+        &config,
+        running_helper(),
+        process_fixture_lease(),
+    )
+    .await
+    .expect("handoff");
+    drop(launched);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let alive = rustix::process::Pid::from_raw(i32::try_from(pid).expect("pid range"))
+                .is_some_and(|pid| rustix::process::test_kill_process(pid).is_ok());
+            if !alive && lifecycle.is_stopped() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("destructor transfers actual effect retirement");
+}

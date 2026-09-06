@@ -1,6 +1,7 @@
 //! Production OS-sandboxed launcher for approved RPC plugins.
 
 mod proxy_settlement;
+mod retirement;
 
 use std::{
     path::{Path, PathBuf},
@@ -215,7 +216,8 @@ async fn attach_supervisor(
     let process = Arc::new(PluginChild {
         _helper: helper,
         admission: Mutex::new(Some(admission)),
-        child: Mutex::new(child),
+        settlement: tokio::sync::Mutex::new(()),
+        child: Mutex::new(Some(child)),
         process_group,
         violation: Arc::new(Mutex::new(None)),
         proxy: proxy_settlement::PluginProxy::new(proxy),
@@ -297,9 +299,10 @@ impl Drop for PendingPluginHandoff {
 }
 
 struct PluginChild {
+    settlement: tokio::sync::Mutex<()>,
     admission: Mutex<Option<rw_resources::ResourceLease>>,
     _helper: rw_tools::SandboxHelper,
-    child: Mutex<Child>,
+    child: Mutex<Option<Child>>,
     process_group: Option<u32>,
     violation: Arc<Mutex<Option<String>>>,
     proxy: proxy_settlement::PluginProxy,
@@ -307,27 +310,22 @@ struct PluginChild {
 
 impl Drop for PluginChild {
     fn drop(&mut self) {
-        // A destructor cannot establish asynchronous process-group/proxy proof.
-        if let Some(lease) = self
-            .admission
-            .get_mut()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-        {
-            std::mem::forget(lease);
-        }
-        let _ = self.kill_original_group();
-        let child = self
-            .child
-            .get_mut()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _ = child.start_kill();
+        retirement::retire_dropped(self);
     }
 }
 
 #[async_trait]
 impl SupervisedPluginProcess for PluginChild {
     async fn settle_effects(&self) -> Result<(), PluginProcessError> {
+        let _settlement = self.settlement.lock().await;
+        if self
+            .admission
+            .lock()
+            .map_err(|_| error("plugin process admission owner poisoned"))?
+            .is_none()
+        {
+            return Ok(());
+        }
         let (process, proxy) = tokio::join!(
             async {
                 self.wait_for_exit().await?;
@@ -353,12 +351,26 @@ impl SupervisedPluginProcess for PluginChild {
     }
 
     fn kill_tree(&self) -> Result<(), PluginProcessError> {
+        if self
+            .admission
+            .lock()
+            .map_err(|_| error("plugin process admission owner poisoned"))?
+            .is_none()
+        {
+            return Ok(());
+        }
         let group = self.kill_original_group();
         let child = self
             .child
             .lock()
             .map_err(|_| error("plugin child lock was poisoned"))
-            .and_then(|mut child| child.start_kill().map_err(|error| process_error(&error)));
+            .and_then(|mut child| {
+                child
+                    .as_mut()
+                    .ok_or_else(|| error("plugin child owner is unavailable"))?
+                    .start_kill()
+                    .map_err(|error| process_error(&error))
+            });
         group.and(child)
     }
 
@@ -403,6 +415,8 @@ impl PluginChild {
                 .child
                 .lock()
                 .map_err(|_| error("plugin child lock was poisoned"))?
+                .as_mut()
+                .ok_or_else(|| error("plugin child owner is unavailable"))?
                 .try_wait()
                 .map_err(|error| process_error(&error))?;
             if let Some(status) = status {
