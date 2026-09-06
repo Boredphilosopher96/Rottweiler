@@ -188,14 +188,14 @@ fn committed_words_and_structured_fields_are_searchable_across_rewinds() {
     );
     let published = index.projection("search").expect("published source");
     journal
-        .append(finish(
+        .append_batch([finish(
             17,
             2,
             "pending",
             ToolOutput::Text {
                 text: "latepoison".into(),
             },
-        ))
+        )])
         .expect("invalid source fixture");
     assert!(synchronize(root.path(), "search", &journal.read_view()).is_err());
     assert_eq!(
