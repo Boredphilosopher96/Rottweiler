@@ -31,7 +31,7 @@ pub enum WorkflowStoreError {
 pub struct WorkflowRunStore {
     directory: PathBuf,
     #[cfg(unix)]
-    _owner: crate::session::ExclusiveFileLock,
+    _owner: crate::session::AdvisoryFileLock,
     #[cfg(not(unix))]
     owner: File,
     state: WorkflowRunState,
@@ -62,7 +62,7 @@ impl WorkflowRunStore {
             .truncate(false)
             .open(directory.join("writer.lock"))?;
         #[cfg(unix)]
-        let owner = crate::session::ExclusiveFileLock::try_acquire(owner).map_err(|error| {
+        let owner = crate::session::AdvisoryFileLock::try_exclusive(owner).map_err(|error| {
             if error.kind() == std::io::ErrorKind::WouldBlock {
                 WorkflowStoreError::Busy
             } else {

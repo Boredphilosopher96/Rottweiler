@@ -405,7 +405,7 @@ pub struct SegmentedJournal {
     sealed_identity: blake3::Hash,
     next_sequence: u64,
     poisoned: bool,
-    _writer_lock: super::exclusive_lock::ExclusiveFileLock,
+    _writer_lock: super::file_lock::AdvisoryFileLock,
 }
 
 /// Immutable logical prefix; later append/rotation cannot change its tail.
@@ -483,7 +483,7 @@ impl SegmentedJournal {
     pub fn open(root: &Path, session_id: &str) -> Result<Self, SessionStoreError> {
         let directory = Arc::new(Directory::open(root, session_id, true)?);
         let writer_lock = directory.file("writer.lock", true, true)?;
-        let writer_lock = super::exclusive_lock::ExclusiveFileLock::try_acquire(writer_lock)?;
+        let writer_lock = super::file_lock::AdvisoryFileLock::try_exclusive(writer_lock)?;
         let segments = Arc::new(SegmentCatalog::from_segments(directory.catalog()?));
         let segment_count = segments.len();
         let active_first = segment_count
@@ -731,8 +731,9 @@ impl JournalReadView {
     /// Captures an existing offline journal without modifying it.
     ///
     /// A live owner must supply its own [`SegmentedJournal::read_view`]. Taking
-    /// the ownership lock prevents mistaking written but unsynchronized active
-    /// records for an acknowledged tail. The lock is released after capture.
+    /// a shared capture lock excludes writers while allowing independent readers.
+    /// This prevents mistaking unsynchronized active records for an acknowledged
+    /// tail. The lock is released after catalog and active-prefix capture.
     ///
     /// # Errors
     /// Rejects a live writer, unsafe files, corrupt complete records, or an
@@ -752,7 +753,8 @@ impl JournalReadView {
             Err(error) => return Err(error),
         };
         let ownership = directory.file("writer.lock", false, false)?;
-        let _ownership = super::exclusive_lock::ExclusiveFileLock::try_acquire(ownership)?;
+        // Offline readers share capture ownership; every writer remains exclusive.
+        let _ownership = super::file_lock::AdvisoryFileLock::try_shared(ownership)?;
         let segments = Arc::new(SegmentCatalog::from_segments(directory.catalog()?));
         let segment_count = segments.len();
         let active = Arc::new(directory.file("active.jsonl", false, false)?);

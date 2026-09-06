@@ -15,7 +15,12 @@ const treeSitter = new MockTreeSitterClient({ autoResolveTimeout: 0 })
 treeSitter.setMockResult({ highlights: [] })
 const runtime = await createEngineRuntimeFromEnvironment()
 if (runtime === null) throw new Error("replay CLI worker requires an engine runtime")
-const app = createRottweilerApp(setup.renderer, { sessionReader: runtime.sessionReader, allocations: runtime.allocations,
+let taskReadError: unknown = null
+const sessionReader = { ...runtime.sessionReader, todos: async (...args: Parameters<typeof runtime.sessionReader.todos>) => {
+  try { return await runtime.sessionReader.todos(...args) }
+  catch (error) { taskReadError = error; throw error }
+} }
+const app = createRottweilerApp(setup.renderer, { sessionReader, allocations: runtime.allocations,
   sessionId,
   replaySessionId: sessionId,
   treeSitterClient: treeSitter,
@@ -27,6 +32,8 @@ const running = runtime.start()
 
 try {
   await waitFor(() => app.state.historyReady !== null && app.transcript.mountedEntryCount === 4)
+  await waitFor(() => app.state.todos.phase === "ready" || app.state.todos.phase === "failed")
+  if (app.state.todos.phase === "failed") throw new Error("historical task snapshot failed", { cause: taskReadError })
   await setup.renderOnce()
   await waitFor(() => treeSitter.isHighlighting() === false)
   await setup.flush()

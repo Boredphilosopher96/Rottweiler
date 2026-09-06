@@ -5,9 +5,9 @@ mod derived_database;
 mod error;
 mod event_log;
 #[cfg(unix)]
-mod exclusive_lock;
+mod file_lock;
 #[cfg(unix)]
-pub(crate) use exclusive_lock::ExclusiveFileLock;
+pub(crate) use file_lock::AdvisoryFileLock;
 mod index;
 mod index_read;
 /// Segmented journal storage and bounded read views.

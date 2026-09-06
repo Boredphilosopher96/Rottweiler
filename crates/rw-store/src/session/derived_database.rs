@@ -1,6 +1,6 @@
 //! Descriptor-owned derived database machinery shared by semantic projections.
 
-use super::exclusive_lock::ExclusiveFileLock;
+use super::file_lock::AdvisoryFileLock;
 use super::{journal::JournalReadView, sync_event_file};
 use redb::{Database, StorageBackend};
 use std::{
@@ -30,7 +30,7 @@ pub(crate) enum DerivedDatabaseError {
 pub(crate) struct DerivedDatabase {
     pub(crate) database: Database,
     pub(crate) directory: File,
-    pub(crate) lock: ExclusiveFileLock,
+    pub(crate) lock: AdvisoryFileLock,
     pub(crate) counters: Arc<IoCounters>,
     pub(crate) was_empty: bool,
 }
@@ -55,7 +55,7 @@ impl DerivedDatabase {
         }
         let directory = view.derived_directory()?;
         let lock = open_file(&directory, &format!("{name}.lock"))?;
-        let lock = ExclusiveFileLock::try_acquire(lock).map_err(|error| {
+        let lock = AdvisoryFileLock::try_exclusive(lock).map_err(|error| {
             if error.kind() == io::ErrorKind::WouldBlock {
                 DerivedDatabaseError::Busy
             } else {

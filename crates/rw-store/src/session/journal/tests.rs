@@ -302,6 +302,57 @@ fn offline_views_capture_only_unowned_journals_and_release_ownership_before_read
 }
 
 #[test]
+fn overlapping_offline_captures_share_read_ownership_and_exclude_writers() {
+    use crate::session::AdvisoryFileLock;
+
+    let root = tempdir().expect("root");
+    let mut journal = SegmentedJournal::open(root.path(), "overlap").expect("journal");
+    journal.append_batch([json!("committed")]).expect("append");
+    let identity = journal.read_view().prefix_identity();
+    drop(journal);
+    let directory = Directory::open(root.path(), "overlap", false).expect("directory");
+    let first = AdvisoryFileLock::try_shared(
+        directory
+            .file("writer.lock", false, false)
+            .expect("first descriptor"),
+    )
+    .expect("first reader starts capture");
+    let inherited = first
+        .descriptor()
+        .try_clone()
+        .expect("inherited description");
+    let second = AdvisoryFileLock::try_shared(
+        directory
+            .file("writer.lock", false, false)
+            .expect("second descriptor"),
+    )
+    .expect("independent reader starts capture");
+    let view = JournalReadView::open_existing(root.path(), "overlap")
+        .expect("offline capture must not reject another reader")
+        .expect("journal exists");
+    assert_eq!(view.prefix_identity(), identity);
+    assert!(SegmentedJournal::open(root.path(), "overlap").is_err());
+    drop(first);
+    assert!(
+        SegmentedJournal::open(root.path(), "overlap").is_err(),
+        "independent reader still excludes every writer"
+    );
+    drop(second);
+    let writer = SegmentedJournal::open(root.path(), "overlap")
+        .expect("logical reader settlement releases inherited description");
+    assert!(
+        JournalReadView::open_existing(root.path(), "overlap").is_err(),
+        "offline capture never observes an active writer's unsynchronized prefix"
+    );
+    assert_eq!(
+        view.verify_all().expect("captured immutable prefix").events,
+        1
+    );
+    drop(inherited);
+    drop(writer);
+}
+
+#[test]
 fn historical_prefix_reopens_after_growth_rotation_and_writer_restart() {
     let root = tempdir().expect("root");
     let mut journal = SegmentedJournal::open(root.path(), "historical").expect("journal");
