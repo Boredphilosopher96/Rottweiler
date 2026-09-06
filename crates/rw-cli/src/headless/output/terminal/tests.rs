@@ -340,9 +340,14 @@ async fn output_only_caller_loss_retains_slot_until_wake_and_restores_shared_fla
         .expect("settle");
     assert_eq!(terminal.output_slot.available_permits(), 1);
     assert_eq!(active.available_permits(), 1);
+    // Writes may set kernel bookkeeping bits. The owned status flags must
+    // return to their original values, including the shared nonblocking mode.
+    let status = rustix::fs::OFlags::NONBLOCK
+        | rustix::fs::OFlags::APPEND
+        | rustix::fs::OFlags::ACCMODE;
     assert_eq!(
-        rustix::fs::fcntl_getfl(&stdout).expect("restored flags"),
-        flags
+        rustix::fs::fcntl_getfl(&stdout).expect("restored flags") & status,
+        flags & status
     );
 }
 
