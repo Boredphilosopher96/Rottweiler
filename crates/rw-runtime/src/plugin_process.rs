@@ -67,10 +67,14 @@ impl PluginLauncher for SandboxedPluginLauncher {
         config: &PluginProcessConfig,
         profile: &PluginSandboxProfile,
     ) -> Result<LaunchedPluginProcess, PluginLaunchError> {
+        let waiting = std::time::Instant::now();
+        tracing::debug!(target: "rw_performance", stage = "plugin.process_admission", phase = "queued");
         let admission =
             rw_resources::acquire(rw_resources::ResourceClass::Process, std::future::pending())
                 .await
                 .map_err(|failure| PluginLaunchError::Rejected(error(&failure.to_string())))?;
+        tracing::debug!(target: "rw_performance", stage = "plugin.process_admission", phase = "admitted",
+            admission_ms = waiting.elapsed().as_secs_f64() * 1000.0);
         let owned_config = config.clone();
         let profile = profile.clone();
         let scratch = self.scratch.clone();
@@ -94,14 +98,22 @@ async fn handoff_in_worker(
     let runtime = tokio::runtime::Handle::current();
     // The physical worker owns admission, helper bytes and the complete
     // handoff. Caller cancellation cannot discard a raw spawned child.
+    let waiting = std::time::Instant::now();
+    tracing::debug!(target: "rw_performance", stage = "plugin.verify_and_spawn", phase = "queued");
     rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+        tracing::debug!(target: "rw_performance", stage = "plugin.verify_and_spawn", phase = "admitted",
+            admission_ms = waiting.elapsed().as_secs_f64() * 1000.0);
         let started = std::time::Instant::now();
         let result = spawn();
         tracing::debug!(target: "rw_performance", stage = "plugin.verify_and_spawn",
             elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
             succeeded = result.is_ok(), "plugin activation stage finished");
         let (child, proxy) = result?;
-        runtime.block_on(attach_supervisor(child, proxy, &config, helper, admission))
+        let started = std::time::Instant::now();
+        let result = runtime.block_on(attach_supervisor(child, proxy, &config, helper, admission));
+        tracing::debug!(target: "rw_performance", stage = "plugin.handoff",
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0, succeeded = result.is_ok());
+        result
     })
     .await
     .map_err(|failure| match failure {

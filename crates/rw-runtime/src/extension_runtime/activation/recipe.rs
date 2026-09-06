@@ -67,28 +67,7 @@ pub(super) async fn activate(
     deadline: Instant,
 ) -> Result<Arc<PluginHost>, PluginRpcError> {
     let recipe = &generation.recipe;
-    let mut lease = generation
-        .resources
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .lease
-        .take()
-        .ok_or_else(|| unsettled("plugin activation admission is absent"))?;
-    // This lease owns only semaphore reservations while waiting. No native work
-    // starts before it is returned to the retained generation resource owner.
-    let reservation = recipe
-        .budget
-        .reserve_process(&mut lease, &generation.cancellation, deadline)
-        .await;
-    generation
-        .resources
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .lease = Some(lease);
-    reservation?;
-    if generation.cancellation.is_cancelled() {
-        return Err(cancelled());
-    }
+    reserve_activation(generation, deadline).await?;
     let owner = Arc::clone(generation);
     let (scratch, launcher) = blocking_stage("plugin.launch_authority", move || {
         let scratch = Arc::new(PrivateMcpScratch::create().map_err(diagnostic)?);
@@ -159,6 +138,42 @@ pub(super) async fn activate(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .host = Some(Arc::clone(&host));
     Ok(host)
+}
+
+async fn reserve_activation(
+    generation: &Arc<Generation>,
+    deadline: Instant,
+) -> Result<(), PluginRpcError> {
+    let recipe = &generation.recipe;
+    let mut lease = generation
+        .resources
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .lease
+        .take()
+        .ok_or_else(|| unsettled("plugin activation admission is absent"))?;
+    // This lease owns only semaphore reservations while waiting. No native work
+    // starts before it is returned to the retained generation resource owner.
+    let waiting = std::time::Instant::now();
+    tracing::debug!(target: "rw_performance", stage = "plugin.local_admission", phase = "queued",
+        plugin = %recipe.metadata.manifest().name);
+    let reservation = recipe
+        .budget
+        .reserve_process(&mut lease, &generation.cancellation, deadline)
+        .await;
+    generation
+        .resources
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .lease = Some(lease);
+    tracing::debug!(target: "rw_performance", stage = "plugin.local_admission", phase = "completed",
+        plugin = %recipe.metadata.manifest().name, succeeded = reservation.is_ok(),
+        admission_ms = waiting.elapsed().as_secs_f64() * 1000.0);
+    reservation?;
+    if generation.cancellation.is_cancelled() {
+        return Err(cancelled());
+    }
+    Ok(())
 }
 
 fn provider_http(
@@ -352,6 +367,7 @@ async fn blocking_stage<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, PluginRpcError> + Send + 'static,
 ) -> Result<T, PluginRpcError> {
     let waiting = std::time::Instant::now();
+    tracing::debug!(target: "rw_performance", stage, phase = "queued");
     rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
         tracing::debug!(target: "rw_performance", stage,
             admission_ms = waiting.elapsed().as_secs_f64() * 1000.0,

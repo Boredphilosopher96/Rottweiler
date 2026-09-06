@@ -66,6 +66,7 @@ pub(super) async fn configure_plugin(
     fixture: &str,
     allowed_domains: &[&str],
 ) {
+    tracing::debug!(target: "rw_performance", stage = "plugin.fixture", phase = "configure", fixture);
     let package = workspace.join("fixture");
     std::fs::create_dir(&package).expect("package");
     let (bun, manifest) = bundle_fixture(&package, fixture).await;

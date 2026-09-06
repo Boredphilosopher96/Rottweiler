@@ -156,8 +156,9 @@ impl PluginHost {
         })
         .map_err(|error| PluginHostError::Rpc(rpc_error("invalid_request", &error.to_string())))?;
         let started = std::time::Instant::now();
+        tracing::debug!(target: "rw_performance", stage = "plugin.initialize", phase = "begin", plugin = %expected_manifest.name);
         let result = client.request(METHOD_INITIALIZE, initialize).await;
-        tracing::debug!(target: "rw_performance", stage = "plugin.initialize",
+        tracing::debug!(target: "rw_performance", stage = "plugin.initialize", plugin = %expected_manifest.name,
             elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
             succeeded = result.is_ok(), "plugin activation stage finished");
         let initialized: PluginManifest = match result.and_then(|value| {
@@ -359,7 +360,11 @@ async fn verify_approved_launch(
     let verified_manifest = expected_manifest.clone();
     let verified_origin = origin.to_owned();
     let verified_roots = approved_roots.to_vec();
+    let waiting = std::time::Instant::now();
+    tracing::debug!(target: "rw_performance", stage = "plugin.approval_verification", phase = "queued", plugin = %expected_manifest.name);
     rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+        tracing::debug!(target: "rw_performance", stage = "plugin.approval_verification", phase = "admitted",
+            plugin = %verified_manifest.name, admission_ms = waiting.elapsed().as_secs_f64() * 1000.0);
         let started = std::time::Instant::now();
         let result = prepare_approved_launch(
             store.as_ref(),
@@ -368,7 +373,7 @@ async fn verify_approved_launch(
             &verified_roots,
             &verified_manifest,
         );
-        tracing::debug!(target: "rw_performance", stage = "plugin.approval_verification",
+        tracing::debug!(target: "rw_performance", stage = "plugin.approval_verification", plugin = %verified_manifest.name,
                     elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
                     succeeded = result.is_ok(), "plugin activation stage finished");
         result
