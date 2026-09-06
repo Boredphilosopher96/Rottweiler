@@ -241,6 +241,7 @@ pub async fn provider_reachability_probe(
         })?;
         headers.append(name, value);
     }
+    let _network_lease = network_admission()?;
     client
         .head(request.url)
         .headers(headers)
@@ -336,6 +337,7 @@ pub async fn guarded_http_request(
         })?;
         headers.append(name, value);
     }
+    let _network_lease = crate::http::network_admission()?;
     let response = client
         .request(method, request.url)
         .headers(headers)
@@ -419,7 +421,10 @@ pub async fn guarded_http_request(
         status,
         final_url,
         headers: response_headers,
-        body: Box::pin(stream),
+        body: Box::pin(stream.map(move |item| {
+            let _ = &_network_lease;
+            item
+        })),
     })
 }
 
@@ -652,6 +657,7 @@ pub async fn guarded_http_fetch(
         })?;
         headers.insert(name, value);
     }
+    let _network_lease = crate::http::network_admission()?;
     let response = client
         .get(request.url)
         .headers(headers)
@@ -1078,4 +1084,11 @@ mod tests {
         server.await.expect("server task");
         assert_eq!(response.body, b"ok");
     }
+}
+
+/// Local capacity rejection is distinct from provider failure and never authorizes failover.
+pub(crate) fn network_admission() -> Result<rw_resources::ResourceLease, ProviderError> {
+    rw_resources::try_acquire(rw_resources::ResourceClass::Network).map_err(|error| {
+        ProviderError::new(ProviderErrorKind::ResourceExhausted, error.to_string())
+    })
 }

@@ -446,6 +446,7 @@ impl GitHubDeviceFlowTransport for ReqwestGitHubDeviceFlowTransport {
         user_agent: &str,
     ) -> Result<GitHubCopilotDeviceAuthorization, ProviderError> {
         require_process_network()?;
+        let _network_lease = crate::http::network_admission()?;
         let response = self
             .client
             .post(self.device_code_endpoint.clone())
@@ -487,6 +488,7 @@ impl GitHubDeviceFlowTransport for ReqwestGitHubDeviceFlowTransport {
         user_agent: &str,
     ) -> Result<GitHubDevicePoll, ProviderError> {
         require_process_network()?;
+        let _network_lease = crate::http::network_admission()?;
         let response = self
             .client
             .post(self.access_token_endpoint.clone())

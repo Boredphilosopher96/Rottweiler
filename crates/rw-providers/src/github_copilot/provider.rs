@@ -144,6 +144,7 @@ impl GitHubCopilotRuntime {
     async fn fetch_catalog(&self) -> Result<GitHubCopilotCatalog, ProviderError> {
         require_network(self.network_policy)?;
         let endpoint = self.endpoint("models")?;
+        let _network_lease = crate::http::network_admission()?;
         let response = self
             .client
             .get(endpoint)

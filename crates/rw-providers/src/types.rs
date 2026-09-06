@@ -451,6 +451,8 @@ pub enum ProviderEvent {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderErrorKind {
+    /// Local physical execution capacity was exhausted before dispatch; never fail over.
+    ResourceExhausted,
     /// Local effects or their accounting could not be proven settled; never retry.
     EffectsUnsettled,
     /// Missing or rejected credentials.

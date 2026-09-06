@@ -75,6 +75,7 @@ pub async fn refresh_models_dev_with_proxy_auth(
         .resolve_global(&source)
         .map(|resolution| resolution.url);
     let client = build_client_with_proxy_auth(proxy.as_ref(), proxy_authentication)?;
+    let _network_lease = crate::http::network_admission()?;
     let response = client
         .get(source.clone())
         .send()

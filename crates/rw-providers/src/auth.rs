@@ -759,6 +759,7 @@ impl OAuthLoginSession {
         ];
         form.extend(self.extra_token_parameters);
         crate::http::require_process_network()?;
+        let _network_lease = crate::http::network_admission()?;
         let response = self
             .client
             .post(self.token_endpoint)
@@ -1263,6 +1264,7 @@ impl AuthProvider for RefreshingOAuth {
         }
 
         crate::http::require_process_network()?;
+        let _network_lease = crate::http::network_admission()?;
         let response = self
             .client
             .post(self.config.token_endpoint.clone())

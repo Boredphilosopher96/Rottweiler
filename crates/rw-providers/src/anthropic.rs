@@ -99,6 +99,7 @@ impl AnthropicProvider {
         material.apply_anthropic(&mut headers)?;
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+        let _network_lease = crate::http::network_admission()?;
         let response = self
             .client
             .post(self.config.endpoint.clone())
@@ -116,6 +117,7 @@ impl AnthropicProvider {
         }
         let chunks = response.bytes_stream();
         let stream = async_stream::try_stream! {
+            let _network_owner = _network_lease;
             let mut chunks = chunks;
             let mut decoder = SseDecoder::default();
             let mut state = AnthropicState::default();
@@ -167,6 +169,7 @@ impl AnthropicProvider {
                     query.append_pair("after_id", cursor);
                 }
             }
+            let _network_lease = crate::http::network_admission()?;
             let response = self
                 .client
                 .get(page_endpoint)
@@ -788,6 +791,7 @@ fn anthropic_stream_error(value: &Value) -> ProviderError {
         }
     };
     let message = match kind {
+        ProviderErrorKind::ResourceExhausted => "local network capacity is exhausted",
         ProviderErrorKind::EffectsUnsettled => "provider effects remain unsettled",
         ProviderErrorKind::ContextOverflow => "Anthropic context window exceeded",
         ProviderErrorKind::Authentication => "Anthropic authentication error",

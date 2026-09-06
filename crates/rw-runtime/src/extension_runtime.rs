@@ -109,6 +109,9 @@ impl Drop for PrivateMcpScratch {
 fn plugin_http_guard_error(error: &rw_providers::GuardedHttpFetchError) -> PluginRpcError {
     let code = match &error {
         rw_providers::GuardedHttpFetchError::Provider(error) => match error.kind {
+            rw_providers::ProviderErrorKind::ResourceExhausted => {
+                "provider_http_resource_exhausted"
+            }
             rw_providers::ProviderErrorKind::EffectsUnsettled => "effects_unsettled",
             rw_providers::ProviderErrorKind::Authentication => "provider_http_authentication",
             rw_providers::ProviderErrorKind::RateLimited => "provider_http_rate_limited",
