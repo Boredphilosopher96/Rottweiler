@@ -100,3 +100,20 @@ fn profile_decoding_requires_the_complete_contract_and_admits_structure_first() 
     let deeply_nested = format!("{}0{}", "[".repeat(33), "]".repeat(33));
     assert!(admit_profile(deeply_nested.as_bytes()).is_err());
 }
+
+#[test]
+fn encoded_profile_writer_bounds_capacity_across_large_incremental_writes() {
+    use std::io::Write as _;
+    let limit = rw_store::prompt_shapes::MAX_PROFILE_BYTES;
+    let mut writer = super::BoundedWriter(Vec::new());
+    writer
+        .write_all(&vec![b'a'; limit * 3 / 4])
+        .expect("first chunk");
+    writer
+        .write_all(&vec![b'b'; limit / 4])
+        .expect("second chunk");
+    assert_eq!(writer.0.len(), limit);
+    assert!(writer.0.capacity() <= limit);
+    assert!(writer.write_all(b"overflow").is_err());
+    assert!(writer.0.capacity() <= limit);
+}

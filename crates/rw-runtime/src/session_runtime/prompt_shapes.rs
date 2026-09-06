@@ -277,6 +277,15 @@ impl Write for BoundedWriter {
         if self.0.len().saturating_add(bytes.len()) > rw_store::prompt_shapes::MAX_PROFILE_BYTES {
             return Err(io::Error::other("prompt shape exceeds encoded admission"));
         }
+        let needed = self.0.len() + bytes.len();
+        if needed > self.0.capacity() {
+            let capacity = needed
+                .next_power_of_two()
+                .min(rw_store::prompt_shapes::MAX_PROFILE_BYTES);
+            self.0
+                .try_reserve_exact(capacity - self.0.len())
+                .map_err(io::Error::other)?;
+        }
         self.0.extend_from_slice(bytes);
         Ok(bytes.len())
     }
