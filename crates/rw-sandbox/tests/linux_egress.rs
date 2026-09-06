@@ -793,9 +793,12 @@ fn test_helper_command(policy: &SandboxPolicy, program: &Path, args: &[OsString]
         "--pid",
         "--fork",
         "--kill-child",
-        "--",
     ]);
+    if matches!(policy.network(), NetworkPolicy::PolicyProxy { .. }) {
+        command.arg("--keep-caps");
+    }
     command
+        .arg("--")
         .arg(env!("CARGO_BIN_EXE_rw-sandbox-helper"))
         .arg(rw_sandbox::HELPER_ARG)
         .arg(serde_json::to_string(policy).expect("serialize policy"))

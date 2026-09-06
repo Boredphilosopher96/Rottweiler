@@ -1,3 +1,5 @@
+mod authority;
+mod loopback;
 mod preparation;
 pub(super) mod process_creation;
 
@@ -27,8 +29,8 @@ use seccompiler::{
 };
 
 use super::{
-    NetworkPolicy, OsString, RootKind, SandboxError, SandboxPolicy, audited_linux_tool,
-    sensitive_home_roots, serde_json,
+    NetworkPolicy, OsString, RootKind, SandboxError, SandboxPolicy, sensitive_home_roots,
+    serde_json,
 };
 
 /// Linux's default shell runtime roots. These are deliberately explicit:
@@ -141,7 +143,8 @@ fn run_proxy_helper(
     }
     rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
         .map_err(sandbox_backend)?;
-    raise_loopback()?;
+    loopback::raise()?;
+    authority::lock_setup_authority()?;
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).map_err(SandboxError::Proxy)?;
     listener
         .set_nonblocking(true)
@@ -173,25 +176,6 @@ fn run_proxy_helper(
         std::process::exit(code);
     }
     std::process::exit(128 + status.signal().unwrap_or(1));
-}
-
-fn raise_loopback() -> Result<(), SandboxError> {
-    let ip = audited_linux_tool(&["/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip"]).ok_or_else(|| {
-        SandboxError::Unavailable(
-            "Linux policy egress requires a trusted iproute2 executable".to_owned(),
-        )
-    })?;
-    let status = Command::new(ip)
-        .args(["link", "set", "dev", "lo", "up"])
-        .env_clear()
-        .status()
-        .map_err(SandboxError::Exec)?;
-    if !status.success() {
-        return Err(SandboxError::Unavailable(
-            "Linux network namespace loopback setup failed".to_owned(),
-        ));
-    }
-    Ok(())
 }
 
 fn serve_namespace_relay(listener: &TcpListener, relay_path: &Path, running: &Arc<AtomicBool>) {

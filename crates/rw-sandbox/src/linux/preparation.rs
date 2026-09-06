@@ -3,9 +3,7 @@
 use super::{command_without_helper_pin, install_landlock, install_network_floor, sandbox_backend};
 use crate::{NetworkPolicy, PreparationFilesystem, SandboxError, SandboxPolicy, preparation::Root};
 use rustix::mount::{MountFlags, mount, mount_bind, mount_remount};
-use seccompiler::{BpfProgram, SeccompAction, SeccompFilter};
 use std::{
-    collections::BTreeMap,
     ffi::{OsStr, OsString},
     fs::{self, File, OpenOptions},
     os::{
@@ -108,7 +106,7 @@ pub(super) fn run(
     install_landlock(&projected, &executable_path)?;
     install_network_floor(false)?;
     super::process_creation::restrict_if_requested(policy)?;
-    lock_mount_authority()?;
+    super::authority::lock_setup_authority()?;
     let mut command = command_without_helper_pin(&executable_path, &args, helper_pin)?;
     command
         .current_dir("/plugin")
@@ -278,53 +276,4 @@ fn open_path(path: &Path) -> Result<File, SandboxError> {
 }
 fn fd_path(file: &File) -> PathBuf {
     PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()))
-}
-fn lock_mount_authority() -> Result<(), SandboxError> {
-    use rustix::thread::{CapabilitiesSecureBits as Bits, CapabilitySet, CapabilitySets};
-    rustix::thread::clear_ambient_capability_set().map_err(sandbox_backend)?;
-    rustix::thread::set_capabilities_secure_bits(
-        Bits::NO_ROOT
-            | Bits::NO_ROOT_LOCKED
-            | Bits::NO_CAP_AMBIENT_RAISE
-            | Bits::NO_CAP_AMBIENT_RAISE_LOCKED
-            | Bits::KEEP_CAPS_LOCKED,
-    )
-    .map_err(sandbox_backend)?;
-    rustix::thread::set_capabilities(
-        None,
-        CapabilitySets {
-            effective: CapabilitySet::empty(),
-            permitted: CapabilitySet::empty(),
-            inheritable: CapabilitySet::empty(),
-        },
-    )
-    .map_err(sandbox_backend)?;
-    let denied = [
-        libc::SYS_mount,
-        libc::SYS_umount2,
-        libc::SYS_chroot,
-        libc::SYS_pivot_root,
-        libc::SYS_setns,
-        libc::SYS_unshare,
-        libc::SYS_open_by_handle_at,
-        libc::SYS_fsopen,
-        libc::SYS_fsconfig,
-        libc::SYS_fsmount,
-        libc::SYS_move_mount,
-        libc::SYS_open_tree,
-        libc::SYS_mount_setattr,
-    ]
-    .into_iter()
-    .map(|syscall| (syscall, Vec::new()))
-    .collect::<BTreeMap<_, _>>();
-    let filter: BpfProgram = SeccompFilter::new(
-        denied,
-        SeccompAction::Allow,
-        SeccompAction::Errno(u32::try_from(libc::EPERM).map_err(sandbox_backend)?),
-        std::env::consts::ARCH.try_into().map_err(sandbox_backend)?,
-    )
-    .map_err(sandbox_backend)?
-    .try_into()
-    .map_err(sandbox_backend)?;
-    seccompiler::apply_filter(&filter).map_err(sandbox_backend)
 }

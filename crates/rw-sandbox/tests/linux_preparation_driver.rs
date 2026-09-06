@@ -8,30 +8,23 @@ mod linux {
     };
     use std::{ffi::OsString, fs, path::Path, process::Command};
     pub(super) fn run() {
+        let mut arguments = std::env::args_os().skip(1);
+        if arguments.next().as_deref() == Some(std::ffi::OsStr::new("--mount-fixture")) {
+            use std::os::unix::process::CommandExt as _;
+            nested_mount();
+            let program = arguments.next().expect("prepared launch program");
+            panic!(
+                "nested fixture exec: {}",
+                Command::new(program).args(arguments).exec()
+            );
+        }
         if maybe_run_helper(std::env::args_os()).expect("sandbox helper dispatch") {
             unreachable!("sandbox helper replaces the process")
         }
         if std::env::var_os("RW_PREPARATION_DRIVER_CHILD").is_none() {
-            if std::env::var_os("RW_PREPARATION_SUBMOUNT").is_some() {
-                nested_mount();
-                fixture();
-            } else {
-                fixture();
-                if probe().support == SandboxSupport::Enforced {
-                    let status = Command::new("unshare")
-                        .args([
-                            "--user",
-                            "--map-root-user",
-                            "--mount",
-                            "--propagation",
-                            "private",
-                        ])
-                        .arg(std::env::current_exe().expect("driver"))
-                        .env("RW_PREPARATION_SUBMOUNT", "1")
-                        .status()
-                        .expect("nested mount driver");
-                    assert!(status.success(), "inherited submount view failed: {status}");
-                }
+            fixture(false);
+            if probe().support == SandboxSupport::Enforced {
+                fixture(true);
             }
             return;
         }
@@ -81,10 +74,30 @@ mod linux {
             &args,
         )
         .expect("view launch plan");
-        let status = Command::new(&plan.program)
-            .args(&plan.args)
-            .status()
-            .expect("sandbox process");
+        let mut command = if std::env::var_os("RW_PREPARATION_SUBMOUNT").is_some() {
+            // Resolve and validate the complete production plan in the original
+            // user namespace, where OS-owned binaries have their real UIDs.
+            // The outer namespace only installs the inherited mount fixture.
+            let mut wrapper = Command::new(&plan.program);
+            wrapper
+                .args([
+                    "--user",
+                    "--map-root-user",
+                    "--mount",
+                    "--propagation",
+                    "private",
+                ])
+                .arg(&helper)
+                .arg("--mount-fixture")
+                .arg(&plan.program)
+                .args(&plan.args);
+            wrapper
+        } else {
+            let mut command = Command::new(&plan.program);
+            command.args(&plan.args);
+            command
+        };
+        let status = command.status().expect("sandbox process");
         assert!(status.success(), "source view failed: {status}");
         compiler(&root, &helper);
         replacement_is_rejected(&root, &helper);
@@ -103,7 +116,7 @@ mod linux {
         fs::write("/usr/local/share/rw-preparation-sentinel", "inherited")
             .expect("nested mount sentinel");
     }
-    fn fixture() {
+    fn fixture(nested: bool) {
         let capability = probe();
         if capability.support != SandboxSupport::Enforced {
             assert!(
@@ -127,11 +140,14 @@ mod linux {
         fs::create_dir(home.join(".ssh")).expect("credential directory");
         fs::write(home.join(".ssh/secret"), "must remain private").expect("secret");
         std::os::unix::fs::symlink(".ssh", home.join("alias")).expect("credential alias");
-        let status = Command::new(std::env::current_exe().expect("driver"))
+        let mut command = Command::new(std::env::current_exe().expect("driver"));
+        command
             .env("RW_PREPARATION_DRIVER_CHILD", root.path())
-            .env("HOME", home)
-            .status()
-            .expect("view driver");
+            .env("HOME", home);
+        if nested {
+            command.env("RW_PREPARATION_SUBMOUNT", "1");
+        }
+        let status = command.status().expect("view driver");
         assert!(status.success(), "preparation driver failed: {status}");
         assert_eq!(
             fs::read(root.path().join("output/result")).expect("published result"),

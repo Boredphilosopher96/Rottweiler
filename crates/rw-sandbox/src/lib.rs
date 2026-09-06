@@ -651,6 +651,7 @@ pub fn probe_policy_egress() -> SandboxCapability {
             .args([
                 "--user",
                 "--map-current-user",
+                "--keep-caps",
                 "--net",
                 "--pid",
                 "--fork",
@@ -738,7 +739,7 @@ pub fn shell_launch_plan(
             let unshare = audited_linux_tool(&["/usr/bin/unshare"])
                 .ok_or(SandboxError::PolicyProxyUnavailable)?;
             let mut unshare_args =
-                linux_namespace_args(&helper_executable, policy.preparation.is_some());
+                linux_namespace_args(&helper_executable, policy.preparation.is_some(), true);
             unshare_args.extend(args);
             return Ok(LaunchPlan {
                 program: unshare,
@@ -752,7 +753,7 @@ pub fn shell_launch_plan(
             SandboxError::Unavailable("trusted /usr/bin/unshare is unavailable".to_owned())
         })?;
         let mut unshare_args =
-            linux_namespace_args(&helper_executable, policy.preparation.is_some());
+            linux_namespace_args(&helper_executable, policy.preparation.is_some(), false);
         unshare_args.extend(args);
         Ok(LaunchPlan {
             program: unshare,
@@ -774,7 +775,7 @@ pub fn shell_launch_plan(
 }
 
 #[cfg(target_os = "linux")]
-fn linux_namespace_args(helper: &Path, preparation: bool) -> Vec<OsString> {
+fn linux_namespace_args(helper: &Path, preparation: bool, proxy: bool) -> Vec<OsString> {
     let mut args = vec![
         OsString::from("--user"),
         OsString::from(if preparation {
@@ -787,6 +788,9 @@ fn linux_namespace_args(helper: &Path, preparation: bool) -> Vec<OsString> {
         OsString::from("--fork"),
         OsString::from("--kill-child"),
     ];
+    if proxy {
+        args.push(OsString::from("--keep-caps"));
+    }
     if preparation {
         args.extend(["--mount", "--propagation", "private"].map(OsString::from));
     }

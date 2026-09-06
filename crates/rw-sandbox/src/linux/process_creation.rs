@@ -73,6 +73,7 @@ pub(crate) fn run_worker(args: &[OsString]) -> Result<std::convert::Infallible, 
         return Err(SandboxError::MalformedHelper);
     }
     let helper_pin = inherited_helper_pin(args)?;
+    super::authority::lock_setup_authority()?;
     install_landlock(&policy, &args[3])?;
     install_network_floor(true)?;
     restrict_if_requested(&policy)?;

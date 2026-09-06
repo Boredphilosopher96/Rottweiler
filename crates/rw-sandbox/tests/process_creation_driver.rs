@@ -46,11 +46,16 @@ fn main() {
             relay_path: proxy.relay_path().map(std::path::Path::to_path_buf),
         },
     ] {
+        let proxy_mode = matches!(network, NetworkPolicy::PolicyProxy { .. });
         let policy = SandboxPolicy::new([workspace.path()], network)
             .expect("policy")
             .without_process_creation();
         let executable = std::env::current_exe().expect("executable");
-        let args = [OsString::from("--probe-child")];
+        let args = [
+            OsString::from("--probe-child"),
+            OsString::from(if proxy_mode { "proxy" } else { "deny" }),
+            OsString::from(rustix::process::getuid().as_raw().to_string()),
+        ];
         let plan =
             shell_launch_plan(&policy, &common::helper(), &executable, &args).expect("launch plan");
         #[cfg(target_os = "linux")]
@@ -75,6 +80,26 @@ fn main() {
 }
 
 fn probe_child() {
+    #[cfg(target_os = "linux")]
+    if std::env::args().nth(2).as_deref() == Some("proxy") {
+        assert_eq!(
+            rustix::process::getuid().as_raw().to_string(),
+            std::env::args().nth(3).expect("invoking UID"),
+            "setup must preserve caller UID"
+        );
+        let status = std::fs::read_to_string("/proc/self/status").expect("worker capability proof");
+        for field in ["CapEff:", "CapPrm:", "CapInh:", "CapAmb:"] {
+            let value = status
+                .lines()
+                .find_map(|line| line.strip_prefix(field))
+                .expect("capability field");
+            assert_eq!(
+                value.trim(),
+                "0000000000000000",
+                "{field} retained setup authority"
+            );
+        }
+    }
     assert_eq!(std::thread::spawn(|| 42).join().expect("thread"), 42);
     let error = Command::new(std::env::current_exe().expect("executable"))
         .arg("--forbidden-child")
