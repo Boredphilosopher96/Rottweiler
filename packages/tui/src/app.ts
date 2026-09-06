@@ -334,6 +334,7 @@ export class RottweilerApp extends BoxRenderable {
       afterPresent: (item) => this.#afterPresentedEvent(item),
     })
     this.#pickerController = new PickerController({
+      allocations: this.#allocations.allocations,
       picker: () => this.picker,
       terminalHeight: () => this.height === 0 ? this.ctx.height : this.height,
       statusHeight: () => Math.max(1, this.statusLine.height || 1),

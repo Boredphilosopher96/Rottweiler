@@ -1,6 +1,7 @@
 import { createTestRenderer } from "@opentui/core/testing"
 import { expect, test } from "bun:test"
 import { FuzzyPickerRenderable, type PickerItem } from "../src/components"
+import { ClientAllocationOwner } from "../src/client-allocation"
 import { PickerController } from "../src/picker-controller"
 import { kennelTheme } from "../src/theme"
 
@@ -16,6 +17,7 @@ test("picker transitions retire captured actions while refresh retains the activ
       refresh(title, items, callback, compact)
     }
     const controller = new PickerController({
+      allocations: new ClientAllocationOwner(),
       picker: () => picker, terminalHeight: () => 24, statusHeight: () => 1,
       composerDockHeight: () => 4, focusComposer() {}, renderPicker() {},
       withRefreshGuard: (_kind, action) => action(), onModalOpened() {}, onClosed() {},

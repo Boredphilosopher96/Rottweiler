@@ -566,7 +566,16 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.input.value = ""
   }
 
+  override destroyRecursively(): void {
+    if (!this.isDestroyed) this.close()
+    super.destroyRecursively()
+  }
+
   override destroy(): void {
+    if (this.isDestroyed) return
+    if (!this.select.isDestroyed) this.close()
+    this.#items = []; this.#filtered = []; this.#onSelect = undefined
+    this.#onQuery = undefined; this.#onSecretSubmit = undefined; this.#onTextSubmit = undefined
     this.ctx.keyInput.off("keypress", this.#onKey)
     this.ctx.keyInput.off("paste", this.#onPaste)
     super.destroy()
