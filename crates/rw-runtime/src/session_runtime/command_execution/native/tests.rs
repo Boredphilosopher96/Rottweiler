@@ -2,6 +2,7 @@
 use super::*;
 use rw_tools::NetworkPolicy;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::sync::watch;
 
 struct FixtureExecutor;
 #[async_trait]
@@ -88,6 +89,7 @@ async fn unused_native_executor_settlement_does_not_capture_a_helper() {
     let root = tempfile::tempdir().expect("workspace");
     let executor = NativeCommandExecutor::new(NativeRecipe {
         policy: Arc::new(SandboxPolicy::new([root.path()], NetworkPolicy::Deny).expect("policy")),
+        scratch: rw_tools::CommandScratch::create("native-test").expect("scratch"),
         execution_lease: Arc::new(
             ExecutionLease::acquire(root.path().join("execution.lock")).expect("execution lease"),
         ),

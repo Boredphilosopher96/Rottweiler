@@ -1,4 +1,5 @@
 mod native;
+mod preparation;
 use super::credential_resolution::DeferredToolProxy;
 use super::credential_resolution::ResolvedToolProxy;
 use super::secret_redaction::SharedCommandFixtureRedactor;
@@ -24,7 +25,7 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::OnceCell;
+use std::sync::OnceLock;
 
 #[derive(Clone)]
 pub(super) enum CommandFixtureMode {
@@ -190,7 +191,7 @@ pub(super) struct DeferredCommandExecutor {
     pub(super) execution_lease: Arc<ExecutionLease>,
     pub(super) command_safety: Arc<CommandSafetyClassifier>,
     pub(super) global_proxy: DeferredToolProxy,
-    pub(super) inner: OnceCell<Arc<dyn CommandExecutor>>,
+    initialization: OnceLock<preparation::Preparation>,
 }
 
 impl DeferredCommandExecutor {
@@ -209,24 +210,24 @@ impl DeferredCommandExecutor {
             execution_lease,
             command_safety,
             global_proxy,
-            inner: OnceCell::new(),
+            initialization: OnceLock::new(),
         }
     }
 
-    pub(super) async fn inner(&self) -> std::result::Result<&Arc<dyn CommandExecutor>, ToolError> {
-        self.inner
-            .get_or_try_init(|| async {
-                let proxy = self
-                    .global_proxy
+    pub(super) async fn inner(&self) -> std::result::Result<Arc<dyn CommandExecutor>, ToolError> {
+        let initialization = self.initialization.get_or_init(|| {
+            let global_proxy = self.global_proxy.clone();
+            let workspace_roots = self.workspace_roots.clone();
+            let workspace = self.workspace.clone();
+            let command_fixture_mode = self.command_fixture_mode.clone();
+            let execution_lease = Arc::clone(&self.execution_lease);
+            let command_safety = Arc::clone(&self.command_safety);
+            preparation::Preparation::from_future(async move {
+                let proxy = global_proxy
                     .resolve()
                     .await
-                    .map_err(ToolError::Command)?;
-                let workspace_roots = self.workspace_roots.clone();
-                let workspace = self.workspace.clone();
-                let command_fixture_mode = self.command_fixture_mode.clone();
-                let execution_lease = Arc::clone(&self.execution_lease);
-                let command_safety = Arc::clone(&self.command_safety);
-                rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+                    .map_err(preparation::Failure::Rejected)?;
+                preparation::Preparation::run(move || {
                     build_command_executor(
                         &workspace_roots,
                         &workspace,
@@ -235,22 +236,23 @@ impl DeferredCommandExecutor {
                         &command_safety,
                         Some(&proxy),
                     )
-                    .map_err(|error| ToolError::Command(error.to_string()))
+                    .map_err(|error| error.to_string())
                 })
                 .await
-                .map_err(|error| {
-                    ToolError::Command(format!("command startup worker failed: {error}"))
-                })?
             })
+        });
+        initialization
+            .wait()
             .await
+            .map_err(preparation::Failure::tool_error)
     }
 }
 
 #[async_trait]
 impl CommandExecutor for DeferredCommandExecutor {
     async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
-        if let Some(inner) = self.inner.get() {
-            inner.settle_effects().await?;
+        if let Some(initialization) = self.initialization.get() {
+            initialization.settle_effects().await?;
         }
         Ok(())
     }

@@ -1,4 +1,5 @@
 //! Native command preparation is single-owner work, started by actual execution.
+use super::preparation::{Failure, Preparation};
 use async_trait::async_trait;
 use rw_tools::{
     CancellationToken, CommandExecutor, CommandOutcome as ToolCommandOutcome, CommandRequest,
@@ -7,11 +8,11 @@ use rw_tools::{
 };
 use std::sync::Arc;
 use std::sync::OnceLock;
-use tokio::sync::watch;
 
 #[derive(Clone)]
 pub(super) struct NativeRecipe {
     pub policy: Arc<SandboxPolicy>,
+    pub scratch: Arc<rw_tools::CommandScratch>,
     pub execution_lease: Arc<ExecutionLease>,
     pub safety: Arc<CommandSafetyClassifier>,
     pub policy_egress: bool,
@@ -25,7 +26,7 @@ impl NativeRecipe {
             self.policy_egress && probe_policy_egress().support == SandboxSupport::Enforced;
         Ok(Arc::new(
             TokioCommandExecutor::with_execution_lease(self.execution_lease)
-                .sandboxed(self.policy, helper)
+                .sandboxed(self.policy, helper, self.scratch)
                 .with_command_safety(self.safety)
                 .with_policy_egress(policy_egress)
                 .with_upstream_proxy(self.upstream),
@@ -57,11 +58,7 @@ impl CommandExecutor for NativeCommandExecutor {
         let Some(preparation) = self.initialization.get() else {
             return Ok(());
         };
-        match preparation.wait().await {
-            Ok(executor) => executor.settle_effects().await,
-            Err(Failure::Rejected(_)) => Ok(()),
-            Err(failure) => Err(failure.tool_error()),
-        }
+        preparation.settle_effects().await
     }
     fn supports_background(&self) -> bool {
         true
@@ -73,57 +70,6 @@ impl CommandExecutor for NativeCommandExecutor {
         output: Arc<dyn ToolOutputSink>,
     ) -> std::result::Result<ToolCommandOutcome, ToolError> {
         self.inner().await?.run(request, cancellation, output).await
-    }
-}
-#[derive(Clone)]
-enum Failure {
-    Rejected(String),
-    Unsettled(String),
-}
-impl Failure {
-    fn tool_error(self) -> ToolError {
-        match self {
-            Self::Rejected(message) => ToolError::Command(message),
-            Self::Unsettled(message) => ToolError::EffectsUnsettled(message),
-        }
-    }
-}
-type Outcome = std::result::Result<Arc<dyn CommandExecutor>, Failure>;
-struct Preparation(watch::Receiver<Option<Outcome>>);
-impl Preparation {
-    fn start(
-        work: impl FnOnce() -> std::result::Result<Arc<dyn CommandExecutor>, String> + Send + 'static,
-    ) -> Self {
-        let (sender, receiver) = watch::channel(None);
-        // This task owns initialization independently of every request waiter.
-        // The physical worker keeps its admission until verification/copy ends;
-        // settlement waits for publication even when the initiating caller left.
-        tokio::spawn(async move {
-            let outcome =
-                match rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, work).await
-                {
-                    Ok(result) => result.map_err(Failure::Rejected),
-                    Err(rw_resources::WorkError::Admission(error)) => {
-                        Err(Failure::Rejected(error.to_string()))
-                    }
-                    Err(rw_resources::WorkError::Worker(error)) => Err(Failure::Unsettled(
-                        format!("command preparation lost physical proof: {error}"),
-                    )),
-                };
-            sender.send_replace(Some(outcome));
-        });
-        Self(receiver)
-    }
-    async fn wait(&self) -> std::result::Result<Arc<dyn CommandExecutor>, Failure> {
-        let mut receiver = self.0.clone();
-        loop {
-            if let Some(outcome) = receiver.borrow_and_update().clone() {
-                return outcome;
-            }
-            receiver.changed().await.map_err(|_| {
-                Failure::Unsettled("command preparation stopped without publication proof".into())
-            })?;
-        }
     }
 }
 

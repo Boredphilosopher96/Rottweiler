@@ -164,25 +164,39 @@ impl Seed {
             text: format!("result {logical}: {}", "output ".repeat(128)),
         };
         let turn_id = TurnId(self.turn.to_string());
+        let logical = rw_types::tool_result_admission::ToolResultAdmission::measure(&Turn {
+            role: Role::Tool,
+            blocks: vec![Block::ToolResult {
+                id: id.clone(),
+                output: output.clone(),
+                is_error: false,
+            }],
+            meta: TurnMeta::default(),
+        })
+        .expect("tool result receipt");
+        let finished_source = SequenceId(self.sequence);
         self.push(batch, |meta| EngineEvent::ToolCallFinished {
             meta,
             turn_id,
-            tool_call_id: id.clone(),
-            invocation_id: invocation,
-            output: output.clone(),
+            tool_call_id: id,
+            invocation_id: invocation.clone(),
+            output,
             is_error: false,
             call_index: 0,
             presentation: None,
         });
-        self.conversation(
-            batch,
-            Role::Tool,
-            vec![Block::ToolResult {
-                id,
-                output,
-                is_error: false,
-            }],
-        );
+        let agent_turn = self.turn;
+        self.push(batch, |meta| {
+            EngineEvent::ConversationToolResultsCommitted {
+                meta,
+                agent_turn,
+                logical,
+                results: vec![rw_types::conversation_input::ToolResultReference {
+                    invocation_id: invocation,
+                    finished_source,
+                }],
+            }
+        });
         self.conversation(
             batch,
             Role::Assistant,
