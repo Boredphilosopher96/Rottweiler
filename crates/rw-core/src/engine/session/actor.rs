@@ -366,7 +366,12 @@ pub(super) async fn run_actor(
         }
         if state.recovery_requested {
             closing_started.get_or_insert_with(tokio::time::Instant::now);
-            if state.tasks.idle() && state.unsettled.is_none() {
+            if state.tasks.idle()
+                && state.pending_command.is_none()
+                && state.pending_model_preparation.is_none()
+                && state.pending_context_read.is_none()
+                && state.unsettled.is_none()
+            {
                 let was_closing = state.closing;
                 while let Ok(signal) = signals.try_recv() {
                     super::recovery::reject_signal(signal, &mut state);
@@ -441,17 +446,17 @@ pub(super) async fn run_actor(
         }
         let tasks = state.tasks.clone();
         tokio::select! {
-            result = crate::engine::dispatch::context_job::wait(&mut state.pending_context_read), if !state.recovery_requested => {
+            result = crate::engine::dispatch::context_job::wait(&mut state.pending_context_read) => {
                 crate::engine::dispatch::context_job::finish(result, &mut state, &config, &events).await;
             }
-            result = crate::engine::dispatch::model_job::wait(&mut state.pending_model_preparation), if !state.recovery_requested => {
+            result = crate::engine::dispatch::model_job::wait(&mut state.pending_model_preparation) => {
                 crate::engine::dispatch::model_job::finish(result, crate::engine::dispatch::DispatchContext {
                     state: &mut state, config: &mut config, tool_context: &mut tool_context,
                     turn_signals: &turn_signals, events: &events, active_turn: &active_turn,
                     command_descriptors: &command_descriptors, mode_registry: &mode_registry,
                 }).await;
             }
-            result = crate::engine::dispatch::command_job::wait(&mut state.pending_command), if state.pending_plugin_tool.is_none() && !state.recovery_requested => {
+            result = crate::engine::dispatch::command_job::wait(&mut state.pending_command), if state.pending_plugin_tool.is_none() => {
                 crate::engine::dispatch::command_job::finish(result, crate::engine::dispatch::DispatchContext {
                     state: &mut state, config: &mut config, tool_context: &mut tool_context,
                     turn_signals: &turn_signals, events: &events, active_turn: &active_turn,
