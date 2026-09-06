@@ -153,7 +153,10 @@ async fn credit_refunds_original_wire_bytes_after_rust_json_normalization() {
         Arc::new(NoopPluginBoundaryRedactor),
         Duration::from_secs(2),
     );
-    let mut stream = client.provider_stream(json!({})).await.expect("stream");
+    let mut stream = client
+        .provider_stream(json!({"alias":"fixture/model","request":{}}))
+        .await
+        .expect("stream");
     let mut input = BufReader::new(plugin_input);
     let mut line = String::new();
     input.read_line(&mut line).await.expect("request");
@@ -206,7 +209,10 @@ async fn full_provider_data_queue_preserves_terminal_and_unrelated_responses() {
         Arc::new(NoopPluginBoundaryRedactor),
         Duration::from_secs(2),
     );
-    let mut stream = client.provider_stream(json!({})).await.expect("stream");
+    let mut stream = client
+        .provider_stream(json!({"alias":"fixture/model","request":{}}))
+        .await
+        .expect("stream");
     let mut input = BufReader::new(plugin_input);
     let mut line = String::new();
     input.read_line(&mut line).await.expect("request");

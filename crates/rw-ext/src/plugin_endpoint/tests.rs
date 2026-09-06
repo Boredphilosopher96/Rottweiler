@@ -72,11 +72,15 @@ async fn registration_is_inert_and_invocation_obtains_its_connection() {
         adapter
             .descriptor()
             .capabilities
-            .contains(&ToolCapability::WriteFilesystem)
+            .contains(&ToolCapability::ReadFilesystem)
     );
-    assert_eq!(
-        adapter.mutation_scope(&json!({})),
-        MutationScope::OpaqueWorkspace
+    assert_eq!(adapter.mutation_scope(&json!({})), MutationScope::None);
+    assert!(
+        !adapter
+            .descriptor()
+            .capabilities
+            .contains(&ToolCapability::WriteFilesystem),
+        "a sibling declaration cannot grant ambient write authority"
     );
     assert_eq!(endpoint.connections.load(Ordering::Acquire), 0);
     let mut changed = declaration;
