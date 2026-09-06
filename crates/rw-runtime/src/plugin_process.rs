@@ -351,12 +351,11 @@ impl SupervisedPluginProcess for PluginChild {
     }
 
     fn kill_tree(&self) -> Result<(), PluginProcessError> {
-        if self
+        let admission = self
             .admission
             .lock()
-            .map_err(|_| error("plugin process admission owner poisoned"))?
-            .is_none()
-        {
+            .map_err(|_| error("plugin process admission owner poisoned"))?;
+        if admission.is_none() {
             return Ok(());
         }
         let group = self.kill_original_group();
