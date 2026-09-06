@@ -2,12 +2,14 @@ mod authority;
 mod loopback;
 mod preparation;
 pub(super) mod process_creation;
+#[cfg(test)]
+mod root_grants_tests;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::TryInto as _;
 use std::io;
 use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
-use std::os::fd::AsFd as _;
+use std::os::fd::{AsFd as _, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::path::{Path, PathBuf};
@@ -20,8 +22,7 @@ use std::thread;
 use std::time::Duration;
 
 use landlock::{
-    ABI, Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
-    RulesetStatus,
+    ABI, Access, AccessFs, PathBeneath, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus,
 };
 use seccompiler::{
     BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
@@ -469,11 +470,18 @@ fn absolute_existing_root(root: &Path) -> Result<Option<(PathBuf, RootKind)>, Sa
     Ok(Some((canonical, RootKind::for_metadata(&metadata))))
 }
 
-fn open_landlock_root(root: &Path, expected: RootKind) -> Result<PathFd, SandboxError> {
-    // Open first and classify the pinned descriptor.  The same descriptor
-    // becomes the Landlock rule parent, so a concurrent path swap cannot
-    // turn file-only authority into directory-wide authority.
-    let root = PathFd::new(root).map_err(sandbox_backend)?;
+fn open_landlock_root(root: &Path, expected: RootKind) -> Result<OwnedFd, SandboxError> {
+    // Policy roots are canonical paths. Refuse a substituted symlink in any
+    // component, including a same-kind replacement that a type check cannot
+    // detect. The descriptor used for classification is the actual rule parent.
+    let root = rustix::fs::openat2(
+        rustix::fs::CWD,
+        root,
+        rustix::fs::OFlags::PATH | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+        rustix::fs::ResolveFlags::NO_SYMLINKS,
+    )
+    .map_err(sandbox_backend)?;
     let metadata = rustix::fs::fstat(root.as_fd()).map_err(sandbox_backend)?;
     let actual = if rustix::fs::FileType::from_raw_mode(metadata.st_mode).is_dir() {
         RootKind::Directory
