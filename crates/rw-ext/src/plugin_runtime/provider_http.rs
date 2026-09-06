@@ -159,8 +159,24 @@ async fn run(
                 AssertUnwindSafe(operation.settle_effects()).catch_unwind(),
             )
             .await;
-            if !matches!(proof, Ok(Ok(Ok(())))) {
-                return;
+            match proof {
+                Ok(Ok(Ok(()))) => {}
+                Err(_) => {
+                    // The response deadline is final for this host instance, but
+                    // slow DNS/runtime shutdown still has an owned observer.
+                    lease.termination.fail_host_proof();
+                    if matches!(
+                        AssertUnwindSafe(operation.settle_effects())
+                            .catch_unwind()
+                            .await,
+                        Ok(Ok(()))
+                    ) {
+                        lease.settled.store(true, Ordering::Release);
+                        lease.complete();
+                    }
+                    return;
+                }
+                Ok(Err(_) | Ok(Err(_))) => return,
             }
             match result {
                 Ok(result) => result,

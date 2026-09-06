@@ -393,6 +393,8 @@ response channel (256 KiB per frame). Cancellation drops the response path insid
 that owned runtime. Completion waits for its connection and blocking resolver tasks
 and all proxy workers to settle. The terminal HTTP outcome follows this proof;
 stream data alone cannot complete the provider call. A failed or five-second
-expired cleanup proof retains the operation and its capacity, closes plugin
-admission and reports `effects_unsettled`. This proves local resource retirement;
+expired cleanup proof closes plugin admission and reports `effects_unsettled`.
+The admitted owner continues observing slow cleanup and returns shared capacity
+only after actual proof; an unprovable or panicked owner stays quarantined.
+This proves local resource retirement;
 it does not assert that a remote service stopped inference or settled billing.

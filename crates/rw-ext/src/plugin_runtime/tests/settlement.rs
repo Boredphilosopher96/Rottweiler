@@ -496,6 +496,15 @@ async fn ordinary_cancellation_drains_admitted_host_push_before_reporting_settle
 
 #[tokio::test]
 async fn ordinary_cancellation_retains_host_http_until_explicit_effect_proof() {
+    http_cancellation_proof(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn expired_http_proof_reports_failure_but_eventual_cleanup_returns_capacity() {
+    http_cancellation_proof(true).await;
+}
+
+async fn http_cancellation_proof(expire: bool) {
     let process = Arc::new(FakeProcess::default());
     let (host_stdin, plugin_input) = tokio::io::duplex(4096);
     let (mut plugin_output, host_stdout) = tokio::io::duplex(4096);
@@ -574,13 +583,49 @@ async fn ordinary_cancellation_retains_host_http_until_explicit_effect_proof() {
             .len(),
         1
     );
-    http.release.notify_one();
+    if expire {
+        tokio::time::advance(Duration::from_secs(6)).await;
+        http.settling.notified().await; // Same owned operation resumes its proof.
+    } else {
+        http.release.notify_one();
+    }
     let failure = tokio::time::timeout(Duration::from_secs(2), task)
         .await
         .expect("settlement deadline")
         .expect("request task")
         .expect_err("cancelled");
-    assert_eq!(failure.code, "cancelled");
+    assert_eq!(
+        failure.code,
+        if expire {
+            "effects_unsettled"
+        } else {
+            "cancelled"
+        }
+    );
+    if expire {
+        assert_eq!(
+            client.termination.host_effects.available_permits(),
+            HOST_EFFECT_CAPACITY as usize - 1
+        );
+        http.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while client.termination.host_effects.available_permits()
+                != HOST_EFFECT_CAPACITY as usize
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("eventual proof returns physical capacity");
+        assert_eq!(
+            client
+                .settle_effects()
+                .await
+                .expect_err("host failure remains sticky")
+                .code,
+            "effects_unsettled"
+        );
+    }
     assert!(http.dropped.load(Ordering::Acquire));
     assert!(
         client
