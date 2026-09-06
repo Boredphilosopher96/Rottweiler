@@ -1,12 +1,13 @@
 //! Read authority belongs to configured toolchain hooks, never the general shell.
 
 use super::command_execution::{
-    CommandFixtureMode, PrivateScratch, ScratchGuardedCommandExecutor,
-    build_command_executor_for_policy, command_fixture_namespace,
+    CommandFixtureMode, ScratchGuardedCommandExecutor, build_command_executor_for_policy,
+    command_fixture_namespace,
 };
 use miette::{Result, miette};
 use rw_tools::{
-    CommandExecutor, CommandSafetyClassifier, ExecutionLease, NetworkPolicy, SandboxPolicy,
+    CommandExecutor, CommandSafetyClassifier, CommandScratch, ExecutionLease, NetworkPolicy,
+    SandboxPolicy,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -24,7 +25,8 @@ pub(super) fn build_toolchain_executor(
             "toolchain runtime read roots violate the configuration bounds"
         ));
     }
-    let scratch = PrivateScratch::create("toolchain")?;
+    let scratch = CommandScratch::create("toolchain")
+        .map_err(|error| miette!("toolchain scratch could not start: {error}"))?;
     let mut writes = workspace_roots.to_vec();
     writes.push(scratch.path().to_path_buf());
     let base = SandboxPolicy::new(&writes, NetworkPolicy::Deny)
@@ -45,7 +47,7 @@ pub(super) fn build_toolchain_executor(
         base
     };
     let inner = build_command_executor_for_policy(
-        &Arc::new(policy),
+        (&Arc::new(policy), &scratch),
         workspace,
         command_fixture_namespace(mode, "toolchain"),
         execution_lease,

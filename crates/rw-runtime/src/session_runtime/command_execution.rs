@@ -12,6 +12,7 @@ use rw_tools::CommandExecutor;
 use rw_tools::CommandOutcome as ToolCommandOutcome;
 use rw_tools::CommandRequest;
 use rw_tools::CommandSafetyClassifier;
+use rw_tools::CommandScratch;
 use rw_tools::ExecutionLease;
 use rw_tools::NetworkPolicy as SandboxNetworkPolicy;
 use rw_tools::RecordingCommandExecutor;
@@ -68,7 +69,8 @@ pub(super) fn build_command_executor(
     command_safety: &Arc<CommandSafetyClassifier>,
     global_proxy: Option<&ResolvedToolProxy>,
 ) -> Result<Arc<dyn CommandExecutor>> {
-    let scratch = PrivateScratch::create("sandbox")?;
+    let scratch = CommandScratch::create("sandbox")
+        .map_err(|error| miette!("sandbox scratch could not start: {error}"))?;
     let mut sandbox_roots = workspace_roots.to_vec();
     sandbox_roots.push(scratch.path().to_path_buf());
     let sandbox_policy = Arc::new(
@@ -76,7 +78,7 @@ pub(super) fn build_command_executor(
             .map_err(|error| miette!("OS sandbox policy could not be built: {error}"))?,
     );
     let executor = build_command_executor_for_policy(
-        &sandbox_policy,
+        (&sandbox_policy, &scratch),
         workspace,
         command_fixture_mode,
         execution_lease,
@@ -99,13 +101,14 @@ pub(super) fn build_read_only_hook_executor(
         command_fixture_mode,
         READ_ONLY_HOOK_COMMAND_FIXTURE_NAMESPACE,
     );
-    let scratch = PrivateScratch::create("hook-readonly")?;
+    let scratch = CommandScratch::create("hook-readonly")
+        .map_err(|error| miette!("hook scratch could not start: {error}"))?;
     let sandbox_policy = Arc::new(
         SandboxPolicy::new([scratch.path()], SandboxNetworkPolicy::Deny)
             .map_err(|error| miette!("read-only hook sandbox could not be built: {error}"))?,
     );
     let executor = build_command_executor_for_policy(
-        &sandbox_policy,
+        (&sandbox_policy, &scratch),
         scratch.path(),
         command_fixture_mode,
         execution_lease,
@@ -158,7 +161,7 @@ impl Drop for PrivateScratch {
 
 pub(super) struct ScratchGuardedCommandExecutor {
     pub(super) inner: Arc<dyn CommandExecutor>,
-    pub(super) _scratch: PrivateScratch,
+    pub(super) _scratch: Arc<CommandScratch>,
 }
 
 #[async_trait]
@@ -269,7 +272,7 @@ impl CommandExecutor for DeferredCommandExecutor {
 }
 
 pub(super) fn build_command_executor_for_policy(
-    sandbox_policy: &Arc<SandboxPolicy>,
+    authority: (&Arc<SandboxPolicy>, &Arc<CommandScratch>),
     workspace: &Path,
     command_fixture_mode: CommandFixtureMode,
     execution_lease: &Arc<ExecutionLease>,
@@ -277,6 +280,7 @@ pub(super) fn build_command_executor_for_policy(
     global_proxy: Option<&ResolvedToolProxy>,
     allow_policy_egress: bool,
 ) -> Result<Arc<dyn CommandExecutor>> {
+    let (sandbox_policy, scratch) = authority;
     // Each approved live command receives its own supervised proxy. macOS
     // binds Seatbelt to its exact port; Linux exposes that port only inside a
     // disposable user/network namespace and relays over a private Unix socket.
@@ -285,6 +289,7 @@ pub(super) fn build_command_executor_for_policy(
     let live_command_executor = || -> Arc<dyn CommandExecutor> {
         Arc::new(native::NativeCommandExecutor::new(native::NativeRecipe {
             policy: Arc::clone(sandbox_policy),
+            scratch: Arc::clone(scratch),
             execution_lease: Arc::clone(execution_lease),
             safety: Arc::clone(command_safety),
             policy_egress,

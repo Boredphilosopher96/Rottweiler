@@ -433,6 +433,9 @@ pub(crate) use safety::audited_system_git;
 
 pub use execution_lease::ExecutionLease;
 
+mod scratch;
+pub use scratch::CommandScratch;
+
 pub use replay::{
     CommandFixtureRedactor, IdentityCommandFixtureRedactor, RecordingCommandExecutor,
     ReplayCommandExecutor,

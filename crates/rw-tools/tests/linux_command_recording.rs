@@ -76,11 +76,12 @@ fn main() {
     runtime.block_on(async {
         let root = tempfile::tempdir().expect("temporary directory");
         let workspace = root.path().join("workspace");
-        let hook_scratch = root.path().join("hook-scratch");
+        let hook_owner = rw_tools::CommandScratch::create("hook-fixture").expect("scratch owner");
+        let hook_scratch = hook_owner.path().to_path_buf();
         let private = root.path().join("private");
         let recordings = root.path().join("recordings");
         let hook_recordings = recordings.join("read-only-hooks");
-        for directory in [&workspace, &hook_scratch, &private] {
+        for directory in [&workspace, &private] {
             std::fs::create_dir(directory).expect("test directory");
         }
         let workspace = std::fs::canonicalize(workspace).expect("canonical workspace");
@@ -102,6 +103,7 @@ fn main() {
                     &std::env::current_exe().expect("native driver"),
                 )
                 .expect("running helper"),
+                rw_tools::CommandScratch::create("fixture").expect("scratch owner"),
             ),
         );
         let hook_live: Arc<dyn CommandExecutor> = Arc::new(
@@ -111,6 +113,7 @@ fn main() {
                     &std::env::current_exe().expect("native driver"),
                 )
                 .expect("running helper"),
+                hook_owner,
             ),
         );
         let ordinary = RecordingCommandExecutor::new(ordinary_live, &recordings, &workspace)

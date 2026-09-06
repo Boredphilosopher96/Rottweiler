@@ -21,6 +21,7 @@ async fn output_failure_still_settles_proxy_and_retains_cancelled_join() {
         released.await.expect("proxy retirement release");
     });
     let owner = Arc::new(tokio::sync::Mutex::new(NativeCommandState {
+        _scratch: None,
         _helper: None,
         _process_credit: rw_resources::try_acquire(rw_resources::ResourceClass::Process)
             .expect("process resource"),

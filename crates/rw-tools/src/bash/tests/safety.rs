@@ -324,9 +324,9 @@ async fn sandboxed_eperm_and_explicit_unsandboxed_escape_have_distinct_boundarie
     let _lifecycle = crate::acquire_process_lifecycle_test_gate().await;
     let root = tempdir().expect("temporary directory");
     let workspace = root.path().join("workspace");
-    let scratch = root.path().join("scratch");
+    let scratch_owner = crate::CommandScratch::create("fixture").expect("scratch owner");
+    let scratch = scratch_owner.path().to_path_buf();
     std::fs::create_dir(&workspace).expect("workspace");
-    std::fs::create_dir(&scratch).expect("scratch");
     let outside = root.path().join("outside");
     std::fs::create_dir(&outside).expect("outside directory");
     std::fs::write(outside.join("canary"), "blocked").expect("outside canary");
@@ -335,7 +335,7 @@ async fn sandboxed_eperm_and_explicit_unsandboxed_escape_have_distinct_boundarie
             .expect("sandbox policy"),
     );
     let executor = TokioCommandExecutor::default()
-        .sandboxed(policy, crate::test_support::sandbox_helper())
+        .sandboxed(policy, crate::test_support::sandbox_helper(), scratch_owner)
         .with_policy_egress(true);
     let sink = Arc::new(RecordingSink::default());
     let command = format!(
@@ -407,9 +407,9 @@ async fn sandboxed_executor_denies_network_even_for_safe_list_eligible_processes
     let _lifecycle = crate::acquire_process_lifecycle_test_gate().await;
     let root = tempdir().expect("temporary directory");
     let workspace = root.path().join("workspace");
-    let scratch = root.path().join("scratch");
+    let scratch_owner = crate::CommandScratch::create("fixture").expect("scratch owner");
+    let scratch = scratch_owner.path().to_path_buf();
     std::fs::create_dir(&workspace).expect("workspace");
-    std::fs::create_dir(&scratch).expect("scratch");
     let policy = Arc::new(
         SandboxPolicy::new([&workspace, &scratch], rw_sandbox::NetworkPolicy::Deny)
             .expect("sandbox policy"),
@@ -435,7 +435,7 @@ sys.exit(92)
             .expect("test safe-list classifier"),
     );
     let executor = TokioCommandExecutor::default()
-        .sandboxed(policy, crate::test_support::sandbox_helper())
+        .sandboxed(policy, crate::test_support::sandbox_helper(), scratch_owner)
         .with_command_safety(Arc::clone(&classifier))
         .with_policy_egress(true);
     assert_eq!(classifier.classify(&command), CommandSafety::SafeListed);
@@ -462,9 +462,9 @@ async fn requested_domains_receive_one_command_scoped_proxy_only() {
     let _lifecycle = crate::acquire_process_lifecycle_test_gate().await;
     let root = tempdir().expect("temporary directory");
     let workspace = root.path().join("workspace");
-    let scratch = root.path().join("scratch");
+    let scratch_owner = crate::CommandScratch::create("fixture").expect("scratch owner");
+    let scratch = scratch_owner.path().to_path_buf();
     std::fs::create_dir(&workspace).expect("workspace");
-    std::fs::create_dir(&scratch).expect("scratch");
     let lifecycles = Arc::new(Mutex::new(Vec::new()));
     let executor = TokioCommandExecutor::default()
         .sandboxed(
@@ -473,6 +473,7 @@ async fn requested_domains_receive_one_command_scoped_proxy_only() {
                     .expect("sandbox policy"),
             ),
             crate::test_support::sandbox_helper(),
+            scratch_owner,
         )
         .with_policy_egress(true)
         .with_proxy_lifecycle_observer(Arc::clone(&lifecycles));
@@ -517,9 +518,9 @@ async fn safe_listed_git_status_really_runs_inside_the_sandbox() {
     let _lifecycle = crate::acquire_process_lifecycle_test_gate().await;
     let root = tempdir().expect("temporary directory");
     let workspace = root.path().join("workspace");
-    let scratch = root.path().join("scratch");
+    let scratch_owner = crate::CommandScratch::create("fixture").expect("scratch owner");
+    let scratch = scratch_owner.path().to_path_buf();
     std::fs::create_dir(&workspace).expect("workspace");
-    std::fs::create_dir(&scratch).expect("scratch");
     let git = audited_system_git().expect("audited system git");
     assert!(
         std::process::Command::new(git)
@@ -559,6 +560,7 @@ async fn safe_listed_git_status_really_runs_inside_the_sandbox() {
                 .expect("sandbox policy"),
         ),
         crate::test_support::sandbox_helper(),
+        scratch_owner,
     );
     let sink = Arc::new(RecordingSink::default());
     let outcome = executor

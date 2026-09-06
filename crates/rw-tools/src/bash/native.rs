@@ -14,7 +14,7 @@ use tokio::process::{Child, Command};
 
 use crate::registry::{CancellationToken, ToolError, ToolOutputSink};
 
-use super::{BashSandboxMode, CommandExecutor, CommandOutcome, CommandRequest};
+use super::{BashSandboxMode, CommandExecutor, CommandOutcome, CommandRequest, CommandScratch};
 
 use super::safety::{
     CommandSafety, CommandSafetyClassifier, audited_bat, audited_system_git,
@@ -46,6 +46,7 @@ pub struct TokioCommandExecutor {
 
 #[derive(Clone, Debug)]
 struct CommandSandbox {
+    scratch: Arc<CommandScratch>,
     policy: Arc<SandboxPolicy>,
     helper: rw_sandbox::SandboxHelper,
 }
@@ -99,8 +100,13 @@ impl TokioCommandExecutor {
         mut self,
         policy: Arc<SandboxPolicy>,
         helper: rw_sandbox::SandboxHelper,
+        scratch: Arc<CommandScratch>,
     ) -> Self {
-        self.sandbox = Some(CommandSandbox { policy, helper });
+        self.sandbox = Some(CommandSandbox {
+            policy,
+            helper,
+            scratch,
+        });
         self
     }
 
@@ -226,6 +232,10 @@ impl CommandExecutor for TokioCommandExecutor {
                 _admission: admission,
                 _process_credit: process_credit,
                 _helper: guarded.helper.take(),
+                _scratch: self
+                    .sandbox
+                    .as_ref()
+                    .map(|sandbox| Arc::clone(&sandbox.scratch)),
                 child_id: child.id(),
                 child,
                 watchdog: None,
@@ -386,8 +396,11 @@ impl std::fmt::Debug for NativeCleanup {
 impl NativeCleanup {
     fn schedule(
         &self,
-        state: NativeCommandState,
+        mut state: NativeCommandState,
     ) -> tokio::sync::oneshot::Receiver<Result<(), ToolError>> {
+        // Runtime shutdown can discard the proof task before its first poll.
+        // Termination is requested now; every resource remains owned for proof.
+        state.request_termination();
         let (proof, completion) = tokio::sync::watch::channel(None);
         let (respond, result) = tokio::sync::oneshot::channel();
         let job = Arc::new(NativeJob {
@@ -465,6 +478,7 @@ impl NativeCleanup {
 }
 
 pub(super) struct NativeCommandState {
+    _scratch: Option<Arc<CommandScratch>>,
     _helper: Option<rw_sandbox::SandboxHelper>,
     _process_credit: rw_resources::ResourceLease,
     _admission: tokio::sync::OwnedSemaphorePermit,
@@ -479,6 +493,11 @@ pub(super) struct NativeCommandState {
 }
 
 impl NativeCommandState {
+    fn request_termination(&mut self) {
+        terminate_process_group(self.child_id);
+        let _ = self.child.start_kill();
+    }
+
     async fn settle(&mut self) -> Result<(), ToolError> {
         if self.child_id.is_some() {
             settle_command_child(&mut self.child, self.child_id).await?;
@@ -851,3 +870,8 @@ pub(super) fn configure_proxy_environment(
 
 #[cfg(all(test, unix))]
 mod settlement_tests;
+
+#[cfg(all(test, unix))]
+mod retirement_tests;
+#[cfg(all(test, unix))]
+mod scratch_tests;

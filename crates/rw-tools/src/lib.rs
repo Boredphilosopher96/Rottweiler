@@ -41,7 +41,7 @@ pub use background::{
 pub use bash::terminate_and_wait_process_group;
 pub use bash::{
     BashInput, BashSandboxMode, BashTool, CommandExecutor, CommandFixtureRedactor, CommandOutcome,
-    CommandRequest, CommandSafety, CommandSafetyClassifier, ExecutionLease,
+    CommandRequest, CommandSafety, CommandSafetyClassifier, CommandScratch, ExecutionLease,
     IdentityCommandFixtureRedactor, RecordingCommandExecutor, ReplayCommandExecutor,
     TokioCommandExecutor, classify_safe_command,
 };
