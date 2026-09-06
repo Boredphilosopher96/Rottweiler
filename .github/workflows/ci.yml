@@ -130,7 +130,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
-      ROTTWEILER_NATIVE_CACHE_DIR: ${{ runner.temp }}/rottweiler-native-cache
       ROTTWEILER_CREDENTIAL_BACKEND: file
     strategy:
       fail-fast: false
@@ -138,6 +137,8 @@ jobs:
         os: [macos-15, ubuntu-latest]
 
     steps:
+      - name: Configure native cache
+        run: echo "ROTTWEILER_NATIVE_CACHE_DIR=$RUNNER_TEMP/rottweiler-native-cache" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -242,13 +243,13 @@ jobs:
 
   linux-candidate-build:
     name: Build native Linux candidate
-    env:
-      ROTTWEILER_NATIVE_CACHE_DIR: ${{ runner.temp }}/rottweiler-native-cache
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     outputs:
       candidate_artifact: linux-native-candidate-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
+      - name: Configure native cache
+        run: echo "ROTTWEILER_NATIVE_CACHE_DIR=$RUNNER_TEMP/rottweiler-native-cache" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -298,13 +299,13 @@ jobs:
 
   macos-candidate-build:
     name: Build native macOS candidate
-    env:
-      ROTTWEILER_NATIVE_CACHE_DIR: ${{ runner.temp }}/rottweiler-native-cache
     runs-on: macos-15
     timeout-minutes: 45
     outputs:
       candidate_artifact: macos-native-candidate-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
+      - name: Configure native cache
+        run: echo "ROTTWEILER_NATIVE_CACHE_DIR=$RUNNER_TEMP/rottweiler-native-cache" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -382,7 +383,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     env:
-      ROTTWEILER_NATIVE_CACHE_DIR: ${{ runner.temp }}/rottweiler-native-cache
       ROTTWEILER_CREDENTIAL_BACKEND: file
       ROTTWEILER_PERF_SMOKE: 1
     strategy:
@@ -390,6 +390,8 @@ jobs:
       matrix:
         os: [macos-15, ubuntu-latest]
     steps:
+      - name: Configure native cache
+        run: echo "ROTTWEILER_NATIVE_CACHE_DIR=$RUNNER_TEMP/rottweiler-native-cache" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false

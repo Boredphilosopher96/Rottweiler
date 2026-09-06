@@ -4,11 +4,13 @@ import copy
 import importlib.util
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
 SPEC = importlib.util.spec_from_file_location("ci_inventory", ROOT / "scripts/ci_inventory.py")
 assert SPEC is not None and SPEC.loader is not None
 CI = importlib.util.module_from_spec(SPEC)
