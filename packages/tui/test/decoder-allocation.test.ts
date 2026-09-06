@@ -51,3 +51,35 @@ test("already-aborted stream cancellation releases both decoder credit and its r
   expect(claim.bytes).toBe(0)
   claim.release()
 })
+
+for (const operation of ["bootstrap", "credential", "activation"] as const) {
+  for (const cancellation of ["resolve", "reject"] as const) {
+    test(`${operation} response disposal awaits ${cancellation} before releasing the operation`, async () => {
+      const owner = new ClientAllocationOwner()
+      const cancelled = Promise.withResolvers<void>(), settlement = Promise.withResolvers<void>()
+      const client = new EngineHttpSseClient({ socketPath: "/private/test.sock", bootstrapToken: "bootstrap", fetch: (async input => {
+        if (String(input).endsWith("/v1/connect") && operation !== "bootstrap") {
+          return Response.json({ client_id: "c", token: "token" })
+        }
+        return new Response(new ReadableStream<Uint8Array>({
+          cancel() { cancelled.resolve(); return settlement.promise },
+        }), { status: operation === "activation" ? 200 : 401 })
+      }) as typeof fetch })
+      let completed = false
+      const pending = (async () => {
+        using allocation = owner.reserve("decoding", 0)
+        if (operation === "activation") await client.activateProvider("s", "provider", undefined, allocation)
+        else await client.submitProviderApiKey("s", "provider", "key", undefined, allocation)
+      })().catch(error => error).finally(() => { completed = true })
+      await cancelled.promise
+      expect(completed).toBeFalse()
+      if (operation !== "bootstrap") expect(owner.usage.domains.decoding).toBeGreaterThan(0)
+      if (cancellation === "reject") settlement.reject(new Error("response disposal failed"))
+      else settlement.resolve()
+      const result = await pending
+      if (operation === "activation" && cancellation === "resolve") expect(result).toBeUndefined()
+      else expect(result).toBeInstanceOf(Error)
+      expect(owner.usage.bytes).toBe(0)
+    })
+  }
+}

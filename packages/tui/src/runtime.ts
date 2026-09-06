@@ -82,7 +82,7 @@ export interface RuntimeEngineClient {
     readonly activated: boolean
     readonly warnings: readonly string[]
   }>
-  activateProvider?(sessionId: string, provider: string, signal?: AbortSignal): Promise<void>
+  activateProvider?(sessionId: string, provider: string, signal: AbortSignal | undefined, allocation: ReplyAllocation): Promise<void>
   restartStream(mode?: EngineStreamRestartMode): boolean
   subscribe(options: EngineSubscriptionOptions): Promise<void>
 }
@@ -457,6 +457,7 @@ export class TuiEngineRuntime {
   }
 
   async activateProvider(provider: string): Promise<void> {
+    using allocation = this.#allocations.reserve("decoding", 0)
     await this.#ready
     if (
       !this.#driverReady ||
@@ -470,6 +471,7 @@ export class TuiEngineRuntime {
       this.#sessionId,
       provider,
       this.#subscriptionController.signal,
+      allocation,
     )
   }
 

@@ -173,6 +173,7 @@ export class EngineHttpSseClient {
     })
     if (!response.ok) {
       if (response.status === 401 || response.status === 403) this.#clientAuth = null
+      await response.body?.cancel()
       throw new EngineTransportError("provider credential submission failed", response.status)
     }
     const value: unknown = await boundedJson(response, MAX_COMMAND_REPLY_BYTES, this.#diagnostics, signal, allocation)
@@ -186,9 +187,10 @@ export class EngineHttpSseClient {
   async activateProvider(
     sessionId: string,
     provider: string,
-    signal?: AbortSignal,
+    signal: AbortSignal | undefined,
+    allocation: ReplyAllocation,
   ): Promise<void> {
-    const auth = await this.#ensureClientAuth(signal)
+    const auth = await this.#ensureClientAuth(signal, allocation)
     const response = await this.#fetch(this.#url("/v1/activate-provider"), {
       unix: this.#socketPath,
       method: "POST",
@@ -196,6 +198,7 @@ export class EngineHttpSseClient {
       body: JSON.stringify({ session_id: sessionId, provider }),
       ...(signal === undefined ? {} : { signal }),
     })
+    await response.body?.cancel()
     if (!response.ok) throw new EngineTransportError("provider activation failed", response.status)
   }
 
@@ -415,6 +418,7 @@ export class EngineHttpSseClient {
       ...(signal === undefined ? {} : { signal }),
     })
     if (!response.ok) {
+      await response.body?.cancel()
       throw new EngineTransportError("engine bootstrap connection rejected", response.status)
     }
     const value: unknown = await boundedJson(response, 64 * 1024, this.#diagnostics, signal, allocation)
