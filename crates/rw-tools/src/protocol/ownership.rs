@@ -64,7 +64,7 @@ impl Physical {
         if let Some(result) = &self.signal_result {
             return result
                 .as_ref()
-                .map(|()| ())
+                .copied()
                 .map_err(|error| io::Error::other(error.clone()));
         }
         #[cfg(unix)]
@@ -90,7 +90,7 @@ impl Physical {
         // The direct child remains ours even if it changed its process group.
         let child = self.child.start_kill();
         let result = group.and(child);
-        self.signal_result = Some(result.as_ref().map(|()| ()).map_err(ToString::to_string));
+        self.signal_result = Some(result.as_ref().copied().map_err(ToString::to_string));
         result
     }
     async fn settle(&mut self, timeout: Duration) -> io::Result<()> {
