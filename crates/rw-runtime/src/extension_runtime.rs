@@ -29,7 +29,6 @@ use std::{
     io::Write as _,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
-    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -60,7 +59,7 @@ use rw_plugin_protocol::{
 };
 use rw_store::config::ConfigLoader;
 use rw_store::credentials::{CredentialManager, CredentialReference};
-use rw_tools::{CancellationToken, EgressPolicy, SandboxedProtocolLauncher, Tool, UpstreamProxy};
+use rw_tools::{CancellationToken, SandboxedProtocolLauncher, Tool, UpstreamProxy};
 use rw_types::{Block, CommandSource, McpServerId, Role, Turn, TurnMeta};
 use serde::{Deserialize, Serialize};
 
