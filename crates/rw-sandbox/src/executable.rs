@@ -127,6 +127,7 @@ impl ApprovedExecutable {
             return Err(SandboxError::UntrustedHelper);
         }
         let source = File::open(&approved.executable).map_err(invalid)?;
+        identity(&source.metadata().map_err(invalid)?)?;
         Self::snapshot(approved, &source)
     }
 

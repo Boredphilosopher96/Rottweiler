@@ -1,7 +1,5 @@
 //! One streamed identity/copy implementation for approval and immutable artifacts.
-use super::{
-    ExecutableArtifactIdentity, MAX_EXECUTABLE_BYTES, SandboxError, hex_digest, identity, invalid,
-};
+use super::{ExecutableArtifactIdentity, MAX_EXECUTABLE_BYTES, SandboxError, hex_digest, invalid};
 use sha2::{Digest as _, Sha256};
 use std::{
     fs::File,
@@ -24,7 +22,7 @@ impl ExecutableArtifactIdentity {
         if !metadata.is_file() || metadata.len() > max_bytes.min(MAX_EXECUTABLE_BYTES) {
             return Err(SandboxError::UntrustedHelper);
         }
-        let (device, inode) = identity(&metadata)?;
+        let (device, inode) = file_identity(&metadata)?;
         let sha256 = copy_digest(&file, metadata.len(), &mut std::io::sink())?;
         Ok(Self {
             executable: path.to_path_buf(),
@@ -65,7 +63,7 @@ pub(super) fn verify_copy(
     let before = source.metadata().map_err(invalid)?;
     if !before.is_file()
         || before.len() != approved.bytes
-        || identity(&before)? != (approved.device, approved.inode)
+        || file_identity(&before)? != (approved.device, approved.inode)
     {
         return Err(SandboxError::UntrustedHelper);
     }
@@ -73,6 +71,19 @@ pub(super) fn verify_copy(
         return Err(SandboxError::UntrustedHelper);
     }
     Ok(())
+}
+
+fn file_identity(metadata: &std::fs::Metadata) -> Result<(u64, u64), SandboxError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        Ok((metadata.dev(), metadata.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        Err(SandboxError::UntrustedHelper)
+    }
 }
 
 fn copy_digest(
