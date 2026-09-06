@@ -15,12 +15,12 @@ use serde::Serialize;
 use std::collections::VecDeque;
 use std::io;
 use std::io::Write;
-use std::path::Path;
 
 mod aggregate;
-mod printer;
+mod input;
 mod public_event;
 mod repl_encoding;
+mod terminal;
 use aggregate::PrintOutput;
 pub(super) const MAX_REPL_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 
@@ -80,7 +80,7 @@ pub(super) async fn run_print(
             invocation_id,
             diff,
             ..
-        } = &event
+        } = event.as_ref()
         {
             let binding = diff.as_ref().map(|diff| ApprovalBinding {
                 proposal_id: diff.proposal_id.clone(),
@@ -102,7 +102,7 @@ pub(super) async fn run_print(
             question_id,
             question,
             ..
-        } = &event
+        } = event.as_ref()
         {
             let answer = question.options.first().map_or_else(
                 || "No interactive answer is available in headless mode.".to_owned(),
@@ -114,34 +114,34 @@ pub(super) async fn run_print(
                 .map_err(display_agent_error)?;
         }
         match format {
-            OutputFormat::Text => render_text_event(&event, false)?,
-            OutputFormat::StreamJson => write_json_line(public_cli_event(&event)?.value())?,
+            OutputFormat::Text => render_text_event(event.as_ref(), false)?,
+            OutputFormat::StreamJson => write_json_line(public_cli_event(event.as_ref())?.value())?,
             OutputFormat::Json => {}
         }
         if let EngineEvent::UserMessageAccepted {
             agent_turn,
             content,
             ..
-        } = &event
+        } = event.as_ref()
             && content == prompt
         {
             target_turn = Some(agent_turn.to_string());
         }
         let target_finished = if command_mode {
             if waits_for_compaction {
-                matches!(&event, EngineEvent::CompactionFinished { .. })
+                matches!(event.as_ref(), EngineEvent::CompactionFinished { .. })
             } else {
-                matches!(&event, EngineEvent::CommandFinished { .. })
+                matches!(event.as_ref(), EngineEvent::CommandFinished { .. })
             }
         } else {
             matches!(
-                &event,
+                event.as_ref(),
                 EngineEvent::TurnFinished { turn_id, .. }
                     if Some(&turn_id.0) == target_turn.as_ref()
             )
         };
         if command_mode || target_turn.is_some() {
-            aggregate.push(&event)?;
+            aggregate.push(event.as_ref())?;
         }
         if target_finished {
             if perf_markers {
@@ -249,7 +249,6 @@ pub(super) fn render_text_event(event: &EngineEvent, repl: bool) -> Result<()> {
 
 pub(super) enum InputLine {
     Line(String),
-    Interrupt,
     Eof,
     Error(String),
 }
@@ -257,17 +256,22 @@ pub(super) enum InputLine {
 #[allow(clippy::too_many_lines)]
 pub(super) async fn run_repl(
     actor: &rw_core::SessionHandle,
-    storage_root: &Path,
     format: OutputFormat,
 ) -> Result<Option<TurnStatus>> {
     let mut events = actor.subscribe().map_err(display_agent_error)?;
-    let (mut input, mut printer) = printer::spawn_readline(storage_root.join("history.txt"))?;
+    let (mut input, mut interrupts, mut printer) = terminal::Terminal::start().await?;
+    let execution = async {
     let mut interactions = VecDeque::new();
     let mut last_status = None;
     loop {
         tokio::select! {
+            signal = interrupts.recv() => {
+                signal.into_diagnostic()?;
+                if actor.interrupt().await.map_err(display_agent_error)? { interactions.clear(); } else { break; }
+            },
             maybe = input.recv() => {
-                match maybe.unwrap_or(InputLine::Eof) {
+                let input::InputDelivery { value, bytes: _input_bytes } = maybe.unwrap_or(input::InputDelivery { value: InputLine::Eof, bytes: None });
+                match value {
                     InputLine::Line(line) => {
                         if let Some(interaction) = interactions.pop_front() {
                             match interaction {
@@ -297,7 +301,7 @@ pub(super) async fn run_repl(
                                         .map_err(display_agent_error)?;
                                 }
                             }
-                            display_next_interaction(interactions.front(), &mut printer).await?;
+                            if !display_next_interaction(actor, &mut interrupts, &mut printer, &mut interactions).await? { return Ok(last_status); }
                             continue;
                         }
                         if line.trim() == "/exit" {
@@ -309,18 +313,11 @@ pub(super) async fn run_repl(
                         }
                         actor.send_message(line).await.map_err(display_agent_error)?;
                     }
-                    InputLine::Interrupt => {
-                        if actor.interrupt().await.map_err(display_agent_error)? {
-                            interactions.clear();
-                        } else {
-                            break;
-                        }
-                    }
                     InputLine::Eof => {
                         let _ = actor.interrupt().await;
                         break;
                     }
-                    InputLine::Error(error) => return Err(miette!("readline failed: {error}")),
+                    InputLine::Error(error) => return Err(miette!("REPL input failed: {error}")),
                 }
             }
             event = events.recv() => {
@@ -332,7 +329,7 @@ pub(super) async fn run_repl(
                     rationale,
                     diff,
                     ..
-                } = &event {
+                } = event.as_ref() {
                     let announce = interactions.is_empty();
                     interactions.push_back(PendingInteraction::Permission {
                         tool_call_id: tool_call_id.0.clone(),
@@ -347,14 +344,14 @@ pub(super) async fn run_repl(
                         }),
                     });
                     if announce {
-                        display_next_interaction(interactions.front(), &mut printer).await?;
+                        if !display_next_interaction(actor, &mut interrupts, &mut printer, &mut interactions).await? { return Ok(last_status); }
                     }
                 }
                 if let EngineEvent::QuestionAsked {
                     question_id,
                     question,
                     ..
-                } = &event
+                } = event.as_ref()
                 {
                     let announce = interactions.is_empty();
                     interactions.push_back(PendingInteraction::Question {
@@ -367,24 +364,27 @@ pub(super) async fn run_repl(
                             .collect(),
                     });
                     if announce {
-                        display_next_interaction(interactions.front(), &mut printer).await?;
+                        if !display_next_interaction(actor, &mut interrupts, &mut printer, &mut interactions).await? { return Ok(last_status); }
                     }
                 }
-                if let EngineEvent::PlanSubmitted { .. } = &event {
+                if let EngineEvent::PlanSubmitted { .. } = event.as_ref() {
                     interactions.push_back(PendingInteraction::Plan);
                 }
-                if let EngineEvent::TurnFinished { status, .. } = &event {
+                if let EngineEvent::TurnFinished { status, .. } = event.as_ref() {
                     last_status = Some(status.clone());
                     interactions.retain(|interaction| matches!(interaction, PendingInteraction::Plan));
-                    display_next_interaction(interactions.front(), &mut printer).await?;
+                    if !display_next_interaction(actor, &mut interrupts, &mut printer, &mut interactions).await? { return Ok(last_status); }
                 }
-                if let Some(message) = repl_event_message(&event, format)? {
-                    printer.print(message).await?;
+                if let Some(message) = repl_event_message(event.as_ref(), format)? {
+                    if !print_ordered(actor, &mut interrupts, &mut printer, &mut interactions, message).await? { return Ok(last_status); }
                 }
             }
         }
     }
     Ok(last_status)
+    }.await;
+    printer.close().await?;
+    execution
 }
 
 pub(super) enum PendingInteraction {
@@ -404,9 +404,12 @@ pub(super) enum PendingInteraction {
 }
 
 async fn display_next_interaction(
-    interaction: Option<&PendingInteraction>,
-    printer: &mut printer::OwnedPrinter,
-) -> Result<()> {
+    actor: &rw_core::SessionHandle,
+    interrupts: &mut terminal::Interrupts,
+    printer: &mut terminal::Terminal,
+    interactions: &mut VecDeque<PendingInteraction>,
+) -> Result<bool> {
+    let interaction = interactions.front();
     let message = match interaction {
         Some(PendingInteraction::Plan) => {
             "plan submitted: type `approve` to enter Execute, or rejection feedback to stay in Plan\n".to_owned()
@@ -425,9 +428,9 @@ async fn display_next_interaction(
             rationale,
             ..
         }) => format!("allow {capabilities:?} ({rationale})? [y] once / [a] session / [p] project / [n] deny\n"),
-        None => return Ok(()),
+        None => return Ok(true),
     };
-    printer.print(message).await
+    print_ordered(actor, interrupts, printer, interactions, message).await
 }
 
 pub(super) fn repl_event_message(
@@ -448,3 +451,24 @@ pub(super) fn parse_approval(input: &str) -> ApprovalDecision {
 
 #[cfg(test)]
 mod tests;
+
+async fn print_ordered(
+    actor: &rw_core::SessionHandle,
+    interrupts: &mut terminal::Interrupts,
+    printer: &mut terminal::Terminal,
+    interactions: &mut VecDeque<PendingInteraction>,
+    message: String,
+) -> Result<bool> {
+    let printing = printer.print(message);
+    tokio::pin!(printing);
+    loop {
+        tokio::select! {
+            result = &mut printing => { result?; return Ok(true); },
+            signal = interrupts.recv() => {
+                signal.into_diagnostic()?;
+                if actor.interrupt().await.map_err(display_agent_error)? { interactions.clear(); }
+                else { return Ok(false); }
+            },
+        }
+    }
+}

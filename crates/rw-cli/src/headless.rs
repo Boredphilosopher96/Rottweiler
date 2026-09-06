@@ -33,7 +33,7 @@ pub(super) async fn run(options: LocalSessionOptions, client: ClientOptions) -> 
             )
             .await
         } else {
-            output::run_repl(session.handle(), session.storage_root(), client.format).await
+            output::run_repl(session.handle(), client.format).await
         }
     }
     .await;

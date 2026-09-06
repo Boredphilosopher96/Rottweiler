@@ -39,7 +39,6 @@ rw-store.workspace = true
 rw-tools.workspace = true
 rw-types.workspace = true
 rustix.workspace = true
-rustyline = "=18.0.1"
 serde.workspace = true
 serde_json.workspace = true
 shell-words.workspace = true
@@ -51,6 +50,7 @@ url.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
+nix = { workspace = true, features = ["term"] }
 ed25519-dalek.workspace = true
 rmcp.workspace = true
 tempfile = "3.23"

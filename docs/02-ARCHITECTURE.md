@@ -81,12 +81,24 @@ rottweiler/
 
 `rw-runtime::session::compose_local_session` returns an owned `LocalSession` with
 its command/event handle and a validated prompt inspection result when requested.
-The CLI owns readline, approval input, text/JSON rendering, standard streams, and
+The CLI owns bounded line input, approval input, text/JSON rendering, standard streams, and
 performance markers. Runtime composition does not depend on terminal libraries or
 write to standard streams; diagnostics go to the client's tracing subscriber.
 Closing a local session waits for actor effects, finalizes durable projections and
 session-local state, then settles services. Dropping a client or a cleanup waiter
 requests that same independently owned shutdown; it cannot cancel cleanup.
+
+The headless REPL accepts UTF-8 lines up to 128 KiB, including a final partial line
+at EOF. CR, LF and CRLF delimit lines. Its terminal input supports erase, Ctrl-U,
+Ctrl-C and Ctrl-D; rich editing, history and undo belong to OpenTUI. Noncanonical
+terminal mode prevents silent kernel line truncation. One polling worker owns
+and restores terminal mode and descriptor flags. Fixed line/echo buffers and
+nonblocking count/byte admission bound queued input; exhaustion explicitly refuses
+the unsubmitted backlog and terminates the REPL. Output is ordered, capped at
+64 MiB per retained message, and fails after five seconds without write progress.
+Ctrl-C reaches the actor through an independent coalesced signal even during a
+blocked write. Shutdown wakes polling, retires queued output, discards unsubmitted
+terminal bytes and waits for physical I/O settlement before returning the terminal.
 
 Dependency rule: arrows point downward only. No Rust crate depends on anything in `packages/`. `rw-operation-contract` and `rw-resources` are dependency leaves. `rw-resources` owns process-wide physical execution admission, with no dependency on sessions, tools, or presentation. `rw-types` consumes the operation contract and the allocation derive macro. `rw-plugin-protocol` consumes the operation and shared-type contracts. `rw-sandbox` owns policy and calls the dependency-free macOS bootstrap crate for Mach authority clearing. `xtask` consumes the type, provider, plugin, operation, and storage owners to generate schemas and SDK projections; product crates never depend on it. `rw-core` is independent of `rw-runtime` and all executable frontends. `rw-runtime` owns concrete storage/provider/tool/MCP/extension assembly and injects it into the core engine. `rw-cli` consumes that owned composition API; its direct lower-level dependencies are explicit, narrow administrative and transport commands, not a re-export facade. The metadata and source-layout rules are enforced in CI by `scripts/check-dependency-direction.py`.
 
