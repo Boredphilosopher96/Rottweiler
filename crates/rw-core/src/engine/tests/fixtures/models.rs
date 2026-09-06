@@ -614,6 +614,8 @@ impl ModelDriver for DelayedFinishModel {
 
 pub(in crate::engine::tests) struct ContinuousDeltaModel {
     pub(in crate::engine::tests) count: usize,
+    pub(in crate::engine::tests) first_delta: Arc<tokio::sync::Notify>,
+    pub(in crate::engine::tests) allow_finish: Arc<tokio::sync::Notify>,
     pub(in crate::engine::tests) delay: Duration,
 }
 
@@ -631,21 +633,31 @@ impl ModelDriver for ContinuousDeltaModel {
     ) -> Result<BoxEventStream, AgentLoopError> {
         let count = self.count;
         let delay = self.delay;
-        let deltas = stream::unfold(0_usize, move |index| async move {
-            if index > count {
-                return None;
+        let first_delta = Arc::clone(&self.first_delta);
+        let allow_finish = Arc::clone(&self.allow_finish);
+        let deltas = stream::unfold(0_usize, move |index| {
+            let first_delta = Arc::clone(&first_delta);
+            let allow_finish = Arc::clone(&allow_finish);
+            async move {
+                if index > count {
+                    return None;
+                }
+                tokio::time::sleep(delay).await;
+                let event = if index == count {
+                    allow_finish.notified().await;
+                    ProviderEvent::Finished {
+                        reason: FinishReason::Stop,
+                    }
+                } else {
+                    if index == 0 {
+                        first_delta.notify_one();
+                    }
+                    ProviderEvent::TextDelta {
+                        text: "x".to_owned(),
+                    }
+                };
+                Some((Ok(event), index.saturating_add(1)))
             }
-            tokio::time::sleep(delay).await;
-            let event = if index == count {
-                ProviderEvent::Finished {
-                    reason: FinishReason::Stop,
-                }
-            } else {
-                ProviderEvent::TextDelta {
-                    text: "x".to_owned(),
-                }
-            };
-            Some((Ok(event), index.saturating_add(1)))
         });
         Ok(Box::pin(
             stream::iter([Ok(ProviderEvent::MessageStart {

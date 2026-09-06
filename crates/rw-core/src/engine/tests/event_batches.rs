@@ -491,10 +491,14 @@ async fn delayed_finish_never_holds_a_lone_delta_beyond_the_coalescing_window() 
 #[tokio::test]
 async fn continuous_deltas_flush_on_the_anchored_coalescing_deadline() {
     let root = TempDir::new().expect("tempdir");
+    let first_delta = Arc::new(Notify::new());
+    let allow_finish = Arc::new(Notify::new());
     let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
         Arc::new(ContinuousDeltaModel {
             count: 50,
+            first_delta: Arc::clone(&first_delta),
+            allow_finish: Arc::clone(&allow_finish),
             delay: Duration::from_micros(100),
         }),
         Arc::new(ToolRegistry::new()),
@@ -506,6 +510,9 @@ async fn continuous_deltas_flush_on_the_anchored_coalescing_deadline() {
     let mut events = handle.subscribe().expect("subscription");
 
     handle.send_message("run").await.expect("message");
+    timeout(Duration::from_secs(3), first_delta.notified())
+        .await
+        .expect("provider started after owned context preparation");
     let delta = timeout(
         Duration::from_millis(30),
         next_matching(&mut events, |kind| {
@@ -518,6 +525,7 @@ async fn continuous_deltas_flush_on_the_anchored_coalescing_deadline() {
         delta.kind,
         PendingEvent::TextDelta { turn: 1, ref text } if !text.is_empty()
     ));
+    allow_finish.notify_one();
     let finished = next_matching(&mut events, |kind| {
         matches!(kind, PendingEvent::TurnFinished { .. })
     })
