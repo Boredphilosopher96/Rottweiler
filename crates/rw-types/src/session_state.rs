@@ -17,15 +17,10 @@ pub const MAX_SESSION_PLUGIN_STATUSES: usize = 64;
 
 /// Validate the status bar contract. An empty status clears the plugin entry.
 /// # Errors
-/// Rejects noncanonical identities, control characters, or oversized UTF-8 text.
+/// Rejects empty display identities, control characters, or oversized UTF-8 text.
 pub fn validate_plugin_status(plugin_id: &str, status: &str) -> Result<(), &'static str> {
-    if plugin_id.is_empty()
-        || plugin_id.len() > 64
-        || !plugin_id.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
-        })
-    {
-        return Err("plugin status requires a bounded canonical plugin id");
+    if plugin_id.is_empty() || plugin_id.len() > 160 || plugin_id.chars().any(char::is_control) {
+        return Err("plugin status requires a bounded display owner identity");
     }
     if status.len() > MAX_PLUGIN_STATUS_BYTES || status.chars().any(char::is_control) {
         return Err("plugin status exceeds its UTF-8 byte limit or contains control characters");
@@ -36,9 +31,9 @@ pub fn validate_plugin_status(plugin_id: &str, status: &str) -> Result<(), &'sta
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS, Allocation)]
 #[serde(deny_unknown_fields)]
 pub struct SessionPluginStatus {
-    #[schemars(length(min = 1, max = 64), regex(pattern = "^[a-z0-9_.-]+$"))]
+    #[schemars(length(min = 1, max = 160), regex(pattern = r"^[^\u0000-\u001f\u007f-\u009f]+$"), extend("x-rw-max-utf8-bytes" = 160))]
     pub plugin_id: String,
-    #[schemars(length(min = 1, max = MAX_PLUGIN_STATUS_BYTES), extend("x-rw-max-utf8-bytes" = MAX_PLUGIN_STATUS_BYTES))]
+    #[schemars(length(min = 1, max = MAX_PLUGIN_STATUS_BYTES), regex(pattern = r"^[^\u0000-\u001f\u007f-\u009f]+$"), extend("x-rw-max-utf8-bytes" = MAX_PLUGIN_STATUS_BYTES))]
     pub status: String,
     pub source: SequenceId,
 }

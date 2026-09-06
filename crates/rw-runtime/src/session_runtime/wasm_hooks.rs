@@ -169,11 +169,13 @@ pub(super) fn wasm_startup_notice(plugin_id: &str, message: &str) -> StartupNoti
 }
 
 pub(super) fn sanitized_wasm_notice_text(value: &str, limit: usize) -> String {
-    value
+    let mut text = value
         .chars()
         .filter(|character| !character.is_control())
-        .take(limit)
-        .collect()
+        .collect::<String>();
+    let end = text.floor_char_boundary(text.len().min(limit));
+    text.truncate(end);
+    text
 }
 
 /// Resolves the bundled private WASM host executable.
