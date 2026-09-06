@@ -192,6 +192,39 @@ fn closed() -> OrchestrationError {
 }
 #[async_trait]
 impl SubagentSession for DeferredActorSession {
+    fn control_summary(&self) -> rw_types::family_controls::ChildControlSummary {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &state.phase {
+            Phase::Live(session) => session.control_summary(),
+            _ => Default::default(),
+        }
+    }
+    async fn child_controls(
+        &self,
+    ) -> Result<rw_types::family_controls::ChildControlsSnapshot, OrchestrationError> {
+        self.live(false)
+            .await?
+            .ok_or_else(closed)?
+            .child_controls()
+            .await
+    }
+    async fn respond_control(
+        &self,
+        authority: crate::FamilyControlAuthority,
+        meta: rw_types::CommandMeta,
+        revision: rw_types::SequenceId,
+        response: rw_types::family_controls::ChildControlResponse,
+    ) -> Result<rw_types::CommandOutcome, OrchestrationError> {
+        self.live(false)
+            .await?
+            .ok_or_else(closed)?
+            .respond_control(authority, meta, revision, response)
+            .await
+    }
+
     fn session_id(&self) -> &SessionId {
         &self.id
     }

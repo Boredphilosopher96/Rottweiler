@@ -84,9 +84,12 @@ fn durable_mutation(command: &ClientCommand) -> bool {
         | ClientCommand::RevokePermissionApproval { .. }
         | ClientCommand::ConfigureBuiltinProvider { .. }
         | ClientCommand::ContinueSubagent { .. }
-        | ClientCommand::CloseSubagent { .. } => true,
+        | ClientCommand::CloseSubagent { .. }
+        | ClientCommand::ResolveChildControl { .. } => true,
         ClientCommand::GetSessionState { .. }
         | ClientCommand::GetSessionControls { .. }
+        | ClientCommand::ReadFamilyControls { .. }
+        | ClientCommand::ReadChildControls { .. }
         | ClientCommand::GetUiCatalog { .. }
         | ClientCommand::GetUiPanels { .. }
         | ClientCommand::ReadSessionChildren { .. }

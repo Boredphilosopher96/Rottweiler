@@ -24,6 +24,25 @@ pub enum ClientCommand {
         meta: CommandMeta,
         session_id: SessionId,
     },
+    ReadFamilyControls {
+        meta: CommandMeta,
+        session_id: SessionId,
+        #[serde(deserialize_with = "Option::deserialize")]
+        #[schemars(schema_with = "crate::schema::required_nullable::<SequenceId>")]
+        after_revision: Option<SequenceId>,
+    },
+    ReadChildControls {
+        meta: CommandMeta,
+        session_id: SessionId,
+        target: crate::family_controls::ChildControlTarget,
+    },
+    ResolveChildControl {
+        meta: CommandMeta,
+        session_id: SessionId,
+        target: crate::family_controls::ChildControlTarget,
+        expected_revision: SequenceId,
+        response: crate::family_controls::ChildControlResponse,
+    },
     GetUiCatalog {
         meta: CommandMeta,
         session_id: SessionId,
@@ -404,6 +423,9 @@ impl ClientCommand {
             | Self::ReadTranscriptContent { meta, .. }
             | Self::GetSessionState { meta, .. }
             | Self::GetSessionControls { meta, .. }
+            | Self::ReadFamilyControls { meta, .. }
+            | Self::ReadChildControls { meta, .. }
+            | Self::ResolveChildControl { meta, .. }
             | Self::GetUiCatalog { meta, .. }
             | Self::GetUiPanels { meta, .. }
             | Self::InvokeUiAction { meta, .. }
@@ -487,6 +509,9 @@ impl ClientCommand {
             | Self::ReadTranscriptContent { session_id, .. }
             | Self::GetSessionState { session_id, .. }
             | Self::GetSessionControls { session_id, .. }
+            | Self::ReadFamilyControls { session_id, .. }
+            | Self::ReadChildControls { session_id, .. }
+            | Self::ResolveChildControl { session_id, .. }
             | Self::GetUiCatalog { session_id, .. }
             | Self::GetUiPanels { session_id, .. }
             | Self::InvokeUiAction { session_id, .. }
@@ -561,6 +586,9 @@ impl ClientCommand {
             | Self::ReadTranscriptContent { meta, .. }
             | Self::GetSessionState { meta, .. }
             | Self::GetSessionControls { meta, .. }
+            | Self::ReadFamilyControls { meta, .. }
+            | Self::ReadChildControls { meta, .. }
+            | Self::ResolveChildControl { meta, .. }
             | Self::GetUiCatalog { meta, .. }
             | Self::GetUiPanels { meta, .. }
             | Self::InvokeUiAction { meta, .. }
@@ -666,6 +694,8 @@ read_commands!(
     DumpPrompt,
     GetSessionState,
     GetSessionControls,
+    ReadFamilyControls,
+    ReadChildControls,
     GetUiCatalog,
     GetUiPanels,
     ReadSessionChildren,
@@ -712,6 +742,7 @@ urgent_commands!(
     ApproveTool,
     ApprovePlan,
     AnswerQuestion,
+    ResolveChildControl,
     ShutdownHost
 );
 

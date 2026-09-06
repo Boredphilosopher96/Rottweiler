@@ -52,6 +52,73 @@ impl EngineHost {
                 ))
             }
 
+            ClientCommand::ReadFamilyControls {
+                meta,
+                session_id,
+                after_revision,
+            } => {
+                let session = self.ready_session(&session_id).await?;
+                let service = session
+                    .subagents()
+                    .ok_or_else(|| HostError::Query("family controls unavailable".into()))?;
+                let snapshot = service.family_controls(&session_id, after_revision).await?;
+                Ok((
+                    CommandOutcome::Accepted {},
+                    Some(session_id.clone()),
+                    vec![EngineEvent::FamilyControlsReady {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        snapshot,
+                    }],
+                ))
+            }
+            ClientCommand::ReadChildControls {
+                meta,
+                session_id,
+                target,
+            } => {
+                let session = self.ready_session(&session_id).await?;
+                let service = session
+                    .subagents()
+                    .ok_or_else(|| HostError::Query("family controls unavailable".into()))?;
+                let snapshot = service.child_controls(&session_id, &target).await?;
+                Ok((
+                    CommandOutcome::Accepted {},
+                    Some(session_id.clone()),
+                    vec![EngineEvent::ChildControlsReady {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        target,
+                        snapshot,
+                    }],
+                ))
+            }
+            ClientCommand::ResolveChildControl {
+                meta,
+                session_id,
+                target,
+                expected_revision,
+                response,
+            } => {
+                let session = self.ready_session(&session_id).await?;
+                let _lifecycle = Arc::clone(&session.lifecycle).lock_owned().await;
+                ensure_session_driver(&session, &meta.client_id).await?;
+                let authority = session.handle().family_control_authority(&meta.client_id)?;
+                let service = session
+                    .subagents()
+                    .ok_or_else(|| HostError::Query("family controls unavailable".into()))?;
+                let outcome = service
+                    .respond_control(
+                        &session_id,
+                        &target,
+                        authority,
+                        meta,
+                        expected_revision,
+                        response,
+                    )
+                    .await?;
+                Ok((outcome, Some(session_id), Vec::new()))
+            }
             ClientCommand::GetUiCatalog { meta, session_id } => {
                 let session = self.ready_session(&session_id).await?;
                 let catalog = session

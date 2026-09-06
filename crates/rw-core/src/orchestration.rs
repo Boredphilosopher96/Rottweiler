@@ -293,6 +293,23 @@ pub struct SubagentTurnResult {
 /// A persistent child session. Implementations must keep context and their own event log.
 #[async_trait]
 pub trait SubagentSession: Send + Sync {
+    /// Scalar control discovery never materializes control bodies or activates a dormant actor.
+    fn control_summary(&self) -> rw_types::family_controls::ChildControlSummary;
+    /// # Errors
+    /// Rejects unavailable actors or snapshots exceeding the source admission.
+    async fn child_controls(
+        &self,
+    ) -> Result<rw_types::family_controls::ChildControlsSnapshot, OrchestrationError>;
+    /// # Errors
+    /// Rejects stale authority, stale control identities, and invalid explicit responses.
+    async fn respond_control(
+        &self,
+        authority: crate::FamilyControlAuthority,
+        meta: rw_types::CommandMeta,
+        revision: rw_types::SequenceId,
+        response: rw_types::family_controls::ChildControlResponse,
+    ) -> Result<rw_types::CommandOutcome, OrchestrationError>;
+
     fn session_id(&self) -> &SessionId;
 
     async fn run_turn(
@@ -507,6 +524,7 @@ use policy::{
 mod tools;
 pub use tools::{SpawnAgentTool, subagent_result_tool_output};
 
+mod family_controls;
 mod sessions;
 pub use sessions::{ActorSubagentSessionFactory, WorktreeSubagentSessionFactory};
 

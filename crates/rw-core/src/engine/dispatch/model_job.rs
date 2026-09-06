@@ -25,6 +25,7 @@ pub(in crate::engine) struct PluginSelection {
 
 pub(in crate::engine) enum SelectionAction {
     Protocol {
+        authority: Option<(crate::FamilyControlAuthority, rw_types::SequenceId)>,
         command: Box<ClientCommand>,
         respond: oneshot::Sender<CommandOutcome>,
         completion: Completion,
@@ -186,13 +187,16 @@ pub(in crate::engine) async fn finish(mut result: ResultValue, context: Dispatch
     }
     match pending.action {
         SelectionAction::Protocol {
+            authority,
             command,
             respond,
             completion,
         } => {
             // Re-run all command authority and input checks after preparation.
-            if !super::admission::dispatch_protocol(*command, respond, completion, true, context)
-                .await
+            if !super::admission::dispatch_protocol(
+                *command, respond, completion, true, authority, context,
+            )
+            .await
             {
                 pending.owner.model.discard_prepared_model(&pending.alias);
             }
@@ -286,6 +290,7 @@ fn reject(
 ) {
     match action {
         SelectionAction::Protocol {
+            authority: _,
             command,
             respond,
             completion,

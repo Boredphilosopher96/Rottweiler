@@ -60,6 +60,9 @@ pub(super) fn is_host_command(command: &ClientCommand) -> bool {
             | ClientCommand::ListSessions { .. }
             | ClientCommand::GetSessionState { .. }
             | ClientCommand::GetSessionControls { .. }
+            | ClientCommand::ReadFamilyControls { .. }
+            | ClientCommand::ReadChildControls { .. }
+            | ClientCommand::ResolveChildControl { .. }
             | ClientCommand::GetUiCatalog { .. }
             | ClientCommand::GetUiPanels { .. }
             | ClientCommand::ListCommands { .. }
@@ -78,6 +81,7 @@ pub(super) async fn dispatch_protocol(
     respond: oneshot::Sender<CommandOutcome>,
     mut completion: Option<oneshot::Sender<Result<ProtocolCompletion, AgentLoopError>>>,
     prepared: bool,
+    authority: Option<(crate::FamilyControlAuthority, rw_types::SequenceId)>,
     context: DispatchContext<'_>,
 ) -> bool {
     let DispatchContext {
@@ -92,7 +96,23 @@ pub(super) async fn dispatch_protocol(
     } = context;
     let meta = command.meta().clone();
     let session = command.session_id().cloned();
-    let rejection = if meta.protocol_version != PROTOCOL_VERSION {
+    crate::engine::session::control_observation::publish(state);
+    let delegated = authority.as_ref().is_some_and(|(proof, revision)| {
+        proof.valid(&meta.client_id)
+            && *revision == state.control.observation.snapshot().revision
+            && matches!(
+                command,
+                ClientCommand::AnswerQuestion { .. }
+                    | ClientCommand::ApproveTool { .. }
+                    | ClientCommand::ApprovePlan { .. }
+            )
+    });
+    let rejection = if authority.is_some() && !delegated {
+        Some(protocol_rejection(
+            "stale_child_control",
+            "root driver or child control revision changed",
+        ))
+    } else if meta.protocol_version != PROTOCOL_VERSION {
         Some(protocol_rejection(
             "unsupported_protocol_version",
             format!(
@@ -128,7 +148,9 @@ pub(super) async fn dispatch_protocol(
             "session_requires_recovery",
             "session is fail-closed until checkpoint journal recovery completes",
         ))
-    } else if requires_driver(&command) && state.control.driver().as_ref() != Some(&meta.client_id)
+    } else if !delegated
+        && requires_driver(&command)
+        && state.control.driver().as_ref() != Some(&meta.client_id)
     {
         Some(protocol_rejection(
             "driver_required",
@@ -607,6 +629,7 @@ pub(super) async fn dispatch_protocol(
             events,
             alias,
             super::model_job::SelectionAction::Protocol {
+                authority,
                 command: Box::new(command),
                 respond,
                 completion,

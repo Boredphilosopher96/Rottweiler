@@ -15,6 +15,7 @@ pub(in crate::engine) enum CompactionPreview<'a> {
 
 #[derive(Default)]
 pub(in crate::engine) struct LiveState {
+    pub(in crate::engine) controls_source: Option<SequenceId>,
     pub(in crate::engine) turn_source: Option<(TurnId, SequenceId)>,
     pub(in crate::engine) compaction: Option<SessionCompactionState>,
     pub(in crate::engine) budget: Option<SessionBudgetState>,
@@ -57,6 +58,9 @@ impl LiveState {
         Ok(())
     }
     pub(in crate::engine) fn observe(&mut self, event: &EngineEvent, running: Option<u64>) {
+        if super::control_observation::is_control_event(event) {
+            self.controls_source = event.meta().map(|meta| meta.sequence_id);
+        }
         match event {
             EngineEvent::PluginStatusChanged {
                 meta,

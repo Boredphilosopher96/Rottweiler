@@ -82,6 +82,39 @@ pub(super) async fn handle_actor_command(
         ActorCommand::LiveState { respond } => {
             let _ = respond.send(live_state::snapshot(state));
         }
+        ActorCommand::ChildControls { respond } => {
+            crate::engine::session::control_observation::publish(state);
+            let revision = state.control.observation.snapshot().revision;
+            let _ = respond.send(controls::snapshot(state).map(|snapshot| {
+                rw_types::family_controls::ChildControlsSnapshot { revision, snapshot }
+            }));
+        }
+        ActorCommand::ChildControl {
+            authority,
+            command,
+            expected_revision,
+            respond,
+            completion,
+        } => {
+            dispatch_protocol(
+                command,
+                respond,
+                Some(completion),
+                false,
+                Some((authority, expected_revision)),
+                DispatchContext {
+                    state,
+                    config,
+                    tool_context,
+                    turn_signals,
+                    events,
+                    active_turn,
+                    command_descriptors,
+                    mode_registry,
+                },
+            )
+            .await;
+        }
         ActorCommand::Controls { respond } => {
             let _ = respond.send(controls::snapshot(state));
         }
@@ -95,6 +128,7 @@ pub(super) async fn handle_actor_command(
                 respond,
                 completion,
                 false,
+                None,
                 DispatchContext {
                     state,
                     config,

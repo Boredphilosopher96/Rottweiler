@@ -44,6 +44,18 @@ pub(in crate::engine) enum ActorCommand {
         respond:
             oneshot::Sender<Result<rw_types::session_state::SessionStateSnapshot, AgentLoopError>>,
     },
+    ChildControls {
+        respond: oneshot::Sender<
+            Result<rw_types::family_controls::ChildControlsSnapshot, AgentLoopError>,
+        >,
+    },
+    ChildControl {
+        authority: super::FamilyControlAuthority,
+        command: ClientCommand,
+        expected_revision: rw_types::SequenceId,
+        respond: oneshot::Sender<CommandOutcome>,
+        completion: oneshot::Sender<Result<ProtocolCompletion, AgentLoopError>>,
+    },
     Controls {
         respond: oneshot::Sender<
             Result<rw_types::session_controls::SessionControlsSnapshot, AgentLoopError>,
@@ -296,6 +308,7 @@ impl ActorState {
             .map_or(recovered.mode, mode_permission_base);
         Self {
             live: super::live_state::LiveState {
+                controls_source: None,
                 budget: recovered.latest_budget,
                 plugin_statuses: recovered.plugin_statuses,
                 ..Default::default()

@@ -23,6 +23,7 @@ pub mod extension_events;
 pub mod extension_invocation;
 pub mod extension_tools;
 pub mod extension_ui;
+pub mod family_controls;
 pub mod hook_contract;
 mod ir;
 pub mod mcp;

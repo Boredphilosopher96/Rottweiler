@@ -16,6 +16,7 @@ struct State {
 }
 
 pub(in crate::engine) struct SessionControl {
+    pub(in crate::engine) observation: super::control_observation::ControlObservation,
     session: SessionId,
     state: Mutex<State>,
     clock: Arc<dyn EventClock>,
@@ -28,6 +29,7 @@ impl SessionControl {
         clock: Arc<dyn EventClock>,
     ) -> Self {
         Self {
+            observation: super::control_observation::ControlObservation::default(),
             session,
             state: Mutex::new(State {
                 driver,
@@ -38,6 +40,13 @@ impl SessionControl {
         }
     }
 
+    pub(super) fn authorizes(&self, client: &ClientId) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        !state.closed && state.driver.as_ref() == Some(client)
+    }
     pub(in crate::engine) fn driver(&self) -> Option<ClientId> {
         self.state
             .lock()

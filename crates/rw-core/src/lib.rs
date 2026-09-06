@@ -137,3 +137,5 @@ pub use update::{
 
 /// Identifies this workspace component in diagnostics.
 pub const COMPONENT: &str = "core";
+
+pub use engine::FamilyControlAuthority;

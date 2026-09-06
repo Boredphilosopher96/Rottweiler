@@ -217,6 +217,7 @@ impl SubagentOrchestrator {
                     close_gate: Arc::new(tokio::sync::Mutex::new(())),
                 },
             );
+        crate::engine::control_observation::changed();
         self.spawn_turn(
             handle.clone(),
             parent_session_id,
@@ -619,6 +620,7 @@ impl SubagentOrchestrator {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(subagent_id);
+        crate::engine::control_observation::changed();
         if let Some(record) = removed {
             self.inner
                 .session_depths
@@ -775,6 +777,7 @@ impl SubagentOrchestrator {
                     close_gate: Arc::new(tokio::sync::Mutex::new(())),
                 },
             );
+        crate::engine::control_observation::changed();
         Ok(())
     }
 

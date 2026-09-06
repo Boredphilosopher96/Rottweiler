@@ -377,6 +377,9 @@ pub(super) async fn apply_accepted(
             if let Some(pending) = state.pending_approvals.remove(&tool_call_id.0) {
                 let _ = pending.respond.send(decision);
             }
+            if let Some(complete) = completion.take() {
+                let _ = complete.send(Ok(ProtocolCompletion::Unit));
+            }
         }
         ClientCommand::AnswerQuestion { .. } => {
             if let Some(answer) = precommitted_answer.take() {
@@ -539,6 +542,9 @@ pub(super) async fn apply_accepted(
         | ClientCommand::SearchSessions { .. }
         | ClientCommand::GetSessionState { .. }
         | ClientCommand::GetSessionControls { .. }
+        | ClientCommand::ReadFamilyControls { .. }
+        | ClientCommand::ReadChildControls { .. }
+        | ClientCommand::ResolveChildControl { .. }
         | ClientCommand::GetUiCatalog { .. }
         | ClientCommand::GetUiPanels { .. }
         | ClientCommand::ListCommands { .. }

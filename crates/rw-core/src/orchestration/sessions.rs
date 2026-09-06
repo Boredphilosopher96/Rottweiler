@@ -134,6 +134,26 @@ pub(super) struct WorktreeSubagentSession {
 
 #[async_trait]
 impl SubagentSession for WorktreeSubagentSession {
+    fn control_summary(&self) -> rw_types::family_controls::ChildControlSummary {
+        self.inner.control_summary()
+    }
+    async fn child_controls(
+        &self,
+    ) -> Result<rw_types::family_controls::ChildControlsSnapshot, OrchestrationError> {
+        self.inner.child_controls().await
+    }
+    async fn respond_control(
+        &self,
+        authority: crate::FamilyControlAuthority,
+        meta: rw_types::CommandMeta,
+        revision: rw_types::SequenceId,
+        response: rw_types::family_controls::ChildControlResponse,
+    ) -> Result<rw_types::CommandOutcome, OrchestrationError> {
+        self.inner
+            .respond_control(authority, meta, revision, response)
+            .await
+    }
+
     fn session_id(&self) -> &SessionId {
         self.inner.session_id()
     }
@@ -399,6 +419,30 @@ pub(super) struct ActorSubagentSession {
 
 #[async_trait]
 impl SubagentSession for ActorSubagentSession {
+    fn control_summary(&self) -> rw_types::family_controls::ChildControlSummary {
+        self.handle.control_summary()
+    }
+    async fn child_controls(
+        &self,
+    ) -> Result<rw_types::family_controls::ChildControlsSnapshot, OrchestrationError> {
+        self.handle
+            .child_controls()
+            .await
+            .map_err(|error| OrchestrationError::Session(error.to_string()))
+    }
+    async fn respond_control(
+        &self,
+        authority: crate::FamilyControlAuthority,
+        meta: rw_types::CommandMeta,
+        revision: rw_types::SequenceId,
+        response: rw_types::family_controls::ChildControlResponse,
+    ) -> Result<rw_types::CommandOutcome, OrchestrationError> {
+        self.handle
+            .respond_child_control(authority, meta, revision, response)
+            .await
+            .map_err(|error| OrchestrationError::Session(error.to_string()))
+    }
+
     fn session_id(&self) -> &SessionId {
         self.handle.session_id()
     }

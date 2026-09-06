@@ -336,6 +336,7 @@ pub(super) async fn run_actor(
     let mut closing_started = None;
     let mut cleanup = None;
     loop {
+        super::control_observation::publish(&state);
         if shutdown.requested() || !commands_open || state.unsettled.is_some() {
             state.control.close();
             state.closing = true;
@@ -451,6 +452,8 @@ pub(super) async fn run_actor(
             }
         }
     }
+    state.closing = true;
+    super::control_observation::publish(&state);
     active_turn.store(0, Ordering::Release);
     if let Some(message) = state.unsettled.clone() {
         shutdown.complete(Err(message));

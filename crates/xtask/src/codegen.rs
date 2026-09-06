@@ -1,3 +1,7 @@
+use rw_types::family_controls::{
+    ChildControlHop, ChildControlResponse, ChildControlSummary, ChildControlTarget,
+    ChildControlsSnapshot, FamilyControlRow, FamilyControlsSnapshot,
+};
 use rw_types::session_children::{
     SessionChildState, SessionChildrenResult, SessionChildrenSnapshot,
 };
@@ -339,6 +343,22 @@ fn generate_typescript() -> Result<String, XtaskError> {
             rw_types::session_state::MAX_SESSION_QUEUE_ITEMS,
         ),
         (
+            "MAX_FAMILY_CONTROL_DEPTH",
+            rw_types::family_controls::MAX_FAMILY_CONTROL_DEPTH,
+        ),
+        (
+            "MAX_FAMILY_CONTROL_ROWS",
+            rw_types::family_controls::MAX_FAMILY_CONTROL_ROWS,
+        ),
+        (
+            "MAX_FAMILY_CONTROLS_BYTES",
+            rw_types::family_controls::MAX_FAMILY_CONTROLS_BYTES,
+        ),
+        (
+            "MAX_FAMILY_CONTROLS_PREPARED_BYTES",
+            rw_types::family_controls::MAX_FAMILY_CONTROLS_PREPARED_BYTES,
+        ),
+        (
             "MAX_SESSION_CONTROLS_BYTES",
             rw_types::session_controls::MAX_SESSION_CONTROLS_BYTES,
         ),
@@ -428,6 +448,14 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(TodoStatus);
     declaration!(SessionControls);
     declaration!(SessionControlsSnapshot);
+    declaration!(ChildControlHop);
+    declaration!(ChildControlTarget);
+    declaration!(ChildControlSummary);
+    declaration!(FamilyControlRow);
+    declaration!(FamilyControlsSnapshot);
+    declaration!(ChildControlsSnapshot);
+    declaration!(ChildControlResponse);
+
     declaration!(SessionStateSnapshot);
     declaration!(SessionPluginStatus);
     declaration!(SessionChildState);

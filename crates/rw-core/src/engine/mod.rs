@@ -644,3 +644,6 @@ struct RoutedEvent {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+pub use session::FamilyControlAuthority;
+pub(crate) use session::control_observation;

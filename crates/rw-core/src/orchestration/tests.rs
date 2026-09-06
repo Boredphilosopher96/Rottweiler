@@ -160,6 +160,28 @@ impl SubagentSessionFactory for FakeFactory {
 
 #[async_trait]
 impl SubagentSession for FakeSession {
+    fn control_summary(&self) -> rw_types::family_controls::ChildControlSummary {
+        Default::default()
+    }
+    async fn child_controls(
+        &self,
+    ) -> Result<rw_types::family_controls::ChildControlsSnapshot, crate::OrchestrationError> {
+        Err(crate::OrchestrationError::Session(
+            "fixture has no actor controls".into(),
+        ))
+    }
+    async fn respond_control(
+        &self,
+        _authority: crate::FamilyControlAuthority,
+        _meta: rw_types::CommandMeta,
+        _revision: rw_types::SequenceId,
+        _response: rw_types::family_controls::ChildControlResponse,
+    ) -> Result<rw_types::CommandOutcome, crate::OrchestrationError> {
+        Err(crate::OrchestrationError::Session(
+            "fixture has no actor controls".into(),
+        ))
+    }
+
     fn session_id(&self) -> &SessionId {
         &self.session_id
     }
@@ -593,3 +615,5 @@ mod worktree_startup;
 
 mod artifact_source;
 use artifact_source::TestArtifactSource;
+
+mod family_controls;

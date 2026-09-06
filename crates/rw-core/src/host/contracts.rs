@@ -492,6 +492,26 @@ pub trait HostRuntimeService: Send + Sync + 'static {
 /// parent ownership and must never expose a child as a generic hosted session.
 #[async_trait]
 pub trait HostSubagentService: Send + Sync + 'static {
+    async fn family_controls(
+        &self,
+        root: &SessionId,
+        after: Option<rw_types::SequenceId>,
+    ) -> Result<rw_types::family_controls::FamilyControlsSnapshot, HostError>;
+    async fn child_controls(
+        &self,
+        root: &SessionId,
+        target: &rw_types::family_controls::ChildControlTarget,
+    ) -> Result<rw_types::family_controls::ChildControlsSnapshot, HostError>;
+    async fn respond_control(
+        &self,
+        root: &SessionId,
+        target: &rw_types::family_controls::ChildControlTarget,
+        authority: crate::FamilyControlAuthority,
+        meta: rw_types::CommandMeta,
+        revision: rw_types::SequenceId,
+        response: rw_types::family_controls::ChildControlResponse,
+    ) -> Result<rw_types::CommandOutcome, HostError>;
+
     async fn list(
         &self,
         parent_session_id: &SessionId,

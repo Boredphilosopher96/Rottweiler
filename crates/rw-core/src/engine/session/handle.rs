@@ -67,6 +67,11 @@ pub struct SessionHandle {
 }
 
 impl SessionHandle {
+    /// Bounded live control identity; this never copies control bodies.
+    #[must_use]
+    pub fn control_summary(&self) -> rw_types::family_controls::ChildControlSummary {
+        self.shutdown.control.observation.snapshot()
+    }
     /// Closes admission and waits for the actor's owned effect settlement.
     ///
     /// # Errors
