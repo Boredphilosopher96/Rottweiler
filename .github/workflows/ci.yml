@@ -158,6 +158,10 @@ jobs:
       - name: Frozen integration dependencies
         run: python3 scripts/ci_evidence.py --gate frozen-install --output ci-results/install.json -- python3 scripts/ci_inventory.py install js-host --build-dependencies
       - run: python3 scripts/ci_evidence.py --gate fmt --output ci-results/fmt.json -- cargo fmt --all -- --check
+      - name: Check isolated test dependency graphs
+        run: |
+          python3 scripts/ci_evidence.py --gate core-test-graph --output ci-results/core-test-graph.json -- cargo check --locked -p rw-core --tests --all-features
+          python3 scripts/ci_evidence.py --gate mcp-test-graph --output ci-results/mcp-test-graph.json -- cargo check --locked -p rw-mcp --tests --all-features
       - run: python3 scripts/ci_evidence.py --gate clippy --output ci-results/clippy.json -- cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Build native sandbox test prerequisite
         run: python3 scripts/ci_evidence.py --gate test-helper-build --output ci-results/test-helper-build.json -- python3 scripts/build-test-helper.py --github-env "$GITHUB_ENV"
