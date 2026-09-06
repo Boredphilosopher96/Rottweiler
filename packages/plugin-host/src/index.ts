@@ -3,7 +3,7 @@ import { builtinModules } from "node:module"
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { pathToFileURL } from "node:url"
 
-import { runPlugin, type PluginDefinition } from "@rottweiler/plugin"
+import type { PluginDefinition } from "@rottweiler/plugin"
 
 import { SOURCE_HOST_ABI, SOURCE_BUNDLE_FORMAT } from "./protocol"
 
@@ -162,6 +162,7 @@ async function run(bundleArgument: string): Promise<void> {
   if (!isRecord(loaded) || !isPluginDefinition(loaded.plugin)) {
     throw new Error("source bundle must export one plugin definition named plugin")
   }
+  const { runPlugin } = await import("@rottweiler/plugin")
   await runPlugin(loaded.plugin)
 }
 

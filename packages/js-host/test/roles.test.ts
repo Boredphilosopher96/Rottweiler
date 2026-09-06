@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import { JS_HOST_ROLES } from "../generated/release-contract"
 
 import { SOURCE_HOST_ABI, SOURCE_BUNDLE_FORMAT } from "../../plugin-host/src/protocol"
@@ -41,4 +41,22 @@ test("missing or unsupported roles reject before application initialization", as
     expect(result.stderr).not.toContain("terminal dependency")
     expect(result.stderr).not.toContain("\u001b")
   }
+})
+
+
+test("source-only version resolves without installed SDK or renderer packages", async () => {
+  const root = await mkdtemp(join(tmpdir(), "rw-js-source-only-"))
+  try {
+    for (const name of ["js-host/src/index.ts", "js-host/generated/release-contract.ts", "plugin-host/src/index.ts", "plugin-host/src/protocol.ts"]) {
+      const target = join(root, "packages", name)
+      await mkdir(dirname(target), { recursive: true })
+      await writeFile(target, await readFile(resolve(import.meta.dir, "../../", name)))
+    }
+    const child = Bun.spawnSync([process.execPath, join(root, "packages/js-host/src/index.ts"), JS_HOST_ROLES.source_plugin, "version"], {
+      cwd: root, env: { PATH: process.env.PATH }, stdout: "pipe", stderr: "pipe",
+    })
+    expect(child.stderr.toString()).toBe("")
+    expect(child.exitCode).toBe(0)
+    expect(JSON.parse(child.stdout.toString())).toEqual({ abi: SOURCE_HOST_ABI, format: SOURCE_BUNDLE_FORMAT })
+  } finally { await rm(root, { recursive: true, force: true }) }
 })

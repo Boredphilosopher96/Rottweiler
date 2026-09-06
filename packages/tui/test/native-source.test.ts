@@ -38,8 +38,8 @@ test("source virtual module selects the exact verified artifact", () => {
 })
 
 test("source-plugin role in the TUI directory needs no native artifact", () => {
-  const result = child('import {plugin} from "bun"; plugin({name:"deny-renderer",setup(build){build.module("@opentui/core",()=>{throw new Error("source plugin imported the renderer")})}}); const {runJavaScriptHost}=await import("../js-host/src/index.ts"); await runJavaScriptHost(["source-plugin","version"])')
-  expect(result.exitCode).toBe(0)
+  const result = child('import {plugin} from "bun"; plugin({name:"deny-renderer",setup(build){build.module("@opentui/core",()=>{throw new Error("source plugin imported the renderer")});build.module("@rottweiler/plugin",()=>{throw new Error("source version imported SDK execution")})}}); const {runJavaScriptHost}=await import("../js-host/src/index.ts"); await runJavaScriptHost(["source-plugin","version"])')
   expect(result.stderr.toString()).toBe("")
+  expect(result.exitCode).toBe(0)
   expect(JSON.parse(result.stdout.toString())).toHaveProperty("abi")
 })
