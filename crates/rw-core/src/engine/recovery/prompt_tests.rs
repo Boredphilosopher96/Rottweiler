@@ -38,7 +38,7 @@ fn prompt_cut_precedes_answer_and_tracks_effective_reused_turn_identity() {
         .expect("reader");
     assert_eq!(before.latest_prompt_turn().expect("latest prompt"), Some(2));
     let prompt = before.prompt_at_turn(2).expect("indexed prompt");
-    assert_eq!(prompt.head().next_sequence, 9);
+    assert_eq!(prompt.head().next_sequence, 11);
     assert!(
         prompt
             .bootstrap()
@@ -57,17 +57,17 @@ fn prompt_cut_precedes_answer_and_tracks_effective_reused_turn_identity() {
             text(Role::User, "request 2")
         ]
     );
-    assert_eq!(page.sources[2].sequence, SequenceId(7));
-    append(
+    assert_eq!(page.sources[2].sequence, SequenceId(9));
+    append_script(
         &mut journal,
         vec![
-            PendingEvent::ConversationRewound {
+            SourceEvent::Event(PendingEvent::ConversationRewound {
                 to_turn: 1,
                 operation_id: "rewind".into(),
                 unrestorable_paths: vec![],
-            },
-            PendingEvent::TurnStarted { turn: 2 },
-            PendingEvent::ConversationTurnCommitted {
+            }),
+            SourceEvent::Event(PendingEvent::TurnStarted { turn: 2 }),
+            SourceEvent::Input {
                 agent_turn: 2,
                 turn: text(Role::User, "replacement"),
             },
@@ -94,7 +94,7 @@ fn prompt_cut_precedes_answer_and_tracks_effective_reused_turn_identity() {
             .expect("pinned source")
             .head()
             .next_sequence,
-        9
+        11
     );
     append(&mut journal, vec![usage(2)]);
     catch_up(&mut index, &journal.read_view(), &modes);
@@ -108,7 +108,7 @@ fn prompt_cut_precedes_answer_and_tracks_effective_reused_turn_identity() {
         Some(2)
     );
     let replacement = current.prompt_at_turn(2).expect("replacement prompt");
-    assert_eq!(replacement.head().next_sequence, 16);
+    assert_eq!(replacement.head().next_sequence, 19);
     assert_eq!(
         replacement
             .conversation_page(2..3, HistoryMaterializationLimits::default())
@@ -120,22 +120,24 @@ fn prompt_cut_precedes_answer_and_tracks_effective_reused_turn_identity() {
 
 fn append_two_completed_prompts(journal: &mut SegmentedJournal) {
     for turn in 1..=2 {
-        append(
+        append_script(
             journal,
             vec![
-                PendingEvent::TurnStarted { turn },
-                PendingEvent::ConversationTurnCommitted {
+                SourceEvent::Event(PendingEvent::TurnStarted { turn }),
+                SourceEvent::Input {
                     agent_turn: turn,
                     turn: text(Role::User, &format!("request {turn}")),
                 },
-                usage(turn),
-                PendingEvent::ConversationTurnCommitted {
+                SourceEvent::Event(usage(turn)),
+                SourceEvent::Event(PendingEvent::ConversationTurnCommitted {
                     agent_turn: turn,
                     turn: text(Role::Assistant, &format!("answer {turn}")),
-                },
-                usage(turn),
-                terminal(turn),
+                }),
+                SourceEvent::Event(usage(turn)),
+                SourceEvent::Event(terminal(turn)),
             ],
         );
     }
 }
+
+use super::test_source::{SourceEvent, append_script};

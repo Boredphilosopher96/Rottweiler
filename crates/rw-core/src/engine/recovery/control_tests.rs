@@ -160,9 +160,15 @@ fn latest_budget_is_physical_state_after_conversation_rewind() {
         CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("recovery");
     let pending = vec![
         PendingEvent::TurnStarted { turn: 1 },
-        PendingEvent::ConversationTurnCommitted {
+        PendingEvent::UserMessageAccepted {
+            turn: 1,
+            content: "first".into(),
+            attachments: vec![],
+        },
+        PendingEvent::ConversationInputCommitted {
             agent_turn: 1,
-            turn: text(Role::User, "first"),
+            accepted_source: rw_types::SequenceId(1),
+            selection: rw_types::conversation_input::InputSelection::Accepted {},
         },
         super::tests::terminal(1),
         PendingEvent::BudgetStatus {
@@ -211,38 +217,38 @@ fn completed_boundary_bootstrap_matches_rewind_without_materializing_history() {
     let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
     let mut recovery =
         CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("recovery");
-    append(
+    append_script(
         &mut journal,
         vec![
-            PendingEvent::ModeChanged {
+            SourceEvent::Event(PendingEvent::ModeChanged {
                 mode: rw_types::ModeId("plan".into()),
                 definition_fingerprint: modes.get("plan").expect("mode").semantic_fingerprint(),
-            },
-            PendingEvent::TurnStarted { turn: 1 },
-            PendingEvent::ConversationTurnCommitted {
+            }),
+            SourceEvent::Event(PendingEvent::TurnStarted { turn: 1 }),
+            SourceEvent::Input {
                 agent_turn: 1,
                 turn: text(Role::User, "first"),
             },
-            PendingEvent::ConversationTurnCommitted {
+            SourceEvent::Event(PendingEvent::ConversationTurnCommitted {
                 agent_turn: 1,
                 turn: text(Role::Assistant, &"history".repeat(100_000)),
-            },
-            super::tests::terminal(1),
-            PendingEvent::ModeChanged {
+            }),
+            SourceEvent::Event(super::tests::terminal(1)),
+            SourceEvent::Event(PendingEvent::ModeChanged {
                 mode: rw_types::ModeId("execute".into()),
                 definition_fingerprint: modes.get("execute").expect("mode").semantic_fingerprint(),
-            },
-            PendingEvent::SessionTitleUpdated {
+            }),
+            SourceEvent::Event(PendingEvent::SessionTitleUpdated {
                 title: "Present title".into(),
                 usage: None,
                 cost: None,
-            },
-            PendingEvent::TurnStarted { turn: 2 },
-            PendingEvent::ConversationTurnCommitted {
+            }),
+            SourceEvent::Event(PendingEvent::TurnStarted { turn: 2 }),
+            SourceEvent::Input {
                 agent_turn: 2,
                 turn: text(Role::User, "second"),
             },
-            super::tests::terminal(2),
+            SourceEvent::Event(super::tests::terminal(2)),
         ],
     );
     catch_up(&mut recovery, &journal.read_view(), &modes);
@@ -352,3 +358,5 @@ fn status_bootstrap_recovers_latest_sources_and_durable_clears() {
     assert_eq!(cleared.controls.plugin_statuses.len(), 1);
     assert_eq!(cleared.controls.plugin_statuses[0].plugin_id, "other");
 }
+
+use super::test_source::{SourceEvent, append_script};

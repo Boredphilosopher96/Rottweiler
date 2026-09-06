@@ -27,15 +27,15 @@ fn accounting_byte_cut_resumes_exactly_and_rewind_preserves_billed_history() {
     let mut recovery =
         CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("recovery");
     for turn in 1..=2 {
-        append(
+        append_script(
             &mut journal,
             vec![
-                PendingEvent::TurnStarted { turn },
-                PendingEvent::ConversationTurnCommitted {
+                SourceEvent::Event(PendingEvent::TurnStarted { turn }),
+                SourceEvent::Input {
                     agent_turn: turn,
                     turn: text(Role::User, "message"),
                 },
-                terminal(turn),
+                SourceEvent::Event(terminal(turn)),
             ],
         );
     }
@@ -113,7 +113,7 @@ fn assert_accounting_page_cuts(history: &CanonicalHistory, both: &RecoveryAccoun
         .accounting_page(None, 128, first_bytes)
         .expect("first byte cut");
     assert_eq!(first.events.len(), 1);
-    assert_eq!(first.next_cursor, Some(SequenceId(2)));
+    assert_eq!(first.next_cursor, Some(SequenceId(3)));
     assert!(first.has_more);
     let second = history
         .accounting_page(first.next_cursor, 128, MAX_ACCOUNTING_PAGE_BYTES)
@@ -125,7 +125,9 @@ fn assert_accounting_page_cuts(history: &CanonicalHistory, both: &RecoveryAccoun
         Err(RecoveryError::Limit(_))
     ));
     assert!(matches!(
-        history.accounting_page(Some(SequenceId(6)), 128, MAX_ACCOUNTING_PAGE_BYTES),
+        history.accounting_page(Some(SequenceId(8)), 128, MAX_ACCOUNTING_PAGE_BYTES),
         Err(RecoveryError::Invalid(_))
     ));
 }
+
+use super::test_source::{SourceEvent, append_script};

@@ -25,24 +25,24 @@ fn interrupted_inputs_keep_only_uncommitted_fragments_and_unresolved_host_invoca
     let user = text(Role::User, "input");
     let answer = text(Role::Assistant, "already committed");
     let output = text(Role::Tool, "already committed tool result");
-    append(
+    append_script(
         &mut journal,
         vec![
-            PendingEvent::TurnStarted { turn: 1 },
-            PendingEvent::ConversationTurnCommitted {
+            SourceEvent::Event(PendingEvent::TurnStarted { turn: 1 }),
+            SourceEvent::Input {
                 agent_turn: 1,
                 turn: user.clone(),
             },
-            PendingEvent::TextDelta {
+            SourceEvent::Event(PendingEvent::TextDelta {
                 turn: 1,
                 text: "already committed".into(),
-            },
-            PendingEvent::ConversationTurnCommitted {
+            }),
+            SourceEvent::Event(PendingEvent::ConversationTurnCommitted {
                 agent_turn: 1,
                 turn: answer.clone(),
-            },
-            start("first"),
-            PendingEvent::ToolCallFinished {
+            }),
+            SourceEvent::Event(start("first")),
+            SourceEvent::Event(PendingEvent::ToolCallFinished {
                 presentation: None,
                 turn: 1,
                 id: "reused-provider-id".into(),
@@ -52,12 +52,12 @@ fn interrupted_inputs_keep_only_uncommitted_fragments_and_unresolved_host_invoca
                 },
                 is_error: false,
                 index: 0,
-            },
-            PendingEvent::ConversationTurnCommitted {
+            }),
+            SourceEvent::Event(PendingEvent::ConversationTurnCommitted {
                 agent_turn: 1,
                 turn: output.clone(),
-            },
-            start("second"),
+            }),
+            SourceEvent::Event(start("second")),
         ],
     );
     append(
@@ -111,16 +111,16 @@ fn interrupted_inputs_follow_compaction_generation_after_reopen() {
     let root = tempdir().expect("root");
     let modes = ModeRegistry::builtins().expect("modes");
     let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
-    append(
+    append_script(
         &mut journal,
         (0..20)
-            .map(|_| PendingEvent::ConversationTurnCommitted {
+            .map(|_| SourceEvent::Input {
                 agent_turn: 0,
                 turn: text(Role::User, "old conversation"),
             })
             .collect(),
     );
-    let summary = text(Role::User, "summary");
+    let summary = text(Role::Assistant, "summary");
     append(
         &mut journal,
         vec![
@@ -247,3 +247,5 @@ fn interrupted_fragment_decode_allowance_is_checked_before_source_materializatio
         .expect("allocation");
     assert!(decoded as u64 <= charge);
 }
+
+use super::test_source::{SourceEvent, append_script};

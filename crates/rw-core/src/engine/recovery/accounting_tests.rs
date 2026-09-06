@@ -9,14 +9,14 @@ use rw_ext::ModeRegistry;
 use rw_store::session::journal::SegmentedJournal;
 use rw_types::{Cost, Role};
 
-fn billed_turn(id: u64, used: &str) -> Vec<PendingEvent> {
+fn billed_turn(id: u64, used: &str) -> Vec<SourceEvent> {
     vec![
-        PendingEvent::TurnStarted { turn: id },
-        PendingEvent::ConversationTurnCommitted {
+        SourceEvent::Event(PendingEvent::TurnStarted { turn: id }),
+        SourceEvent::Input {
             agent_turn: id,
             turn: text(Role::User, "request"),
         },
-        PendingEvent::TurnFinished {
+        SourceEvent::Event(PendingEvent::TurnFinished {
             turn: id,
             status: AgentTurnStatus::Completed,
             usage: SessionUsage {
@@ -28,7 +28,7 @@ fn billed_turn(id: u64, used: &str) -> Vec<PendingEvent> {
                 used: Some(used.into()),
                 unit: Some("requests".into()),
             },
-        },
+        }),
     ]
 }
 
@@ -38,8 +38,8 @@ fn indexed_accounting_survives_rewind_reopen_and_reused_turn_number() {
     let modes = ModeRegistry::builtins().expect("modes");
     let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
     let mut recovery = CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("index");
-    append(&mut journal, billed_turn(1, "9007199254740993.1"));
-    append(&mut journal, billed_turn(2, "0.2"));
+    append_script(&mut journal, billed_turn(1, "9007199254740993.1"));
+    append_script(&mut journal, billed_turn(2, "0.2"));
     catch_up(&mut recovery, &journal.read_view(), &modes);
     append(
         &mut journal,
@@ -54,7 +54,7 @@ fn indexed_accounting_survives_rewind_reopen_and_reused_turn_number() {
     assert_eq!(recovery.head().expect("head").accounting.entries, 2);
     drop(recovery);
     let mut recovery = CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("reopen");
-    append(&mut journal, billed_turn(2, "0.7"));
+    append_script(&mut journal, billed_turn(2, "0.7"));
     catch_up(&mut recovery, &journal.read_view(), &modes);
     let state = &recovery.head().expect("head").accounting;
     assert_eq!(state.entries, 3);
@@ -65,3 +65,5 @@ fn indexed_accounting_survives_rewind_reopen_and_reused_turn_number() {
         "9007199254740994"
     );
 }
+
+use super::test_source::{SourceEvent, append_script};

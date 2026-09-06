@@ -39,39 +39,39 @@ fn context_revision_seek_restores_rewind_without_resurrecting_discarded_actions(
     let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
     let mut recovery =
         CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("recovery");
-    append(
+    append_script(
         &mut journal,
         vec![
-            PendingEvent::TurnStarted { turn: 1 },
-            PendingEvent::ConversationTurnCommitted {
+            SourceEvent::Event(PendingEvent::TurnStarted { turn: 1 }),
+            SourceEvent::Input {
                 agent_turn: 1,
                 turn: text(Role::User, "first"),
             },
-            PendingEvent::ContextItemPinned {
-                item_id: ContextItemId("conversation:1".into()),
+            SourceEvent::Event(PendingEvent::ContextItemPinned {
+                item_id: ContextItemId("conversation:2".into()),
                 effective_after_agent_turn: 1,
-            },
-            completed(1),
-            PendingEvent::TurnStarted { turn: 2 },
-            PendingEvent::ConversationTurnCommitted {
+            }),
+            SourceEvent::Event(completed(1)),
+            SourceEvent::Event(PendingEvent::TurnStarted { turn: 2 }),
+            SourceEvent::Input {
                 agent_turn: 2,
                 turn: text(Role::User, "discarded"),
             },
-            PendingEvent::ContextItemEvicted {
-                item_id: ContextItemId("conversation:1".into()),
+            SourceEvent::Event(PendingEvent::ContextItemEvicted {
+                item_id: ContextItemId("conversation:2".into()),
                 effective_after_agent_turn: 2,
-            },
-            PendingEvent::ContextItemPinned {
-                item_id: ContextItemId("conversation:5".into()),
+            }),
+            SourceEvent::Event(PendingEvent::ContextItemPinned {
+                item_id: ContextItemId("conversation:7".into()),
                 effective_after_agent_turn: 2,
-            },
-            completed(2),
+            }),
+            SourceEvent::Event(completed(2)),
         ],
     );
     catch_up(&mut recovery, &journal.read_view(), &modes);
     let before = snapshot(&recovery, &journal);
-    assert_eq!(pinned(&before, 1), Some(false));
-    assert_eq!(pinned(&before, 5), Some(true));
+    assert_eq!(pinned(&before, 2), Some(false));
+    assert_eq!(pinned(&before, 7), Some(true));
     append(
         &mut journal,
         vec![PendingEvent::ConversationRewound {
@@ -82,26 +82,26 @@ fn context_revision_seek_restores_rewind_without_resurrecting_discarded_actions(
     );
     catch_up(&mut recovery, &journal.read_view(), &modes);
     let rewound = snapshot(&recovery, &journal);
-    assert_eq!(pinned(&rewound, 1), Some(true));
-    assert_eq!(pinned(&rewound, 5), None);
+    assert_eq!(pinned(&rewound, 2), Some(true));
+    assert_eq!(pinned(&rewound, 7), None);
     assert_eq!(
-        pinned(&before, 1),
+        pinned(&before, 2),
         Some(false),
         "captured revision remains immutable"
     );
-    append(
+    append_script(
         &mut journal,
         vec![
-            PendingEvent::TurnStarted { turn: 3 },
-            PendingEvent::ConversationTurnCommitted {
+            SourceEvent::Event(PendingEvent::TurnStarted { turn: 3 }),
+            SourceEvent::Input {
                 agent_turn: 3,
                 turn: text(Role::User, "replacement"),
             },
-            PendingEvent::ContextItemEvicted {
-                item_id: ContextItemId("conversation:11".into()),
+            SourceEvent::Event(PendingEvent::ContextItemEvicted {
+                item_id: ContextItemId("conversation:14".into()),
                 effective_after_agent_turn: 3,
-            },
-            completed(3),
+            }),
+            SourceEvent::Event(completed(3)),
         ],
     );
     catch_up(&mut recovery, &journal.read_view(), &modes);
@@ -125,9 +125,9 @@ fn context_latest_revision_is_found_after_many_same_item_updates_and_reopen() {
     let root = tempfile::tempdir().expect("root");
     let modes = ModeRegistry::builtins().expect("modes");
     let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
-    append(
+    append_script(
         &mut journal,
-        vec![PendingEvent::ConversationTurnCommitted {
+        vec![SourceEvent::Input {
             agent_turn: 1,
             turn: text(Role::User, "same source"),
         }],
@@ -136,7 +136,7 @@ fn context_latest_revision_is_found_after_many_same_item_updates_and_reopen() {
         &mut journal,
         (0..300)
             .map(|index| {
-                let item_id = ContextItemId("conversation:0".into());
+                let item_id = ContextItemId("conversation:1".into());
                 if index % 2 == 0 {
                     PendingEvent::ContextItemPinned {
                         item_id,
@@ -156,7 +156,7 @@ fn context_latest_revision_is_found_after_many_same_item_updates_and_reopen() {
     catch_up(&mut recovery, &journal.read_view(), &modes);
     drop(recovery);
     let recovery = CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("reopen");
-    assert_eq!(pinned(&snapshot(&recovery, &journal), 0), Some(false));
+    assert_eq!(pinned(&snapshot(&recovery, &journal), 1), Some(false));
 }
 
 #[test]
@@ -166,21 +166,21 @@ fn context_mutation_rejects_a_discarded_source_after_position_reuse() {
     let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
     let mut recovery =
         CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("recovery");
-    append(
+    append_script(
         &mut journal,
         vec![
-            PendingEvent::TurnStarted { turn: 1 },
-            PendingEvent::ConversationTurnCommitted {
+            SourceEvent::Event(PendingEvent::TurnStarted { turn: 1 }),
+            SourceEvent::Input {
                 agent_turn: 1,
                 turn: text(Role::User, "retained"),
             },
-            completed(1),
-            PendingEvent::TurnStarted { turn: 2 },
-            PendingEvent::ConversationTurnCommitted {
+            SourceEvent::Event(completed(1)),
+            SourceEvent::Event(PendingEvent::TurnStarted { turn: 2 }),
+            SourceEvent::Input {
                 agent_turn: 2,
                 turn: text(Role::User, "discarded"),
             },
-            completed(2),
+            SourceEvent::Event(completed(2)),
         ],
     );
     catch_up(&mut recovery, &journal.read_view(), &modes);
@@ -193,9 +193,9 @@ fn context_mutation_rejects_a_discarded_source_after_position_reuse() {
         }],
     );
     catch_up(&mut recovery, &journal.read_view(), &modes);
-    append(
+    append_script(
         &mut journal,
-        vec![PendingEvent::ConversationTurnCommitted {
+        vec![SourceEvent::Input {
             agent_turn: 2,
             turn: text(Role::User, "replacement"),
         }],
@@ -204,11 +204,11 @@ fn context_mutation_rejects_a_discarded_source_after_position_reuse() {
     let current = snapshot(&recovery, &journal);
     assert_eq!(
         current.turn_source(1).expect("replacement").sequence,
-        rw_types::SequenceId(7)
+        rw_types::SequenceId(10)
     );
     assert!(
         current
-            .source_turn(rw_types::SequenceId(4))
+            .source_turn(rw_types::SequenceId(6))
             .expect("discarded")
             .is_none()
     );
@@ -216,7 +216,7 @@ fn context_mutation_rejects_a_discarded_source_after_position_reuse() {
     append(
         &mut journal,
         vec![PendingEvent::ContextItemPinned {
-            item_id: ContextItemId("conversation:4".into()),
+            item_id: ContextItemId("conversation:6".into()),
             effective_after_agent_turn: 3,
         }],
     );
@@ -226,5 +226,7 @@ fn context_mutation_rejects_a_discarded_source_after_position_reuse() {
             "context source is not effective"
         ))
     ));
-    assert_eq!(recovery.head().expect("head").next_sequence, 8);
+    assert_eq!(recovery.head().expect("head").next_sequence, 11);
 }
+
+use super::test_source::{SourceEvent, append_script};

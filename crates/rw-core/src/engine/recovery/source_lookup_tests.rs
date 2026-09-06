@@ -10,23 +10,23 @@ use rw_store::session::journal::SegmentedJournal;
 use rw_types::{Cost, Role, SequenceId};
 
 fn turn(journal: &mut SegmentedJournal, id: u64, body: &str) -> SequenceId {
-    let source = SequenceId(journal.read_view().prefix_identity().next_sequence + 1);
-    append(
+    let source = SequenceId(journal.read_view().prefix_identity().next_sequence + 2);
+    append_script(
         journal,
         vec![
-            PendingEvent::TurnStarted { turn: id },
-            PendingEvent::ConversationTurnCommitted {
+            SourceEvent::Event(PendingEvent::TurnStarted { turn: id }),
+            SourceEvent::Input {
                 agent_turn: id,
                 turn: text(Role::User, body),
             },
-            PendingEvent::TurnFinished {
+            SourceEvent::Event(PendingEvent::TurnFinished {
                 turn: id,
                 status: AgentTurnStatus::Completed,
                 usage: SessionUsage::default(),
                 cost: Cost::Unavailable {
                     reason: "fixture".into(),
                 },
-            },
+            }),
         ],
     );
     source
@@ -162,3 +162,5 @@ fn assert_initial_sources(
     assert_eq!(before.agent_turn, 1);
     assert_eq!(before.source_sequence, SequenceId(first.0 + 1));
 }
+
+use super::test_source::{SourceEvent, append_script};

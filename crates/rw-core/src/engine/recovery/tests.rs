@@ -68,22 +68,22 @@ fn exact_window_admission_and_snapshot_are_independent_of_later_appends() {
         CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("recovery");
     let user = text(Role::User, "first");
     let answer = text(Role::Assistant, "answer\n\"🙂");
-    append(
+    append_script(
         &mut journal,
         vec![
-            PendingEvent::SessionCreated {
+            SourceEvent::Event(PendingEvent::SessionCreated {
                 driver_client_id: ClientId("driver".into()),
-            },
-            PendingEvent::TurnStarted { turn: 1 },
-            PendingEvent::ConversationTurnCommitted {
+            }),
+            SourceEvent::Event(PendingEvent::TurnStarted { turn: 1 }),
+            SourceEvent::Input {
                 agent_turn: 1,
                 turn: user.clone(),
             },
-            PendingEvent::ConversationTurnCommitted {
+            SourceEvent::Event(PendingEvent::ConversationTurnCommitted {
                 agent_turn: 1,
                 turn: answer.clone(),
-            },
-            terminal(1),
+            }),
+            SourceEvent::Event(terminal(1)),
         ],
     );
     catch_up(&mut recovery, &journal.read_view(), &modes);
@@ -137,15 +137,15 @@ fn exact_window_admission_and_snapshot_are_independent_of_later_appends() {
             .expect("window"),
         vec![answer]
     );
-    append(
+    append_script(
         &mut journal,
         vec![
-            PendingEvent::TurnStarted { turn: 2 },
-            PendingEvent::ConversationTurnCommitted {
+            SourceEvent::Event(PendingEvent::TurnStarted { turn: 2 }),
+            SourceEvent::Input {
                 agent_turn: 2,
                 turn: text(Role::User, "later"),
             },
-            terminal(2),
+            SourceEvent::Event(terminal(2)),
         ],
     );
     catch_up(&mut recovery, &journal.read_view(), &modes);
@@ -163,28 +163,28 @@ fn compaction_generation_and_rewind_restore_exact_canonical_turns_across_reopen(
     let root = tempdir().expect("root");
     let modes = ModeRegistry::builtins().expect("modes");
     let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
-    append(
+    append_script(
         &mut journal,
         vec![
-            PendingEvent::TurnStarted { turn: 1 },
-            PendingEvent::ConversationTurnCommitted {
+            SourceEvent::Event(PendingEvent::TurnStarted { turn: 1 }),
+            SourceEvent::Input {
                 agent_turn: 1,
                 turn: text(Role::User, "original"),
             },
-            terminal(1),
-            PendingEvent::CompactionStarted {
+            SourceEvent::Event(terminal(1)),
+            SourceEvent::Event(PendingEvent::CompactionStarted {
                 reason: CompactionReason::Manual,
-            },
-            PendingEvent::ConversationTurnCommitted {
+            }),
+            SourceEvent::Event(PendingEvent::ConversationTurnCommitted {
                 agent_turn: 2,
-                turn: text(Role::User, "summary"),
-            },
-            PendingEvent::CompactionFinished {
+                turn: text(Role::Assistant, "summary"),
+            }),
+            SourceEvent::Event(PendingEvent::CompactionFinished {
                 summary_turn: 2,
                 reclaimed_tokens: 0,
                 usage: None,
                 cost: None,
-            },
+            }),
         ],
     );
     let mut recovery = CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("open");
@@ -284,19 +284,21 @@ fn model_clear_retains_only_system_rows_and_resumes_bounded_batches() {
     let modes = ModeRegistry::builtins().expect("modes");
     let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
     let pending = (0..200)
-        .map(|index| PendingEvent::ConversationTurnCommitted {
-            agent_turn: 1,
-            turn: text(
-                if index % 50 == 0 {
-                    Role::System
-                } else {
-                    Role::User
-                },
-                &index.to_string(),
-            ),
+        .map(|index| {
+            if index % 50 == 0 {
+                SourceEvent::Event(PendingEvent::ConversationTurnCommitted {
+                    agent_turn: 1,
+                    turn: text(Role::System, &index.to_string()),
+                })
+            } else {
+                SourceEvent::Input {
+                    agent_turn: 1,
+                    turn: text(Role::User, &index.to_string()),
+                }
+            }
         })
         .collect();
-    append(&mut journal, pending);
+    append_script(&mut journal, pending);
     let mut recovery = CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("open");
     catch_up(&mut recovery, &journal.read_view(), &modes);
     append(
@@ -345,15 +347,15 @@ fn recovery_head_stays_small_when_canonical_payload_history_grows() {
     let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
     let mut recovery = CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("open");
     for turn in 1..=200 {
-        append(
+        append_script(
             &mut journal,
             vec![
-                PendingEvent::TurnStarted { turn },
-                PendingEvent::ConversationTurnCommitted {
+                SourceEvent::Event(PendingEvent::TurnStarted { turn }),
+                SourceEvent::Input {
                     agent_turn: turn,
                     turn: text(Role::User, &"historical".repeat(1000)),
                 },
-                terminal(turn),
+                SourceEvent::Event(terminal(turn)),
             ],
         );
     }
@@ -374,9 +376,9 @@ fn large_source_record_does_not_inflate_metadata_or_prevent_exact_materializatio
     let modes = ModeRegistry::builtins().expect("modes");
     let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
     let turn = text(Role::User, &"large source".repeat(200_000));
-    append(
+    append_script(
         &mut journal,
-        vec![PendingEvent::ConversationTurnCommitted {
+        vec![SourceEvent::Input {
             agent_turn: 1,
             turn: turn.clone(),
         }],
@@ -423,17 +425,17 @@ fn changed_mode_definition_rejects_entire_batch_without_advancing_head() {
     let modes = ModeRegistry::builtins().expect("modes");
     let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
     let mut recovery = CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("open");
-    append(
+    append_script(
         &mut journal,
         vec![
-            PendingEvent::ConversationTurnCommitted {
+            SourceEvent::Input {
                 agent_turn: 1,
                 turn: text(Role::User, "must not publish"),
             },
-            PendingEvent::ModeChanged {
+            SourceEvent::Event(PendingEvent::ModeChanged {
                 mode: rw_types::ModeId("plan".into()),
                 definition_fingerprint: "changed".into(),
-            },
+            }),
         ],
     );
     assert!(matches!(
@@ -454,3 +456,5 @@ fn changed_mode_definition_rejects_entire_batch_without_advancing_head() {
             .is_none()
     );
 }
+
+use super::test_source::{SourceEvent, append_script};

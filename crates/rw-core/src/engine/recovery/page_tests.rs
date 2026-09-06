@@ -30,12 +30,12 @@ fn decoded_admission_cuts_source_pages_and_resumes_without_losing_turns() {
     let expected = (0..9)
         .map(|index| text(Role::User, &format!("message {index} with escaped \"🙂")))
         .collect::<Vec<_>>();
-    append(
+    append_script(
         &mut journal,
         expected
             .iter()
             .enumerate()
-            .map(|(index, turn)| PendingEvent::ConversationTurnCommitted {
+            .map(|(index, turn)| SourceEvent::Input {
                 agent_turn: index as u64 + 1,
                 turn: turn.clone(),
             })
@@ -63,7 +63,7 @@ fn decoded_admission_cuts_source_pages_and_resumes_without_losing_turns() {
         assert!(page.range.end - next <= 2);
         assert!(page.decoded_bytes <= two);
         for (source, ordinal) in page.sources.iter().zip(page.range.clone()) {
-            assert_eq!(source.sequence, SequenceId(ordinal));
+            assert_eq!(source.sequence, SequenceId(ordinal * 2 + 1));
         }
         assert_eq!(page.has_more, page.range.end < 9);
         next = page.range.end;
@@ -120,15 +120,15 @@ fn captured_context_pages_keep_exact_sources_across_rewind_and_reused_ordinals()
     let mut recovery =
         CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("recovery");
     for turn in 1..=2 {
-        append(
+        append_script(
             &mut journal,
             vec![
-                PendingEvent::TurnStarted { turn },
-                PendingEvent::ConversationTurnCommitted {
+                SourceEvent::Event(PendingEvent::TurnStarted { turn }),
+                SourceEvent::Input {
                     agent_turn: turn,
                     turn: text(Role::User, &format!("original {turn}")),
                 },
-                finish(turn),
+                SourceEvent::Event(finish(turn)),
             ],
         );
     }
@@ -138,20 +138,20 @@ fn captured_context_pages_keep_exact_sources_across_rewind_and_reused_ordinals()
         .expect("snapshot")
         .bind_source(&journal.read_view())
         .expect("source");
-    append(
+    append_script(
         &mut journal,
         vec![
-            PendingEvent::ConversationRewound {
+            SourceEvent::Event(PendingEvent::ConversationRewound {
                 to_turn: 1,
                 operation_id: "rewind".into(),
                 unrestorable_paths: vec![],
-            },
-            PendingEvent::TurnStarted { turn: 2 },
-            PendingEvent::ConversationTurnCommitted {
+            }),
+            SourceEvent::Event(PendingEvent::TurnStarted { turn: 2 }),
+            SourceEvent::Input {
                 agent_turn: 2,
                 turn: text(Role::User, "replacement"),
             },
-            finish(2),
+            SourceEvent::Event(finish(2)),
         ],
     );
     catch_up(&mut recovery, &journal.read_view(), &modes);
@@ -262,9 +262,9 @@ fn retained_turn_window_does_not_accumulate_decoder_scratch() {
     let mut recovery =
         CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("recovery");
     for index in 0..300 {
-        append(
+        append_script(
             &mut journal,
-            vec![PendingEvent::ConversationTurnCommitted {
+            vec![SourceEvent::Input {
                 agent_turn: index + 1,
                 turn: text(Role::User, &format!("bounded message {index}")),
             }],
@@ -284,3 +284,5 @@ fn retained_turn_window_does_not_accumulate_decoder_scratch() {
     assert_eq!(page.turns.len(), 300);
     assert!(page.decoded_bytes < 1024 * 1024);
 }
+
+use super::test_source::{SourceEvent, append_script};

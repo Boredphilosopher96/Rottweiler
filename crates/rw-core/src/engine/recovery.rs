@@ -125,3 +125,6 @@ mod input_commit_tests;
 
 #[cfg(test)]
 mod context_selection_tests;
+
+#[cfg(test)]
+mod test_source;
