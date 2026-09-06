@@ -586,6 +586,7 @@ function applyKnownEvent(
       }
     case "user_message_accepted":
       return { ...state, errors: [] }
+    case "user_message_retained":
     case "plugin_message_injected":
       return state
     case "plugin_status_changed": {

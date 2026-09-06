@@ -64,3 +64,15 @@ test("provider receipts advance the durable cursor without duplicating turn disp
   expect(duplicate.cost).toBe(completed.cost)
   expect(duplicate.protocol.duplicateEvents).toBe(1)
 })
+
+
+test("retained input source directives advance the cursor without changing display or controls", () => {
+  const initial = createInitialState()
+  const event = { type: "user_message_retained", meta: meta("0"), accepted_source: "0" } satisfies EngineEvent
+  expect(isWireEngineEvent(event)).toBe(true)
+  const state = reduceRottweilerState(initial, engineEvent(event))
+  expect(state.lastSequence).toBe("0")
+  expect(state.hasActivity).toBe(initial.hasActivity)
+  expect(state.questions).toBe(initial.questions)
+  expect(state.tools).toBe(initial.tools)
+})
