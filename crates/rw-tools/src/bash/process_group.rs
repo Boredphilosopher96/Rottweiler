@@ -1,6 +1,11 @@
+#[cfg(target_os = "linux")]
+use std::io::Read as _;
+#[cfg(target_os = "macos")]
 use std::process::Stdio;
 
+#[cfg(target_os = "macos")]
 use tokio::io::AsyncReadExt;
+#[cfg(target_os = "macos")]
 use tokio::process::Command;
 use tokio::time::{Duration, sleep};
 
