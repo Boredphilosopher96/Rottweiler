@@ -22,7 +22,7 @@ async fn excess_batch_output_is_rejected_before_completion_and_closes_exact_ir()
         .collect::<Vec<_>>();
     let calls = ids
         .iter()
-        .map(|id| (id.as_str(), "large", serde_json::json!({})))
+        .map(|id| (id.as_str(), "large", serde_json::json!({"item":id})))
         .collect::<Vec<_>>();
     let model = Arc::new(ScriptedModel::new([tool_script(&calls, &[])]));
     let mut tools = ToolRegistry::new();
@@ -56,13 +56,12 @@ async fn excess_batch_output_is_rejected_before_completion_and_closes_exact_ir()
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let event = events.recv().await.expect("event");
-            if matches!(
-                event.as_ref(),
-                EngineEvent::TurnFinished {
-                    status: rw_types::TurnStatus::MaxTurns,
-                    ..
-                }
-            ) {
+            if let EngineEvent::TurnFinished { status, .. } = event.as_ref() {
+                assert_eq!(
+                    *status,
+                    rw_types::TurnStatus::MaxTurns,
+                    "batch terminal status"
+                );
                 break;
             }
         }
