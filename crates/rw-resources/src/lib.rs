@@ -88,6 +88,7 @@ impl Pool {
         tokio::select! {
             biased;
             () = cancelled => Err(AdmissionError::Cancelled),
+            () = tokio::time::sleep(std::time::Duration::from_secs(30)) => Err(AdmissionError::Deadline),
             result = self.execution.clone().acquire_owned() => {
                 drop(waiting);
                 result.map(|permit| ResourceLease { permit }).map_err(|_| AdmissionError::Closed)
@@ -155,12 +156,7 @@ pub async fn run_blocking<T: Send + 'static>(
     class: ResourceClass,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, WorkError> {
-    let lease = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        acquire(class, std::future::pending()),
-    )
-    .await
-    .map_err(|_| AdmissionError::Deadline)??;
+    let lease = acquire(class, std::future::pending()).await?;
     let span = tracing::Span::current();
     Ok(tokio::task::spawn_blocking(move || {
         let _lease = lease;

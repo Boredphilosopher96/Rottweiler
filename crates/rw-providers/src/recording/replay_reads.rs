@@ -121,10 +121,19 @@ impl ReadLease {
         mut self,
         read: impl FnOnce() -> Result<Vec<u8>, ProviderError> + Send + 'static,
     ) -> Result<Vec<u8>, ProviderError> {
+        let physical = rw_resources::acquire(
+            rw_resources::ResourceClass::Blocking,
+            std::future::pending(),
+        )
+        .await
+        .map_err(|error| {
+            ProviderError::new(ProviderErrorKind::ResourceExhausted, error.to_string())
+        })?;
         let completion = WorkerCompletion(Arc::clone(&self.job));
         self.started = true;
         // Construct before spawn so dropping a queued closure records failed proof.
-        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+        tokio::task::spawn_blocking(move || {
+            let _physical = physical;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(read))
                 .unwrap_or_else(|_| {
                     Err(ProviderError::new(
