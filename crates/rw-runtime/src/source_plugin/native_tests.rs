@@ -141,22 +141,33 @@ async fn preparation_directory_grants_do_not_read_siblings_or_recur() {
         )
         .expect("sandbox launcher"),
     );
-    let config = PluginProcessConfig::new("/bin/sh")
+    let entry = package.join("probe.js");
+    fs::write(
+        &entry,
+        r"import { readFileSync, readdirSync } from 'node:fs';
+const root = Bun.argv[2];
+if (!readdirSync(root).includes('secret')) process.exit(11);
+let readDenied = false;
+try { readFileSync(root + '/secret'); } catch { readDenied = true; }
+if (!readDenied) process.exit(12);
+let recursionDenied = false;
+try { readdirSync(root + '/sibling'); } catch { recursionDenied = true; }
+if (!recursionDenied) process.exit(13);
+process.stdout.write('only exact ancestor entries\n');
+",
+    )
+    .expect("owned preparation probe");
+    let path = std::env::var_os("PATH").expect("PATH");
+    let bun = std::env::split_paths(&path)
+        .map(|directory| directory.join("bun"))
+        .find(|path| path.is_file())
+        .expect("Bun is required for native preparation conformance");
+    let config = PluginProcessConfig::new(bun)
         .and_then(|config| config.with_cwd(&package))
         .and_then(|config| config.with_code_root(&package))
         .and_then(|config| {
             config.with_argv([
-                "-c".to_owned(),
-                r#"set -- "$1" "$1"/*
-case "$*" in *secret*) ;; *) exit 11 ;; esac
-if IFS= read -r content < "$1/secret"; then exit 12; fi
-for entry in "$1/sibling"/*; do
-    case "$entry" in */hidden) exit 13 ;; esac
-done
-printf 'only exact ancestor entries\n'
-"#
-                .to_owned(),
-                "preparation".to_owned(),
+                entry.to_string_lossy().into_owned(),
                 root.to_string_lossy().into_owned(),
             ])
         })

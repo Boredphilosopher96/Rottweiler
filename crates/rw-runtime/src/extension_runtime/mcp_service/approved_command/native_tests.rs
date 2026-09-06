@@ -80,7 +80,8 @@ async fn approved_mcp_bytes_survive_replacement_without_losing_workspace_authori
         .write_all(b"continue\n")
         .await
         .expect("continue after launcher retirement");
-    child.stdin.shutdown().await.expect("close input");
+    child.stdin.shutdown().await.expect("flush input");
+    drop(child.stdin); // ChildStdin::shutdown does not close the owned pipe.
     let mut output = Vec::new();
     tokio::time::timeout(
         Duration::from_secs(3),

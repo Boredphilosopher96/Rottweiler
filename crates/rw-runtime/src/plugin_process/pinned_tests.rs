@@ -248,3 +248,20 @@ async fn assert_ready(stdout: &mut (impl tokio::io::AsyncRead + Unpin)) {
         .expect("native fixture must execute before retirement");
     assert_eq!(&marker, b"ready");
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn preparation_read_view_is_distinct_from_immutable_executable_authority() {
+    let (_directory, config) = fixture("preparation input");
+    let mut policy = profile();
+    policy.mode = rw_ext::PluginSandboxMode::Preparation {};
+    let bytes = LaunchBytes::capture(&config, &policy).expect("capture preparation executable");
+    bytes
+        .validate_write_roots(&[config.cwd().to_path_buf()])
+        .expect("preparation source view is governed by its existing output policy");
+    assert!(
+        bytes
+            .validate_write_roots(&[bytes.program(&config).to_path_buf()])
+            .is_err()
+    );
+}
