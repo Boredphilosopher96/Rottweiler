@@ -127,19 +127,7 @@ impl TranscriptProjector {
         let mut interpreted = 0;
         let mut charged_bytes = 0;
         for envelope in &page.events {
-            if envelope
-                .event
-                .meta()
-                .is_none_or(|meta| meta.sequence_id != envelope.sequence)
-            {
-                return Err(TranscriptProjectionError::Invalid(
-                    "envelope/event sequence mismatch",
-                ));
-            }
-            let resolved = crate::recovery::materialize_conversation_event(view, &envelope.event)
-                .map_err(|_| {
-                TranscriptProjectionError::Invalid("accepted conversation source")
-            })?;
+            let resolved = resolve_source(view, envelope.sequence, &envelope.event)?;
             match project_transcript_event(&resolved, &checkpoint.state, &overlay)? {
                 TranscriptEventProjection::Update {
                     state,
@@ -446,4 +434,18 @@ fn projection_page_limits() -> SessionEventPageLimits {
         max_scan_bytes: limits.max_line_bytes as u64 * 2,
         ..limits
     }
+}
+
+fn resolve_source<'a>(
+    view: &JournalReadView,
+    sequence: SequenceId,
+    event: &'a EngineEvent,
+) -> Result<std::borrow::Cow<'a, EngineEvent>, TranscriptProjectionError> {
+    if event.meta().is_none_or(|meta| meta.sequence_id != sequence) {
+        return Err(TranscriptProjectionError::Invalid(
+            "envelope/event sequence mismatch",
+        ));
+    }
+    crate::recovery::materialize_conversation_event(view, event)
+        .map_err(|_| TranscriptProjectionError::Invalid("conversation source"))
 }

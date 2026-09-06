@@ -67,16 +67,7 @@ pub(in crate::engine) async fn compact(
             summary.carry.push(rw_context::auto_continue_turn());
         }
         let suffix_start = summary.carry.len();
-        let selected = config.history.capture_history().await?;
-        let mut suffix_sources = Vec::with_capacity(suffix.len());
-        for value in suffix {
-            let source = selected.source_turn(value.source).await?;
-            let (_, source) = source
-                .as_ref()
-                .ok_or_else(|| invalid("compaction suffix source is not effective"))?;
-            suffix_sources.push(source.clone());
-            summary.carry.push(value.turn);
-        }
+        let suffix_sources = append_suffix(config, &mut summary.carry, suffix).await?;
         check_carry(&summary.carry, &summary.pins)?;
         let mut committed = Vec::with_capacity(summary.carry.len());
         for (ordinal, value) in summary.carry.iter().enumerate() {
@@ -148,6 +139,24 @@ pub(in crate::engine) async fn compact(
     drop(working);
     let captured = config.history.capture_history().await?;
     Ok((history_context::read_view(&captured).await?, cost))
+}
+
+async fn append_suffix(
+    config: &SessionActorConfig,
+    carry: &mut Vec<Turn>,
+    suffix: Vec<super::context_commits::RetainedUser>,
+) -> Result<Vec<crate::engine::recovery::ConversationSource>, AgentLoopError> {
+    let selected = config.history.capture_history().await?;
+    let mut sources = Vec::with_capacity(suffix.len());
+    for value in suffix {
+        let source = selected.source_turn(value.source).await?;
+        let (_, source) = source
+            .as_ref()
+            .ok_or_else(|| invalid("compaction suffix source is not effective"))?;
+        sources.push(source.clone());
+        carry.push(value.turn);
+    }
+    Ok(sources)
 }
 
 #[derive(Default)]

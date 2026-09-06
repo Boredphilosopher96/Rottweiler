@@ -7,7 +7,7 @@ use crate::engine::{AgentLoopError, PendingEvent, recovery::ConversationSource};
 use rw_types::{ContextItemId, Role, SequenceId, Turn, conversation_input::ContextSelection};
 use tokio::sync::mpsc;
 
-pub(super) struct RetainedUser {
+pub(in crate::engine) struct RetainedUser {
     pub turn: Turn,
     pub source: SequenceId,
 }

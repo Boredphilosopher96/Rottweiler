@@ -379,14 +379,26 @@ impl SessionProjector {
                 accepted_source,
                 ..
             } = event
-            {
-                if !uncommitted_users.get(agent_turn).is_some_and(|pending| {
+                && !uncommitted_users.get(agent_turn).is_some_and(|pending| {
                     pending.iter().any(|(source, _)| source == accepted_source)
-                }) {
-                    return Err(SessionProjectionError::InvalidInput(
-                        "input is not pending in this turn",
-                    ));
+                })
+            {
+                return Err(SessionProjectionError::InvalidInput(
+                    "input is not pending in this turn",
+                ));
+            }
+            if matches!(
+                event,
+                EngineEvent::ConversationContextCommitted {
+                    selection: rw_types::conversation_input::ContextSelection::Continuation {}
+                        | rw_types::conversation_input::ContextSelection::Retained { .. },
+                    ..
                 }
+            ) && compacted_conversation.is_none()
+            {
+                return Err(SessionProjectionError::InvalidInput(
+                    "compaction context requires an active compaction",
+                ));
             }
             let Some(kind) = recovered_pending_event(resolved)? else {
                 break 'event;
@@ -956,7 +968,7 @@ impl SessionProjector {
     /// # Errors
     /// Returns a projection failure when terminal repair cannot be represented.
     #[allow(clippy::too_many_lines)]
-    pub fn finish(self) -> Result<SessionRecoveredState, SessionProjectionError> {
+    pub fn finish(self) -> SessionRecoveredState {
         let Self {
             mut conversation,
             title,
@@ -1034,7 +1046,7 @@ impl SessionProjector {
             }
         }
         let interrupted_compaction = compacted_conversation.is_some();
-        Ok(SessionRecoveredState {
+        SessionRecoveredState {
             title,
             conversation,
             queued_messages: queued.iter().map(|(_, content)| content.clone()).collect(),
@@ -1066,7 +1078,7 @@ impl SessionProjector {
             active_shell,
             workspace_generation,
             workspace_roots,
-        })
+        }
     }
 }
 
@@ -1080,7 +1092,7 @@ fn project_session_events_resolving_mode(
             .map_err(|_| SessionProjectionError::InvalidInput("conversation source"))?;
         projector = projector.push_resolving(event, &resolved, &mut resolve_mode)?;
     }
-    projector.finish()
+    Ok(projector.finish())
 }
 
 pub(super) fn shell_context_turn(
