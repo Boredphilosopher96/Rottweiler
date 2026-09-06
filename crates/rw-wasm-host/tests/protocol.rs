@@ -8,9 +8,16 @@ use rw_plugin_protocol::{
 };
 
 fn helper_digest(path: &Path) -> rw_tools::ExecutableDigest {
-    use sha2::{Digest as _, Sha256};
     let bytes = std::fs::read(path).expect("fixture bytes");
-    let digest = Sha256::digest(&bytes)
+    rw_tools::ExecutableDigest {
+        bytes: bytes.len() as u64,
+        sha256: sha256_bytes(&bytes),
+    }
+}
+
+fn sha256_bytes(bytes: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+    Sha256::digest(bytes)
         .iter()
         .flat_map(|byte| {
             let digits = b"0123456789abcdef";
@@ -19,11 +26,7 @@ fn helper_digest(path: &Path) -> rw_tools::ExecutableDigest {
                 char::from(digits[usize::from(byte & 15)]),
             ]
         })
-        .collect();
-    rw_tools::ExecutableDigest {
-        bytes: bytes.len() as u64,
-        sha256: digest,
-    }
+        .collect()
 }
 
 fn approve_helper(path: &Path) -> rw_tools::ApprovedExecutable {
@@ -73,7 +76,7 @@ fn component_for_input(output: &str, expected: Option<&str>) -> Vec<u8> {
         String::new()
     } else {
         format!(
-            r#"
+            r"
             local.get $input_len i32.const {length} i32.ne if unreachable end
             (block $done (loop $compare
               local.get $index i32.const {length} i32.ge_u br_if $done
@@ -82,7 +85,7 @@ fn component_for_input(output: &str, expected: Option<&str>) -> Vec<u8> {
               i32.ne if unreachable end
               local.get $index i32.const 1 i32.add local.set $index
               br $compare))
-        "#,
+        ",
             length = expected.len()
         )
     };

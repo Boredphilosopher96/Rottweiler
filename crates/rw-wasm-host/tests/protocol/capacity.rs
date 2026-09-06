@@ -2,7 +2,6 @@
 use super::{HookDispatcher, WasmHookLimits, WasmProcessHook, WasmWorkerPool, manifest};
 use rw_ext::HookInput;
 use rw_types::hook_contract::HookToolInput;
-use sha2::{Digest as _, Sha256};
 use std::{collections::BTreeMap, io::Read as _, sync::Arc, time::Instant};
 
 const WARM_CALLS: usize = 32;
@@ -79,7 +78,7 @@ pub(super) async fn measure() {
         "{}",
         serde_json::json!({
             "workload":"byte-checked-transform", "helper_sha256":receipt.sha256,"helper_bytes":receipt.bytes,
-            "component_sha256":format!("{:x}", Sha256::digest(&workload.component)),
+            "component_sha256":super::sha256_bytes(&workload.component),
             "component_bytes":workload.component.len(),"input_bytes":workload.input_bytes,
             "directive_bytes":workload.output_bytes,"rounds":rounds,
             "warm_calls":WARM_CALLS,"concurrent_calls":CONCURRENT_CALLS,"concurrent_batches":CONCURRENT_BATCHES,
