@@ -77,7 +77,7 @@ pub(super) fn resolve(
         // A reference cannot multiply individually legal sources into an oversized IR.
         // Prefix ownership reduces the next exact record's pre-decode allowance.
         if encoded > MAX_JOURNAL_APPEND_BYTES as u64
-            || retained > super::MAX_MATERIALIZED_HISTORY_DECODE_BYTES as usize
+            || retained as u64 > super::MAX_MATERIALIZED_HISTORY_DECODE_BYTES
         {
             return Err(RecoveryError::Limit("logical tool result admission"));
         }
