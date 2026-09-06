@@ -875,19 +875,26 @@ if "TYPE_ERROR" in text:
                 "process-tree fixture did not announce readiness: {ready:?}; cleanup: {cleanup:?}"
             );
         }
-        let descendant = readiness.trim().parse::<i32>().expect("descendant pid");
+        assert!(
+            readiness
+                .trim()
+                .parse::<u32>()
+                .expect("descendant namespace PID")
+                > 0
+        );
         process.handle.kill().await.expect("kill process group");
-        let descendant = rustix::process::Pid::from_raw(descendant).expect("positive pid");
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-        loop {
-            match rustix::process::test_kill_process(descendant) {
-                Err(rustix::io::Errno::SRCH) => break,
-                Ok(()) if tokio::time::Instant::now() < deadline => {
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-                result => panic!("descendant process survived group teardown: {result:?}"),
-            }
-        }
+        // The descendant inherits stdout and holds it until death. Its numeric
+        // PID belongs to the sandbox PID namespace, not the test's host table.
+        // Require both the physical owner's settlement proof and pipe EOF.
+        let mut remaining = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::io::AsyncReadExt::read_to_end(&mut process.stdout, &mut remaining),
+        )
+        .await
+        .expect("descendant retained stdout after group teardown")
+        .expect("descendant stdout EOF");
+        assert!(remaining.is_empty());
     }
 
     struct MockIntel;

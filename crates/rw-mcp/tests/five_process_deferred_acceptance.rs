@@ -5,7 +5,6 @@ use std::{
     net::TcpListener,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
@@ -60,14 +59,14 @@ fn fixture_config(
 ) -> McpServerConfig {
     let authority = workspace.join("authority").join(profile);
     let denied = workspace.join("denied").join(format!("{profile}.txt"));
-    let pid_file = authority.join("pid");
+    let lifetime_file = authority.join("lifetime");
     let filesystem_result = authority.join("filesystem-result");
     let network_result = authority.join("network-result");
     let mut environment = vec![
         ("RW_MCP_PROFILE".to_owned(), profile.to_owned()),
         (
-            "RW_MCP_PID_FILE".to_owned(),
-            pid_file.to_string_lossy().into_owned(),
+            "RW_MCP_LIFETIME_FILE".to_owned(),
+            lifetime_file.to_string_lossy().into_owned(),
         ),
         (
             "RW_MCP_ALLOWED_WRITE".to_owned(),
@@ -120,26 +119,19 @@ fn fixture_config(
     }
 }
 
-async fn assert_reaped(pids: &BTreeSet<i32>) {
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        let remaining = pids
-            .iter()
-            .copied()
-            .filter(|raw| {
-                rustix::process::Pid::from_raw(*raw)
-                    .is_some_and(|pid| rustix::process::test_kill_process(pid).is_ok())
-            })
-            .collect::<Vec<_>>();
-        if remaining.is_empty() {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "fixture processes were not reaped: {remaining:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+fn sandbox_helper() -> rw_tools::SandboxHelper {
+    use std::io::Read as _;
+    let path = std::env::var_os("ROTTWEILER_TEST_SANDBOX_HELPER_RECEIPT")
+        .expect("native fixture prerequisite: run scripts/build-test-helper.py and export ROTTWEILER_TEST_SANDBOX_HELPER_RECEIPT");
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .expect("helper receipt")
+        .take(4097)
+        .read_to_end(&mut bytes)
+        .expect("bounded receipt read");
+    assert!(bytes.len() <= 4096);
+    let identity = serde_json::from_slice(&bytes).expect("typed helper receipt");
+    rw_tools::SandboxHelper::from_artifact(&identity).expect("verified helper artifact")
 }
 
 struct AcceptanceHarness {
@@ -161,7 +153,7 @@ async fn acceptance_harness(executable: &Path, directory: &Path) -> AcceptanceHa
     let workspace = std::fs::canonicalize(workspace).expect("workspace");
     let allowed_environment = [
         "RW_MCP_PROFILE",
-        "RW_MCP_PID_FILE",
+        "RW_MCP_LIFETIME_FILE",
         "RW_MCP_ALLOWED_WRITE",
         "RW_MCP_DENIED_WRITE",
         "RW_MCP_FILESYSTEM_RESULT",
@@ -174,10 +166,7 @@ async fn acceptance_harness(executable: &Path, directory: &Path) -> AcceptanceHa
     let launcher = SandboxedProtocolLauncher::new(
         std::slice::from_ref(&workspace),
         scratch.path(),
-        &rw_tools::SandboxHelper::from_running(
-            &std::env::current_exe().expect("sandbox helper identity"),
-        )
-        .expect("running helper"),
+        &sandbox_helper(),
         allowed_environment,
     )
     .expect("production launcher");
@@ -302,23 +291,37 @@ async fn five_distinct_production_sandboxed_servers_remain_deferred_and_bounded(
 
     assert_policy_probes(&harness);
 
-    let pids = PROFILES
+    let lifetimes = PROFILES
         .iter()
         .map(|profile| {
-            std::fs::read_to_string(
-                harness
-                    .workspace
-                    .join("authority")
-                    .join(profile)
-                    .join("pid"),
-            )
-            .expect("pid file")
-            .parse::<i32>()
-            .expect("pid")
+            harness
+                .workspace
+                .join("authority")
+                .join(profile)
+                .join("lifetime")
         })
+        .collect::<Vec<_>>();
+    let identities = lifetimes
+        .iter()
+        .map(|path| std::fs::read(path).expect("instance marker"))
         .collect::<BTreeSet<_>>();
-    assert_eq!(pids.len(), PROFILES.len());
+    assert_eq!(identities.len(), PROFILES.len());
+    assert!(identities.iter().all(|identity| identity.len() == 32));
+    for path in &lifetimes {
+        let file = std::fs::File::open(path).expect("lifetime lock");
+        assert!(
+            rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_err(),
+            "fixture process did not retain its kernel lifetime lock"
+        );
+    }
     let shutdown = manager.shutdown().await;
-    assert!(shutdown.iter().all(|(_, result)| result.is_ok()));
-    assert_reaped(&pids).await;
+    assert!(
+        shutdown.iter().all(|(_, result)| result.is_ok()),
+        "{shutdown:?}"
+    );
+    for path in &lifetimes {
+        let file = std::fs::File::open(path).expect("retired lifetime lock");
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+            .expect("a fixture process still owns its lifetime descriptor after shutdown");
+    }
 }

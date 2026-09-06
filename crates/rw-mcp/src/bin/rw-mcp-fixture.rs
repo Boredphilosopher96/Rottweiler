@@ -97,16 +97,13 @@ impl ServerHandler for Fixture {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let profile = std::env::var("RW_MCP_PROFILE").unwrap_or_else(|_| "generic".to_owned());
-    if let Ok(path) = std::env::var("RW_MCP_PID_FILE") {
-        let _ = std::fs::write(path, std::process::id().to_string());
-    }
+    hold_process_lifetime()?;
     run_policy_probes();
-    let Ok(service) = Fixture { profile }.serve(rmcp::transport::stdio()).await else {
-        return;
-    };
-    let _ = service.waiting().await;
+    let service = Fixture { profile }.serve(rmcp::transport::stdio()).await?;
+    service.waiting().await?;
+    Ok(())
 }
 
 fn run_policy_probes() {
@@ -141,4 +138,24 @@ fn run_policy_probes() {
             .map_or("denied", |_| "unexpectedly_allowed");
         let _ = std::fs::write(result, outcome);
     }
+}
+
+fn hold_process_lifetime() -> std::io::Result<()> {
+    use std::{io::Write as _, os::fd::IntoRawFd as _};
+    let Ok(path) = std::env::var("RW_MCP_LIFETIME_FILE") else {
+        return Ok(());
+    };
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)?;
+    let mut identity = [0_u8; 32];
+    getrandom::fill(&mut identity).map_err(std::io::Error::other)?;
+    file.write_all(&identity)?;
+    // Keep this descriptor open through runtime destruction. Only process exit
+    // releases the kernel lock; namespace-local PIDs cannot prove host retirement.
+    let _exit_owned_descriptor = file.into_raw_fd();
+    Ok(())
 }
