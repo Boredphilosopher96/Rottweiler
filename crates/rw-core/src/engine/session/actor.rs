@@ -364,8 +364,35 @@ pub(super) async fn run_actor(
             }
             closing_started.get_or_insert_with(tokio::time::Instant::now);
         }
+        if state.recovery_requested {
+            closing_started.get_or_insert_with(tokio::time::Instant::now);
+            if state.tasks.idle() && state.unsettled.is_none() {
+                let was_closing = state.closing;
+                while let Ok(signal) = signals.try_recv() {
+                    super::recovery::reject_signal(signal, &mut state);
+                }
+                if state.unsettled.is_none() {
+                    match recover_actor_from_journal(&mut state, &config, &events, &active_turn)
+                        .await
+                    {
+                        Ok(()) => {
+                            state.closing = was_closing;
+                            if !was_closing {
+                                closing_started = None;
+                            }
+                        }
+                        Err(error) => {
+                            state.unsettled.get_or_insert_with(|| error.to_string());
+                        }
+                    }
+                }
+            }
+        }
         if let Some(error) = state.tasks.failure() {
             state.unsettled.get_or_insert_with(|| error.to_string());
+        }
+        if state.recovery_requested && state.tasks.idle() && state.unsettled.is_some() {
+            break;
         }
         if state.closing
             && state.tasks.idle()
@@ -382,6 +409,7 @@ pub(super) async fn run_actor(
             ));
         }
         if !state.closing
+            && !state.recovery_requested
             && state.suspended_inputs.is_none()
             && state.running.is_none()
             && !state.initialization_running
@@ -413,17 +441,17 @@ pub(super) async fn run_actor(
         }
         let tasks = state.tasks.clone();
         tokio::select! {
-            result = crate::engine::dispatch::context_job::wait(&mut state.pending_context_read) => {
+            result = crate::engine::dispatch::context_job::wait(&mut state.pending_context_read), if !state.recovery_requested => {
                 crate::engine::dispatch::context_job::finish(result, &mut state, &config, &events).await;
             }
-            result = crate::engine::dispatch::model_job::wait(&mut state.pending_model_preparation) => {
+            result = crate::engine::dispatch::model_job::wait(&mut state.pending_model_preparation), if !state.recovery_requested => {
                 crate::engine::dispatch::model_job::finish(result, crate::engine::dispatch::DispatchContext {
                     state: &mut state, config: &mut config, tool_context: &mut tool_context,
                     turn_signals: &turn_signals, events: &events, active_turn: &active_turn,
                     command_descriptors: &command_descriptors, mode_registry: &mode_registry,
                 }).await;
             }
-            result = crate::engine::dispatch::command_job::wait(&mut state.pending_command), if state.pending_plugin_tool.is_none() => {
+            result = crate::engine::dispatch::command_job::wait(&mut state.pending_command), if state.pending_plugin_tool.is_none() && !state.recovery_requested => {
                 crate::engine::dispatch::command_job::finish(result, crate::engine::dispatch::DispatchContext {
                     state: &mut state, config: &mut config, tool_context: &mut tool_context,
                     turn_signals: &turn_signals, events: &events, active_turn: &active_turn,
@@ -456,13 +484,16 @@ pub(super) async fn run_actor(
                     state.unsettled.get_or_insert_with(|| "session effect signal channel closed".to_owned());
                     break;
                 };
+                if state.recovery_requested {
+                    super::recovery::reject_signal(signal, &mut state);
+                    continue;
+                }
                 if let Err(error) = handle_turn_signal(
                     signal, &mut state, &config, &turn_signals, &events, &active_turn,
                 ).await {
                     if state.closing {
                         state.unsettled.get_or_insert_with(|| error.to_string());
                     } else {
-                        while signals.try_recv().is_ok() {}
                         if let Err(error) = recover_actor_from_journal(&mut state, &config, &events, &active_turn).await {
                             state.unsettled.get_or_insert_with(|| error.to_string());
                         }

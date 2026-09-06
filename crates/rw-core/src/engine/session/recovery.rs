@@ -1,3 +1,4 @@
+mod fence;
 use super::SessionActorRecovery;
 use crate::engine::AgentLoopError;
 use crate::engine::AgentTurnStatus;
@@ -10,6 +11,7 @@ use crate::engine::turn::emit;
 use crate::engine::turn::emit_batch;
 use crate::engine::unavailable_cost;
 use crate::engine::wire_turn_id;
+pub(in crate::engine) use fence::reject_signal;
 use rw_types::AccountingAttribution;
 use rw_types::ApprovalDecision;
 use rw_types::TurnAccounting;
@@ -158,6 +160,13 @@ pub(in crate::engine) async fn recover_actor_from_journal(
     events: &crate::engine::live_events::LiveEvents,
     active_turn: &Arc<AtomicU64>,
 ) -> Result<(), AgentLoopError> {
+    let already_requested = state.recovery_requested;
+    state.recovery_requested = true;
+    state.poisoned = true;
+    state.tasks.cancel();
+    // A plugin command may await this reply while its task is being cancelled.
+    // Reject it now so physical command settlement can finish.
+    state.pending_plugin_tool.take();
     if let Some(running) = &state.running {
         running.cancellation.cancel();
         state.control.finish(running.id);
@@ -168,6 +177,15 @@ pub(in crate::engine) async fn recover_actor_from_journal(
     }
     for (_, pending) in std::mem::take(&mut state.pending_questions) {
         let _ = pending.respond.send(Err(rw_tools::ToolError::Cancelled));
+    }
+
+    if let Some(error) = state.tasks.failure() {
+        return Err(error);
+    }
+    if !already_requested || !state.tasks.idle() {
+        // The actor must continue rejecting worker acknowledgements until the
+        // physical task owners retire. Waiting here would deadlock those workers.
+        return Ok(());
     }
 
     let suspended = state.suspended_inputs.is_some();

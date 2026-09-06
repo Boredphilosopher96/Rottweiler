@@ -19,6 +19,7 @@ mod navigation;
 mod permissions;
 mod plugin_control;
 mod plugin_messages;
+mod recovery_fence;
 mod replies;
 mod rewind;
 mod source_rewind;
@@ -77,6 +78,10 @@ pub(super) async fn handle_actor_command(
     command_descriptors: &Arc<RwLock<Arc<[CommandDescriptor]>>>,
     mode_registry: &Arc<RwLock<Arc<ModeRegistry>>>,
 ) {
+    if state.recovery_requested {
+        recovery_fence::reject(command, state, events);
+        return;
+    }
     match command {
         ActorCommand::LiveState { respond } => {
             let _ = respond.send(live_state::snapshot(state));

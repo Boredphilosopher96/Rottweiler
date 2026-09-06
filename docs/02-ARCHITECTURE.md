@@ -90,6 +90,11 @@ after its configuration and state are destroyed; after callers release their ses
 handles, an independent reader can capture the journal without racing its writer lock.
 Dropping a client or a cleanup waiter
 requests that same independently owned shutdown; it cannot cancel cleanup.
+An append failure suspends actor admission and rejects stale worker replies while
+physical tasks settle. Journal repair consumes the acknowledged prefix only after
+those tasks retire and their queued signals are discarded; it cannot publish an
+interrupted turn while another tool is still running. Unproven task settlement
+retains its owners and prevents repair.
 
 The native renderer is built from checksum-verified OpenTUI source and the exact
 Zig release in `contracts/opentui-native.json`. Editor views and glyph/link pool

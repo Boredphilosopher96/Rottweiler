@@ -110,6 +110,9 @@ pub(in crate::engine) struct TodoRequest {
     complete: bool,
 }
 impl TodoRequest {
+    pub(in crate::engine) fn reject_recovery(mut self) {
+        self.finish(Err(ToolError::Cancelled), None);
+    }
     fn finish(&mut self, result: Result<ToolResult, ToolError>, failure: Option<String>) {
         self.job.finish(result, failure);
         self.complete = true;

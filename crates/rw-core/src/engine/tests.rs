@@ -38,6 +38,7 @@ mod provider_usage;
 mod questions;
 mod reasoning;
 mod recovery;
+mod recovery_fence;
 mod redaction;
 mod retained_inputs;
 mod rewind;
