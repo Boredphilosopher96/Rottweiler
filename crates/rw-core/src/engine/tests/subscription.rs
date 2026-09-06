@@ -242,7 +242,7 @@ async fn attach_and_subscription_reject_wrong_session_or_protocol_gap_events() {
         } else {
             meta.protocol_version = PROTOCOL_VERSION.saturating_add(1);
         }
-        let mut actor_config = config(
+        let actor_config = config(
             root.path(),
             Arc::new(ScriptedModel::default()),
             Arc::new(ToolRegistry::new()),

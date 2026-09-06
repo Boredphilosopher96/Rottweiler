@@ -337,7 +337,7 @@ fn status_bootstrap_recovers_latest_sources_and_durable_clears() {
         .find(|entry| entry.plugin_id == "worker")
         .expect("worker");
     assert_eq!(worker.status, "working");
-    assert_eq!(worker.source, SequenceId(2));
+    assert_eq!(worker.source, rw_types::SequenceId(2));
     assert!(recovered.retained_bytes().expect("charged") > worker.status.len());
     drop(recovered);
     append(&mut journal, vec![update("worker", "")]);

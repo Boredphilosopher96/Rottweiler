@@ -335,7 +335,7 @@ async fn permission_mode_projects_and_is_reapplied_when_a_session_resumes() {
     );
 
     let root = TempDir::new().expect("workspace");
-    let mut actor_config = config(
+    let actor_config = config(
         root.path(),
         Arc::new(ScriptedModel::new([])),
         Arc::new(ToolRegistry::new()),

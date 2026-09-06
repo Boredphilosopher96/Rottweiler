@@ -110,7 +110,7 @@ async fn recovered_sequence_and_user_message_are_appended_before_broadcast() {
 async fn persistence_failure_is_returned_before_provider_work_or_broadcast() {
     let root = TempDir::new().expect("tempdir");
     let model = Arc::new(ScriptedModel::new([stop_script("unused", &[])]));
-    let mut actor_config = config(
+    let actor_config = config(
         root.path(),
         model.clone(),
         Arc::new(ToolRegistry::new()),
