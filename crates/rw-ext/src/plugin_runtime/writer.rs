@@ -245,6 +245,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn full_result_boundary_rejects_rpc_envelope_without_truncating_or_leaking() {
+        use super::super::{NoopPluginBoundaryRedactor, PushReplyLimits, PushReplySlot};
+        let pool = Arc::new(Semaphore::new(64 * 1024 * 1024));
+        let source = Arc::new(());
+        let weak = Arc::downgrade(&source);
+        // The result alone is exactly 4 MiB; an RPC envelope cannot fit beside it.
+        let body = "x".repeat(MAX_FRAME_BYTES - 2);
+        let reply = PushReplySlot::from_pool(pool.clone(), PushReplyLimits::CONTENT)
+            .expect("slot")
+            .encode(&body)
+            .expect("legal result body")
+            .retain(source)
+            .redact(RpcId::Number(1), &NoopPluginBoundaryRedactor)
+            .expect("bounded redaction");
+        drop(body);
+        let (writer, mut receiver) = RpcWriter::channel();
+        assert!(writer.send_reply(reply).await.is_err());
+        assert!(weak.upgrade().is_none());
+        assert_eq!(pool.available_permits(), 64 * 1024 * 1024);
+        assert!(futures_util::poll!(Box::pin(receiver.recv())).is_pending());
+        assert_eq!(
+            writer.control_bytes.available_permits(),
+            CONTROL_QUEUE_BYTES
+        );
+    }
+
+    #[tokio::test]
     async fn saturated_byte_admission_never_allocates_an_encoded_pending_frame() {
         use std::sync::atomic::Ordering;
         let (writer, mut receiver) = RpcWriter::channel();
