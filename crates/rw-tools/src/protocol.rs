@@ -1,3 +1,6 @@
+mod ownership;
+pub(crate) use ownership::ProcessOwner;
+
 use std::{
     collections::BTreeSet,
     ffi::OsString,
@@ -12,7 +15,7 @@ use rw_sandbox::{
     EgressPolicy, LaunchPlan, NetworkPolicy, SandboxPolicy, SandboxSupport, SupervisedEgressProxy,
     normalize_egress_domain, shell_launch_plan,
 };
-use tokio::process::{Child, ChildStdin, ChildStdout};
+use tokio::process::{ChildStdin, ChildStdout};
 
 /// Exact argv request for a long-lived, line/framed protocol child.
 #[derive(Clone, Debug)]
@@ -186,27 +189,24 @@ impl ProtocolChildLauncher for SandboxedProtocolLauncher {
         }
         #[cfg(unix)]
         command.process_group(0);
-        let mut child = command.spawn()?;
+        let child = command.spawn()?;
         release_helper_pin(&mut plan);
-        let process_group = child.id();
-        let stdin = child
+        let mut owner =
+            ProcessOwner::new(child, self.helper_executable.clone(), process_credit, proxy);
+        let stdin = owner
+            .child()?
             .stdin
             .take()
             .ok_or_else(|| io::Error::other("protocol stdin unavailable"))?;
-        let stdout = child
+        let stdout = owner
+            .child()?
             .stdout
             .take()
             .ok_or_else(|| io::Error::other("protocol stdout unavailable"))?;
         Ok(SpawnedProtocolChild {
             stdin,
             stdout,
-            handle: Box::new(TokioProtocolHandle {
-                _process_credit: process_credit,
-                _helper: self.helper_executable.clone(),
-                child,
-                process_group,
-                _proxy: proxy,
-            }),
+            handle: Box::new(TokioProtocolHandle(owner)),
         })
     }
 }
@@ -408,75 +408,14 @@ fn has_symlink_provenance(path: &Path) -> bool {
     false
 }
 
-struct TokioProtocolHandle {
-    _process_credit: rw_resources::ResourceLease,
-    _helper: rw_sandbox::SandboxHelper,
-    child: Child,
-    process_group: Option<u32>,
-    _proxy: Option<SupervisedEgressProxy>,
-}
-
+struct TokioProtocolHandle(ProcessOwner);
 #[async_trait]
 impl ProtocolProcessHandle for TokioProtocolHandle {
     async fn observe_exit(&mut self, deadline: Duration) -> io::Result<Option<ExitStatus>> {
-        match tokio::time::timeout(deadline, self.child.wait()).await {
-            Ok(status) => status.map(Some),
-            Err(_) => Ok(None),
-        }
+        self.0.observe_exit(deadline).await
     }
-
     async fn terminate_and_reap(&mut self, deadline: Duration) -> io::Result<()> {
-        #[cfg(unix)]
-        if let Some(group) = self
-            .process_group
-            .and_then(|id| i32::try_from(id).ok())
-            .and_then(rustix::process::Pid::from_raw)
-        {
-            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-        }
-        #[cfg(not(unix))]
-        self.child.start_kill()?;
-        tokio::time::timeout(deadline, self.child.wait())
-            .await
-            .map_err(|_| {
-                io::Error::new(io::ErrorKind::TimedOut, "protocol child did not exit")
-            })??;
-        #[cfg(unix)]
-        if let Some(group) = self
-            .process_group
-            .and_then(|id| i32::try_from(id).ok())
-            .and_then(rustix::process::Pid::from_raw)
-        {
-            let end = tokio::time::Instant::now() + deadline;
-            while rustix::process::test_kill_process_group(group).is_ok() {
-                if tokio::time::Instant::now() >= end {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "protocol process group did not exit",
-                    ));
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        }
-        self.process_group = None;
-        Ok(())
-    }
-}
-
-impl Drop for TokioProtocolHandle {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        if let Some(group) = self
-            .process_group
-            .and_then(|id| i32::try_from(id).ok())
-            .and_then(rustix::process::Pid::from_raw)
-        {
-            // Async cancellation can drop a connector while rmcp initialization
-            // is pending. Signal the complete group synchronously so descendants
-            // cannot survive merely because the async reap path was cancelled.
-            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-        }
-        let _ = self.child.start_kill();
+        self.0.settle(deadline).await
     }
 }
 

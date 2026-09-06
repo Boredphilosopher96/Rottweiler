@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 
+use crate::protocol::ProcessOwner;
 use async_trait::async_trait;
 use rw_intel::{
     CodeIntelligence, Diagnostic, IntelligenceResult, Language, Location, LspError,
@@ -21,7 +22,6 @@ use rw_types::ToolCapability;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::process::Child;
 
 /// PATH discovery for optional language servers. Candidates are rejected when
 /// their path provenance contains symlinks, is group/other writable, or lands
@@ -151,47 +151,11 @@ impl SandboxedLspSpawner {
     }
 }
 
-struct TokioLspHandle {
-    _process_credit: rw_resources::ResourceLease,
-    _helper: rw_sandbox::SandboxHelper,
-    child: Child,
-    process_group: Option<u32>,
-}
-
+struct TokioLspHandle(ProcessOwner);
 #[async_trait]
 impl LspProcessHandle for TokioLspHandle {
     async fn kill(&mut self) -> io::Result<()> {
-        #[cfg(unix)]
-        if let Some(group) = self
-            .process_group
-            .and_then(|value| i32::try_from(value).ok())
-            .and_then(rustix::process::Pid::from_raw)
-        {
-            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-        }
-        #[cfg(not(unix))]
-        self.child.start_kill()?;
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), self.child.wait())
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "LSP child did not exit"))??;
-        #[cfg(unix)]
-        if let Some(group) = self
-            .process_group
-            .and_then(|value| i32::try_from(value).ok())
-            .and_then(rustix::process::Pid::from_raw)
-        {
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-            while rustix::process::test_kill_process_group(group).is_ok() {
-                if tokio::time::Instant::now() >= deadline {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "LSP process group did not exit",
-                    ));
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        }
-        Ok(())
+        self.0.settle(std::time::Duration::from_secs(2)).await
     }
 }
 
@@ -224,18 +188,14 @@ impl LspProcessSpawner for SandboxedLspSpawner {
         }
         #[cfg(unix)]
         command.process_group(0);
-        let mut child = command.spawn()?;
+        let child = command.spawn()?;
         release_lsp_launch_pin(&mut plan);
-        let process_group = child.id();
-        let stdin = child.stdin.take().ok_or(LspError::Unavailable)?;
-        let stdout = child.stdout.take().ok_or(LspError::Unavailable)?;
+        let mut owner =
+            ProcessOwner::new(child, self.helper_executable.clone(), process_credit, None);
+        let stdin = owner.child()?.stdin.take().ok_or(LspError::Unavailable)?;
+        let stdout = owner.child()?.stdout.take().ok_or(LspError::Unavailable)?;
         Ok(SpawnedLspProcess {
-            handle: Box::new(TokioLspHandle {
-                _process_credit: process_credit,
-                _helper: self.helper_executable.clone(),
-                child,
-                process_group,
-            }),
+            handle: Box::new(TokioLspHandle(owner)),
             stdin: Box::pin(stdin),
             stdout: Box::pin(stdout),
         })
