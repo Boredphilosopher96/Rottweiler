@@ -1,22 +1,22 @@
 import type { ReplyAllocation } from "./transport/reply-allocation"
 import { EngineProtocolError } from "./transport/errors"
 
-interface Request { readonly sessionId: string; readonly signal: AbortSignal }
+interface Request<Target> { readonly target: Target; readonly signal: AbortSignal }
 
 /** One decoding owner plus one coalesced request; cancellation settles before ownership transfers. */
-export class SessionSnapshotReader<Event> {
-  #wanted: Request | null = null
+export class SessionSnapshotReader<Event, Target = string> {
+  #wanted: Request<Target> | null = null
   #running: Promise<void> | null = null
   #nextReadAt = 0
   constructor(
     readonly maximumPreparedBytes: number,
-    readonly read: (sessionId: string, signal: AbortSignal, allocation: ReplyAllocation) => Promise<Event>,
+    readonly read: (target: Target, signal: AbortSignal, allocation: ReplyAllocation) => Promise<Event>,
     readonly apply: (event: Event) => boolean,
-    readonly failed: (error: unknown, sessionId: string) => void,
+    readonly failed: (error: unknown, target: Target) => void,
   ) {}
 
-  refresh(sessionId: string, signal: AbortSignal): Promise<void> {
-    this.#wanted = { sessionId, signal }
+  refresh(target: Target, signal: AbortSignal): Promise<void> {
+    this.#wanted = { target, signal }
     if (this.#running !== null) return this.#running
     const running = Promise.resolve().then(() => this.#drain())
     this.#running = running
@@ -36,7 +36,7 @@ export class SessionSnapshotReader<Event> {
         if (request.signal.aborted) continue
         this.#nextReadAt = performance.now() + 250
         const maximumPreparedBytes = this.maximumPreparedBytes
-        const event = await this.read(request.sessionId, request.signal, {
+        const event = await this.read(request.target, request.signal, {
           admit(bytes) {
             if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > maximumPreparedBytes) {
               throw new EngineProtocolError("session snapshot reply exceeds its prepared allocation limit")
@@ -48,7 +48,7 @@ export class SessionSnapshotReader<Event> {
           if (!request.signal.aborted && this.#wanted === null) this.#wanted = request
         }
       } catch (error) {
-        if (!request.signal.aborted) this.failed(error, request.sessionId)
+        if (!request.signal.aborted) this.failed(error, request.target)
       }
     } } finally { this.#running = null }
   }

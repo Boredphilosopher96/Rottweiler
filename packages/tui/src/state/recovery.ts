@@ -44,7 +44,7 @@ export function readSessionState(state: RottweilerState, sessionId: string, snap
   }
   const restored = restoreCompaction(state, snapshot.compaction, snapshot.through)
   return {
-    ...state, mode: snapshot.mode_id, model: snapshot.model_alias, provider: snapshot.provider,
+    ...state, pluginStatuses: Object.fromEntries(snapshot.plugin_statuses.map(status => [status.plugin_id, status.status])), mode: snapshot.mode_id, model: snapshot.model_alias, provider: snapshot.provider,
     driverClientId: snapshot.driver_client_id, turns,
     sessions: state.sessions.map(session => session.sessionId === sessionId
       ? { ...session, ...(snapshot.title === null ? {} : { title: snapshot.title }), model: snapshot.model_alias, driverClientId: snapshot.driver_client_id, shellActive: snapshot.shell !== null }
@@ -68,7 +68,7 @@ export function readSessionState(state: RottweilerState, sessionId: string, snap
 
 export function metadataEvent(event: EngineEvent): boolean {
   switch (event.type) {
-    case "session_created": case "driver_changed": case "session_title_updated": case "model_changed":
+    case "session_created": case "plugin_status_changed": case "driver_changed": case "session_title_updated": case "model_changed":
     case "mode_changed": case "user_shell_state_changed": case "message_queued": case "queued_message_removed":
     case "queued_messages_cleared": case "budget_status_changed": case "turn_started": case "turn_finished":
     case "conversation_turn_committed": case "conversation_rewound": case "compaction_started": case "compaction_finished": case "compaction_failed": return true
@@ -81,7 +81,7 @@ export function preserveMetadata(before: RottweilerState, after: RottweilerState
   const cut = parseU64(before.recovery.metadataThrough)
   if (cut !== null && BigInt(sequence) <= cut) return {
     ...after, mode: before.mode, model: before.model, provider: before.provider, driverClientId: before.driverClientId,
-    sessions: before.sessions, turns: before.turns, queuedMessages: before.queuedMessages, shell: before.shell,
+    pluginStatuses: before.pluginStatuses, sessions: before.sessions, turns: before.turns, queuedMessages: before.queuedMessages, shell: before.shell,
     latestShell: before.latestShell, compaction: before.compaction, budgets: before.budgets,
     recovery: { ...after.recovery, compaction: before.recovery.compaction },
   }

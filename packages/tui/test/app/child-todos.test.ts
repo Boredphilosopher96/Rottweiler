@@ -25,6 +25,7 @@ test("opening an idle child loads exact tasks and leaving retires a pending chil
   }
   try {
     selectChild()
+    await waitForHistory(setup, () => reads.length === 1)
     expect(reads[0]?.session).toBe("child")
     reads[0]!.resolve({ type: "ready", todos: { through: "7", snapshot: { items: [{ id: "inspect", content: "Child inspection task", status: "in_progress" }] } } })
     await waitForHistory(setup, () => setup.captureCharFrame().includes("Child inspection task"))
@@ -32,6 +33,7 @@ test("opening an idle child loads exact tasks and leaving retires a pending chil
     setup.mockInput.pressEscape()
     await waitForHistory(setup, () => app.activeSubagentId === null)
     selectChild()
+    await waitForHistory(setup, () => reads.length === 2)
     expect(reads[1]?.session).toBe("child")
     setup.mockInput.pressEscape()
     await waitForHistory(setup, () => app.activeSubagentId === null)

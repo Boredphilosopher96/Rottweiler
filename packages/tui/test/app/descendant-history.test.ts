@@ -54,6 +54,7 @@ test("historical nested child navigation carries exact ancestry across history, 
       { session_id: "grand", subagent_id: "agent-4", source_sequence: "4" },
     ] } }
     expect(reads).toContainEqual({ kind: "page", target })
+    await waitForHistory(setup, () => reads.some(read => read.kind === "todos" && read.target.sessionId === "grand"))
     expect(reads).toContainEqual({ kind: "todos", target })
     await open("9")
     await waitForHistory(setup, () => app.outputViewer.body.plainText === "complete body")

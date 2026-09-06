@@ -26,7 +26,7 @@ export interface SessionReader {
   children(target: SessionReadTarget, signal: AbortSignal, allocation: ReplyAllocation): Promise<SessionChildrenResult>
   uiCatalog(sessionId: string, signal: AbortSignal): Promise<UiCatalog>
   uiPanels(sessionId: string, signal: AbortSignal): Promise<UiPanels>
-  todos(target: SessionReadTarget, signal: AbortSignal): Promise<TodoReadResult>
+  todos(target: SessionReadTarget, signal: AbortSignal, allocation: ReplyAllocation): Promise<TodoReadResult>
   page(target: SessionReadTarget, read: TranscriptRead, signal: AbortSignal, allocation: ReplyAllocation): Promise<TranscriptReadResult>
   content(target: SessionReadTarget, read: TranscriptContentRead, signal: AbortSignal, allocation: ReplyAllocation): Promise<TranscriptContentPage>
 }

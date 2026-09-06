@@ -23,11 +23,11 @@ test("session task capability reads a child without changing the driver and reje
   try {
     await waitFor(() => client.commands.some(command => command.type === "list_commands"))
     const target = descendantSessionRead(directSessionRead("parent"), { session_id: "child", subagent_id: "agent", source_sequence: "9" })
-    expect(await runtime.sessionReader.todos(target, new AbortController().signal)).toMatchObject({ type: "ready", todos: { through: "12" } })
+    expect(await runtime.sessionReader.todos(target, new AbortController().signal, { admit() {} })).toMatchObject({ type: "ready", todos: { through: "12" } })
     expect(app.sessionId).toBe("parent")
     expect(client.commands.at(-1)).toMatchObject({ type: "get_todos", session_id: "child", scope: target.scope })
     replySession = "foreign"
-    await expect(runtime.sessionReader.todos(directSessionRead("child"), new AbortController().signal)).rejects.toThrow("session-bound result")
+    await expect(runtime.sessionReader.todos(directSessionRead("child"), new AbortController().signal, { admit() {} })).rejects.toThrow("session-bound result")
   } finally { await runtime.stop(); await running }
 })
 

@@ -388,7 +388,6 @@ export interface RottweilerState {
   readonly promptDump: PromptDump | null
   readonly mode: string | null
   readonly pendingPlan: PlanArtifact | null
-  readonly approvedPlan: PlanArtifact | null
   readonly model: string | null
   readonly provider: string | null
   readonly driverClientId: string | null
@@ -455,7 +454,6 @@ export function createInitialState(): RottweilerState {
     promptDump: null,
     mode: "execute",
     pendingPlan: null,
-    approvedPlan: null,
     model: null,
     provider: null,
     driverClientId: null,

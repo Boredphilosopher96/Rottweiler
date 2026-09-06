@@ -81,8 +81,21 @@ describe("M4 transport and process acceptance", () => {
   }, 10_000)
 
   test("supervised TUI approves a mutating tool through the real panel and driver transport", async () => {
+    let finished = false
     let controls: SessionControlsSnapshot = { through: null, controls: { questions: [], approvals: [], pending_plan: null } }
     const engine = new AuthenticatedMockEngine([{ chunks: [], holdOpen: true }], command => {
+      if (command.type === "get_session_state") return { type: "read", outcome: { type: "accepted" }, events: [{
+        type: "session_state_ready", session_id: command.session_id,
+        meta: { ...command.meta, emitted_at: "2026-07-10T00:00:00Z" }, snapshot: {
+          through: finished ? "6" : controls.through, driver_client_id: command.meta.client_id, title: null, model_alias: "main", provider: null,
+          thinking: "off", mode_id: "execute", active_turn: finished || controls.through === null ? null : { turn_id: "turn-approval", started: "1" },
+          completed_turns: finished ? "1" : "0", shell: null, compaction: null, queued_messages: [], plugin_statuses: [], budget: null,
+        },
+      }] }
+      if (command.type === "read_session_children") return { type: "read", outcome: { type: "accepted" }, events: [{
+        type: "session_children_ready", session_id: command.session_id, meta: { ...command.meta, emitted_at: "2026-07-10T00:00:00Z" },
+        result: { type: "ready", snapshot: { through: finished ? "6" : controls.through, children: [] } },
+      }] }
       if (command.type === "get_session_controls") return { type: "read", outcome: { type: "accepted" }, events: [{
         type: "session_controls_ready", session_id: command.session_id,
         meta: { ...command.meta, emitted_at: "2026-07-10T00:00:00Z" }, snapshot: controls,
@@ -196,6 +209,7 @@ describe("M4 transport and process acceptance", () => {
       is_error: false,
       call_index: 0,
     })
+    finished = true
     engine.emit({
       type: "turn_finished",
       meta: meta(6),

@@ -14,7 +14,7 @@ test("the production runtime refreshes a missed compaction revision without repl
     const snapshot: SessionStateSnapshot = { through: "1", driver_client_id: command.meta.client_id, title: null, model_alias: "main", provider: null,
       thinking: "off", mode_id: "execute", active_turn: { turn_id: "summary", started: null }, completed_turns: "0", shell: null,
       compaction: { started: "1", revision, summary_turn_id: "summary", attempt: 0, text: { text, truncated: false }, thinking: { text: "", truncated: false } },
-      queued_messages: [], budget: null }
+      plugin_statuses: [], queued_messages: [], budget: null }
     if (reads === 2) refreshed()
     return { type: "read", outcome: { type: "accepted" }, events: [{ type: "session_state_ready", session_id: command.session_id,
       meta: { ...command.meta, emitted_at: "2026-01-01T00:00:00Z" }, snapshot }] }

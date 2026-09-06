@@ -1,3 +1,4 @@
+import { CLIENT_HISTORY_BYTES, ClientAllocationOwner, type ClientAllocationLease } from "../client-allocation"
 import { retainedJsonBytes } from "../retained-json"
 
 /** A retained value remains charged until its last mounted reader releases it. */
@@ -20,6 +21,7 @@ export interface CacheLimits {
 }
 
 interface Entry<Value> {
+  readonly allocation: ClientAllocationLease
   readonly value: Value
   readonly bytes: number
   readers: number
@@ -41,7 +43,7 @@ export class ClientCache<Value> {
   #entries = 0
   #pinned = 0
 
-  constructor(limits: CacheLimits = { bytes: 16 * 1024 * 1024, entries: 2048 }) {
+  constructor(limits: CacheLimits = { bytes: CLIENT_HISTORY_BYTES, entries: 2048 }, readonly allocations = new ClientAllocationOwner()) {
     if (!Number.isSafeInteger(limits.bytes) || limits.bytes <= 0
       || !Number.isSafeInteger(limits.entries) || limits.entries <= 0) {
       throw new RangeError("invalid client cache limits")
@@ -77,9 +79,13 @@ export class ClientCache<Value> {
       availableEntries += 1
     }
     if (availableBytes < bytes || availableEntries < 1) return false
+    const releasing = evictions.reduce((sum, candidate) => sum + this.#resident.get(candidate)!.bytes, reclaimPrevious ? previous!.bytes : 0)
+    if (!this.allocations.canReserve("history", bytes, releasing)) return false
     for (const candidate of evictions) this.remove(candidate)
     this.remove(key)
-    this.#resident.set(key, { value, bytes, readers: 0, resident: true })
+    let allocation: ClientAllocationLease
+    try { allocation = this.allocations.reserve("history", bytes) } catch { return false }
+    this.#resident.set(key, { value, bytes, allocation, readers: 0, resident: true })
     this.#bytes += bytes
     this.#entries += 1
     return true
@@ -98,7 +104,11 @@ export class ClientCache<Value> {
       entries += 1
     }
     if (bytes < maximumBytes || entries < 1) return null
+    const releasing = evictions.reduce((sum, key) => sum + this.#resident.get(key)!.bytes, 0)
+    if (!this.allocations.canReserve("history", maximumBytes, releasing)) return null
     for (const key of evictions) this.remove(key)
+    let allocation: ClientAllocationLease
+    try { allocation = this.allocations.reserve("history", maximumBytes) } catch { return null }
     this.#bytes += maximumBytes
     this.#entries += 1
     let active = true
@@ -115,7 +125,10 @@ export class ClientCache<Value> {
         available += entry.bytes
       }
       if (available < required - maximumBytes) throw new Error("client cache is full with active readers")
+      const releasing = evictions.reduce((sum, key) => sum + this.#resident.get(key)!.bytes, 0)
+      if (!this.allocations.canReserve("history", required - maximumBytes, releasing)) throw new Error("client allocation admission exhausted")
       for (const key of evictions) this.remove(key)
+      allocation.resize(required)
       this.#bytes += required - maximumBytes
       maximumBytes = required
     }
@@ -124,6 +137,7 @@ export class ClientCache<Value> {
       release: () => {
         if (!active) return
         active = false
+        allocation.release()
         this.#bytes -= maximumBytes
         this.#entries -= 1
       },
@@ -132,8 +146,9 @@ export class ClientCache<Value> {
         const actual = retainedJsonBytes(value, maximumBytes) + 96 + key.length * 2
         if (actual > maximumBytes) throw new Error("decoded value exceeds reserved cache allocation")
         this.remove(key)
+        allocation.resize(actual)
         this.#bytes -= maximumBytes - actual
-        this.#resident.set(key, { value, bytes: actual, readers: 0, resident: true })
+        this.#resident.set(key, { value, bytes: actual, allocation, readers: 0, resident: true })
         active = false
         const lease = this.lease(key)
         if (lease === null) throw new Error("committed cache value is missing")
@@ -171,6 +186,7 @@ export class ClientCache<Value> {
   }
 
   #release(entry: Entry<Value>): void {
+    entry.allocation.release()
     this.#bytes -= entry.bytes
     this.#entries -= 1
   }

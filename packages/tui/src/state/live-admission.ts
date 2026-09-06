@@ -1,5 +1,5 @@
 import {
-  MAX_CITATION_TEXT_BYTES, MAX_TURN_CITATIONS, MAX_TURN_CITATION_TEXT_BYTES,
+  MAX_PLUGIN_STATUS_BYTES, MAX_SESSION_PLUGIN_STATUSES, MAX_CITATION_TEXT_BYTES, MAX_TURN_CITATIONS, MAX_TURN_CITATION_TEXT_BYTES,
   MAX_PENDING_QUESTION_REQUESTS, MAX_QUESTION_SET_BYTES,
 } from "../../../../protocol/types"
 import type { EngineEvent } from "../protocol"
@@ -13,7 +13,14 @@ export function citationBytes(uri: string, title: string | null): number {
 
 /** Reject an inadmissible live payload before its cursor or projection can advance. */
 export function assertLiveAdmission(state: RottweilerState, event: EngineEvent): void {
-  if (event.type === "question_asked") {
+  if (event.type === "plugin_status_changed") {
+    if (state.recovery.metadataThrough !== null && BigInt(event.meta.sequence_id) <= BigInt(state.recovery.metadataThrough)) return
+    if (Buffer.byteLength(event.status) > MAX_PLUGIN_STATUS_BYTES
+      || (event.status !== "" && !Object.hasOwn(state.pluginStatuses, event.plugin_id)
+        && Object.keys(state.pluginStatuses).length >= MAX_SESSION_PLUGIN_STATUSES)) {
+      throw new EngineProtocolError("plugin statuses exceed the source-owned admission limit")
+    }
+  } else if (event.type === "question_asked") {
     const pending = Object.keys(state.questions).length
     if ((state.questions[event.question_id] === undefined && pending >= MAX_PENDING_QUESTION_REQUESTS)
       || event.questions.length === 0 || event.questions.length > MAX_PENDING_QUESTION_REQUESTS

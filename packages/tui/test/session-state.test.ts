@@ -8,7 +8,7 @@ const apply = (state: ReturnType<typeof createInitialState>, event: EngineEvent)
 function snapshot(through: string): SessionStateSnapshot {
   return { through, driver_client_id: "driver", title: "Session", model_alias: "main", provider: "provider", thinking: "high", mode_id: "execute",
     active_turn: { turn_id: "2", started: "5" }, completed_turns: "1", shell: null, compaction: null,
-    queued_messages: [{ position: "2", preview: "next task", truncated: false }], budget: null }
+    plugin_statuses: [], queued_messages: [{ position: "2", preview: "next task", truncated: false }], budget: null }
 }
 function ready(snapshot: SessionStateSnapshot): EngineEvent {
   return { type: "session_state_ready", session_id: "s", snapshot,
@@ -41,4 +41,14 @@ test("snapshot keeps a newer transient compaction attempt and does not fabricate
   expect(next.compaction).toBe(state.compaction)
   expect(next.recovery.activeTurnSource).toBeNull()
   expect(next.streamingTail).toBeNull()
+})
+
+test("plugin status recovery preserves exact source state and explicit empty updates remove widgets", () => {
+  let state = apply(createInitialState(), ready({ ...snapshot("5"), plugin_statuses: [{ plugin_id: "p", status: "Ready", source: "3" }] }))
+  state = apply(state, { type: "plugin_status_changed", meta: meta("4"), plugin_id: "p", status: "old" })
+  expect(state.pluginStatuses).toEqual({ p: "Ready" })
+  state = apply(state, { type: "plugin_status_changed", meta: meta("5"), plugin_id: "p", status: "covered" })
+  state = apply(state, { type: "plugin_status_changed", meta: meta("6"), plugin_id: "p", status: "" })
+  expect(state.pluginStatuses).toEqual({})
+  expect(apply(state, ready({ ...snapshot("5"), plugin_statuses: [{ plugin_id: "p", status: "Ready", source: "3" }] }))).toBe(state)
 })

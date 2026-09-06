@@ -456,7 +456,7 @@ function stateReply(command: Extract<ClientCommand, { type: "get_session_state" 
     meta: { ...command.meta, emitted_at: "2026-01-01T00:00:00Z" }, session_id: command.session_id,
     snapshot: { through: "5", driver_client_id: command.meta.client_id, title: null, model_alias: "main",
       provider: null, thinking: "off", mode_id: mode, active_turn: null, completed_turns: "0", shell: null,
-      compaction: null, queued_messages: [], budget: null },
+      compaction: null, plugin_statuses: [], queued_messages: [], budget: null },
   }] }
 }
 

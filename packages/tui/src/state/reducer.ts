@@ -583,11 +583,12 @@ function applyKnownEvent(
       return { ...state, errors: [] }
     case "plugin_message_injected":
       return state
-    case "plugin_status_changed":
-      return {
-        ...state,
-        pluginStatuses: { ...state.pluginStatuses, [event.plugin_id]: event.status },
-      }
+    case "plugin_status_changed": {
+      const pluginStatuses = { ...state.pluginStatuses }
+      if (event.status === "") delete pluginStatuses[event.plugin_id]
+      else pluginStatuses[event.plugin_id] = event.status
+      return { ...state, pluginStatuses }
+    }
     case "ui_notification":
       return {
         ...state,
@@ -1057,7 +1058,7 @@ function applyKnownEvent(
       }
     case "mode_changed":
       return event.mode === "plan"
-        ? { ...state, mode: event.mode, pendingPlan: null, approvedPlan: null }
+        ? { ...state, mode: event.mode, pendingPlan: null }
         : { ...state, mode: event.mode }
     case "permission_mode_changed":
       // The durable override is reflected by the typed permissions projection;
@@ -1069,7 +1070,6 @@ function applyKnownEvent(
       return {
         ...state,
         pendingPlan: null,
-        approvedPlan: event.decision === "approve" ? event.artifact : state.approvedPlan,
       }
     case "model_changed":
       return { ...state, model: event.model, provider: event.provider ?? null }

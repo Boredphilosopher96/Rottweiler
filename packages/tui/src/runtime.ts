@@ -269,8 +269,8 @@ export class TuiEngineRuntime {
       }
       return event.panels
     },
-    todos: async ({ sessionId, scope }, signal) => {
-      const reply = await this.#readSession({ type: "get_todos", meta: this.#meta(), session_id: sessionId, scope }, signal)
+    todos: async ({ sessionId, scope }, signal, allocation) => {
+      const reply = await this.#readSession({ type: "get_todos", meta: this.#meta(), session_id: sessionId, scope }, signal, allocation)
       const event = reply.events[0]
       if (reply.events.length !== 1 || event?.type !== "todos_read" || event.session_id !== sessionId) {
         throw new EngineRuntimeError("task reply is missing its session-bound result")

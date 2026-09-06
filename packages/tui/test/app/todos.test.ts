@@ -29,6 +29,7 @@ test("mounted task panel catches up with one owned query and retires retries on 
   const fixture = await setup()
   const { app, reads, renderOnce, captureCharFrame } = fixture
   app.handleEvent(ready)
+  await waitForHistory(fixture, () => reads.length > 0)
   expect(reads).toHaveLength(1)
   expect(reads[0]?.session).toBe("task-session")
   await renderOnce()
@@ -53,11 +54,14 @@ test("superseded task reads cannot replace a newer live commit or another sessio
   const fixture = await setup()
   const { app, reads } = fixture
   app.handleEvent(ready)
+  await waitForHistory(fixture, () => reads.length > 0)
   app.handleEvent({ type: "todo_state_committed", meta: { protocol_version: PROTOCOL_VERSION, session_id: "task-session", sequence_id: "21", emitted_at: "2026-01-01T00:00:00Z" }, snapshot: { items: [{ id: "live", content: "New live state", status: "in_progress" }] } })
   reads[0]!.resolve(task("Stale query state"))
   await fixture.flush()
   expect(app.state.todos.snapshot.items[0]?.content).toBe("New live state")
   app.handleEvent(ready)
+  await waitForHistory(fixture, () => reads.length > 0)
+  await waitForHistory(fixture, () => reads.length === 2)
   const late = reads[1]!
   app.setSessionId("another-session")
   expect(late.signal.aborted).toBeTrue()
@@ -70,12 +74,14 @@ test("task read failures expose one explicit retry action", async () => {
   const fixture = await setup()
   const { app, reads, captureCharFrame } = fixture
   app.handleEvent(ready)
+  await waitForHistory(fixture, () => reads.length === 1)
   reads[0]!.reject(new Error("Task index is busy"))
   await waitForHistory(fixture, () => app.state.todos.phase === "failed")
   expect(captureCharFrame()).toContain("Retry loading tasks")
   app.contextPanel.todos.emit(SelectRenderableEvents.ITEM_SELECTED, 0)
-  expect(reads).toHaveLength(2)
   expect(app.state.todos.phase).toBe("loading")
+  await waitForHistory(fixture, () => reads.length === 2)
+  expect(reads).toHaveLength(2)
   app.contextPanel.todos.emit(SelectRenderableEvents.ITEM_SELECTED, 0)
   expect(reads).toHaveLength(2)
 })

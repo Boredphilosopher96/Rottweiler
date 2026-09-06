@@ -254,10 +254,10 @@ async function main(): Promise<void> {
         if (runtime === null) throw new Error("engine runtime is unavailable")
         return runtime.sessionReader.uiPanels(sessionId, signal)
       },
-      todos: async (target, signal) => {
+      todos: async (target, signal, allocation) => {
         const { runtime } = await runtimeBootstrap
         if (runtime === null) throw new Error("engine runtime is unavailable")
-        return runtime.sessionReader.todos(target, signal)
+        return runtime.sessionReader.todos(target, signal, allocation)
       },
       page: async (target, read, signal, allocation) => {
         const { runtime } = await runtimeBootstrap
