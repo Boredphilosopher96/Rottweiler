@@ -9,6 +9,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod read;
+
 const MAX_PATHS: usize = 100_000;
 const MAX_PATH_BYTES: usize = 8 * 1024 * 1024;
 const MAX_DEPTH: usize = 64;
@@ -40,6 +42,7 @@ pub struct CheckpointOperation {
     path_bytes: usize,
     hash_bytes: u64,
     capture_bytes: u64,
+    read: read::ReadAllowance,
 }
 
 impl Default for CheckpointOperation {
@@ -51,6 +54,7 @@ impl Default for CheckpointOperation {
             path_bytes: 0,
             hash_bytes: 0,
             capture_bytes: 0,
+            read: read::ReadAllowance::default(),
         }
     }
 }
@@ -135,18 +139,7 @@ fn charge(
 }
 
 pub(super) fn read_metadata(path: &std::path::Path) -> Result<Vec<u8>, CheckpointError> {
-    let file = std::fs::File::open(path)?;
-    if file.metadata()?.len() > MAX_METADATA_BYTES as u64 {
-        return Err(CheckpointError::OperationLimit("32 MiB metadata"));
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_METADATA_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_METADATA_BYTES {
-        return Err(CheckpointError::OperationLimit("32 MiB metadata"));
-    }
-    validate_metadata(&bytes)?;
-    Ok(bytes)
+    CheckpointOperation::default().read_metadata(path)
 }
 
 /// Serialize through a bounded writer so rejection precedes a large allocation.

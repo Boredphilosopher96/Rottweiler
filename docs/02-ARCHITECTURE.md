@@ -489,7 +489,13 @@ transaction replaces the canonical conversation generation.
   its rollback journal and temporary reference tables have separate bounded storage.
   Source metadata admits at most 32 MiB encoded and a conservative 128 MiB decoded
   allocation per record. Cleanup also shares the capture operation's path, hash,
-  and deadline bounds. Cold open performs no quota database reads or writes.
+  and deadline bounds. Manifest traversal also admits at most 128 MiB of aggregate
+  encoded source and 32 MiB of conservatively charged retained collections before
+  growth. Turn selectors, rewind steps and review baselines share that allowance;
+  review enforces its 1,024 unique-file limit during union, preserving each path's
+  earliest baseline. Rewind reference publication/removal takes the same bounded
+  writer exclusion as reclamation without changing blob-accounting state.
+  Cold open performs no quota database reads or writes.
   Captures hold a cross-process workspace writer lease through manifest publication.
   Staging is reserved before writes; new retained content is admitted before blob
   publication. Interrupted operations reconcile before new admission. Reclamation

@@ -3,8 +3,8 @@ use super::{BlobWriteGuard, CheckpointError, CheckpointOperation, MAX_BLOBS};
 use crate::checkpoint::{
     CheckpointFileState, CheckpointManifest, CheckpointStore, MAX_CAPTURE_FILE_BYTES,
     REWIND_TRANSACTION_VERSION, RewindPhase, RewindTransaction, is_lower_blake3,
-    is_private_temporary, normalize_relative, operation::read_metadata, parse_exact_turn_filename,
-    validate_operation_id, validate_rewind_report, validate_session_id,
+    is_private_temporary, normalize_relative, parse_exact_turn_filename, validate_operation_id,
+    validate_rewind_report, validate_session_id,
 };
 use rusqlite::OptionalExtension;
 use std::{
@@ -99,7 +99,7 @@ impl BlobWriteGuard<'_> {
                     regular(&entry.path())?;
                     operation.path(&entry.path().to_string_lossy())?;
                     let manifest: CheckpointManifest =
-                        serde_json::from_slice(&read_metadata(&entry.path())?)?;
+                        serde_json::from_slice(&operation.read_metadata(&entry.path())?)?;
                     let turn = parse_exact_turn_filename(&entry.file_name())
                         .ok_or(CheckpointError::CorruptManifest)?;
                     let name = session.file_name();
@@ -136,7 +136,7 @@ impl BlobWriteGuard<'_> {
             regular(&entry.path())?;
             operation.path(&entry.path().to_string_lossy())?;
             let transaction: RewindTransaction =
-                serde_json::from_slice(&read_metadata(&entry.path())?)?;
+                serde_json::from_slice(&operation.read_metadata(&entry.path())?)?;
             let name = entry.file_name();
             if name.to_str().and_then(|name| name.strip_suffix(".json"))
                 != Some(transaction.handle.session_id.as_str())

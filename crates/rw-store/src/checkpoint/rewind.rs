@@ -4,10 +4,10 @@ use std::{
 };
 
 use super::{
-    CheckpointError, CheckpointFileState, CheckpointStore, REWIND_TRANSACTION_VERSION,
-    RewindCommit, RewindHandle, RewindPhase, RewindReport, RewindStep, RewindTransaction,
-    atomic_replace, is_lower_blake3, is_private_temporary, normalize_relative, remove_durable,
-    validate_operation_id, validate_rewind_report, validate_session_id,
+    CheckpointError, CheckpointFileState, CheckpointOperation, CheckpointStore,
+    REWIND_TRANSACTION_VERSION, RewindCommit, RewindHandle, RewindPhase, RewindReport, RewindStep,
+    RewindTransaction, atomic_replace, is_lower_blake3, is_private_temporary, normalize_relative,
+    remove_durable, validate_operation_id, validate_rewind_report, validate_session_id,
 };
 
 impl CheckpointStore {
@@ -26,18 +26,20 @@ impl CheckpointStore {
         target_turn: u64,
         operation_id: &str,
     ) -> Result<RewindHandle, CheckpointError> {
+        let mut operation = CheckpointOperation::default();
+        let _references = self.blobs.lock_references(&mut operation)?;
         validate_session_id(session_id)?;
         validate_operation_id(operation_id)?;
         let path = self.rewind_path(session_id);
         if path.exists() {
-            let existing = self.load_rewind_transaction(session_id)?;
+            let existing = self.load_rewind_transaction(session_id, &mut operation)?;
             if existing.handle.operation_id == operation_id && existing.target_turn == target_turn {
                 return Ok(existing.handle);
             }
             return Err(CheckpointError::RewindPending);
         }
-        let steps = self.build_rewind_steps(session_id, target_turn)?;
-        self.validate_rewind_steps(&steps, true)?;
+        let steps = self.build_rewind_steps(session_id, target_turn, &mut operation)?;
+        self.validate_rewind_steps(&steps, true, &mut operation)?;
         let handle = RewindHandle {
             session_id: session_id.to_owned(),
             operation_id: operation_id.to_owned(),
@@ -64,14 +66,24 @@ impl CheckpointStore {
     ///
     /// Returns an error for identity mismatch or a confined filesystem write.
     pub fn apply_rewind(&self, handle: &RewindHandle) -> Result<RewindCommit, CheckpointError> {
-        let mut transaction = self.load_rewind_transaction(&handle.session_id)?;
+        self.apply_rewind_in(handle, &mut CheckpointOperation::default())
+    }
+
+    fn apply_rewind_in(
+        &self,
+        handle: &RewindHandle,
+        operation: &mut CheckpointOperation,
+    ) -> Result<RewindCommit, CheckpointError> {
+        let _references = self.blobs.lock_references(operation)?;
+        let mut transaction = self.load_rewind_transaction(&handle.session_id, operation)?;
         if transaction.handle != *handle {
             return Err(CheckpointError::RewindIdentityMismatch);
         }
         while transaction.phase == RewindPhase::Applying
             && transaction.next_step < transaction.steps.len()
         {
-            let step = transaction.steps[transaction.next_step].clone();
+            let step = &transaction.steps[transaction.next_step];
+            operation.retain_read::<String>(step.path.capacity())?;
             self.restore_state(&step.path, &step.state, &mut transaction.report)?;
             transaction.next_step += 1;
             self.write_rewind_transaction(&transaction)?;
@@ -94,11 +106,20 @@ impl CheckpointStore {
     ///
     /// Returns an error for a corrupt transaction or confined write failure.
     pub fn recover_rewinds(&self) -> Result<Vec<RewindCommit>, CheckpointError> {
-        let handles = self.enumerate_rewinds()?;
-        handles
-            .iter()
-            .map(|handle| self.apply_rewind(handle))
-            .collect()
+        let mut operation = CheckpointOperation::default();
+        let handles = self.enumerate_rewinds(&mut operation)?;
+        let mut commits = Vec::new();
+        for handle in handles {
+            let commit = self.apply_rewind_in(&handle, &mut operation)?;
+            operation.retain_read::<RewindCommit>(
+                handle
+                    .session_id
+                    .capacity()
+                    .saturating_add(handle.operation_id.capacity()),
+            )?;
+            commits.push(commit);
+        }
+        Ok(commits)
     }
 
     /// Discards a staged rewind before any workspace step has been applied.
@@ -116,10 +137,12 @@ impl CheckpointStore {
         handle: &RewindHandle,
         target_turn: u64,
     ) -> Result<(), CheckpointError> {
+        let mut operation = CheckpointOperation::default();
+        let _references = self.blobs.lock_references(&mut operation)?;
         if !self.rewind_path(&handle.session_id).try_exists()? {
             return Ok(());
         }
-        let transaction = self.load_rewind_transaction(&handle.session_id)?;
+        let transaction = self.load_rewind_transaction(&handle.session_id, &mut operation)?;
         if transaction.handle != *handle || transaction.target_turn != target_turn {
             return Err(CheckpointError::RewindIdentityMismatch);
         }
@@ -139,7 +162,9 @@ impl CheckpointStore {
     ///
     /// Returns an error if the workspace is not committed or identity differs.
     pub fn acknowledge_rewind(&self, handle: &RewindHandle) -> Result<(), CheckpointError> {
-        let transaction = self.load_rewind_transaction(&handle.session_id)?;
+        let mut operation = CheckpointOperation::default();
+        let _references = self.blobs.lock_references(&mut operation)?;
+        let transaction = self.load_rewind_transaction(&handle.session_id, &mut operation)?;
         if transaction.handle != *handle {
             return Err(CheckpointError::RewindIdentityMismatch);
         }
@@ -153,19 +178,19 @@ impl CheckpointStore {
         &self,
         session_id: &str,
         target_turn: u64,
+        operation: &mut CheckpointOperation,
     ) -> Result<Vec<RewindStep>, CheckpointError> {
-        let mut turns = self.manifest_turns(session_id)?;
+        let mut turns = self.manifest_turns(session_id, operation)?;
         turns.retain(|turn| *turn > target_turn);
         turns.sort_unstable_by(|left, right| right.cmp(left));
         let mut steps = Vec::new();
         for turn in turns {
-            let manifest = self.load_manifest(session_id, turn)?;
-            steps.extend(
-                manifest
-                    .files
-                    .into_iter()
-                    .map(|(path, state)| RewindStep { path, state }),
-            );
+            let manifest = self.load_manifest_in(session_id, turn, operation)?;
+            for (path, state) in manifest.files {
+                operation.path(&path)?;
+                operation.retain_state::<RewindStep>(path.capacity(), &state)?;
+                steps.push(RewindStep { path, state });
+            }
         }
         Ok(steps)
     }
@@ -174,8 +199,11 @@ impl CheckpointStore {
         &self,
         steps: &[RewindStep],
         validate_blobs: bool,
+        operation: &mut CheckpointOperation,
     ) -> Result<(), CheckpointError> {
         for step in steps {
+            operation.path(&step.path)?;
+            operation.retain_state::<RewindStep>(step.path.capacity(), &step.state)?;
             if normalize_relative(Path::new(&step.path))? != step.path {
                 return Err(CheckpointError::CorruptManifest);
             }
@@ -189,7 +217,7 @@ impl CheckpointStore {
                         return Err(CheckpointError::CorruptRewindTransaction);
                     }
                     if validate_blobs {
-                        self.read_valid_blob(blob, *bytes)?;
+                        self.validate_blob(blob, *bytes, operation)?;
                     } else if !is_lower_blake3(blob) {
                         return Err(CheckpointError::CorruptRewindTransaction);
                     }
@@ -210,11 +238,11 @@ impl CheckpointStore {
     pub(super) fn load_rewind_transaction(
         &self,
         session_id: &str,
+        operation: &mut CheckpointOperation,
     ) -> Result<RewindTransaction, CheckpointError> {
         validate_session_id(session_id)?;
-        let transaction: RewindTransaction = serde_json::from_slice(
-            &super::operation::read_metadata(&self.rewind_path(session_id))?,
-        )?;
+        let transaction: RewindTransaction =
+            serde_json::from_slice(&operation.read_metadata(&self.rewind_path(session_id))?)?;
         if transaction.version != REWIND_TRANSACTION_VERSION
             || transaction.handle.session_id != session_id
             || transaction.next_step > transaction.steps.len()
@@ -224,11 +252,30 @@ impl CheckpointStore {
             return Err(CheckpointError::CorruptRewindTransaction);
         }
         validate_operation_id(&transaction.handle.operation_id)?;
-        self.validate_rewind_steps(&transaction.steps, false)?;
+        self.validate_rewind_steps(&transaction.steps, false, operation)?;
         if transaction.phase == RewindPhase::Applying {
-            self.validate_rewind_steps(&transaction.steps[transaction.next_step..], true)?;
+            for step in &transaction.steps[transaction.next_step..] {
+                if let CheckpointFileState::Present { blob, bytes, .. } = &step.state {
+                    self.validate_blob(blob, *bytes, operation)?;
+                }
+            }
         }
         validate_rewind_report(&transaction.report)?;
+        for path in transaction
+            .report
+            .restored
+            .iter()
+            .chain(&transaction.report.removed)
+        {
+            operation.path(path)?;
+            operation.retain_read::<String>(path.capacity())?;
+        }
+        for (path, reason) in &transaction.report.unrestorable {
+            operation.path(path)?;
+            operation.retain_read::<(String, String)>(
+                path.capacity().saturating_add(reason.capacity()),
+            )?;
+        }
         Ok(transaction)
     }
 
@@ -242,7 +289,10 @@ impl CheckpointStore {
         )
     }
 
-    pub(super) fn enumerate_rewinds(&self) -> Result<Vec<RewindHandle>, CheckpointError> {
+    pub(super) fn enumerate_rewinds(
+        &self,
+        operation: &mut CheckpointOperation,
+    ) -> Result<Vec<RewindHandle>, CheckpointError> {
         let directory = self.root.join("rewinds");
         let mut handles = Vec::new();
         for entry in fs::read_dir(directory)? {
@@ -261,7 +311,14 @@ impl CheckpointStore {
                 .strip_suffix(".json")
                 .ok_or(CheckpointError::CorruptRewindTransaction)?;
             validate_session_id(session_id)?;
-            handles.push(self.load_rewind_transaction(session_id)?.handle);
+            let handle = self.load_rewind_transaction(session_id, operation)?.handle;
+            operation.retain_read::<RewindHandle>(
+                handle
+                    .session_id
+                    .capacity()
+                    .saturating_add(handle.operation_id.capacity()),
+            )?;
+            handles.push(handle);
         }
         handles.sort_by(|left, right| left.session_id.cmp(&right.session_id));
         Ok(handles)

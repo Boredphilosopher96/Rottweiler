@@ -94,7 +94,7 @@ impl CheckpointStore {
         let mut blobs = self.blobs.begin(&self.root, operation)?;
         let path = self.manifest_path(session_id, turn);
         let mut files = if path.exists() {
-            self.load_manifest(session_id, turn)?.files
+            self.load_manifest_in(session_id, turn, operation)?.files
         } else {
             BTreeMap::new()
         };
@@ -154,8 +154,17 @@ impl CheckpointStore {
         session_id: &str,
         turn: u64,
     ) -> Result<CheckpointManifest, CheckpointError> {
+        self.load_manifest_in(session_id, turn, &mut CheckpointOperation::default())
+    }
+
+    pub(super) fn load_manifest_in(
+        &self,
+        session_id: &str,
+        turn: u64,
+        operation: &mut CheckpointOperation,
+    ) -> Result<CheckpointManifest, CheckpointError> {
         validate_session_id(session_id)?;
-        let bytes = read_metadata(&self.manifest_path(session_id, turn))?;
+        let bytes = operation.read_metadata(&self.manifest_path(session_id, turn))?;
         let manifest: CheckpointManifest = serde_json::from_slice(&bytes)?;
         Self::validate_manifest(&manifest, session_id, turn)?;
         Ok(manifest)
@@ -358,7 +367,7 @@ impl CheckpointStore {
         let mut blobs = target.blobs.begin(&target.root, &mut operation)?;
         let manifests_directory = target.root.join("manifests");
         let child_directory = manifests_directory.join(child_session_id);
-        let mut turns = self.manifest_turns(parent_session_id)?;
+        let mut turns = self.manifest_turns(parent_session_id, &mut operation)?;
         turns.sort_unstable();
         if let Some(through_turn) = through_turn {
             turns.retain(|turn| *turn <= through_turn);
@@ -377,7 +386,8 @@ impl CheckpointStore {
         }
         let result: Result<(), CheckpointError> = (|| {
             for turn in turns {
-                let mut manifest = self.load_manifest(parent_session_id, turn)?;
+                let mut manifest =
+                    self.load_manifest_in(parent_session_id, turn, &mut operation)?;
                 for state in manifest.files.values() {
                     if let CheckpointFileState::Present { blob, bytes, .. } = state {
                         let content = self.read_valid_blob(blob, *bytes)?;
@@ -513,6 +523,24 @@ impl CheckpointStore {
             CheckpointFileState::Unrestorable { reason } => {
                 report.unrestorable.insert(key.to_owned(), reason.clone());
             }
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_blob(
+        &self,
+        blob: &str,
+        bytes: u64,
+        operation: &mut CheckpointOperation,
+    ) -> Result<(), CheckpointError> {
+        if !is_lower_blake3(blob) || bytes > MAX_CAPTURE_FILE_BYTES {
+            return Err(CheckpointError::CorruptBlob);
+        }
+        let file = File::open(self.blobs.directory().join(&blob[..2]).join(blob))?;
+        if file.metadata()?.len() != bytes
+            || operation.hash(file.take(bytes + 1))?.to_hex().as_str() != blob
+        {
+            return Err(CheckpointError::CorruptBlob);
         }
         Ok(())
     }
@@ -760,7 +788,11 @@ impl CheckpointStore {
         Ok(mutations)
     }
 
-    pub(super) fn manifest_turns(&self, session_id: &str) -> Result<Vec<u64>, CheckpointError> {
+    pub(super) fn manifest_turns(
+        &self,
+        session_id: &str,
+        operation: &mut CheckpointOperation,
+    ) -> Result<Vec<u64>, CheckpointError> {
         let directory = self.root.join("manifests").join(session_id);
         if !directory.exists() {
             return Ok(Vec::new());
@@ -774,6 +806,8 @@ impl CheckpointStore {
             if !fs::symlink_metadata(entry.path())?.is_file() {
                 return Err(CheckpointError::CorruptManifest);
             }
+            operation.path(&entry.path().to_string_lossy())?;
+            operation.retain_read::<u64>(0)?;
             turns.push(
                 parse_exact_turn_filename(&entry.file_name())
                     .ok_or(CheckpointError::CorruptManifest)?,

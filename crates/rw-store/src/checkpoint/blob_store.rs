@@ -69,25 +69,7 @@ impl CheckpointBlobStore {
         namespace: &Path,
         operation: &mut CheckpointOperation,
     ) -> Result<BlobWriteGuard<'a>, CheckpointError> {
-        self.validate_workspace(&self.workspace)?;
-        super::create_directory_durable(&self.directory())?;
-        super::create_directory_durable(&self.root.join("staging"))?;
-        let lock = loop {
-            operation.check()?;
-            let file = OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(self.root.join("writer.lock"))?;
-            match AdvisoryFileLock::try_exclusive(file) {
-                Ok(lock) => break lock,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                Err(error) => return Err(error.into()),
-            }
-        };
+        let lock = self.lock_references(operation)?;
         let connection = self.open_ledger()?;
         let mut guard = BlobWriteGuard {
             owner: self,
@@ -107,6 +89,32 @@ impl CheckpointBlobStore {
             guard.reconcile(operation, true)?;
         }
         Ok(guard)
+    }
+    // Reference publications use the same exclusion as GC, without opening the
+    // quota ledger or changing blob-accounting state.
+    pub(super) fn lock_references(
+        &self,
+        operation: &mut CheckpointOperation,
+    ) -> Result<AdvisoryFileLock, CheckpointError> {
+        self.validate_workspace(&self.workspace)?;
+        super::create_directory_durable(&self.directory())?;
+        super::create_directory_durable(&self.root.join("staging"))?;
+        loop {
+            operation.check()?;
+            let file = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(self.root.join("writer.lock"))?;
+            match AdvisoryFileLock::try_exclusive(file) {
+                Ok(lock) => return Ok(lock),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 }
 

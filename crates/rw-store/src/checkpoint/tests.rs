@@ -544,7 +544,7 @@ fn rewind_recovers_idempotently_after_apply_before_progress_persist() {
         .prepare_rewind("session", 0, "crash-rewind")
         .unwrap_or_else(|error| panic!("rewind must prepare: {error}"));
     let transaction = store
-        .load_rewind_transaction("session")
+        .load_rewind_transaction("session", &mut super::CheckpointOperation::default())
         .unwrap_or_else(|error| panic!("transaction must load: {error}"));
     let mut discarded_report = RewindReport::default();
     store

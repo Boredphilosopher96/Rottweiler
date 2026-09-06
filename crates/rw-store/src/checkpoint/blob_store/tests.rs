@@ -292,7 +292,11 @@ fn read_open_never_erases_an_active_writers_unpublished_manifest() -> TestResult
     let temporary = session.join(".rw-123-1.tmp");
     fs::write(&temporary, b"in progress")?;
     let reopened = fixture.store("session")?;
-    assert!(reopened.manifest_turns("session")?.is_empty());
+    assert!(
+        reopened
+            .manifest_turns("session", &mut CheckpointOperation::default())?
+            .is_empty()
+    );
     assert!(temporary.exists());
     drop(writer);
     fixture.capture(&reopened, 1, b"new")?;

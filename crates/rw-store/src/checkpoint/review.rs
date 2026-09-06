@@ -1,17 +1,16 @@
 use std::{
     collections::BTreeMap,
-    fs::{self},
     path::{Path, PathBuf},
 };
 
 use rw_types::{ReviewFileDecision, ReviewFileStatus, SessionId, SessionReview, SessionReviewFile};
 
 use super::{
-    CheckpointError, CheckpointFileState, CheckpointStore, MAX_REVIEW_FILE_BYTES, MAX_REVIEW_FILES,
-    MAX_REVIEW_TOTAL_DIFF_BYTES, REVIEW_LEDGER_VERSION, ReviewCurrentState, ReviewDecisionRecord,
-    ReviewLedger, RewindReport, atomic_replace, baseline_matches_current,
-    capture_review_regular_confined, normalize_relative, render_whole_file_diff, review_identity,
-    validate_review_current, validate_session_id,
+    CheckpointError, CheckpointFileState, CheckpointOperation, CheckpointStore,
+    MAX_REVIEW_FILE_BYTES, MAX_REVIEW_FILES, MAX_REVIEW_TOTAL_DIFF_BYTES, REVIEW_LEDGER_VERSION,
+    ReviewCurrentState, ReviewDecisionRecord, ReviewLedger, RewindReport, atomic_replace,
+    baseline_matches_current, capture_review_regular_confined, normalize_relative,
+    render_whole_file_diff, review_identity, validate_review_current, validate_session_id,
 };
 
 impl CheckpointStore {
@@ -26,15 +25,24 @@ impl CheckpointStore {
     /// Returns an error for corrupt manifests/blobs, unsafe paths, an excessive
     /// file count, or an unreadable workspace state.
     pub fn session_review(&self, session_id: &str) -> Result<SessionReview, CheckpointError> {
+        self.session_review_in(session_id, &mut CheckpointOperation::default())
+    }
+
+    fn session_review_in(
+        &self,
+        session_id: &str,
+        operation: &mut CheckpointOperation,
+    ) -> Result<SessionReview, CheckpointError> {
         validate_session_id(session_id)?;
-        let baselines = self.cumulative_baselines(session_id)?;
-        if baselines.len() > MAX_REVIEW_FILES {
-            return Err(CheckpointError::ReviewFileLimit);
-        }
-        let ledger = self.load_review_ledger(session_id)?;
+        let baselines = self.cumulative_baselines(session_id, operation)?;
+        let ledger = self.load_review_ledger(session_id, operation)?;
         let mut remaining_diff_bytes = MAX_REVIEW_TOTAL_DIFF_BYTES;
+        for _ in 0..baselines.len() {
+            operation.retain_read::<SessionReviewFile>(128)?;
+        }
         let mut files = Vec::with_capacity(baselines.len());
         for (path, baseline) in baselines {
+            operation.path(&path)?;
             let (current, current_content) = self.capture_review_current(&path)?;
             let matching_decision = ledger
                 .files
@@ -58,6 +66,7 @@ impl CheckpointStore {
                 remaining_diff_bytes,
             )?;
             remaining_diff_bytes = remaining_diff_bytes.saturating_sub(unified_diff.len());
+            operation.retain_read::<String>(unified_diff.capacity())?;
             files.push(SessionReviewFile {
                 path,
                 unified_diff,
@@ -88,9 +97,10 @@ impl CheckpointStore {
         decision: ReviewFileDecision,
         expected_current_hash: &str,
     ) -> Result<SessionReview, CheckpointError> {
+        let mut operation = CheckpointOperation::default();
         validate_session_id(session_id)?;
         let path = normalize_relative(relative_path)?;
-        let before = self.session_review(session_id)?;
+        let before = self.session_review_in(session_id, &mut operation)?;
         let file = before
             .files
             .iter()
@@ -102,7 +112,7 @@ impl CheckpointStore {
         if file.unrestorable_reason.is_some() {
             return Err(CheckpointError::ReviewPathNotRevertible);
         }
-        let baselines = self.cumulative_baselines(session_id)?;
+        let baselines = self.cumulative_baselines(session_id, &mut operation)?;
         let baseline = baselines
             .get(&path)
             .ok_or(CheckpointError::ReviewPathNotFound)?;
@@ -110,6 +120,12 @@ impl CheckpointStore {
         if review_identity(&current_before_decision)? != expected_current_hash {
             return Err(CheckpointError::ReviewPathChanged);
         }
+        let mut ledger = self.load_review_ledger(session_id, &mut operation)?;
+        if !ledger.files.contains_key(&path) && ledger.files.len() >= MAX_REVIEW_FILES {
+            return Err(CheckpointError::ReviewFileLimit);
+        }
+        operation
+            .retain_read::<(String, ReviewDecisionRecord)>(path.capacity().saturating_add(1024))?;
         let current = if decision == ReviewFileDecision::Revert {
             self.restore_state(&path, baseline, &mut RewindReport::default())?;
             let (restored, _) = self.capture_review_current(&path)?;
@@ -120,27 +136,35 @@ impl CheckpointStore {
         } else {
             current_before_decision
         };
-        let mut ledger = self.load_review_ledger(session_id)?;
         ledger
             .files
             .insert(path, ReviewDecisionRecord { decision, current });
         self.write_review_ledger(&ledger)?;
-        self.session_review(session_id)
+        self.session_review_in(session_id, &mut operation)
     }
 
     pub(super) fn cumulative_baselines(
         &self,
         session_id: &str,
+        operation: &mut CheckpointOperation,
     ) -> Result<BTreeMap<String, CheckpointFileState>, CheckpointError> {
-        let mut turns = self.manifest_turns(session_id)?;
+        let mut turns = self.manifest_turns(session_id, operation)?;
         turns.sort_unstable();
         let mut baselines = BTreeMap::new();
         for turn in turns {
-            for (path, state) in self.load_manifest(session_id, turn)?.files {
+            for (path, state) in self.load_manifest_in(session_id, turn, operation)?.files {
                 if path.chars().any(char::is_control) {
                     return Err(CheckpointError::UnsafePath);
                 }
-                baselines.entry(path).or_insert(state);
+                operation.path(&path)?;
+                if baselines.contains_key(&path) {
+                    continue;
+                }
+                if baselines.len() >= MAX_REVIEW_FILES {
+                    return Err(CheckpointError::ReviewFileLimit);
+                }
+                operation.retain_state::<(String, CheckpointFileState)>(path.capacity(), &state)?;
+                baselines.insert(path, state);
             }
         }
         Ok(baselines)
@@ -218,24 +242,37 @@ impl CheckpointStore {
     pub(super) fn load_review_ledger(
         &self,
         session_id: &str,
+        operation: &mut CheckpointOperation,
     ) -> Result<ReviewLedger, CheckpointError> {
         let path = self.review_path(session_id);
-        let bytes = match fs::read(path) {
+        let bytes = match operation.read_metadata(&path) {
             Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(CheckpointError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(ReviewLedger {
                     version: REVIEW_LEDGER_VERSION,
                     session_id: session_id.to_owned(),
                     files: BTreeMap::new(),
                 });
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(error),
         };
         let ledger: ReviewLedger = serde_json::from_slice(&bytes)?;
         if ledger.version != REVIEW_LEDGER_VERSION || ledger.session_id != session_id {
             return Err(CheckpointError::CorruptReviewLedger);
         }
+        if ledger.files.len() > MAX_REVIEW_FILES {
+            return Err(CheckpointError::ReviewFileLimit);
+        }
         for (path, record) in &ledger.files {
+            operation.path(path)?;
+            let heap = match &record.current {
+                ReviewCurrentState::Present { content_blake3, .. } => content_blake3.capacity(),
+                ReviewCurrentState::Unsupported { reason } => reason.capacity(),
+                ReviewCurrentState::Absent => 0,
+            };
+            operation.retain_read::<(String, ReviewDecisionRecord)>(
+                path.capacity().saturating_add(heap),
+            )?;
             if normalize_relative(Path::new(path))? != *path {
                 return Err(CheckpointError::CorruptReviewLedger);
             }
@@ -247,7 +284,7 @@ impl CheckpointStore {
     pub(super) fn write_review_ledger(&self, ledger: &ReviewLedger) -> Result<(), CheckpointError> {
         atomic_replace(
             &self.review_path(&ledger.session_id),
-            &serde_json::to_vec(ledger)?,
+            &super::operation::serialize_metadata(ledger, false)?,
         )
     }
 

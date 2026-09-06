@@ -1133,4 +1133,6 @@ pub enum CheckpointError {
 }
 
 #[cfg(test)]
+mod read_tests;
+#[cfg(test)]
 mod tests;
