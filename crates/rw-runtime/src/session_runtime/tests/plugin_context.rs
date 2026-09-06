@@ -58,6 +58,8 @@ async fn sdk_context_workflow_pins_and_evicts_committed_conversation() {
     .await
     .expect("canonical seed turn");
     seeded.handle.close().await.expect("seed effects settled");
+    drop(events);
+    drop(seeded);
     configure_plugin(root.path(), &storage, &workspace, "context-workflow", &[]).await;
     let runtime = compose_fixture_session(&storage, &workspace, "context-workflow", true).await;
     tokio::time::timeout(

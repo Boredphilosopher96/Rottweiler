@@ -44,6 +44,7 @@ async fn sdk_task_reopen_preserves_receipt_and_rebinds_rich_actions() {
         .close()
         .await
         .expect("first generation settled");
+    drop(first);
 
     let resumed = compose_fixture_session(&storage, &workspace, "persistent-task", true).await;
     let (summary, reads) = run_status(&resumed.handle, "status").await;
