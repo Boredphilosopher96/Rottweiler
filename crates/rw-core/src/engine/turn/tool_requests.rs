@@ -575,6 +575,7 @@ fn validate_question_input(request: &AskUserInput) -> Result<(), ToolError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod question_admission_tests {
     use super::{ActorQuestionAsker, QuestionAsker};
     use rw_tools::{AskUserInput, CancellationToken, ToolError};
