@@ -165,16 +165,82 @@ fn same_transport(discovered: &DiscoveredMcpServer, config: &McpServerConfig) ->
                 && read_roots == &sandbox.read_roots
                 && write_roots == &sandbox.write_roots
                 && allowed_domains == &sandbox.allowed_domains
-                && environment.iter().all(|pair| actual.contains(pair))
-                && actual.iter().all(|(name, _)| {
-                    environment.iter().any(|(key, _)| key == name)
-                        || inherit_env.contains(name)
-                        || discovered
-                            .credentials
-                            .iter()
-                            .any(|binding| &binding.environment == name)
-                })
+                && same_environment(environment, inherit_env, &discovered.credentials, actual)
         }
         _ => false,
+    }
+}
+
+fn same_environment(
+    literal: &[(String, String)],
+    inherited: &[String],
+    credentials: &[crate::extension_config::CredentialBinding],
+    actual: &[(String, String)],
+) -> bool {
+    if actual.len() > 256 {
+        return false;
+    }
+    let mut names = std::collections::BTreeSet::new();
+    actual.iter().all(|(name, value)| {
+        value.len() <= 16 * 1024
+            && names.insert(name)
+            && if let Some((_, expected)) = literal.iter().find(|(key, _)| key == name) {
+                value == expected
+            } else {
+                inherited.contains(name)
+                    || credentials
+                        .iter()
+                        .any(|binding| &binding.environment == name)
+            }
+    }) && literal.iter().all(|(name, _)| names.contains(name))
+        && credentials
+            .iter()
+            .all(|binding| names.contains(&binding.environment))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_environment;
+    #[test]
+    fn approved_environment_rejects_overrides_duplicates_and_missing_secrets() {
+        let literal = vec![("MODE".into(), "approved".into())];
+        let inherited = vec!["PATH".into()];
+        let credentials = vec![crate::extension_config::CredentialBinding {
+            environment: "TOKEN".into(),
+            credential_reference: "vault:fixture".into(),
+        }];
+        let actual = vec![
+            ("MODE".into(), "approved".into()),
+            ("PATH".into(), "/tools".into()),
+            ("TOKEN".into(), "resolved".into()),
+        ];
+        assert!(same_environment(
+            &literal,
+            &inherited,
+            &credentials,
+            &actual
+        ));
+        for altered in [
+            vec![("MODE".into(), "changed".into()), actual[2].clone()],
+            vec![
+                actual[0].clone(),
+                actual[2].clone(),
+                ("MODE".into(), "changed".into()),
+            ],
+            vec![actual[0].clone()],
+            vec![actual[2].clone()],
+            vec![
+                actual[0].clone(),
+                actual[2].clone(),
+                ("OTHER".into(), "value".into()),
+            ],
+        ] {
+            assert!(!same_environment(
+                &literal,
+                &inherited,
+                &credentials,
+                &altered
+            ));
+        }
     }
 }

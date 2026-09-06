@@ -163,6 +163,7 @@ impl SandboxedProtocolLauncher {
 #[async_trait]
 impl ProtocolChildLauncher for SandboxedProtocolLauncher {
     async fn spawn(&self, request: &ProtocolChildRequest) -> io::Result<SpawnedProtocolChild> {
+        validate_request(request, &self.allowed_environment)?;
         let process_credit = rw_resources::try_acquire(rw_resources::ResourceClass::Process)
             .map_err(io::Error::other)?;
         let launcher = self.clone();
@@ -392,6 +393,7 @@ fn validated_domains(domains: &[String]) -> io::Result<Vec<String>> {
 }
 
 fn validate_request(request: &ProtocolChildRequest, allowed: &BTreeSet<String>) -> io::Result<()> {
+    validate_request_bounds(request)?;
     if request.executable.as_os_str().is_empty()
         || request.args.iter().any(|arg| arg.contains('\0'))
     {
@@ -411,6 +413,46 @@ fn validate_request(request: &ProtocolChildRequest, allowed: &BTreeSet<String>) 
                 "protocol environment key is not approved",
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_request_bounds(request: &ProtocolChildRequest) -> io::Result<()> {
+    let argument_bytes = request
+        .args
+        .iter()
+        .try_fold(0usize, |total, arg| total.checked_add(arg.len()));
+    if request.args.len() > 256
+        || argument_bytes.is_none_or(|bytes| bytes > 1024 * 1024)
+        || request.environment.len() > 256
+        || request
+            .environment
+            .iter()
+            .any(|(key, value)| key.len() > 256 || value.len() > 16 * 1024)
+        || request.sandbox.read_roots.len() > MAX_PROTOCOL_ROOTS
+        || request.sandbox.write_roots.len() > MAX_PROTOCOL_ROOTS
+        || request.sandbox.allowed_domains.len() > MAX_PROTOCOL_DOMAINS
+        || request.executable.as_os_str().len() > 4096
+        || request
+            .working_directory
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().len() > 4096)
+        || request
+            .sandbox
+            .read_roots
+            .iter()
+            .chain(&request.sandbox.write_roots)
+            .any(|path| path.as_os_str().len() > 4096)
+        || request
+            .sandbox
+            .allowed_domains
+            .iter()
+            .any(|domain| domain.len() > 253)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "protocol request exceeds bounded launch authority",
+        ));
     }
     Ok(())
 }

@@ -1,5 +1,7 @@
 //! Exact content authority supplied by the host's MCP approval owner.
-use super::{ProtocolChildRequest, ProtocolSandboxPolicy, trusted_executable};
+use super::{
+    ProtocolChildRequest, ProtocolSandboxPolicy, trusted_executable, validate_request_bounds,
+};
 use rw_sandbox::{ApprovedCode, ApprovedExecutable, ExecutableArtifactIdentity, ExecutableLaunch};
 use std::{
     ffi::OsString,
@@ -35,6 +37,7 @@ impl ApprovedProtocolCommand {
         workspace_roots: &[PathBuf],
         cwd: &Path,
     ) -> io::Result<Self> {
+        validate_request_bounds(request)?;
         if trusted_executable(&request.executable, workspace_roots)? != executable.executable {
             return Err(io::Error::other(
                 "MCP executable differs from its approved identity",
@@ -112,3 +115,6 @@ fn environment_identity(values: &[(String, String)]) -> [u8; 32] {
     }
     *hash.finalize().as_bytes()
 }
+
+#[cfg(all(test, unix))]
+mod tests;
