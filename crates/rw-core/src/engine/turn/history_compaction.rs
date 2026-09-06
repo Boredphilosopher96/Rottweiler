@@ -399,7 +399,7 @@ pub(super) fn apply_pruning(
 ) {
     for (index, block) in value.blocks.iter_mut().enumerate() {
         if let rw_types::Block::ToolResult { output, .. } = block
-            && pruned.contains_key(&super::context::block_source(sequence, index).key())
+            && pruned.contains_key(&super::context::block_key(sequence, index))
         {
             *output = rw_types::ToolOutput::Text {
                 text: rw_context::PRUNED_TOOL_OUTPUT_REPLACEMENT.into(),

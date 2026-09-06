@@ -242,6 +242,10 @@ pub(super) async fn execute_compaction(
             thinking: config.thinking,
             cache_hint: None,
         };
+        if let Err(error) = validate_summary_window(config, &request) {
+            last_error = Some(error);
+            continue;
+        }
         let provider = (alias == config.model_alias)
             .then_some(config.recovered.provider.as_deref())
             .flatten();
@@ -537,22 +541,7 @@ pub(in crate::engine) async fn compact_during_turn(
 ) -> Result<(u64, u64, u64, bool), AgentLoopError> {
     let view = config.history.capture_history().await?;
     if super::history_compaction::requires_streaming(&view, config, instructions.as_deref())? {
-        let suffix = if reason == CompactionReason::ProviderOverflow {
-            vec![
-                conversation
-                    .iter()
-                    .rev()
-                    .find(|turn| turn.role == Role::User && !turn.meta.synthetic)
-                    .ok_or_else(|| {
-                        AgentLoopError::InvalidConfiguration(
-                            "provider overflow requires a user turn".into(),
-                        )
-                    })?
-                    .clone(),
-            ]
-        } else {
-            Vec::new()
-        };
+        let suffix = overflow_suffix(conversation, &reason)?;
         let (page, spend) = super::history_compaction::compact(
             view,
             suffix,
@@ -587,32 +576,7 @@ pub(in crate::engine) async fn compact_during_turn(
     let transaction = async {
         let view = config.history.capture_history().await?;
         let page = super::history_context::read_view(&view).await?;
-        let mut compact_input = Vec::new();
-        let mut pins = Vec::new();
-        for ((value, source), action) in page
-            .turns
-            .iter()
-            .zip(&page.sources)
-            .zip(&page.context_actions)
-        {
-            if action.as_ref().is_some_and(|action| !action.pinned) {
-                continue;
-            }
-            let mut value = value.clone();
-            super::history_compaction::apply_pruning(
-                &mut value,
-                source.sequence,
-                &page.pruned_tool_outputs,
-            );
-            if let Some(action) = action {
-                pins.push(ConversationPin {
-                    item_id: action.item_id.0.clone(),
-                    order: action.effective_after_agent_turn,
-                    turn: value.clone(),
-                });
-            }
-            compact_input.push(value);
-        }
+        let (compact_input, pins) = compaction_input(&page);
         let execution = execute_compaction(
             &compact_input,
             pins,
@@ -630,70 +594,7 @@ pub(in crate::engine) async fn compact_during_turn(
             false,
         )
         .await?;
-        let mut committed = Vec::with_capacity(execution.conversation.len());
-        for compacted_turn in &execution.conversation {
-            committed.push(persist_conversation_turn(signals, turn, compacted_turn).await?);
-        }
-        surgery.clear();
-        for ordinal in &execution.remapped_pins {
-            let source = committed
-                .get(*ordinal)
-                .ok_or_else(|| AgentLoopError::Persistence("compaction pin position".into()))?;
-            let item_id = rw_types::context_source::conversation_item(*source);
-            persist_event(
-                signals,
-                PendingEvent::ContextItemPinned {
-                    item_id: item_id.clone(),
-                    effective_after_agent_turn: turn,
-                },
-            )
-            .await?;
-            surgery.push(ContextSurgeryAction {
-                item_id,
-                pinned: true,
-                effective_after_agent_turn: turn,
-            });
-        }
-        let successful = cost_units(&execution.cost);
-        let cost_micros = successful
-            .cost_micros_usd
-            .saturating_add(execution.failed_attempt_cost_micros);
-        let credit_micros = successful
-            .ai_credit_micros
-            .saturating_add(execution.failed_attempt_credit_micros);
-        let tokens = successful
-            .subscription_tokens
-            .saturating_add(execution.failed_attempt_tokens);
-        let now = config.event_clock.unix_time_millis();
-        let ledger = config
-            .event_sink
-            .budget_totals(BudgetLedgerQuery {
-                now_unix_ms: now,
-                utc_day_start_unix_ms: now.saturating_sub(now % 86_400_000),
-                trailing_minute_start_unix_ms: now.saturating_sub(60_000),
-            })
-            .await?;
-        persist_event(
-            signals,
-            PendingEvent::CompactionFinished {
-                summary_turn: turn,
-                reclaimed_tokens: execution.reclaimed_tokens,
-                usage: Some(execution.usage),
-                cost: Some(execution.cost),
-            },
-        )
-        .await?;
-        *conversation = execution.conversation;
-        Ok((
-            if ledger.authoritative { 0 } else { cost_micros },
-            if ledger.authoritative {
-                0
-            } else {
-                credit_micros
-            },
-            if ledger.authoritative { 0 } else { tokens },
-            execution.hard_stop,
-        ))
+        publish_compaction(execution, conversation, surgery, config, signals, turn).await
     }
     .await;
     match transaction {
@@ -710,6 +611,133 @@ pub(in crate::engine) async fn compact_during_turn(
             Err(error)
         }
     }
+}
+
+fn overflow_suffix(
+    conversation: &[Turn],
+    reason: &CompactionReason,
+) -> Result<Vec<Turn>, AgentLoopError> {
+    Ok(if *reason == CompactionReason::ProviderOverflow {
+        vec![
+            conversation
+                .iter()
+                .rev()
+                .find(|turn| turn.role == Role::User && !turn.meta.synthetic)
+                .ok_or_else(|| {
+                    AgentLoopError::InvalidConfiguration(
+                        "provider overflow requires a user turn".into(),
+                    )
+                })?
+                .clone(),
+        ]
+    } else {
+        Vec::new()
+    })
+}
+
+fn compaction_input(
+    page: &crate::engine::recovery::ConversationPage,
+) -> (Vec<Turn>, Vec<ConversationPin>) {
+    let mut compact_input = Vec::new();
+    let mut pins = Vec::new();
+    for ((value, source), action) in page
+        .turns
+        .iter()
+        .zip(&page.sources)
+        .zip(&page.context_actions)
+    {
+        if action.as_ref().is_some_and(|action| !action.pinned) {
+            continue;
+        }
+        let mut value = value.clone();
+        super::history_compaction::apply_pruning(
+            &mut value,
+            source.sequence,
+            &page.pruned_tool_outputs,
+        );
+        if let Some(action) = action {
+            pins.push(ConversationPin {
+                item_id: action.item_id.0.clone(),
+                order: action.effective_after_agent_turn,
+                turn: value.clone(),
+            });
+        }
+        compact_input.push(value);
+    }
+    (compact_input, pins)
+}
+async fn publish_compaction(
+    execution: CompactionExecution,
+    conversation: &mut Vec<Turn>,
+    surgery: &mut Vec<ContextSurgeryAction>,
+    config: &SessionActorConfig,
+    signals: &mpsc::UnboundedSender<TurnSignal>,
+    turn: u64,
+) -> Result<(u64, u64, u64, bool), AgentLoopError> {
+    let mut committed = Vec::with_capacity(execution.conversation.len());
+    for compacted_turn in &execution.conversation {
+        committed.push(persist_conversation_turn(signals, turn, compacted_turn).await?);
+    }
+    surgery.clear();
+    for ordinal in &execution.remapped_pins {
+        let source = committed
+            .get(*ordinal)
+            .ok_or_else(|| AgentLoopError::Persistence("compaction pin position".into()))?;
+        let item_id = rw_types::context_source::conversation_item(*source);
+        persist_event(
+            signals,
+            PendingEvent::ContextItemPinned {
+                item_id: item_id.clone(),
+                effective_after_agent_turn: turn,
+            },
+        )
+        .await?;
+        surgery.push(ContextSurgeryAction {
+            item_id,
+            pinned: true,
+            effective_after_agent_turn: turn,
+        });
+    }
+    let successful = cost_units(&execution.cost);
+    let cost_micros = successful
+        .cost_micros_usd
+        .saturating_add(execution.failed_attempt_cost_micros);
+    let credit_micros = successful
+        .ai_credit_micros
+        .saturating_add(execution.failed_attempt_credit_micros);
+    let tokens = successful
+        .subscription_tokens
+        .saturating_add(execution.failed_attempt_tokens);
+    let now = config.event_clock.unix_time_millis();
+    let ledger = config
+        .event_sink
+        .budget_totals(BudgetLedgerQuery {
+            now_unix_ms: now,
+            utc_day_start_unix_ms: now.saturating_sub(now % 86_400_000),
+            trailing_minute_start_unix_ms: now.saturating_sub(60_000),
+        })
+        .await?;
+    persist_event(
+        signals,
+        PendingEvent::CompactionFinished {
+            summary_turn: turn,
+            reclaimed_tokens: execution.reclaimed_tokens,
+            usage: Some(execution.usage),
+            cost: Some(execution.cost),
+        },
+    )
+    .await?;
+    *conversation = execution.conversation;
+    Ok((
+        if ledger.authoritative { 0 } else { cost_micros },
+        if ledger.authoritative {
+            0
+        } else {
+            credit_micros
+        },
+        if ledger.authoritative { 0 } else { tokens },
+        execution.hard_stop,
+    ))
 }
 
 fn append_summary(summary: &mut String, text: &str) -> Result<(), AgentLoopError> {
@@ -732,4 +760,30 @@ pub(super) fn summary_output_tokens(config: &SessionActorConfig, alias: &str) ->
         .map_or(config.max_output_tokens, |maximum| {
             config.max_output_tokens.min(maximum)
         })
+}
+
+fn validate_summary_window(
+    config: &SessionActorConfig,
+    request: &ProviderRequest,
+) -> Result<(), AgentLoopError> {
+    let Some(limit) = config
+        .model
+        .context_metadata(&request.model)
+        .max_context_tokens
+    else {
+        return Ok(());
+    };
+    let tokens = request
+        .turns
+        .iter()
+        .fold(u64::from(request.max_output_tokens), |total, turn| {
+            total.saturating_add(rw_context::LocalTokenEstimator::turn(turn))
+        });
+    if tokens > limit {
+        return Err(AgentLoopError::InvalidConfiguration(
+            "compaction request including hook output exceeds the selected model context window"
+                .into(),
+        ));
+    }
+    Ok(())
 }

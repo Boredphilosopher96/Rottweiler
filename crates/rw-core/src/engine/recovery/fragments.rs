@@ -87,53 +87,62 @@ impl CanonicalHistory {
         } else {
             block
         };
-        let header = format!(
-            "Canonical {:?} {} block {}:{}; JSON byte offset {}. Consecutive fragments are one block.\n",
-            turn.role,
-            kind(block),
-            source.sequence.0,
-            cursor.block_index,
-            cursor.byte_offset
-        );
-        let payload_limit = max_bytes
-            .checked_sub(header.len())
-            .filter(|limit| *limit >= 4)
-            .ok_or(RecoveryError::Limit("fragment framing allowance"))?;
-        let (payload, consumed, complete) =
-            fragment_json(block, cursor.byte_offset, payload_limit)?;
-        let next = if complete {
-            (cursor.block_index as usize + 1 < turn.blocks.len()).then_some(
-                ConversationFragmentCursor {
-                    ordinal: cursor.ordinal,
-                    block_index: cursor
-                        .block_index
-                        .checked_add(1)
-                        .ok_or(RecoveryError::Limit("fragment block index"))?,
-                    byte_offset: 0,
-                },
-            )
-        } else {
-            Some(ConversationFragmentCursor {
-                byte_offset: cursor
-                    .byte_offset
-                    .checked_add(consumed as u64)
-                    .ok_or(RecoveryError::Limit("fragment byte cursor"))?,
-                ..cursor
-            })
-        };
-        let mut text = String::with_capacity(header.len() + payload.len());
-        text.push_str(&header);
-        text.push_str(&payload);
-        Ok(ConversationFragment {
-            source: identity,
-            next,
-            turn: Some(Turn {
-                role: Role::User,
-                blocks: vec![Block::Text { text }],
-                meta: TurnMeta::default(),
-            }),
-        })
+        frame_fragment(&turn, block, identity, cursor, max_bytes)
     }
+}
+
+fn frame_fragment(
+    turn: &Turn,
+    block: &Block,
+    identity: ContextBlockId,
+    cursor: ConversationFragmentCursor,
+    max_bytes: usize,
+) -> Result<ConversationFragment, RecoveryError> {
+    let header = format!(
+        "Canonical {:?} {} block {}:{}; JSON byte offset {}. Consecutive fragments are one block.\n",
+        turn.role,
+        kind(block),
+        identity.sequence.0,
+        cursor.block_index,
+        cursor.byte_offset
+    );
+    let payload_limit = max_bytes
+        .checked_sub(header.len())
+        .filter(|limit| *limit >= 4)
+        .ok_or(RecoveryError::Limit("fragment framing allowance"))?;
+    let (payload, consumed, complete) = fragment_json(block, cursor.byte_offset, payload_limit)?;
+    let next = if complete {
+        (cursor.block_index as usize + 1 < turn.blocks.len()).then_some(
+            ConversationFragmentCursor {
+                ordinal: cursor.ordinal,
+                block_index: cursor
+                    .block_index
+                    .checked_add(1)
+                    .ok_or(RecoveryError::Limit("fragment block index"))?,
+                byte_offset: 0,
+            },
+        )
+    } else {
+        Some(ConversationFragmentCursor {
+            byte_offset: cursor
+                .byte_offset
+                .checked_add(consumed as u64)
+                .ok_or(RecoveryError::Limit("fragment byte cursor"))?,
+            ..cursor
+        })
+    };
+    let mut text = String::with_capacity(header.len() + payload.len());
+    text.push_str(&header);
+    text.push_str(&payload);
+    Ok(ConversationFragment {
+        source: identity,
+        next,
+        turn: Some(Turn {
+            role: Role::User,
+            blocks: vec![Block::Text { text }],
+            meta: TurnMeta::default(),
+        }),
+    })
 }
 
 fn kind(block: &Block) -> &'static str {

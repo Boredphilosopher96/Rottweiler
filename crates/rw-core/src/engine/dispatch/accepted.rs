@@ -248,14 +248,10 @@ pub(super) async fn apply_accepted(
                 },
             )
             .await
-            .map(|_| ());
-            if result.is_ok() {
-                state.append_conversation(
-                    context,
-                    rw_types::SequenceId(state.sequence.expect("acknowledged shell source")),
-                );
+            .map(|meta| {
+                state.append_conversation(context, meta.sequence_id);
                 state.active_shell = None;
-            }
+            });
             if let Some(complete) = completion.take() {
                 let _ = complete.send(result.map(|()| ProtocolCompletion::Unit));
             }

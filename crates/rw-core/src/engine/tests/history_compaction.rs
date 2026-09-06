@@ -367,3 +367,91 @@ async fn oversized_pruned_block_never_reaches_summary_provider() {
     assert!(text.contains(rw_context::PRUNED_TOOL_OUTPUT_REPLACEMENT));
     actor.close().await.expect("close");
 }
+
+#[tokio::test]
+async fn oversized_pinned_source_rejects_compaction_without_summary_dispatch() {
+    let root = tempfile::tempdir().expect("root");
+    let model = Arc::new(M3Model::new([stop_script("must not run", &[])]));
+    let mut input = config(
+        root.path(),
+        model.clone(),
+        Arc::new(ToolRegistry::new()),
+        PermissionDecision::Allow,
+        builtin_hook_dispatcher().expect("hooks"),
+    );
+    input.recovered.conversation = vec![text_turn(Role::User, "immutable pin ".repeat(100_000))];
+    input
+        .recovered
+        .context_surgery
+        .push(crate::engine::projection::ContextSurgeryAction {
+            item_id: rw_types::context_source::conversation_item(SequenceId(0)),
+            pinned: true,
+            effective_after_agent_turn: 0,
+        });
+    let config = history::bind(input).await.expect("source");
+    let history = config.history.capture_history().await.expect("capture");
+    let actor = SessionActor::spawn(config).expect("actor");
+    let error = actor.compact(None).await.expect_err("oversized pin");
+    assert!(error.to_string().contains("pinned conversation"), "{error}");
+    assert!(model.requests().is_empty());
+    let page = history
+        .conversation_page(0..1, HistoryMaterializationLimits::default())
+        .await
+        .expect("original pin");
+    assert_eq!(
+        page.turns[0],
+        text_turn(Role::User, "immutable pin ".repeat(100_000))
+    );
+    actor.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn hook_expansion_is_checked_against_the_actual_summary_request_window() {
+    use crate::engine::tests::fixtures::hooks::FixedHook;
+    use rw_types::hook_contract::{HookClass, HookDirective, HookEvent, HookTransform};
+    let root = tempfile::tempdir().expect("root");
+    let mut model = M3Model::new([stop_script("must not run", &[])]);
+    model.metadata = crate::engine::model::ModelContextMetadata {
+        max_context_tokens: Some(2_000),
+        max_output_tokens: Some(256),
+        cache_breakpoints: None,
+    };
+    let model = Arc::new(model);
+    let mut hooks = builtin_hook_dispatcher().expect("hooks");
+    hooks
+        .register(
+            rw_ext::HookRegistration::new(
+                "summary.expand",
+                HookEvent::PreCompact,
+                HookClass::Transform,
+            ),
+            FixedHook {
+                label: "expand",
+                calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+                result: Ok(HookDirective::Transform {
+                    change: HookTransform::PreCompact {
+                        injected_context: vec!["hook context ".repeat(2_000)],
+                        replacement_prompt: None,
+                        suppress_auto_continue: false,
+                    },
+                }),
+            },
+        )
+        .expect("hook");
+    let mut input = config(
+        root.path(),
+        model.clone(),
+        Arc::new(ToolRegistry::new()),
+        PermissionDecision::Allow,
+        hooks,
+    );
+    input.recovered.conversation = vec![text_turn(Role::User, "small input")];
+    let actor = history::spawn(input).await.expect("actor");
+    let error = actor.compact(None).await.expect_err("expanded request");
+    assert!(
+        error.to_string().contains("including hook output"),
+        "{error}"
+    );
+    assert!(model.requests().is_empty());
+    actor.close().await.expect("close");
+}

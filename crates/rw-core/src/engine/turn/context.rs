@@ -112,8 +112,7 @@ pub(in crate::engine) fn prompt_turn(
                 output,
                 is_error,
             } => {
-                let is_pruned =
-                    pruned_tool_outputs.contains_key(&block_source(sequence, block_index).key());
+                let is_pruned = pruned_tool_outputs.contains_key(&block_key(sequence, block_index));
                 Block::ToolResult {
                     id: id.clone(),
                     output: prompt_tool_output(output, is_pruned, toon),
@@ -209,7 +208,7 @@ fn conversation_items(
             let item_id = conversation_item(sequence);
             let (pinned, evicted) = context_action_state(surgery, &item_id);
             let pruned = turn.blocks.iter().enumerate().any(|(block_index, block)| {
-                matches!(block, Block::ToolResult { .. } if pruned_tool_outputs.contains_key(&block_source(sequence, block_index).key()))
+                matches!(block, Block::ToolResult { .. } if pruned_tool_outputs.contains_key(&block_key(sequence, block_index)))
             });
             normalized.into_item(rw_context::ContextItemProperties {
                 id: AssemblyContextItemId(item_id.0),
@@ -335,17 +334,26 @@ pub(super) fn resolved_overflow_policy(
     .map_err(|error| error.to_string())
 }
 
+pub(in crate::engine) struct ContextSnapshotSource<'a> {
+    pub conversation: &'a [Turn],
+    pub sources: &'a [ConversationSource],
+    pub pruned: &'a BTreeMap<String, u64>,
+}
+
 #[allow(clippy::too_many_lines)]
 pub(in crate::engine) fn context_snapshot(
     assembled: &AssembledContext,
-    durable_conversation: &[Turn],
-    sources: &[ConversationSource],
-    pruned_tool_outputs: &BTreeMap<String, u64>,
+    source: ContextSnapshotSource<'_>,
     metadata: ModelContextMetadata,
     compaction: &CompactionConfig,
     turn_id: Option<TurnId>,
     through: Option<rw_types::SequenceId>,
 ) -> ContextSnapshot {
+    let ContextSnapshotSource {
+        conversation: durable_conversation,
+        sources,
+        pruned: pruned_tool_outputs,
+    } = source;
     let (policy, context_window_reason) = match resolved_overflow_policy(metadata, compaction) {
         Ok(Some(policy)) => (Some(policy), None),
         Ok(None) => (
@@ -459,22 +467,21 @@ pub(in crate::engine) fn context_snapshot(
                     .and_then(|turn| turn.blocks.get(block_index))
                     .unwrap_or(block);
                 items.push(ContextItemSnapshot {
-                    item_id: block_source(sequence, block_index).item_id(),
+                    item_id: ContextItemId(format!(
+                        "tool_result:{}",
+                        block_key(sequence, block_index)
+                    )),
                     kind: ContextItemKind::ToolResult,
                     label: format!("Tool result {}", id.0),
                     source: "conversation_tool_result".to_owned(),
                     machine_local_path: None,
-                    estimated_tokens: LocalTokenEstimator::turn(&Turn {
-                        role: Role::Tool,
-                        blocks: vec![prompt_block.clone()],
-                        meta: TurnMeta::default(),
-                    }),
+                    estimated_tokens: 4_u64
+                        .saturating_add(LocalTokenEstimator::block(prompt_block)),
                     state: ContextItemState {
                         pinned: parent.is_some_and(|item| item.pinned),
                         evicted: parent.is_some_and(|item| item.evicted),
                         summarized: parent.is_some_and(|item| item.summarized),
-                        pruned: pruned_tool_outputs
-                            .contains_key(&block_source(sequence, block_index).key()),
+                        pruned: pruned_tool_outputs.contains_key(&block_key(sequence, block_index)),
                     },
                 });
             }
@@ -543,9 +550,7 @@ pub(super) fn prune_plan(
     pruned_tool_outputs: &BTreeMap<String, u64>,
 ) -> Result<Vec<PendingEvent>, AgentLoopError> {
     working.validate()?;
-    let mut tool_names = BTreeMap::<String, String>::new();
-    let mut records = Vec::new();
-    let mut identities = BTreeMap::new();
+    let mut plan = PruningRecords::default();
     let prompt_conversation = working
         .cache
         .lock()
@@ -556,16 +561,16 @@ pub(super) fn prune_plan(
     {
         for block in &conversation_turn.blocks {
             if let Block::ToolCall { id, name, .. } = block {
-                tool_names.insert(id.0.clone(), name.clone());
+                plan.tool_names.insert(id.0.clone(), name.clone());
             }
         }
         let sequence = sources[turn_index].sequence;
         let context_id = conversation_item(sequence);
         let (pinned, evicted) = context_action_state(context_surgery, &context_id);
         if evicted {
-            records.push(PruneRecord {
+            plan.records.push(PruneRecord {
                 item_id: context_id.0,
-                transcript_index: records.len(),
+                transcript_index: plan.records.len(),
                 kind: PruneRecordKind::PrunedMarker,
                 tokens: 0,
                 pinned: false,
@@ -573,9 +578,9 @@ pub(super) fn prune_plan(
             continue;
         }
         if conversation_turn.meta.summary {
-            records.push(PruneRecord {
+            plan.records.push(PruneRecord {
                 item_id: context_id.0.clone(),
-                transcript_index: records.len(),
+                transcript_index: plan.records.len(),
                 kind: PruneRecordKind::SummaryMarker,
                 tokens: prompt_conversation_turn.tokens(),
                 pinned,
@@ -583,14 +588,48 @@ pub(super) fn prune_plan(
             continue;
         }
         if conversation_turn.role == Role::User {
-            records.push(PruneRecord {
+            plan.records.push(PruneRecord {
                 item_id: context_id.0.clone(),
-                transcript_index: records.len(),
+                transcript_index: plan.records.len(),
                 kind: PruneRecordKind::User,
                 tokens: prompt_conversation_turn.tokens(),
                 pinned,
             });
         }
+        plan.tool_outputs(
+            conversation_turn,
+            prompt_conversation_turn,
+            sequence,
+            pinned,
+            pruned_tool_outputs,
+        )?;
+    }
+    let decisions = Pruner::plan(&plan.records, &PruneConfig::default());
+    Ok(decisions
+        .decisions
+        .into_iter()
+        .map(|decision| PendingEvent::ToolOutputPruned {
+            source: plan.identities[&decision.output_id],
+            reclaimed_tokens: decision.original_tokens,
+        })
+        .collect())
+}
+
+#[derive(Default)]
+struct PruningRecords {
+    tool_names: BTreeMap<String, String>,
+    records: Vec<PruneRecord>,
+    identities: BTreeMap<String, ContextBlockId>,
+}
+impl PruningRecords {
+    fn tool_outputs(
+        &mut self,
+        conversation_turn: &Turn,
+        prompt_conversation_turn: &rw_context::PreparedTurn,
+        sequence: SequenceId,
+        pinned: bool,
+        pruned_tool_outputs: &BTreeMap<String, u64>,
+    ) -> Result<(), AgentLoopError> {
         for (block_index, (block, _prompt_block)) in conversation_turn
             .blocks
             .iter()
@@ -607,18 +646,19 @@ pub(super) fn prune_plan(
                         AgentLoopError::Persistence("normalized block alignment".into())
                     })?,
             );
-            let identity = block_source(sequence, block_index);
+            let identity = block_source(sequence, block_index)?;
             let already_pruned = pruned_tool_outputs.contains_key(&identity.key());
-            identities.insert(identity.key(), identity);
-            records.push(PruneRecord {
+            self.identities.insert(identity.key(), identity);
+            self.records.push(PruneRecord {
                 item_id: identity.key(),
-                transcript_index: records.len(),
+                transcript_index: self.records.len(),
                 kind: if already_pruned {
                     PruneRecordKind::PrunedMarker
                 } else {
                     PruneRecordKind::ToolOutput {
                         output_id: identity.key(),
-                        tool_name: tool_names
+                        tool_name: self
+                            .tool_names
                             .get(&id.0)
                             .cloned()
                             .unwrap_or_else(|| "unknown".to_owned()),
@@ -629,24 +669,25 @@ pub(super) fn prune_plan(
                 pinned,
             });
         }
+        Ok(())
     }
-    let plan = Pruner::plan(&records, &PruneConfig::default());
-    Ok(plan
-        .decisions
-        .into_iter()
-        .map(|decision| PendingEvent::ToolOutputPruned {
-            source: identities[&decision.output_id],
-            reclaimed_tokens: decision.original_tokens,
-        })
-        .collect())
 }
 
-/// Block counts are bounded below u32 by canonical event admission.
-pub(in crate::engine) fn block_source(sequence: SequenceId, block_index: usize) -> ContextBlockId {
-    ContextBlockId {
+/// Lookup keys preserve the full index; typed durable mutations additionally
+/// validate its u32 representation before emitting an event.
+pub(super) fn block_key(sequence: SequenceId, block_index: usize) -> String {
+    format!("{}:{block_index}", sequence.0)
+}
+fn block_source(
+    sequence: SequenceId,
+    block_index: usize,
+) -> Result<ContextBlockId, AgentLoopError> {
+    Ok(ContextBlockId {
         sequence,
-        block_index: u32::try_from(block_index).expect("admitted canonical block index"),
-    }
+        block_index: u32::try_from(block_index).map_err(|_| {
+            AgentLoopError::Persistence("canonical context block index exceeds its contract".into())
+        })?,
+    })
 }
 
 fn normalized_json_copy(value: &serde_json::Value) -> serde_json::Value {

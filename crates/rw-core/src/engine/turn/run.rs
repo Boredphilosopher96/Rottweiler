@@ -398,9 +398,11 @@ pub(super) async fn run_turn(
         }
         let mut snapshot = context_snapshot(
             &assembled,
-            &conversation,
-            &sources,
-            &pruned_tool_outputs,
+            super::context::ContextSnapshotSource {
+                conversation: &conversation,
+                sources: &sources,
+                pruned: &pruned_tool_outputs,
+            },
             metadata,
             &compaction,
             Some(wire_turn_id(turn)),

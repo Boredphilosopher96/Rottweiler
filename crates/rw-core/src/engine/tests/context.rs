@@ -85,9 +85,11 @@ fn invalid_resolved_overflow_policy_disables_automatic_compaction() {
         ContextAssembler::assemble(AssemblyInput::default()).expect("empty context assembles");
     let snapshot = turn::context_snapshot(
         &assembled,
-        &[],
-        &[],
-        &BTreeMap::new(),
+        turn::context::ContextSnapshotSource {
+            conversation: &[],
+            sources: &[],
+            pruned: &BTreeMap::new(),
+        },
         ModelContextMetadata {
             max_context_tokens: Some(10_000),
             max_output_tokens: Some(2_000),

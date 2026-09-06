@@ -161,9 +161,11 @@ async fn read(
                     } else {
                         Ok(Output::Context(context_snapshot(
                             &current.assembled,
-                            &current.conversation,
-                            &current.sources,
-                            &current.pruned_tool_outputs,
+                            crate::engine::turn::context::ContextSnapshotSource {
+                                conversation: &current.conversation,
+                                sources: &current.sources,
+                                pruned: &current.pruned_tool_outputs,
+                            },
                             config.model.context_metadata(&config.model_alias),
                             &config.model.compaction_config(),
                             active_turn,

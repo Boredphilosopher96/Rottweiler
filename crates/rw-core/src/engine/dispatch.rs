@@ -368,14 +368,10 @@ pub(super) async fn handle_actor_command(
                     },
                 )
                 .await
-                .map(|_| ());
-                if persisted.is_ok() {
-                    state.append_conversation(
-                        context,
-                        rw_types::SequenceId(state.sequence.expect("acknowledged shell source")),
-                    );
+                .map(|meta| {
+                    state.append_conversation(context, meta.sequence_id);
                     state.active_shell = None;
-                }
+                });
                 persisted
             };
             let _ = respond.send(result);
