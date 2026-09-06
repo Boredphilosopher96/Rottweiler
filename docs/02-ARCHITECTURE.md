@@ -100,9 +100,14 @@ an already running effect. Nested work transfers ownership or uses a different
 class instead of reacquiring its own exhausted pool. A process-group credit
 counts one supervised group, not arbitrary descendants within it. These limits
 complement per-session queues and permission policy; they do not grant authority.
-Finite filesystem/database work enters the blocking pool at its async execution
-boundary; context assembly, event encoding, and symbol queries enter the CPU
-pool. Cleanup joins and persistent service pumps remain separately owned: they
+Finite filesystem/database work and system DNS lookup enter the blocking pool
+at their async execution boundary; an HTTP caller disappearing does not release
+the OS resolver worker's capacity. Context assembly, event encoding, and symbol
+queries enter the CPU pool. Git owns one admitted process group and its
+nonblocking pipes in the same finite worker. Cancellation settles that group
+before the effect caller resumes; no output-reader task survives independently.
+PTY execution keeps its process and IO ownership through retirement, and an
+unproven exit keeps the session's shell exclusion active. Cleanup joins and persistent service pumps remain separately owned: they
 must keep progressing when ordinary execution admission is exhausted. Failed
 settlement retains the physical owner and its capacity rather than admitting
 replacement work over effects whose termination is unknown.
