@@ -244,3 +244,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, unix))]
+mod native_tests;

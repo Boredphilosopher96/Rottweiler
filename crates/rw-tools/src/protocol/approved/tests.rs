@@ -29,8 +29,14 @@ fn captured_protocol_bytes_bind_request_and_live_launch_owner() {
     let identity = ExecutableArtifactIdentity::capture(&executable, 4096).expect("identity");
     let code = ExecutableArtifactIdentity::capture(&entry, 4096).expect("code identity");
     let captured = Arc::new(
-        ApprovedProtocolCommand::capture(&request, &identity, &[code], &[root.clone()], &root)
-            .expect("capture"),
+        ApprovedProtocolCommand::capture(
+            &request,
+            &identity,
+            &[code],
+            std::slice::from_ref(&root),
+            &root,
+        )
+        .expect("capture"),
     );
     fs::write(&executable, b"changed executable fixture").expect("replace executable");
     fs::write(&entry, b"changed code").expect("replace code");
