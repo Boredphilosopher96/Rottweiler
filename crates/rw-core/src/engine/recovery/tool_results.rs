@@ -1,4 +1,5 @@
-//! Ordered source references retain the same logical admission as an embedded tool turn.
+//! Source references admit at most 16 MiB of encoded Tool IR and 64 MiB of decode work.
+//! Receipts include the exact event envelope and are verified against source bodies.
 use super::{
     RecoveryError,
     input::{EventSource, read_source_with_limit},

@@ -159,7 +159,7 @@ fn unclaimed_reordered_foreign_and_forged_tool_result_references_are_rejected() 
 }
 
 #[test]
-fn logical_receipt_matches_the_existing_journal_envelope_admission() {
+fn logical_receipt_matches_exact_journal_envelope_admission() {
     for text in ["plain", "\\\"\né", "\u{0000}"] {
         let turn = output(text);
         let logical = ToolResultAdmission::measure(&turn).expect("logical profile");

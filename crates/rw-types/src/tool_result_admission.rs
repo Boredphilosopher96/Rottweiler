@@ -9,7 +9,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-/// The existing journal record ceiling also bounds the expanded logical tool IR.
+/// Maximum encoded bytes of the expanded logical tool IR, before envelope overhead.
 pub const MAX_TOOL_RESULT_IR_BYTES: usize = 16 * 1024 * 1024;
 /// Aggregate retained selector metadata; result bodies are owned by their source records.
 pub const MAX_TOOL_RESULT_REFERENCE_BYTES: usize = 256 * 1024;

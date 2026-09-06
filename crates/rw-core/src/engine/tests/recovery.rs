@@ -598,14 +598,12 @@ async fn resume_persists_tool_result_repairs_before_interrupted_closure() {
         } if id == "lost-call"
     ));
     assert!(matches!(
-        repairs[2].kind,
-        PendingEvent::ConversationTurnCommitted {
-            turn: Turn {
-                role: Role::Tool,
-                ..
-            },
-            ..
-        }
+        &repairs[2].kind,
+        PendingEvent::ConversationToolResultsCommitted { agent_turn: 1, results, .. }
+            if results == &[rw_types::conversation_input::ToolResultReference {
+                invocation_id: rw_types::ToolInvocationId("turn-1:repair-0".into()),
+                finished_source: repairs[1].sequence,
+            }]
     ));
     assert!(matches!(
         repairs[3].kind,
