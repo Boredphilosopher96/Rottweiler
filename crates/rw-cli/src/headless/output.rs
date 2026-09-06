@@ -22,7 +22,9 @@ use std::path::PathBuf;
 use tokio::sync::mpsc;
 
 mod aggregate;
+mod repl_encoding;
 use aggregate::PrintOutput;
+pub(super) const MAX_REPL_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 
 #[allow(clippy::too_many_lines)]
 pub(super) async fn run_print(
@@ -417,7 +419,7 @@ pub(super) async fn run_repl(
                     interactions.retain(|interaction| matches!(interaction, PendingInteraction::Plan));
                     display_next_interaction(interactions.front(), printer.as_mut())?;
                 }
-                if let Some(message) = repl_event_message(&event, format)? {
+                if let Some(message) = repl_event_message(event, format)? {
                     printer.print(message).into_diagnostic()?;
                 }
             }
@@ -470,56 +472,10 @@ pub(super) fn display_next_interaction(
 }
 
 pub(super) fn repl_event_message(
-    event: &EngineEvent,
+    event: EngineEvent,
     format: OutputFormat,
 ) -> Result<Option<String>> {
-    if format == OutputFormat::StreamJson {
-        let mut message =
-            serde_json::to_string(&public_cli_event(event.clone())).into_diagnostic()?;
-        message.push('\n');
-        return Ok(Some(message));
-    }
-    Ok(match event {
-        EngineEvent::TextDelta { text, .. } | EngineEvent::ToolOutputDelta { chunk: text, .. } => {
-            Some(text.clone())
-        }
-        EngineEvent::ContextSnapshotReady { snapshot, .. } => Some(format!(
-            "{}\n",
-            serde_json::to_string_pretty(snapshot).into_diagnostic()?
-        )),
-        EngineEvent::CostSnapshotReady { snapshot, .. } => Some(format!(
-            "{}\n",
-            serde_json::to_string_pretty(snapshot).into_diagnostic()?
-        )),
-        EngineEvent::ContextItemPinned { item_id, .. } => {
-            Some(format!("pinned context item {}\n", item_id.0))
-        }
-        EngineEvent::ContextItemEvicted { item_id, .. } => {
-            Some(format!("evicted context item {}\n", item_id.0))
-        }
-        EngineEvent::CompactionStarted { reason, .. } => {
-            Some(format!("compaction started ({reason:?})\n"))
-        }
-        EngineEvent::CompactionAttemptFinished { cost, .. } => {
-            Some(format!("compaction attempt accounted ({cost:?})\n"))
-        }
-        EngineEvent::CompactionFinished {
-            reclaimed_tokens, ..
-        } => Some(format!(
-            "compaction finished; reclaimed {reclaimed_tokens} estimated tokens\n"
-        )),
-        EngineEvent::BudgetStatusChanged {
-            level,
-            scope,
-            current,
-            limit,
-            ..
-        } => Some(format!("budget {level:?} ({scope:?}): {current}/{limit}\n")),
-        EngineEvent::CommandFinished { message, .. } => Some(format!("{message}\n")),
-        EngineEvent::GuardTriggered { message, .. } => Some(format!("error: {message}\n")),
-        EngineEvent::Error { error, .. } => Some(format!("error: {}\n", error.message)),
-        _ => None,
-    })
+    repl_encoding::message(event, format)
 }
 
 pub(super) fn parse_approval(input: &str) -> ApprovalDecision {
