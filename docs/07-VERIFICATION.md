@@ -6,6 +6,21 @@ release preflight, paid live canaries, and protected release gates. A gate only
 counts when the named run completed for the exact source or archive; queued,
 unconfigured, and intentionally unrun tiers are not green evidence.
 
+## Protected branch policy
+
+The default branch requires a pull request, resolved review threads, a linear
+history, and the complete `CI required` aggregate alongside its mandatory status
+contexts. The aggregate rejects failed, cancelled, missing, or unexpectedly
+skipped jobs, including both TUI performance smoke jobs. Repository roles have
+no standing bypass. A failing build is repaired through a pull request; reruns
+must retain the first failure and explain what changed.
+
+An emergency ruleset change requires the repository owner's explicit incident
+approval, a recorded reason and scope, and restoration of protection immediately
+after the incident action. It does not qualify the resulting source: the exact
+merged source must still complete every mandatory check. Do not use protection
+changes to deliver unfinished feature work.
+
 ## 1. Deterministic replay (the foundation)
 
 The record/replay middleware is the spine of all agent-level testing:
