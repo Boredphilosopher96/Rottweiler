@@ -641,6 +641,42 @@ impl RuntimeWorkspaceRootController {
     }
 }
 
+impl RuntimeWorkspaceRootController {
+    async fn prepare_native_workspace(
+        &self,
+        native_owner: Option<Arc<crate::extension_runtime::RuntimeSessionExtensionController>>,
+        prepared: &mut PreparedRootGeneration,
+        model_alias: &str,
+        generation: u64,
+    ) -> std::result::Result<Option<rw_core::SessionExtensionSnapshot>, AgentLoopError> {
+        if let Some(controller) = native_owner {
+            Ok(Some(
+                match controller
+                    .prepare_workspace(prepared, model_alias, generation)
+                    .await
+                {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        // Cleanup diagnostics cannot turn failed native retirement
+                        // into a recoverable configuration error.
+                        if let Err(cleanup) =
+                            rw_core::WorkspaceRootController::abort_generation(self, generation)
+                                .await
+                        {
+                            return Err(AgentLoopError::EffectsUnsettled(format!(
+                                "{error}; workspace generation rollback failed: {cleanup}"
+                            )));
+                        }
+                        return Err(error);
+                    }
+                },
+            ))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
 #[async_trait]
 impl rw_core::WorkspaceRootController for RuntimeWorkspaceRootController {
     async fn append_root(
@@ -711,28 +747,9 @@ impl rw_core::WorkspaceRootController for RuntimeWorkspaceRootController {
                 ));
             }
         };
-        let native = if let Some(controller) = native_owner {
-            Some(
-                match controller
-                    .prepare_workspace(&mut prepared, model_alias, generation)
-                    .await
-                {
-                    Ok(snapshot) => snapshot,
-                    Err(error) => {
-                        // Cleanup diagnostics cannot turn failed native retirement
-                        // into a recoverable configuration error.
-                        if let Err(cleanup) = self.abort_generation(generation).await {
-                            return Err(AgentLoopError::EffectsUnsettled(format!(
-                                "{error}; workspace generation rollback failed: {cleanup}"
-                            )));
-                        }
-                        return Err(error);
-                    }
-                },
-            )
-        } else {
-            None
-        };
+        let native = self
+            .prepare_native_workspace(native_owner, &mut prepared, model_alias, generation)
+            .await?;
         self.toolchain_runtime.prepare(
             generation,
             Arc::clone(&prepared.built.command_executor),

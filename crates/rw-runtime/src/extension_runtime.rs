@@ -360,6 +360,29 @@ impl SessionPluginPushHandler {
         }
     }
 
+    fn publish_panel(
+        &self,
+        params: serde_json::Value,
+    ) -> std::result::Result<serde_json::Value, PluginRpcError> {
+        let update: rw_types::extension_ui::UiPanelUpdate = serde_json::from_value(params)
+            .map_err(|_| plugin_push_error("invalid_push", "invalid panel update"))?;
+        update
+            .validate()
+            .map_err(|error| plugin_push_error("invalid_push", &error.to_string()))?;
+        let (registry, owner) = self
+            .ui
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .ok_or_else(|| plugin_push_error("ui_unavailable", "UI registry is not attached"))?;
+        let registry = registry
+            .upgrade()
+            .ok_or_else(|| plugin_push_error("ui_unavailable", "UI registry is closed"))?;
+        let revision = registry.publish_panel(&owner, &update.id, update.data)?;
+        serde_json::to_value(rw_types::extension_ui::UiPanelUpdated { revision })
+            .map_err(|_| plugin_push_error("ui_unavailable", "cannot encode panel revision"))
+    }
+
     fn bound(
         &self,
         params: &serde_json::Value,
@@ -408,28 +431,7 @@ impl PushHandler for SessionPluginPushHandler {
                     plugin_push_error("host_tool_failed", "host tool result encoding failed")
                 })
             }
-            rw_plugin_protocol::METHOD_UI_PUBLISH_PANEL => {
-                let update: rw_types::extension_ui::UiPanelUpdate = serde_json::from_value(params)
-                    .map_err(|_| plugin_push_error("invalid_push", "invalid panel update"))?;
-                update
-                    .validate()
-                    .map_err(|error| plugin_push_error("invalid_push", &error.to_string()))?;
-                let (registry, owner) = self
-                    .ui
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone()
-                    .ok_or_else(|| {
-                        plugin_push_error("ui_unavailable", "UI registry is not attached")
-                    })?;
-                let registry = registry
-                    .upgrade()
-                    .ok_or_else(|| plugin_push_error("ui_unavailable", "UI registry is closed"))?;
-                let revision = registry.publish_panel(&owner, &update.id, update.data)?;
-                serde_json::to_value(rw_types::extension_ui::UiPanelUpdated { revision }).map_err(
-                    |_| plugin_push_error("ui_unavailable", "cannot encode panel revision"),
-                )
-            }
+            rw_plugin_protocol::METHOD_UI_PUBLISH_PANEL => self.publish_panel(params),
             METHOD_EVENT_READ => {
                 let read = serde_json::from_value(params).map_err(|_| {
                     plugin_push_error("invalid_event_read", "invalid event source parameters")

@@ -13,8 +13,13 @@ impl HistoryRetentions {
         Self(Arc::new(Semaphore::new(TOTAL_BYTES / UNIT_BYTES)))
     }
     pub(super) fn admit(&self) -> Result<HistoryRetention, AgentLoopError> {
+        let units = u32::try_from(MAX_HISTORY_RESULT_BYTES / UNIT_BYTES).map_err(|_| {
+            AgentLoopError::Persistence(
+                "canonical admission unit count exceeds semaphore capacity".into(),
+            )
+        })?;
         Arc::clone(&self.0)
-            .try_acquire_many_owned((MAX_HISTORY_RESULT_BYTES / UNIT_BYTES) as u32)
+            .try_acquire_many_owned(units)
             .map(HistoryRetention)
             .map_err(|_| {
                 AgentLoopError::Persistence("retained canonical read admission exhausted".into())

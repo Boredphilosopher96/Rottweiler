@@ -29,7 +29,7 @@ impl ChildPlugins {
     ) -> Result<Self, AgentLoopError> {
         let owner =
             PluginGenerationOwner::compose(configuration.child_session(), configured, roots)
-                .map_err(invalid)?;
+                .map_err(|error| invalid(&error))?;
         // Install cleanup ownership before constructing any delivery workers.
         let resources = RuntimeSessionResources::native(owner.clone());
         Ok(Self {
@@ -44,7 +44,9 @@ impl ChildPlugins {
         }
         let registry = Arc::make_mut(registry);
         for tool in &self.runtime.tools {
-            registry.register(tool.clone()).map_err(invalid)?;
+            registry
+                .register(tool.clone())
+                .map_err(|error| invalid(&error))?;
         }
         Ok(())
     }
@@ -52,7 +54,7 @@ impl ChildPlugins {
         for (registration, handler) in &self.runtime.hooks {
             hooks
                 .register_shared(registration.clone(), handler.clone())
-                .map_err(invalid)?;
+                .map_err(|error| invalid(&error))?;
         }
         Ok(())
     }
@@ -63,7 +65,7 @@ impl ChildPlugins {
         for (descriptor, handler) in &self.runtime.commands {
             commands
                 .register_shared(descriptor.clone(), handler.clone())
-                .map_err(invalid)?;
+                .map_err(|error| invalid(&error))?;
         }
         Ok(())
     }
@@ -79,7 +81,7 @@ impl ChildPlugins {
         )?);
         self.owner
             .bind_delivery(delivery.clone())
-            .map_err(invalid)?;
+            .map_err(|error| invalid(&error))?;
         Ok(delivery)
     }
     pub(super) fn resources(
@@ -121,6 +123,6 @@ impl SessionResources for ChildResources {
         self.cleanup.shutdown().await
     }
 }
-fn invalid(error: impl ToString) -> AgentLoopError {
+fn invalid(error: &(impl ToString + ?Sized)) -> AgentLoopError {
     AgentLoopError::InvalidConfiguration(error.to_string())
 }

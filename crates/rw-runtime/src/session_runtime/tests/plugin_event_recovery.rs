@@ -33,6 +33,10 @@ fn value<'a>(state: &'a ExtensionStateSnapshot, key: &str) -> &'a serde_json::Va
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keeps the production setup and ordered lifecycle assertions in one scenario."
+)]
 async fn sdk_event_process_crash_replays_only_the_unacknowledged_delivery() {
     let _admission = crate::native_fixture::admit().await;
     let root = tempfile::tempdir().expect("fixture root");

@@ -142,7 +142,7 @@ async fn delegated_webfetch_rejects_redirect_name_before_dns_or_connection() {
     let server = tokio::spawn(async move {
         let (mut connection, _) = listener.accept().await.expect("admitted request");
         let mut bytes = [0_u8; 4096];
-        connection.read(&mut bytes).await.expect("HTTP request");
+        assert_ne!(connection.read(&mut bytes).await.expect("HTTP request"), 0);
         connection.write_all(format!(
             "HTTP/1.1 302 Found\r\nLocation: http://localhost:{}/outside\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
             address.port()).as_bytes()).await.expect("redirect");

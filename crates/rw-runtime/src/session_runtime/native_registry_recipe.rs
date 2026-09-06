@@ -57,9 +57,9 @@ impl NativeRegistryRecipe {
     ) -> Result<(), AgentLoopError> {
         if let Some(mcp) = &self.mcp {
             rw_core::register_mcp_tools(tools, mcp.manager.clone(), mcp.spool.clone())
-                .map_err(error)?;
+                .map_err(|error| error(&error))?;
         }
-        let mut agents = compose_agent_registry(catalog).map_err(error)?;
+        let mut agents = compose_agent_registry(catalog).map_err(|error| error(&error))?;
         let mut names = tools
             .descriptors()
             .into_iter()
@@ -69,7 +69,9 @@ impl NativeRegistryRecipe {
         if catalog.workflows().len() > 0 {
             names.push("workflow".into());
         }
-        agents.resolve_tool_names(names).map_err(error)?;
+        agents
+            .resolve_tool_names(names)
+            .map_err(|error| error(&error))?;
         let agents = Arc::new(agents);
         tools
             .register(Arc::new(SpawnAgentTool::new(
@@ -77,12 +79,12 @@ impl NativeRegistryRecipe {
                 agents.clone(),
                 self.models.source(),
             )))
-            .map_err(error)?;
+            .map_err(|error| error(&error))?;
         tools
             .register(Arc::new(ApplyWorktreeDiffTool::new(
                 self.orchestrator.diff_artifact_authority(),
             )))
-            .map_err(error)?;
+            .map_err(|error| error(&error))?;
         if catalog.workflows().len() > 0 {
             tools
                 .register(Arc::new(crate::workflow_runtime::WorkflowTool::new(
@@ -91,11 +93,11 @@ impl NativeRegistryRecipe {
                     catalog.clone(),
                     self.storage_root.clone(),
                 )))
-                .map_err(error)?;
+                .map_err(|error| error(&error))?;
         }
         Ok(())
     }
 }
-fn error(error: impl ToString) -> AgentLoopError {
+fn error(error: &(impl ToString + ?Sized)) -> AgentLoopError {
     AgentLoopError::InvalidConfiguration(error.to_string())
 }

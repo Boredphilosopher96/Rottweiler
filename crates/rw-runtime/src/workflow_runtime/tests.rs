@@ -731,6 +731,10 @@ needs = ["impl", "tests"]
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keeps the production setup and ordered lifecycle assertions in one scenario."
+)]
 async fn production_actor_dispatches_command_node_through_typed_registry() {
     let fixture = TempDir::new().expect("fixture");
     let project = fixture.path().join("project");

@@ -20,7 +20,7 @@ pub(in crate::session_runtime) enum NativeProviderRecipe {
     Live {
         credentials: PathBuf,
         pricing: PricingTable,
-        config: Config,
+        config: Box<Config>,
     },
     Fixed(Arc<dyn ModelDriver>),
 }
@@ -43,7 +43,7 @@ impl NativeModelRecipe {
                 config,
             } => {
                 let factory = ProviderFactory::system(credentials, pricing.clone());
-                let config = config.clone();
+                let config = config.as_ref().clone();
                 let user_config = credentials.with_file_name("config.toml");
                 let redactor = self.redactor.clone();
                 Arc::new(move |workspace, alias, providers| {
@@ -85,7 +85,7 @@ impl NativeModelRecipe {
                         .with_extension_providers(input.providers);
                     let model = lazy_live_provider_model(
                         factory,
-                        config.clone(),
+                        config.as_ref().clone(),
                         credentials.with_file_name("config.toml"),
                         primary.join(".rottweiler/config.toml"),
                         input.alias,

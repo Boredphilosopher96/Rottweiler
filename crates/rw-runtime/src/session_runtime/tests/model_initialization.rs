@@ -303,6 +303,10 @@ async fn concurrent_first_prepares_initialize_once_and_failed_initialization_is_
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keeps the production setup and ordered lifecycle assertions in one scenario."
+)]
 async fn lazy_first_model_switch_does_not_activate_when_persistence_fails() {
     let initialize_calls = Arc::new(AtomicUsize::new(0));
     let calls = Arc::clone(&initialize_calls);

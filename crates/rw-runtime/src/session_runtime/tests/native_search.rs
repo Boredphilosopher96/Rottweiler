@@ -23,6 +23,7 @@ use super::provider_model_for_alias;
 use super::provider_native_search_available;
 use super::tempdir;
 use super::test_provider_invocation;
+use futures_util::StreamExt as _;
 
 #[tokio::test]
 async fn runtime_websearch_resolves_native_backend_for_each_turn_alias() {
@@ -213,7 +214,6 @@ async fn unsupported_alias_prompt_shape_omits_dead_websearch_schema() {
             tools_in_prefix: true,
         }),
     };
-    use futures_util::StreamExt as _;
     let mut stream = model
         .stream("local", request, test_provider_invocation())
         .expect("filtered request");

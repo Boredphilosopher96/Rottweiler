@@ -749,7 +749,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
         provider_recipe = Some(NativeProviderRecipe::Live {
             credentials: config_loader.credentials_path().clone(),
             pricing: pricing.clone(),
-            config: loaded_config.config.clone(),
+            config: Box::new(loaded_config.config.clone()),
         });
         let factory = ProviderFactory::system(config_loader.credentials_path(), pricing)
             .with_extension_providers(

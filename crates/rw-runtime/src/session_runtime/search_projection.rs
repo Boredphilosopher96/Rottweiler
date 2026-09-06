@@ -197,10 +197,10 @@ fn tool_fields(
             for item in parts {
                 match item {
                     ToolOutputPart::Text { text } => {
-                        text_field(writer, turn, sequence, part, text)?
+                        text_field(writer, turn, sequence, part, text)?;
                     }
                     ToolOutputPart::Structured { value } => {
-                        json_fields(writer, turn, sequence, part, value)?
+                        json_fields(writer, turn, sequence, part, value)?;
                     }
                     ToolOutputPart::Image { .. } => {}
                 }

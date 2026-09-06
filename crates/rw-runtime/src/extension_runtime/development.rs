@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    ApprovalStore, ApprovalStoreError, Arc, BTreeMap, IntoDiagnostic, Mutex, Path, PathBuf,
+    PluginManifest, Result, async_trait, fs, miette,
+};
 
 #[derive(Default)]
 pub(super) struct SessionDevelopmentApprovalStore(Mutex<BTreeMap<String, String>>);
@@ -147,20 +150,22 @@ impl RuntimeSessionExtensionController {
         let candidate = prepared.runtime.clone();
         let mut tools = built.registry.as_ref().clone();
         for tool in &candidate.tools {
-            tools.register(tool.clone()).map_err(closed_generation)?;
+            tools
+                .register(tool.clone())
+                .map_err(|error| closed_generation(&error))?;
         }
         self.recipe
             .add_tools(&mut tools, catalog)
-            .map_err(closed_generation)?;
+            .map_err(|error| closed_generation(&error))?;
         built.registry = Arc::new(tools);
         let extensions = root_owner
             .prepare_extensions(catalog, roots, built)
-            .map_err(closed_generation)?;
+            .map_err(|error| closed_generation(&error))?;
         let mut hooks = extensions.hooks.as_ref().clone();
         for (registration, handler) in &candidate.hooks {
             hooks
                 .register_shared(registration.clone(), handler.clone())
-                .map_err(closed_generation)?;
+                .map_err(|error| closed_generation(&error))?;
         }
         let mut commands = extensions.commands.as_ref().clone();
         if let Some(mcp) = &self.recipe.mcp {
@@ -170,12 +175,12 @@ impl RuntimeSessionExtensionController {
                 Some(mcp.approvals.clone()),
             )
             .await
-            .map_err(closed_generation)?;
+            .map_err(|error| closed_generation(&error))?;
         }
         for (descriptor, handler) in &candidate.commands {
             commands
                 .register_shared(descriptor.clone(), handler.clone())
-                .map_err(closed_generation)?;
+                .map_err(|error| closed_generation(&error))?;
         }
         let publication = prepared.with_model(
             crate::session_runtime::native_model_generations::NativeModelInput {
@@ -193,7 +198,7 @@ impl RuntimeSessionExtensionController {
             .ok_or_else(|| closed_generation("extension revision exhausted"))?;
         let model = publication.model();
         for agent in rw_ext::compose_agent_registry(catalog)
-            .map_err(closed_generation)?
+            .map_err(|error| closed_generation(&error))?
             .definitions()
         {
             if let Some(alias) = agent.model()
@@ -244,10 +249,10 @@ impl RuntimeSessionExtensionController {
     }
 }
 
-pub(super) fn development_error(error: impl ToString) -> rw_core::AgentLoopError {
+pub(super) fn development_error(error: &(impl ToString + ?Sized)) -> rw_core::AgentLoopError {
     rw_core::AgentLoopError::InvalidConfiguration(error.to_string())
 }
-fn closed_generation(error: impl ToString) -> rw_core::AgentLoopError {
+fn closed_generation(error: &(impl ToString + ?Sized)) -> rw_core::AgentLoopError {
     rw_core::AgentLoopError::EffectsUnsettled(error.to_string())
 }
 #[async_trait]
@@ -258,8 +263,8 @@ impl rw_core::SessionExtensionController for RuntimeSessionExtensionController {
         current: rw_core::SessionExtensionSnapshot,
     ) -> std::result::Result<rw_core::SessionExtensionSnapshot, rw_core::AgentLoopError> {
         let mut state = self.state.lock().await;
-        let (plugin, manifest) =
-            Self::discovered(source, &current.workspace_roots).map_err(development_error)?;
+        let (plugin, manifest) = Self::discovered(source, &current.workspace_roots)
+            .map_err(|error| development_error(&error))?;
         if state
             .ceiling
             .as_ref()
@@ -334,6 +339,9 @@ impl rw_core::SessionExtensionController for RuntimeSessionExtensionController {
         Ok(snapshot)
     }
     async fn shutdown(&self) -> std::result::Result<(), rw_core::AgentLoopError> {
-        self.owner.shutdown().await.map_err(closed_generation)
+        self.owner
+            .shutdown()
+            .await
+            .map_err(|error| closed_generation(&error))
     }
 }

@@ -91,6 +91,10 @@ async fn effective_child_lifecycle_drops_rewound_branch_and_keeps_new_branch() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keeps the production setup and ordered lifecycle assertions in one scenario."
+)]
 async fn tail_repair_closes_original_turn_and_rewind_removes_both_lifecycle_events() {
     let parent = SessionId("parent".to_owned());
     let child = rw_types::SubagentId("child".to_owned());

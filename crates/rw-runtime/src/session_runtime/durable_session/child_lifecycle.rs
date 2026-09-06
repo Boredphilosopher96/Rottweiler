@@ -178,7 +178,7 @@ impl SubagentArtifactSource for ChildLifecycleReader {
         let child = child.clone();
         self.query(parent, move |view, _| view.latest_artifact(&child))
             .await
-            .map_err(orchestration)
+            .map_err(|error| orchestration(&error))
     }
     async fn verify_result(
         &self,
@@ -193,17 +193,18 @@ impl SubagentArtifactSource for ChildLifecycleReader {
             view.verify_terminal(&child, &session, digest)
         })
         .await
-        .map_err(orchestration)
+        .map_err(|error| orchestration(&error))
     }
 }
 fn persistence(error: impl std::fmt::Display) -> AgentLoopError {
     AgentLoopError::Persistence(error.to_string())
 }
-fn orchestration(error: AgentLoopError) -> OrchestrationError {
+fn orchestration(error: &AgentLoopError) -> OrchestrationError {
     OrchestrationError::Session(error.to_string())
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::{journal_service::JournalService, subagent_metadata::PrivateSubagentMetadataStore};

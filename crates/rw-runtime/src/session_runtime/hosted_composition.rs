@@ -518,7 +518,7 @@ pub(crate) async fn compose_hosted_actor(
             provider_recipe = Some(NativeProviderRecipe::Live {
                 credentials: options.credentials_path.clone(),
                 pricing: pricing.clone(),
-                config: options.config.clone(),
+                config: Box::new(options.config.clone()),
             });
             let factory = ProviderFactory::system(options.credentials_path, pricing)
                 .with_extension_providers(extension_providers);

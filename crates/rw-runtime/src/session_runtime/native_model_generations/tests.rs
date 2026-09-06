@@ -151,7 +151,7 @@ async fn live_child_model_selection_is_private_to_each_session() {
         provider: NativeProviderRecipe::Live {
             credentials: root.path().join("credentials.json"),
             pricing: rw_providers::PricingTable::default(),
-            config,
+            config: Box::new(config),
         },
         redactor: FixtureRedactor::default(),
         prompt_shapes: None,

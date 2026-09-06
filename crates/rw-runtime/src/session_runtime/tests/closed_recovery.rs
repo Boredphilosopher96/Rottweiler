@@ -2,6 +2,10 @@
 use super::*;
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keeps the production setup and ordered lifecycle assertions in one scenario."
+)]
 async fn closed_children_never_rebind_missing_workspaces_or_invent_publication() {
     for published in [false, true] {
         let fixture = TempDir::new().expect("fixture");

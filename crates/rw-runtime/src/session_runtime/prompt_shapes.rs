@@ -40,6 +40,14 @@ pub(super) struct PromptShapeRecord {
     pub(super) source: u64,
 }
 
+#[derive(Serialize)]
+struct Profile<'a> {
+    model_alias: &'a str,
+    tools: &'a [ToolDefinition],
+    cache_support: CacheBreakpointSupport,
+    cache_hint: Option<CacheHint>,
+    cache_breakpoints: &'a [PromptCacheBreakpoint],
+}
 #[derive(Debug)]
 struct ActivePrompt {
     turn: rw_core::TurnId,
@@ -154,14 +162,6 @@ impl PromptShapeJournal {
             .ok_or_else(|| miette!("provider request lacks its committed context source"))?;
         let turn = active.turn.0.parse::<u64>().into_diagnostic()?;
         let breakpoints = cache_breakpoints_for_hint(request.cache_hint, cache_support);
-        #[derive(Serialize)]
-        struct Profile<'a> {
-            model_alias: &'a str,
-            tools: &'a [ToolDefinition],
-            cache_support: CacheBreakpointSupport,
-            cache_hint: Option<CacheHint>,
-            cache_breakpoints: &'a [PromptCacheBreakpoint],
-        }
         let profile = Profile {
             model_alias,
             tools: &request.tools,

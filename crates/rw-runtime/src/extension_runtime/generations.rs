@@ -215,7 +215,7 @@ impl PluginGenerationOwner {
         let batch = self
             .configuration
             .discover(configured, development, roots)
-            .map_err(invalid)?;
+            .map_err(|error| invalid(&error))?;
         let raw = batch
             .plugins
             .iter()
@@ -247,19 +247,21 @@ impl PluginGenerationOwner {
             self.invocations.pause_and_settle(),
         );
         // Both actual owners are asked for proof even if either one fails.
-        let guard = native_proof.map_err(unsettled)?;
-        delivery_proof.map_err(unsettled)?;
+        let guard = native_proof.map_err(|error| unsettled(&error))?;
+        delivery_proof.map_err(|error| unsettled(&error))?;
         self.current().ui.close();
-        let candidate = guard.prepare(&raw).map_err(unsettled)?;
-        let managed = candidate.endpoints().map_err(unsettled)?;
+        let candidate = guard.prepare(&raw).map_err(|error| unsettled(&error))?;
+        let managed = candidate.endpoints().map_err(|error| unsettled(&error))?;
         let runtime = self
             .configuration
             .runtime(batch, managed)
-            .map_err(unsettled)?;
-        runtime.bind_generation(&binding).map_err(unsettled)?;
+            .map_err(|error| unsettled(&error))?;
+        runtime
+            .bind_generation(&binding)
+            .map_err(|error| unsettled(&error))?;
         let delivery = delivery
             .prepare(runtime.event_routers.clone())
-            .map_err(unsettled)?;
+            .map_err(|error| unsettled(&error))?;
         Ok(PreparedPluginGeneration {
             owner: self.clone(),
             runtime,
@@ -267,7 +269,7 @@ impl PluginGenerationOwner {
             guard,
             candidate,
             model,
-            _operation: operation,
+            operation,
         })
     }
     pub(crate) async fn shutdown(&self) -> Result<()> {
@@ -305,15 +307,18 @@ pub(crate) struct PreparedPluginGeneration {
     guard: ExclusiveInvocationGuard,
     candidate: PreparedExtensionGeneration,
     model: NativeModelReplacement,
-    _operation: OwnedMutexGuard<()>,
+    operation: OwnedMutexGuard<()>,
 }
 impl PreparedPluginGeneration {
     pub(crate) fn with_model(
         self,
         mut input: NativeModelInput,
     ) -> std::result::Result<PreparedNativePublication, AgentLoopError> {
-        input.providers = self.runtime.providers.clone();
-        let model = self.model.prepare(input).map_err(unsettled)?;
+        input.providers.clone_from(&self.runtime.providers);
+        let model = self
+            .model
+            .prepare(input)
+            .map_err(|error| unsettled(&error))?;
         Ok(PreparedNativePublication {
             owner: self.owner,
             runtime: self.runtime,
@@ -321,7 +326,7 @@ impl PreparedPluginGeneration {
             guard: self.guard,
             candidate: self.candidate,
             model,
-            _operation: self._operation,
+            _operation: self.operation,
         })
     }
 }
@@ -352,7 +357,7 @@ impl PreparedNativePublication {
     }
     fn publish(
         self,
-        orchestrator: rw_core::SubagentOrchestrator,
+        orchestrator: &rw_core::SubagentOrchestrator,
         tools: Arc<rw_tools::ToolRegistry>,
     ) -> std::result::Result<(), AgentLoopError> {
         if self.owner.closed.load(std::sync::atomic::Ordering::Acquire) {
@@ -360,7 +365,9 @@ impl PreparedNativePublication {
         }
         self.delivery.publish_with(|| {
             orchestrator.bind_tools(tools);
-            self.guard.resume(self.candidate).map_err(unsettled)?;
+            self.guard
+                .resume(self.candidate)
+                .map_err(|error| unsettled(&error))?;
             *self
                 .owner
                 .current
@@ -386,12 +393,12 @@ impl rw_core::PreparedRuntimePublication for Publication {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
             .ok_or_else(|| unsettled("native generation publication was already consumed"))?;
-        prepared.publish(orchestrator, tools)
+        prepared.publish(&orchestrator, tools)
     }
 }
-fn invalid(error: impl ToString) -> AgentLoopError {
+fn invalid(error: &(impl ToString + ?Sized)) -> AgentLoopError {
     AgentLoopError::InvalidConfiguration(error.to_string())
 }
-fn unsettled(error: impl ToString) -> AgentLoopError {
+fn unsettled(error: &(impl ToString + ?Sized)) -> AgentLoopError {
     AgentLoopError::EffectsUnsettled(error.to_string())
 }
