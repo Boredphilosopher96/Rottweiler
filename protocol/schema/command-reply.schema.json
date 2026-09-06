@@ -1676,6 +1676,35 @@
             "agent_turn": {
               "type": "string"
             },
+            "accepted_source": {
+              "$ref": "#/$defs/SequenceId"
+            },
+            "selection": {
+              "$ref": "#/$defs/InputSelection"
+            },
+            "type": {
+              "type": "string",
+              "const": "conversation_input_committed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "agent_turn",
+            "accepted_source",
+            "selection"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "agent_turn": {
+              "type": "string"
+            },
             "turn": {
               "$ref": "#/$defs/Turn"
             },
@@ -8288,6 +8317,40 @@
       "required": [
         "session_id",
         "sequence"
+      ]
+    },
+    "InputSelection": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "accepted"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "transformed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "text"
+          ]
+        }
       ]
     },
     "UnrestorablePath": {
