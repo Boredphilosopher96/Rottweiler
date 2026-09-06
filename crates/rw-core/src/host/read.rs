@@ -415,7 +415,11 @@ impl HostReadChannel {
                 Some(lease),
             );
         }
-        let result = match query(command).await {
+        Self::encode_result(query(command).await, lease)
+    }
+
+    fn encode_result(result: Result<HostReadResult, HostError>, lease: ReadLease) -> HostReply {
+        let result = match result {
             Ok(result)
                 if result
                     .events
