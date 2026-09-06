@@ -166,3 +166,21 @@ test("input read reservations retain capacity across clear and reserve attachmen
   pending.cancel()
   expect(owner.usage.bytes).toBe(0)
 })
+
+
+test("native editing reads preserve admitted text and selections beyond the convenience getter cap", async () => {
+  const { createTestRenderer } = await import("@opentui/core/testing")
+  const { ComposerEditorRenderable } = await import("../src/components/composer-editor")
+  const setup = await createTestRenderer({ width: 40, height: 10, useThread: false })
+  const editor = new ComposerEditorRenderable(setup.renderer, { id: "large-editor" }, units => units <= 3 * 1024 * 1024)
+  setup.renderer.root.add(editor)
+  try {
+    const text = "é".repeat(1024 * 1024) + "tail"
+    editor.setText(text)
+    expect(editor.plainText).toBe(text)
+    editor.setSelection(0, text.length)
+    expect(editor.getSelectedText()).toBe(text)
+    editor.insertText("replacement")
+    expect(editor.plainText).toBe("replacement")
+  } finally { setup.renderer.destroy() }
+})

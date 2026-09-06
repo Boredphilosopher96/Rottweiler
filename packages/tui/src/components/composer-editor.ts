@@ -1,4 +1,4 @@
-import { TextareaRenderable, type KeyEvent, type RenderContext, type TextareaOptions } from "@opentui/core"
+import { TextareaRenderable, resolveRenderLib, type KeyEvent, type RenderContext, type TextareaOptions } from "@opentui/core"
 
 export const MAX_COMPOSER_UNDO_BYTES = 4 * 1024 * 1024
 
@@ -14,6 +14,17 @@ export class ComposerEditorRenderable extends TextareaRenderable {
     this.#canRetain = canRetain
     this.#maximumHistoryBytes = maximumHistoryBytes
   }
+  /** Native convenience getters cap reads at 1 MiB; editing admission owns the full buffer. */
+  #readText(selected: boolean): string {
+    const lib = resolveRenderLib()
+    const bytes = lib.textBufferGetByteSize(lib.editBufferGetTextBuffer(this.editBuffer.ptr))
+    if (bytes === 0) return ""
+    const text = selected ? lib.editorViewGetSelectedTextBytes(this.editorView.ptr, bytes)
+      : lib.editBufferGetText(this.editBuffer.ptr, bytes)
+    return text === null ? "" : lib.decoder.decode(text)
+  }
+  override get plainText(): string { return this.#readText(false) }
+  override getSelectedText(): string { return this.#readText(true) }
   get historyCharge(): number { return this.#historyBytes }
   #admit(length: number): boolean { return this.#canRetain?.(length) ?? true }
   #insertion(text: string): boolean {
