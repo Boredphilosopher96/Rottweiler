@@ -21,14 +21,14 @@ TUI_ROLE = load_contract(REPO / "contracts/release-contract.json").js_host_roles
 def run(candidate: Path, output: Path, cycles: int, generations: int) -> None:
     receipt = native_candidate.verify(candidate, REPO)
     executable = candidate / receipt["components"]["js_host"]["path"]
-    output.mkdir(parents=True, exist_ok=True)
+    output.mkdir(parents=True, exist_ok=False)
     reports = []
     with tempfile.TemporaryDirectory(prefix="rw-client-memory-", dir="/tmp") as temporary:
         private = Path(temporary)
         for generation in range(generations):
             report = output / f"process-{generation}.json"
             recycle = generation + 1 < generations
-            environment = dict(os.environ, ROTTWEILER_HOME=str(private / "home"),
+            environment = dict(probe_environment(), ROTTWEILER_HOME=str(private / "home"),
                                ROTTWEILER_CLIENT_MEMORY_PROBE_REPORT=str(report),
                                ROTTWEILER_CLIENT_MEMORY_PROBE_DIRECTORY=str(private),
                                ROTTWEILER_CLIENT_MEMORY_PROBE_CYCLES=str(cycles),
@@ -58,11 +58,11 @@ def run(candidate: Path, output: Path, cycles: int, generations: int) -> None:
 def run_held(candidate: Path, output: Path, cycles: int, view: str) -> None:
     receipt = native_candidate.verify(candidate, REPO)
     executable = candidate / receipt["components"]["js_host"]["path"]
-    output.mkdir(parents=True, exist_ok=True)
+    output.mkdir(parents=True, exist_ok=False)
     report = output / f"held-{view}.json"
     with tempfile.TemporaryDirectory(prefix="rw-held-memory-", dir="/tmp") as temporary:
         private = Path(temporary)
-        environment = dict(os.environ, ROTTWEILER_HOME=str(private / "home"),
+        environment = dict(probe_environment(), ROTTWEILER_HOME=str(private / "home"),
                            ROTTWEILER_CLIENT_MEMORY_PROBE_REPORT=str(report),
                            ROTTWEILER_CLIENT_MEMORY_PROBE_DIRECTORY=str(private),
                            ROTTWEILER_CLIENT_MEMORY_PROBE_CYCLES=str(cycles),
@@ -82,6 +82,11 @@ def run_held(candidate: Path, output: Path, cycles: int, view: str) -> None:
                "process": data}
     (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps({key: value for key, value in summary.items() if key != "process"}, sort_keys=True))
+
+
+def probe_environment() -> dict[str, str]:
+    return {key: value for key, value in os.environ.items()
+            if not key.startswith("ROTTWEILER_")}
 
 
 def main() -> None:
