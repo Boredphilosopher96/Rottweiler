@@ -122,7 +122,6 @@ impl DeferredActorSession {
     async fn live(
         &self,
         start: bool,
-        resume_inputs: bool,
     ) -> Result<Option<Arc<ActorSubagentSession>>, OrchestrationError> {
         loop {
             let mut completion = {
@@ -143,7 +142,7 @@ impl DeferredActorSession {
                             _recipe: recipe.clone(),
                             completion: completion.clone(),
                         };
-                        spawn_preparation(self.state.clone(), recipe, done, resume_inputs);
+                        spawn_preparation(self.state.clone(), recipe, done);
                         completion
                     }
                     Phase::Starting { completion, .. } => completion.clone(),
@@ -163,12 +162,7 @@ impl DeferredActorSession {
         }
     }
 }
-fn spawn_preparation(
-    state: Arc<Mutex<State>>,
-    recipe: Arc<Recipe>,
-    done: watch::Sender<bool>,
-    resume_inputs: bool,
-) {
+fn spawn_preparation(state: Arc<Mutex<State>>, recipe: Arc<Recipe>, done: watch::Sender<bool>) {
     let span = tracing::Span::current();
     tokio::spawn(
         async move {
@@ -199,11 +193,7 @@ fn spawn_preparation(
                         return;
                     }
                     rw_resources::run_blocking(rw_resources::ResourceClass::Cpu, move || {
-                        if resume_inputs {
-                            crate::SessionActor::spawn(config)
-                        } else {
-                            crate::SessionActor::spawn_for_controls(config)
-                        }
+                        crate::SessionActor::spawn_for_controls(config)
                     })
                     .await
                     .map_err(|error| OrchestrationError::EffectsUnsettled(error.to_string()))
@@ -250,7 +240,7 @@ impl SubagentSession for DeferredActorSession {
     async fn child_state(
         &self,
     ) -> Result<rw_types::session_state::SessionStateSnapshot, OrchestrationError> {
-        self.live(true, false)
+        self.live(true)
             .await?
             .ok_or_else(closed)?
             .child_state()
@@ -259,7 +249,7 @@ impl SubagentSession for DeferredActorSession {
     async fn child_controls(
         &self,
     ) -> Result<rw_types::family_controls::ChildControlsSnapshot, OrchestrationError> {
-        self.live(true, false)
+        self.live(true)
             .await?
             .ok_or_else(closed)?
             .child_controls()
@@ -272,7 +262,7 @@ impl SubagentSession for DeferredActorSession {
         revision: rw_types::SequenceId,
         response: rw_types::family_controls::ChildControlResponse,
     ) -> Result<rw_types::CommandOutcome, OrchestrationError> {
-        self.live(false, false)
+        self.live(false)
             .await?
             .ok_or_else(closed)?
             .respond_control(authority, meta, revision, response)
@@ -288,7 +278,7 @@ impl SubagentSession for DeferredActorSession {
         cancellation: CancellationToken,
         progress: Arc<dyn SubagentProgressObserver>,
     ) -> Result<SubagentTurnResult, OrchestrationError> {
-        let session = self.live(true, true).await?.ok_or_else(closed)?;
+        let session = self.live(true).await?.ok_or_else(closed)?;
         if cancellation.is_cancelled() {
             return Err(OrchestrationError::Session(
                 "child turn cancelled before activation".into(),
@@ -297,7 +287,7 @@ impl SubagentSession for DeferredActorSession {
         session.run_turn(prompt, cancellation, progress).await
     }
     async fn cancel(&self) -> Result<(), OrchestrationError> {
-        if let Some(session) = self.live(false, false).await? {
+        if let Some(session) = self.live(false).await? {
             session.cancel().await?;
         }
         Ok(())
@@ -314,7 +304,7 @@ impl SubagentSession for DeferredActorSession {
                 return Ok(());
             }
         }
-        if let Some(session) = self.live(false, false).await? {
+        if let Some(session) = self.live(false).await? {
             session.close(artifact).await?;
         }
         self.state
