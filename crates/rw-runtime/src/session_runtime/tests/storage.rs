@@ -288,6 +288,7 @@ fn fork_storage_starts_empty_review_and_skips_inherited_accounting() {
     )
     .expect("parent metadata");
     let parent_stores = open_checkpoint_stores(
+        &storage,
         &checkpoint_root(&storage, &workspace, &parent.0),
         std::slice::from_ref(&workspace),
     )
@@ -481,6 +482,7 @@ fn fork_storage_starts_empty_review_and_skips_inherited_accounting() {
         vec![workspace.clone(), added.clone(), added_later]
     );
     let child_stores = open_checkpoint_stores(
+        &storage,
         &checkpoint_root(&storage, &workspace, &child.0),
         &[workspace.clone(), added],
     )

@@ -257,7 +257,11 @@ pub(crate) async fn compose_hosted_actor(
     };
 
     let session_checkpoint_root = checkpoint_root(&options.storage_root, &workspace, &session_id);
-    let checkpoint_stores = open_checkpoint_stores(&session_checkpoint_root, &workspace_roots)?;
+    let checkpoint_stores = open_checkpoint_stores(
+        &options.storage_root,
+        &session_checkpoint_root,
+        &workspace_roots,
+    )?;
     let recovery_stores = Arc::clone(&checkpoint_stores);
     rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
         let mut operation = rw_store::checkpoint::CheckpointOperation::default();

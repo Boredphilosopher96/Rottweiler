@@ -184,7 +184,8 @@ fn aborted_workspace_root_generation_is_retry_clean() {
     std::fs::create_dir(&added).expect("added");
     let primary = std::fs::canonicalize(primary).expect("canonical primary");
     let added = std::fs::canonicalize(added).expect("canonical added");
-    open_checkpoint_stores(&checkpoint, std::slice::from_ref(&primary)).expect("base generation");
+    open_checkpoint_stores(root.path(), &checkpoint, std::slice::from_ref(&primary))
+        .expect("base generation");
     let appended = vec![primary.clone(), added];
     append_checkpoint_root_generation(&checkpoint, std::slice::from_ref(&primary), &appended, 1, 2)
         .expect("prepare generation");
@@ -212,7 +213,7 @@ fn host_root_load_ignores_pre_event_committed_marker_after_crash() {
     let session_id = "pre-event-crash";
     SessionEventLog::open(&storage, session_id).expect("empty durable event log");
     let checkpoint = checkpoint_root(&storage, &primary, session_id);
-    open_checkpoint_stores(&checkpoint, std::slice::from_ref(&primary))
+    open_checkpoint_stores(&storage, &checkpoint, std::slice::from_ref(&primary))
         .expect("base root generation");
     let prepared = vec![primary.clone(), added.clone()];
     append_checkpoint_root_generation(&checkpoint, std::slice::from_ref(&primary), &prepared, 1, 1)
@@ -264,7 +265,7 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
     let primary = std::fs::canonicalize(primary).expect("canonical primary");
     let added = std::fs::canonicalize(added).expect("canonical added");
     let checkpoint_root = private.join("checkpoint");
-    open_checkpoint_stores(&checkpoint_root, std::slice::from_ref(&primary))
+    open_checkpoint_stores(&private, &checkpoint_root, std::slice::from_ref(&primary))
         .expect("initial checkpoint mapping");
     let lease =
         Arc::new(ExecutionLease::acquire(private.join("execution.lock")).expect("execution lease"));

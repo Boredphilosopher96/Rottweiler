@@ -98,7 +98,8 @@ pub(crate) fn fork_hosted_session_storage(
         // Forks share the live workspace but not checkpoint history. A child starts
         // with an empty mutation baseline so review/rewind only describe its own
         // changes instead of attributing post-boundary parent changes to the child.
-        let _target_stores = open_checkpoint_stores(&target_checkpoint_root, &fork_roots)?;
+        let _target_stores =
+            open_checkpoint_stores(storage_root, &target_checkpoint_root, &fork_roots)?;
         let child_id = SessionId(child_session_id.to_owned());
         let child_id_for_map = child_id.clone();
         let log = SessionEventLog::fork_mapped_view::<EngineEvent, _>(

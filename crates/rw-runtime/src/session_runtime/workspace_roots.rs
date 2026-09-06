@@ -250,7 +250,7 @@ impl RuntimeWorkspaceRootController {
         let mode_registry = compose_mode_registry(&catalog)
             .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
         let child_checkpoint_root = checkpoint_root(storage_root, workspace_root, &session_id.0);
-        let stores = open_checkpoint_stores(&child_checkpoint_root, &roots)
+        let stores = open_checkpoint_stores(storage_root, &child_checkpoint_root, &roots)
             .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
         let log = SessionEventLog::open(storage_root, &session_id.0)
             .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
@@ -660,7 +660,7 @@ impl RuntimeWorkspaceRootController {
         .map_err(|_error| {
             AgentLoopError::Persistence("workspace generation journal could not prepare".to_owned())
         })?;
-        match open_checkpoint_stores(&self.checkpoint_root, roots) {
+        match open_checkpoint_stores(&self.storage_root, &self.checkpoint_root, roots) {
             Ok(stores) => Ok(stores),
             Err(_error) => {
                 let _ = abort_checkpoint_root_generation(&self.checkpoint_root, generation);

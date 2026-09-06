@@ -89,7 +89,15 @@ async fn session_handle_rewind_restores_ten_agent_edits_to_turn_three() {
     let coordinator_root = checkpoint_root(&storage, &workspace, &session.0);
     let checkpoints = Arc::new(DurableCheckpointCoordinator::new(
         coordinator_root.clone(),
-        Arc::new(CheckpointStore::open(&coordinator_root, &workspace).expect("checkpoint store")),
+        Arc::new(
+            CheckpointStore::open(
+                &coordinator_root,
+                &workspace,
+                rw_store::checkpoint::CheckpointBlobStore::open(&storage, &workspace)
+                    .expect("workspace blobs"),
+            )
+            .expect("checkpoint store"),
+        ),
     ));
     let recovered = rw_core::SessionActorRecovery::from_bootstrap(
         sink.capture_history()

@@ -7,7 +7,7 @@ use crate::journal_service::JournalService;
 use miette::IntoDiagnostic;
 use miette::Result;
 use miette::miette;
-use rw_store::checkpoint::CheckpointStore;
+use rw_store::checkpoint::{CheckpointBlobStore, CheckpointStore};
 use serde::Deserialize;
 use serde::Serialize;
 use std::io;
@@ -59,6 +59,7 @@ pub(super) struct RewindCoordinatorDecision {
 }
 
 pub(super) fn open_checkpoint_stores(
+    storage_root: &Path,
     root: &Path,
     workspace_roots: &[PathBuf],
 ) -> Result<Arc<Vec<Arc<CheckpointStore>>>> {
@@ -98,7 +99,10 @@ pub(super) fn open_checkpoint_stores(
         .iter()
         .enumerate()
         .map(|(index, workspace)| {
-            CheckpointStore::open(&root.join(format!("root-{index:04}")), workspace)
+            let blobs = CheckpointBlobStore::open(storage_root, workspace).map_err(|error| {
+                miette!("checkpoint blob authority for root {index} could not open: {error}")
+            })?;
+            CheckpointStore::open(&root.join(format!("root-{index:04}")), workspace, blobs)
                 .map(Arc::new)
                 .map_err(|error| {
                     miette!("checkpoint store for root {index} could not open: {error}")

@@ -16,6 +16,7 @@ use super::load_rewind_coordinator;
 use super::open_checkpoint_stores;
 use super::recover_rewind_transactions;
 use super::tempdir;
+use rw_store::checkpoint::CheckpointBlobStore;
 
 #[test]
 fn per_session_checkpoint_namespaces_isolate_pending_recovery() {
@@ -32,8 +33,18 @@ fn per_session_checkpoint_namespaces_isolate_pending_recovery() {
     let root_a = checkpoint_root(&storage, &workspace_a, session_a);
     let root_b = checkpoint_root(&storage, &workspace_b, session_b);
     assert_ne!(root_a, root_b);
-    let store_a = CheckpointStore::open(&root_a, &workspace_a).expect("store a");
-    let store_b = CheckpointStore::open(&root_b, &workspace_b).expect("store b");
+    let store_a = CheckpointStore::open(
+        &root_a,
+        &workspace_a,
+        CheckpointBlobStore::open(&storage, &workspace_a).expect("workspace a blobs"),
+    )
+    .expect("store a");
+    let store_b = CheckpointStore::open(
+        &root_b,
+        &workspace_b,
+        CheckpointBlobStore::open(&storage, &workspace_b).expect("workspace b blobs"),
+    )
+    .expect("store b");
     let pending_a = store_a
         .begin_opaque_mutation(
             session_a,
@@ -111,8 +122,14 @@ async fn durable_coordinator_rewinds_ten_edits_to_turn_three_byte_exactly() {
     std::fs::write(workspace.join("state.txt"), b"turn-0\n").expect("initial state");
     let session = SessionId("session-rewind".to_owned());
     let coordinator_root = checkpoint_root(root.path(), &workspace, &session.0);
-    let store =
-        Arc::new(CheckpointStore::open(&coordinator_root, &workspace).expect("checkpoint store"));
+    let store = Arc::new(
+        CheckpointStore::open(
+            &coordinator_root,
+            &workspace,
+            CheckpointBlobStore::open(root.path(), &workspace).expect("workspace blobs"),
+        )
+        .expect("checkpoint store"),
+    );
     let coordinator = DurableCheckpointCoordinator::new(coordinator_root, store);
     for turn in 1..=10_u64 {
         let checkpoint = coordinator
@@ -155,10 +172,20 @@ async fn shared_workspace_sessions_serialize_mutation_checkpoints() {
     std::fs::create_dir(&workspace).expect("workspace");
     std::fs::write(workspace.join("shared.txt"), "base\n").expect("fixture");
     let first_store = Arc::new(
-        CheckpointStore::open(&root.path().join("first"), &workspace).expect("first store"),
+        CheckpointStore::open(
+            &root.path().join("first"),
+            &workspace,
+            CheckpointBlobStore::open(root.path(), &workspace).expect("shared workspace blobs"),
+        )
+        .expect("first store"),
     );
     let second_store = Arc::new(
-        CheckpointStore::open(&root.path().join("second"), &workspace).expect("second store"),
+        CheckpointStore::open(
+            &root.path().join("second"),
+            &workspace,
+            CheckpointBlobStore::open(root.path(), &workspace).expect("shared workspace blobs"),
+        )
+        .expect("second store"),
     );
     let first = Arc::new(DurableCheckpointCoordinator::new(
         root.path().join("first"),
@@ -223,10 +250,19 @@ async fn multi_root_checkpoints_restore_known_and_opaque_added_root_mutations() 
     std::fs::write(&target, b"added-before\0bytes").expect("added target");
     let session = SessionId("session-multi-root-rewind".to_owned());
     let checkpoint_root = checkpoint_root(root.path(), &primary, &session.0);
-    let stores = open_checkpoint_stores(&checkpoint_root, &[primary.clone(), added.clone()])
-        .expect("multi-root stores");
+    let stores = open_checkpoint_stores(
+        root.path(),
+        &checkpoint_root,
+        &[primary.clone(), added.clone()],
+    )
+    .expect("multi-root stores");
     assert!(
-        open_checkpoint_stores(&checkpoint_root, &[added.clone(), primary.clone()]).is_err(),
+        open_checkpoint_stores(
+            root.path(),
+            &checkpoint_root,
+            &[added.clone(), primary.clone()]
+        )
+        .is_err(),
         "persisted root order must reject reorder/replacement"
     );
     let coordinator = DurableCheckpointCoordinator::from_stores(checkpoint_root.clone(), stores);
@@ -351,8 +387,12 @@ async fn failed_multi_root_rewind_is_not_committed_by_restart_recovery() {
     let second = std::fs::canonicalize(second).expect("canonical second");
     let session = SessionId("failed-multi-root-rewind".to_owned());
     let checkpoint_root = checkpoint_root(root.path(), &first, &session.0);
-    let stores = open_checkpoint_stores(&checkpoint_root, &[first.clone(), second.clone()])
-        .expect("multi-root stores");
+    let stores = open_checkpoint_stores(
+        root.path(),
+        &checkpoint_root,
+        &[first.clone(), second.clone()],
+    )
+    .expect("multi-root stores");
 
     for (store, workspace) in stores.iter().zip([&first, &second]) {
         std::fs::write(workspace.join("state.txt"), b"before").expect("initial state");
@@ -417,8 +457,12 @@ async fn committed_multi_root_rewind_is_completed_by_restart_recovery() {
     let second = std::fs::canonicalize(second).expect("canonical second");
     let session = SessionId("committed-multi-root-rewind".to_owned());
     let checkpoint_root = checkpoint_root(root.path(), &first, &session.0);
-    let stores = open_checkpoint_stores(&checkpoint_root, &[first.clone(), second.clone()])
-        .expect("multi-root stores");
+    let stores = open_checkpoint_stores(
+        root.path(),
+        &checkpoint_root,
+        &[first.clone(), second.clone()],
+    )
+    .expect("multi-root stores");
 
     for (store, workspace) in stores.iter().zip([&first, &second]) {
         std::fs::write(workspace.join("state.txt"), b"before").expect("initial state");
@@ -488,8 +532,12 @@ async fn committed_multi_root_apply_failure_completes_in_process() {
     let second = std::fs::canonicalize(second).expect("canonical second");
     let session = SessionId("retry-multi-root-rewind".to_owned());
     let checkpoint_root = checkpoint_root(root.path(), &first, &session.0);
-    let stores = open_checkpoint_stores(&checkpoint_root, &[first.clone(), second.clone()])
-        .expect("multi-root stores");
+    let stores = open_checkpoint_stores(
+        root.path(),
+        &checkpoint_root,
+        &[first.clone(), second.clone()],
+    )
+    .expect("multi-root stores");
 
     for (store, workspace) in stores.iter().zip([&first, &second]) {
         std::fs::write(workspace.join("state.txt"), b"before").expect("initial state");
@@ -550,8 +598,12 @@ async fn repeated_committed_multi_root_apply_failure_poisons_live_mutations() {
     let second = std::fs::canonicalize(second).expect("canonical second");
     let session = SessionId("poisoned-multi-root-rewind".to_owned());
     let checkpoint_root = checkpoint_root(root.path(), &first, &session.0);
-    let stores = open_checkpoint_stores(&checkpoint_root, &[first.clone(), second.clone()])
-        .expect("multi-root stores");
+    let stores = open_checkpoint_stores(
+        root.path(),
+        &checkpoint_root,
+        &[first.clone(), second.clone()],
+    )
+    .expect("multi-root stores");
 
     for (store, workspace) in stores.iter().zip([&first, &second]) {
         std::fs::write(workspace.join("state.txt"), b"before").expect("initial state");

@@ -298,7 +298,8 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
     };
 
     let checkpoint_root = checkpoint_root(&storage_root, &workspace, &session_id);
-    let checkpoint_stores = open_checkpoint_stores(&checkpoint_root, &workspace_roots)?;
+    let checkpoint_stores =
+        open_checkpoint_stores(&storage_root, &checkpoint_root, &workspace_roots)?;
     let recovery_stores = Arc::clone(&checkpoint_stores);
     rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
         let mut operation = rw_store::checkpoint::CheckpointOperation::default();
