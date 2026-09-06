@@ -283,7 +283,7 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
         child_plugins: Arc::new(
             crate::extension_runtime::generations::PluginGenerationConfig {
                 private_root: private.clone(),
-                helper: crate::plugin_process::helper_executable().expect("test helper"),
+                helper: crate::extension_runtime::SandboxHelperSource::pending(),
                 redactor: Arc::new(crate::extension_runtime::SharedPluginRedactor::new(
                     FixtureRedactor::default(),
                 )),
@@ -671,7 +671,7 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
         child_plugins: Arc::new(
             crate::extension_runtime::generations::PluginGenerationConfig {
                 private_root: private.clone(),
-                helper: crate::plugin_process::helper_executable().expect("test helper"),
+                helper: crate::extension_runtime::SandboxHelperSource::pending(),
                 redactor: Arc::new(crate::extension_runtime::SharedPluginRedactor::new(
                     FixtureRedactor::default(),
                 )),

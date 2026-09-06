@@ -28,7 +28,7 @@ pub(in crate::extension_runtime) struct ActivationRecipe {
     pub config: DiscoveredPlugin,
     pub private_root: PathBuf,
     pub workspace_roots: Vec<PathBuf>,
-    pub helper: rw_tools::SandboxHelper,
+    pub helper: Arc<crate::extension_runtime::SandboxHelperSource>,
     pub redactor: Arc<SharedPluginRedactor>,
     pub push_handler: Arc<SessionPluginPushHandler>,
     pub budget: Arc<super::PluginRuntimeBudget>,
@@ -286,8 +286,9 @@ fn launcher(
     if let Some(launcher) = &recipe.launcher {
         return Ok(Arc::clone(launcher));
     }
+    let helper = recipe.helper.capture().map_err(diagnostic)?;
     Ok(Arc::new(
-        crate::plugin_process::SandboxedPluginLauncher::new(scratch.path(), &recipe.helper)
+        crate::plugin_process::SandboxedPluginLauncher::new(scratch.path(), &helper)
             .map_err(diagnostic)?,
     ))
 }

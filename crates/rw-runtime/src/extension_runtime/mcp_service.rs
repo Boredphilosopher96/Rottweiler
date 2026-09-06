@@ -348,7 +348,7 @@ pub(crate) struct DispatchingMcpConnector {
 pub(super) struct LazySandboxedStdioConnector {
     workspace_roots: Vec<PathBuf>,
     scratch: PathBuf,
-    helper: rw_tools::SandboxHelper,
+    helper: Arc<super::SandboxHelperSource>,
     environment: Arc<RwLock<std::collections::BTreeSet<String>>>,
     approvals: Arc<McpApprovalStore>,
 }
@@ -366,10 +366,15 @@ impl McpConnector for LazySandboxedStdioConnector {
             .iter()
             .cloned()
             .collect::<Vec<_>>();
+        let helper = self
+            .helper
+            .capture_owned()
+            .await
+            .map_err(McpError::Policy)?;
         let launcher = SandboxedProtocolLauncher::new(
             &self.workspace_roots,
             &self.scratch,
-            &self.helper,
+            &helper,
             environment,
         )
         .map_err(|error| McpError::Policy(error.to_string()))?;
@@ -945,7 +950,7 @@ impl McpSessionRuntime {
         configs: &[DiscoveredMcpServer],
         workspace_roots: &[PathBuf],
         private_session_root: &Path,
-        helper: &rw_tools::SandboxHelper,
+        helper: &Arc<super::SandboxHelperSource>,
         credentials_path: &Path,
         upstream_proxy: Option<UpstreamProxy>,
     ) -> Result<Self> {
@@ -993,24 +998,6 @@ impl McpSessionRuntime {
             approvals.clone(),
         ));
         let stdio_environment = Arc::new(RwLock::new(configured_stdio_environment(configs)));
-        if configs.iter().any(|config| {
-            matches!(
-                &config.transport,
-                crate::extension_config::DiscoveredMcpTransport::Stdio { .. }
-            )
-        }) {
-            SandboxedProtocolLauncher::new(
-                workspace_roots,
-                scratch.path(),
-                helper,
-                stdio_environment
-                    .read()
-                    .map_err(|_| miette!("MCP environment authority is unavailable"))?
-                    .iter()
-                    .cloned(),
-            )
-            .into_diagnostic()?;
-        }
         let stdio: Arc<dyn McpConnector> = Arc::new(LazySandboxedStdioConnector {
             workspace_roots: workspace_roots.to_vec(),
             scratch: scratch.path().to_owned(),

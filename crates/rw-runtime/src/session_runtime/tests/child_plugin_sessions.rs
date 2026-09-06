@@ -36,7 +36,7 @@ pub(super) fn controller(private: &Path, primary: &Path) -> RuntimeWorkspaceRoot
         child_plugins: Arc::new(
             crate::extension_runtime::generations::PluginGenerationConfig {
                 private_root: private.clone(),
-                helper: crate::plugin_process::helper_executable().expect("test helper"),
+                helper: crate::extension_runtime::SandboxHelperSource::pending(),
                 redactor: Arc::new(crate::extension_runtime::SharedPluginRedactor::new(
                     FixtureRedactor::default(),
                 )),

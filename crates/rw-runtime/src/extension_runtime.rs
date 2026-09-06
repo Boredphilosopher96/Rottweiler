@@ -7,6 +7,8 @@ mod mcp_service;
 pub(crate) use mcp_service::*;
 
 mod activation;
+mod helper;
+pub(crate) use helper::SandboxHelperSource;
 mod budget;
 mod provider_http;
 use provider_http::RuntimePluginProviderHttp;

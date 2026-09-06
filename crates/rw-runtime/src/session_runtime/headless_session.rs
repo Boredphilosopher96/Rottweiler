@@ -511,6 +511,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
             }
             catalog
         };
+    let sandbox_helper = crate::extension_runtime::SandboxHelperSource::pending();
     let mcp_runtime = (if executable_catalog.mcp_servers.is_empty() {
         None
     } else {
@@ -519,7 +520,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
             &executable_catalog.mcp_servers,
             &workspace_roots,
             &session_root,
-            &crate::plugin_process::helper_executable().into_diagnostic()?,
+            &sandbox_helper,
             &config_loader.credentials_path(),
             root_global_proxy
                 .as_ref()
@@ -637,7 +638,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
     let native_extensions = crate::extension_runtime::generations::PluginGenerationOwner::compose(
         crate::extension_runtime::generations::PluginGenerationConfig {
             private_root: storage_root.clone(),
-            helper: crate::plugin_process::helper_executable().into_diagnostic()?,
+            helper: sandbox_helper.clone(),
             redactor: plugin_redactor.clone(),
             budget: plugin_runtime_budget.clone(),
             session_ui: session_ui.clone(),

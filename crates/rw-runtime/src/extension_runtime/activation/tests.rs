@@ -86,8 +86,7 @@ impl Fixture {
             config,
             private_root: root.path().to_path_buf(),
             workspace_roots: vec![root.path().to_path_buf()],
-            helper: crate::plugin_process::helper_executable()
-                .expect("fixture sandbox helper prerequisite"),
+            helper: crate::extension_runtime::SandboxHelperSource::pending(),
             redactor: Arc::new(SharedPluginRedactor::new(
                 rw_providers::FixtureRedactor::default(),
             )),
@@ -281,10 +280,7 @@ async fn source_and_provider_metadata_registration_performs_no_activation() {
     let owner = crate::extension_runtime::generations::PluginGenerationOwner::compose(
         crate::extension_runtime::generations::PluginGenerationConfig {
             private_root: fixture.root.path().to_path_buf(),
-            helper: rw_tools::SandboxHelper::from_running(
-                &std::env::current_exe().expect("test executable"),
-            )
-            .expect("running helper"),
+            helper: crate::extension_runtime::SandboxHelperSource::pending(),
             redactor: fixture.endpoint.generation.recipe.redactor.clone(),
             budget: fixture.budget.clone(),
             session_ui: Arc::new(crate::extension_runtime::ui::UiSessionBudget::default()),
@@ -381,13 +377,11 @@ async fn zero_ten_and_fifty_installed_plugins_remain_inert() {
             })
             .collect::<Vec<_>>();
         let budget = Arc::new(PluginRuntimeBudget::default());
+        let helper = crate::extension_runtime::SandboxHelperSource::pending();
         let owner = crate::extension_runtime::generations::PluginGenerationOwner::compose(
             crate::extension_runtime::generations::PluginGenerationConfig {
                 private_root: fixture.root.path().to_path_buf(),
-                helper: rw_tools::SandboxHelper::from_running(
-                    &std::env::current_exe().expect("test executable"),
-                )
-                .expect("running helper"),
+                helper: helper.clone(),
                 redactor: fixture.endpoint.generation.recipe.redactor.clone(),
                 budget: budget.clone(),
                 session_ui: Arc::new(crate::extension_runtime::ui::UiSessionBudget::default()),
@@ -402,6 +396,10 @@ async fn zero_ten_and_fifty_installed_plugins_remain_inert() {
         assert_eq!(runtime.commands.len(), count);
         assert_eq!(runtime.providers.len(), count);
         assert!(runtime.pending.is_empty());
+        assert!(
+            !helper.is_captured(),
+            "metadata composition cannot capture executable bytes"
+        );
         owner.shutdown().await.expect("inert closure");
         budget.close().expect("no activation slots consumed");
     }

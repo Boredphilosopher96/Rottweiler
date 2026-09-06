@@ -281,7 +281,7 @@ fn production_roots() -> (
     tempfile::TempDir,
     PathBuf,
     PathBuf,
-    rw_tools::SandboxHelper,
+    Arc<super::SandboxHelperSource>,
     PathBuf,
 ) {
     use std::os::unix::fs::PermissionsExt as _;
@@ -293,9 +293,7 @@ fn production_roots() -> (
         fs::create_dir(directory).expect("private directory");
         fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).expect("private mode");
     }
-    let helper =
-        rw_tools::SandboxHelper::from_running(&std::env::current_exe().expect("host executable"))
-            .expect("running helper authority");
+    let helper = super::SandboxHelperSource::pending();
     let credentials = root.path().join("credentials.toml");
     (root, workspace, session, helper, credentials)
 }
@@ -316,6 +314,10 @@ async fn empty_or_http_only_production_runtime_never_launches_the_helper() {
     .expect("empty hosted MCP runtime remains inert");
     assert!(empty.manager.statuses().await.is_empty());
     assert!(empty.shutdown().await.is_ok());
+    assert!(
+        !helper.is_captured(),
+        "empty MCP catalog must not capture executable bytes"
+    );
 
     let http = DiscoveredMcpServer {
         name: "remote.docs".to_owned(),
@@ -350,6 +352,10 @@ async fn empty_or_http_only_production_runtime_never_launches_the_helper() {
     .expect("HTTP-only MCP runtime remains inert");
     assert_eq!(http_runtime.manager.statuses().await.len(), 1);
     assert!(http_runtime.shutdown().await.is_ok());
+    assert!(
+        !helper.is_captured(),
+        "HTTP-only MCP must not capture stdio helper bytes"
+    );
 }
 
 #[tokio::test]

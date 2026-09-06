@@ -85,8 +85,7 @@ async fn aborted_first_use_waits_for_real_sandboxed_process_handoff_and_reap() {
         config,
         private_root: root.path().to_path_buf(),
         workspace_roots: vec![root.path().to_path_buf()],
-        helper: crate::plugin_process::helper_executable()
-            .expect("fixture sandbox helper prerequisite"),
+        helper: crate::extension_runtime::SandboxHelperSource::pending(),
         redactor: Arc::new(SharedPluginRedactor::new(
             rw_providers::FixtureRedactor::default(),
         )),
