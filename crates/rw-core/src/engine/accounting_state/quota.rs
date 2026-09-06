@@ -9,6 +9,12 @@ pub(super) enum Quota {
     Unavailable,
 }
 impl Quota {
+    pub(super) fn retained_heap_bytes(&self) -> Option<usize> {
+        match self {
+            Self::Known(value) => value.used.capacity().checked_add(value.unit.capacity()),
+            Self::Empty | Self::Unavailable => Some(0),
+        }
+    }
     pub(super) fn add(&mut self, used: &str, unit: Option<&str>) {
         let unit = unit.unwrap_or("quota");
         if unit.is_empty()

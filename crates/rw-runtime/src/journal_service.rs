@@ -1,5 +1,6 @@
 //! Runtime-owned journal commit admission and acknowledged read prefixes.
 mod commits;
+mod retained;
 use commits::JournalCommits;
 
 use miette::{Result, miette};
@@ -16,6 +17,7 @@ const MAX_READ_VIEWS: usize = 8;
 
 pub(crate) struct JournalService {
     pub(crate) commits: Arc<JournalCommits>,
+    retained_history: retained::HistoryRetentions,
     root: JournalRoot,
     active: Mutex<HashMap<String, Weak<JournalPublication>>>,
     child_projection_orders: Mutex<HashMap<String, Weak<Mutex<()>>>>,
@@ -96,6 +98,7 @@ impl JournalService {
     pub(crate) fn new(root: &Path) -> Result<Arc<Self>> {
         Ok(Arc::new(Self {
             commits: JournalCommits::new(),
+            retained_history: retained::HistoryRetentions::new(),
             root: JournalRoot::open(root)
                 .map_err(|error| miette!("journal root could not open: {error}"))?,
             active: Mutex::new(HashMap::new()),
@@ -159,6 +162,12 @@ impl JournalService {
             session: session.to_owned(),
             publisher,
         })
+    }
+
+    pub(crate) fn retain_history(
+        &self,
+    ) -> Result<retained::HistoryRetention, rw_core::AgentLoopError> {
+        self.retained_history.admit()
     }
 
     pub(crate) fn admit_read(self: &Arc<Self>) -> Result<JournalReadAdmission> {

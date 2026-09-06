@@ -341,31 +341,24 @@ async fn captured_semantic_history_preserves_pages_and_charges_its_read_lifetime
             .await
             .is_err()
     );
-    // A delivered page retains its own charge even after its source view drops.
+    // Completed results retain byte ownership without reserving an active read slot.
     let mut pages = vec![page];
-    for _ in 2..8 {
+    let mut bootstraps = Vec::new();
+    for _ in 1..32 {
         pages.push(
             captured
                 .conversation_page(0..1, HistoryMaterializationLimits::default())
                 .await
-                .expect("admitted page"),
+                .expect("small delivered page"),
+        );
+        bootstraps.push(
+            captured
+                .bootstrap()
+                .await
+                .expect("small retained bootstrap"),
         );
     }
-    assert!(
-        captured
-            .conversation_page(0..1, HistoryMaterializationLimits::default())
-            .await
-            .is_err()
-    );
-    assert!(current.capture_history().await.is_err());
     drop(captured);
-    let replacement = current
-        .capture_history()
-        .await
-        .expect("released snapshot allowance");
-    assert!(current.capture_history().await.is_err());
-    drop(replacement);
-    drop(pages);
     let captured = current.capture_history().await.expect("released pages");
     let mut views = vec![captured];
     for _ in 1..8 {
@@ -380,5 +373,8 @@ async fn captured_semantic_history_preserves_pages_and_charges_its_read_lifetime
         .await
         .expect("released view readmission");
     drop(views);
+    assert_eq!(pages[0].sources[0].sequence, SequenceId(0));
+    assert_eq!(bootstraps[0].head.next_sequence, 1);
+    drop((pages, bootstraps));
     current.settle_effects().await.expect("read jobs settled");
 }

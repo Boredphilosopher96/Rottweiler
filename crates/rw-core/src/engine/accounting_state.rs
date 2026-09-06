@@ -43,6 +43,9 @@ impl Default for SessionAccountingState {
     }
 }
 impl SessionAccountingState {
+    pub(in crate::engine) fn retained_heap_bytes(&self) -> Option<usize> {
+        self.quota.retained_heap_bytes()
+    }
     pub(crate) fn record(&mut self, entry: &TurnAccounting) {
         self.record_actuals(&entry.usage, &entry.cost);
     }

@@ -1,7 +1,9 @@
 //! Canonical recovery and exact provider history; independent of display transcript rows.
 
 mod active;
+mod allocation;
 pub use active::InterruptedTurnInputs;
+pub use allocation::MAX_HISTORY_RESULT_BYTES;
 mod accounting;
 pub use accounting::{
     AccountingReconciliationPage, MAX_ACCOUNTING_PAGE_BYTES, RecoveryAccountingPage,

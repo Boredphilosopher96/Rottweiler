@@ -92,6 +92,7 @@ impl CanonicalHistory {
         }
         let selected = range.start..low;
         let turns = self.materialize(selected.clone(), limits)?;
+        super::allocation::admit_page_metadata(&turns)?;
         let sources = selected
             .clone()
             .map(|ordinal| self.turn_source(ordinal))

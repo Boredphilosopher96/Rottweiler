@@ -90,30 +90,49 @@ impl SessionHistoryView for CapturedHistory {
     }
 }
 impl CapturedHistory {
-    async fn query<T: Send + 'static>(
+    async fn query<T: RetainedResult + Send + 'static>(
         &self,
         query: impl FnOnce(&CanonicalHistory) -> Result<T, rw_core::recovery::RecoveryError>
         + Send
         + 'static,
     ) -> Result<HistoryRead<T>, AgentLoopError> {
+        let retention = self.journal.retain_history()?;
         let admission = self.journal.admit_read().map_err(persistence)?;
         let lease = self.lease.clone();
         // The transaction must remain owned by the worker if its waiter drops.
         let history = Arc::clone(&self.history);
         self.reads
             .run(
-                (history, lease, Some(admission)),
-                move |(history, _lease, admission)| {
+                (history, lease, admission, Some(retention)),
+                move |(history, _lease, _admission, retention)| {
                     let history = history
                         .lock()
                         .map_err(|_| persistence("history reader poisoned"))?;
-                    let value = query(&history).map_err(persistence)?;
-                    let admission = admission
+                    let mut value = query(&history).map_err(persistence)?;
+                    let bytes = value.prepare_retained()?;
+                    let mut retention = retention
                         .take()
                         .ok_or_else(|| persistence("history query already completed"))?;
-                    Ok(HistoryRead::new(value, admission))
+                    retention.resize(bytes)?;
+                    Ok(HistoryRead::new(value, retention))
                 },
             )
             .await
+    }
+}
+
+trait RetainedResult {
+    fn prepare_retained(&mut self) -> Result<usize, AgentLoopError>;
+}
+impl RetainedResult for RecoveryBootstrap {
+    fn prepare_retained(&mut self) -> Result<usize, AgentLoopError> {
+        let bytes = self.retained_bytes().map_err(persistence)?;
+        self.prepare_allocations();
+        Ok(bytes)
+    }
+}
+impl RetainedResult for ConversationPage {
+    fn prepare_retained(&mut self) -> Result<usize, AgentLoopError> {
+        self.retained_bytes().map_err(persistence)
     }
 }
