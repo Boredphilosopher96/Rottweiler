@@ -247,6 +247,23 @@ pub(super) async fn compose_fixture_session(
     session_id: &str,
     resume: bool,
 ) -> super::super::runtime_options::HostedActorRuntime {
+    compose_fixture_with_provider(
+        storage,
+        workspace,
+        session_id,
+        resume,
+        HostedProviderMode::Live,
+    )
+    .await
+}
+
+pub(super) async fn compose_fixture_with_provider(
+    storage: &Path,
+    workspace: &Path,
+    session_id: &str,
+    resume: bool,
+    provider_mode: HostedProviderMode,
+) -> super::super::runtime_options::HostedActorRuntime {
     let storage = storage.to_path_buf();
     let workspace = workspace.to_path_buf();
     let mut config = Config::default();
@@ -286,7 +303,7 @@ pub(super) async fn compose_fixture_session(
         resume,
         permission_mode: Some(PermissionModeDescriptor::Strict),
         max_turns: 2,
-        provider_mode: HostedProviderMode::Live,
+        provider_mode,
         dangerously_trust: true,
         wait_for_execution_lease: false,
     })
