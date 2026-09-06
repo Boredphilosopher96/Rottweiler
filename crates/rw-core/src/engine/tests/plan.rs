@@ -267,9 +267,11 @@ fn mode_and_approved_plan_project_durably_with_conversation_pin() {
             decision: PlanDecision::Approve,
             revisions: None,
         },
-        PendingEvent::ConversationTurnCommitted {
+        PendingEvent::ConversationContextCommitted {
             agent_turn: 0,
-            turn: context.clone(),
+            selection: rw_types::conversation_input::ContextSelection::PlanReview {
+                source: rw_types::SequenceId(2),
+            },
         },
         PendingEvent::ContextItemPinned {
             item_id: item_id.clone(),

@@ -318,22 +318,33 @@ async fn pending_model_switch_question_recovers_and_can_be_answered() {
         text_turn(Role::User, "durable prior context"),
     ];
     let question_id = QuestionId("model-switch-recovered".to_owned());
-    let mut events = original
-        .iter()
-        .cloned()
-        .enumerate()
-        .map(|(sequence, turn)| {
-            wire_event(
-                u64::try_from(sequence).expect("sequence"),
-                PendingEvent::ConversationTurnCommitted {
-                    agent_turn: 1,
-                    turn,
-                },
-            )
-        })
-        .collect::<Vec<_>>();
+    let mut events = vec![
+        wire_event(
+            0,
+            PendingEvent::ConversationTurnCommitted {
+                agent_turn: 1,
+                turn: original[0].clone(),
+            },
+        ),
+        wire_event(
+            1,
+            PendingEvent::UserMessageAccepted {
+                turn: 1,
+                content: "durable prior context".into(),
+                attachments: vec![],
+            },
+        ),
+        wire_event(
+            2,
+            PendingEvent::ConversationInputCommitted {
+                agent_turn: 1,
+                accepted_source: rw_types::SequenceId(1),
+                selection: rw_types::conversation_input::InputSelection::Accepted {},
+            },
+        ),
+    ];
     events.push(wire_event(
-        2,
+        3,
         PendingEvent::QuestionAsked {
             turn: 1,
             question_id: question_id.clone(),

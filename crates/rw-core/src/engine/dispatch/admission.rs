@@ -606,11 +606,18 @@ pub(super) async fn dispatch_protocol(
                 let _ = respond.send(outcome);
                 return false;
             }
-            let known = item_id
-                .0
-                .strip_prefix("conversation:")
-                .and_then(|ordinal| ordinal.parse::<u64>().ok())
-                .is_some_and(|ordinal| ordinal < state.conversation_turns);
+            let known =
+                match super::context_surgery::context_source_is_effective(state, config, item_id)
+                    .await
+                {
+                    Ok(known) => known,
+                    Err(error) => {
+                        let outcome = protocol_rejection("context_unavailable", &error.to_string());
+                        send_ack(state, events, &meta, session, outcome.clone());
+                        let _ = respond.send(outcome);
+                        return false;
+                    }
+                };
             if !known {
                 let outcome = protocol_rejection(
                     "unknown_context_item",

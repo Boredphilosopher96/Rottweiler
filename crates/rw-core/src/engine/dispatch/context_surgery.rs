@@ -45,6 +45,20 @@ pub(super) async fn apply_registered_context_surgery(
                 .to_owned(),
         ));
     }
+    let known = context_source_is_effective(state, config, &item_id).await?;
+    if !known {
+        return Err(AgentLoopError::InvalidConfiguration(
+            "unknown_context_item: context item is not present in the current inventory".to_owned(),
+        ));
+    }
+    apply_context_surgery(state, events, &config.event_sink, item_id, pinned).await
+}
+
+pub(super) async fn context_source_is_effective(
+    state: &ActorState,
+    config: &SessionActorConfig,
+    item_id: &ContextItemId,
+) -> Result<bool, AgentLoopError> {
     let source = item_id
         .0
         .strip_prefix("conversation:")
@@ -56,15 +70,10 @@ pub(super) async fn apply_registered_context_surgery(
     )
     .await?;
     let known = if let Some(source) = source {
-        rw_types::context_source::conversation_item(source) == item_id
+        rw_types::context_source::conversation_item(source) == *item_id
             && view.source_turn(source).await?.is_some()
     } else {
         false
     };
-    if !known {
-        return Err(AgentLoopError::InvalidConfiguration(
-            "unknown_context_item: context item is not present in the current inventory".to_owned(),
-        ));
-    }
-    apply_context_surgery(state, events, &config.event_sink, item_id, pinned).await
+    Ok(known)
 }
