@@ -219,38 +219,35 @@ fn kill_nine_mid_provider_is_closed_as_interrupted_on_resume() {
     );
     let run = TestRun::new(&root, "kill-workspace");
     run.write_agents();
-    let mut child = base_command(&run.workspace, &run.home)
-        .args([
-            "-p",
-            "wait for the delayed provider",
-            "--permission-mode",
-            "yolo",
-            "--replay-dir",
-            fixtures.to_str().expect("fixture path"),
-            "--record-replay-script",
-            delayed_script.to_str().expect("script path"),
-            "--record-script-delay-ms",
-            "30000",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("delayed child");
-    // This acceptance test waits for a semantic crash point; cold-start latency
-    // is enforced by the dedicated release performance gate. Debug binaries
-    // include the WASM compiler and can take longer to validate after relink on
-    // macOS, especially under the full parallel workspace test load.
-    wait_until(Duration::from_secs(15), || {
+    let mut child = TestProcess::spawn(
+        base_command(&run.workspace, &run.home)
+            .args([
+                "-p",
+                "wait for the delayed provider",
+                "--permission-mode",
+                "yolo",
+                "--replay-dir",
+                fixtures.to_str().expect("fixture path"),
+                "--record-replay-script",
+                delayed_script.to_str().expect("script path"),
+                "--record-script-delay-ms",
+                "30000",
+            ])
+            .stdout(Stdio::null()),
+    );
+    // Preserve the existing semantic deadline, while retaining startup errors
+    // and observing early exit. TestProcess kills and reaps on every panic path.
+    child.wait_ready_within(Duration::from_secs(15), || {
         event_log(&run.home)
             .and_then(|path| fs::read_to_string(path).ok())
             .is_some_and(|log| log.contains("user_message_accepted"))
     });
     let killed = Command::new("kill")
-        .args(["-9", &child.id().to_string()])
+        .args(["-9", &child.child.id().to_string()])
         .status()
         .expect("kill -9");
     assert!(killed.success());
-    assert!(!child.wait().expect("killed child").success());
+    assert!(!child.child.wait().expect("killed child").success());
 
     let session_id = only_session_id(&run.home);
     let resume_script = root.path().join("resume.json");

@@ -20,20 +20,28 @@ impl TestProcess {
     pub fn wait_ready(&mut self, ready: impl Fn() -> bool) {
         // Functional tests may run many unoptimized native images concurrently.
         // Product startup latency is independently measured on release candidates.
-        let deadline = Instant::now() + Duration::from_secs(30);
+        self.wait_ready_within(Duration::from_secs(30), ready);
+    }
+
+    pub fn wait_ready_within(&mut self, timeout: Duration, ready: impl Fn() -> bool) {
+        let started = Instant::now();
+        let deadline = started + timeout;
         loop {
             if ready() {
                 return;
             }
             if let Some(status) = self.child.try_wait().expect("child status") {
                 panic!(
-                    "native child exited before readiness: {status}; stderr: {}",
+                    "native child {} exited before readiness after {:?}: {status}; stderr: {}",
+                    self.child.id(),
+                    started.elapsed(),
                     self.diagnostics()
                 );
             }
             assert!(
                 Instant::now() < deadline,
-                "native child never became ready; stderr: {}",
+                "native child {} never became ready within {timeout:?}; stderr: {}",
+                self.child.id(),
                 self.diagnostics()
             );
             thread::sleep(Duration::from_millis(10));
