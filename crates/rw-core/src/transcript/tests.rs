@@ -602,10 +602,16 @@ fn encoded_row_budget_can_stop_mid_page_without_skipping_canonical_events() {
     let mut journal = SegmentedJournal::open(root.path(), "semantic").expect("journal");
     for first in (0..160).step_by(16) {
         journal
-            .append_batch(
-                (first..first + 16)
-                    .flat_map(|ordinal| input(ordinal * 2, 1, "\u{0}".repeat(20_000))),
-            )
+            .append_batch((first..first + 16).map(|sequence| {
+                turn(
+                    sequence,
+                    1,
+                    Role::Assistant,
+                    vec![Block::Text {
+                        text: "\u{0}".repeat(20_000),
+                    }],
+                )
+            }))
             .expect("bounded raw batch");
     }
     let view = journal.read_view();
@@ -613,6 +619,11 @@ fn encoded_row_budget_can_stop_mid_page_without_skipping_canonical_events() {
     let first = projector
         .advance(&view)
         .expect("admitted prefix of raw page");
+    let row = projector.index().page(0, 1, 32 * 1024).expect("first row");
+    assert!(
+        row.rows[0].payload.len() * 64 > rw_store::session::transcript_index::MAX_BATCH_BYTES,
+        "a full raw page must exceed the encoded row budget"
+    );
     assert!(first.interpreted_events > 0 && first.interpreted_events < 64);
     assert_eq!(first.applied_next_sequence, first.interpreted_events as u64);
     while projector
@@ -630,7 +641,7 @@ fn encoded_row_budget_can_stop_mid_page_without_skipping_canonical_events() {
             break;
         }
         for row in page.rows {
-            assert_eq!(row.source, SequenceId(ordinal * 2 + 1));
+            assert_eq!(row.source, SequenceId(ordinal));
             assert_eq!(row.ordinal, ordinal);
             ordinal += 1;
         }
