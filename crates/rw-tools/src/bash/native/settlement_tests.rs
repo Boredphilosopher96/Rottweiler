@@ -9,7 +9,8 @@ use crate::ToolError;
 
 #[tokio::test]
 async fn output_failure_still_settles_proxy_and_retains_cancelled_join() {
-    let mut child = Command::new("/bin/true")
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "exit 0"])
         .process_group(0)
         .spawn()
         .expect("physical child");
