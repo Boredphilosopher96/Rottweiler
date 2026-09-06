@@ -81,7 +81,7 @@ impl PluginHost {
     )]
     pub async fn launch_approved(
         launcher: &dyn PluginLauncher,
-        store: &dyn ApprovalStore,
+        store: Arc<dyn ApprovalStore>,
         config: &PluginProcessConfig,
         origin: &str,
         approved_roots: &[PathBuf],
@@ -116,7 +116,7 @@ impl PluginHost {
     )]
     pub async fn launch_approved_with_http(
         launcher: &dyn PluginLauncher,
-        store: &dyn ApprovalStore,
+        store: Arc<dyn ApprovalStore>,
         config: &PluginProcessConfig,
         origin: &str,
         approved_roots: &[PathBuf],
@@ -125,13 +125,9 @@ impl PluginHost {
         provider_http: Arc<dyn PluginProviderHttpHandler>,
         redactor: Arc<dyn PluginBoundaryRedactor>,
     ) -> Result<Self, PluginHostError> {
-        let profile =
-            approved_plugin_profile(store, config, origin, approved_roots, &expected_manifest)?;
-        let identity = approval_identity(&expected_manifest, config, origin)?.fingerprint()?;
-        let roots = serde_json::to_vec(&profile.approved_roots)
-            .map_err(|error| PluginHostError::Protocol(error.to_string()))?;
-        let continuation_provenance =
-            rw_providers::ContinuationProvenance::bind(&[identity.as_bytes(), &roots]);
+        let (profile, continuation_provenance) =
+            verify_approved_launch(store, config, origin, approved_roots, &expected_manifest)
+                .await?;
         let child = launcher.launch(config, &profile).await?;
         if child.executable_identity != *config.executable_identity() {
             terminate_and_reap(child.process.as_ref()).await;
@@ -159,7 +155,11 @@ impl PluginHost {
             capabilities: vec!["provider-models".to_owned(), "provider-http".to_owned()],
         })
         .map_err(|error| PluginHostError::Rpc(rpc_error("invalid_request", &error.to_string())))?;
+        let started = std::time::Instant::now();
         let result = client.request(METHOD_INITIALIZE, initialize).await;
+        tracing::debug!(target: "rw_performance", stage = "plugin.initialize",
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            succeeded = result.is_ok(), "plugin activation stage finished");
         let initialized: PluginManifest = match result.and_then(|value| {
             serde_json::from_value(value)
                 .map_err(|error| rpc_error("invalid_manifest", &error.to_string()))
@@ -331,4 +331,48 @@ fn canonical_roots(roots: &[PathBuf]) -> Result<Vec<PathBuf>, PluginHostError> {
             })
         })
         .collect()
+}
+
+fn prepare_approved_launch(
+    store: &dyn ApprovalStore,
+    config: &PluginProcessConfig,
+    origin: &str,
+    approved_roots: &[PathBuf],
+    manifest: &PluginManifest,
+) -> Result<(PluginSandboxProfile, rw_providers::ContinuationProvenance), PluginHostError> {
+    let profile = approved_plugin_profile(store, config, origin, approved_roots, manifest)?;
+    let identity = approval_identity(manifest, config, origin)?.fingerprint()?;
+    let roots = serde_json::to_vec(&profile.approved_roots)
+        .map_err(|error| PluginHostError::Protocol(error.to_string()))?;
+    let provenance = rw_providers::ContinuationProvenance::bind(&[identity.as_bytes(), &roots]);
+    Ok((profile, provenance))
+}
+
+async fn verify_approved_launch(
+    store: Arc<dyn ApprovalStore>,
+    config: &PluginProcessConfig,
+    origin: &str,
+    approved_roots: &[PathBuf],
+    expected_manifest: &PluginManifest,
+) -> Result<(PluginSandboxProfile, rw_providers::ContinuationProvenance), PluginHostError> {
+    let verified_config = config.clone();
+    let verified_manifest = expected_manifest.clone();
+    let verified_origin = origin.to_owned();
+    let verified_roots = approved_roots.to_vec();
+    rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+        let started = std::time::Instant::now();
+        let result = prepare_approved_launch(
+            store.as_ref(),
+            &verified_config,
+            &verified_origin,
+            &verified_roots,
+            &verified_manifest,
+        );
+        tracing::debug!(target: "rw_performance", stage = "plugin.approval_verification",
+                    elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+                    succeeded = result.is_ok(), "plugin activation stage finished");
+        result
+    })
+    .await
+    .map_err(|error| PluginHostError::Protocol(format!("plugin verification worker: {error}")))?
 }

@@ -98,7 +98,7 @@ impl Fixture {
         Arc::new(
             PluginHost::launch_approved(
                 &self.launcher,
-                &approvals,
+                Arc::new(approvals),
                 &self.config,
                 "native-long-tool-acceptance",
                 &[self.root.path().to_path_buf()],

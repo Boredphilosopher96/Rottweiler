@@ -89,7 +89,13 @@ pub(super) async fn activate(
     if generation.cancellation.is_cancelled() {
         return Err(cancelled());
     }
-    let scratch = Arc::new(PrivateMcpScratch::create().map_err(diagnostic)?);
+    let owner = Arc::clone(generation);
+    let (scratch, launcher) = blocking_stage("plugin.launch_authority", move || {
+        let scratch = Arc::new(PrivateMcpScratch::create().map_err(diagnostic)?);
+        let launcher = launcher(&owner.recipe, &scratch)?;
+        Ok((scratch, launcher))
+    })
+    .await?;
     {
         let mut resources = generation
             .resources
@@ -101,18 +107,23 @@ pub(super) async fn activate(
             lease.begin_effects();
         }
     }
-    let launcher = launcher(recipe, &scratch)?;
     let process = prepare_process(generation, Arc::clone(&launcher), scratch).await?;
     if generation.cancellation.is_cancelled() {
         return Err(cancelled());
     }
-    let (store, origin) = approvals(recipe, &process)?;
-    require_approval(
-        store.as_ref(),
-        recipe.metadata.manifest(),
-        &process,
-        &origin,
-    )?;
+    let owner = Arc::clone(generation);
+    let approved_process = process.clone();
+    let (store, origin) = blocking_stage("plugin.approval_store", move || {
+        let (store, origin) = approvals(&owner.recipe, &approved_process)?;
+        require_approval(
+            store.as_ref(),
+            owner.recipe.metadata.manifest(),
+            &approved_process,
+            &origin,
+        )?;
+        Ok((store, origin))
+    })
+    .await?;
     let provider_http: Arc<dyn PluginProviderHttpHandler> =
         if recipe.metadata.manifest().capabilities.providers.is_empty() {
             Arc::new(rw_ext::DenyPluginProviderHttpHandler)
@@ -134,7 +145,7 @@ pub(super) async fn activate(
     // retained here and retired by the operation owner before proof is reported.
     let result = PluginHost::launch_approved_with_http(
         launcher.as_ref(),
-        store.as_ref(),
+        store,
         &process,
         &origin,
         &recipe.workspace_roots,
@@ -172,10 +183,17 @@ async fn prepare_process(
 ) -> Result<rw_ext::PluginProcessConfig, PluginRpcError> {
     let recipe = &generation.recipe;
     match recipe.config.target {
-        DiscoveredPluginTarget::Executable { .. } => recipe
-            .config
-            .executable_process_config()
-            .map_err(diagnostic),
+        DiscoveredPluginTarget::Executable { .. } => {
+            let owner = Arc::clone(generation);
+            blocking_stage("plugin.executable_identity", move || {
+                owner
+                    .recipe
+                    .config
+                    .executable_process_config()
+                    .map_err(diagnostic)
+            })
+            .await
+        }
         DiscoveredPluginTarget::TypeScript { .. } => {
             let host = recipe
                 .helper
@@ -213,8 +231,8 @@ async fn prepare_process(
 fn approvals(
     recipe: &ActivationRecipe,
     process: &rw_ext::PluginProcessConfig,
-) -> Result<(Box<dyn ApprovalStore>, String), PluginRpcError> {
-    let (store, origin): (Box<dyn ApprovalStore>, String) = match recipe.approval {
+) -> Result<(Arc<dyn ApprovalStore>, String), PluginRpcError> {
+    let (store, origin): (Arc<dyn ApprovalStore>, String) = match recipe.approval {
         ActivationApproval::Configured => {
             let store =
                 PrivatePluginApprovalStore::open(&recipe.private_root).map_err(diagnostic)?;
@@ -223,7 +241,7 @@ fn approvals(
                 crate::extension_config::ExecutableConfigOrigin::TrustedProject(_) => "project",
             };
             (
-                Box::new(store),
+                Arc::new(store),
                 format!("{scope}:{}", recipe.config.origin.path().display()),
             )
         }
@@ -233,7 +251,7 @@ fn approvals(
             let origin = format!("development:{}", recipe.config.manifest_path.display());
             rw_ext::approve_plugin_launch(&store, recipe.metadata.manifest(), process, &origin)
                 .map_err(diagnostic)?;
-            (Box::new(store), origin)
+            (Arc::new(store), origin)
         }
     };
     Ok((store, origin))
@@ -321,4 +339,24 @@ pub(super) async fn retire(generation: &Generation) -> Result<(), PluginRpcError
 }
 fn diagnostic(error: impl std::fmt::Display) -> PluginRpcError {
     super::error("activation_failed", &error.to_string())
+}
+
+async fn blocking_stage<T: Send + 'static>(
+    stage: &'static str,
+    work: impl FnOnce() -> Result<T, PluginRpcError> + Send + 'static,
+) -> Result<T, PluginRpcError> {
+    let waiting = std::time::Instant::now();
+    rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+        tracing::debug!(target: "rw_performance", stage,
+            admission_ms = waiting.elapsed().as_secs_f64() * 1000.0,
+            "plugin activation worker admitted");
+        let started = std::time::Instant::now();
+        let result = work();
+        tracing::debug!(target: "rw_performance", stage,
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            succeeded = result.is_ok(), "plugin activation stage finished");
+        result
+    })
+    .await
+    .map_err(diagnostic)?
 }

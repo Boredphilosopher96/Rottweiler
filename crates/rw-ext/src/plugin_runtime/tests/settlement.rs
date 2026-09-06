@@ -150,7 +150,7 @@ async fn approved_handshake_registers_custom_tool_and_reaps_on_shutdown() {
     let host = Arc::new(
         PluginHost::launch_approved(
             &launcher,
-            &store,
+            Arc::new(store),
             &config,
             "project:test",
             &[root.path().to_path_buf()],
@@ -203,7 +203,7 @@ async fn dropping_launched_host_kills_process_without_explicit_shutdown() {
             push: None,
             hang_method: None,
         },
-        &store,
+        Arc::new(store),
         &config,
         "project:drop",
         &[root.path().to_path_buf()],
@@ -241,7 +241,7 @@ async fn shutdown_uses_effect_proof_instead_of_kill_attempt_outcome() {
         };
         let host = PluginHost::launch_approved(
             &launcher,
-            &approvals,
+            Arc::new(approvals),
             &config,
             "project:shutdown",
             &[root.path().to_path_buf()],
@@ -721,4 +721,87 @@ async fn reader_exit_cancels_without_discarding_active_provider_http_ownership()
         "cancellation cannot erase an operation's identity before its owner proves settlement"
     );
     assert!(process.killed.load(Ordering::Acquire) >= 1);
+}
+
+struct PausedApprovalRead {
+    started: StdMutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: StdMutex<std::sync::mpsc::Receiver<()>>,
+}
+impl ApprovalStore for PausedApprovalRead {
+    fn approved_fingerprint(&self, _: &str) -> Result<Option<String>, ApprovalStoreError> {
+        if let Some(started) = self.started.lock().expect("start owner").take() {
+            let _ = started.send(());
+        }
+        self.release
+            .lock()
+            .expect("read owner")
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|error| ApprovalStoreError {
+                message: error.to_string(),
+            })?;
+        Ok(None)
+    }
+    fn record_approval(&self, _: &str, _: &str) -> Result<(), ApprovalStoreError> {
+        panic!("verification cannot write approval")
+    }
+}
+
+#[tokio::test]
+async fn cancelled_launch_keeps_blocking_approval_owner_without_blocking_callbacks() {
+    let root = TempDir::new().expect("root");
+    let config = shell_config(&root);
+    let (started, entered) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let store = Arc::new(PausedApprovalRead {
+        started: StdMutex::new(Some(started)),
+        release: StdMutex::new(released),
+    });
+    let retained = Arc::downgrade(&store);
+    let process = Arc::new(FakeProcess::default());
+    let launcher = MemoryLauncher {
+        manifest: manifest(),
+        process: process.clone(),
+        push: None,
+        hang_method: None,
+    };
+    let launch = tokio::spawn(async move {
+        PluginHost::launch_approved(
+            &launcher,
+            store,
+            &config,
+            "paused-verification",
+            &[root.path().to_path_buf()],
+            manifest(),
+            Arc::new(DenyPushHandler),
+            Arc::new(NoopPluginBoundaryRedactor),
+        )
+        .await
+    });
+    entered.await.expect("verification entered physical worker");
+    // A synchronous implementation stalls this current-thread executor until
+    // the store's safety timeout and the launch has already returned an error.
+    tokio::task::yield_now().await;
+    assert!(
+        !launch.is_finished(),
+        "approval IO must leave callbacks serviceable"
+    );
+    launch.abort();
+    assert!(matches!(launch.await, Err(error) if error.is_cancelled()));
+    assert!(
+        retained.upgrade().is_some(),
+        "caller drop cannot release the active read owner"
+    );
+    release.send(()).expect("finish actual read");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while retained.upgrade().is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("physical read retires its owner");
+    assert_eq!(
+        process.killed.load(Ordering::Acquire),
+        0,
+        "cancelled verification never launches a process"
+    );
 }

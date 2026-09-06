@@ -638,7 +638,7 @@ async fn approved_fixture_host_with_http(
     Arc::new(
         PluginHost::launch_approved_with_http(
             &TestDirectLauncher,
-            &store,
+            Arc::new(store),
             config,
             "conformance:typescript",
             &[root.to_path_buf()],

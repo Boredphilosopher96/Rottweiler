@@ -172,7 +172,7 @@ async fn manifest_rejects_workspace_root_as_code_root() {
     approve_plugin_launch(&store, &manifest, &config, "project:root-code").expect("approve");
     let result = PluginHost::launch_approved(
         &TestDirectLauncher,
-        &store,
+        Arc::new(store),
         &config,
         "project:root-code",
         &[root.path().to_path_buf()],

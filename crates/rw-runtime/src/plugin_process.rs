@@ -71,10 +71,47 @@ impl PluginLauncher for SandboxedPluginLauncher {
             rw_resources::acquire(rw_resources::ResourceClass::Process, std::future::pending())
                 .await
                 .map_err(|failure| PluginLaunchError::Rejected(error(&failure.to_string())))?;
-        let (child, proxy) = spawn_sandboxed_plugin(config, profile, &self.scratch, &self.helper)
-            .map_err(PluginLaunchError::Rejected)?;
-        attach_supervisor(child, proxy, config, self.helper.clone(), admission).await
+        let owned_config = config.clone();
+        let profile = profile.clone();
+        let scratch = self.scratch.clone();
+        let helper = self.helper.clone();
+        handoff_in_worker(config.clone(), helper.clone(), admission, move || {
+            spawn_sandboxed_plugin(&owned_config, &profile, &scratch, &helper)
+                .map_err(PluginLaunchError::Rejected)
+        })
+        .await
     }
+}
+
+async fn handoff_in_worker(
+    config: PluginProcessConfig,
+    helper: rw_tools::SandboxHelper,
+    admission: rw_resources::ResourceLease,
+    spawn: impl FnOnce() -> Result<(Child, Option<SupervisedEgressProxy>), PluginLaunchError>
+    + Send
+    + 'static,
+) -> Result<LaunchedPluginProcess, PluginLaunchError> {
+    let runtime = tokio::runtime::Handle::current();
+    // The physical worker owns admission, helper bytes and the complete
+    // handoff. Caller cancellation cannot discard a raw spawned child.
+    rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+        let started = std::time::Instant::now();
+        let result = spawn();
+        tracing::debug!(target: "rw_performance", stage = "plugin.verify_and_spawn",
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            succeeded = result.is_ok(), "plugin activation stage finished");
+        let (child, proxy) = result?;
+        runtime.block_on(attach_supervisor(child, proxy, &config, helper, admission))
+    })
+    .await
+    .map_err(|failure| match failure {
+        rw_resources::WorkError::Admission(error) => {
+            PluginLaunchError::Rejected(process_error(&error))
+        }
+        rw_resources::WorkError::Worker(_) => PluginLaunchError::EffectsUnsettled {
+            message: "plugin launch worker exited without handoff proof".into(),
+        },
+    })?
 }
 
 fn approved_write_roots(
@@ -675,7 +712,7 @@ mod tests {
         approve_plugin_launch(&approvals, &manifest, config, origin).expect("exact approval");
         PluginHost::launch_approved(
             launcher,
-            &approvals,
+            Arc::new(approvals),
             config,
             origin,
             &[sdk.to_path_buf()],
@@ -786,7 +823,7 @@ mod tests {
         .expect("exact approval");
         let host = PluginHost::launch_approved(
             &launcher,
-            &approvals,
+            Arc::new(approvals),
             &config,
             "conformance:production:no-reads",
             &[workspace.path().to_path_buf()],

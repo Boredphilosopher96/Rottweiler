@@ -154,3 +154,48 @@ async fn dropping_bare_launched_process_settles_actual_child_and_proxy() {
     .await
     .expect("destructor transfers actual effect retirement");
 }
+
+#[tokio::test]
+async fn dropped_launch_waiter_retires_the_child_returned_by_its_blocking_worker() {
+    let config = PluginProcessConfig::new("/bin/sh").expect("fixture config");
+    let helper = running_helper();
+    let admission = process_fixture_lease();
+    let (started, entered) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let (spawned, child_pid) = tokio::sync::oneshot::channel();
+    let waiting = tokio::spawn(handoff_in_worker(config, helper, admission, move || {
+        let _ = started.send(());
+        released
+            .recv_timeout(Duration::from_secs(2))
+            .expect("release launch worker");
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command
+            .args(["-c", "while :; do :; done"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        command.as_std_mut().process_group(0);
+        let child = command.spawn().expect("physical child");
+        let _ = spawned.send(child.id().expect("child pid"));
+        Ok((child, None))
+    }));
+    entered.await.expect("worker owns launch");
+    waiting.abort();
+    assert!(matches!(waiting.await, Err(error) if error.is_cancelled()));
+    release.send(()).expect("finish admitted worker");
+    let pid = child_pid.await.expect("worker completed actual spawn");
+    let group = rustix::process::Pid::from_raw(i32::try_from(pid).expect("pid range"))
+        .expect("group identity");
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match rustix::process::test_kill_process_group(group) {
+                Err(rustix::io::Errno::SRCH) => return,
+                Ok(()) => tokio::time::sleep(Duration::from_millis(5)).await,
+                other => panic!("unexpected group proof: {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("dropped result retains group ownership through cleanup");
+}

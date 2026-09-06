@@ -348,7 +348,7 @@ async fn undeclared_push_kills_and_prevents_handshake() {
     };
     let result = PluginHost::launch_approved(
         &launcher,
-        &store,
+        Arc::new(store),
         &config,
         "project:test",
         &[root.path().to_path_buf()],
@@ -474,7 +474,7 @@ async fn plugin_originated_undeclared_push_is_killed_and_reaped() {
     let launcher = TrackingDirectLauncher::default();
     let host_result = PluginHost::launch_approved(
         &launcher,
-        &store,
+        Arc::new(store),
         &config,
         "conformance:violation",
         &[sdk],
