@@ -67,37 +67,43 @@ impl LaunchBytes {
         Ok(Self::Native { executable, code })
     }
 
-    pub(super) fn program<'a>(&'a self, _config: &'a PluginProcessConfig) -> &'a Path {
+    pub(super) fn program<'a>(&'a self, config: &'a PluginProcessConfig) -> &'a Path {
+        #[cfg(not(any(target_os = "linux", test)))]
+        let _ = config;
         match self {
             Self::Native { executable, .. } => executable.path(),
             #[cfg(target_os = "linux")]
-            Self::Preparation { .. } => _config.executable(),
+            Self::Preparation { .. } => config.executable(),
             #[cfg(test)]
-            Self::Harness { .. } => _config.executable(),
+            Self::Harness { .. } => config.executable(),
         }
     }
-    pub(super) fn cwd<'a>(&'a self, _config: &'a PluginProcessConfig) -> &'a Path {
+    pub(super) fn cwd<'a>(&'a self, config: &'a PluginProcessConfig) -> &'a Path {
+        #[cfg(not(any(target_os = "linux", test)))]
+        let _ = config;
         match self {
             Self::Native {
                 code: CodeView::Attested { cwd, .. } | CodeView::Preparation { cwd, .. },
                 ..
             } => cwd,
             #[cfg(target_os = "linux")]
-            Self::Preparation { .. } => _config.cwd(),
+            Self::Preparation { .. } => config.cwd(),
             #[cfg(test)]
-            Self::Harness { .. } => _config.cwd(),
+            Self::Harness { .. } => config.cwd(),
         }
     }
-    pub(super) fn args<'a>(&'a self, _config: &'a PluginProcessConfig) -> &'a [OsString] {
+    pub(super) fn args<'a>(&'a self, config: &'a PluginProcessConfig) -> &'a [OsString] {
+        #[cfg(not(any(target_os = "linux", test)))]
+        let _ = config;
         match self {
             Self::Native {
                 code: CodeView::Attested { args, .. } | CodeView::Preparation { args, .. },
                 ..
             } => args,
             #[cfg(target_os = "linux")]
-            Self::Preparation { .. } => _config.argv(),
+            Self::Preparation { .. } => config.argv(),
             #[cfg(test)]
-            Self::Harness { .. } => _config.argv(),
+            Self::Harness { .. } => config.argv(),
         }
     }
     pub(super) fn validate_write_roots(&self, roots: &[PathBuf]) -> Result<(), PluginProcessError> {

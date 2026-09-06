@@ -238,6 +238,8 @@ fn plugin_sandbox_policy(
     roots: &[PathBuf],
     bytes: &LaunchBytes,
 ) -> Result<(SandboxPolicy, Option<SupervisedEgressProxy>), PluginProcessError> {
+    #[cfg(not(target_os = "macos"))]
+    let _ = config;
     #[cfg(target_os = "linux")]
     if let rw_ext::PluginSandboxMode::Preparation { filesystem } = &profile.mode {
         if profile.capabilities != rw_plugin_protocol::PluginCapabilities::default()
@@ -294,11 +296,12 @@ fn attach_supervisor(
         proxy: proxy_settlement::PluginProxy::new(proxy),
     });
     let executable_identity = config.executable_identity().clone();
-    let mut handoff = PendingPluginHandoff {
+    let handoff = PendingPluginHandoff {
         process: Arc::clone(&process),
         settled: false,
     };
     async move {
+        let mut handoff = handoff;
         let (Some(stdin), Some(stdout), Some(stderr)) = (stdin, stdout, stderr) else {
             // A failed handoff still owns the process and every descendant.
             let _ = process.kill_tree();
