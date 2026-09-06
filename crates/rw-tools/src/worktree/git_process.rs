@@ -23,11 +23,20 @@ pub(super) async fn run(
     input: Option<&[u8]>,
     cancellation: &CancellationToken,
 ) -> Result<GitOutput, ToolError> {
+    let credit = rw_resources::acquire(ResourceClass::Blocking, cancellation.cancelled())
+        .await
+        .map_err(|error| match error {
+            rw_resources::AdmissionError::Cancelled => ToolError::Cancelled,
+            error => ToolError::Command(format!("Git worker admission failed: {error}")),
+        })?;
     let caller = Caller(CancellationToken::default());
     let abandoned = caller.0.clone();
     let cancellation = cancellation.clone();
     let input = input.unwrap_or_default().to_vec();
-    rw_resources::run_blocking(ResourceClass::Blocking, move || {
+    let span = tracing::Span::current();
+    tokio::task::spawn_blocking(move || {
+        let _credit = credit;
+        let _entered = span.enter();
         cancellation.check()?;
         abandoned.check()?;
         let mut process =
