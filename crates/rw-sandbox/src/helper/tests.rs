@@ -86,12 +86,13 @@ fn approved_snapshot_is_sealed_against_all_later_writes() {
     let (_directory, approved) = fixture();
     let helper = SandboxHelper::from_artifact(&approved).expect("approved snapshot");
     let (path, _pin) = helper.pin().expect("pin");
-    let mut writable = fs::OpenOptions::new()
-        .write(true)
-        .open(path)
-        .expect("open descriptor");
-    assert!(writable.write_all(b"mutate").is_err());
-    assert!(writable.set_len(0).is_err());
+    match fs::OpenOptions::new().write(true).open(path) {
+        Ok(mut writable) => {
+            assert!(writable.write_all(b"mutate").is_err());
+            assert!(writable.set_len(0).is_err());
+        }
+        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied),
+    }
 }
 
 #[cfg(target_os = "macos")]

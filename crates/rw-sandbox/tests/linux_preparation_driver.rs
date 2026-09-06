@@ -12,7 +12,27 @@ mod linux {
             unreachable!("sandbox helper replaces the process")
         }
         if std::env::var_os("RW_PREPARATION_DRIVER_CHILD").is_none() {
-            fixture();
+            if std::env::var_os("RW_PREPARATION_SUBMOUNT").is_some() {
+                nested_mount();
+                fixture();
+            } else {
+                fixture();
+                if probe().support == SandboxSupport::Enforced {
+                    let status = Command::new("unshare")
+                        .args([
+                            "--user",
+                            "--map-root-user",
+                            "--mount",
+                            "--propagation",
+                            "private",
+                        ])
+                        .arg(std::env::current_exe().expect("driver"))
+                        .env("RW_PREPARATION_SUBMOUNT", "1")
+                        .status()
+                        .expect("nested mount driver");
+                    assert!(status.success(), "inherited submount view failed: {status}");
+                }
+            }
             return;
         }
         let root = std::path::PathBuf::from(
@@ -30,6 +50,10 @@ mod linux {
         let policy = SandboxPolicy::for_preparation(layout).expect("preparation policy");
         let script = r#"set -eu
     test -r /plugin/entry.ts
+    if test "${RW_PREPARATION_SUBMOUNT:-}" = 1; then
+      test "$(cat /usr/local/share/rw-preparation-sentinel)" = inherited
+      if printf changed >> /usr/local/share/rw-preparation-sentinel 2>/dev/null; then exit 34; fi
+    fi
     test ! -e /plugin/.ssh
     test ! -e /plugin/alias/secret
     test ! -e /root
@@ -64,6 +88,20 @@ mod linux {
         assert!(status.success(), "source view failed: {status}");
         compiler(&root, &helper);
         replacement_is_rejected(&root, &helper);
+    }
+    fn nested_mount() {
+        use rustix::mount::{MountFlags, mount};
+        // This process owns a private mount namespace; no host files or mounts change.
+        mount(
+            "tmpfs",
+            "/usr/local/share",
+            "tmpfs",
+            MountFlags::NOSUID | MountFlags::NODEV | MountFlags::NOEXEC | MountFlags::NOATIME,
+            None,
+        )
+        .expect("private nested runtime mount");
+        fs::write("/usr/local/share/rw-preparation-sentinel", "inherited")
+            .expect("nested mount sentinel");
     }
     fn fixture() {
         let capability = probe();

@@ -15,6 +15,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod mounts;
+
 const MAX_VIEW_NODES: usize = 512;
 const MAX_VIEW_ENTRIES: usize = 8192;
 
@@ -117,6 +119,7 @@ pub(super) fn run(
 
 struct View {
     root: File,
+    mounts: mounts::Mounts,
     nodes: usize,
     entries: usize,
 }
@@ -132,6 +135,7 @@ impl View {
         }
         Ok(Self {
             root: pinned,
+            mounts: mounts::Mounts::capture()?,
             nodes: 0,
             entries: 0,
         })
@@ -185,7 +189,13 @@ impl View {
             return Ok(());
         }
         let metadata = source.metadata().map_err(sandbox_backend)?;
-        if metadata.is_dir() && excluded.iter().any(|path| path.starts_with(logical)) {
+        // A nonrecursive bind cannot prune locked submounts inherited from
+        // the enclosing user namespace. Preserve their visible contents with
+        // separate read-only leaf binds, including every nested mount boundary.
+        if metadata.is_dir()
+            && (excluded.iter().any(|path| path.starts_with(logical))
+                || self.mounts.has_descendant(logical))
+        {
             self.directory(relative)?;
             for entry in fs::read_dir(fd_path(source)).map_err(sandbox_backend)? {
                 let entry = entry.map_err(sandbox_backend)?;
@@ -239,15 +249,13 @@ impl View {
         }
         let target = self.target(relative);
         mount_bind(fd_path(source), &target).map_err(|error| {
-            SandboxError::Backend(format!("source preparation bind mount: {error}"))
+            SandboxError::Backend(format!(
+                "source preparation bind mount for {}: {error}",
+                relative.display()
+            ))
         })?;
         if readonly {
-            mount_remount(
-                target,
-                MountFlags::BIND | MountFlags::RDONLY | MountFlags::NOSUID,
-                "",
-            )
-            .map_err(|error| {
+            mount_remount(target, mounts::readonly_flags(source)?, "").map_err(|error| {
                 SandboxError::Backend(format!("source preparation read-only remount: {error}"))
             })?;
         }
