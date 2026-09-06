@@ -718,6 +718,23 @@ read_commands!(
     ListSubagents,
 );
 
+// Watch requests remain read-only, with a separate lightweight waiting lane.
+macro_rules! read_watch_commands {
+    ($($variant:ident),+ $(,)?) => {
+        impl ClientCommand {
+            #[must_use]
+            pub const fn is_read_watch(&self) -> bool { matches!(self, $(Self::$variant { .. })|+) }
+            pub fn read_watch_type_tags() -> impl Serialize {
+                #[derive(Serialize)]
+                #[serde(rename_all = "snake_case")]
+                enum Tag { $($variant),+ }
+                [$(Tag::$variant),+]
+            }
+        }
+    };
+}
+read_watch_commands!(ReadFamilyControls);
+
 // One variant list owns admission priority and its generated transport projection.
 macro_rules! urgent_commands {
     ($($variant:ident),+ $(,)?) => {
